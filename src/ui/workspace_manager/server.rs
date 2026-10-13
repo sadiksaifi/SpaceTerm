@@ -20,10 +20,10 @@ use spaceterm_core::operations::{
 };
 
 pub(super) struct ServerWorkspaces {
-    runtime: Entity<DesktopClientRuntime>,
+    pub(super) runtime: Entity<DesktopClientRuntime>,
     pub(super) collection: ServerWorkspaceCollection<Entity<TabManager>>,
     window: gpui::AnyWindowHandle,
-    frames: BTreeMap<ServerId, Arc<DesktopServerFrame>>,
+    pub(super) frames: BTreeMap<ServerId, Arc<DesktopServerFrame>>,
     panes: Rc<dyn ServerPaneFactory>,
     empty: Entity<EmptyWorkspaceWindow>,
     switcher: ComboBoxHandle<QualifiedWorkspaceId, ServerId>,
@@ -37,7 +37,7 @@ pub(super) struct ServerWorkspaces {
     requests: BTreeMap<UiRequestId, WorkspaceRequest>,
     paused_detaches: BTreeMap<QualifiedWorkspaceId, PausedDetach>,
     presentation_errors: BTreeMap<QualifiedWorkspaceId, DesktopClientError>,
-    navigation: u64,
+    pub(super) navigation: u64,
 }
 
 struct WorkspaceRequest {
@@ -349,6 +349,7 @@ impl WorkspaceManager {
             .presentation_errors
             .retain(|workspace, _| server.collection.record(*workspace).is_some());
         let next = server.active_manager().map(Entity::entity_id);
+        self.sync_server_git(window, cx);
         self.refresh_server_sidebar(cx);
         self.sync_terminal_focus_blocker(window, cx);
         self.advance_workspace_requests(window, cx);
@@ -374,7 +375,7 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    fn refresh_server_sidebar(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn refresh_server_sidebar(&mut self, cx: &mut Context<Self>) {
         let Some(server) = &mut self.server else {
             return;
         };
@@ -385,6 +386,7 @@ impl WorkspaceManager {
             manager.update(cx, |manager, cx| manager.deactivate(cx));
         }
         server.frames.retain(|id, _| available.contains(id));
+        let Some(server) = &self.server else { return };
         let sections = infos
             .into_iter()
             .map(|info| ServerSidebarSection {
@@ -408,6 +410,17 @@ impl WorkspaceManager {
                             pinned: record.pinned_directory.value.is_some(),
                             active: server.collection.active() == Some(workspace),
                             paused: server.paused_detaches.contains_key(&workspace),
+                            repository:
+                                crate::repository_status::presentation::SidebarBadge::from_view(
+                                    &self.server_repository_view(
+                                        spaceterm_core::worktrees::GitStatusTarget::Workspace(
+                                            workspace,
+                                        ),
+                                        cx,
+                                    ),
+                                ),
+                            worktrees: self.server_worktree_rows(workspace, cx),
+                            creates_worktrees: self.server_creates_worktrees(workspace, cx),
                         })
                     })
                     .collect(),
@@ -436,6 +449,7 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.server_worktree_event(event, window, cx);
         let Some(server) = &mut self.server else {
             return;
         };
@@ -535,7 +549,11 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    fn advance_navigation(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(super) fn advance_navigation(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(server) = &mut self.server else {
             return false;
         };
@@ -659,7 +677,7 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    fn submit_server(
+    pub(super) fn submit_server(
         &mut self,
         request: DesktopRequest,
         window: &mut Window,
@@ -765,6 +783,15 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         match event {
+            ServerSidebarEvent::NewWorktree(workspace) => {
+                self.new_server_worktree(workspace, window, cx);
+            }
+            ServerSidebarEvent::OpenWorktree(workspace, worktree) => {
+                self.open_server_worktree(workspace, worktree, window, cx);
+            }
+            ServerSidebarEvent::RemoveWorktree(worktree) => {
+                self.remove_server_worktree(worktree, window, cx);
+            }
             ServerSidebarEvent::Activate(workspace) => {
                 self.select_server_workspace(workspace, window, cx)
             }
@@ -1564,6 +1591,9 @@ impl WorkspaceManager {
                     manager.create_server_workspace(None, String::new(), window, cx)
                 });
             })
+            .on_action(cx.listener(Self::on_new_worktree))
+            .on_action(cx.listener(Self::on_next_worktree))
+            .on_action(cx.listener(Self::on_previous_worktree))
             .on_action(cx.listener(Self::on_toggle_sidebar))
             .on_action(cx.listener(Self::on_toggle_sidebar_focus))
             .on_action(cx.listener(Self::on_activate_workspace_1))
@@ -1598,7 +1628,7 @@ impl WorkspaceManager {
     }
 }
 
-fn shared_ready(frame: &DesktopServerFrame) -> bool {
+pub(super) fn shared_ready(frame: &DesktopServerFrame) -> bool {
     frame.replica_status == ReplicaStatus::Ready
         && matches!(frame.connection, ConnectionState::Connected { .. })
 }
@@ -1685,7 +1715,7 @@ fn close_copy(
 
 #[cfg(test)]
 #[path = "server_tests.rs"]
-mod tests;
+pub(super) mod tests;
 
 fn frame_refusal(frame: &DesktopServerFrame) -> DesktopClientError {
     match frame.connection {

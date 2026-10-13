@@ -124,6 +124,28 @@ impl spaceterm_host::git::RepositoryProgramRunner for Runner {
         result
     }
 }
+struct NativeAccount(std::path::PathBuf);
+impl NativeAccount {
+    fn uid(&self) -> u32 {
+        use std::os::unix::fs::MetadataExt as _;
+        std::fs::metadata(&self.0).unwrap().uid()
+    }
+}
+impl spaceterm_server::adapters::terminal::AccountLaunchProvider for NativeAccount {
+    fn account(
+        &self,
+    ) -> Result<spaceterm_server::adapters::terminal::AccountLaunchFacts, ServerFailure> {
+        Ok(spaceterm_server::adapters::terminal::AccountLaunchFacts {
+            uid: self.uid(),
+            home: self.0.clone(),
+            planner: spaceterm_host::shell_launch::ShellLaunchPlanner::for_test(
+                self.0.join("shell"),
+                self.0.clone(),
+            ),
+            machine: spaceterm_terminal::metadata::LocalMachine::default(),
+        })
+    }
+}
 pub(super) struct Fixture {
     pub(super) directory: physical::Directory,
     pub(super) server: RecoveredServer,
@@ -154,6 +176,12 @@ pub(super) fn run_git(directory: &Path, args: &[&str]) {
 }
 impl Fixture {
     pub(super) async fn new() -> Self {
+        Self::new_with_runtime(false).await
+    }
+    pub(super) async fn new_native_runtime() -> Self {
+        Self::new_with_runtime(true).await
+    }
+    async fn new_with_runtime(native_runtime: bool) -> Self {
         let directory = physical::Directory::new();
         let root = directory.0.join("repository");
         std::fs::create_dir(&root).unwrap();
@@ -174,7 +202,7 @@ impl Fixture {
         );
         let mut storage = physical::Fixture::new(&directory.0);
         storage.enroll(42);
-        Self::from_storage(directory, storage).await
+        Self::from_storage(directory, storage, native_runtime).await
     }
     pub(super) async fn reopen(directory: physical::Directory) -> Self {
         let mut store = physical::reopen(&directory.0).unwrap();
@@ -184,9 +212,13 @@ impl Fixture {
             recovered.ledger.unwrap(),
         )
         .unwrap();
-        Self::from_storage(directory, physical::Fixture { store, ledger }).await
+        Self::from_storage(directory, physical::Fixture { store, ledger }, false).await
     }
-    async fn from_storage(directory: physical::Directory, mut storage: physical::Fixture) -> Self {
+    async fn from_storage(
+        directory: physical::Directory,
+        mut storage: physical::Fixture,
+        native_runtime: bool,
+    ) -> Self {
         let root = directory.0.join("repository");
         let home = ServerDirectory::new(
             physical::identity().server,
@@ -248,6 +280,34 @@ impl Fixture {
         dependencies.store = Box::new(storage.store);
         dependencies.credentials = key.clone();
         dependencies.pairing = lookup.clone();
+        if native_runtime {
+            use spaceterm_server::adapters::terminal::{NativeRuntime, NativeRuntimeClock};
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::write(
+                directory.0.join("shell"),
+                "#!/bin/sh\nprintf '%s' \"$$\" > runtime-pid\nexec /bin/sh \"$@\"\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(
+                directory.0.join("shell"),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+            let account = Arc::new(NativeAccount(directory.0.clone()));
+            let clock = Arc::new(NativeRuntimeClock::default());
+            let runtime = NativeRuntime::new(
+                physical::identity().server,
+                account.uid(),
+                account,
+                clock.clone(),
+                spaceterm_terminal::runtime::budget::RuntimeLimits::default(),
+            )
+            .unwrap();
+            config.launch = runtime.clone();
+            config.cleanup = runtime.clone();
+            dependencies.runtime = runtime;
+            dependencies.clock = clock;
+        }
         let server = RecoveredServer::recover(config, dependencies)
             .await
             .unwrap();
@@ -338,6 +398,25 @@ impl Fixture {
             initial_wire: Some(initial_wire),
         }
     }
+    pub(super) async fn replace_client(&mut self, major: u32) {
+        if let Some(wire) = self.initial_wire.take() {
+            wire.close().await;
+        }
+        self.handle.disconnect(self.principal).await.unwrap();
+        let wire = self.wire(major).await;
+        let spaceterm_server::connection::PeerConnection::Ordinary(session) = &wire.peer.connection
+        else {
+            panic!("ordinary replacement client")
+        };
+        self.principal = session.principal;
+        let access = self
+            .handle
+            .reconcile(self.principal, self.handle.snapshot().state().revision)
+            .await
+            .unwrap();
+        self.git_principal = AuthenticatedGitPrincipal::from_connection_access(&access).unwrap();
+        self.initial_wire = Some(wire);
+    }
     pub(super) async fn wire(&self, major: u32) -> Wire {
         Wire::connect(
             &self.directory.0,
@@ -352,19 +431,22 @@ impl Fixture {
         &self,
         request: CanonicalOperationRequest,
     ) -> OperationResponse {
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                match self.handle.submit(self.principal, request.clone()).await {
-                    Ok(response) => break response,
-                    Err(error) if error.class == ServerFailureClass::Capacity => {
-                        tokio::task::yield_now().await
-                    }
-                    Err(error) => panic!("request failed: {:?}", error.class),
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            // Bound Capacity retries without cancelling an admitted request's
+            // durable commit on a busy filesystem.
+            match self.handle.submit(self.principal, request.clone()).await {
+                Ok(response) => break response,
+                Err(error) if error.class == ServerFailureClass::Capacity => {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "request capacity retry deadline elapsed"
+                    );
+                    tokio::task::yield_now().await;
                 }
+                Err(error) => panic!("request failed: {:?}", error.class),
             }
-        })
-        .await
-        .unwrap()
+        }
     }
     pub(super) fn operation(&self, sequence: u64) -> OperationId {
         OperationId::new(self.stream, OperationSequence::new(sequence).unwrap())
@@ -592,7 +674,7 @@ impl Fixture {
             &CanonicalCodec,
         )
         .unwrap();
-        self.handle.submit(self.principal, request).await.unwrap();
+        self.submit_when_available(request).await;
         let grid = GridSize::new(
             31,
             93,
@@ -613,7 +695,7 @@ impl Fixture {
         let OperationResponse::Completed {
             outcome: Outcome::SessionStarted(session),
             ..
-        } = self.handle.submit(self.principal, request).await.unwrap()
+        } = self.submit_when_available(request).await
         else {
             panic!("started")
         };

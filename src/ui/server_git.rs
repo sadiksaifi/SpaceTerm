@@ -61,8 +61,127 @@ pub(crate) struct ServerStatusView {
     pub(crate) scope: Option<RepositoryScope>,
     pub(crate) facts: Option<GitStatusFacts>,
     pub(crate) freshness: GitFreshness,
+    pub(crate) read_at: Instant,
     /// Client-local presentation only. It is never submitted to organization.
     pub(crate) pull_request: Option<Result<Option<PullRequest>, PullRequestError>>,
+}
+
+impl ServerStatusView {
+    /// Presentation only. Even private IPC directories remain opaque remote roots.
+    pub(crate) fn repository_view(
+        &self,
+        directory: &spaceterm_core::organization::ServerDirectory,
+    ) -> crate::repository_status::RepositoryView {
+        use crate::repository_status::{
+            ChangeState, ChangeSummary, ChangeTotal, Freshness, RepositoryHead, RepositoryKey,
+            RepositoryMachine, RepositoryRoot, RepositoryStatus, RepositoryView, Upstream,
+        };
+        use spaceterm_core::worktrees::queries::{GitChangeTotal, GitRepositoryOperation};
+        use spaceterm_host::git::{
+            ChangeEntry, ChangeKind, Divergence, OperationStep, RepositoryOperation,
+        };
+        let (Some(scope), Some(facts)) = (self.scope, self.facts.as_ref()) else {
+            return RepositoryView::Hidden;
+        };
+        if scope.server != directory.server() {
+            return RepositoryView::Hidden;
+        }
+        let now = self.read_at;
+        let step = |step: spaceterm_core::worktrees::queries::GitOperationStep| OperationStep {
+            current: step.current,
+            total: step.total,
+        };
+        let operation = facts.operation.map(|operation| match operation {
+            GitRepositoryOperation::Rebasing { step: progress } => RepositoryOperation::Rebasing {
+                step: progress.map(step),
+            },
+            GitRepositoryOperation::Applying { step: progress } => RepositoryOperation::Applying {
+                step: progress.map(step),
+            },
+            GitRepositoryOperation::Merging => RepositoryOperation::Merging,
+            GitRepositoryOperation::Reverting => RepositoryOperation::Reverting,
+            GitRepositoryOperation::CherryPicking => RepositoryOperation::CherryPicking,
+            GitRepositoryOperation::Bisecting => RepositoryOperation::Bisecting,
+        });
+        let changes = facts.counts.map_or(ChangeState::NotCounted, |counts| {
+            ChangeState::Known(ChangeSummary {
+                total: match counts.total {
+                    GitChangeTotal::Exact(n) => ChangeTotal::Exact(n),
+                    GitChangeTotal::AtLeast(n) => ChangeTotal::AtLeast(n),
+                },
+                staged: counts.staged,
+                modified: counts.modified,
+                deleted: counts.deleted,
+                renamed: counts.renamed,
+                conflicted: counts.conflicted,
+                untracked: counts.untracked,
+                entries: facts
+                    .changes
+                    .iter()
+                    .filter_map(|change| {
+                        let kind = match change.kind {
+                            1 => ChangeKind::Staged,
+                            2 => ChangeKind::Modified,
+                            3 => ChangeKind::Deleted,
+                            4 => ChangeKind::Renamed,
+                            5 => ChangeKind::Conflicted,
+                            6 => ChangeKind::Untracked,
+                            _ => return None,
+                        };
+                        Some(ChangeEntry {
+                            kind,
+                            path: crate::repository_status::presentation::sanitize_for_display(
+                                &String::from_utf8_lossy(change.path()),
+                                crate::repository_status::presentation::MAXIMUM_PATH_CHARS,
+                            )
+                            .into(),
+                        })
+                    })
+                    .collect(),
+            })
+        });
+        RepositoryView::Repository(Arc::new(RepositoryStatus {
+            key: RepositoryKey {
+                machine: RepositoryMachine::Remote(
+                    crate::repository_status::RemoteMachineKey::new(format!(
+                        "server-{:032x}",
+                        u128::from_be_bytes(scope.server.bytes())
+                    )),
+                ),
+                root: RepositoryRoot::Remote(
+                    String::from_utf8_lossy(directory.bytes())
+                        .into_owned()
+                        .into(),
+                ),
+            },
+            head: facts.branch.as_ref().map_or_else(
+                || RepositoryHead::Detached("HEAD".into()),
+                |branch| RepositoryHead::Branch(branch.as_str().into()),
+            ),
+            commit: None,
+            upstream: facts.upstream.as_ref().map(|upstream| Upstream {
+                name: upstream.name.as_str().into(),
+                divergence: upstream.divergence.map(|value| Divergence {
+                    ahead: value.ahead,
+                    behind: value.behind,
+                }),
+            }),
+            operation,
+            changes,
+            freshness: if self.freshness == GitFreshness::Current && !facts.unchecked {
+                Freshness::Current
+            } else {
+                Freshness::LastKnown { as_of: now }
+            },
+            read_at: now,
+            pull_request: self
+                .pull_request
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .and_then(Clone::clone),
+            read_failure: None,
+        }))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -114,6 +233,7 @@ struct StatusInterest {
     target: GitStatusTarget,
     epoch: ServerEpoch,
     replica: GitStatusReplica,
+    read_at: Instant,
     pull_request: Option<Result<Option<PullRequest>, PullRequestError>>,
     generation: u64,
     task: Option<Task<()>>,
@@ -134,6 +254,7 @@ pub(crate) struct ServerGitStore {
     next: u64,
     pull_requests: ServerPullRequests,
     pull_request_adapters: ServerPullRequestAdapters,
+    presentation_enabled: bool,
 }
 impl EventEmitter<ServerGitChanged> for ServerGitStore {}
 impl ServerGitStore {
@@ -143,6 +264,7 @@ impl ServerGitStore {
             statuses: BTreeMap::new(),
             inventories: BTreeMap::new(),
             next: 0,
+            presentation_enabled: true,
             pull_requests: ServerPullRequests::new(
                 RepositoryStatusPreferences::default(),
                 GitHubCliStatus::Unknown,
@@ -163,6 +285,7 @@ impl ServerGitStore {
         adapters: ServerPullRequestAdapters,
         cx: &mut Context<Self>,
     ) -> Result<(), ClientGitFailure> {
+        self.presentation_enabled = preferences.show_repository_status;
         self.pull_request_adapters = adapters;
         let mut tickets = self
             .pull_requests
@@ -363,6 +486,7 @@ impl ServerGitStore {
                 target,
                 epoch,
                 replica: GitStatusReplica::new(target, epoch),
+                read_at: Instant::now(),
                 pull_request: None,
                 generation: 0,
                 task: None,
@@ -406,11 +530,20 @@ impl ServerGitStore {
         Ok(id)
     }
 
+    /// Local lifetime check, independent of presentation policy and online admission.
+    pub(crate) fn contains_interest(&self, id: ServerGitInterest) -> bool {
+        self.statuses.contains_key(&id) || self.inventories.contains_key(&id)
+    }
+
     pub(crate) fn status(&self, id: ServerGitInterest) -> Option<ServerStatusView> {
+        if !self.presentation_enabled {
+            return None;
+        }
         self.statuses.get(&id).map(|interest| ServerStatusView {
             scope: interest.replica.scope(),
             facts: interest.replica.facts().cloned(),
             freshness: interest.replica.freshness(),
+            read_at: interest.read_at,
             pull_request: interest.pull_request.clone().or_else(|| {
                 (interest.replica.freshness() == GitFreshness::Current)
                     .then(|| self.pull_requests.view(interest.target).cloned())
@@ -738,6 +871,7 @@ impl ServerGitStore {
             return;
         }
         interest.pull_request = None;
+        interest.read_at = Instant::now();
         let tickets = match interest.replica.scope().zip(interest.replica.facts()) {
             Some((scope, facts)) => {
                 self.pull_requests

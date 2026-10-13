@@ -319,6 +319,19 @@ fn validate_display_values(value: &Value) -> Result<(), CliFailure> {
         _ => Ok(()),
     }
 }
+/// Announces a provider-issued durable reservation before polling any native
+/// mutation or destructive assessment. Stderr leaves final stdout output intact.
+/// This lookup reference is not completion acknowledgement or authority.
+pub fn emit_native_request(
+    request: spaceterm_host::native_deployment::contracts::NativeRequestId,
+    io: &mut dyn CliIo,
+) -> Result<(), CliFailure> {
+    io.write_stderr(&encoded(&json!({
+        "schema": 1,
+        "request": { "native_request": hex(request.as_bytes()) }
+    }))?)
+}
+
 pub fn emit_failure(
     failure: CliFailure,
     json_output: bool,

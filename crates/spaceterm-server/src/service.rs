@@ -193,6 +193,7 @@ pub(crate) enum LifecycleRequest {
         reply: Reply<ShutdownReport>,
     },
     Listeners(Arc<dyn ListenerLifecyclePort>, Reply<()>),
+    CloseOwnerEnrollment(Reply<ShutdownReport>),
 }
 enum RetirementReply {
     Operation(OperationReply),
@@ -566,6 +567,25 @@ impl RecoveredServer {
         listeners.lifecycle.close().await?;
         open_result?;
         result
+    }
+    /// Only the exclusive stopped-owner wrapper calls this listener-free close.
+    /// It drains and joins without fabricating a native Stop request.
+    pub(crate) async fn close_owner_enrollment(mut self) -> Result<ShutdownReport, ServerFailure> {
+        let (reply, result) = oneshot::channel();
+        self.handle
+            .lifecycle
+            .send(LifecycleRequest::CloseOwnerEnrollment(reply))
+            .await
+            .map_err(|_| failure(ServerFailureClass::RecoveryRequired))?;
+        let closed = crate::api::receive(result).await;
+        if closed.is_err()
+            && let Some(sender) = self.owner_drop.take()
+        {
+            let _ = sender.send(());
+        }
+        let joined = self.wait().await;
+        closed?;
+        joined
     }
     /// Join an explicitly stopped injected composition without opening listeners.
     pub async fn wait(mut self) -> Result<ShutdownReport, ServerFailure> {
@@ -3403,6 +3423,27 @@ impl Actor {
                     _ => {
                         let _ = reply.send(Err(failure(ServerFailureClass::NativeUnavailable)));
                     }
+                }
+            }
+            LifecycleRequest::CloseOwnerEnrollment(reply) => {
+                if self.listeners.is_some()
+                    || !self.connections.is_empty()
+                    || !self.starting.is_empty()
+                    || self.shutdown.is_some()
+                    || self.native_retirement.is_some()
+                    || self
+                        .registry
+                        .as_ref()
+                        .is_none_or(|r| !r.sessions().is_empty())
+                {
+                    let _ = reply.send(Err(failure(ServerFailureClass::NativeUnavailable)));
+                } else {
+                    self.shutdown = Some(ShutdownState {
+                        request: None,
+                        replies: vec![reply],
+                    });
+                    self.native_completed = true;
+                    self.begin_quiescence();
                 }
             }
             LifecycleRequest::Listeners(port, reply) => {

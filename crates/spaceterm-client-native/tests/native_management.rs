@@ -35,7 +35,7 @@ use spaceterm_host::{
 };
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 struct Clock(AtomicU64);
@@ -50,6 +50,9 @@ impl ServiceClock for Clock {
 struct Manager {
     state: Mutex<SupervisorState>,
     effects: Mutex<Vec<&'static str>>,
+    block_start: AtomicBool,
+    start_entered: tokio::sync::Notify,
+    start_release: tokio::sync::Notify,
 }
 impl ServiceManager for Manager {
     fn status<'a>(&'a self, _: Option<&'a RegisteredServer>) -> ServiceFuture<'a, SupervisorState> {
@@ -71,6 +74,10 @@ impl ServiceManager for Manager {
         Box::pin(async {
             self.effects.lock().unwrap().push("start");
             *self.state.lock().unwrap() = SupervisorState::Running;
+            if self.block_start.load(Ordering::SeqCst) {
+                self.start_entered.notify_one();
+                self.start_release.notified().await;
+            }
             Ok(())
         })
     }
@@ -176,6 +183,9 @@ impl Fixture {
             manager: Arc::new(Manager {
                 state: Mutex::new(state),
                 effects: Mutex::new(vec![]),
+                block_start: AtomicBool::new(false),
+                start_entered: tokio::sync::Notify::new(),
+                start_release: tokio::sync::Notify::new(),
             }),
             processes: Arc::new(Processes(AtomicU64::new(1))),
             clock: Arc::new(Clock(AtomicU64::new(100))),
@@ -193,15 +203,25 @@ impl Fixture {
 #[derive(Default)]
 struct Io {
     stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    fail_stdout: bool,
+    fail_stderr: bool,
     prompts: usize,
     confirm: bool,
 }
 impl CliIo for Io {
     fn write_stdout(&mut self, bytes: &[u8]) -> Result<(), ManagementFailure> {
+        if self.fail_stdout {
+            return Err(ManagementFailure::IoUnavailable);
+        }
         self.stdout.extend_from_slice(bytes);
         Ok(())
     }
-    fn write_stderr(&mut self, _: &[u8]) -> Result<(), ManagementFailure> {
+    fn write_stderr(&mut self, bytes: &[u8]) -> Result<(), ManagementFailure> {
+        if self.fail_stderr {
+            return Err(ManagementFailure::IoUnavailable);
+        }
+        self.stderr.extend_from_slice(bytes);
         Ok(())
     }
     fn read_confirmation(
@@ -494,4 +514,322 @@ async fn cli_native_request_status_uses_the_same_supervisor_outcome_without_prot
         spaceterm_client_native::cli::output::hex(request.as_bytes())
     );
     assert_eq!(value["result"]["outcome"], "started");
+}
+
+fn dependencies(provider: &NativeClientProvider) -> CliDependencies {
+    CliDependencies::new(
+        Ok(provider.key()),
+        Arc::new(UnavailableProtocolManagement),
+        provider.management(),
+        Arc::new(UnavailablePairingBindings),
+    )
+}
+async fn dispatch_args(args: &[&str], deps: &CliDependencies, io: &mut Io) -> u8 {
+    let invocation =
+        spaceterm_client_native::cli::arguments::parse(args.iter().map(std::ffi::OsString::from))
+            .unwrap();
+    let Dispatch::Exit(exit) = dispatch(invocation, deps, io).await else {
+        panic!("serve")
+    };
+    exit.code()
+}
+
+#[tokio::test]
+async fn cli_lost_start_then_completed_stop_replays_original_start_without_restarting() {
+    let fixture = Fixture::new(Some(DesiredServerState::Stopped));
+    let deps = dependencies(&fixture.provider());
+    let mut lost = Io {
+        fail_stdout: true,
+        ..Io::default()
+    };
+    assert_eq!(
+        dispatch_args(&["--json", "start"], &deps, &mut lost).await,
+        75
+    );
+    // The provider's durable reservation is announced before Start is polled.
+    // A failed final response still leaves the original lookup reference available.
+    let reservation: serde_json::Value =
+        serde_json::from_slice(lost.stderr.split(|byte| *byte == b'\n').next().unwrap()).unwrap();
+    let original = reservation["request"]["native_request"].as_str().unwrap();
+    assert_eq!(original.len(), 32);
+    assert!(lost.stdout.is_empty());
+    let reopened = fixture.provider();
+    assert_eq!(
+        reopened.management().status().await.unwrap().desired,
+        Some(DesiredServerState::Running)
+    );
+    let deps = dependencies(&reopened);
+    let mut stopped = Io {
+        confirm: true,
+        ..Io::default()
+    };
+    assert_eq!(
+        dispatch_args(&["--json", "stop"], &deps, &mut stopped).await,
+        0
+    );
+    assert_eq!(
+        reopened.management().status().await.unwrap().desired,
+        Some(DesiredServerState::Stopped)
+    );
+    let effects = fixture.manager.effects.lock().unwrap().clone();
+    let mut replay = Io::default();
+    let selector = format!("native:{original}");
+    assert_eq!(
+        dispatch_args(
+            &["--json", "status", "--operation", &selector],
+            &dependencies(&fixture.provider()),
+            &mut replay
+        )
+        .await,
+        0
+    );
+    let response: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
+    assert_eq!(response["result"]["native_request"], original);
+    assert_eq!(response["result"]["outcome"], "started");
+    assert_eq!(fixture.manager.effects.lock().unwrap().as_slice(), effects);
+    assert_eq!(
+        fixture
+            .provider()
+            .management()
+            .status()
+            .await
+            .unwrap()
+            .desired,
+        Some(DesiredServerState::Stopped)
+    );
+}
+
+#[tokio::test]
+async fn cli_cannot_poll_start_or_destructive_assessment_without_publishing_retained_request_id() {
+    for command in [vec!["start"], vec!["stop", "--assess"]] {
+        let fixture = Fixture::new(Some(DesiredServerState::Running));
+        let mut io = Io {
+            fail_stderr: true,
+            ..Io::default()
+        };
+        assert_eq!(
+            dispatch_args(&command, &dependencies(&fixture.provider()), &mut io).await,
+            75
+        );
+        assert!(fixture.manager.effects.lock().unwrap().is_empty());
+        assert_eq!(fixture.processes.0.load(Ordering::SeqCst), 1);
+        // Allocation reserved an ID but accepted no service action.
+        assert_eq!(
+            fixture
+                .provider()
+                .management()
+                .status()
+                .await
+                .unwrap()
+                .pending,
+            None
+        );
+    }
+}
+
+struct InvalidFeedTransport(AtomicU64);
+impl spaceterm_client_native::native::artifacts::ArtifactTransport for InvalidFeedTransport {
+    fn get(&self, _: &str, _: usize) -> Result<Vec<u8>, ManagementFailure> {
+        let n = self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(if n == 0 {
+            b"{\"version\":\"1.2.4\"}".to_vec()
+        } else {
+            vec![b'A'; 88]
+        })
+    }
+}
+#[tokio::test]
+async fn cli_update_check_verifies_signed_metadata_without_artifact_or_lifecycle_effects() {
+    let fixture = Fixture::new(None);
+    let transport = Arc::new(InvalidFeedTransport(AtomicU64::new(0)));
+    let provider = fixture
+        .provider()
+        .with_artifact_transport(transport.clone());
+    let mut io = Io::default();
+    let code = dispatch_args(
+        &["--json", "update", "check"],
+        &dependencies(&provider),
+        &mut io,
+    )
+    .await;
+    assert_eq!(transport.0.load(Ordering::SeqCst), 2);
+    let response: serde_json::Value = serde_json::from_slice(&io.stderr).unwrap();
+    assert_eq!(response["error"], "unsafe_native_state");
+    assert_eq!(code, ManagementFailure::UnsafeNativeState.exit_code());
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+    assert!(!fixture.account.anchor().exists());
+    assert!(io.stdout.is_empty());
+}
+
+#[tokio::test]
+async fn interrupted_cli_wait_preserves_and_resolves_the_original_admitted_start() {
+    let fixture = Fixture::new(Some(DesiredServerState::Stopped));
+    fixture.manager.block_start.store(true, Ordering::SeqCst);
+    let provider = fixture.provider();
+    let deps = dependencies(&provider);
+    let mut io = Io::default();
+    let invocation = spaceterm_client_native::cli::arguments::parse(
+        ["--json", "start"].map(std::ffi::OsString::from),
+    )
+    .unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        spaceterm_client_native::cli::runner::dispatch_until(
+            invocation,
+            &deps,
+            &mut io,
+            fixture.manager.start_entered.notified(),
+        ),
+    )
+    .await;
+    fixture.manager.start_release.notify_one();
+    assert!(matches!(result, Ok(Dispatch::Exit(exit)) if exit.code() == 75));
+    let mut records =
+        serde_json::Deserializer::from_slice(&io.stderr).into_iter::<serde_json::Value>();
+    let reservation = records.next().unwrap().unwrap();
+    let failure = records.next().unwrap().unwrap();
+    assert_eq!(failure["error"], "outcome_pending");
+    assert!(records.next().is_none());
+    let original = reservation["request"]["native_request"].as_str().unwrap();
+    assert!(io.stdout.is_empty());
+    let selector = format!("native:{original}");
+    let parsed = spaceterm_client_native::cli::arguments::parse(
+        ["status", "--operation", &selector].map(std::ffi::OsString::from),
+    )
+    .unwrap();
+    let spaceterm_client_native::cli::arguments::CliCommand::Status {
+        operation: Some(spaceterm_client_native::cli::arguments::RequestSelector::Native(request)),
+    } = parsed.command
+    else {
+        panic!("native selector")
+    };
+    // Joining the service-owned worker is independent from the cancelled CLI wait.
+    let progress = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match provider.management().resolve(request).await {
+                Ok(progress) if matches!(progress.state, ServiceRequestState::Completed(_)) => {
+                    break progress;
+                }
+                Ok(_) | Err(ServiceFailure::Pending) => tokio::task::yield_now().await,
+                Err(error) => panic!("resolution failed: {error:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(progress.request, request);
+    assert_eq!(
+        progress.state,
+        ServiceRequestState::Completed(ServiceOutcome::Started)
+    );
+    assert_eq!(
+        fixture
+            .manager
+            .effects
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|effect| **effect == "start")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn cli_activates_only_the_assessed_staged_installation_and_preserves_stopped() {
+    let fixture = Fixture::new(Some(DesiredServerState::Stopped));
+    let staged: InstallationStatus = serde_json::from_value(serde_json::json!({
+        "installation":2,"version":"1.2.4","artifact_sha256":vec![4;32]
+    }))
+    .unwrap();
+    fixture.account.stage_installation(staged.clone()).unwrap();
+    let provider = fixture.provider();
+    let deps = dependencies(&provider);
+    let mut assessed = Io::default();
+    assert_eq!(
+        dispatch_args(
+            &[
+                "--json",
+                "update",
+                "activate",
+                "--installation",
+                "2",
+                "--assess"
+            ],
+            &deps,
+            &mut assessed
+        )
+        .await,
+        0
+    );
+    let assessment: serde_json::Value = serde_json::from_slice(&assessed.stdout).unwrap();
+    let token = assessment["result"]["token"].as_str().unwrap();
+    let original = assessment["result"]["native_request"].as_str().unwrap();
+    let reservation: serde_json::Value = serde_json::from_slice(&assessed.stderr).unwrap();
+    assert_eq!(reservation["request"]["native_request"], original);
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+    assert_eq!(
+        dispatch_args(
+            &[
+                "--non-interactive",
+                "update",
+                "activate",
+                "--installation",
+                "3",
+                "--confirm",
+                token
+            ],
+            &deps,
+            &mut Io::default()
+        )
+        .await,
+        2
+    );
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+    let mut activated = Io::default();
+    assert_eq!(
+        dispatch_args(
+            &[
+                "--json",
+                "--non-interactive",
+                "update",
+                "activate",
+                "--installation",
+                "2",
+                "--confirm",
+                token
+            ],
+            &dependencies(&fixture.provider()),
+            &mut activated
+        )
+        .await,
+        0
+    );
+    let result: serde_json::Value = serde_json::from_slice(&activated.stdout).unwrap();
+    assert_eq!(result["result"]["native_request"], original);
+    assert_eq!(result["result"]["outcome"], "activated");
+    let status = provider.management().status().await.unwrap();
+    assert_eq!(status.desired, Some(DesiredServerState::Stopped));
+    assert_eq!(status.approved, Some(staged));
+    assert_eq!(status.staged, None);
+    assert!(!fixture.manager.effects.lock().unwrap().contains(&"start"));
+    let effects = fixture.manager.effects.lock().unwrap().clone();
+    let mut replay = Io::default();
+    assert_eq!(
+        dispatch_args(
+            &[
+                "--json",
+                "status",
+                "--operation",
+                &format!("native:{original}")
+            ],
+            &dependencies(&fixture.provider()),
+            &mut replay
+        )
+        .await,
+        0
+    );
+    let result: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
+    assert_eq!(result["result"]["outcome"], "activated");
+    assert_eq!(fixture.manager.effects.lock().unwrap().as_slice(), effects);
 }

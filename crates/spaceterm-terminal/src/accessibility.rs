@@ -616,6 +616,11 @@ impl<'a> AccessibilityRowView<'a> {
 }
 
 impl TerminalAccessibilityModel {
+    /// An inert model for revoked or unavailable terminal content.
+    pub fn empty() -> Self {
+        Self::new_with_generation(Vec::new(), 0..0, None, PresentationGeneration::default())
+    }
+
     pub fn rows(&self) -> impl Iterator<Item = AccessibilityRowView<'_>> {
         let document = &self.data.document;
         document

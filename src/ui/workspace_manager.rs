@@ -467,6 +467,7 @@ impl WorkspaceManager {
                 store.update(cx, |store, cx| store.window_activated(cx));
             }
             if window.is_window_active() {
+                manager.server_git_window_activated(cx);
                 Self::worktrees_window_activated(cx);
             }
             cx.notify();
@@ -3114,6 +3115,13 @@ impl WorkspaceManager {
     }
 
     fn on_new_worktree(&mut self, _: &NewWorktree, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(workspace) = self.active_server_workspace() {
+            self.new_server_worktree(workspace, window, cx);
+            return;
+        }
+        if self.is_server_backed() {
+            return;
+        }
         let workspace_id = self.workspaces.active_workspace_id();
         self.new_worktree(workspace_id, window, cx);
     }

@@ -12,6 +12,29 @@ impl WorkspaceManager {
     /// Whether the Active Workspace has more than one Worktree with Tabs, or Tabs outside every
     /// Worktree and a Worktree with Tabs, to step between.
     pub(in crate::ui::workspace_manager) fn steps_worktrees(&self, cx: &App) -> bool {
+        if self.is_server_backed() {
+            return self
+                .active_server_workspace()
+                .and_then(|workspace| {
+                    self.server
+                        .as_ref()?
+                        .frames
+                        .get(&workspace.server())
+                        .map(|frame| (workspace, frame))
+                })
+                .is_some_and(|(workspace, frame)| {
+                    frame
+                        .organization
+                        .state()
+                        .tabs
+                        .iter()
+                        .filter(|tab| tab.workspace == workspace)
+                        .map(|tab| tab.worktree)
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                        > 1
+                });
+        }
         let manager = self.workspaces.active_workspace().payload().read(cx);
         manager.worktree_tab_counts().len() + usize::from(manager.has_unscoped_tabs()) > 1
     }
@@ -24,6 +47,10 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.is_server_backed() {
+            self.step_server_worktree(forward, window, cx);
+            return;
+        }
         let workspace_id = self.workspaces.active_workspace_id();
         let Some(section) = self.worktree_section(workspace_id, cx) else {
             return;

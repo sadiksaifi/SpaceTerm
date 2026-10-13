@@ -75,9 +75,10 @@ pub enum NativeCliCommand {
     },
 }
 /// The bridge is supplied by the native provider. It must preserve that owner's
-/// original NativeRequestId, exact assessment, expiry and protected sudo path.
-/// In particular RemoteAccess obtains BOTH pairing and OS authority before the
-/// actor transition. This port cannot mutate SQL or construct listener authority.
+/// original NativeRequestId, exact assessment and expiry. Only missing Linux
+/// linger invokes the supplied authorization adapter. Remote policy is paired
+/// protocol work, not a native or administrator-authorized lifecycle operation.
+/// This port cannot mutate SQL or construct listener authority.
 pub trait NativeCommandBindings: Send + Sync {
     fn inspect(&self, key: AccountBuildKey) -> ManagementFuture<'_, NativeObservation>;
     fn run<'a>(

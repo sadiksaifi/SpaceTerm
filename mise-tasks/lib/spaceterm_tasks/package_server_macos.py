@@ -81,6 +81,7 @@ def verify_macho_closure(root, code):
                 "CoreFoundation",
                 "Foundation",
                 "Security",
+                "OpenDirectory",
                 "SystemConfiguration",
                 "DiskArbitration",
                 "IOKit",

@@ -49,3 +49,5 @@ pub mod worktrees;
 pub mod native_management;
 
 pub mod runtime_authority;
+
+pub mod bootstrap;
