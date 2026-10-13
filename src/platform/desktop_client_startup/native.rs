@@ -37,6 +37,7 @@ pub(crate) fn production(
         store: SharedViewStore(Arc::new(std::sync::Mutex::new(NativeViewStore::new(paths)))),
         consumed: Arc::new(AtomicBool::new(false)),
         executor: Arc::new(executor),
+        enrollment: Arc::default(),
     }))
 }
 

@@ -92,27 +92,65 @@ impl<S: ViewStore + 'static> RecoveredDesktopClient for DesktopClientComposition
         self: Box<Self>,
         cx: &mut App,
     ) -> Result<Entity<DesktopClientRuntime>, DesktopClientError> {
-        if let Some(installed) =
-            cx.try_global::<crate::ui::server_client_runtime::InstalledDesktopClient>()
-        {
-            return Ok(installed.0.clone());
-        }
-        let executor = self.executor.clone();
-        let handles: Vec<_> = self
-            .registry
-            .servers()
-            .into_iter()
-            .filter_map(|server| self.registry.server(server.server))
-            .collect();
-        let runtime = composed::install(*self, cx)?;
-        // The registry owns network workers. Connect only requests their first attempt after
-        // installation has bound the journal gate and recovered the personal attachment owner.
-        for handle in handles {
-            executor.spawn(async move {
-                let _ = handle.connect().await;
-            });
-        }
-        Ok(runtime)
+        install_recovered(*self, None, cx)
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "application host installs recovered native client owners"
+    )
+)]
+fn install_recovered<S: ViewStore + 'static>(
+    composition: DesktopClientComposition<S>,
+    enrollment: Option<
+        crate::ui::settings_window::server_enrollment::native::NativeEnrollmentServices,
+    >,
+    cx: &mut App,
+) -> Result<Entity<DesktopClientRuntime>, DesktopClientError> {
+    if let Some(installed) =
+        cx.try_global::<crate::ui::server_client_runtime::InstalledDesktopClient>()
+    {
+        return Ok(installed.0.clone());
+    }
+    let executor = composition.executor.clone();
+    let handles: Vec<_> = composition
+        .registry
+        .servers()
+        .into_iter()
+        .filter_map(|server| composition.registry.server(server.server))
+        .collect();
+    let runtime = composed::install_with_enrollment(composition, enrollment, cx)?;
+    // The registry owns network workers. Connect only requests their first attempt after
+    // installation has bound the journal gate and recovered the personal attachment owner.
+    for handle in handles {
+        executor.spawn(async move {
+            let _ = handle.connect().await;
+        });
+    }
+    Ok(runtime)
+}
+
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "application host supplies foreground enrollment capabilities"
+    )
+)]
+struct RecoveredWithEnrollment<S: ViewStore> {
+    composition: DesktopClientComposition<S>,
+    enrollment:
+        Option<crate::ui::settings_window::server_enrollment::native::NativeEnrollmentServices>,
+}
+impl<S: ViewStore + 'static> RecoveredDesktopClient for RecoveredWithEnrollment<S> {
+    fn install(
+        self: Box<Self>,
+        cx: &mut App,
+    ) -> Result<Entity<DesktopClientRuntime>, DesktopClientError> {
+        install_recovered(self.composition, self.enrollment, cx)
     }
 }
 
@@ -136,6 +174,12 @@ pub(crate) struct NativeDesktopStartup<S: ViewStore> {
     store: SharedViewStore<S>,
     consumed: Arc<std::sync::atomic::AtomicBool>,
     executor: Arc<tokio::runtime::Runtime>,
+    // Shared with the recovery task so a failed attempt keeps the services for retry.
+    enrollment: Arc<
+        std::sync::Mutex<
+            Option<crate::ui::settings_window::server_enrollment::native::NativeEnrollmentServices>,
+        >,
+    >,
 }
 
 struct SharedViewStore<S: ViewStore>(Arc<std::sync::Mutex<S>>);
@@ -193,7 +237,23 @@ impl<S: ViewStore + 'static> NativeDesktopStartup<S> {
             store: SharedViewStore(Arc::new(std::sync::Mutex::new(store))),
             consumed: Arc::default(),
             executor,
+            enrollment: Arc::default(),
         }
+    }
+    /// Foreground native capabilities are retained with this one startup, not window state.
+    #[allow(
+        dead_code,
+        reason = "application host supplies foreground enrollment capabilities"
+    )]
+    pub(crate) fn with_enrollment(
+        self,
+        services: crate::ui::settings_window::server_enrollment::native::NativeEnrollmentServices,
+    ) -> Self {
+        *self
+            .enrollment
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(services);
+        self
     }
 }
 
@@ -215,6 +275,7 @@ impl<S: ViewStore + 'static> DesktopClientStartup for NativeDesktopStartup<S> {
         let consumed = self.consumed.clone();
         let executor = self.executor.clone();
         let factory = self.factory.clone();
+        let enrollment = self.enrollment.clone();
         let recovery = executor.spawn(async move {
             let result = async {
                 let mut retained = owners.lock().await;
@@ -227,9 +288,16 @@ impl<S: ViewStore + 'static> DesktopClientStartup for NativeDesktopStartup<S> {
                     .ok_or(DesktopClientError::LocalStorageUnavailable)?
                     .clone();
                 drop(retained);
-                recover(original, store)
-                    .await
-                    .map(|composition| Box::new(composition) as Box<dyn RecoveredDesktopClient>)
+                recover(original, store).await.map(|composition| {
+                    let enrollment = enrollment
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take();
+                    Box::new(RecoveredWithEnrollment {
+                        composition,
+                        enrollment,
+                    }) as Box<dyn RecoveredDesktopClient>
+                })
             }
             .await;
             // Retry retains the original recovered owners and store. A failed load never

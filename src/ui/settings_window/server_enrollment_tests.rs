@@ -55,14 +55,20 @@ impl ReceiptVerifier for CryptoVerifier {
 }
 // Shared UI tests inject storage. The native-client package suite owns SQLite durability.
 // The canonical controller, transaction validator, receipt cryptography and protocol stay real.
-struct TestStore {
-    journal: Arc<JournalController>,
-    runtime: tokio::runtime::Runtime,
-    storage: Arc<MemoryJournal>,
+pub(super) struct TestStore {
+    pub(super) journal: Arc<JournalController>,
+    pub(super) runtime: Arc<tokio::runtime::Runtime>,
+    pub(super) storage: Arc<MemoryJournal>,
 }
 impl TestStore {
     fn new() -> Self {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
         let storage = Arc::new(MemoryJournal::default());
         let journal = runtime
             .block_on(JournalController::recover(
@@ -78,7 +84,7 @@ impl TestStore {
             storage,
         }
     }
-    fn store(&self) -> JournalPairingStore<JournalController> {
+    pub(super) fn store(&self) -> JournalPairingStore<JournalController> {
         JournalPairingStore::new(self.journal.clone())
     }
     fn reopened_controller(&self) -> Arc<JournalController> {
@@ -97,18 +103,18 @@ impl TestStore {
         JournalPairingStore::new(self.reopened_controller())
     }
 }
-struct Fixture {
-    prepared: PreparedEnrollment,
-    device: PreparedCredential,
-    credentials: Keys,
-    saved: SavedPairing,
-    reservation: PublicEnrollmentReservation,
-    authorization: RefCell<Option<EnrollmentAuthorization>>,
-    endpoint: Endpoint,
-    storage: TestStore,
+pub(super) struct Fixture {
+    pub(super) prepared: PreparedEnrollment,
+    pub(super) device: PreparedCredential,
+    pub(super) credentials: Keys,
+    pub(super) saved: SavedPairing,
+    pub(super) reservation: PublicEnrollmentReservation,
+    pub(super) authorization: RefCell<Option<EnrollmentAuthorization>>,
+    pub(super) endpoint: Endpoint,
+    pub(super) storage: TestStore,
 }
 impl Fixture {
-    fn new(major: u32, lose_reply: bool) -> Self {
+    pub(super) fn new(major: u32, lose_reply: bool) -> Self {
         let storage = TestStore::new();
         let server_key = Arc::new(DeterministicKey::new(1).unwrap());
         let device_key = Arc::new(DeterministicKey::new(3).unwrap());
@@ -304,7 +310,7 @@ impl Fixture {
     }
 }
 #[derive(Clone)]
-struct Keys {
+pub(super) struct Keys {
     device: Arc<DeterministicKey>,
     auth: Arc<DeterministicKey>,
 }
@@ -342,14 +348,14 @@ impl NativeDeviceCredentials for Keys {
     }
 }
 #[derive(Clone)]
-struct Endpoint {
-    server: Arc<DeterministicKey>,
-    reservation: Arc<Mutex<EnrollmentReservation>>,
-    receipt: SignedPairingReceipt,
-    major: u32,
-    submissions: Arc<AtomicU64>,
-    lookups: Arc<AtomicU64>,
-    lose_reply: Arc<AtomicBool>,
+pub(super) struct Endpoint {
+    pub(super) server: Arc<DeterministicKey>,
+    pub(super) reservation: Arc<Mutex<EnrollmentReservation>>,
+    pub(super) receipt: SignedPairingReceipt,
+    pub(super) major: u32,
+    pub(super) submissions: Arc<AtomicU64>,
+    pub(super) lookups: Arc<AtomicU64>,
+    pub(super) lose_reply: Arc<AtomicBool>,
 }
 impl EnrollmentLookup for Endpoint {
     fn lookup(&self, ticket: &EnrollmentTicketId) -> Result<EnrollmentReservation, ProtocolError> {
@@ -1236,4 +1242,9 @@ fn self_unpair_fence_rejects_a_historical_receipt_before_the_tombstone_is_writte
             PairingFailure::AuthorizationDenied
         ))
     ));
+}
+
+#[gpui::test]
+async fn foreground_enrollment_production_composition(cx: &mut TestAppContext) {
+    super::native::tests::foreground_composition(cx).await;
 }

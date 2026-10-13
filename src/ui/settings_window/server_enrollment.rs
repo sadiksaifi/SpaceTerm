@@ -49,6 +49,8 @@ use crate::ui::{
     sidebar_window::form::action_button,
 };
 
+pub(crate) mod native;
+
 #[cfg(test)]
 #[path = "server_enrollment_tests.rs"]
 mod tests;
@@ -148,6 +150,7 @@ pub(crate) struct DirectCandidate {
     reservation: PublicEnrollmentReservation,
     authorization: Option<EnrollmentAuthorization>,
     majors: Vec<u32>,
+    native_route: Option<spaceterm_client::api::RouteDescription>,
 }
 impl DirectCandidate {
     pub(crate) fn new(
@@ -188,6 +191,7 @@ impl DirectCandidate {
             reservation,
             authorization,
             majors,
+            native_route: None,
         })
     }
     fn verifier(&self) -> Result<DirectEnrollmentAttempt, EnrollmentFailure> {
@@ -217,6 +221,7 @@ impl DirectCandidate {
             reservation: self.reservation.clone(),
             authorization: self.authorization.take(),
             majors: self.majors.clone(),
+            native_route: self.native_route.clone(),
         })
     }
 }
@@ -231,6 +236,7 @@ pub(crate) struct DirectApproval {
     reservation: PublicEnrollmentReservation,
     authorization: Option<EnrollmentAuthorization>,
     majors: Vec<u32>,
+    native_route: Option<spaceterm_client::api::RouteDescription>,
 }
 impl DirectApproval {
     /// Production providers use the existing enrollment driver and canonical pairing store.
@@ -267,6 +273,7 @@ pub(crate) struct DurableEnrollment {
     bootstrap: Option<BootstrapOutcome>,
     prepared: PreparedEnrollment,
     saved: SavedPairing,
+    handle: Option<spaceterm_client::registry::ServerHandle>,
 }
 impl DurableEnrollment {
     pub(crate) async fn verify(
@@ -293,6 +300,7 @@ impl DurableEnrollment {
             bootstrap: None,
             prepared,
             saved,
+            handle: None,
         })
     }
     /// The server and route are the verified BootstrapCoordinator result, not UI-discovered claims.
@@ -320,6 +328,7 @@ pub(crate) struct SshCandidate {
     attempt: EnrollmentAttempt,
     facts: BootstrapHostFacts,
     pending: Option<BootstrapRequest>,
+    confirmation: Arc<std::sync::Mutex<Option<BootstrapAttempt>>>,
 }
 impl SshCandidate {
     pub(crate) fn attempt(&self) -> EnrollmentAttempt {
@@ -378,6 +387,7 @@ impl SshCandidate {
             attempt,
             facts,
             pending: None,
+            confirmation: Arc::new(std::sync::Mutex::new(None)),
         })
     }
     /// Native recovery supplies the original request; reopening a sheet cannot issue a replacement.
@@ -403,10 +413,16 @@ impl SshCandidate {
         ) {
             return Err(PairingFailure::ExplicitStartRequired.into());
         }
-        Ok(ForegroundBootstrap::confirm_observed(
-            self.facts,
-            self.attempt.generation,
-        )?)
+        let mut confirmation = self
+            .confirmation
+            .lock()
+            .map_err(|_| PairingFailure::InvalidDurableState)?;
+        if confirmation.is_some() {
+            return Err(PairingFailure::RecoveryRequired.into());
+        }
+        let intent = ForegroundBootstrap::confirm_observed(self.facts, self.attempt.generation)?;
+        *confirmation = Some(intent.cancellation());
+        Ok(intent)
     }
 }
 

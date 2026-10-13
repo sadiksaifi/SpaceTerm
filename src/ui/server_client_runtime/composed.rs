@@ -63,12 +63,28 @@ pub(crate) struct ComposedDesktopClientProvider<S: ViewStore> {
     reason = "native enrollment supplies these recovered owners at startup"
 )]
 pub(crate) fn install<S: ViewStore + 'static>(
+    composition: DesktopClientComposition<S>,
+    cx: &mut App,
+) -> Result<gpui::Entity<super::DesktopClientRuntime>, DesktopClientError> {
+    install_with_enrollment(composition, None, cx)
+}
+
+pub(crate) fn install_with_enrollment<S: ViewStore + 'static>(
     mut composition: DesktopClientComposition<S>,
+    enrollment: Option<
+        crate::ui::settings_window::server_enrollment::native::NativeEnrollmentServices,
+    >,
     cx: &mut App,
 ) -> Result<gpui::Entity<super::DesktopClientRuntime>, DesktopClientError> {
     if let Some(installed) = cx.try_global::<super::InstalledDesktopClient>() {
         return Ok(installed.0.clone());
     }
+    if enrollment.as_ref().is_some_and(|services| {
+        !Arc::ptr_eq(services.pairing.journal(), composition.tracker.journal())
+    }) {
+        return Err(DesktopClientError::LocalStorageUnavailable);
+    }
+    let enrollment_registry = composition.registry.clone();
     let saved = composition
         .tracker
         .journal()
@@ -133,7 +149,7 @@ pub(crate) fn install<S: ViewStore + 'static>(
     let runtime = cx.new(|cx| {
         super::DesktopClientRuntime::new(
             super::DesktopClientDependencies {
-                provider,
+                provider: provider.clone(),
                 notifications,
             },
             cx,
@@ -141,9 +157,17 @@ pub(crate) fn install<S: ViewStore + 'static>(
     });
     cx.set_global(super::InstalledDesktopClient(runtime.clone()));
     crate::ui::settings_window::server_runtime::install(settings, cx);
+    if let Some(services) = enrollment {
+        crate::ui::settings_window::server_enrollment::install(
+            Rc::new(crate::ui::settings_window::server_enrollment::native::NativeEnrollmentProvider::new(
+                services, enrollment_registry, provider,
+            )), cx,
+        );
+    }
     Ok(runtime)
 }
 
+#[derive(Clone)]
 struct Source {
     binding: PairedServerBinding,
     name: DesktopServerInfo,
@@ -175,8 +199,8 @@ struct State {
 struct Inner {
     git: gpui::Entity<crate::ui::server_git::ServerGitStore>,
     git_publications: RefCell<BTreeMap<ServerId, GitPublication>>,
-    sources: BTreeMap<ServerId, Source>,
-    order: Vec<ServerId>,
+    sources: RefCell<BTreeMap<ServerId, Source>>,
+    order: RefCell<Vec<ServerId>>,
     channels: Arc<PaneChannels>,
     tracker: OperationTracker,
     operations: Arc<dyn OperationPeer>,
@@ -265,8 +289,8 @@ impl<S: ViewStore + 'static> ComposedDesktopClientProvider<S> {
         let inner = Rc::new(Inner {
             git: crate::ui::server_git::InstalledServerGit::install(cx),
             git_publications: RefCell::new(BTreeMap::new()),
-            sources,
-            order,
+            sources: RefCell::new(sources),
+            order: RefCell::new(order),
             channels,
             tracker,
             operations,
@@ -295,7 +319,7 @@ impl<S: ViewStore + 'static> ComposedDesktopClientProvider<S> {
         server: ServerId,
         block: Option<(BlockedLocation, IntendedAction)>,
     ) -> Result<(), DesktopClientError> {
-        if !self.inner.sources.contains_key(&server) {
+        if !self.inner.sources.borrow().contains_key(&server) {
             return Err(DesktopClientError::TargetGone);
         }
         let mut state = self.inner.state.borrow_mut();
@@ -331,7 +355,101 @@ impl<S: ViewStore + 'static> ComposedDesktopClientProvider<S> {
     }
 }
 
+impl<S: ViewStore + 'static>
+    crate::ui::settings_window::server_enrollment::native::EnrollmentPublication
+    for ComposedDesktopClientProvider<S>
+{
+    fn publish(
+        &self,
+        enrollment: &crate::ui::settings_window::server_enrollment::DurableEnrollment,
+        handle: ServerHandle,
+        cx: &mut App,
+    ) -> Result<(), crate::ui::settings_window::server_enrollment::EnrollmentFailure> {
+        use spaceterm_core::pairing::PairingFailure;
+        let journal = self.inner.tracker.journal();
+        let snapshot = journal
+            .snapshot()
+            .map_err(|_| PairingFailure::StorageUnavailable)?;
+        let binding = snapshot
+            .bindings()
+            .iter()
+            .find(|binding| binding.proof() == enrollment.saved().receipt())
+            .ok_or(PairingFailure::InvalidDurableState)?
+            .binding()
+            .map_err(|_| PairingFailure::InvalidDurableState)?;
+        if !journal
+            .ordinary_use_allowed(&binding)
+            .map_err(|_| PairingFailure::StorageUnavailable)?
+        {
+            return Err(PairingFailure::PairingRevoked.into());
+        }
+        let server = binding.target().server();
+        if handle.identity() != server {
+            return Err(PairingFailure::IdentityMismatch.into());
+        }
+        let previous = self.inner.source(&server);
+        if let Some(existing) = &previous {
+            if existing.binding == binding {
+                return Ok(());
+            }
+            if journal
+                .ordinary_use_allowed(&existing.binding)
+                .map_err(|_| PairingFailure::StorageUnavailable)?
+            {
+                return Err(PairingFailure::IdentityMismatch.into());
+            }
+        }
+        let name = DesktopServerInfo {
+            server,
+            name: DisplayName::unnamed(),
+            local: matches!(
+                binding.target().route().parts(),
+                spaceterm_client::api::RouteParts::Ipc { .. }
+            ),
+        };
+        let settings = crate::ui::settings_window::server_runtime::SettingsConnection::from_handle(
+            binding.clone(),
+            name.clone(),
+            &handle,
+            &self.inner.tracker,
+        )
+        .map_err(|_| PairingFailure::InvalidDurableState)?;
+        crate::ui::settings_window::server_runtime::add_connection(settings, cx)
+            .map_err(|_| PairingFailure::InvalidDurableState)?;
+        self.inner.sources.borrow_mut().insert(
+            server,
+            Source {
+                binding,
+                name,
+                state: handle.state(),
+                replica: handle.replica(),
+                handle: Some(handle),
+            },
+        );
+        if previous.is_none() {
+            self.inner.order.borrow_mut().push(server);
+        }
+        {
+            let mut state = self.inner.state.borrow_mut();
+            state.frames.remove(&server);
+            state
+                .view
+                .filter_suppressed(&snapshot)
+                .map_err(|_| PairingFailure::InvalidDurableState)?;
+        }
+        self.inner
+            .follow_server(server, cx)
+            .map_err(|_| PairingFailure::InvalidDurableState)?;
+        self.inner.notifier.frame_changed(server);
+        Ok(())
+    }
+}
+
 impl Inner {
+    fn source(&self, server: &ServerId) -> Option<Source> {
+        self.sources.borrow().get(server).cloned()
+    }
+
     fn install(self: &Rc<Self>, cx: &mut App) -> Result<(), DesktopClientError> {
         // Subscribe before the final snapshot so a concurrent suppression commit cannot land
         // between the initial read and the watcher and disappear from both observations.
@@ -348,13 +466,47 @@ impl Inner {
                     .map_err(DesktopClientError::from)?,
             )
             .map_err(view_error)?;
-        for (&server, source) in &self.sources {
-            self.refresh(server)?;
-            self.sync_git(server, cx);
-            let mut connection = source.state.clone();
-            let mut replica = source.replica.clone();
-            let weak = Rc::downgrade(self);
-            self.tasks.borrow_mut().push(cx.spawn(async move |cx| {
+        for server in self.order.borrow().iter().copied() {
+            self.follow_server(server, cx)?;
+        }
+        let weak = Rc::downgrade(self);
+        self.tasks.borrow_mut().push(cx.spawn(async move |cx| {
+            loop {
+                let alive = tokio::select! { changed = revisions.changed() => changed.is_ok(), changed = health.changed() => changed.is_ok() };
+                if !alive { break; }
+                let Some(inner) = weak.upgrade() else { break; };
+                let _edit = inner.edits.lock().await;
+                cx.update(|cx| {
+                    for server in inner.order.borrow().iter() { inner.sync_git(*server, cx); }
+                });
+                let markers = inner.tracker.journal().snapshot();
+                let mut state = inner.state.borrow_mut();
+                if let Ok(markers) = markers {
+                    let _ = state.view.filter_suppressed(&markers);
+                    state.outcomes.retain(|operation, _| markers.operation(*operation).is_some());
+                    state.watching.retain(|operation| markers.operation(*operation).is_some());
+                    let _ = inner.publish_frames(&mut state);
+                } else {
+                    state.frames.clear();
+                    for server in inner.order.borrow().iter() { inner.notifier.frame_changed(*server); }
+                }
+            }
+        }));
+        Ok(())
+    }
+
+    fn follow_server(
+        self: &Rc<Self>,
+        server: ServerId,
+        cx: &mut App,
+    ) -> Result<(), DesktopClientError> {
+        let source = self.source(&server).ok_or(DesktopClientError::TargetGone)?;
+        self.refresh(server)?;
+        self.sync_git(server, cx);
+        let mut connection = source.state.clone();
+        let mut replica = source.replica.clone();
+        let weak = Rc::downgrade(self);
+        self.tasks.borrow_mut().push(cx.spawn(async move |cx| {
                 loop {
                     let alive = tokio::select! { result = connection.changed() => result.is_ok(), result = replica.changed() => result.is_ok() };
                     if !alive { break; }
@@ -368,36 +520,11 @@ impl Inner {
                     let _ = inner.execute(effects, cx).await;
                 }
             }));
-        }
-        let weak = Rc::downgrade(self);
-        self.tasks.borrow_mut().push(cx.spawn(async move |cx| {
-            loop {
-                let alive = tokio::select! { changed = revisions.changed() => changed.is_ok(), changed = health.changed() => changed.is_ok() };
-                if !alive { break; }
-                let Some(inner) = weak.upgrade() else { break; };
-                let _edit = inner.edits.lock().await;
-                cx.update(|cx| {
-                    for server in &inner.order { inner.sync_git(*server, cx); }
-                });
-                let markers = inner.tracker.journal().snapshot();
-                let mut state = inner.state.borrow_mut();
-                if let Ok(markers) = markers {
-                    let _ = state.view.filter_suppressed(&markers);
-                    state.outcomes.retain(|operation, _| markers.operation(*operation).is_some());
-                    state.watching.retain(|operation| markers.operation(*operation).is_some());
-                    let _ = inner.publish_frames(&mut state);
-                } else {
-                    state.frames.clear();
-                    for server in &inner.order { inner.notifier.frame_changed(*server); }
-                }
-            }
-        }));
         Ok(())
     }
 
     fn snapshot(&self, server: ServerId) -> Result<Arc<ReplicaSnapshot>, DesktopClientError> {
-        self.sources
-            .get(&server)
+        self.source(&server)
             .ok_or(DesktopClientError::TargetGone)?
             .replica
             .borrow()
@@ -412,10 +539,7 @@ impl Inner {
         snapshot: &'a ReplicaSnapshot,
         synchronizing: bool,
     ) -> Result<ReplicaObservation<'a>, DesktopClientError> {
-        let source = self
-            .sources
-            .get(&server)
-            .ok_or(DesktopClientError::TargetGone)?;
+        let source = self.source(&server).ok_or(DesktopClientError::TargetGone)?;
         let connection = source.state.borrow().clone();
         let (status, binding, ready) = match connection {
             ConnectionState::Connected { info } => (
@@ -534,7 +658,7 @@ impl Inner {
             .checked_successor()
             .ok_or(DesktopClientError::CounterExhausted)?;
         let personal = Arc::new(state.view.clone());
-        for (&server, source) in &self.sources {
+        for (&server, source) in self.sources.borrow().iter() {
             if !self
                 .tracker
                 .journal()
@@ -573,8 +697,7 @@ impl Inner {
 
     fn channel(&self, pane: PaneId) -> Result<PaneChannel, DesktopClientError> {
         let source = self
-            .sources
-            .get(&pane.server())
+            .source(&pane.server())
             .ok_or(DesktopClientError::TargetGone)?;
         if !self
             .tracker
@@ -656,8 +779,7 @@ impl Inner {
             .find(|runtime| runtime.pane == pane)
             .copied();
         let current_connection = match &*self
-            .sources
-            .get(&pane.server())
+            .source(&pane.server())
             .ok_or(DesktopClientError::TargetGone)?
             .state
             .borrow()
@@ -682,8 +804,7 @@ impl Inner {
         let observation = self.observation(pane.server(), &snapshot, synchronizing)?;
         let token = self.token(pane)?;
         let source = self
-            .sources
-            .get(&pane.server())
+            .source(&pane.server())
             .ok_or(DesktopClientError::TargetGone)?;
         let mut state = self.state.borrow_mut();
         let workspace = state
@@ -925,8 +1046,7 @@ impl Inner {
                 })
                 .clone();
             let binding = self
-                .sources
-                .get(&server)
+                .source(&server)
                 .ok_or(DesktopClientError::TargetGone)?
                 .binding
                 .clone();
@@ -1064,8 +1184,7 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
     ) -> Result<Rc<dyn crate::ui::directory_picker::DirectorySource>, DesktopClientError> {
         let source = self
             .inner
-            .sources
-            .get(&server)
+            .source(&server)
             .ok_or(DesktopClientError::TargetGone)?;
         let name = source
             .name
@@ -1102,8 +1221,9 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
     fn servers(&self) -> Vec<DesktopServerInfo> {
         self.inner
             .order
+            .borrow()
             .iter()
-            .filter_map(|server| self.inner.sources.get(server))
+            .filter_map(|server| self.inner.source(server))
             .filter(|source| {
                 self.inner
                     .tracker
@@ -1115,7 +1235,7 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
             .collect()
     }
     fn frame(&self, server: ServerId) -> Option<Arc<DesktopServerFrame>> {
-        let source = self.inner.sources.get(&server)?;
+        let source = self.inner.source(&server)?;
         if !self
             .inner
             .tracker
@@ -1277,8 +1397,7 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
             }
             DesktopRequest::RetryConnection(server) => {
                 let handle = inner
-                    .sources
-                    .get(&server)
+                    .source(&server)
                     .and_then(|source| source.handle.clone())
                     .ok_or(DesktopClientError::UnsupportedCapability)?;
                 Ok(cx.spawn(async move |_| {
@@ -1302,8 +1421,7 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
                     ReplicaStatus::RetainedOffline => return Err(DesktopClientError::Offline),
                 }
                 let binding = inner
-                    .sources
-                    .get(&server)
+                    .source(&server)
                     .ok_or(DesktopClientError::TargetGone)?
                     .binding
                     .clone();
@@ -1361,8 +1479,7 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
                                 status: observation.status(),
                             };
                             let binding = inner
-                                .sources
-                                .get(&workspace.server())
+                                .source(&workspace.server())
                                 .ok_or(DesktopClientError::TargetGone)?
                                 .binding
                                 .clone();
@@ -1428,8 +1545,7 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
                     .map_err(view_error)?;
                 let attachment = plan.attachment();
                 let binding = inner
-                    .sources
-                    .get(&workspace.server())
+                    .source(&workspace.server())
                     .ok_or(DesktopClientError::TargetGone)?
                     .binding
                     .clone();
