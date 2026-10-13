@@ -3130,22 +3130,42 @@ fn kitty_auto_sizing_from_pty_pixels_should_agree_with_size_replies_and_not_wrap
     reader_steps
         .send(ReaderStep::Bytes(stream.into_bytes()))
         .unwrap();
-    let event = receive_event(
-        &events,
-        "the complete automatic icat image",
-        |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen.cursor.position.is_some_and(|position| position.row == 2) && !screen.graphics.images.is_empty()),
+    // EOF completes this finite script without a wall-clock presentation wait.
+    // Join before releasing the graphics test lock, including on assertion failure.
+    reader_steps.send(ReaderStep::Eof).unwrap();
+    session.worker.take().unwrap().join().unwrap();
+    session.shutdown_and_join();
+    let mut snapshot = None;
+    let mut exit = None;
+    while let Ok(event) = events.try_recv() {
+        match event {
+            TerminalSessionEvent::Screen(screen) => snapshot = Some(screen),
+            TerminalSessionEvent::Exited(status) => exit = Some(status),
+            _ => {}
+        }
+    }
+    assert_eq!(exit, Some(TerminalSessionExit::Success));
+    let snapshot = snapshot.expect("the completed icat script must publish its final Screen");
+    assert_eq!(
+        snapshot.cursor.position.map(|position| (position.row, position.column)),
+        Some((2, 0)),
     );
-    let TerminalSessionEvent::Screen(snapshot) = event else {
-        unreachable!()
-    };
+    assert_eq!(snapshot.graphics.images.len(), 1);
     assert_eq!(snapshot.graphics.placements.len(), 2);
     assert!(snapshot.graphics.placements.iter().all(|placement| {
         matches!(placement.viewport_row, 0 | 1)
             && placement.viewport_col == 0
             && placement.destination_width == u32::from(size.pixel_width)
     }));
-    // Keep the graphics test lock until the worker releases its native pixels.
-    session.shutdown_and_join();
+    drop(snapshot);
+    drop(events);
+    assert!(
+        crate::terminal::graphics::GraphicsReservation::try_acquire(
+            crate::terminal::graphics::APPLICATION_DECODED_LIMIT,
+        )
+        .is_some(),
+        "the completed script must release its pixels before another graphics quota test",
+    );
 }
 
 #[test]

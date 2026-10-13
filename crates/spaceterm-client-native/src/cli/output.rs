@@ -108,7 +108,7 @@ impl CliOutput {
                 json!({"kind":"assessment","server":hex(&a.action().server().bytes()),"action":a.action().name(),"token":a.token().as_str(),"description":assessment_description(a)})
             }
             Self::Progress(p) => {
-                json!({"kind":"operation","request":match p.request {ManagementRequestReference::Operation(b)=>json!({"operation":operation_text(b.id)}),ManagementRequestReference::Native(bytes)=>json!({"native_request":hex(&bytes)})},"state":p.state,"completed_units":p.completed_units,"total_units":p.total_units})
+                json!({"kind":"operation","request":match p.request {ManagementRequestReference::Operation(b)=>json!({"operation":operation_text(b.id)}),ManagementRequestReference::OperationReference(id)=>json!({"operation":operation_text(id)}),ManagementRequestReference::Native(bytes)=>json!({"native_request":hex(&bytes)})},"state":p.state,"completed_units":p.completed_units,"total_units":p.total_units})
             }
             Self::NativeProgress(p) => {
                 json!({"kind":"native_operation","native_request":hex(&p.request),"state":format!("{:?}",p.state),"phase":format!("{:?}",p.phase)})
@@ -157,6 +157,7 @@ fn status_value(status: &ServerStatus) -> Value {
 fn request_text(request: ManagementRequestReference) -> String {
     match request {
         ManagementRequestReference::Operation(binding) => operation_text(binding.id),
+        ManagementRequestReference::OperationReference(id) => operation_text(id),
         ManagementRequestReference::Native(bytes) => format!("native:{}", hex(&bytes)),
     }
 }
@@ -354,6 +355,7 @@ fn human_output(output: &CliOutput) -> String {
             "Request: {}\nState: {:?}\nProgress: {}/{}\n",
             match p.request {
                 ManagementRequestReference::Operation(b) => operation_text(b.id),
+                ManagementRequestReference::OperationReference(id) => operation_text(id),
                 ManagementRequestReference::Native(bytes) => format!("native:{}", hex(&bytes)),
             },
             p.state,

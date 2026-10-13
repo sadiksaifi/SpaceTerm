@@ -49,6 +49,9 @@ pub const CAPABILITY_SERVER_GIT: u32 = 520_001;
 pub const CAPABILITY_SERVER_DIRECTORIES: u32 = 520_002;
 /// Complete canonical-domain conversion and revision-exact resource contract.
 pub const CAPABILITY_CANONICAL_DOMAIN: u32 = 520_003;
+/// Exact Tab membership versions and Pane runtime failure classifications.
+/// Frozen canonical-domain peers do not know these nested organization fields.
+pub const CAPABILITY_ORGANIZATION_COMPARISONS: u32 = 520_004;
 
 /// Additive envelope registration: tag, authenticated capability, permitted directions.
 pub const EXTENSION_ENVELOPES: &[(u32, u32, bool, bool)] = &[

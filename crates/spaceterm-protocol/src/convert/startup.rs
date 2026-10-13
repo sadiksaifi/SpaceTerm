@@ -182,6 +182,21 @@ mod tests {
                 let begin = Command::BeginStartup(
                     StartupIntent::new(id, fence, StartupSource::ExplicitSelection).unwrap(),
                 );
+                let payload = match stringify!($p) {
+                    "v1" => crate::codec::Payload::Major1(crate::wire::v1::Message {
+                        kind: Some(crate::wire::v1::message::Kind::StartupIntent(
+                            v1::encode_request(&begin).unwrap(),
+                        )),
+                    }),
+                    _ => crate::codec::Payload::Major2(crate::wire::v2::Message {
+                        kind: Some(crate::wire::v2::message::Kind::StartupIntent(
+                            v2::encode_request(&begin).unwrap(),
+                        )),
+                    }),
+                };
+                payload
+                    .encode()
+                    .expect("initial generation must pass actual admission");
                 assert_eq!(
                     $p::decode_request(&$p::encode_request(&begin).unwrap(), id),
                     Ok(begin)
@@ -198,6 +213,50 @@ mod tests {
                     fence,
                     grid: measured,
                 });
+                let payload = match stringify!($p) {
+                    "v1" => crate::codec::Payload::Major1(crate::wire::v1::Message {
+                        kind: Some(crate::wire::v1::message::Kind::StartupIntent(
+                            v1::encode_request(&complete).unwrap(),
+                        )),
+                    }),
+                    _ => crate::codec::Payload::Major2(crate::wire::v2::Message {
+                        kind: Some(crate::wire::v2::message::Kind::StartupIntent(
+                            v2::encode_request(&complete).unwrap(),
+                        )),
+                    }),
+                };
+                payload
+                    .encode()
+                    .expect("initial measured generation must pass actual admission");
+                let runtime = match stringify!($p) {
+                    "v1" => crate::codec::Payload::Major1(crate::wire::v1::Message {
+                        kind: Some(crate::wire::v1::message::Kind::RuntimeCommand(
+                            crate::wire::v1::RuntimeCommand {
+                                fence: Some(encode_fence(fence)),
+                                request: 1,
+                                action: Some(
+                                    crate::wire::v1::runtime_command::Action::InputMethodText(
+                                        "x".into(),
+                                    ),
+                                ),
+                            },
+                        )),
+                    }),
+                    _ => crate::codec::Payload::Major2(crate::wire::v2::Message {
+                        kind: Some(crate::wire::v2::message::Kind::RuntimeCommand(
+                            crate::wire::v2::RuntimeCommand {
+                                fence: Some(encode_fence(fence)),
+                                request: 1,
+                                action: Some(
+                                    crate::wire::v2::runtime_command::Action::InputMethodText(
+                                        "x".into(),
+                                    ),
+                                ),
+                            },
+                        )),
+                    }),
+                };
+                assert_eq!(runtime.encode(), Err(ProtocolError::Malformed));
                 let operation = OperationId::new(stream, OperationSequence::new(2).unwrap());
                 assert_eq!(
                     $p::decode_request(&$p::encode_request(&complete).unwrap(), operation),

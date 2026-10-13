@@ -977,6 +977,15 @@ impl<T: IntoElement + 'static, A: Clone + 'static> ContextMenu<T, A> {
 
     control_builders!(A, MenuActivation<A>, on_activate);
 
+    /// Allows a nonempty menu to open even when every entry is disabled.
+    ///
+    /// Entries are captured when the opening request is accepted and retained until dismissal,
+    /// including the first popup redraw. Disabled entries remain non-activatable.
+    pub fn open_when_all_disabled(mut self) -> Self {
+        self.core.open_when_all_disabled = true;
+        self
+    }
+
     /// Handles a proposed context opening before menu state or focus changes.
     ///
     /// Returning `false` rejects the request and leaves the gesture available to the underlay.
@@ -1507,6 +1516,14 @@ enum TriggerKind {
     Picker,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum EntrySnapshot {
+    EachRender,
+    OpenRequest,
+    // Default context menus refresh after their request handler selects the opening target.
+    FirstOpenRender,
+}
+
 type TypedActivationHandler<A> = Rc<dyn Fn(&MenuActivation<A>, &mut Window, &mut App)>;
 
 struct MenuControl<A> {
@@ -1517,6 +1534,7 @@ struct MenuControl<A> {
     size: MenuSize,
     placement: MenuPlacementConfig,
     disabled: bool,
+    open_when_all_disabled: bool,
     icon_trigger: bool,
     fill_parent_width: bool,
     fill_parent_height: bool,
@@ -1548,6 +1566,7 @@ impl<A> MenuControl<A> {
             size: MenuSize::default(),
             placement: MenuPlacementConfig::default(),
             disabled: false,
+            open_when_all_disabled: false,
             icon_trigger: false,
             fill_parent_width: false,
             fill_parent_height: false,
@@ -1564,7 +1583,10 @@ impl<A> MenuControl<A> {
     }
 
     fn is_enabled(&self) -> bool {
-        !self.disabled && self.on_activate.is_some() && has_selectable(&self.entries)
+        !self.disabled
+            && self.on_activate.is_some()
+            && (has_selectable(&self.entries)
+                || (self.open_when_all_disabled && !self.entries.is_empty()))
     }
 }
 
@@ -1619,7 +1641,13 @@ impl<A: Clone + 'static> MenuControl<A> {
                 self.placement,
                 enabled,
                 self.kind != TriggerKind::Context,
-                self.kind == TriggerKind::Context,
+                match self.kind {
+                    TriggerKind::Context if self.open_when_all_disabled => {
+                        EntrySnapshot::OpenRequest
+                    }
+                    TriggerKind::Context => EntrySnapshot::FirstOpenRender,
+                    TriggerKind::Menu | TriggerKind::Picker => EntrySnapshot::EachRender,
+                },
                 lifecycle.clone(),
             );
             should_close
@@ -2280,7 +2308,7 @@ struct MenuState {
     style: MenuStyle,
     placement: MenuPlacementConfig,
     enabled: bool,
-    freeze_entries_while_open: bool,
+    entry_snapshot: EntrySnapshot,
     awaiting_context_snapshot: bool,
     open: bool,
     open_generation: u64,
@@ -2373,7 +2401,7 @@ impl MenuState {
             },
             placement: MenuPlacementConfig::default(),
             enabled: false,
-            freeze_entries_while_open: false,
+            entry_snapshot: EntrySnapshot::EachRender,
             awaiting_context_snapshot: false,
             open: false,
             open_generation: 0,
@@ -2408,17 +2436,20 @@ impl MenuState {
         placement: MenuPlacementConfig,
         enabled: bool,
         trigger_focusable: bool,
-        freeze_entries_while_open: bool,
+        entry_snapshot: EntrySnapshot,
         lifecycle: Option<MenuLifecycleHandler>,
     ) {
-        if !self.open || !freeze_entries_while_open || self.awaiting_context_snapshot {
+        if !self.open
+            || entry_snapshot == EntrySnapshot::EachRender
+            || self.awaiting_context_snapshot
+        {
             self.entries = entries;
             self.awaiting_context_snapshot = false;
         }
         self.style = style;
         self.placement = placement;
         self.enabled = enabled;
-        self.freeze_entries_while_open = freeze_entries_while_open;
+        self.entry_snapshot = entry_snapshot;
         self.lifecycle = lifecycle;
         self.focus_handle = self
             .focus_handle
@@ -2487,7 +2518,7 @@ impl MenuState {
         self.hovered_row = None;
         self.open_generation = self.open_generation.wrapping_add(1);
         self.reservation = reservation;
-        self.awaiting_context_snapshot = self.freeze_entries_while_open;
+        self.awaiting_context_snapshot = self.entry_snapshot == EntrySnapshot::FirstOpenRender;
         self.active_path.clear();
         self.panel_scroll.clear();
         self.highlighted.clear();
@@ -4734,6 +4765,138 @@ mod tests {
     }
 
     #[gpui::test]
+    fn all_disabled_context_menus_require_opt_in_and_keep_control_guards(cx: &mut TestAppContext) {
+        use crate::a11y_testing::{A11yTree, supports};
+        use gpui::accesskit::{Action, Role};
+
+        struct TargetRoot {
+            focus: FocusHandle,
+            allow_disabled: bool,
+            disabled: bool,
+            handler: bool,
+            empty: bool,
+        }
+        impl Render for TargetRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                ContextMenu::new(
+                    "row-menu",
+                    "Row actions",
+                    div().w(px(80.0)).h(px(40.0)),
+                    if self.empty {
+                        Vec::new()
+                    } else {
+                        vec![MenuEntry::action("Inspect", ()).disabled(true)]
+                    },
+                )
+                .when(self.allow_disabled, ContextMenu::open_when_all_disabled)
+                .disabled(self.disabled)
+                .when(self.handler, |menu| menu.on_activate(|_, _, _| {}))
+                .keyboard_trigger(&self.focus)
+                .target(ContextMenuTarget::new(Role::Group, "Row"))
+            }
+        }
+
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        for (allow_disabled, disabled, handler, empty, opens) in [
+            (false, false, true, false, false),
+            (true, false, true, false, true),
+            (true, true, true, false, false),
+            (true, false, false, false, false),
+            (true, false, true, true, false),
+        ] {
+            let (root, cx) = cx.add_window_view(move |window, cx| {
+                window.activate_window();
+                let focus = cx.focus_handle();
+                focus.focus(window, cx);
+                TargetRoot {
+                    focus,
+                    allow_disabled,
+                    disabled,
+                    handler,
+                    empty,
+                }
+            });
+            let tree = A11yTree::read(cx);
+            assert_eq!(supports(tree.node("Row"), Action::ShowContextMenu), opens);
+            cx.simulate_keystrokes("shift-f10");
+            assert_eq!(!A11yTree::read(cx).with_role("Menu").is_empty(), opens);
+            cx.simulate_keystrokes("escape");
+            assert!(A11yTree::read(cx).with_role("Menu").is_empty());
+            assert!(cx.update(|window, cx| root.read(cx).focus.is_focused(window)));
+        }
+    }
+
+    #[gpui::test]
+    fn context_menu_opt_in_captures_entries_at_the_request_without_changing_default_target_refresh(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::a11y_testing::{A11yTree, perform};
+        use gpui::accesskit::Action;
+
+        struct TargetRoot {
+            focus: FocusHandle,
+            target: Rc<Cell<&'static str>>,
+            allow_disabled: bool,
+            selected: Rc<RefCell<Vec<&'static str>>>,
+        }
+        impl Render for TargetRoot {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let target = Rc::clone(&self.target);
+                let selected = Rc::clone(&self.selected);
+                ContextMenu::new(
+                    "row-menu",
+                    "Row actions",
+                    div().w(px(80.0)).h(px(40.0)),
+                    vec![MenuEntry::action(self.target.get(), self.target.get())],
+                )
+                .when(self.allow_disabled, ContextMenu::open_when_all_disabled)
+                .keyboard_trigger(&self.focus)
+                .on_open_request(move |_, window, _| {
+                    target.set("Opening target");
+                    window.refresh();
+                    true
+                })
+                .on_activate(move |activation, _, _| {
+                    selected.borrow_mut().push(*activation.action());
+                })
+            }
+        }
+
+        cx.update(super::init);
+        cx.set_global(test_theme());
+        for (allow_disabled, expected) in [(false, "Opening target"), (true, "Before request")] {
+            let target = Rc::new(Cell::new("Before request"));
+            let selected = Rc::new(RefCell::new(Vec::new()));
+            let root_target = Rc::clone(&target);
+            let root_selected = Rc::clone(&selected);
+            let (_, cx) = cx.add_window_view(move |window, cx| {
+                window.activate_window();
+                let focus = cx.focus_handle();
+                focus.focus(window, cx);
+                TargetRoot {
+                    focus,
+                    target: root_target,
+                    allow_disabled,
+                    selected: root_selected,
+                }
+            });
+            A11yTree::read(cx);
+            cx.simulate_keystrokes("shift-f10");
+            assert_eq!(
+                A11yTree::read(cx).with_role("MenuItem")[0]["aria"]["label"],
+                expected
+            );
+            target.set("Later target");
+            cx.update(|window, _| window.refresh());
+            let tree = A11yTree::read(cx);
+            assert_eq!(tree.with_role("MenuItem")[0]["aria"]["label"], expected);
+            perform(cx, tree.node(expected), Action::Click);
+            assert_eq!(*selected.borrow(), [expected]);
+        }
+    }
+
+    #[gpui::test]
     fn context_menus_return_focus_to_the_target_after_an_assistive_opening(
         cx: &mut TestAppContext,
     ) {
@@ -5991,7 +6154,7 @@ mod tests {
                     MenuPlacementConfig::default(),
                     true,
                     true,
-                    false,
+                    EntrySnapshot::EachRender,
                     lifecycle,
                 );
                 state.open(None, None, None, false, window, cx);
@@ -6085,7 +6248,7 @@ mod tests {
                     MenuPlacementConfig::default(),
                     true,
                     false,
-                    true,
+                    EntrySnapshot::FirstOpenRender,
                     None,
                 );
                 state.open(
@@ -6102,7 +6265,7 @@ mod tests {
                     MenuPlacementConfig::default(),
                     true,
                     false,
-                    true,
+                    EntrySnapshot::FirstOpenRender,
                     None,
                 );
                 state.synchronize(
@@ -6111,7 +6274,7 @@ mod tests {
                     MenuPlacementConfig::default(),
                     true,
                     false,
-                    true,
+                    EntrySnapshot::FirstOpenRender,
                     None,
                 );
             });
@@ -6150,7 +6313,7 @@ mod tests {
                     MenuPlacementConfig::default(),
                     true,
                     true,
-                    false,
+                    EntrySnapshot::EachRender,
                     Some(Rc::new(move |event, _| {
                         first_events.borrow_mut().push((1, *event))
                     })),
@@ -6167,7 +6330,7 @@ mod tests {
                     MenuPlacementConfig::default(),
                     true,
                     true,
-                    false,
+                    EntrySnapshot::EachRender,
                     Some(Rc::new(move |event, _| {
                         second_events.borrow_mut().push((2, *event))
                     })),
@@ -6209,7 +6372,7 @@ mod tests {
                     MenuPlacementConfig::default(),
                     true,
                     true,
-                    false,
+                    EntrySnapshot::EachRender,
                     Some(Rc::new(move |event, _| {
                         lifecycle_events
                             .borrow_mut()

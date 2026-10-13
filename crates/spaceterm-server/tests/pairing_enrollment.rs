@@ -40,41 +40,7 @@ impl SigningKey for Key {
         Ok(self.0.sign(bytes).as_ref().try_into().unwrap())
     }
 }
-// Only the frozen codec port is faked. Ledger encoding belongs to op-ledger,
-// which is absent from this base. Unsupported codec operations fail explicitly.
-struct Codec;
-impl LedgerCodec for Codec {
-    fn canonical_request_digest(
-        &self,
-        binding: &StreamBinding,
-        operation: OperationId,
-        command: &Command,
-    ) -> Result<RequestDigest, LedgerFailure> {
-        binding.check_operation(operation)?;
-        RequestDigest::for_command(command)
-            .map_err(|_| LedgerFailure::new(LedgerFailureClass::InvalidRequest))
-    }
-    fn encode_canonical_request(
-        &self,
-        _: &StreamBinding,
-        _: OperationId,
-        _: &Command,
-    ) -> Result<Vec<u8>, LedgerFailure> {
-        Err(LedgerFailure::new(LedgerFailureClass::UnsupportedFormat))
-    }
-    fn decode_canonical_request(
-        &self,
-        _: &[u8],
-    ) -> Result<CanonicalOperationRequest, LedgerFailure> {
-        Err(LedgerFailure::new(LedgerFailureClass::UnsupportedFormat))
-    }
-    fn encode_compact_outcome(&self, _: &Outcome) -> Result<Vec<u8>, LedgerFailure> {
-        Err(LedgerFailure::new(LedgerFailureClass::UnsupportedFormat))
-    }
-    fn decode_compact_outcome(&self, _: &[u8]) -> Result<Outcome, LedgerFailure> {
-        Err(LedgerFailure::new(LedgerFailureClass::UnsupportedFormat))
-    }
-}
+use spaceterm_core::operation_ledger::canonical::CanonicalCodec as Codec;
 struct Owner;
 impl AccountOwnerEnrollmentPort for Owner {
     fn revalidate_owner_issuance(
@@ -281,10 +247,22 @@ impl PairingActorPort for Actor {
     }
     fn restricted_acknowledge<'a>(
         &'a self,
-        _: OperationBinding,
-        _: PairingTarget,
+        binding: OperationBinding,
+        target: PairingTarget,
     ) -> ServerFuture<'a, Result<(), PairingFailure>> {
-        Box::pin(async { Err(PairingFailure::InvalidRequest) })
+        Box::pin(async move {
+            if self.restricted_status(binding, target).await?.is_none() {
+                return Err(PairingFailure::RevocationUnconfirmed);
+            }
+            let mut state = self.state.lock().unwrap();
+            if let Some((digest, _)) = state.outcomes.get(&binding.id) {
+                if *digest != binding.digest {
+                    return Err(PairingFailure::RequestIdentityReused);
+                }
+                state.outcomes.remove(&binding.id);
+            }
+            Ok(())
+        })
     }
 }
 impl EnrollmentLookup for Actor {
@@ -711,6 +689,17 @@ fn restricted_channel(
     client: &PairingClientStreams,
     versions: Vec<u32>,
 ) -> spaceterm_protocol::connection::RestrictedConnection {
+    restricted_channels(f, target, client, versions).1
+}
+fn restricted_channels(
+    f: &Fixture,
+    target: &PairingTarget,
+    client: &PairingClientStreams,
+    versions: Vec<u32>,
+) -> (
+    spaceterm_protocol::connection::RestrictedConnection,
+    spaceterm_protocol::connection::RestrictedConnection,
+) {
     use spaceterm_protocol::authentication::*;
     let local = |value: u64| {
         let mut bytes = [0; 16];
@@ -743,12 +732,8 @@ fn restricted_channel(
             .unwrap();
     let (client, proof) = client.receive_server(&reply).unwrap();
     let (server, ready) = server.receive_device(&lookup, &proof).unwrap();
-    assert!(matches!(
-        client.receive_ready(&ready).unwrap(),
-        Established::Restricted(_)
-    ));
-    match server {
-        Established::Restricted(server) => server,
+    match (client.receive_ready(&ready).unwrap(), server) {
+        (Established::Restricted(client), Established::Restricted(server)) => (client, server),
         _ => panic!("ordinary escalation"),
     }
 }
@@ -1303,10 +1288,15 @@ async fn revoked_paired_issuer_cannot_activate_wire_authorization() {
             OperationSequence::new(1).unwrap(),
         );
         let connection = restricted_channel(&f, &target, &client, vec![2, 1]);
-        let digest = RequestDigest::for_command(&Command::Pairing(PairingCommand::SelfRevoke {
-            target: target.clone(),
-        }))
-        .unwrap();
+        let digest = Codec
+            .canonical_request_digest(
+                &StreamBinding::from_stream(operation.stream()),
+                operation,
+                &Command::Pairing(PairingCommand::SelfRevoke {
+                    target: target.clone(),
+                }),
+            )
+            .unwrap();
         f.service
             .restricted_exchange(
                 &connection,
@@ -1340,5 +1330,447 @@ async fn revoked_paired_issuer_cannot_activate_wire_authorization() {
                 .len(),
             1
         );
+    }
+}
+
+#[tokio::test]
+async fn restricted_frame_dispatch_uses_pairing_service_in_both_majors() {
+    use spaceterm_protocol::wire::pairing;
+    use spaceterm_server::pairing::restricted::dispatch_frame;
+    for versions in [vec![1], vec![2, 1]] {
+        let f = Fixture::new();
+        let enrollment = f.enroll().await;
+        let (target, binding) = receipt_target(&enrollment);
+        let (mut client, mut server) = restricted_channels(&f, &target, &binding, versions);
+        let codec = PairingRestrictedCodec::new(f.pin);
+        let operation = OperationId::new(
+            binding.parts().self_revocation,
+            OperationSequence::new(1).unwrap(),
+        );
+        let digest = Codec
+            .canonical_request_digest(
+                &StreamBinding::from_stream(operation.stream()),
+                operation,
+                &Command::Pairing(PairingCommand::SelfRevoke {
+                    target: target.clone(),
+                }),
+            )
+            .unwrap();
+        let revoke = pairing::RestrictedExtension {
+            kind: Some(pairing::restricted_extension::Kind::Revoke(
+                pairing::SelfRevocation {
+                    operation: Some(operation_to_wire(operation)),
+                    request_digest: digest.bytes().to_vec(),
+                    target: Some(target_to_wire(&target)),
+                },
+            )),
+        };
+        let bytes = client.encode_pairing_extension(&revoke, &codec).unwrap();
+        let bytes = dispatch_frame(&f.service, &mut server, &bytes)
+            .await
+            .unwrap();
+        let response = client.decode_pairing_extension(&bytes, &codec).unwrap();
+        let Some(pairing::restricted_extension::Kind::Result(result)) = response.kind else {
+            panic!("missing result")
+        };
+        assert_eq!(result.disposition, 1);
+        let proof = ReceiptCodec::new(f.pin)
+            .from_wire(result.receipt.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(result.request_operation, Some(operation_to_wire(operation)));
+        assert_eq!(result.request_digest, digest.bytes());
+        let status = pairing::RestrictedExtension {
+            kind: Some(pairing::restricted_extension::Kind::Status(
+                pairing::ReceiptStatus {
+                    operation: Some(operation_to_wire(operation)),
+                    request_digest: digest.bytes().to_vec(),
+                    target: Some(target_to_wire(&target)),
+                },
+            )),
+        };
+        let bytes = client.encode_pairing_extension(&status, &codec).unwrap();
+        let bytes = dispatch_frame(&f.service, &mut server, &bytes)
+            .await
+            .unwrap();
+        let response = client.decode_pairing_extension(&bytes, &codec).unwrap();
+        assert!(
+            matches!(response.kind, Some(pairing::restricted_extension::Kind::Result(result)) if result.receipt.as_ref() == Some(&receipt_to_wire(&proof)))
+        );
+        let ack = pairing::RestrictedExtension {
+            kind: Some(pairing::restricted_extension::Kind::Acknowledgement(
+                pairing::RestrictedAcknowledgement {
+                    operation: Some(operation_to_wire(operation)),
+                    request_digest: digest.bytes().to_vec(),
+                    target: Some(target_to_wire(&target)),
+                    acknowledged_through: 1,
+                },
+            )),
+        };
+        let bytes = client.encode_pairing_extension(&ack, &codec).unwrap();
+        let bytes = dispatch_frame(&f.service, &mut server, &bytes)
+            .await
+            .unwrap();
+        let response = client.decode_pairing_extension(&bytes, &codec).unwrap();
+        assert!(
+            matches!(response.kind, Some(pairing::restricted_extension::Kind::Result(result)) if result.disposition == 1 && result.receipt.as_ref() == Some(&receipt_to_wire(&proof)))
+        );
+        let lookup = spaceterm_server::pairing::protocol_lookup::PairingProtocolLookup::new(
+            Source(f.actor.clone()),
+        );
+        use spaceterm_protocol::authentication::PairingLookup;
+        let principal = server.principal();
+        assert!(
+            !PairingLookup::lookup(
+                &lookup,
+                principal.server,
+                principal.pairing,
+                principal.client
+            )
+            .unwrap()
+            .active
+        );
+    }
+}
+
+#[tokio::test]
+async fn restricted_frame_replay_and_legacy_grammar_never_reach_mutation() {
+    use spaceterm_protocol::wire::{common, pairing};
+    use spaceterm_server::{contracts::ServerFailureClass, pairing::restricted::dispatch_frame};
+    for versions in [vec![1], vec![2, 1]] {
+        let f = Fixture::new();
+        let enrollment = f.enroll().await;
+        let (target, binding) = receipt_target(&enrollment);
+        let operation = OperationId::new(
+            binding.parts().self_revocation,
+            OperationSequence::new(1).unwrap(),
+        );
+        let digest = Codec
+            .canonical_request_digest(
+                &StreamBinding::from_stream(operation.stream()),
+                operation,
+                &Command::Pairing(PairingCommand::SelfRevoke {
+                    target: target.clone(),
+                }),
+            )
+            .unwrap();
+        let before = f.actor.state.lock().unwrap().snapshot.clone();
+        let (mut client, mut server) = restricted_channels(&f, &target, &binding, versions.clone());
+        let status = pairing::RestrictedExtension {
+            kind: Some(pairing::restricted_extension::Kind::Status(
+                pairing::ReceiptStatus {
+                    operation: Some(operation_to_wire(operation)),
+                    request_digest: digest.bytes().to_vec(),
+                    target: Some(target_to_wire(&target)),
+                },
+            )),
+        };
+        let codec = PairingRestrictedCodec::new(f.pin);
+        let bytes = client.encode_pairing_extension(&status, &codec).unwrap();
+        let reply = dispatch_frame(&f.service, &mut server, &bytes)
+            .await
+            .unwrap();
+        assert!(
+            matches!(client.decode_pairing_extension(&reply, &codec).unwrap().kind, Some(pairing::restricted_extension::Kind::Result(result)) if result.disposition == 3 && result.receipt.is_none())
+        );
+        assert_eq!(
+            dispatch_frame(&f.service, &mut server, &bytes)
+                .await
+                .unwrap_err()
+                .class,
+            ServerFailureClass::Authentication
+        );
+        let fresh = client.encode_pairing_extension(&status, &codec).unwrap();
+        assert_eq!(
+            dispatch_frame(&f.service, &mut server, &fresh)
+                .await
+                .unwrap_err()
+                .class,
+            ServerFailureClass::Authentication
+        );
+        let (mut client, mut server) = restricted_channels(&f, &target, &binding, versions);
+        let legacy = common::RestrictedMessage {
+            kind: Some(common::restricted_message::Kind::Status(
+                common::RevocationStatus {
+                    operation: Some(operation_to_wire(operation)),
+                    target_pairing: Some(common::Identity {
+                        value: server.principal().pairing.to_vec(),
+                    }),
+                },
+            )),
+        };
+        let bytes = client.encode(&legacy).unwrap();
+        assert!(
+            dispatch_frame(&f.service, &mut server, &bytes)
+                .await
+                .is_err()
+        );
+        let fresh = client.encode_pairing_extension(&status, &codec).unwrap();
+        assert_eq!(
+            dispatch_frame(&f.service, &mut server, &fresh)
+                .await
+                .unwrap_err()
+                .class,
+            ServerFailureClass::Authentication
+        );
+        let state = f.actor.state.lock().unwrap();
+        assert_eq!(state.snapshot.revision(), before.revision());
+        assert_eq!(state.snapshot.recovery(), before.recovery());
+    }
+}
+
+#[tokio::test]
+async fn restricted_frame_acknowledgement_cannot_compact_ordinary_revocation_result() {
+    use spaceterm_protocol::wire::pairing;
+    use spaceterm_server::pairing::restricted::dispatch_frame;
+    for versions in [vec![1], vec![2, 1]] {
+        let f = Fixture::new();
+        let enrollment = f.enroll().await;
+        let (target, binding) = receipt_target(&enrollment);
+        let proof = revoke(&f, target.clone(), &binding).await;
+        let PairingReceiptBody::Revocation { receipt, .. } = &proof.parts().claims else {
+            panic!("revocation")
+        };
+        let original = f
+            .actor
+            .state
+            .lock()
+            .unwrap()
+            .outcomes
+            .get(&receipt.operation)
+            .unwrap()
+            .clone();
+        let (mut client, mut server) = restricted_channels(&f, &target, &binding, versions);
+        let operation = OperationId::new(
+            binding.parts().self_revocation,
+            OperationSequence::new(1).unwrap(),
+        );
+        let digest = Codec
+            .canonical_request_digest(
+                &StreamBinding::from_stream(operation.stream()),
+                operation,
+                &Command::Pairing(PairingCommand::SelfRevoke {
+                    target: target.clone(),
+                }),
+            )
+            .unwrap();
+        let ack = pairing::RestrictedExtension {
+            kind: Some(pairing::restricted_extension::Kind::Acknowledgement(
+                pairing::RestrictedAcknowledgement {
+                    operation: Some(operation_to_wire(operation)),
+                    request_digest: digest.bytes().to_vec(),
+                    target: Some(target_to_wire(&target)),
+                    acknowledged_through: 1,
+                },
+            )),
+        };
+        let codec = PairingRestrictedCodec::new(f.pin);
+        let bytes = client.encode_pairing_extension(&ack, &codec).unwrap();
+        let bytes = dispatch_frame(&f.service, &mut server, &bytes)
+            .await
+            .unwrap();
+        assert!(
+            matches!(client.decode_pairing_extension(&bytes, &codec).unwrap().kind, Some(pairing::restricted_extension::Kind::Result(result)) if result.disposition == 2 && result.receipt == Some(receipt_to_wire(&proof)))
+        );
+        let state = f.actor.state.lock().unwrap();
+        assert_eq!(state.outcomes.get(&receipt.operation), Some(&original));
+        assert!(!state.outcomes.contains_key(&operation));
+    }
+}
+
+#[path = "support/job_a.rs"]
+mod dispatcher_actor;
+#[path = "support/job_b.rs"]
+mod dispatcher_ipc;
+
+impl spaceterm_server::contracts::ServerCredentialPort for Key {}
+
+#[derive(Default)]
+struct ForbiddenDispatch(std::sync::atomic::AtomicUsize);
+impl spaceterm_server::protocol_dispatch::OrdinaryDispatchPort for ForbiddenDispatch {
+    fn dispatch(
+        &self,
+        _: spaceterm_server::api::VerifiedPrincipal,
+        _: spaceterm_protocol::codec::Payload,
+        _: spaceterm_server::api::ServerHandle,
+    ) -> ServerFuture<
+        '_,
+        Result<
+            Option<spaceterm_protocol::codec::Payload>,
+            spaceterm_server::contracts::ServerFailure,
+        >,
+    > {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async {
+            Err(spaceterm_server::failure::failure(
+                spaceterm_server::contracts::ServerFailureClass::Authentication,
+            ))
+        })
+    }
+}
+impl spaceterm_server::protocol_dispatch::RestrictedDispatchPort for ForbiddenDispatch {
+    fn dispatch(
+        &self,
+        _: spaceterm_protocol::authentication::Principal,
+        _: spaceterm_protocol::wire::common::RestrictedMessage,
+    ) -> ServerFuture<
+        '_,
+        Result<
+            spaceterm_protocol::wire::common::RestrictedMessage,
+            spaceterm_server::contracts::ServerFailure,
+        >,
+    > {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async {
+            Err(spaceterm_server::failure::failure(
+                spaceterm_server::contracts::ServerFailureClass::Authentication,
+            ))
+        })
+    }
+}
+
+#[tokio::test]
+async fn authenticated_ipc_dispatcher_routes_restricted_pairing_without_ordinary_authority_in_both_majors()
+ {
+    use spaceterm_host::transport::MessageTransport;
+    use spaceterm_protocol::{
+        authentication::{ClientHandshake, Established, HandshakeConfig, Principal, Purpose},
+        wire::pairing,
+    };
+    use spaceterm_server::{
+        connection::{AuthenticationConfig, Authenticator},
+        listeners::ConnectionDispatchPort,
+        pairing::protocol_lookup::PairingProtocolLookup,
+        protocol_dispatch::ProtocolDispatcher,
+        service::RecoveredServer,
+    };
+    use std::{sync::atomic::Ordering, time::Duration};
+    for major in [1, 2] {
+        let f = Fixture::new();
+        let enrollment = f.enroll().await;
+        let (target, binding) = receipt_target(&enrollment);
+        // The real dispatcher requires a ServerHandle even for restricted peers.
+        // This actor supplies that unused handle; pairing still injects its absent port.
+        let actor = dispatcher_actor::Fixture::new();
+        let host = actor.host.clone();
+        let actor = RecoveredServer::recover(actor.config, actor.dependencies)
+            .await
+            .unwrap();
+        let directory = dispatcher_ipc::Directory::new();
+        let listener = directory.listener();
+        let client = directory.connect().await;
+        let authority = Arc::new(dispatcher_ipc::Authority::default());
+        let authenticator = Authenticator::new(AuthenticationConfig {
+            server: ServerId::new(f.pin.identity),
+            epoch: ServerEpoch::new(1),
+            owning_uid: client.peer_facts().local_uid.unwrap(),
+            handshake: HandshakeConfig::default(),
+            credentials: f.server.clone(),
+            pairing: Arc::new(PairingProtocolLookup::new(Source(f.actor.clone()))),
+            authority: authority.clone(),
+            unauthenticated_limit: 16,
+            authenticated_limit: 32,
+            deadline: Duration::from_secs(5),
+        })
+        .unwrap();
+        let pending = listener.accept().await.unwrap();
+        let principal = Principal {
+            server: f.pin.identity,
+            device: target.parts().device.bytes(),
+            pairing: dispatcher_ipc::local(target.parts().pairing.local()),
+            client: dispatcher_ipc::local(binding.parts().client.id.local()),
+        };
+        let client_handshake = async {
+            let (handshake, hello) = ClientHandshake::begin(
+                f.pin,
+                principal,
+                Purpose::RevocationStatus,
+                HandshakeConfig {
+                    majors: vec![major],
+                    ..Default::default()
+                },
+                f.auth.clone(),
+            )
+            .unwrap();
+            client.send(&hello).await.unwrap();
+            let reply = client.recv().await.unwrap().unwrap();
+            let (handshake, proof) = handshake.receive_server(&reply).unwrap();
+            client.send(&proof).await.unwrap();
+            let ready = client.recv().await.unwrap().unwrap();
+            match handshake.receive_ready(&ready).unwrap() {
+                Established::Restricted(codec) => codec,
+                _ => panic!("ordinary escalation"),
+            }
+        };
+        let (peer, mut codec) = tokio::join!(
+            authenticator.authenticate(pending, authenticator.try_admit().unwrap()),
+            client_handshake
+        );
+        let mut peer = peer.unwrap();
+        let ports = Arc::new(ForbiddenDispatch::default());
+        let (_feed, status) = tokio::sync::watch::channel(dispatcher_ipc::status(1));
+        let dispatcher =
+            ProtocolDispatcher::new(authenticator.clone(), status, ports.clone(), ports.clone())
+                .with_pairing(f.service.clone());
+        let handle = actor.handle();
+        let run = tokio::spawn(async move {
+            let result = dispatcher.run(&mut peer, handle).await;
+            peer.close().await.unwrap();
+            result
+        });
+        let operation = OperationId::new(
+            binding.parts().self_revocation,
+            OperationSequence::new(1).unwrap(),
+        );
+        let digest = Codec
+            .canonical_request_digest(
+                &StreamBinding::from_stream(operation.stream()),
+                operation,
+                &Command::Pairing(PairingCommand::SelfRevoke {
+                    target: target.clone(),
+                }),
+            )
+            .unwrap();
+        let revoke = pairing::RestrictedExtension {
+            kind: Some(pairing::restricted_extension::Kind::Revoke(
+                pairing::SelfRevocation {
+                    operation: Some(operation_to_wire(operation)),
+                    request_digest: digest.bytes().to_vec(),
+                    target: Some(target_to_wire(&target)),
+                },
+            )),
+        };
+        let restricted = PairingRestrictedCodec::new(f.pin);
+        client
+            .send(
+                &codec
+                    .encode_pairing_extension(&revoke, &restricted)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = client.recv().await.unwrap().unwrap();
+        assert!(
+            matches!(codec.decode_pairing_extension(&bytes, &restricted).unwrap().kind, Some(pairing::restricted_extension::Kind::Result(result)) if result.disposition == 1 && result.receipt.is_some())
+        );
+        assert_eq!(ports.0.load(Ordering::SeqCst), 0);
+        assert_eq!(authority.registered.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            f.actor
+                .state
+                .lock()
+                .unwrap()
+                .snapshot
+                .authorization(target.parts().pairing)
+                .unwrap()
+                .parts()
+                .record
+                .state,
+            PairingState::Revoked { .. }
+        ));
+        client.close().await.unwrap();
+        run.await.unwrap().unwrap();
+        authenticator.close().await.unwrap();
+        dispatcher_actor::stop(&actor.handle(), host).await.unwrap();
+        actor.wait().await.unwrap();
     }
 }

@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 use spaceterm_core::{
     authority::{ConnectionBinding, ServerEpoch},
     identity::{DeviceId, OperationStreamId, ServerId},
-    management::{ManagementProgress, ManagementRequestReference, ServerStatus},
+    management::{ManagementProgress, ServerStatus},
     observations::RuntimeClock,
     operations::OperationId,
 };
@@ -172,11 +172,11 @@ impl<B: ManagementBackend> TrackedProtocolManagement<B> {
         context: AuthenticatedManagementContext,
         expected: Option<OperationId>,
     ) -> Result<ManagementProgress, ManagementFailure> {
-        let ManagementRequestReference::Operation(binding) = progress.request else {
+        let Some(operation) = progress.request.operation_id() else {
             return Err(ManagementFailure::UnsafeNativeState);
         };
-        check_operation(binding.id, context.stream)?;
-        if expected.is_some_and(|id| id != binding.id)
+        check_operation(operation, context.stream)?;
+        if expected.is_some_and(|id| id != operation)
             || progress.completed_units > progress.total_units
         {
             return Err(ManagementFailure::UnsafeNativeState);

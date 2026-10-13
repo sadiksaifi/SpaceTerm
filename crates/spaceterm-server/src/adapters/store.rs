@@ -8,6 +8,28 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use tokio::sync::{mpsc, oneshot};
 
+/// Compose the host SQL projection and domain validators with pairing's exact-byte
+/// receipt reader. The pin and home are comparison facts supplied by native startup;
+/// they grant no filesystem authority and select no credentials.
+pub fn production_services(
+    identity: spaceterm_host::organization_store::StoreIdentity,
+    home: spaceterm_core::organization::ServerDirectory,
+) -> Result<spaceterm_host::organization_store::StoreServices, StoreFailure> {
+    if home.server() != identity.server
+        || identity.account.account_uid == 0
+        || identity.account.account_uid == u32::MAX
+    {
+        return Err(StoreFailure::IdentityMismatch);
+    }
+    let reader = crate::pairing::store_projection::SignedReceiptReader::new(
+        spaceterm_protocol::authentication::ServerPin {
+            identity: identity.server.bytes(),
+            public_key: identity.server_public_key,
+        },
+    )?;
+    Ok(spaceterm_host::organization_store::StoreServices::production(home, Arc::new(reader)))
+}
+
 enum StoreRequest {
     Recover(oneshot::Sender<Result<RecoveredState, StoreFailure>>),
     Commit(Arc<DurableTransaction>, oneshot::Sender<CommitDisposition>),

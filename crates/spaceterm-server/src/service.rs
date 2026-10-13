@@ -74,6 +74,11 @@ pub(crate) enum ActorRequest {
         binding: OperationBinding,
         reply: Reply<OperationResponse>,
     },
+    LookupState {
+        principal: VerifiedPrincipal,
+        binding: OperationBinding,
+        reply: Reply<OperationLookup>,
+    },
     Acknowledge {
         principal: VerifiedPrincipal,
         stream: OperationStreamId,
@@ -693,6 +698,22 @@ impl Actor {
                     self.check_principal(principal, false)?;
                     self.check_binding(principal, binding)?;
                     self.lookup(binding)
+                })();
+                let _ = reply.send(result);
+            }
+            ActorRequest::LookupState {
+                principal,
+                binding,
+                reply,
+            } => {
+                let result = (|| {
+                    self.check_principal(principal, false)?;
+                    self.check_binding(principal, binding)?;
+                    if self.delivery_pending == Some(binding) {
+                        Ok(OperationLookup::Pending)
+                    } else {
+                        self.config.core.ledger.lookup(binding)
+                    }
                 })();
                 let _ = reply.send(result);
             }

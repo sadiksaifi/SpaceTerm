@@ -1,12 +1,13 @@
 //! Owned OpenSSH stream-local forwarding. A tunnel changes reachability, never protocol authority.
 //!
-//! Linux readiness connects through a pinned socket inode to verify the owned
-//! process's peer PID. macOS verifies the peer PID but cannot pin that pathname.
-//! Neither platform can atomically remove a pathname only if it still names the
-//! registered socket. Cleanup therefore preserves all endpoint entries, including
-//! proven owned sockets. A lease is advisory, not exclusion of raw native binds.
-//! Stale entries block reuse until the directory owner removes them with local
-//! authority. A refused connection does not prove a dead socket.
+//! Linux readiness pins the socket inode before verifying the owned process's PID.
+//! macOS verifies the PID and original bound address before registering the observed
+//! pathname identity. Cleanup reaps the child, then removes only that registered
+//! dead socket through its retained private directory. Replacement entries remain.
+//! The owning-account check/unlink race is accepted by the endpoint-reclaim owner
+//! decision. macOS cannot pin Unix socket pathnames against owning-account renames.
+//! A lease excludes cooperating starts, not raw native binds. Each start uses a
+//! fresh name; an unverified socket or a refused connection grants no removal authority.
 
 use std::ffi::{OsStr, OsString};
 use std::os::fd::{AsFd, AsRawFd};
@@ -295,8 +296,8 @@ enum ProcessState {
 pub struct TunnelCompletion(watch::Receiver<ProcessState>);
 
 impl TunnelCompletion {
-    /// Resolves after group termination, leader reaping, and any registered endpoint checks.
-    /// Socket entries are preserved because their deletion targets remain replaceable.
+    /// Resolves after group termination, leader reaping and registered-socket removal.
+    /// An unverified or replacement socket is preserved.
     pub async fn wait(&self) -> Result<TunnelExit, TransportError> {
         let mut state = self.0.clone();
         loop {
@@ -400,8 +401,8 @@ impl SshTunnel {
         TunnelCompletion(self.state.clone())
     }
 
-    /// Cancels and waits for native termination, reaping, and any registered endpoint checks.
-    /// Socket entries are preserved; same-endpoint reuse requires directory-owner cleanup.
+    /// Cancels and waits for native termination, reaping and registered-socket removal.
+    /// Unverified and replacement entries remain untouched.
     pub async fn cancel(&self) -> Result<TunnelExit, TransportError> {
         let _ = self.cancel.send(());
         self.completion().wait().await
@@ -555,11 +556,11 @@ fn clear_child_signal_mask() -> std::io::Result<()> {
     Ok(())
 }
 
-struct ForwardingSocket(Option<RegisteredSocket>);
+struct ForwardingSocket(RegisteredSocket);
 
 impl ForwardingSocket {
     fn cleanup(&mut self) -> Result<(), TransportError> {
-        self.0.as_mut().map_or(Ok(()), RegisteredSocket::cleanup)
+        self.0.remove()
     }
 }
 
@@ -572,9 +573,9 @@ fn inspect_forwarding_socket(
         return Ok(None);
     };
     #[cfg(target_os = "macos")]
-    if endpoint.socket_identity()?.is_none() {
+    let Some(identity) = endpoint.socket_identity()? else {
         return Ok(None);
-    }
+    };
     let probe = {
         let _guard = crate::process::descriptor_guard().map_err(|_| TransportError::Unavailable)?;
         socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
@@ -622,19 +623,50 @@ fn inspect_forwarding_socket(
     if facts.local_pid != Some(pid) {
         return Err(TransportError::UnsafeEndpoint);
     }
+    #[cfg(target_os = "macos")]
+    if !matches_bound_address(
+        &probe
+            .peer_addr()
+            .map_err(|_| TransportError::UnsafeEndpoint)?,
+        endpoint.path(),
+    ) {
+        // A listener renamed from another address cannot prove this forwarding entry.
+        return Err(TransportError::UnsafeEndpoint);
+    }
     #[cfg(target_os = "linux")]
     {
         pinned
             .register(endpoint)
-            .map(|registered| Some(ForwardingSocket(Some(registered))))
+            .map(|registered| Some(ForwardingSocket(registered)))
     }
     #[cfg(target_os = "macos")]
     {
-        // The native peer PID proves reachability, not which filesystem inode was
-        // reached. Never manufacture cleanup authority from pathname snapshots.
-        endpoint.verify()?;
-        Ok(Some(ForwardingSocket(None)))
+        // Preserve the pre-connect identity through PID verification. Registration
+        // checks it again; cleanup removes only this dead socket after child reaping.
+        endpoint
+            .register_identity(identity)
+            .map(|registered| Some(ForwardingSocket(registered)))
     }
+}
+
+#[cfg(target_os = "macos")]
+fn matches_bound_address(address: &socket2::SockAddr, path: &std::path::Path) -> bool {
+    let offset = std::mem::offset_of!(libc::sockaddr_un, sun_path);
+    let length = address.len() as usize;
+    if address.family() != libc::AF_UNIX as libc::sa_family_t
+        || length <= offset
+        || length > std::mem::size_of::<libc::sockaddr_un>()
+    {
+        return false;
+    }
+    // Darwin getpeername can omit the NUL from its length. socket2::as_pathname
+    // assumes a terminator and drops the last byte, so inspect the bounded bytes.
+    // SAFETY: SockAddr initializes length bytes; the checked offset and length
+    // keep this slice inside its live sockaddr storage.
+    let bytes = unsafe {
+        std::slice::from_raw_parts(address.as_ptr().cast::<u8>().add(offset), length - offset)
+    };
+    bytes.strip_suffix(&[0]).unwrap_or(bytes) == path.as_os_str().as_bytes()
 }
 
 fn supervise(

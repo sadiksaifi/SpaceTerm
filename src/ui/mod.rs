@@ -371,6 +371,7 @@ pub(crate) mod server_client_runtime;
 
 pub(crate) mod server_desktop_contracts;
 
+pub(crate) mod server_pane_actions;
 pub(crate) mod server_pane_session;
 
 pub(crate) mod server_git;

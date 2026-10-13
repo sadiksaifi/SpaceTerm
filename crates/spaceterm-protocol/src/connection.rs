@@ -375,12 +375,43 @@ fn varint_len(mut value: usize) -> usize {
     length
 }
 
-/// Additive fields nested in legacy envelopes require the same authenticated
-/// capability as canonical envelope roots. Structural admission runs first.
+/// Nested additions require their own authenticated capability. Structural
+/// admission runs first, and an outgoing rejection allocates no envelope sequence.
 fn ordinary_field_capabilities(
     payload: &Payload,
     capabilities: &[u32],
 ) -> Result<(), ProtocolError> {
+    macro_rules! organization_comparisons {
+        ($message:expr, $p:ident) => {{
+            use crate::wire::$p;
+            match &$message.kind {
+                Some($p::message::Kind::OrganizationSnapshot(value)) => {
+                    value.tabs.iter().any(|tab| tab.membership_version != 0)
+                        || value
+                            .panes
+                            .iter()
+                            .any(|pane| pane.runtime_failure_class.is_some())
+                }
+                Some($p::message::Kind::OrganizationDelta(value)) => {
+                    value.tabs.iter().any(|tab| tab.membership_version != 0)
+                        || value
+                            .panes
+                            .iter()
+                            .any(|pane| pane.runtime_failure_class.is_some())
+                }
+                _ => false,
+            }
+        }};
+    }
+    let comparisons = match payload {
+        Payload::Major1(message) => organization_comparisons!(message, v1),
+        Payload::Major2(message) => organization_comparisons!(message, v2),
+    };
+    if comparisons
+        && !capabilities.contains(&crate::negotiation::CAPABILITY_ORGANIZATION_COMPARISONS)
+    {
+        return Err(ProtocolError::Negotiation);
+    }
     macro_rules! canonical {
         ($message:expr, $p:ident) => {{
             use crate::wire::$p;
@@ -395,7 +426,9 @@ fn ordinary_field_capabilities(
                     | $p::outcome::Result::LegacyCreatedWorktree(_)
                     | $p::outcome::Result::LegacyControlAcquired(_)
                     | $p::outcome::Result::LegacyAssessed(_)
-                    | $p::outcome::Result::OperationFailure(_))),
+                    | $p::outcome::Result::OperationFailure(_)))
+                    || matches!(&outcome.result, Some($p::outcome::Result::Conflict(value))
+                        if value.directory_value.is_some() || value.remote_access.is_some() || value.server.is_some()),
                 Some($p::message::Kind::OrganizationDelta(delta)) => !delta.repositories.is_empty() || !delta.deleted_repositories.is_empty(),
                 Some($p::message::Kind::StartupIntent(intent)) => intent.measured_grid.is_some(),
                 Some($p::message::Kind::RuntimeCommand(command)) => matches!(command.action, Some($p::runtime_command::Action::MeasuredResize(_)

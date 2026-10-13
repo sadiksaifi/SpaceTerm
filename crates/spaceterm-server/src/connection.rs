@@ -272,6 +272,17 @@ impl Authenticator {
             .map_err(|_| failure(ServerFailureClass::CleanupIncomplete))?
     }
 
+    async fn close_pending<T: MessageTransport + 'static>(
+        &self,
+        pending: PendingConnection<T>,
+    ) -> Result<(), ServerFailure> {
+        let result = pending.close_joinable().await.map_err(transport_failure);
+        if result.is_err() {
+            self.0.teardown_failed.store(true, Ordering::Release);
+        }
+        result
+    }
+
     async fn authenticate_owned<T: MessageTransport + 'static>(
         &self,
         pending: PendingConnection<T>,
@@ -281,7 +292,7 @@ impl Authenticator {
     ) -> Result<AuthenticatedPeer, ServerFailure> {
         let UnauthenticatedPermit(permit) = permit;
         if !Arc::ptr_eq(permit.semaphore(), &self.0.unauthenticated) {
-            let _ = pending.close().await;
+            let _ = self.close_pending(pending).await;
             return Err(failure(ServerFailureClass::Authentication));
         }
         let deadline = tokio::time::Instant::now() + self.0.config.deadline;
@@ -296,7 +307,7 @@ impl Authenticator {
         let (connection, ready, generation) = match result {
             Ok(value) => value,
             Err(error) => {
-                let _ = pending.close().await;
+                let _ = self.close_pending(pending).await;
                 drop(permit);
                 return Err(error);
             }
@@ -310,7 +321,7 @@ impl Authenticator {
         let registration = match self.track_handshake(principal, generation) {
             Ok(value) => value,
             Err(error) => {
-                let _ = pending.close().await;
+                let _ = self.close_pending(pending).await;
                 drop(permit);
                 return Err(error);
             }
@@ -370,13 +381,12 @@ impl Authenticator {
         match result {
             Ok(()) => {}
             Err(error) => {
-                let cleanup = pending.close().await.map_err(transport_failure);
+                let cleanup = self.close_pending(pending).await;
                 let cleanup = cleanup.and(
                     authority_registration
                         .cleanup(self.0.config.authority.as_ref(), principal)
                         .await,
                 );
-                drop(pending);
                 drop(authenticated_slot);
                 drop(permit);
                 self.finish_registration(generation, registration, cleanup);
@@ -386,33 +396,19 @@ impl Authenticator {
         let authenticated = authenticated_slot
             .take()
             .ok_or_else(|| failure(ServerFailureClass::RecoveryRequired))?;
-        let transport = match pending.finish_authentication() {
+        let transport = match pending.finish_authentication_joinable() {
             Ok(value) => value,
-            Err(_error) => {
-                // The host's consuming finish can lose a deadline race after
-                // readiness was written. It retains ordered native cleanup but
-                // supplies no joinable close receipt here. Close this admission
-                // pool before returning its permit, and never claim clean Stop.
-                self.0.teardown_failed.store(true, Ordering::Release);
-                self.0.closed.send_replace(true);
-                self.0.unauthenticated.close();
-                self.0.authenticated.close();
-                if let Ok(active) = self.0.active.lock() {
-                    for entry in active.values() {
-                        entry.signal.request();
-                    }
-                }
-                if let Some(principal) = principal {
-                    let _ = self.0.config.authority.disconnect(principal).await;
-                }
+            Err(pending) => {
+                let cleanup = self.close_pending(pending).await;
+                let cleanup = cleanup.and(
+                    authority_registration
+                        .cleanup(self.0.config.authority.as_ref(), principal)
+                        .await,
+                );
                 drop(authenticated);
                 drop(permit);
-                self.finish_registration(
-                    generation,
-                    registration,
-                    Err(failure(ServerFailureClass::CleanupIncomplete)),
-                );
-                return Err(failure(ServerFailureClass::CleanupIncomplete));
+                self.finish_registration(generation, registration, cleanup);
+                return Err(failure(ServerFailureClass::Authentication));
             }
         };
         let transport: Arc<dyn MessageTransport> = transport;

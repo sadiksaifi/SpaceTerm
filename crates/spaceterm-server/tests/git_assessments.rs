@@ -3548,3 +3548,543 @@ fn checked_native_discovery_preserves_intentional_status_suppression() {
         );
     }
 }
+
+struct RefreshInventoryHost {
+    inventory: InventoryHost,
+    reads: AtomicUsize,
+    blocked: (Mutex<bool>, std::sync::Condvar),
+}
+impl RefreshInventoryHost {
+    fn enter(&self) {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        let mut blocked = self.blocked.0.lock().unwrap();
+        while *blocked {
+            blocked = self.blocked.1.wait(blocked).unwrap();
+        }
+    }
+}
+impl ServerGitHost for RefreshInventoryHost {
+    fn status(
+        &self,
+        source: &ServerDirectory,
+        basis: &GitAuthoritySnapshot,
+        cancellation: &GitReadCancellation,
+    ) -> Result<HostGitStatus, GitFailure> {
+        self.enter();
+        Ok(HostGitStatus {
+            inventory: self.inventory.inventory(source, basis, cancellation)?,
+            facts: GitStatusFacts {
+                revision: std::num::NonZeroU64::new(1).unwrap(),
+                branch: None,
+                changes: vec![],
+                dirty: false,
+                unchecked: false,
+                pull_request: None,
+                upstream: None,
+                operation: None,
+                counts: None,
+            },
+        })
+    }
+    fn discover_source(
+        &self,
+        source: &ServerDirectory,
+        basis: &GitAuthoritySnapshot,
+        cancellation: &GitReadCancellation,
+    ) -> Result<Option<HostGitSource>, GitFailure> {
+        self.inventory.discover_source(source, basis, cancellation)
+    }
+    fn inventory(
+        &self,
+        source: &ServerDirectory,
+        basis: &GitAuthoritySnapshot,
+        cancellation: &GitReadCancellation,
+    ) -> Result<Option<HostGitInventory>, GitFailure> {
+        self.enter();
+        self.inventory.inventory(source, basis, cancellation)
+    }
+    fn containment(
+        &self,
+        source: &ServerDirectory,
+        root: &ServerDirectory,
+    ) -> spaceterm_core::server_directories::DirectoryContainment {
+        self.inventory.containment(source, root)
+    }
+    fn prepare_write(
+        &self,
+        _: HostGitWriteRequest,
+        _: &GitReadCancellation,
+    ) -> Result<Box<dyn PreparedServerGitWrite>, GitFailure> {
+        Err(GitFailure::Unchecked)
+    }
+    fn reconcile(
+        &self,
+        _: &GitWriteIntent,
+        _: &GitReadCancellation,
+    ) -> Result<HostRecoveryObservation, GitFailure> {
+        Err(GitFailure::Unchecked)
+    }
+    fn shutdown(&self) -> Result<(), GitFailure> {
+        Ok(())
+    }
+}
+
+async fn read_count(counter: &AtomicUsize, expected: usize) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while counter.load(Ordering::SeqCst) < expected {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        // Keep the paused clock fixed, so the periodic poller cannot rescue a lost trigger.
+        tokio::task::yield_now().await;
+    }
+    true
+}
+
+#[tokio::test(start_paused = true)]
+async fn committed_change_during_inventory_refresh_keeps_one_follow_up() {
+    let actor = actor(snapshot());
+    let host = Arc::new(RefreshInventoryHost {
+        inventory: InventoryHost {
+            fail: AtomicBool::new(false),
+            records: vec![directory(b"/work")],
+        },
+        reads: AtomicUsize::new(0),
+        blocked: (Mutex::new(false), std::sync::Condvar::new()),
+    });
+    let service = GitService::new(
+        server(),
+        ServerEpoch::new(1),
+        host.clone(),
+        actor,
+        GitLimits::default(),
+    )
+    .unwrap();
+    let _cleanup = ReadCleanup(service.clone());
+    service.recover(vec![]).await.unwrap();
+    service
+        .query(
+            principal(1),
+            GitQuery::Inventory {
+                workspace: WorkspaceId::new(server(), 1).unwrap(),
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    *host.blocked.0.lock().unwrap() = true;
+    service.refresh_inventory(principal(1)).unwrap();
+    let entered = read_count(&host.reads, 2).await;
+    if entered {
+        for _ in 0..20 {
+            service.refresh_inventory(principal(1)).unwrap();
+        }
+    }
+    *host.blocked.0.lock().unwrap() = false;
+    host.blocked.1.notify_all();
+    let followed_up = read_count(&host.reads, 3).await;
+    service.shutdown().await.unwrap();
+    assert!(entered, "the first refresh must reach the native read");
+    assert!(
+        followed_up,
+        "a committed-change trigger must survive an in-flight read"
+    );
+    assert_eq!(
+        host.reads.load(Ordering::SeqCst),
+        3,
+        "triggers coalesce into one follow-up"
+    );
+}
+
+#[tokio::test]
+async fn idle_inventory_worker_releases_the_clients_read_quota() {
+    let fixture = NativeFixture::new("idle-inventory-quota");
+    let initial = with_panes(native_actor(&fixture).snapshot.lock().unwrap().clone(), 4);
+    let actor = actor(initial);
+    let host = ControlledHost::new(fixture.host.clone());
+    let service = GitService::new(
+        server(),
+        ServerEpoch::new(1),
+        host.clone(),
+        actor.clone(),
+        GitLimits::default(),
+    )
+    .unwrap();
+    let _cleanup = ReadCleanup(service.clone());
+    service.recover(vec![]).await.unwrap();
+    service
+        .query(
+            principal(1),
+            GitQuery::Inventory {
+                workspace: WorkspaceId::new(server(), 1).unwrap(),
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    service.refresh_inventory(principal(1)).unwrap();
+    assert!(read_count(&actor.reconciliations, 2).await);
+    host.block.store(true, Ordering::SeqCst);
+    let mut callers = Vec::new();
+    for index in 1..=4 {
+        let service = service.clone();
+        callers.push(tokio::spawn(async move {
+            service
+                .query(
+                    principal(1),
+                    GitQuery::Status {
+                        target: GitStatusTarget::Pane(PaneId::new(server(), index).unwrap()),
+                    },
+                )
+                .await
+        }));
+    }
+    let admitted = read_count(&host.entered, 4).await;
+    service.shutdown().await.unwrap();
+    assert!(
+        admitted,
+        "an idle inventory worker must leave four read slots available"
+    );
+    for caller in callers {
+        assert_eq!(caller.await.unwrap(), Err(GitFailure::CancelledRead));
+    }
+    assert_eq!(host.finished.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test(start_paused = true)]
+async fn pending_inventory_refresh_reserves_the_next_clients_read_quota() {
+    let actor = actor(with_panes(snapshot(), 4));
+    let host = Arc::new(RefreshInventoryHost {
+        inventory: InventoryHost {
+            fail: AtomicBool::new(false),
+            records: vec![directory(b"/work")],
+        },
+        reads: AtomicUsize::new(0),
+        blocked: (Mutex::new(true), std::sync::Condvar::new()),
+    });
+    let service = GitService::new(
+        server(),
+        ServerEpoch::new(1),
+        host.clone(),
+        actor,
+        GitLimits::default(),
+    )
+    .unwrap();
+    let _cleanup = ReadCleanup(service.clone());
+    service.recover(vec![]).await.unwrap();
+    service.refresh_inventory(principal(1)).unwrap();
+    let first = read_count(&host.reads, 1).await;
+    service.refresh_inventory(principal(2)).unwrap();
+    let mut callers = Vec::new();
+    for index in 1..=4 {
+        let service = service.clone();
+        callers.push(tokio::spawn(async move {
+            service
+                .query(
+                    principal(2),
+                    GitQuery::Status {
+                        target: GitStatusTarget::Pane(PaneId::new(server(), index).unwrap()),
+                    },
+                )
+                .await
+        }));
+    }
+    let admitted = read_count(&host.reads, 4).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while !callers.iter().any(tokio::task::JoinHandle::is_finished)
+        && std::time::Instant::now() < deadline
+    {
+        tokio::task::yield_now().await;
+    }
+    *host.blocked.0.lock().unwrap() = false;
+    host.blocked.1.notify_all();
+    let mut refused = 0;
+    for caller in callers {
+        refused += usize::from(caller.await.unwrap() == Err(GitFailure::Capacity));
+    }
+    service.shutdown().await.unwrap();
+    assert!(
+        first && admitted,
+        "inventory and three status reads must reach the host"
+    );
+    assert_eq!(
+        refused, 1,
+        "the pending refresh reserves the fourth read slot for its client"
+    );
+}
+
+struct InventoryQuotaHost {
+    inactive_available: AtomicBool,
+    status_started: AtomicUsize,
+    status_finished: AtomicUsize,
+    status_permits: (Mutex<usize>, std::sync::Condvar),
+    inventory_reads: AtomicUsize,
+}
+impl InventoryQuotaHost {
+    fn observation_host(&self) -> InventoryHost {
+        let mut records = vec![directory(b"/work")];
+        if self.inactive_available.load(Ordering::SeqCst) {
+            records.push(directory(b"/inactive"));
+        }
+        InventoryHost {
+            fail: AtomicBool::new(false),
+            records,
+        }
+    }
+    fn release_statuses(&self, count: usize) {
+        *self.status_permits.0.lock().unwrap() += count;
+        self.status_permits.1.notify_all();
+    }
+}
+impl ServerGitHost for InventoryQuotaHost {
+    fn status(
+        &self,
+        _: &ServerDirectory,
+        _: &GitAuthoritySnapshot,
+        cancellation: &GitReadCancellation,
+    ) -> Result<HostGitStatus, GitFailure> {
+        self.status_started.fetch_add(1, Ordering::SeqCst);
+        let mut permits = self.status_permits.0.lock().unwrap();
+        while *permits == 0 && !cancellation.is_cancelled() {
+            permits = self
+                .status_permits
+                .1
+                .wait_timeout(permits, std::time::Duration::from_millis(5))
+                .unwrap()
+                .0;
+        }
+        if cancellation.is_cancelled() {
+            return Err(GitFailure::CancelledRead);
+        }
+        *permits -= 1;
+        self.status_finished.fetch_add(1, Ordering::SeqCst);
+        Err(GitFailure::Unchecked)
+    }
+    fn discover_source(
+        &self,
+        source: &ServerDirectory,
+        basis: &GitAuthoritySnapshot,
+        cancellation: &GitReadCancellation,
+    ) -> Result<Option<HostGitSource>, GitFailure> {
+        self.observation_host()
+            .discover_source(source, basis, cancellation)
+    }
+    fn inventory(
+        &self,
+        source: &ServerDirectory,
+        basis: &GitAuthoritySnapshot,
+        cancellation: &GitReadCancellation,
+    ) -> Result<Option<HostGitInventory>, GitFailure> {
+        self.inventory_reads.fetch_add(1, Ordering::SeqCst);
+        self.observation_host()
+            .inventory(source, basis, cancellation)
+    }
+    fn containment(
+        &self,
+        source: &ServerDirectory,
+        root: &ServerDirectory,
+    ) -> spaceterm_core::server_directories::DirectoryContainment {
+        self.observation_host().containment(source, root)
+    }
+    fn prepare_write(
+        &self,
+        _: HostGitWriteRequest,
+        _: &GitReadCancellation,
+    ) -> Result<Box<dyn PreparedServerGitWrite>, GitFailure> {
+        Err(GitFailure::Unchecked)
+    }
+    fn reconcile(
+        &self,
+        _: &GitWriteIntent,
+        _: &GitReadCancellation,
+    ) -> Result<HostRecoveryObservation, GitFailure> {
+        Err(GitFailure::Unchecked)
+    }
+    fn shutdown(&self) -> Result<(), GitFailure> {
+        Ok(())
+    }
+}
+
+fn inventory_quota_snapshot() -> GitAuthoritySnapshot {
+    let mut initial = with_panes(snapshot(), 4);
+    let mut state = initial.organization.state().clone();
+    let mut workspace = state.workspaces[0].clone();
+    workspace.id = WorkspaceId::new(server(), 2).unwrap();
+    workspace.root_tab = TabId::new(server(), 2).unwrap();
+    workspace.creation_ordinal = CreationOrdinal::new(7);
+    workspace.name.value.display = NameText::new("inactive".into()).unwrap();
+    let mut tab = state.tabs[0].clone();
+    tab.id = workspace.root_tab;
+    tab.workspace = workspace.id;
+    tab.root_pane = PaneId::new(server(), 5).unwrap();
+    tab.creation_ordinal = CreationOrdinal::new(8);
+    let mut pane = state.panes[0].clone();
+    pane.id = tab.root_pane;
+    pane.tab = tab.id;
+    pane.starting_directory = directory(b"/inactive");
+    pane.creation_ordinal = CreationOrdinal::new(9);
+    let mut runtime = initial.organization.runtime().to_vec();
+    let mut inactive_runtime = runtime[0];
+    inactive_runtime.pane = pane.id;
+    runtime.push(inactive_runtime);
+    state.workspaces.push(workspace);
+    state.tabs.push(tab);
+    state.panes.push(pane);
+    state.retained = None;
+    initial.organization = versioned_snapshot(initial.organization.epoch(), state, runtime);
+    initial.runtime.panes.push(RuntimeWorkStamp {
+        pane: PaneId::new(server(), 5).unwrap(),
+        ..initial.runtime.panes[0].clone()
+    });
+    initial
+}
+
+async fn inactive_inventory_changed(actor: &Actor) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        let changed = {
+            let current = actor.snapshot.lock().unwrap();
+            let state = current.organization.state();
+            let inactive = state
+                .tabs
+                .iter()
+                .find(|tab| tab.workspace.local() == 2)
+                .unwrap();
+            state.worktrees.iter().any(|worktree| {
+                inactive.worktree == Some(worktree.id)
+                    && worktree.directory == directory(b"/inactive")
+            })
+        };
+        if changed || std::time::Instant::now() >= deadline {
+            return changed;
+        }
+        // No clock advance: neither polling nor a read deadline can release capacity.
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn client_quota_deferred_inventory_refresh_precedes_status_follow_ups() {
+    let actor = actor(inventory_quota_snapshot());
+    let host = Arc::new(InventoryQuotaHost {
+        inactive_available: AtomicBool::new(false),
+        status_started: AtomicUsize::new(0),
+        status_finished: AtomicUsize::new(0),
+        status_permits: (Mutex::new(0), std::sync::Condvar::new()),
+        inventory_reads: AtomicUsize::new(0),
+    });
+    let service = GitService::new(
+        server(),
+        ServerEpoch::new(1),
+        host.clone(),
+        actor.clone(),
+        GitLimits::default(),
+    )
+    .unwrap();
+    let _cleanup = ReadCleanup(service.clone());
+    service.recover(vec![]).await.unwrap();
+    // Create the worker first. Four admitted reads then prove it has gone idle.
+    service.refresh_inventory(principal(1)).unwrap();
+    let mut subscriptions = Vec::new();
+    for pane in 1..=4 {
+        subscriptions.push(
+            service
+                .subscribe_status(
+                    principal(1),
+                    GitStatusTarget::Pane(PaneId::new(server(), pane).unwrap()),
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    let saturated = read_count(&host.status_started, 4).await;
+    let inventory_reads = host.inventory_reads.load(Ordering::SeqCst);
+    host.inactive_available.store(true, Ordering::SeqCst);
+    for _ in 0..20 {
+        service.refresh_statuses().unwrap();
+    }
+    let trigger = service.refresh_inventory(principal(1));
+    let premature = host.inventory_reads.load(Ordering::SeqCst) != inventory_reads;
+    host.release_statuses(1);
+    let changed = inactive_inventory_changed(&actor).await;
+    let finished = host.status_finished.load(Ordering::SeqCst);
+    service.shutdown().await.unwrap();
+    assert!(saturated, "four reads must occupy the client's quota");
+    assert_eq!(trigger, Err(GitFailure::Capacity));
+    assert!(!premature, "the dirty request must respect the read quota");
+    assert_eq!(finished, 1, "only one status read released capacity");
+    assert!(
+        changed,
+        "freeing one read slot must refresh the unrelated Workspace before status follow-ups"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn global_quota_deferred_inventory_refresh_precedes_status_follow_ups() {
+    let actor = actor(inventory_quota_snapshot());
+    let host = Arc::new(InventoryQuotaHost {
+        inactive_available: AtomicBool::new(false),
+        status_started: AtomicUsize::new(0),
+        status_finished: AtomicUsize::new(0),
+        status_permits: (Mutex::new(0), std::sync::Condvar::new()),
+        inventory_reads: AtomicUsize::new(0),
+    });
+    let service = GitService::new(
+        server(),
+        ServerEpoch::new(1),
+        host.clone(),
+        actor.clone(),
+        GitLimits::default(),
+    )
+    .unwrap();
+    let _cleanup = ReadCleanup(service.clone());
+    service.recover(vec![]).await.unwrap();
+    let mut subscriptions = Vec::new();
+    for client in 1..=8 {
+        for pane in 1..=4 {
+            subscriptions.push(
+                service
+                    .subscribe_status(
+                        principal(client),
+                        GitStatusTarget::Pane(PaneId::new(server(), pane).unwrap()),
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+    }
+    let saturated = read_count(&host.status_started, 8).await;
+    let excess = service
+        .query(
+            principal(9),
+            GitQuery::Status {
+                target: workspace_target(),
+            },
+        )
+        .await;
+    host.inactive_available.store(true, Ordering::SeqCst);
+    for _ in 0..20 {
+        service.refresh_statuses().unwrap();
+    }
+    // This Client has no active reads. Only the global queue can defer its request.
+    let trigger = service.refresh_inventory(principal(9));
+    let premature = host.inventory_reads.load(Ordering::SeqCst) != 0;
+    host.release_statuses(32);
+    let changed = inactive_inventory_changed(&actor).await;
+    service.shutdown().await.unwrap();
+    assert!(saturated, "eight native reads must occupy the worker slots");
+    assert_eq!(
+        excess,
+        Err(GitFailure::Capacity),
+        "32 jobs fill the global queue"
+    );
+    assert_eq!(trigger, Err(GitFailure::Capacity));
+    assert!(
+        !premature,
+        "deferred inventory must not exceed the global quota"
+    );
+    assert!(
+        changed,
+        "read completion must retry inventory without another trigger or periodic polling"
+    );
+}

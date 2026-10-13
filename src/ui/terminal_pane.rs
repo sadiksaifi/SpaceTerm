@@ -2,6 +2,10 @@ mod report;
 mod repository;
 
 use super::pane_lifecycle::PaneLifecycleDependencies;
+use super::pane_presentation::PanePresentation;
+use super::server_desktop_contracts::{
+    DesktopClientError, MeasuredGrid, PaneAction, PaneMeasurement, PaneViewToken, SelectionSource,
+};
 use super::terminal_focus::TerminalFocusBlocker;
 pub(crate) use crate::domain::remote_workspace::RemotePaneLifecycleError;
 use crate::domain::remote_workspace::{RemotePaneFacts, RemoteRestartAuthority};
@@ -82,6 +86,7 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Render, ScrollDelta, ScrollWheelEvent,
     SharedString, Task, TextRun, UTF16Selection, Window, div, point, px, relative, size,
 };
+use spaceterm_core::geometry::{CellPixels, SUPPORTED_GRID_LIMITS};
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, Button, ButtonRole, ButtonSize, ButtonVariant, ContextMenu,
     ContextMenuTarget, EditCopy, EditPaste, FloatingRole, FloatingShell, Icon, IconButton,
@@ -232,6 +237,25 @@ pub(crate) enum TerminalPaneEvent {
     SurfaceBackgroundChanged,
     AttentionChanged { unread_count: u32 },
     Exited,
+    /// The Pane's admitted grid for one measurement request of a server-backed Pane.
+    #[allow(
+        dead_code,
+        reason = "only a Pane created for a server Terminal Session reports measurements"
+    )]
+    Measured(PaneMeasurement),
+    /// A person explicitly selected a server-backed Pane. Native focus restoration sends
+    /// [`Self::FocusRequested`] instead, which never acquires control or starts a Session.
+    #[allow(
+        dead_code,
+        reason = "only a Pane created for a server Terminal Session reports selections"
+    )]
+    SelectionRequested(SelectionSource),
+    /// A person chose an action on a server-backed Pane's presentation.
+    #[allow(
+        dead_code,
+        reason = "only a Pane created for a server Terminal Session presents server actions"
+    )]
+    ActionRequested(PaneAction),
 }
 
 impl std::fmt::Debug for TerminalPaneEvent {
@@ -243,6 +267,9 @@ impl std::fmt::Debug for TerminalPaneEvent {
             Self::SurfaceBackgroundChanged => "TerminalPaneEvent::SurfaceBackgroundChanged",
             Self::AttentionChanged { .. } => "TerminalPaneEvent::AttentionChanged",
             Self::Exited => "TerminalPaneEvent::Exited",
+            Self::Measured(_) => "TerminalPaneEvent::Measured",
+            Self::SelectionRequested(_) => "TerminalPaneEvent::SelectionRequested",
+            Self::ActionRequested(_) => "TerminalPaneEvent::ActionRequested",
         })
     }
 }
@@ -4210,6 +4237,60 @@ impl TerminalPane {
 }
 
 impl EventEmitter<TerminalPaneEvent> for TerminalPane {}
+
+/// Server-backed presentation. Only a Pane created for a server Terminal Session accepts a
+/// presentation or a server context. A Pane hosting a local or SSH Terminal Session refuses both
+/// as [`DesktopClientError::WrongServer`], so it never shows server state it cannot enforce.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "server-backed Tabs call these once Panes host server Terminal Sessions"
+    )
+)]
+impl TerminalPane {
+    pub(crate) fn set_presentation(
+        &mut self,
+        _presentation: PanePresentation,
+        _cx: &mut Context<Self>,
+    ) -> Result<(), DesktopClientError> {
+        Err(DesktopClientError::WrongServer)
+    }
+
+    pub(crate) fn set_server_context(
+        &mut self,
+        _token: PaneViewToken,
+        _cx: &mut Context<Self>,
+    ) -> Result<(), DesktopClientError> {
+        Err(DesktopClientError::WrongServer)
+    }
+
+    /// The laid-out cell grid with its device-pixel cell size. It is `Ok(None)` until the Pane has
+    /// a layout. A grid or cell size that core geometry refuses is
+    /// [`DesktopClientError::InvalidGeometry`], so a measurement request for the current layout
+    /// fails at once instead of waiting. The grid keeps its cells and metrics when a multiplied
+    /// PTY pixel extent cannot fit u16.
+    pub(crate) fn measured_grid(&self) -> Result<Option<MeasuredGrid>, DesktopClientError> {
+        let Some(geometry) = self.last_geometry else {
+            return Ok(None);
+        };
+        let grid = geometry.grid();
+        let cell = geometry.backing_cell_size();
+        let cell_pixels = CellPixels::new(
+            u16::try_from(cell.width).map_err(|_| DesktopClientError::InvalidGeometry)?,
+            u16::try_from(cell.height).map_err(|_| DesktopClientError::InvalidGeometry)?,
+        )
+        .map_err(|_| DesktopClientError::InvalidGeometry)?;
+        MeasuredGrid::new(
+            u32::from(grid.rows),
+            u32::from(grid.cols),
+            cell_pixels,
+            SUPPORTED_GRID_LIMITS,
+        )
+        .map(Some)
+        .map_err(|_| DesktopClientError::InvalidGeometry)
+    }
+}
 
 impl EntityInputHandler for TerminalPane {
     fn text_for_range(

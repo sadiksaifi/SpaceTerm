@@ -2232,8 +2232,4 @@ pub(crate) mod server_enrollment;
 
 pub(crate) mod server_runtime;
 
-#[expect(
-    unused_imports,
-    reason = "frozen Settings action boundary consumed by desktop-integration"
-)]
 pub(crate) use servers::model::ServerRequest as SelectedServerAction;

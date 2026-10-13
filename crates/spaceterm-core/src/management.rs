@@ -84,7 +84,19 @@ pub enum ManagementProgressState {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ManagementRequestReference {
     Operation(crate::operations::OperationBinding),
+    /// Shared progress identifies work without possessing its execution digest.
+    OperationReference(crate::operations::OperationId),
     Native([u8; 16]),
+}
+impl ManagementRequestReference {
+    /// Comparison identity only. This never supplies an execution digest.
+    pub const fn operation_id(self) -> Option<crate::operations::OperationId> {
+        match self {
+            Self::Operation(binding) => Some(binding.id),
+            Self::OperationReference(id) => Some(id),
+            Self::Native(_) => None,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ManagementProgress {
@@ -142,6 +154,9 @@ impl ServerStatus {
                 || match value.request {
                     ManagementRequestReference::Operation(binding) => {
                         binding.id.stream().server() != parts.server
+                    }
+                    ManagementRequestReference::OperationReference(id) => {
+                        id.stream().server() != parts.server
                     }
                     ManagementRequestReference::Native(bytes) => bytes == [0; 16],
                 }
