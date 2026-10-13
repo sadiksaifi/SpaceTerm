@@ -346,6 +346,7 @@ async fn handshake(
             spaceterm_protocol::negotiation::CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
             spaceterm_protocol::negotiation::CAPABILITY_CANONICAL_DOMAIN,
             spaceterm_protocol::negotiation::CAPABILITY_ORGANIZATION_COMPARISONS,
+            spaceterm_protocol::negotiation::CAPABILITY_NATIVE_NOTIFICATIONS,
         ],
         ..Default::default()
     };
@@ -372,6 +373,11 @@ async fn handshake(
         codec
             .capabilities()
             .contains(&spaceterm_protocol::negotiation::CAPABILITY_CANONICAL_DOMAIN)
+    );
+    assert!(
+        codec
+            .capabilities()
+            .contains(&spaceterm_protocol::negotiation::CAPABILITY_NATIVE_NOTIFICATIONS)
     );
     codec
 }
