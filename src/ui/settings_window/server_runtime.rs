@@ -139,6 +139,12 @@ struct ServerState {
     applied_revision: Option<spaceterm_core::authority::OrganizationRevision>,
     /// A conflict reply can arrive before its organization publication.
     conflict: Option<(SharedString, u64)>,
+    remote_edit: Option<RemoteAccessEdit>,
+    remote_conflict: Option<(
+        spaceterm_core::remote_access::RemoteAccessPolicy,
+        FieldVersion,
+    )>,
+    remote_applied_revision: Option<spaceterm_core::authority::OrganizationRevision>,
     status: Option<spaceterm_core::management::ServerStatus>,
     status_connection: Option<spaceterm_core::authority::ConnectionBinding>,
     devices: Option<PairedDevices>,
@@ -292,17 +298,61 @@ impl SettingsRuntime {
                 let same_connection = matches!(*source.state.borrow(), ConnectionState::Connected { info } if personal.and_then(|state| state.status_connection) == Some(info.binding));
                 ready && same_connection && status.parts().server == source.name.server && Some(status.parts().epoch) == runtime_epoch
             });
-            let remote_access = verified_status.map(|status| RemoteAccess {
-                version: status.parts().remote_access.version,
-                enabled: status.parts().remote_access.value.is_enabled(),
-                // A policy is not an inventory of selectable machine scopes.
-                scope: None,
-                scopes: vec![],
-                pending: personal.is_some_and(|state| state.busy),
+            // Both status and organization frames arrive through the authenticated worker.
+            // Retained policy is display data while disconnected, never mutation authority.
+            let retained_remote = replica
+                .retained()
+                .and_then(|snapshot| snapshot.organization.state().retained.as_ref())
+                .map(|facts| facts.remote_access().clone());
+            let published_remote = verified_status
+                .map(|status| status.parts().remote_access.clone())
+                .filter(|status| {
+                    retained_remote
+                        .as_ref()
+                        .is_none_or(|retained| status.version.get() >= retained.version.get())
+                })
+                .or(retained_remote);
+            let current_remote = personal
+                .and_then(|state| state.remote_conflict.as_ref())
+                .filter(|(_, version)| {
+                    published_remote
+                        .as_ref()
+                        .is_none_or(|value| version.get() >= value.version.get())
+                })
+                .map(|(value, version)| spaceterm_core::organization::Versioned {
+                    value: value.clone(),
+                    version: *version,
+                })
+                .or(published_remote);
+            let remote_access = current_remote.map(|current| {
+                let edit = personal.and_then(|state| {
+                    state.remote_edit.clone().filter(|edit| {
+                        !state.remote_applied_revision.is_some_and(|revision| {
+                            replica
+                                .retained()
+                                .is_some_and(|snapshot| snapshot.cursor.revision >= revision)
+                                || current.version.get() > edit.base_version.get()
+                        })
+                    })
+                });
+                RemoteAccess {
+                    version: current.version,
+                    enabled: current.value.is_enabled(),
+                    // A policy is not an inventory of selectable machine scopes.
+                    scope: None,
+                    scopes: vec![],
+                    pending: personal.is_some_and(|state| state.busy)
+                        || edit
+                            .as_ref()
+                            .is_some_and(|edit| edit.state == SettingEditState::Saving),
+                    endpoints: current.value.endpoints().to_vec(),
+                    edit,
+                }
             });
             let mut management = personal
                 .map(|state| state.management.clone())
                 .unwrap_or_default();
+            management.pending = personal.is_some_and(|state| state.busy);
             if let Some(request) = native.and_then(|native| native.pending) {
                 management.native_request = Some(request);
             }
@@ -563,6 +613,48 @@ impl SettingsRuntime {
             ) else {
                 continue;
             };
+            if let Command::SetRemoteAccess {
+                server,
+                expected_version,
+                value,
+            } = request.command()
+            {
+                let (edit_state, outcome, revision) = match &operation.state {
+                    RetainedOperationState::Pending => (SettingEditState::Saving, None, None),
+                    RetainedOperationState::Completed {
+                        outcome,
+                        publication_revision,
+                        ..
+                    } => {
+                        let Ok(outcome) = outcome.outcome(self.tracker.journal().codec()) else {
+                            continue;
+                        };
+                        let state = match &outcome {
+                            Outcome::Conflict(FieldConflict::RemoteAccess { .. }) => {
+                                SettingEditState::Conflict
+                            }
+                            Outcome::Failed(_) => {
+                                SettingEditState::Rejected(SettingRejection::NotSaved)
+                            }
+                            Outcome::Applied => SettingEditState::Saving,
+                            _ => continue,
+                        };
+                        (state, Some(outcome), Some(*publication_revision))
+                    }
+                    _ => continue,
+                };
+                let mut states = self.state.borrow_mut();
+                let state = states.entry(*server).or_default();
+                state.remote_edit = Some(RemoteAccessEdit {
+                    draft: value.clone(),
+                    base_version: *expected_version,
+                    state: edit_state,
+                });
+                state.remote_applied_revision = None;
+                if let Some(outcome) = outcome {
+                    apply_outcome(state, &outcome, SettingOperation::Remote, revision);
+                }
+            }
             if let Command::SetWorktreeLocation {
                 server, template, ..
             } = request.command()
@@ -675,7 +767,7 @@ impl SettingsRuntime {
                                 outcome,
                                 issued,
                                 restored,
-                                operation_edits_worktree(&runtime.tracker, operation),
+                                operation_setting(&runtime.tracker, operation),
                                 Some(publication_revision),
                             ),
                             _ => state.management.failure = Some(ManagementFailure::Indeterminate),
@@ -722,6 +814,15 @@ impl SettingsRuntime {
             self.publish(cx);
             return;
         }
+        if matches!(bound.request, ServerRequest::DiscardRemoteAccessEdit(_)) {
+            self.state
+                .borrow_mut()
+                .entry(server)
+                .or_default()
+                .remote_edit = None;
+            self.publish(cx);
+            return;
+        }
         if self
             .state
             .borrow()
@@ -740,6 +841,20 @@ impl SettingsRuntime {
             });
             self.publish(cx);
             return;
+        }
+        if let ServerRequestTarget::Server {
+            remote_policy: Some((version, policy)),
+            ..
+        } = &bound.target
+        {
+            let mut states = self.state.borrow_mut();
+            let state = states.entry(server).or_default();
+            state.remote_edit = Some(RemoteAccessEdit {
+                draft: policy.clone(),
+                base_version: *version,
+                state: SettingEditState::Saving,
+            });
+            state.remote_applied_revision = None;
         }
         match &bound.request {
             ServerRequest::SetWorktreeLocation { template, .. } => {
@@ -763,6 +878,10 @@ impl SettingsRuntime {
             .failure = None;
         self.publish(cx);
         let editing = matches!(bound.request, ServerRequest::SetWorktreeLocation { .. });
+        let remote_editing = matches!(
+            bound.request,
+            ServerRequest::EnableRemoteAccess { .. } | ServerRequest::DisableRemoteAccess(_)
+        );
         let binding = source.binding.clone();
         let tracker = self.tracker.clone();
         let peer = self.operations.clone();
@@ -822,7 +941,7 @@ impl SettingsRuntime {
                             apply_outcome(
                                 state,
                                 &outcome,
-                                operation_edits_worktree(&runtime.tracker, operation),
+                                operation_setting(&runtime.tracker, operation),
                                 operation_publication_revision(&runtime.tracker, operation),
                             );
                         }
@@ -855,6 +974,9 @@ impl SettingsRuntime {
                     Err(failure) => {
                         state.management.failure = Some(failure);
                         if editing && let Some(edit) = &mut state.edit {
+                            edit.state = SettingEditState::Rejected(SettingRejection::NotSaved);
+                        }
+                        if remote_editing && let Some(edit) = &mut state.remote_edit {
                             edit.state = SettingEditState::Rejected(SettingRejection::NotSaved);
                         }
                         state.unpair = None;
@@ -1016,9 +1138,6 @@ async fn execute(
             if !summary.route.manages_host() {
                 return Err(ManagementFailure::NativeUnavailable);
             }
-            if !summary.route.manages_host() {
-                return Err(ManagementFailure::NativeUnavailable);
-            }
             let native = native.ok_or(ManagementFailure::NativeUnavailable)?;
             let native_status = check_native(&native, &binding).await?;
             check_ordinary(&tracker, &binding)?;
@@ -1116,7 +1235,9 @@ async fn execute(
                 value: policy.clone(),
             }
         }
-        ServerRequest::DiscardWorktreeLocationEdit(_) | ServerRequest::DismissUnpairNotice(_) => {
+        ServerRequest::DiscardWorktreeLocationEdit(_)
+        | ServerRequest::DiscardRemoteAccessEdit(_)
+        | ServerRequest::DismissUnpairNotice(_) => {
             return Err(ManagementFailure::Usage);
         }
     };
@@ -1355,7 +1476,7 @@ fn apply_received_outcome(
     outcome: Outcome,
     issued: u64,
     restored: bool,
-    editing: bool,
+    editing: SettingOperation,
     revision: Option<spaceterm_core::authority::OrganizationRevision>,
 ) {
     if restored
@@ -1409,7 +1530,14 @@ fn apply_received_outcome(
     }
 }
 
-fn operation_edits_worktree(tracker: &OperationTracker, operation: OperationId) -> bool {
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SettingOperation {
+    Other,
+    Worktree,
+    Remote,
+}
+
+fn operation_setting(tracker: &OperationTracker, operation: OperationId) -> SettingOperation {
     tracker
         .journal()
         .snapshot()
@@ -1418,7 +1546,11 @@ fn operation_edits_worktree(tracker: &OperationTracker, operation: OperationId) 
         .and_then(|record| {
             CanonicalOperationRequest::decode(&record.request, tracker.journal().codec()).ok()
         })
-        .is_some_and(|request| matches!(request.command(), Command::SetWorktreeLocation { .. }))
+        .map_or(SettingOperation::Other, |request| match request.command() {
+            Command::SetWorktreeLocation { .. } => SettingOperation::Worktree,
+            Command::SetRemoteAccess { .. } => SettingOperation::Remote,
+            _ => SettingOperation::Other,
+        })
 }
 
 fn operation_publication_revision(
@@ -1438,10 +1570,32 @@ fn operation_publication_revision(
 fn apply_outcome(
     state: &mut ServerState,
     outcome: &Outcome,
-    editing: bool,
+    editing: SettingOperation,
     revision: Option<spaceterm_core::authority::OrganizationRevision>,
 ) {
-    if !editing {
+    if editing == SettingOperation::Remote {
+        match outcome {
+            Outcome::Applied => state.remote_applied_revision = revision,
+            Outcome::Conflict(FieldConflict::RemoteAccess {
+                current_value,
+                current_version,
+                ..
+            }) => {
+                state.remote_conflict = Some((current_value.clone(), *current_version));
+                if let Some(edit) = &mut state.remote_edit {
+                    edit.state = SettingEditState::Conflict;
+                }
+            }
+            Outcome::Failed(_) => {
+                if let Some(edit) = &mut state.remote_edit {
+                    edit.state = SettingEditState::Rejected(SettingRejection::NotSaved);
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+    if editing == SettingOperation::Other {
         if let Outcome::Failed(failure) = outcome {
             state.management.failure = Some(match failure {
                 OperationFailure::StaleAssessment

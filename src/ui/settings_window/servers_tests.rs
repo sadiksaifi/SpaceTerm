@@ -48,12 +48,12 @@ impl Recorder {
     }
 }
 
-struct Fixture<'a> {
-    window: Entity<SettingsWindow>,
+pub(in crate::ui::settings_window) struct Fixture<'a> {
+    pub(in crate::ui::settings_window) window: Entity<SettingsWindow>,
     servers: Entity<Servers>,
     requests: Rc<Recorder>,
     storage: std::sync::Arc<MemoryStorage>,
-    cx: &'a mut VisualTestContext,
+    pub(in crate::ui::settings_window) cx: &'a mut VisualTestContext,
 }
 
 impl Fixture<'_> {
@@ -64,7 +64,7 @@ impl Fixture<'_> {
         self.cx.run_until_parked();
     }
 
-    fn click(&mut self, selector: &str) {
+    pub(in crate::ui::settings_window) fn click(&mut self, selector: &str) {
         let selector: &'static str = selector.to_owned().leak();
         let position = self
             .cx
@@ -75,6 +75,49 @@ impl Fixture<'_> {
             .simulate_mouse_move(position, None, Modifiers::none());
         self.cx.simulate_click(position, Modifiers::none());
         self.cx.run_until_parked();
+    }
+
+    fn review_management(&mut self, selector: &str) {
+        self.click(selector);
+        let reads = self.requests.take();
+        if reads.is_empty() {
+            return;
+        }
+        assert_eq!(reads.len(), 1);
+        let read = &reads[0];
+        let mut snapshot = self
+            .servers
+            .read_with(self.cx, |source, _| source.snapshot().clone());
+        let server = snapshot
+            .servers
+            .iter_mut()
+            .find(|server| Some(&server.key) == read.server())
+            .unwrap();
+        match read {
+            ServerRequest::AssessStop(_) => {
+                server.management.stop = Some(host_assessment(
+                    spaceterm_host::account_service::ServiceAction::Stop,
+                    server.management.stop.as_ref().map_or(1, |value| {
+                        if value.reference.as_str() == "host-1" {
+                            2
+                        } else {
+                            1
+                        }
+                    }),
+                ))
+            }
+            ServerRequest::AssessRestart(_) => {
+                server.management.restart = Some(host_assessment(
+                    spaceterm_host::account_service::ServiceAction::Restart,
+                    1,
+                ))
+            }
+            ServerRequest::AssessEndAllSessions(_) => {
+                server.management.end_all = Some(end_all_assessment(server))
+            }
+            _ => panic!("expected a read-only management assessment"),
+        }
+        self.publish(snapshot);
     }
 
     fn rendered(&mut self, selector: &str) -> bool {
@@ -118,7 +161,7 @@ impl Fixture<'_> {
         self.cx.run_until_parked();
     }
 
-    fn modal_open(&mut self) -> bool {
+    pub(in crate::ui::settings_window) fn modal_open(&mut self) -> bool {
         self.cx
             .update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx))
     }
@@ -156,7 +199,7 @@ impl Fixture<'_> {
         self.cx.run_until_parked();
     }
 
-    fn document(&mut self) -> SettingsDocument {
+    pub(in crate::ui::settings_window) fn document(&mut self) -> SettingsDocument {
         self.window
             .read_with(self.cx, |window, _| window.editor.document().clone())
     }
@@ -164,6 +207,27 @@ impl Fixture<'_> {
 
 /// Opens Settings on the Servers section with `snapshot` published.
 fn open(appearance: Appearance, snapshot: ServersSnapshot, cx: &mut TestAppContext) -> Fixture<'_> {
+    open_with_source(appearance, snapshot, None, cx)
+}
+
+pub(in crate::ui::settings_window) fn open_from_publisher(
+    source: Entity<Servers>,
+    cx: &mut TestAppContext,
+) -> Fixture<'_> {
+    open_with_source(
+        Appearance::Dark,
+        ServersSnapshot::default(),
+        Some(source),
+        cx,
+    )
+}
+
+fn open_with_source(
+    appearance: Appearance,
+    snapshot: ServersSnapshot,
+    publisher: Option<Entity<Servers>>,
+    cx: &mut TestAppContext,
+) -> Fixture<'_> {
     let storage = MemoryStorage::with_document(&SettingsDocument::default());
     let settings = crate::settings::Settings::load(storage.clone());
     let platform = RecordingAppearancePlatform::default();
@@ -173,9 +237,13 @@ fn open(appearance: Appearance, snapshot: ServersSnapshot, cx: &mut TestAppConte
         appearance_runtime::install(settings, Rc::new(platform), cx)
             .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
-        let servers = model::install(requests.clone(), cx);
-        servers.update(cx, |servers, cx| servers.publish(snapshot, cx));
-        servers
+        if let Some(source) = publisher {
+            source
+        } else {
+            let servers = model::install(requests.clone(), cx);
+            servers.update(cx, |servers, cx| servers.publish(snapshot, cx));
+            servers
+        }
     });
     let (window, cx) = cx.add_window_view(|window, cx| {
         SettingsWindow::new_with_capabilities(
@@ -334,6 +402,8 @@ pub(super) fn local() -> ServerSummary {
             scope: None,
             scopes: scopes(),
             pending: false,
+            endpoints: Vec::new(),
+            edit: None,
         }),
     }
 }
@@ -673,13 +743,13 @@ fn a_selected_server_that_leaves_the_list_hands_selection_to_the_first(cx: &mut 
 fn stop_asks_first_and_sends_only_when_confirmed(cx: &mut TestAppContext) {
     let mut fixture = open(Appearance::Dark, snapshot(vec![local()]), cx);
 
-    fixture.click("settings-server-stop");
+    fixture.review_management("settings-server-stop");
     assert!(fixture.modal_open());
     fixture.click("modal-action-settings-server-stop-cancel");
     assert!(!fixture.modal_open());
     assert!(fixture.requests.take().is_empty());
 
-    fixture.click("settings-server-stop");
+    fixture.review_management("settings-server-stop");
     fixture.click("modal-action-settings-server-stop-confirm");
     assert_eq!(
         fixture.requests.take(),
@@ -775,7 +845,7 @@ fn status_actions_follow_what_the_route_and_state_allow() {
 fn restart_confirms_that_every_client_loses_its_sessions(cx: &mut TestAppContext) {
     let mut fixture = open(Appearance::Dark, snapshot(vec![local()]), cx);
 
-    fixture.click("settings-server-restart");
+    fixture.review_management("settings-server-restart");
     fixture.click("modal-action-settings-server-restart-confirm");
     assert_eq!(
         fixture.requests.take(),
@@ -862,14 +932,13 @@ fn installing_an_update_needs_host_access_as_start_and_stop_do() {
     // Activating a release replaces the server's approved installation, which only the host's
     // authorization allows, and a WSS connection can't obtain it.
     assert_eq!(version_action(&staged(wss())), update(false));
-    // The server restarts its own running version under its service manager, so any live
-    // connection can ask for that.
+    // Restart also requires the selected host's native assessment provider.
     assert_eq!(
         version_action(&ServerSummary {
             status: ServerStatus::Running,
             ..wss()
         }),
-        VersionAction::Restart { enabled: true }
+        VersionAction::Restart { enabled: false }
     );
 }
 
@@ -911,7 +980,7 @@ fn a_confirmation_accepted_after_its_server_changed_sends_nothing(cx: &mut TestA
     );
 
     // The connection drops while End All Sessions waits for an answer.
-    fixture.click("settings-server-end-all-sessions");
+    fixture.review_management("settings-server-end-all-sessions");
     assert!(fixture.modal_open());
     let offline = ServerSummary {
         status: ServerStatus::Offline,
@@ -919,7 +988,8 @@ fn a_confirmation_accepted_after_its_server_changed_sends_nothing(cx: &mut TestA
     };
     fixture.publish(snapshot(vec![offline, stopped_with_update.clone()]));
     fixture.click("modal-action-settings-server-end-all-sessions-confirm");
-    assert!(!fixture.modal_open());
+    assert!(fixture.modal_open());
+    fixture.click("modal-action-settings-server-confirmation-changed-cancel");
     assert!(fixture.requests.take().is_empty());
 
     // The update was confirmed for a stopped server, which it would leave stopped. A server that
@@ -936,6 +1006,7 @@ fn a_confirmation_accepted_after_its_server_changed_sends_nothing(cx: &mut TestA
     ]));
     fixture.click("modal-action-settings-server-update-confirm");
     assert!(fixture.requests.take().is_empty());
+    fixture.click("modal-action-settings-server-confirmation-changed-cancel");
 
     // Another device turned remote connections on, on other addresses, before this one confirmed.
     fixture.publish(snapshot(vec![local(), stopped_with_update]));
@@ -949,6 +1020,8 @@ fn a_confirmation_accepted_after_its_server_changed_sends_nothing(cx: &mut TestA
             scope: Some("tailnet".into()),
             scopes: scopes(),
             pending: false,
+            endpoints: Vec::new(),
+            edit: None,
         }),
         ..local()
     }]));
@@ -960,7 +1033,7 @@ fn a_confirmation_accepted_after_its_server_changed_sends_nothing(cx: &mut TestA
 fn end_all_sessions_needs_a_live_connection_and_confirms(cx: &mut TestAppContext) {
     let mut fixture = open(Appearance::Dark, snapshot(vec![local(), ssh()]), cx);
 
-    fixture.click("settings-server-end-all-sessions");
+    fixture.review_management("settings-server-end-all-sessions");
     fixture.click("modal-action-settings-server-end-all-sessions-confirm");
     assert_eq!(
         fixture.requests.take(),
@@ -968,7 +1041,7 @@ fn end_all_sessions_needs_a_live_connection_and_confirms(cx: &mut TestAppContext
     );
 
     fixture.click("settings-server-option-build");
-    fixture.click("settings-server-end-all-sessions");
+    fixture.review_management("settings-server-end-all-sessions");
     assert!(!fixture.modal_open());
     assert!(fixture.requests.take().is_empty());
     assert_eq!(
@@ -1491,6 +1564,8 @@ fn remote_access_on() -> Option<RemoteAccess> {
         scope: Some("lan".into()),
         scopes: scopes(),
         pending: false,
+        endpoints: Vec::new(),
+        edit: None,
     })
 }
 
@@ -1637,6 +1712,8 @@ fn a_pending_remote_access_change_waits_for_the_server(cx: &mut TestAppContext) 
             scope: None,
             scopes: scopes(),
             pending: true,
+            endpoints: Vec::new(),
+            edit: None,
         }),
         ..local()
     };
@@ -1661,6 +1738,8 @@ fn remote_access_turns_off_after_the_server_stops_offering_its_addresses(cx: &mu
             scope: Some("lan".into()),
             scopes: Vec::new(),
             pending: false,
+            endpoints: Vec::new(),
+            edit: None,
         }),
         ..local()
     };
@@ -1693,6 +1772,8 @@ fn listen_on_never_presents_other_addresses_as_the_ones_in_use(cx: &mut TestAppC
             scope: Some("wifi".into()),
             scopes: scopes(),
             pending: false,
+            endpoints: Vec::new(),
+            edit: None,
         }),
         ..local()
     };
@@ -1741,6 +1822,8 @@ fn a_server_without_addresses_says_why_remote_access_cannot_turn_on(cx: &mut Tes
             scope: None,
             scopes: Vec::new(),
             pending: false,
+            endpoints: Vec::new(),
+            edit: None,
         }),
         ..local()
     };
@@ -1896,7 +1979,7 @@ fn no_settings_reset_reaches_a_server_row() {
 #[gpui::test]
 fn a_confirmation_cannot_target_a_repaired_server_under_the_same_ui_key(cx: &mut TestAppContext) {
     let mut fixture = open(Appearance::Dark, snapshot(vec![local()]), cx);
-    fixture.click("settings-server-stop");
+    fixture.review_management("settings-server-stop");
     assert!(fixture.modal_open());
     let replacement = ServerSummary {
         pairing: pairing(1, 2),
@@ -1993,4 +2076,287 @@ fn importing_and_resetting_client_settings_never_reseed_an_existing_server(
     });
     fixture.cx.run_until_parked();
     assert_eq!(fixture.field(), LOCATION);
+}
+
+#[gpui::test]
+fn management_reads_an_assessment_before_opening_a_destructive_confirmation(
+    cx: &mut TestAppContext,
+) {
+    let mut fixture = open(Appearance::Dark, snapshot(vec![local()]), cx);
+    fixture.click("settings-server-stop");
+    assert_eq!(
+        fixture.requests.take(),
+        vec![ServerRequest::AssessStop(ServerKey::new("local"))]
+    );
+    assert!(!fixture.modal_open());
+}
+
+#[gpui::test]
+fn an_offline_unsent_location_draft_survives_switching_servers(cx: &mut TestAppContext) {
+    let mut fixture = open(Appearance::Dark, snapshot(vec![local(), ssh()]), cx);
+    fixture.click("settings-server-worktree-location");
+    let input = fixture.window.read_with(fixture.cx, |settings, _| {
+        settings.servers.worktree.input.clone()
+    });
+    fixture
+        .cx
+        .update(|_, cx| input.update(cx, |input, cx| input.set_value("~/unsent/{branch}", cx)));
+    fixture.publish(snapshot(vec![
+        ServerSummary {
+            status: ServerStatus::Offline,
+            ..local()
+        },
+        ssh(),
+    ]));
+    fixture.click("settings-server-option-build");
+    fixture.click("settings-server-option-local");
+    assert_eq!(fixture.field(), "~/unsent/{branch}");
+    assert!(fixture.requests.take().is_empty());
+}
+
+#[gpui::test]
+fn a_typed_management_failure_is_visible_and_announced(cx: &mut TestAppContext) {
+    let mut server = local();
+    server.management.failure =
+        Some(spaceterm_client::management_cli::ManagementFailure::StaleAssessment);
+    let mut fixture = open(Appearance::Dark, snapshot(vec![server]), cx);
+    assert!(fixture.rendered("settings-server-management-status"));
+    let tree = A11yTree::read(fixture.cx);
+    assert!(tree.with_role("Status").iter().any(|node| {
+        node["aria"]["label"]
+            .as_str()
+            .is_some_and(|label| label.contains("Review"))
+    }));
+}
+
+#[gpui::test]
+fn switching_servers_cancels_a_pending_management_review(cx: &mut TestAppContext) {
+    let mut fixture = open(Appearance::Dark, snapshot(vec![local(), ssh()]), cx);
+    fixture.click("settings-server-stop");
+    assert_eq!(
+        fixture.requests.take(),
+        vec![ServerRequest::AssessStop(ServerKey::new("local"))]
+    );
+    fixture.click("settings-server-option-build");
+    let mut studio = local();
+    studio.management.stop = Some(host_assessment(
+        spaceterm_host::account_service::ServiceAction::Stop,
+        1,
+    ));
+    fixture.publish(snapshot(vec![studio, ssh()]));
+    assert!(!fixture.modal_open());
+    assert!(fixture.requests.take().is_empty());
+}
+
+#[gpui::test]
+fn a_changed_exact_update_candidate_requires_another_confirmation_with_cancel_focused(
+    cx: &mut TestAppContext,
+) {
+    let mut server = staged_server(local());
+    server.staged_version = Some("1.5.0".into());
+    let mut fixture = open(Appearance::Dark, snapshot(vec![server.clone()]), cx);
+    fixture.click("settings-server-update");
+    server
+        .installations
+        .staged
+        .as_mut()
+        .unwrap()
+        .artifact_sha256 = [9; 32];
+    fixture.publish(snapshot(vec![server]));
+    fixture.click("modal-action-settings-server-update-confirm");
+    assert!(fixture.requests.take().is_empty());
+    assert!(fixture.modal_open());
+    let tree = A11yTree::read(fixture.cx);
+    assert_eq!(tree.focused().unwrap()["aria"]["label"], "Cancel");
+    fixture.press_return();
+    assert!(!fixture.modal_open());
+}
+
+fn host_assessment(
+    action: spaceterm_host::account_service::ServiceAction,
+    identity: u8,
+) -> model::HostAssessment {
+    model::HostAssessment {
+        reference: spaceterm_client::management_cli::confirmation::AssessmentToken::new(format!(
+            "host-{identity}"
+        ))
+        .unwrap(),
+        request: spaceterm_host::native_deployment::contracts::NativeRequestId::new([identity; 16])
+            .unwrap(),
+        action,
+        affected_sessions: 2,
+    }
+}
+
+fn end_all_assessment(
+    server: &ServerSummary,
+) -> spaceterm_client::management_cli::confirmation::ManagementAssessment {
+    use spaceterm_client::management_cli::confirmation::{
+        AssessmentEvidence, AssessmentToken, ManagementAction, ManagementAssessment,
+    };
+    use spaceterm_core::{
+        observations::MonotonicTick,
+        operations::{
+            AssessmentRef, AssessmentSummary, AssessmentTarget, CloseAssessment, RequestDigest,
+        },
+    };
+    let id = server.pairing.parts().server;
+    let original = spaceterm_core::operations::OperationId::new(
+        spaceterm_core::identity::OperationStreamId::new(
+            spaceterm_core::identity::OperationStreamKey::new(id, 1).unwrap(),
+            server.pairing.parts().pairing,
+            spaceterm_core::identity::ClientId::new(id, 1).unwrap(),
+        )
+        .unwrap(),
+        spaceterm_core::operations::OperationSequence::new(1).unwrap(),
+    );
+    let assessed = CloseAssessment::new(
+        AssessmentRef {
+            operation: original,
+            digest: RequestDigest::from_bytes([1; 32]),
+        },
+        server.runtime_epoch.unwrap(),
+        AssessmentSummary::new(AssessmentTarget::EndAllSessions(id), 1, 1, 2, 2, true).unwrap(),
+    )
+    .unwrap();
+    ManagementAssessment::new(
+        AssessmentToken::new("end-all-1".into()).unwrap(),
+        ManagementAction::EndAllSessions { server: id },
+        AssessmentEvidence::EndAllSessions(assessed),
+        MonotonicTick::new(1),
+        MonotonicTick::new(30_001),
+    )
+    .unwrap()
+}
+
+#[gpui::test]
+fn a_remote_access_conflict_retains_the_exact_draft_and_shows_current_addresses(
+    cx: &mut TestAppContext,
+) {
+    let mut server = local();
+    let remote = server.remote_access.as_mut().unwrap();
+    remote.enabled = true;
+    remote.version = spaceterm_core::authority::FieldVersion::new(4);
+    remote.scope = Some("tailnet".into());
+    remote.endpoints = vec!["100.64.0.4:443".parse().unwrap()];
+    remote.edit = Some(model::RemoteAccessEdit {
+        draft: spaceterm_core::remote_access::RemoteAccessPolicy::disabled(
+            server.pairing.parts().server,
+        ),
+        base_version: spaceterm_core::authority::FieldVersion::new(3),
+        state: SettingEditState::Conflict,
+    });
+    let mut fixture = open(Appearance::Dark, snapshot(vec![server]), cx);
+    fixture.search("remote connections");
+    assert!(fixture.rendered("settings-server-remote-access-conflict"));
+    fixture.click("settings-server-remote-access-save-mine");
+    assert!(fixture.modal_open());
+    assert!(fixture.requests.take().is_empty());
+    let tree = A11yTree::read(fixture.cx);
+    assert_eq!(tree.focused().unwrap()["aria"]["label"], "Cancel");
+    fixture.click("modal-action-settings-server-remote-access-disable-confirm");
+    assert_eq!(
+        fixture.requests.take(),
+        vec![ServerRequest::DisableRemoteAccess(ServerKey::new("local"))]
+    );
+}
+
+#[gpui::test]
+fn pending_revocation_has_only_dismissal_and_restores_search_focus_without_servers(
+    cx: &mut TestAppContext,
+) {
+    let mut fixture = open(
+        Appearance::Light,
+        ServersSnapshot {
+            servers: vec![],
+            pending_unpairs: vec![PendingUnpair {
+                id: "pending-only".into(),
+                server_name: "Removed server".into(),
+                original_pairing: pairing(4, 1),
+                operation: operation(4),
+                phase: model::PendingUnpairPhase::AwaitingConfirmation(
+                    model::PendingUnpairReason::Incompatible,
+                ),
+            }],
+        },
+        cx,
+    );
+    for selector in [
+        "settings-server-start",
+        "settings-server-stop",
+        "settings-server-restart",
+        "settings-server-update",
+        "settings-server-end-all-sessions",
+        "settings-server-unpair",
+    ] {
+        assert!(!fixture.rendered(selector));
+    }
+    fixture.click("settings-server-unpair-notice-pending-only-dismiss");
+    assert_eq!(
+        fixture.requests.take(),
+        vec![ServerRequest::DismissUnpairNotice("pending-only".into())]
+    );
+    let tree = A11yTree::read(fixture.cx);
+    assert_eq!(tree.focused().unwrap()["aria"]["label"], "Search settings");
+}
+
+#[gpui::test]
+fn client_preferences_save_while_all_servers_are_offline(cx: &mut TestAppContext) {
+    let mut fixture = open(
+        Appearance::Light,
+        snapshot(vec![ServerSummary {
+            status: ServerStatus::Offline,
+            ..local()
+        }]),
+        cx,
+    );
+    fixture.click("settings-navigation-settings-section-interface");
+    fixture.click("settings-sidebar-default-state-collapsed");
+    fixture
+        .cx
+        .executor()
+        .advance_clock(crate::ui::settings_window::editor::COMMIT_DELAY * 2);
+    fixture.cx.run_until_parked();
+    assert_eq!(
+        fixture.storage.document().unwrap().sidebar.default_state,
+        crate::settings::sidebar::SidebarState::Collapsed
+    );
+    assert!(fixture.requests.take().is_empty());
+}
+
+#[gpui::test]
+fn a_changed_native_session_scope_is_not_accepted_under_an_unchanged_token(
+    cx: &mut TestAppContext,
+) {
+    let mut fixture = open(Appearance::Dark, snapshot(vec![local()]), cx);
+    fixture.review_management("settings-server-stop");
+    let mut current = local();
+    let mut changed = host_assessment(spaceterm_host::account_service::ServiceAction::Stop, 1);
+    changed.affected_sessions += 1;
+    current.management.stop = Some(changed);
+    fixture.publish(snapshot(vec![current]));
+    fixture.click("modal-action-settings-server-stop-confirm");
+    assert!(fixture.requests.take().is_empty());
+    assert!(fixture.modal_open());
+    assert_eq!(
+        A11yTree::read(fixture.cx).focused().unwrap()["aria"]["label"],
+        "Cancel"
+    );
+}
+
+#[gpui::test]
+fn known_bind_endpoints_are_shown_without_inventing_an_offered_scope(cx: &mut TestAppContext) {
+    let mut server = local();
+    let remote = server.remote_access.as_mut().unwrap();
+    remote.enabled = true;
+    remote.scopes.clear();
+    remote.endpoints = vec!["[::1]:4444".parse().unwrap()];
+    let mut fixture = open(Appearance::Dark, snapshot(vec![server]), cx);
+    assert!(
+        fixture
+            .caption(SettingsRowId::ServerRemoteAccessScope)
+            .unwrap()
+            .contains("[::1]:4444")
+    );
+    assert!(!fixture.rendered("settings-server-remote-access-scope-lan"));
 }
