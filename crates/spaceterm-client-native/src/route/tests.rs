@@ -198,7 +198,7 @@ fn native_failures_never_retain_or_format_raw_errors() {
 }
 
 #[tokio::test]
-async fn native_route_tunnel_reconnect_after_cancel_uses_a_fresh_socket_name() {
+async fn native_route_tunnel_cleanup_removes_only_its_registered_socket() {
     use std::os::unix::fs::FileTypeExt;
     let directory = Directory::new();
     let executable = directory.0.join("tunnel-fixture");
@@ -261,6 +261,10 @@ while True:
     let first_sockets = sockets();
     assert_eq!(first_sockets.len(), 1);
     first.sender.close().await.unwrap();
+    assert!(
+        sockets().is_empty(),
+        "awaited cleanup leaked the registered forwarding socket"
+    );
     let second = connector
         .open(&target, ConnectionPurpose::Ordinary)
         .await
@@ -268,6 +272,81 @@ while True:
     let second_sockets = sockets();
     assert_eq!(second_sockets.difference(&first_sockets).count(), 1);
     second.sender.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_route_tunnel_cleanup_preserves_replacement_socket() {
+    use std::os::unix::fs::FileTypeExt;
+    let directory = Directory::new();
+    let executable = directory.0.join("tunnel-fixture");
+    // A test-only process boundary implements just OpenSSH's local forwarding
+    // endpoint. It does not contact a host, enroll, or supply credentials.
+    fs::write(
+        &executable,
+        r#"#!/usr/bin/python3 -I
+import socket
+import sys
+forward = sys.argv[sys.argv.index('-L') + 1]
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(forward.split(':', 1)[0])
+listener.listen(8)
+while True:
+    peer, _ = listener.accept()
+    while peer.recv(4096):
+        pass
+    peer.close()
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let configuration = directory.0.join("ssh-config");
+    fs::write(&configuration, b"").unwrap();
+    let ssh = SshRouteConfiguration::new(
+        executable,
+        configuration,
+        directory.0.clone(),
+        vec![(OsString::from("PATH"), OsString::from("/usr/bin:/bin"))],
+        TunnelEndpoints::new(directory.authority()).unwrap(),
+        None,
+    )
+    .unwrap();
+    let connector = NativeRouteConnector::new(vec![], Some(ssh)).unwrap();
+    let target = target(
+        RouteDescription::new(RouteParts::Ssh {
+            destination: "fixture-host".into(),
+            remote_socket: "/private/server".into(),
+        })
+        .unwrap(),
+    );
+    let sockets = || {
+        fs::read_dir(&directory.0)
+            .unwrap()
+            .filter_map(|entry| {
+                let entry = entry.unwrap();
+                entry
+                    .file_type()
+                    .unwrap()
+                    .is_socket()
+                    .then(|| entry.file_name())
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let first = connector
+        .open(&target, ConnectionPurpose::Ordinary)
+        .await
+        .unwrap();
+    let first_sockets = sockets();
+    assert_eq!(first_sockets.len(), 1);
+    let socket_path = directory.0.join(first_sockets.iter().next().unwrap());
+    fs::remove_file(&socket_path).unwrap();
+    let replacement = UnixListener::bind(&socket_path).unwrap();
+    let identity = fs::symlink_metadata(&socket_path).unwrap().ino();
+    assert_eq!(
+        first.sender.close().await.unwrap_err().class(),
+        ClientFailureClass::UnsafeEndpoint
+    );
+    assert_eq!(fs::symlink_metadata(&socket_path).unwrap().ino(), identity);
+    drop(replacement);
 }
 
 struct GatedTransport {

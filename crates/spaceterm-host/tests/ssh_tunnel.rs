@@ -227,7 +227,10 @@ async fn cancellation_preserves_a_foreign_socket_substituted_after_the_native_in
         .unwrap();
     let bound = fs::symlink_metadata(&foreign_path).unwrap();
     let race = cleanup_race::CleanupRace::arm(endpoint.path(), &foreign_path);
-    tunnel.cancel().await.unwrap();
+    assert_eq!(
+        tunnel.cancel().await.err(),
+        Some(TransportError::UnsafeEndpoint)
+    );
     assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
     assert_eq!(
         std::io::Error::last_os_error().raw_os_error(),
@@ -407,7 +410,7 @@ fn tunnel_rejects_option_shell_and_forwarding_delimiter_injection() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn tunnel_drop_reaps_its_process_and_preserves_its_replaceable_endpoint() {
+async fn tunnel_drop_reaps_its_process_and_removes_its_registered_endpoint() {
     let (temporary, directory) = fixture();
     let executable = fake_ssh(
         temporary.path(),
@@ -436,8 +439,8 @@ async fn tunnel_drop_reaps_its_process_and_preserves_its_replaceable_endpoint() 
     drop(tunnel);
     fixture_watchdog(completion.wait()).await.unwrap().unwrap();
     assert!(
-        endpoint.path().exists(),
-        "an owned inode does not protect a pathname deletion target from replacement"
+        !endpoint.path().exists(),
+        "registered forwarding socket leaked after cleanup"
     );
     assert_eq!(unsafe { libc::kill(pid as libc::pid_t, 0) }, -1);
     assert_eq!(
@@ -505,10 +508,7 @@ async fn cancelling_a_tunnel_does_not_unlink_a_replacement_socket() {
     fs::rename(endpoint.path(), endpoint.path().with_file_name("old")).unwrap();
     let replacement = std::os::unix::net::UnixListener::bind(endpoint.path()).unwrap();
     let cancelled = tunnel.cancel().await;
-    #[cfg(target_os = "linux")]
     assert_eq!(cancelled.err(), Some(TransportError::UnsafeEndpoint));
-    #[cfg(target_os = "macos")]
-    cancelled.unwrap();
     assert!(endpoint.path().exists());
     drop(replacement);
 }
@@ -684,8 +684,8 @@ fn tunnel_cleanup_survives_shutdown_of_the_async_executor() {
         .unwrap();
     observer.block_on(async { fixture_watchdog(completion.wait()).await.unwrap().unwrap() });
     assert!(
-        endpoint.path().exists(),
-        "an owned inode does not protect a pathname deletion target from replacement"
+        !endpoint.path().exists(),
+        "registered forwarding socket leaked after cleanup"
     );
 }
 
@@ -1046,7 +1046,12 @@ mod socket_provenance {
             Ok(tunnel) => {
                 tunnel.cancel().await.unwrap();
             }
-            Err(error) => assert_eq!(error, TransportError::HandshakeExpired),
+            Err(error) => {
+                #[cfg(target_os = "linux")]
+                assert_eq!(error, TransportError::HandshakeExpired);
+                #[cfg(target_os = "macos")]
+                assert_eq!(error, TransportError::UnsafeEndpoint);
+            }
         }
         CONNECT_GATE.lock().unwrap().take();
         assert!(
@@ -1117,7 +1122,7 @@ mod cancellation_binding {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn cancellation_preserves_a_socket_bound_after_the_final_inspection_before_signaling() {
+    async fn cancellation_removes_a_registered_socket_bound_during_the_final_ownership_probe() {
         let (temporary, directory) = fixture();
         let executable = fake_ssh(
             temporary.path(),
@@ -1155,11 +1160,9 @@ mod cancellation_binding {
             Some(libc::ESRCH)
         );
         assert!(
-            endpoint.path().exists(),
-            "late-bind provenance does not protect a pathname deletion target"
+            !endpoint.path().exists(),
+            "the stopped child and pinned inode prove ownership before reaping"
         );
-        // Fixture ownership supplies explicit local authority, not tunnel cleanup.
-        fs::remove_file(endpoint.path()).unwrap();
         let retry = start_tunnel(
             command(executable, endpoint, "retry"),
             environment(temporary.path()),
@@ -1267,9 +1270,10 @@ async fn an_unrelated_fork_cannot_retain_a_finished_tunnels_endpoint_lease() {
     });
     parent.read_exact(&mut [0]).unwrap();
     tunnel.cancel().await.unwrap();
-    // The fixture owns this private directory and can explicitly remove its stale
-    // entry. Tunnel cleanup cannot exclude replacement of its deletion target.
-    fs::remove_file(endpoint.path()).unwrap();
+    assert!(
+        !endpoint.path().exists(),
+        "awaited cleanup removes the registered socket before releasing its lease"
+    );
     let retry = start_tunnel(
         command(executable, endpoint, "retry"),
         environment(temporary.path()),

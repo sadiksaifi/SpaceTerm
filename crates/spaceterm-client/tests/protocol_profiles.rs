@@ -604,3 +604,611 @@ async fn callback_acknowledgement_uses_the_ordered_writer_without_blocking_publi
         runtime.shutdown().await.unwrap();
     }
 }
+
+#[cfg(feature = "test-support")]
+mod fake_profiles {
+    use spaceterm_client::{
+        ports::*,
+        testing::{FakeFault, FakeServer},
+    };
+    use spaceterm_core::{
+        control::TakeOverRequest,
+        operations::{Command, WorkspaceCreationSource},
+        organization::{ControlRecord, NameDraft},
+    };
+    use spaceterm_protocol::{
+        authentication::{ClientHandshake, Established, HandshakeConfig, Principal, Purpose},
+        codec::Payload,
+        connection::AuthenticatedConnection,
+        convert::{control, identity::*},
+        negotiation::{CAPABILITY_CANONICAL_DOMAIN, CAPABILITY_NORMALIZED_CREATION_TOPOLOGY},
+        wire::{v1, v2},
+    };
+    use std::{num::NonZeroU64, sync::atomic::Ordering, time::Duration};
+
+    async fn connect(
+        server: &FakeServer,
+        major: u32,
+        client: u64,
+    ) -> (ConnectedRoute, AuthenticatedConnection) {
+        let binding = server.add_client(client).unwrap();
+        let target = binding.target();
+        let access = server
+            .signing_access(target, ConnectionPurpose::Ordinary)
+            .await
+            .unwrap();
+        let principal = Principal {
+            server: target.server().bytes(),
+            device: target.device().bytes(),
+            pairing: encode_local(target.pairing().local())
+                .value
+                .try_into()
+                .unwrap(),
+            client: encode_local(target.client().local())
+                .value
+                .try_into()
+                .unwrap(),
+        };
+        let config = HandshakeConfig {
+            majors: vec![major],
+            capabilities: vec![
+                CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
+                CAPABILITY_CANONICAL_DOMAIN,
+            ],
+            ..Default::default()
+        };
+        let (handshake, hello) =
+            ClientHandshake::begin(target.pin(), principal, Purpose::Ordinary, config, access.0)
+                .unwrap();
+        let mut route = server
+            .open(target, ConnectionPurpose::Ordinary)
+            .await
+            .unwrap();
+        route.sender.send(&hello).await.unwrap();
+        let reply = route.receiver.receive().await.unwrap().unwrap();
+        let (handshake, proof) = handshake.receive_server(&reply).unwrap();
+        route.sender.send(&proof).await.unwrap();
+        let ready = route.receiver.receive().await.unwrap().unwrap();
+        let Established::Ordinary(codec) = handshake.receive_ready(&ready).unwrap() else {
+            panic!("ordinary codec required")
+        };
+        (route, codec)
+    }
+    async fn send(route: &ConnectedRoute, codec: &mut AuthenticatedConnection, payload: &Payload) {
+        route
+            .sender
+            .send(&codec.encode(payload).unwrap())
+            .await
+            .unwrap();
+    }
+    async fn receive(route: &mut ConnectedRoute, codec: &mut AuthenticatedConnection) -> Payload {
+        let bytes = tokio::time::timeout(Duration::from_secs(2), route.receiver.receive())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        codec.decode(&bytes).unwrap()
+    }
+    fn create_workspace(server: &FakeServer) {
+        server
+            .command(
+                server.next_operation(1).unwrap(),
+                Command::CreateWorkspace {
+                    server: server.server(),
+                    source: WorkspaceCreationSource::ServerHome {
+                        server: server.server(),
+                    },
+                    name: NameDraft::Automatic,
+                },
+            )
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn fake_server_authenticates_both_profiles_and_retries_real_policy_once() {
+        for major in [1, 2] {
+            let server = FakeServer::new(1, vec![2, 1]).unwrap();
+            create_workspace(&server);
+            let (mut route, mut codec) = connect(&server, major, 2).await;
+            let snapshot = server.snapshot().unwrap();
+            let pane = snapshot.state().panes[0].id;
+            let client = server.binding(2).unwrap().target().client();
+            let id = server.next_operation(2).unwrap();
+            let command = Command::TakeOver(TakeOverRequest {
+                epoch: snapshot.epoch(),
+                pane,
+                client,
+            });
+            let request = NonZeroU64::new(1).unwrap();
+            let payload = match major {
+                1 => Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::Operation(v1::Operation {
+                        id: Some(encode_operation(id)),
+                        action: Some(v1::operation::Action::IdentifiedControl(
+                            control::v1::encode_request(&command, request).unwrap(),
+                        )),
+                    })),
+                }),
+                2 => Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::Operation(v2::Operation {
+                        id: Some(encode_operation(id)),
+                        action: Some(v2::operation::Action::IdentifiedControl(
+                            control::v2::encode_request(&command, request).unwrap(),
+                        )),
+                    })),
+                }),
+                _ => unreachable!(),
+            };
+            server
+                .faults
+                .drop_next_outcome
+                .store(true, Ordering::Release);
+            send(&route, &mut codec, &payload).await;
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while server.received_operations().unwrap().len() < 2 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let committed = server.snapshot().unwrap();
+            send(&route, &mut codec, &payload).await;
+            let outcome = receive(&mut route, &mut codec).await;
+            let grant = match outcome {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::Outcome(outcome)),
+                }) => {
+                    assert_eq!(
+                        decode_operation(outcome.operation.as_ref().unwrap()).unwrap(),
+                        id
+                    );
+                    assert_eq!(
+                        outcome.publication_revision,
+                        committed.state().revision.get()
+                    );
+                    let Some(v1::outcome::Result::ControlGranted(grant)) = outcome.result else {
+                        panic!("grant expected")
+                    };
+                    control::v1::decode_grant(&grant).unwrap()
+                }
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::Outcome(outcome)),
+                }) => {
+                    assert_eq!(
+                        decode_operation(outcome.operation.as_ref().unwrap()).unwrap(),
+                        id
+                    );
+                    assert_eq!(
+                        outcome.publication_revision,
+                        committed.state().revision.get()
+                    );
+                    let Some(v2::outcome::Result::ControlGranted(grant)) = outcome.result else {
+                        panic!("grant expected")
+                    };
+                    control::v2::decode_grant(&grant).unwrap()
+                }
+                _ => panic!("identified outcome required"),
+            };
+            assert_eq!(
+                committed.runtime()[0].control,
+                ControlRecord::Held {
+                    client,
+                    generation: grant.grant().generation()
+                }
+            );
+            assert_eq!(
+                server.snapshot().unwrap(),
+                committed,
+                "retry returns the retained ledger result without another takeover"
+            );
+            assert_eq!(server.negotiated_majors().unwrap(), [major]);
+            server.fault(FakeFault::Disconnect).unwrap();
+            assert!(route.receiver.receive().await.unwrap().is_none());
+        }
+    }
+    #[tokio::test]
+    async fn fake_server_does_not_acknowledge_foreign_reconciliation_facts() {
+        for major in [1, 2] {
+            let server = FakeServer::new(1, vec![2, 1]).unwrap();
+            let (mut route, mut codec) = connect(&server, major, 1).await;
+            let client = server.binding(1).unwrap().target().client();
+            let revision = server.snapshot().unwrap().state().revision.get();
+            let payload = match major {
+                1 => Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::Reconciliation(v1::Reconciliation {
+                        request: 1,
+                        request_generation: 1,
+                        server: Some(encode_global([2; 16])),
+                        epoch: 1,
+                        client: Some(encode_client(client)),
+                        organization_revision: revision,
+                        ..Default::default()
+                    })),
+                }),
+                2 => Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::Reconciliation(v2::Reconciliation {
+                        request: 1,
+                        request_generation: 1,
+                        server: Some(encode_global([2; 16])),
+                        epoch: 1,
+                        client: Some(encode_client(client)),
+                        organization_revision: revision,
+                        ..Default::default()
+                    })),
+                }),
+                _ => unreachable!(),
+            };
+            send(&route, &mut codec, &payload).await;
+            assert!(
+                route.receiver.receive().await.unwrap().is_none(),
+                "foreign facts must not receive a success acknowledgement"
+            );
+        }
+    }
+    fn startup_payload(
+        major: u32,
+        id: spaceterm_core::operations::OperationId,
+        command: &Command,
+    ) -> Payload {
+        use spaceterm_protocol::convert::startup;
+        match major {
+            1 => Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::Operation(v1::Operation {
+                    id: Some(encode_operation(id)),
+                    action: Some(v1::operation::Action::IdentifiedStartup(
+                        startup::v1::encode_request(command).unwrap(),
+                    )),
+                })),
+            }),
+            2 => Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::Operation(v2::Operation {
+                    id: Some(encode_operation(id)),
+                    action: Some(v2::operation::Action::IdentifiedStartup(
+                        startup::v2::encode_request(command).unwrap(),
+                    )),
+                })),
+            }),
+            _ => unreachable!(),
+        }
+    }
+    fn assert_stale_startup_outcome(payload: Payload) {
+        match payload {
+            Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::Outcome(outcome)),
+            }) => assert!(matches!(outcome.result,
+                Some(v1::outcome::Result::OperationFailure(failure)) if failure.kind == v1::OperationFailureKind::OpStaleAuthority as i32)),
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::Outcome(outcome)),
+            }) => assert!(matches!(outcome.result,
+                Some(v2::outcome::Result::OperationFailure(failure)) if failure.kind == v2::OperationFailureKind::OpStaleAuthority as i32)),
+            _ => panic!("tracked stale startup outcome required"),
+        }
+    }
+    fn ended_startup_pane(server: &FakeServer) {
+        use spaceterm_core::{authority::*, organization::*, reducer::OrganizationEvent};
+        create_workspace(server);
+        let runtime = server.snapshot().unwrap().runtime()[0];
+        let session = SessionKey {
+            pane: runtime.pane,
+            epoch: ServerEpoch::new(1),
+            generation: SessionGeneration::new(1),
+        };
+        server
+            .event(OrganizationEvent::StartupReserved(
+                StartupReservation::new(
+                    runtime.pane,
+                    runtime.session_generation,
+                    runtime.control_generation,
+                    runtime.control,
+                    session,
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        server
+            .event(OrganizationEvent::StartupCancelled { session })
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn fake_server_authenticated_startup_rejects_never_admitted_old_connection_in_both_majors()
+     {
+        use spaceterm_core::{authority::*, control::*};
+        for major in [1, 2] {
+            let server = FakeServer::new(1, vec![2, 1]).unwrap();
+            ended_startup_pane(&server);
+            let (old_route, _) = connect(&server, major, 1).await;
+            old_route.sender.close().await.unwrap();
+            let (mut route, mut codec) = connect(&server, major, 1).await;
+            let snapshot = server.snapshot().unwrap();
+            let runtime = snapshot.runtime()[0];
+            let client = server.binding(1).unwrap().target().client();
+            let spaceterm_core::organization::ControlRecord::Held { generation, .. } =
+                runtime.control
+            else {
+                panic!("held control required")
+            };
+            let fence = EffectFence::new(
+                SessionKey {
+                    pane: runtime.pane,
+                    epoch: snapshot.epoch(),
+                    generation: runtime.session_generation,
+                },
+                ControlGrant::new(runtime.pane, client, generation).unwrap(),
+                ConnectionBinding::new(client, ConnectionGeneration::new(1)),
+                ContextGeneration::new(1),
+                None,
+            )
+            .unwrap();
+            let id = server.next_operation(1).unwrap();
+            let intent = StartupIntent::new(id, fence, StartupSource::StartSession).unwrap();
+            send(
+                &route,
+                &mut codec,
+                &startup_payload(major, id, &Command::BeginStartup(intent)),
+            )
+            .await;
+            assert_stale_startup_outcome(receive(&mut route, &mut codec).await);
+            assert_eq!(server.snapshot().unwrap().runtime()[0].phase, runtime.phase);
+            assert_eq!(
+                server.snapshot().unwrap().runtime()[0].session_generation,
+                runtime.session_generation
+            );
+        }
+    }
+
+    fn startup_fence(
+        server: &FakeServer,
+        connection: u64,
+        context: u64,
+    ) -> spaceterm_core::authority::EffectFence {
+        use spaceterm_core::{authority::*, organization::ControlRecord};
+        let snapshot = server.snapshot().unwrap();
+        let runtime = snapshot.runtime()[0];
+        let ControlRecord::Held { client, generation } = runtime.control else {
+            panic!("held control required")
+        };
+        EffectFence::new(
+            SessionKey {
+                pane: runtime.pane,
+                epoch: snapshot.epoch(),
+                generation: runtime.session_generation,
+            },
+            ControlGrant::new(runtime.pane, client, generation).unwrap(),
+            ConnectionBinding::new(client, ConnectionGeneration::new(connection)),
+            ContextGeneration::new(context),
+            None,
+        )
+        .unwrap()
+    }
+    fn assert_awaiting_measurement(payload: Payload) {
+        match payload {
+            Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::Outcome(outcome)),
+            }) => assert!(matches!(
+                outcome.result,
+                Some(v1::outcome::Result::StartupAwaitingMeasurement(_))
+            )),
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::Outcome(outcome)),
+            }) => assert!(matches!(
+                outcome.result,
+                Some(v2::outcome::Result::StartupAwaitingMeasurement(_))
+            )),
+            _ => panic!("startup intent required"),
+        }
+    }
+    #[tokio::test]
+    async fn fake_server_authenticated_startup_rejects_old_context_begin_and_completion_in_both_majors()
+     {
+        use spaceterm_core::{authority::ContextGeneration, control::*, geometry::*};
+        for major in [1, 2] {
+            for complete in [false, true] {
+                for measured in [false, true] {
+                    let server = FakeServer::new(1, vec![2, 1]).unwrap();
+                    ended_startup_pane(&server);
+                    let (mut route, mut codec) = connect(&server, major, 1).await;
+                    let fence = startup_fence(&server, 1, 1);
+                    let before = server.snapshot().unwrap().runtime()[0];
+                    let id = server.next_operation(1).unwrap();
+                    let intent =
+                        StartupIntent::new(id, fence, StartupSource::StartSession).unwrap();
+                    if complete {
+                        send(
+                            &route,
+                            &mut codec,
+                            &startup_payload(major, id, &Command::BeginStartup(intent)),
+                        )
+                        .await;
+                        assert_awaiting_measurement(receive(&mut route, &mut codec).await);
+                    }
+                    server
+                        .update_context(
+                            fence.connection(),
+                            fence.session().pane,
+                            ContextGeneration::new(2),
+                        )
+                        .unwrap();
+                    let command = if complete {
+                        let legacy = StartupMeasurement {
+                            intent: id,
+                            fence,
+                            grid: GridSize::new(
+                                30,
+                                100,
+                                CellPixels::new(8, 16).unwrap(),
+                                SUPPORTED_GRID_LIMITS,
+                            )
+                            .unwrap(),
+                        };
+                        if measured {
+                            Command::CompleteMeasuredStartup(legacy.into())
+                        } else {
+                            Command::CompleteStartup(legacy)
+                        }
+                    } else {
+                        Command::BeginStartup(intent)
+                    };
+                    let operation = server.next_operation(1).unwrap();
+                    send(
+                        &route,
+                        &mut codec,
+                        &startup_payload(major, operation, &command),
+                    )
+                    .await;
+                    assert_stale_startup_outcome(receive(&mut route, &mut codec).await);
+                    assert_eq!(
+                        server.snapshot().unwrap().runtime()[0],
+                        before,
+                        "stale authority cannot reserve or start a Session"
+                    );
+                }
+            }
+        }
+    }
+    #[tokio::test]
+    async fn fake_server_authenticated_startup_rejects_old_connection_completion_in_both_majors() {
+        use spaceterm_core::{control::*, geometry::*};
+        for major in [1, 2] {
+            for measured in [false, true] {
+                let server = FakeServer::new(1, vec![2, 1]).unwrap();
+                ended_startup_pane(&server);
+                let (mut route, mut codec) = connect(&server, major, 1).await;
+                let fence = startup_fence(&server, 1, 1);
+                let before = server.snapshot().unwrap().runtime()[0];
+                let id = server.next_operation(1).unwrap();
+                let intent = StartupIntent::new(id, fence, StartupSource::StartSession).unwrap();
+                send(
+                    &route,
+                    &mut codec,
+                    &startup_payload(major, id, &Command::BeginStartup(intent)),
+                )
+                .await;
+                assert_awaiting_measurement(receive(&mut route, &mut codec).await);
+                route.sender.close().await.unwrap();
+                let (mut route, mut codec) = connect(&server, major, 1).await;
+                let legacy = StartupMeasurement {
+                    intent: id,
+                    fence,
+                    grid: GridSize::new(
+                        30,
+                        100,
+                        CellPixels::new(8, 16).unwrap(),
+                        SUPPORTED_GRID_LIMITS,
+                    )
+                    .unwrap(),
+                };
+                let command = if measured {
+                    Command::CompleteMeasuredStartup(legacy.into())
+                } else {
+                    Command::CompleteStartup(legacy)
+                };
+                let operation = server.next_operation(1).unwrap();
+                send(
+                    &route,
+                    &mut codec,
+                    &startup_payload(major, operation, &command),
+                )
+                .await;
+                assert_stale_startup_outcome(receive(&mut route, &mut codec).await);
+                assert_eq!(server.snapshot().unwrap().runtime()[0], before);
+            }
+        }
+    }
+    #[tokio::test]
+    async fn fake_server_startup_checks_authenticated_dispatch_not_only_the_claimed_current_fence()
+    {
+        use spaceterm_core::control::*;
+        for major in [1, 2] {
+            let server = FakeServer::new(1, vec![2, 1]).unwrap();
+            ended_startup_pane(&server);
+            let (mut old_route, mut old_codec) = connect(&server, major, 1).await;
+            let (_current_route, _) = connect(&server, major, 1).await;
+            let fence = startup_fence(&server, 2, 1);
+            let before = server.snapshot().unwrap().runtime()[0];
+            let id = server.next_operation(1).unwrap();
+            let intent = StartupIntent::new(id, fence, StartupSource::StartSession).unwrap();
+            send(
+                &old_route,
+                &mut old_codec,
+                &startup_payload(major, id, &Command::BeginStartup(intent)),
+            )
+            .await;
+            assert_stale_startup_outcome(receive(&mut old_route, &mut old_codec).await);
+            assert_eq!(server.snapshot().unwrap().runtime()[0], before);
+        }
+    }
+    #[tokio::test]
+    async fn fake_server_authenticated_startup_accepts_current_connection_and_context_in_both_majors()
+     {
+        use spaceterm_core::{authority::*, control::*, geometry::*, organization::SessionPhase};
+        for major in [1, 2] {
+            let server = FakeServer::new(1, vec![2, 1]).unwrap();
+            ended_startup_pane(&server);
+            let (mut route, mut codec) = connect(&server, major, 1).await;
+            let fence = startup_fence(&server, 1, 2);
+            server
+                .update_context(
+                    fence.connection(),
+                    fence.session().pane,
+                    ContextGeneration::new(2),
+                )
+                .unwrap();
+            let id = server.next_operation(1).unwrap();
+            let intent = StartupIntent::new(id, fence, StartupSource::StartSession).unwrap();
+            send(
+                &route,
+                &mut codec,
+                &startup_payload(major, id, &Command::BeginStartup(intent)),
+            )
+            .await;
+            assert_awaiting_measurement(receive(&mut route, &mut codec).await);
+            let command = Command::CompleteMeasuredStartup(MeasuredStartupMeasurement {
+                intent: id,
+                fence,
+                grid: MeasuredGrid::new(
+                    1024,
+                    1024,
+                    CellPixels::new(64, 16).unwrap(),
+                    SUPPORTED_GRID_LIMITS,
+                )
+                .unwrap(),
+            });
+            let operation = server.next_operation(1).unwrap();
+            send(
+                &route,
+                &mut codec,
+                &startup_payload(major, operation, &command),
+            )
+            .await;
+            let started = match receive(&mut route, &mut codec).await {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::Outcome(outcome)),
+                }) => {
+                    let Some(v1::outcome::Result::SessionStarted(session)) = outcome.result else {
+                        panic!("started Session required")
+                    };
+                    decode_session(&session).unwrap()
+                }
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::Outcome(outcome)),
+                }) => {
+                    let Some(v2::outcome::Result::SessionStarted(session)) = outcome.result else {
+                        panic!("started Session required")
+                    };
+                    decode_session(&session).unwrap()
+                }
+                _ => panic!("startup outcome required"),
+            };
+            assert_eq!(
+                started,
+                SessionKey {
+                    generation: fence.session().generation.checked_successor().unwrap(),
+                    ..fence.session()
+                }
+            );
+            assert!(matches!(
+                server.snapshot().unwrap().runtime()[0].phase,
+                SessionPhase::Running { .. }
+            ));
+        }
+    }
+}
