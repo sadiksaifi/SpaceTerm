@@ -2,13 +2,11 @@
 
 use std::{ffi::OsString, process::ExitCode, sync::Arc};
 
+use spaceterm_client_native::NativeClientProvider;
 use spaceterm_client_native::cli::{
-    arguments::{MAX_ARGUMENTS, parse},
-    bindings::{
-        UnavailableNativeBindings, UnavailablePairingBindings, UnavailableProtocolManagement,
-        invoking_account_key,
-    },
-    output::emit_failure,
+    arguments::{CliCommand, MAX_ARGUMENTS, parse},
+    bindings::{UnavailablePairingBindings, UnavailableProtocolManagement},
+    output::{emit_failure, emit_text},
     runner::{CliDependencies, Dispatch, dispatch},
     tty::TerminalIo,
 };
@@ -33,10 +31,39 @@ async fn main() -> ExitCode {
             return ExitCode::from(failure.exit_code());
         }
     };
+    // Help and version do not require a native account, registration or manager.
+    let text = match invocation.command {
+        CliCommand::Help => Some(("usage", spaceterm_client_native::cli::output::USAGE)),
+        CliCommand::Version => Some((
+            "version",
+            spaceterm_client_native::cli::bindings::CLI_VERSION,
+        )),
+        _ => None,
+    };
+    if let Some((kind, text)) = text {
+        return match emit_text(kind, text, json, &mut io) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(failure) => ExitCode::from(failure.exit_code()),
+        };
+    }
+    let mode = if invocation.non_interactive {
+        spaceterm_host::account_service::SudoMode::NonInteractive
+    } else {
+        spaceterm_host::account_service::SudoMode::Interactive
+    };
+    let provider = match NativeClientProvider::with_authorization(Some(Arc::new(
+        spaceterm_host::account_service::SudoLingerAuthorization::new(mode),
+    ))) {
+        Ok(provider) => provider,
+        Err(failure) => {
+            let _ = emit_failure(failure, json, &mut io);
+            return ExitCode::from(failure.exit_code());
+        }
+    };
     let dependencies = CliDependencies::new(
-        invoking_account_key(),
+        Ok(provider.key()),
         Arc::new(UnavailableProtocolManagement),
-        Arc::new(UnavailableNativeBindings::default()),
+        provider.management(),
         Arc::new(UnavailablePairingBindings),
     );
     match dispatch(invocation, &dependencies, &mut io).await {

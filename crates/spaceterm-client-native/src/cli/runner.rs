@@ -28,6 +28,14 @@ pub trait CliIo: Send {
     ) -> Result<(), CliFailure> {
         Err(CliFailure::ConfirmationRequired)
     }
+    /// Confirms a native all-client lifecycle assessment through the controlling
+    /// terminal. Implementations must not silently confirm or consume stdin.
+    fn confirm_native_action(
+        &mut self,
+        _prompt: &crate::native::NativeActionPrompt,
+    ) -> Result<(), CliFailure> {
+        Err(CliFailure::ConfirmationRequired)
+    }
     /// Read a bounded controlling-terminal reply, never stdin.
     fn read_confirmation(
         &mut self,
@@ -166,8 +174,12 @@ async fn run(
             )
             .await
             .map_err(|_| CliFailure::OutcomePending)??;
-            if !matches!(&result, output::CliOutput::NativeProgress(progress) if progress.request == *request.as_bytes())
-            {
+            let original_request = match &result {
+                output::CliOutput::NativeProgress(progress) => Some(progress.request),
+                output::CliOutput::ServiceProgress(progress) => Some(*progress.request.as_bytes()),
+                _ => None,
+            };
+            if original_request != Some(*request.as_bytes()) {
                 return Err(CliFailure::UnsafeNativeState);
             }
             result
@@ -199,6 +211,31 @@ async fn run(
                 }
             }
             output::CliOutput::Status(status)
+        }
+        CliCommand::Install { version } => {
+            deps.native
+                .run(
+                    key,
+                    NativeCliCommand::Install { version },
+                    ConfirmationMode::Interactive,
+                    mode,
+                    io,
+                )
+                .await?
+        }
+        CliCommand::Restart { confirmation } => {
+            native_confirmed(deps, key, NativeCliCommand::Restart, confirmation, mode, io).await?
+        }
+        CliCommand::Uninstall { confirmation } => {
+            native_confirmed(
+                deps,
+                key,
+                NativeCliCommand::Uninstall,
+                confirmation,
+                mode,
+                io,
+            )
+            .await?
         }
         CliCommand::Start => {
             deps.native
