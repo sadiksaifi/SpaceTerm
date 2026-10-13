@@ -511,7 +511,7 @@ class CompanionBoundaryTests(CompanionFixture):
             package_server.build()
         self.assertEqual(
             {binary for binary, _ in built},
-            {"spaceterm-server", "spaceterm-server-launcher", "spaceterm-server-manager"},
+            {"spaceterm-server"},
         )
         for _, cargo_args in built:
             self.assertNotIn(companion_packaging.FEATURE, cargo_args)
