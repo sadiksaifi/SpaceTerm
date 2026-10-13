@@ -730,3 +730,267 @@ fn servers_settings_runtime_applied_setting_keeps_its_draft_until_the_matching_p
     assert!(applied.edit.is_none());
     assert_eq!(applied.value.as_ref(), "~/Worktrees/{repository}/{branch}");
 }
+
+#[gpui::test]
+fn servers_settings_remote_conflict_publishes_the_exact_draft_and_current_field_version(
+    cx: &mut TestAppContext,
+) {
+    let fixture = Fixture::new(cx);
+    let summary = fixture.snapshot(cx).servers.remove(0);
+    let old = summary
+        .remote_access
+        .as_ref()
+        .expect("authenticated retained policy")
+        .version;
+    let server = fixture.server.server();
+    let policy = spaceterm_core::remote_access::RemoteAccessPolicy::enabled(
+        server,
+        vec!["127.0.0.1:4444".parse().unwrap()],
+    )
+    .unwrap();
+    let binding = fixture.server.binding(1).unwrap();
+    fixture
+        .tokio
+        .block_on(fixture.tracker.submit(
+            &binding,
+            Command::SetRemoteAccess {
+                server,
+                expected_version: old,
+                value: policy.clone(),
+            },
+            None,
+            fixture.server.as_ref(),
+        ))
+        .unwrap();
+    // The other edit committed before this connection received its publication.
+    fixture.send(ServerRequest::DisableRemoteAccess(summary.key), cx);
+    let remote = fixture
+        .snapshot(cx)
+        .servers
+        .remove(0)
+        .remote_access
+        .unwrap();
+    assert_eq!(remote.version.get(), old.get() + 1);
+    assert_eq!(remote.endpoints, policy.endpoints());
+    let edit = remote.edit.unwrap();
+    assert_eq!(
+        edit.draft,
+        spaceterm_core::remote_access::RemoteAccessPolicy::disabled(server)
+    );
+    assert_eq!(edit.state, SettingEditState::Conflict);
+    fixture.connection.send_replace(ConnectionState::Offline {
+        failure: ClientFailure::new(ClientFailureClass::Unavailable),
+        retry: RetryState {
+            failures: 1,
+            delay: None,
+        },
+    });
+    fixture.drain(cx);
+    assert_eq!(
+        fixture.snapshot(cx).servers[0]
+            .remote_access
+            .as_ref()
+            .unwrap()
+            .edit
+            .as_ref()
+            .unwrap()
+            .draft,
+        edit.draft
+    );
+}
+
+#[gpui::test]
+fn servers_settings_end_all_ui_uses_the_application_assessment_publisher(cx: &mut TestAppContext) {
+    let fixture = Fixture::new(cx);
+    let before = fixture.journal.snapshot().unwrap().operations().len();
+    let mut settings =
+        crate::ui::settings_window::servers::tests::open_from_publisher(fixture.source.clone(), cx);
+    settings.click("settings-server-end-all-sessions");
+    assert!(!settings.modal_open());
+    for _ in 0..100 {
+        fixture.tokio.block_on(tokio::task::yield_now());
+        settings.cx.run_until_parked();
+    }
+    assert!(settings.modal_open());
+    assert_eq!(
+        fixture.journal.snapshot().unwrap().operations().len(),
+        before + 1
+    );
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(settings.cx);
+    assert_eq!(tree.focused().unwrap()["aria"]["label"], "Cancel");
+    settings.click("modal-action-settings-server-end-all-sessions-confirm");
+    for _ in 0..100 {
+        fixture.tokio.block_on(tokio::task::yield_now());
+        settings.cx.run_until_parked();
+    }
+    assert_eq!(
+        fixture.journal.snapshot().unwrap().operations().len(),
+        before + 2
+    );
+}
+
+#[gpui::test]
+fn servers_settings_remote_noop_does_not_wait_for_a_nonexistent_field_revision(
+    cx: &mut TestAppContext,
+) {
+    let fixture = Fixture::new(cx);
+    let summary = fixture.snapshot(cx).servers.remove(0);
+    let version = summary.remote_access.as_ref().unwrap().version;
+    fixture.send(ServerRequest::DisableRemoteAccess(summary.key), cx);
+    let current = fixture
+        .snapshot(cx)
+        .servers
+        .remove(0)
+        .remote_access
+        .unwrap();
+    assert_eq!(current.version, version);
+    assert!(current.edit.is_none());
+    assert!(!current.pending);
+}
+
+#[gpui::test]
+fn servers_settings_client_import_export_and_reset_leave_the_live_journal_and_server_unchanged(
+    cx: &mut TestAppContext,
+) {
+    use crate::ui::settings_window::catalog::SettingsSectionId;
+    use crate::ui::sidebar_window::SidebarOwner as _;
+    let fixture = Fixture::new(cx);
+    let pending = PendingTasks::new(fixture.journal.clone(), Arc::new(Invalidator));
+    fixture
+        .tokio
+        .block_on(
+            pending
+                .record_self_revocation(&fixture.server.binding(1).unwrap(), revocation(&fixture)),
+        )
+        .unwrap();
+    fixture.connection.send_replace(ConnectionState::Stopped);
+    fixture.drain(cx);
+    let journal = fixture.journal.snapshot().unwrap();
+    let organization = fixture.server.snapshot().unwrap();
+    let published = fixture.snapshot(cx);
+    assert_eq!(published.pending_unpairs.len(), 1);
+    let mut settings =
+        crate::ui::settings_window::servers::tests::open_from_publisher(fixture.source.clone(), cx);
+    let mut imported = crate::settings::SettingsDocument::default();
+    imported.git.worktree_path_template = "~/client-only/{branch}".into();
+    let bytes = crate::settings::export_settings(&imported)
+        .unwrap()
+        .into_bytes();
+    let window = settings.window.clone();
+    settings.cx.update(|native, cx| {
+        window.update(cx, |settings, cx| {
+            settings.select_section(SettingsSectionId::Advanced, cx);
+            settings.finish_settings_import(Ok(bytes), native, cx);
+        })
+    });
+    settings.cx.run_until_parked();
+    settings.click("modal-action-settings-import-confirm");
+    assert_eq!(
+        settings.document().git.worktree_path_template,
+        imported.git.worktree_path_template
+    );
+    let exported = crate::settings::export_settings(&settings.document()).unwrap();
+    let roundtrip: crate::settings::SettingsDocument = serde_json::from_str(&exported).unwrap();
+    assert_eq!(
+        roundtrip.git.worktree_path_template,
+        imported.git.worktree_path_template
+    );
+    settings.click("settings-reset-all");
+    settings.click("modal-action-settings-reset-all-confirm");
+    assert_eq!(fixture.journal.snapshot().unwrap(), journal);
+    assert_eq!(fixture.server.snapshot().unwrap(), organization);
+    assert_eq!(
+        fixture
+            .source
+            .read_with(settings.cx, |source, _| source.snapshot().clone()),
+        published
+    );
+    assert!(matches!(
+        *fixture.connection.borrow(),
+        ConnectionState::Stopped
+    ));
+}
+
+#[gpui::test]
+fn servers_settings_remote_completion_does_not_restore_an_old_draft_after_a_later_policy_change(
+    cx: &mut TestAppContext,
+) {
+    let fixture = Fixture::new(cx);
+    let server = fixture.server.server();
+    let binding = fixture.server.binding(1).unwrap();
+    let enabled = spaceterm_core::remote_access::RemoteAccessPolicy::enabled(
+        server,
+        vec!["127.0.0.1:4444".parse().unwrap()],
+    )
+    .unwrap();
+    let publish_latest = |cx: &mut TestAppContext| {
+        let snapshot = fixture.server.replica().unwrap();
+        let ConnectionState::Connected { mut info } = fixture.connection.borrow().clone() else {
+            panic!("live fixture")
+        };
+        info.organization_revision = snapshot.cursor.revision;
+        fixture
+            .connection
+            .send_replace(ConnectionState::Connected { info });
+        fixture
+            .replica
+            .send_replace(ReplicaState::Ready { snapshot });
+        fixture.drain(cx);
+    };
+    fixture
+        .tokio
+        .block_on(fixture.tracker.submit(
+            &binding,
+            Command::SetRemoteAccess {
+                server,
+                expected_version: FieldVersion::new(1),
+                value: enabled.clone(),
+            },
+            None,
+            fixture.server.as_ref(),
+        ))
+        .unwrap();
+    publish_latest(cx);
+    let selected = fixture.snapshot(cx).servers.remove(0);
+    fixture.send(ServerRequest::DisableRemoteAccess(selected.key), cx);
+    assert!(
+        fixture.snapshot(cx).servers[0]
+            .remote_access
+            .as_ref()
+            .unwrap()
+            .edit
+            .is_some()
+    );
+    publish_latest(cx);
+    assert!(
+        fixture.snapshot(cx).servers[0]
+            .remote_access
+            .as_ref()
+            .unwrap()
+            .edit
+            .is_none()
+    );
+    fixture
+        .tokio
+        .block_on(fixture.tracker.submit(
+            &binding,
+            Command::SetRemoteAccess {
+                server,
+                expected_version: FieldVersion::new(3),
+                value: enabled,
+            },
+            None,
+            fixture.server.as_ref(),
+        ))
+        .unwrap();
+    publish_latest(cx);
+    let final_policy = fixture
+        .snapshot(cx)
+        .servers
+        .remove(0)
+        .remote_access
+        .unwrap();
+    assert!(final_policy.enabled);
+    assert_eq!(final_policy.version.get(), 4);
+    assert!(final_policy.edit.is_none());
+}
