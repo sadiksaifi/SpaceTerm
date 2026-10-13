@@ -68,7 +68,9 @@ impl ServiceSupervisor {
             return Err(ServiceFailure::IdentityMismatch);
         }
         self.mutate_request(request, |journal, index| {
-            if journal.reservations[index].service.is_some() {
+            if journal.reservations[index].service.is_some()
+                || journal.reservations[index].install.is_some()
+            {
                 return Err(ServiceFailure::RequestConflict);
             }
             let retained = &mut journal.reservations[index].owner;

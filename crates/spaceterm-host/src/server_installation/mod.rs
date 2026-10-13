@@ -138,6 +138,15 @@ struct Metadata {
     manifest: String,
 }
 
+/// Original interrupted code publication or removal, not new mutation authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InterruptedInstallationStatus {
+    /// Exact candidate named by the retained selection journal.
+    pub installation: InstallationId,
+    /// Original authenticated archive digest.
+    pub artifact_sha256: [u8; 32],
+}
+
 /// Bounded selection facts, not authority to start a process.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InstallationSnapshot {
@@ -362,6 +371,79 @@ impl ServerInstallationStore {
         self.mutation(scope, InstallationOperation::Cleanup, || {
             self.cleanup_inner()
         })
+    }
+    /// Removes verified code under confirmed account lifecycle admission, retaining all server data.
+    pub fn uninstall(&self, scope: &InstallationScope<'_>) -> Result<(), ServiceFailure> {
+        self.mutation(scope, InstallationOperation::Uninstall, || {
+            loop {
+                scope.verify(self.key, InstallationOperation::Uninstall)?;
+                self.cleanup_inner()?;
+                let lock = self.tree.lock()?;
+                let (mut selection, expected) = self.load()?;
+                if let Some(preparing) = selection.preparing {
+                    let generation = selection.generation;
+                    drop(lock);
+                    self.discard_preparing_inner(preparing.id(), generation)?;
+                    continue;
+                }
+                let version = selection
+                    .staged
+                    .take()
+                    .or_else(|| selection.previous.take())
+                    .or_else(|| selection.approved.take());
+                let Some(version) = version else {
+                    return Ok(());
+                };
+                // Reuse the durable original cleanup journal. Interrupted removal
+                // resumes this exact inode, never a directory scan or a new candidate.
+                self.validate_version(version)?;
+                selection.cleanup = Some(version);
+                self.advance(&mut selection)?;
+                self.publish(&selection, Some(&expected))?;
+            }
+        })
+    }
+    /// Returns only the original preparing candidate, never a directory-scan result.
+    pub fn preparing_status(
+        &self,
+    ) -> Result<Option<InterruptedInstallationStatus>, ServiceFailure> {
+        let _lock = self.tree.lock()?;
+        let (selection, _) = self.load()?;
+        Ok(selection.preparing.map(|preparing| {
+            let (installation, artifact_sha256) = match preparing {
+                Preparation::Created(version) => (version.id, version.digest),
+                Preparation::Reserved(candidate) => (candidate.id, candidate.digest),
+            };
+            InterruptedInstallationStatus {
+                installation,
+                artifact_sha256,
+            }
+        }))
+    }
+    /// Returns only the already journaled cleanup candidate.
+    pub fn cleanup_status(&self) -> Result<Option<InterruptedInstallationStatus>, ServiceFailure> {
+        let _lock = self.tree.lock()?;
+        let (selection, _) = self.load()?;
+        Ok(selection
+            .cleanup
+            .map(|version| InterruptedInstallationStatus {
+                installation: version.id,
+                artifact_sha256: version.digest,
+            }))
+    }
+    /// Returns authenticated staged facts without activating or executing the candidate.
+    pub fn staged_status(&self) -> Result<Option<InstallationStatus>, ServiceFailure> {
+        let _lock = self.tree.lock()?;
+        let (selection, _) = self.load()?;
+        let Some(version) = selection.staged else {
+            return Ok(None);
+        };
+        let manifest = self.validate_version(version)?;
+        Ok(Some(InstallationStatus {
+            installation: version.id,
+            version: manifest.version,
+            artifact_sha256: version.digest,
+        }))
     }
     /// Reads retained selection without inferring approval from directory contents.
     pub fn snapshot(&self) -> Result<InstallationSnapshot, ServiceFailure> {
@@ -646,6 +728,12 @@ impl ServerInstallationStore {
         let _lock = self.tree.lock()?;
         let (selection, _) = self.load()?;
         let version = selection.approved.ok_or(ServiceFailure::Missing)?;
+        self.retain_version(version)
+    }
+    fn retain_version(
+        &self,
+        version: Version,
+    ) -> Result<InstalledServerExecutable, ServiceFailure> {
         let manifest = self.validate_version(version)?;
         let tree = self.version_tree(version)?.ok_or(ServiceFailure::Missing)?;
         let expected = manifest
@@ -667,6 +755,17 @@ impl ServerInstallationStore {
                 artifact_sha256: version.digest,
             },
         })
+    }
+    /// Verifies that approved code implements the retained organization schema.
+    pub fn retain_compatible_approved(
+        &self,
+        schema: u32,
+    ) -> Result<InstalledServerExecutable, ServiceFailure> {
+        let _lock = self.tree.lock()?;
+        let (selection, _) = self.load()?;
+        let version = selection.approved.ok_or(ServiceFailure::Missing)?;
+        self.compatible(version, schema)?;
+        self.retain_version(version)
     }
     fn compatible(&self, version: Version, schema: u32) -> Result<(), ServiceFailure> {
         let manifest = self.validate_version(version)?;

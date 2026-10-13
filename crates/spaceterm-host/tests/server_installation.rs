@@ -411,6 +411,413 @@ mod account_installation {
         }
     }
 
+    struct InstallManager {
+        key: UpdateKey,
+        running: std::sync::atomic::AtomicBool,
+        effects: std::sync::Mutex<Vec<&'static str>>,
+    }
+    impl InstallManager {
+        fn new(key: UpdateKey) -> Self {
+            Self {
+                key,
+                running: std::sync::atomic::AtomicBool::new(false),
+                effects: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+    impl spaceterm_host::account_service::ServiceManager for InstallManager {
+        fn status<'a>(
+            &'a self,
+            _: Option<&'a spaceterm_host::account_service::RegisteredServer>,
+        ) -> spaceterm_host::account_service::ServiceFuture<
+            'a,
+            spaceterm_host::account_service::SupervisorState,
+        > {
+            Box::pin(async {
+                Ok(if self.running.load(std::sync::atomic::Ordering::SeqCst) {
+                    spaceterm_host::account_service::SupervisorState::Running
+                } else {
+                    spaceterm_host::account_service::SupervisorState::Inactive
+                })
+            })
+        }
+        fn linger(
+            &self,
+        ) -> spaceterm_host::account_service::ServiceFuture<
+            '_,
+            Option<spaceterm_host::account_service::LingerState>,
+        > {
+            Box::pin(async {
+                Ok(if cfg!(target_os = "linux") {
+                    Some(spaceterm_host::account_service::LingerState::Enabled)
+                } else {
+                    None
+                })
+            })
+        }
+        fn configure<'a>(
+            &'a self,
+            registration: &'a spaceterm_host::account_service::RegisteredServer,
+        ) -> spaceterm_host::account_service::ServiceFuture<'a, ()> {
+            Box::pin(async move {
+                self.verify_installation(registration)?;
+                self.effects.lock().unwrap().push("configure");
+                Ok(())
+            })
+        }
+        fn start<'a>(
+            &'a self,
+            _: &'a spaceterm_host::account_service::RegisteredServer,
+        ) -> spaceterm_host::account_service::ServiceFuture<'a, ()> {
+            Box::pin(async {
+                self.effects.lock().unwrap().push("start");
+                self.running
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+        }
+        fn stop<'a>(
+            &'a self,
+            _: &'a spaceterm_host::account_service::RegisteredServer,
+        ) -> spaceterm_host::account_service::ServiceFuture<'a, ()> {
+            Box::pin(async {
+                Err(spaceterm_host::account_service::ServiceFailure::SupervisorUnavailable)
+            })
+        }
+        fn uninstall<'a>(
+            &'a self,
+            _: &'a spaceterm_host::account_service::RegisteredServer,
+        ) -> spaceterm_host::account_service::ServiceFuture<'a, ()> {
+            Box::pin(async {
+                Err(spaceterm_host::account_service::ServiceFailure::SupervisorUnavailable)
+            })
+        }
+        fn verify_installation(
+            &self,
+            registration: &spaceterm_host::account_service::RegisteredServer,
+        ) -> Result<(), spaceterm_host::account_service::ServiceFailure> {
+            let selected = test_support::existing_store(registration, self.key.clone())?
+                .retain_compatible_approved(1)?
+                .status();
+            let approved = registration
+                .approved_installation()
+                .ok_or(spaceterm_host::account_service::ServiceFailure::Missing)?;
+            if selected.installation != approved.installation
+                || selected.artifact_sha256 != approved.artifact_sha256
+            {
+                return Err(spaceterm_host::account_service::ServiceFailure::IdentityMismatch);
+            }
+            Ok(())
+        }
+    }
+    struct InstallClock;
+    impl spaceterm_host::account_service::ServiceClock for InstallClock {
+        fn now(
+            &self,
+        ) -> Result<
+            spaceterm_host::account_service::ServiceTime,
+            spaceterm_host::account_service::ServiceFailure,
+        > {
+            Ok(spaceterm_host::account_service::ServiceTime {
+                boot: [1; 32],
+                millis: 0,
+            })
+        }
+    }
+    fn installer(
+        account: &AccountServiceFixture,
+        key: UpdateKey,
+        manager: std::sync::Arc<InstallManager>,
+    ) -> spaceterm_host::account_service::ServiceSupervisor {
+        use spaceterm_host::account_service::{NativeServiceInstallations, NativeServiceProcesses};
+        let processes = std::sync::Arc::new(
+            NativeServiceProcesses::current(std::sync::Arc::new(NativeServiceInstallations))
+                .unwrap(),
+        );
+        let supervisor =
+            account.with_providers(manager, processes, std::sync::Arc::new(InstallClock), None);
+        account.with_installation_trust(supervisor, key)
+    }
+    #[tokio::test]
+    async fn confirmed_install_initializes_one_identity_and_replays_original_result_without_starting_again()
+     {
+        use spaceterm_host::account_service::{
+            ServiceFailure, ServiceOutcome, ServiceRequestState,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let supervisor = installer(&account, key, manager.clone());
+        let request = supervisor.allocate_request().unwrap();
+        let result = supervisor
+            .install(request, account.confirm_install(artifact))
+            .await
+            .unwrap();
+        assert!(matches!(
+            result.state,
+            ServiceRequestState::Completed(ServiceOutcome::Installed { reused: false, .. })
+        ));
+        let registered = supervisor.discover().unwrap().unwrap();
+        let pin = registered.server_pin();
+        assert_eq!(registered.desired_state(), DesiredServerState::Running);
+        assert_eq!(
+            manager.effects.lock().unwrap().as_slice(),
+            &["configure", "start"]
+        );
+        assert_eq!(supervisor.resolve(request).await.unwrap(), result);
+        assert_eq!(manager.effects.lock().unwrap().len(), 2);
+        let (_, changed) = fixture("1.2.4", 7, native_machine());
+        assert_eq!(
+            supervisor
+                .install(request, account.confirm_install(changed))
+                .await,
+            Err(ServiceFailure::RequestConflict)
+        );
+        assert_eq!(supervisor.discover().unwrap().unwrap().server_pin(), pin);
+        supervisor.acknowledge_request(request).unwrap();
+        assert_eq!(
+            supervisor.resolve_install(request).await,
+            Err(ServiceFailure::RequestRetired)
+        );
+    }
+    #[tokio::test]
+    async fn concurrent_confirmed_installs_converge_on_one_identity_and_approved_version() {
+        use spaceterm_host::account_service::{
+            ServiceFailure, ServiceOutcome, ServiceRequestState,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, first) = fixture("1.2.3", 7, native_machine());
+        let (_, second) = fixture("1.2.3", 7, native_machine());
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let left = installer(&account, key.clone(), manager.clone());
+        let right = installer(&account, key, manager.clone());
+        let left_id = left.allocate_request().unwrap();
+        let right_id = right.allocate_request().unwrap();
+        let first = account.confirm_install(first);
+        let second = account.confirm_install(second);
+        let barrier = std::sync::Barrier::new(2);
+        let (left_result, right_result) = std::thread::scope(|scope| {
+            let left = left.clone();
+            let right = right.clone();
+            let barrier = &barrier;
+            let first = scope.spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                barrier.wait();
+                runtime.block_on(left.install(left_id, first))
+            });
+            let second = scope.spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                barrier.wait();
+                runtime.block_on(right.install(right_id, second))
+            });
+            (first.join().unwrap(), second.join().unwrap())
+        });
+        let mut outcomes = Vec::new();
+        for (provider, request, initial) in [
+            (&left, left_id, left_result),
+            (&right, right_id, right_result),
+        ] {
+            let result = match initial {
+                Ok(result) => result,
+                Err(ServiceFailure::Pending) => {
+                    let (_, retry) = fixture("1.2.3", 7, native_machine());
+                    provider
+                        .install(request, account.confirm_install(retry))
+                        .await
+                        .unwrap()
+                }
+                Err(error) => panic!("unexpected install classification {error:?}"),
+            };
+            let ServiceRequestState::Completed(ServiceOutcome::Installed {
+                server,
+                installation,
+                reused,
+            }) = result.state
+            else {
+                panic!("installation did not complete");
+            };
+            outcomes.push((server, installation, reused));
+        }
+        assert_eq!(outcomes[0].0, outcomes[1].0);
+        assert_eq!(outcomes[0].1, outcomes[1].1);
+        assert_ne!(outcomes[0].2, outcomes[1].2);
+        assert_eq!(
+            manager.effects.lock().unwrap().as_slice(),
+            &["configure", "start"]
+        );
+    }
+
+    #[test]
+    fn test_support_trust_never_changes_production_artifact_assessment() {
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let provider = installer(&account, key, manager);
+        assert!(matches!(
+            provider.assess_install(artifact),
+            Err(spaceterm_host::account_service::ServiceFailure::ArtifactRejected)
+        ));
+        assert!(provider.discover().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn install_reuses_stopped_registration_without_replacing_approval_or_starting() {
+        use spaceterm_host::account_service::{
+            InstallationStatus, ServiceOutcome, ServiceRequestState,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let original = InstallationStatus {
+            installation: spaceterm_host::startup::InstallationId(
+                std::num::NonZeroU64::new(9).unwrap(),
+            ),
+            version: BuildVersion::parse("1.2.2").unwrap(),
+            artifact_sha256: [3; 32],
+        };
+        let registered = account
+            .initialize_with_installation(DesiredServerState::Stopped, Some(original.clone()))
+            .unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let supervisor = installer(&account, key, manager.clone());
+        let request = supervisor.allocate_request().unwrap();
+        let result = supervisor
+            .install(request, account.confirm_install(artifact))
+            .await
+            .unwrap();
+        assert!(
+            matches!(result.state, ServiceRequestState::Completed(ServiceOutcome::Installed { reused: true, installation, .. }) if installation == original)
+        );
+        let reused = supervisor.discover().unwrap().unwrap();
+        assert_eq!(reused.server_pin(), registered.server_pin());
+        assert_eq!(reused.desired_state(), DesiredServerState::Stopped);
+        assert!(manager.effects.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn install_resumes_original_request_after_interrupted_archive_extraction() {
+        use spaceterm_host::account_service::{
+            ServiceFailure, ServiceOutcome, ServiceRequestState,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let supervisor = installer(&account, key.clone(), manager.clone());
+        let request = supervisor.allocate_request().unwrap();
+        test_support::after_next_partial_copy(1, || {});
+        assert_eq!(
+            supervisor
+                .install(request, account.confirm_install(artifact))
+                .await,
+            Err(ServiceFailure::StorageUnavailable)
+        );
+        let original_pin = supervisor.discover().unwrap().unwrap().server_pin();
+        let reopened = installer(&account, key, manager.clone());
+        let pending = reopened.resolve(request).await.unwrap();
+        assert_eq!(pending.request, request);
+        assert_eq!(pending.state, ServiceRequestState::Pending);
+        let (_, artifact) = fixture("1.2.3", 7, native_machine());
+        let completed = reopened
+            .install(request, account.confirm_install(artifact))
+            .await
+            .unwrap();
+        assert!(
+            matches!(completed.state, ServiceRequestState::Completed(ServiceOutcome::Installed { reused: false, server, .. }) if server == original_pin)
+        );
+        assert_eq!(
+            manager.effects.lock().unwrap().as_slice(),
+            &["configure", "start"]
+        );
+    }
+
+    #[tokio::test]
+    async fn install_resumes_published_staging_from_original_request_after_provider_reconstruction()
+    {
+        use spaceterm_host::account_service::{
+            ServiceFailure, ServiceOutcome, ServicePhase, ServiceRequestState,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let supervisor = installer(&account, key.clone(), manager.clone());
+        let request = supervisor.allocate_request().unwrap();
+        spaceterm_host::account_service::test_support::interrupt_after_phase(
+            ServicePhase::Publishing,
+        );
+        assert_eq!(
+            supervisor
+                .install(request, account.confirm_install(artifact))
+                .await,
+            Err(ServiceFailure::SupervisorUnavailable)
+        );
+        assert!(matches!(
+            supervisor.admit_startup(),
+            Err(ServiceFailure::Pending)
+        ));
+        let reopened = installer(&account, key, manager.clone());
+        let result = reopened.resolve(request).await.unwrap();
+        assert!(matches!(
+            result.state,
+            ServiceRequestState::Completed(ServiceOutcome::Installed { reused: false, .. })
+        ));
+        assert_eq!(result.request, request);
+        assert_eq!(
+            manager.effects.lock().unwrap().as_slice(),
+            &["configure", "start"]
+        );
+    }
+
+    #[test]
+    fn confirmed_uninstall_removes_approved_and_staged_code_but_retains_identity() {
+        use spaceterm_host::server_installation::{
+            InstallationAdmission, InstallationOperation, InstallationScope,
+        };
+        struct Confirmed;
+        impl InstallationAdmission for Confirmed {
+            fn verify(
+                &self,
+                _: &spaceterm_host::account_service::RegisteredServer,
+                _: InstallationOperation,
+            ) -> Result<(), spaceterm_host::account_service::ServiceFailure> {
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registered = account.initialize(DesiredServerState::Stopped).unwrap();
+        let pin = registered.server_pin();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let store = test_support::store(&registered, key.clone()).unwrap();
+        let id = store.stage(&artifact).unwrap();
+        store
+            .activate(id, store.snapshot().unwrap().generation, 1)
+            .unwrap();
+        let path = store.retain_approved().unwrap().path().to_owned();
+        let (_, next) = fixture("1.2.4", 7, native_machine());
+        store.stage(&next).unwrap();
+        let scope = InstallationScope::new(&registered, &Confirmed).unwrap();
+        let inner = test_support::existing_store(&registered, key).unwrap();
+        inner.uninstall(&scope).unwrap();
+        assert!(!path.exists());
+        assert_eq!(inner.snapshot().unwrap().approved, None);
+        assert_eq!(inner.snapshot().unwrap().staged, None);
+        assert_eq!(
+            account.reopen().discover().unwrap().unwrap().server_pin(),
+            pin
+        );
+        inner.uninstall(&scope).unwrap();
+    }
+
     #[test]
     fn staging_does_not_activate_or_start_a_stopped_registration() {
         use std::os::unix::fs::PermissionsExt;

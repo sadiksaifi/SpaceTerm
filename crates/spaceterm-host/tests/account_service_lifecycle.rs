@@ -248,9 +248,15 @@ impl ServiceProcesses for Processes {
         &'a self,
         _: &'a RegisteredServer,
         _: ServerEpoch,
-        _: &'a [SessionKey],
+        sessions: &'a [SessionKey],
     ) -> ServiceFuture<'a, Vec<SessionCleanupObservation>> {
-        Box::pin(async { Err(ServiceFailure::CleanupUnresolved) })
+        Box::pin(async move {
+            if self.absence && sessions.is_empty() {
+                Ok(Vec::new())
+            } else {
+                Err(ServiceFailure::CleanupUnresolved)
+            }
+        })
     }
 }
 struct Fixture {
@@ -283,6 +289,42 @@ impl Fixture {
             None,
         )
     }
+}
+
+#[tokio::test]
+async fn first_epoch_zero_cleanup_requires_native_absence_and_no_old_sessions() {
+    let fixture = Fixture::new(false, true);
+    let supervisor = fixture.supervisor();
+    let server = ServerId::new(
+        supervisor
+            .discover()
+            .unwrap()
+            .unwrap()
+            .server_pin()
+            .identity,
+    );
+    assert_eq!(
+        supervisor
+            .previous_instance_cleanup(server, ServerEpoch::new(0), &[])
+            .await,
+        Ok(Vec::new())
+    );
+    let unavailable = Fixture::new(false, false);
+    let supervisor = unavailable.supervisor();
+    let server = ServerId::new(
+        supervisor
+            .discover()
+            .unwrap()
+            .unwrap()
+            .server_pin()
+            .identity,
+    );
+    assert_eq!(
+        supervisor
+            .previous_instance_cleanup(server, ServerEpoch::new(0), &[])
+            .await,
+        Err(ServiceFailure::CleanupUnresolved)
+    );
 }
 
 #[tokio::test]
@@ -1527,4 +1569,30 @@ async fn original_starting_phase_authorizes_only_its_reconciled_installation() {
         drop(startup);
         fixture.supervisor().resolve(request).await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn native_process_composition_requires_actor_custody_and_validates_actor_assessments() {
+    use spaceterm_host::account_service::{NativeServiceInstallations, NativeServiceProcesses};
+    let fixture = Fixture::new(false, true);
+    let registration = fixture.supervisor().discover().unwrap().unwrap();
+    let native = NativeServiceProcesses::current(Arc::new(NativeServiceInstallations)).unwrap();
+    assert_eq!(
+        native.assess(&registration).await,
+        Err(ServiceFailure::CleanupUnresolved)
+    );
+    let native = native.with_runtime(fixture.processes.clone());
+    let assessment = native.assess(&registration).await.unwrap();
+    native.revalidate(&registration, &assessment).await.unwrap();
+    assert!(fixture.processes.reserved.load(Ordering::SeqCst));
+    native
+        .abort_reservation(&registration, &assessment)
+        .await
+        .unwrap();
+    assert!(!fixture.processes.reserved.load(Ordering::SeqCst));
+    fixture.processes.generation.store(0, Ordering::SeqCst);
+    assert_eq!(
+        native.assess(&registration).await,
+        Err(ServiceFailure::InvalidRecord)
+    );
 }
