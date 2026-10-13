@@ -383,6 +383,8 @@ impl ServiceSupervisor {
         if record.phase == ServicePhase::IntentCommitted || record.phase == ServicePhase::Publishing
         {
             let registered = self.discover()?.ok_or(ServiceFailure::Missing)?;
+            lease.verify()?;
+            initialize_organization_store(&registered)?;
             let admission = InstallAdmission {
                 supervisor: self,
                 request,
@@ -596,5 +598,95 @@ pub(super) fn test_assessment(
     ServiceInstallAssessment {
         artifact,
         roots: InstallRoots { data, runtime },
+    }
+}
+
+// Only the original, confirmed install reaches this path, under its lifecycle
+// lease and before configuration or Start. Startup remains an existing-only read.
+fn initialize_organization_store(registration: &RegisteredServer) -> Result<(), ServiceFailure> {
+    use crate::organization_store::{
+        SqliteOrganizationStore, StoreIdentity, StoreLimits, StoreServices,
+        bootstrap::{InitializationDisposition, NewServerOrigin, NewStoreSeed},
+        migrations,
+        pairing::SignedReceiptReader,
+        schema,
+    };
+    use crate::storage::Database;
+    use spaceterm_core::{identity::ServerId, organization::ServerDirectory};
+
+    let account = super::TrustedAccountFacts::current()?;
+    if account.uid() != registration.key().account_uid {
+        return Err(ServiceFailure::IdentityMismatch);
+    }
+    let pin = registration.server_pin();
+    let identity = StoreIdentity {
+        server: ServerId::new(pin.identity),
+        account: registration.key(),
+        server_public_key: pin.public_key,
+    };
+    let home = ServerDirectory::new(
+        identity.server,
+        account.home().as_os_str().as_encoded_bytes().to_vec(),
+    )
+    .map_err(|_| ServiceFailure::InvalidRecord)?;
+    let services = StoreServices::production(
+        home,
+        std::sync::Arc::new(SignedReceiptReader::new(pin).map_err(store_failure)?),
+    );
+    let database = Database::open_for_application(
+        registration.organization_directory(),
+        migrations(),
+        schema::APPLICATION_ID,
+    )
+    .map_err(storage_failure)?;
+    if !database.is_new_storage().map_err(storage_failure)? {
+        // A retry can recover the already seeded original identity. An existing
+        // empty or incomplete database is rejected, never seeded or replaced.
+        SqliteOrganizationStore::open_existing(
+            database,
+            identity,
+            StoreLimits::production(),
+            services,
+        )
+        .map_err(store_failure)?;
+        return Ok(());
+    }
+    match SqliteOrganizationStore::initialize_new(
+        database,
+        NewStoreSeed {
+            identity,
+            origin: NewServerOrigin::LocalHeadless,
+        },
+        StoreLimits::production(),
+        services,
+    ) {
+        InitializationDisposition::Durable { .. } => Ok(()),
+        InitializationDisposition::NotApplied(error) => Err(store_failure(error)),
+        InitializationDisposition::Indeterminate => Err(ServiceFailure::Indeterminate),
+    }
+}
+fn storage_failure(error: crate::storage::StorageFailure) -> ServiceFailure {
+    use crate::storage::StorageFailure;
+    match error {
+        StorageFailure::Unavailable | StorageFailure::Io => ServiceFailure::StorageUnavailable,
+        StorageFailure::UnsafeStorage => ServiceFailure::UnsafeStorage,
+        StorageFailure::UnknownSchema { .. } => ServiceFailure::UnsupportedSchema,
+        StorageFailure::InvalidState => ServiceFailure::InvalidRecord,
+        StorageFailure::RecoveryRequired => ServiceFailure::Indeterminate,
+    }
+}
+fn store_failure(error: spaceterm_core::storage::StoreFailure) -> ServiceFailure {
+    use spaceterm_core::storage::StoreFailure;
+    match error {
+        StoreFailure::Locked => ServiceFailure::StorageLocked,
+        StoreFailure::Unavailable | StoreFailure::Io => ServiceFailure::StorageUnavailable,
+        StoreFailure::UnsafeStorage => ServiceFailure::UnsafeStorage,
+        StoreFailure::UnknownSchema => ServiceFailure::UnsupportedSchema,
+        StoreFailure::IdentityMismatch => ServiceFailure::IdentityMismatch,
+        StoreFailure::Exhausted => ServiceFailure::LimitExceeded,
+        StoreFailure::RecoveryRequired => ServiceFailure::Indeterminate,
+        StoreFailure::InvalidDurableState
+        | StoreFailure::InvalidTransaction
+        | StoreFailure::RevisionConflict => ServiceFailure::InvalidRecord,
     }
 }

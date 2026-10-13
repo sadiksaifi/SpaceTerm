@@ -7,49 +7,7 @@ use spaceterm_core::{
     storage::{OperationWrite, TransactionParts},
 };
 
-/// Reads the pairing protocol's retained receipt format against the original
-/// native Server pin. It owns no signer or credential and cannot issue receipts.
-pub struct SignedReceiptReader(spaceterm_protocol::pairing_adapter::ReceiptCodec);
-impl SignedReceiptReader {
-    pub fn new(
-        pin: spaceterm_protocol::authentication::ServerPin,
-    ) -> Result<Self, spaceterm_core::storage::StoreFailure> {
-        if pin.identity == [0; 16] || pin.public_key == [0; 32] {
-            return Err(spaceterm_core::storage::StoreFailure::IdentityMismatch);
-        }
-        Ok(Self(
-            spaceterm_protocol::pairing_adapter::ReceiptCodec::new(pin),
-        ))
-    }
-}
-impl PairingReceiptValidator for SignedReceiptReader {
-    fn validate_receipt(&self, receipt: &SignedPairingReceipt) -> Result<(), PairingContractError> {
-        self.0.validate_receipt(receipt)
-    }
-}
-impl spaceterm_host::organization_store::pairing::PairingReceiptReader for SignedReceiptReader {
-    fn read_receipt(
-        &self,
-        schema: u16,
-        body: &[u8],
-        signature: &[u8],
-    ) -> Result<SignedPairingReceipt, spaceterm_core::storage::StoreFailure> {
-        use spaceterm_core::storage::StoreFailure;
-        if schema != 1 {
-            return Err(StoreFailure::UnknownSchema);
-        }
-        // Check before copying retained bytes into the bounded protocol envelope.
-        if signature.len() != 64 || body.len() > MAX_SIGNED_PAIRING_RECEIPT_BYTES - 64 {
-            return Err(StoreFailure::InvalidDurableState);
-        }
-        self.0
-            .from_wire(&spaceterm_protocol::wire::pairing::SignedReceipt {
-                canonical_body: body.to_vec(),
-                signature: signature.to_vec(),
-            })
-            .map_err(|_| StoreFailure::InvalidDurableState)
-    }
-}
+pub use spaceterm_host::organization_store::pairing::SignedReceiptReader;
 
 /// Ledger registration/retirement/completion and reducer control release remain
 /// actor-owned. This function adds only pairing's writes and allocation marks.
