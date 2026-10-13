@@ -40,23 +40,44 @@ impl ServiceSupervisor {
         server: ServerId,
         claim_digest: RequestDigest,
     ) -> Result<RequestDigest, ServiceFailure> {
-        let (directory, _, journal) = self.read_journal()?;
-        match journal.reservation(request) {
-            Ok(_) => {}
-            Err(ServiceFailure::RequestRetired) => {
-                let original = read_archived_owner(&directory, self.key, request)?
-                    .ok_or(ServiceFailure::RequestRetired)?;
-                if original.server != server || original.claim_digest != claim_digest {
-                    return Err(ServiceFailure::RequestConflict);
-                }
-                return Ok(original.request_digest);
-            }
-            Err(failure) => return Err(failure),
-        }
+        let (_, _, journal) = self.read_journal()?;
+        journal.reservation(request)?;
         if server.bytes() == [0; 16] || claim_digest.bytes() == [0; 32] {
             return Err(ServiceFailure::InvalidRecord);
         }
         Ok(digest(self.key, request, server, claim_digest))
+    }
+    /// Reads an original owner binding, including its acknowledged archive.
+    /// Unlike admission digest calculation, this cannot readmit a retired request.
+    /// None means an allocated request has not retained owner authority yet.
+    pub fn retained_owner_enrollment_digest(
+        &self,
+        request: NativeRequestId,
+        server: ServerId,
+        claim_digest: RequestDigest,
+    ) -> Result<Option<RequestDigest>, ServiceFailure> {
+        let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
+        if registration.server_pin().identity != server.bytes() {
+            return Err(ServiceFailure::IdentityMismatch);
+        }
+        let (directory, _, journal) = self.read_journal()?;
+        let original = match journal.reservation(request) {
+            Ok(index) => journal.reservations[index].owner.clone(),
+            Err(ServiceFailure::RequestRetired) => Some(
+                read_archived_owner(&directory, self.key, request)?
+                    .ok_or(ServiceFailure::RequestRetired)?,
+            ),
+            Err(failure) => return Err(failure),
+        };
+        original
+            .map(|original| {
+                original.validate(self.key, request)?;
+                if original.server != server || original.claim_digest != claim_digest {
+                    return Err(ServiceFailure::RequestConflict);
+                }
+                Ok(original.request_digest)
+            })
+            .transpose()
     }
     /// Deliberately records the exact reserved account/build/server/request/claim binding.
     /// Repeating identical issuance is idempotent. Changed contents are rejected.
