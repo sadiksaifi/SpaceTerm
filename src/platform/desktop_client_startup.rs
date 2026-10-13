@@ -197,6 +197,8 @@ pub(crate) async fn recover<S: ViewStore + 'static>(
         view,
         executor: tokio::runtime::Handle::current(),
         servers,
+        // Native lifecycle, host and inventory adapters attach when recovered; defaults refuse effects.
+        settings: Default::default(),
     })
 }
 
