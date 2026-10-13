@@ -3,7 +3,13 @@
 
 use std::{fmt, sync::Arc};
 
-use spaceterm_core::{identity::ServerId, organization::ServerDirectory, storage::StoreFailure};
+use spaceterm_core::{
+    identity::ServerId,
+    operations::RequestDigest,
+    organization::ServerDirectory,
+    pairing::{EnrollmentProposal, PairingFailure},
+    storage::StoreFailure,
+};
 use spaceterm_host::{
     account_service::{RegisteredServer, ServiceFailure, ServiceSupervisor},
     organization_store::{SqliteOrganizationStore, StoreIdentity, StoreLimits, migrations, schema},
@@ -12,7 +18,87 @@ use spaceterm_host::{
     storage::{Database, StorageFailure},
 };
 
-use crate::contracts::ServerCredentialPort;
+use crate::{contracts::ServerCredentialPort, pairing::management::AccountOwnerEnrollmentPort};
+use spaceterm_host::native_deployment::contracts::NativeRequestId;
+use spaceterm_protocol::pairing_adapter::enrollment_proposal_digest;
+
+/// Account-owner enrollment binds deliberate issuance to the retained host journal.
+/// Both pairing callbacks only validate persisted authority, including after restart.
+/// Neither validation nor issuance starts a deliberately stopped server.
+pub struct AccountOwnerEnrollment {
+    supervisor: Arc<ServiceSupervisor>,
+}
+impl AccountOwnerEnrollment {
+    pub fn new(supervisor: Arc<ServiceSupervisor>) -> Self {
+        Self { supervisor }
+    }
+
+    /// Called only by deliberate owner issuance, after the host reserved the request.
+    /// The proposal is public comparison data; pairing separately verifies its proof.
+    pub fn record_authorization(
+        &self,
+        request: NativeRequestId,
+        proposal: &EnrollmentProposal,
+    ) -> Result<RequestDigest, PairingFailure> {
+        let server = proposal.parts().server;
+        let claim =
+            enrollment_proposal_digest(proposal).map_err(|_| PairingFailure::InvalidRequest)?;
+        let digest = self
+            .supervisor
+            .owner_enrollment_digest(request, server, claim)
+            .map_err(owner_failure)?;
+        self.supervisor
+            .record_owner_enrollment(request, digest, server, claim)
+            .map_err(owner_failure)?;
+        Ok(digest)
+    }
+}
+impl AccountOwnerEnrollmentPort for AccountOwnerEnrollment {
+    fn revalidate_owner_issuance(
+        &self,
+        request: &NativeRequestId,
+        digest: RequestDigest,
+        server: ServerId,
+        claim_digest: RequestDigest,
+    ) -> Result<(), PairingFailure> {
+        self.supervisor
+            .validate_owner_enrollment(request, digest, server, claim_digest)
+            .map_err(owner_failure)
+    }
+
+    fn validate_owner_request(
+        &self,
+        request: &NativeRequestId,
+        digest: RequestDigest,
+        server: ServerId,
+        proposal: &EnrollmentProposal,
+    ) -> Result<(), PairingFailure> {
+        if proposal.parts().server != server {
+            return Err(PairingFailure::IdentityMismatch);
+        }
+        let claim =
+            enrollment_proposal_digest(proposal).map_err(|_| PairingFailure::InvalidRequest)?;
+        self.revalidate_owner_issuance(request, digest, server, claim)
+    }
+}
+fn owner_failure(failure: ServiceFailure) -> PairingFailure {
+    match failure {
+        ServiceFailure::Missing
+        | ServiceFailure::UnknownRequest
+        | ServiceFailure::RequestRetired => PairingFailure::AuthorizationRequired,
+        ServiceFailure::IdentityMismatch => PairingFailure::IdentityMismatch,
+        ServiceFailure::RequestConflict => PairingFailure::RequestIdentityReused,
+        ServiceFailure::UnsafeStorage => PairingFailure::UnsafeStorage,
+        ServiceFailure::UnsupportedSchema => PairingFailure::UnknownSchema,
+        ServiceFailure::InvalidRecord => PairingFailure::InvalidRequest,
+        ServiceFailure::LimitExceeded => PairingFailure::LimitExceeded,
+        ServiceFailure::StorageLocked | ServiceFailure::StorageUnavailable => {
+            PairingFailure::StorageUnavailable
+        }
+        ServiceFailure::Indeterminate => PairingFailure::RecoveryRequired,
+        _ => PairingFailure::AuthorizationUnavailable,
+    }
+}
 
 /// Startup errors contain only provider classifications, not native messages.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -131,4 +217,41 @@ pub fn production_startup() -> Result<AccountStartup, StartupFailure> {
         .map_err(StartupFailure::Account)?
         .ok_or(StartupFailure::RegistrationMissing)?;
     AccountStartup::open(registration)
+}
+
+/// Read-only registration facts. Running is durable intent, not a claim that a
+/// process or listener is live. Native supervision reports those facts separately.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(tag = "registration", rename_all = "lowercase")]
+pub enum AccountStatus {
+    Missing {
+        build_identity: spaceterm_host::startup::BuildIdentity,
+    },
+    Registered {
+        build_identity: spaceterm_host::startup::BuildIdentity,
+        desired_state: DesiredServerState,
+    },
+}
+
+/// Queries only retained account registration. Missing registration is an ordinary
+/// status result, not permission to initialize keys, storage or a service.
+pub fn account_status(supervisor: &ServiceSupervisor) -> Result<AccountStatus, StartupFailure> {
+    let build_identity = supervisor.key().build_identity;
+    Ok(
+        match supervisor.discover().map_err(StartupFailure::Account)? {
+            Some(registration) => AccountStatus::Registered {
+                build_identity,
+                desired_state: registration.desired_state(),
+            },
+            None => AccountStatus::Missing { build_identity },
+        },
+    )
+}
+
+/// The account/build identity is selected by native discovery, never caller roots.
+pub fn production_status() -> Result<Vec<u8>, StartupFailure> {
+    let supervisor = ServiceSupervisor::current(None).map_err(StartupFailure::Account)?;
+    let result = account_status(&supervisor)?;
+    serde_json::to_vec(&serde_json::json!({"schema": 1, "result": result}))
+        .map_err(|_| StartupFailure::Account(ServiceFailure::InvalidRecord))
 }
