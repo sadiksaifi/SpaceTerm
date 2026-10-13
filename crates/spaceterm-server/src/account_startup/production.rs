@@ -28,7 +28,7 @@ use crate::{
         service::PairingService,
     },
     service::RecoveredServer,
-    shutdown::{ShutdownReport, StoppedAuthorizationPort, TrustedShutdownRequest},
+    shutdown::{ShutdownReport, StoppedAuthorizationPort},
 };
 use spaceterm_core::{
     authority::{ServerEpoch, SessionKey},
@@ -177,6 +177,7 @@ pub struct RecoveredAccountServer {
     management: Arc<NativeManagement>,
     admission: Arc<spaceterm_host::account_service::AccountStartup>,
     owner_supervisor: Arc<ServiceSupervisor>,
+    account_runtime: Arc<crate::account_runtime::AccountRuntimeProcesses>,
 }
 impl RecoveredAccountServer {
     pub async fn recover(
@@ -262,6 +263,11 @@ impl RecoveredAccountServer {
             host_management: management.clone(),
             clock,
         };
+        spaceterm_host::account_service::runtime_inventory::RuntimeCustody::prepare_start(
+            &account.registration,
+            account.credentials.as_ref(),
+        )
+        .map_err(StartupFailure::Account)?;
         let server = RecoveredServer::recover(config, dependencies)
             .await
             .map_err(StartupFailure::Runtime)?;
@@ -269,6 +275,15 @@ impl RecoveredAccountServer {
         *source.0.lock().map_err(|_| {
             StartupFailure::Runtime(failure(ServerFailureClass::RecoveryRequired))
         })? = Some(handle.clone());
+        let account_runtime = crate::account_runtime::AccountRuntimeProcesses::new(
+            handle.clone(),
+            supervisor.as_ref().clone(),
+            account.credentials.clone(),
+        )
+        .map_err(StartupFailure::Account)?;
+        ports
+            .install_account_runtime(account_runtime.clone())
+            .map_err(StartupFailure::Runtime)?;
         let git = GitService::new(
             server_id,
             handle.snapshot().epoch(),
@@ -314,6 +329,7 @@ impl RecoveredAccountServer {
             management,
             admission,
             owner_supervisor: supervisor,
+            account_runtime,
         })
     }
     pub fn handle(&self) -> ServerHandle {
@@ -335,6 +351,7 @@ impl RecoveredAccountServer {
             management,
             admission,
             owner_supervisor,
+            account_runtime,
             ..
         } = self;
         admission.revalidate().map_err(StartupFailure::Account)?;
@@ -353,6 +370,7 @@ impl RecoveredAccountServer {
                 }
             };
         let handle = server.handle();
+        let cleanup = account_runtime.clone();
         let monitor = async move {
             let mut interval = tokio::time::interval(Duration::from_millis(100));
             loop {
@@ -362,11 +380,9 @@ impl RecoveredAccountServer {
                     .verify_stopped(snapshot.state().server, snapshot.epoch())
                     .is_ok()
                 {
-                    let _ = handle
-                        .shutdown(TrustedShutdownRequest {
-                            authority: management.clone(),
-                        })
-                        .await;
+                    if account_runtime.start_original_retirement().await.is_ok() {
+                        std::future::pending::<()>().await;
+                    }
                     break;
                 }
             }
@@ -382,8 +398,10 @@ impl RecoveredAccountServer {
             .close()
             .await
             .map_err(|_| StartupFailure::Runtime(failure(ServerFailureClass::CleanupIncomplete)));
+        let retirements = cleanup.finish_retirements().await.map_err(StartupFailure::Account);
         drop(admission);
         owner_closed?;
+        retirements?;
         result
     }
 }

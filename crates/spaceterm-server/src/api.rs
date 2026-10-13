@@ -308,6 +308,41 @@ pub struct ServerHandle {
         watch::Receiver<Option<spaceterm_core::pairing::policy::PairingSnapshot>>,
 }
 impl ServerHandle {
+    /// Obtains exact content-free scope for native account lifecycle confirmation.
+    pub async fn assess_account_runtime(
+        &self,
+    ) -> Result<spaceterm_host::account_service::RuntimeAssessment, ServerFailure> {
+        let (reply, result) = oneshot::channel();
+        self.lifecycle
+            .send(LifecycleRequest::NativeAssess(reply))
+            .await
+            .map_err(|_| failure(ServerFailureClass::RecoveryRequired))?;
+        receive(result).await
+    }
+    /// Reserves native admissions against this original actor-issued comparison.
+    pub async fn reserve_account_runtime(
+        &self,
+        assessment: spaceterm_host::account_service::RuntimeAssessment,
+    ) -> Result<(), ServerFailure> {
+        let (reply, result) = oneshot::channel();
+        self.lifecycle
+            .send(LifecycleRequest::NativeReserve(assessment, reply))
+            .await
+            .map_err(|_| failure(ServerFailureClass::RecoveryRequired))?;
+        receive(result).await
+    }
+    /// Releases only this original reservation after native durable non-admission.
+    pub async fn abort_account_runtime(
+        &self,
+        assessment: spaceterm_host::account_service::RuntimeAssessment,
+    ) -> Result<(), ServerFailure> {
+        let (reply, result) = oneshot::channel();
+        self.lifecycle
+            .send(LifecycleRequest::NativeAbort(assessment, reply))
+            .await
+            .map_err(|_| failure(ServerFailureClass::RecoveryRequired))?;
+        receive(result).await
+    }
     pub fn phase(&self) -> ServicePhase {
         *self.phase.borrow()
     }

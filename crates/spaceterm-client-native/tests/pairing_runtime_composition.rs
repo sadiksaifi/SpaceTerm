@@ -2382,3 +2382,68 @@ async fn cli_unpair_resolves_exact_saved_pairing() {
     ));
     assert_eq!(inventory.revocations.len(), 1);
 }
+
+#[tokio::test]
+async fn cli_reopens_suppressed_pairing_for_restricted_retry_without_native_registration() {
+    use spaceterm_client_native::{
+        NativeClientProvider,
+        cli::bindings::{PairingCommandBindings, RevocationState},
+        native::consumer::{NativeConsumer, NativeConsumerKind},
+        route::NativeRouteConnector,
+    };
+    use spaceterm_host::{
+        account_service::test_support::AccountServiceFixture, startup::BuildIdentity,
+    };
+    let directory = Directory::new();
+    let native = Arc::new(directory.create().await);
+    let fixture = Fixture::new(1);
+    fixture.seed(native.as_ref()).await;
+    let key = fixture.binding.target().local_pairing().unwrap();
+    let composition = runtime(controller(native).await);
+    let assessment = composition
+        .assess_unpair(&key, fixture.binding.target().client())
+        .await
+        .unwrap();
+    let removal = composition.self_unpair(assessment).await.unwrap();
+    composition.dismiss_notice(removal.operation).await.unwrap();
+    drop(composition);
+    let storage = NativeClientJournal::open_existing(
+        directory.0.clone(),
+        Arc::new(CanonicalCodec),
+        Arc::new(Verifier),
+        JournalLimits::default(),
+    )
+    .await
+    .unwrap();
+    let journal = controller(Arc::new(storage)).await;
+    let account_root = tempfile::Builder::new()
+        .prefix("st-retry-")
+        .tempdir_in("/var/tmp")
+        .unwrap();
+    let account =
+        AccountServiceFixture::new(account_root.path(), BuildIdentity::Development).unwrap();
+    assert!(account.reopen().discover().unwrap().is_none());
+    let provider = NativeClientProvider::from_supervisor(account.reopen());
+    let consumer = NativeConsumer::with_recovered_journal(
+        provider.management(),
+        NativeConsumerKind::Cli,
+        journal.clone(),
+        Arc::new(Credentials::new()),
+        NativeRouteConnector::new(vec![], None).unwrap(),
+    );
+    let reports = consumer.retry_pending().await.unwrap();
+    assert_eq!(reports.len(), 1);
+    assert!(reports[0].local_connection_removed);
+    assert_eq!(reports[0].revocation, RevocationState::Pending);
+    let inventory = consumer
+        .pairing_runtime()
+        .await
+        .unwrap()
+        .inventory()
+        .await
+        .unwrap();
+    assert!(inventory.is_suppressed(&key));
+    assert!(inventory.task(removal.operation).unwrap().notice_dismissed);
+    assert!(journal.snapshot().unwrap().bindings().is_empty());
+    assert!(account.reopen().discover().unwrap().is_none());
+}

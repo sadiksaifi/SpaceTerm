@@ -505,7 +505,8 @@ fn reply_policy(payload: &spaceterm_protocol::codec::Payload) -> Result<bool, Eg
                     | Kind::ResourceCancel(_)
                     | Kind::RuntimeOutcome(_)
                     | Kind::PairingOutcome(_)
-                    | Kind::ClientContext(_),
+                    | Kind::ClientContext(_)
+                    | Kind::AccountRuntimeReply(_),
                 ) => Ok(true),
                 Some(
                     Kind::OrganizationSnapshot(_)

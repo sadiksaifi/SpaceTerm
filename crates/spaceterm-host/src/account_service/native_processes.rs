@@ -168,6 +168,9 @@ impl ServiceProcesses for NativeServiceProcesses {
             self.account(registration)?;
             let assessment = self.runtime()?.assess(registration).await?;
             assessment.validate(registration)?;
+            if assessment.epoch.is_none() {
+                self.absent(registration, false).await?;
+            }
             Ok(assessment)
         })
     }

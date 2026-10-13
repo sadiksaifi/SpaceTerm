@@ -180,6 +180,15 @@ pub(crate) enum ActorRequest {
     },
 }
 pub(crate) enum LifecycleRequest {
+    NativeAssess(Reply<spaceterm_host::account_service::RuntimeAssessment>),
+    NativeReserve(
+        spaceterm_host::account_service::RuntimeAssessment,
+        Reply<()>,
+    ),
+    NativeAbort(
+        spaceterm_host::account_service::RuntimeAssessment,
+        Reply<()>,
+    ),
     Disconnect {
         principal: VerifiedPrincipal,
         reply: Reply<()>,
@@ -474,6 +483,8 @@ impl RecoveredServer {
             delivery_pending: None,
             busy: false,
             terminal_barrier: false,
+            native_assessments: BTreeMap::new(),
+            native_reservation: None,
             retirements: BTreeMap::new(),
             git_cleanup_waiters: BTreeMap::new(),
             git: git_actor::GitActorState::default(),
@@ -655,6 +666,8 @@ struct Actor {
     delivery_pending: Option<OperationBinding>,
     busy: bool,
     terminal_barrier: bool,
+    native_assessments: BTreeMap<[u8; 32], spaceterm_host::account_service::RuntimeAssessment>,
+    native_reservation: Option<spaceterm_host::account_service::RuntimeAssessment>,
     retirements: BTreeMap<OperationId, Arc<RetirementDescriptor>>,
     git_cleanup_waiters: BTreeMap<OperationId, Vec<Reply<Vec<SessionCleanupObservation>>>>,
     native_retirement: Option<Arc<NativeRetirementDescriptor>>,
@@ -781,10 +794,11 @@ impl Actor {
         result
     }
     fn ordinary_open(&self) -> bool {
-        matches!(
-            *self.phase.borrow(),
-            ServicePhase::Ready | ServicePhase::Serving
-        )
+        self.native_reservation.is_none()
+            && matches!(
+                *self.phase.borrow(),
+                ServicePhase::Ready | ServicePhase::Serving
+            )
     }
     fn available(&self) -> Result<(), ServerFailure> {
         if *self.phase.borrow() == ServicePhase::RecoveryRequired {
@@ -1124,8 +1138,10 @@ impl Actor {
         &mut self,
         principal: VerifiedPrincipal,
     ) -> Result<ConnectionAccessSnapshot, ServerFailure> {
-        if !self.ordinary_open()
-            || principal.server() != self.cursor.server
+        if !matches!(
+            *self.phase.borrow(),
+            ServicePhase::Ready | ServicePhase::Serving
+        ) || principal.server() != self.cursor.server
             || principal.epoch() != self.cursor.epoch
             || self.revoked.contains(&principal.client())
             || self.pairing_barrier.contains(&principal.client())
@@ -3211,6 +3227,7 @@ impl Actor {
                             self.release_unreferenced(session.session());
                         }
                         self.terminal_barrier = self.shutdown.is_some()
+                            || self.native_reservation.is_some()
                             || self.retirements.values().any(|v| v.server_wide_barrier());
                     }
                     CommitAction::Observed {
@@ -3392,8 +3409,111 @@ impl Actor {
             }
         }
     }
+    fn native_scope(
+        &self,
+    ) -> Result<spaceterm_host::account_service::RuntimeAssessment, ServerFailure> {
+        if !matches!(
+            *self.phase.borrow(),
+            ServicePhase::Ready | ServicePhase::Serving
+        ) || self.pending.is_some()
+            || self.busy
+            || !self.starting.is_empty()
+            || !self.retirements.is_empty()
+            || self.shutdown.is_some()
+        {
+            return Err(failure(ServerFailureClass::StaleAuthority));
+        }
+        let mut sessions = self
+            .registry
+            .as_ref()
+            .ok_or_else(|| failure(ServerFailureClass::RecoveryRequired))?
+            .sessions();
+        sessions.sort_unstable();
+        if sessions.len() > 64 {
+            return Err(failure(ServerFailureClass::Capacity));
+        }
+        Ok(spaceterm_host::account_service::RuntimeAssessment {
+            server: self.cursor.server,
+            epoch: Some(self.cursor.epoch),
+            generation: self.cursor.store.get().max(1),
+            sessions,
+            token: [0; 32],
+        })
+    }
+    fn native_matches(
+        &self,
+        assessment: &spaceterm_host::account_service::RuntimeAssessment,
+    ) -> Result<(), ServerFailure> {
+        let mut current = self.native_scope()?;
+        current.token = assessment.token;
+        if current != *assessment
+            || self.native_assessments.get(&assessment.token) != Some(assessment)
+        {
+            return Err(failure(ServerFailureClass::StaleAuthority));
+        }
+        Ok(())
+    }
     fn lifecycle(&mut self, request: LifecycleRequest) {
         match request {
+            LifecycleRequest::NativeAssess(reply) => {
+                let result = (|| {
+                    if self.native_reservation.is_some() {
+                        return Err(failure(ServerFailureClass::StaleAuthority));
+                    }
+                    let mut scope = self.native_scope()?;
+                    self.native_assessments.retain(|_, old| {
+                        old.generation == scope.generation && old.sessions == scope.sessions
+                    });
+                    if self.native_assessments.len() >= 64 {
+                        return Err(failure(ServerFailureClass::Capacity));
+                    }
+                    getrandom::fill(&mut scope.token)
+                        .map_err(|_| failure(ServerFailureClass::NativeUnavailable))?;
+                    if scope.token == [0; 32] || self.native_assessments.contains_key(&scope.token)
+                    {
+                        return Err(failure(ServerFailureClass::Exhausted));
+                    }
+                    self.native_assessments.insert(scope.token, scope.clone());
+                    Ok(scope)
+                })();
+                let _ = reply.send(result);
+            }
+            LifecycleRequest::NativeReserve(assessment, reply) => {
+                let result = if self.native_reservation.as_ref() == Some(&assessment) {
+                    Ok(())
+                } else if self.native_reservation.is_some() {
+                    Err(failure(ServerFailureClass::StaleAuthority))
+                } else {
+                    self.native_matches(&assessment).map(|()| {
+                        self.native_reservation = Some(assessment);
+                        self.terminal_barrier = true;
+                    })
+                };
+                let _ = reply.send(result);
+            }
+            LifecycleRequest::NativeAbort(assessment, reply) => {
+                let result = if self.shutdown.is_some()
+                    || self
+                        .native_reservation
+                        .as_ref()
+                        .is_some_and(|old| old != &assessment)
+                    || self
+                        .native_assessments
+                        .get(&assessment.token)
+                        .is_some_and(|old| old != &assessment)
+                {
+                    Err(failure(ServerFailureClass::StaleAuthority))
+                } else {
+                    self.native_assessments.remove(&assessment.token);
+                    self.native_reservation = None;
+                    self.terminal_barrier = self
+                        .retirements
+                        .values()
+                        .any(|old| old.server_wide_barrier());
+                    Ok(())
+                };
+                let _ = reply.send(result);
+            }
             LifecycleRequest::Disconnect { principal, reply } => {
                 let result = self.disconnect(principal);
                 let _ = reply.send(result);

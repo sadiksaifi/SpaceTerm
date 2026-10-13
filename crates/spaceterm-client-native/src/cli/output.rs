@@ -190,6 +190,8 @@ fn status_value(status: &ServerStatus) -> Value {
     json!({
         "server": hex(&p.server.bytes()),
         "epoch": p.epoch.get(),
+        "storage_state": p.runtime.storage,
+        "run_intent": p.runtime.intent,
         "revision": p.revision.get(),
         "storage_state": p.runtime.storage,
         "run_intent": p.runtime.intent,
