@@ -2214,8 +2214,10 @@ impl TabView {
             ),
         };
         // Moving Panes reach outside their laid-out places and across the gap between them. A
-        // raised Pane moves above the layout instead, which stays as it is.
-        let moving = self.pane_frames.moving && self.pane_frames.raised.is_none();
+        // raised Pane moves above the layout instead, which stays as it is unless the stage
+        // stretches it.
+        let moving = self.stage_stretch != px(0.0)
+            || (self.pane_frames.moving && self.pane_frames.raised.is_none());
         split
             .child(split_child("split-first", first, axis, ratio, !moving))
             .child(spacer.when(!moving, |spacer| {

@@ -6268,7 +6268,10 @@ fn sidebar_presentation(
 ) {
     (
         cx.debug_bounds("workspace-sidebar"),
-        cx.debug_bounds("tab-manager-content").unwrap(),
+        // A moving stage is laid out where it rests and drawn where the sidebar leaves it.
+        cx.debug_bounds("tab-manager-moving-stage")
+            .or_else(|| cx.debug_bounds("tab-manager-content"))
+            .unwrap(),
         cx.debug_bounds("pane-surface-1").unwrap(),
         cx.debug_bounds("workspace-chip-label").is_some(),
     )
@@ -6343,22 +6346,44 @@ fn toggling_the_sidebar_should_slide_it_while_the_terminal_resizes_once(cx: &mut
 
 #[gpui::test]
 fn every_frame_of_a_sidebar_toggle_should_keep_the_terminal_size(cx: &mut TestAppContext) {
-    toggle_the_sidebar_frame_by_frame(None, cx);
+    toggle_the_sidebar_frame_by_frame(None, None, false, cx);
 }
 
 #[gpui::test]
 fn every_frame_of_a_sidebar_toggle_should_keep_the_terminal_size_beside_a_fractional_width(
     cx: &mut TestAppContext,
 ) {
-    toggle_the_sidebar_frame_by_frame(Some(px(251.3)), cx);
+    toggle_the_sidebar_frame_by_frame(None, Some(px(251.3)), false, cx);
 }
 
-/// Toggles the sidebar twice, drawing every frame, and asserts the Terminal resizes once per
+#[gpui::test]
+fn every_frame_of_a_sidebar_toggle_should_keep_the_terminal_size_at_a_fractional_scale(
+    cx: &mut TestAppContext,
+) {
+    toggle_the_sidebar_frame_by_frame(Some(1.25), Some(px(251.3)), false, cx);
+}
+
+#[gpui::test]
+fn every_frame_of_a_sidebar_toggle_should_keep_split_terminal_sizes_at_a_fractional_scale(
+    cx: &mut TestAppContext,
+) {
+    toggle_the_sidebar_frame_by_frame(Some(1.75), Some(px(251.3)), true, cx);
+}
+
+/// Toggles the sidebar twice, drawing every frame, and asserts each Terminal resizes once per
 /// toggle.
-fn toggle_the_sidebar_frame_by_frame(sidebar_width: Option<Pixels>, cx: &mut TestAppContext) {
+fn toggle_the_sidebar_frame_by_frame(
+    scale: Option<f32>,
+    sidebar_width: Option<Pixels>,
+    split: bool,
+    cx: &mut TestAppContext,
+) {
     use crate::ui::drag_and_drop::AnimatePresence;
 
     let (manager, records, cx) = workspace_manager(cx);
+    if let Some(scale) = scale {
+        cx.simulate_scale_factor_change(scale);
+    }
     // A width where the stage's fractional edges round across a Terminal cell boundary.
     cx.simulate_resize(gpui::size(px(804.0), px(600.0)));
     if let Some(width) = sidebar_width {
@@ -6369,6 +6394,9 @@ fn toggle_the_sidebar_frame_by_frame(sidebar_width: Option<Pixels>, cx: &mut Tes
                 })
             })
         });
+    }
+    if split {
+        cx.simulate_keystrokes("cmd-d");
     }
     cx.run_until_parked();
     let resizes = || {
@@ -6398,10 +6426,12 @@ fn toggle_the_sidebar_frame_by_frame(sidebar_width: Option<Pixels>, cx: &mut Tes
     }
 
     let after = resizes();
+    let terminals = if split { 2 } else { 1 };
     assert_eq!(
         after.len(),
-        before + 2,
-        "the Terminal must resize once per toggle beside a {sidebar_width:?} sidebar: {:?}",
+        before + 2 * terminals,
+        "each Terminal must resize once per toggle at scale {scale:?} beside a {sidebar_width:?} \
+         sidebar: {:?}",
         &after[before..]
     );
 }
@@ -6531,6 +6561,52 @@ fn split_panes_should_stretch_across_the_stage_while_the_sidebar_slides(cx: &mut
         "the trailing Pane must keep its trailing edge"
     );
     assert_eq!(resizes(), before + 2, "each Terminal must resize once");
+}
+
+#[gpui::test]
+fn an_unzoom_while_the_sidebar_slides_should_not_clip_the_stretched_panes(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    cx.simulate_keystrokes("cmd-d cmd-shift-enter");
+    cx.run_until_parked();
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    let frame = |cx: &mut VisualTestContext| {
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(30));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    };
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    frame(cx);
+    cx.simulate_keystrokes("cmd-shift-enter");
+    frame(cx);
+
+    for selector in ["pane-surface-1", "pane-surface-2"] {
+        let surface = cx.debug_bounds(selector).unwrap();
+        cx.update(|window, _| {
+            let surface = surface.scale(window.scale_factor());
+            // The surface's fill and rim are quads at its bounds, each clipped to the part it
+            // draws. Together they reach both sides unless something else clips them.
+            let shown = window
+                .painted_quads()
+                .into_iter()
+                .filter(|quad| quad.bounds == surface)
+                .map(|quad| quad.bounds.intersect(&quad.content_mask.bounds))
+                .filter(|shown| shown.size.width.0 > 0.0 && shown.size.height.0 > 0.0)
+                .map(|shown| (shown.left(), shown.right()))
+                .reduce(|(left, right), (l, r)| (left.min(l), right.max(r)))
+                .expect("the Pane surface should be painted");
+            assert_eq!(
+                shown,
+                (surface.left(), surface.right()),
+                "{selector} must not be clipped to its place while the stage stretches"
+            );
+        });
+    }
 }
 
 #[gpui::test]

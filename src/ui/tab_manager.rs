@@ -917,10 +917,10 @@ impl TabManager {
         }
     }
 
-    /// The stage's leading margin and inset in this frame, and how far it is offset from where it
-    /// rests. The stage moves by whole device pixels from where it rests, so both edges of the
-    /// active Tab round alike and its Terminal Sessions keep their size in every frame.
-    fn stage_leading_edge(&self, window: &Window, cx: &App) -> (Pixels, Pixels, Pixels) {
+    /// Where the stage's leading edge rests and where this frame draws it. The stage is laid out
+    /// where it rests and drawn a whole number of device pixels from there, so the active Tab's
+    /// layout, and the size of its Terminal Sessions, is the same in every frame.
+    fn stage_leading_edge(&self, window: &Window, cx: &App) -> StageLeadingEdge {
         let frame = super::workspace_frame::WorkspaceFrame::for_appearance(
             super::appearance::chrome(cx),
             cx,
@@ -931,16 +931,18 @@ impl TabManager {
             let inset = hidden + (frame.stage_leading_inset(true) - hidden) * reveal;
             (self.sidebar_width * reveal, inset)
         };
-        let rest_leading = {
-            let (margin, inset) = leading_edge(if self.sidebar_visible { 1.0 } else { 0.0 });
-            margin + inset
-        };
+        let (rest_margin, rest_inset) = leading_edge(if self.sidebar_visible { 1.0 } else { 0.0 });
         let scale = window.scale_factor();
         let snap = |length: Pixels| (length * scale).round() / scale;
-        let (leading_margin, leading_inset) = leading_edge(self.sidebar_reveal);
-        let leading_inset = snap(leading_inset);
-        let offset = snap(rest_leading - leading_margin - leading_inset);
-        (rest_leading - offset - leading_inset, leading_inset, offset)
+        let (margin, inset) = leading_edge(self.sidebar_reveal);
+        let inset = snap(inset);
+        let offset = snap(rest_margin + rest_inset - margin - inset);
+        StageLeadingEdge {
+            rest_margin,
+            rest_inset,
+            margin: rest_margin + rest_inset - offset - inset,
+            offset,
+        }
     }
 
     /// Presents `reveal` of the sidebar in the current frame while it shows or hides. The stage's
@@ -2484,9 +2486,9 @@ impl Render for TabManager {
         }
         let manager = cx.entity().downgrade();
         let active_tab = self.tabs.active_tab().clone();
-        let (leading_margin, leading_inset, offset) = self.stage_leading_edge(window, cx);
+        let edge = self.stage_leading_edge(window, cx);
         // The active Tab keeps its resting width, and its Panes stretch across the stage.
-        active_tab.update(cx, |view, cx| view.present_stage_stretch(offset, cx));
+        active_tab.update(cx, |view, cx| view.present_stage_stretch(edge.offset, cx));
         let hovers = self.tab_hovers(window, cx);
         let appearance = super::appearance::chrome(cx);
         let presentation = TabChromePresentation::resolve(
@@ -2497,6 +2499,8 @@ impl Render for TabManager {
         let tab_bar = self.render_tab_bar(&presentation, hovers, manager.clone(), window, cx);
         let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
         let stage_surface = super::workspace_frame::base_surface(&appearance.colors);
+        let stage_color =
+            gpui_color(appearance.surface(crate::appearance::SurfaceRole::Base, stage_surface));
 
         div()
             .id("tab-manager")
@@ -2556,16 +2560,14 @@ impl Render for TabManager {
                     .min_w_0()
                     .min_h_0()
                     .relative()
-                    .overflow_hidden()
-                    .ml(leading_margin)
+                    .when(edge.offset == px(0.0), |content| content.overflow_hidden())
+                    .ml(edge.rest_margin)
                     // No top edge: the chrome above carries that space. No leading edge beside a
                     // sidebar: the sidebar chip's trailing margin is already that gap.
-                    .border_color(gpui_color(
-                        appearance.surface(crate::appearance::SurfaceRole::Base, stage_surface),
-                    ))
+                    .border_color(stage_color)
                     .border_b(frame.window_edge_inset())
                     .border_r(frame.window_edge_inset())
-                    .border_l(leading_inset)
+                    .border_l(edge.rest_inset)
                     .child(
                         div()
                             .debug_selector(move || {
@@ -2577,7 +2579,24 @@ impl Render for TabManager {
                             .absolute()
                             .inset_0(),
                     )
-                    .child(div().h_full().mr(offset).child(active_tab)),
+                    // The stage as this frame draws it, from its leading edge to the window's
+                    // edges.
+                    .when(edge.offset != px(0.0), |content| {
+                        content.child(
+                            div()
+                                .debug_selector(|| "tab-manager-moving-stage".to_owned())
+                                .absolute()
+                                .top_0()
+                                .left(edge.margin - edge.rest_margin - edge.rest_inset)
+                                .right(-frame.window_edge_inset())
+                                .bottom(-frame.window_edge_inset())
+                                .bg(stage_color),
+                        )
+                    })
+                    .child(StageOffset {
+                        offset: edge.offset,
+                        child: div().size_full().child(active_tab).into_any_element(),
+                    }),
             )
     }
 }
@@ -2631,6 +2650,106 @@ fn active_tab_covers(edge: StripEdge, items: &ScrollHandle, active: usize, len: 
         StripEdge::End => viewport.right() - px(0.5),
     };
     span.left() + offset < edge && edge < span.right() + offset
+}
+
+/// Where the stage's leading edge rests and where one frame draws it.
+#[derive(Clone, Copy, Debug)]
+struct StageLeadingEdge {
+    /// The leading margin of the stage at rest.
+    rest_margin: Pixels,
+    /// The leading inset of the stage at rest.
+    rest_inset: Pixels,
+    /// The leading margin this frame draws.
+    margin: Pixels,
+    /// How far this frame draws the stage's content leading of where it rests, in whole device
+    /// pixels.
+    offset: Pixels,
+}
+
+/// Draws its child `offset` leading of where it is laid out, clipped to the space from there to
+/// its own trailing edge. The child's layout, and so the size of everything in it, does not
+/// depend on the offset.
+struct StageOffset {
+    offset: Pixels,
+    child: AnyElement,
+}
+
+impl StageOffset {
+    fn content_mask(&self, bounds: Bounds<Pixels>) -> gpui::ContentMask<Pixels> {
+        gpui::ContentMask {
+            bounds: Bounds::from_corners(
+                gpui::point(bounds.left() - self.offset, bounds.top()),
+                bounds.bottom_right(),
+            ),
+        }
+    }
+}
+
+impl IntoElement for StageOffset {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for StageOffset {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let child = self.child.request_layout(window, cx);
+        let style = gpui::Style {
+            size: gpui::size(relative(1.0).into(), relative(1.0).into()),
+            ..gpui::Style::default()
+        };
+        (window.request_layout(style, [child], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let mask = self.content_mask(bounds);
+        window.with_content_mask(Some(mask), |window| {
+            window.with_element_offset(gpui::point(-self.offset, px(0.0)), |window| {
+                self.child.prepaint(window, cx)
+            })
+        });
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let mask = self.content_mask(bounds);
+        window.with_content_mask(Some(mask), |window| self.child.paint(window, cx));
+    }
 }
 
 /// Paints its child only when `visible` holds at prepaint, after the elements before it have
