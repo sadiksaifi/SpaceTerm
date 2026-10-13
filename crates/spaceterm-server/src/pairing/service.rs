@@ -2,7 +2,7 @@
 //! signatures, not a listener, database, ledger, retry loop or runtime registry.
 
 use super::management::{AccountOwnerEnrollmentPort, EnrollmentAuthority};
-use crate::contracts::ServerFuture;
+use crate::{api::VerifiedPrincipal, contracts::ServerFuture};
 use spaceterm_core::pairing::{
     policy::{EnrollmentMutation, PairingPolicy, PairingSnapshot},
     transition::PairingTransition,
@@ -24,9 +24,16 @@ use spaceterm_protocol::{
 };
 use std::sync::Arc;
 
-/// The native journal identity is not convertible to an ordinary OperationId.
+/// Ordinary requests retain their authenticated connection fence. Restricted
+/// operations and native owner issuance cannot borrow an ordinary identity.
 pub enum PairingActorRequest {
+    /// Enrollment or self-revocation, checked against immutable stream purpose.
     Operation(CanonicalOperationRequest),
+    /// Ordinary admission retains the authenticated connection's original fence.
+    Ordinary {
+        principal: VerifiedPrincipal,
+        request: CanonicalOperationRequest,
+    },
     AccountOwner {
         request: NativeRequestId,
         digest: RequestDigest,
@@ -66,8 +73,9 @@ where
 /// identified operation it commits store-only ledger admission before allocation.
 /// Enrollment streams must already be registered with Enrollment purpose; unknown
 /// streams are rejected. Owner requests use native-journal admission, never an
-/// ordinary identity. The actor checks assessments against their retained original
-/// operation/digest/result, revalidates authority, enters revocation barriers,
+/// ordinary identity. Ordinary requests reserve reliable egress and revalidate the
+/// original principal at admission and planning. Assessments compare server-owned
+/// original facts independently of outcome acknowledgement. The actor enters revocation barriers,
 /// merges exact reducer releases and stream retirement with pairing/outcome writes,
 /// and commits once. Durable success waits for connection/worker invalidation.
 /// NotApplied yields no secret/receipt. Indeterminate seals admissions until recovery.
@@ -159,6 +167,7 @@ impl PairingService {
     /// request. Candidate key possession is required only at restricted enrollment.
     pub async fn issue_direct_authorization(
         &self,
+        principal: VerifiedPrincipal,
         operation: OperationId,
         proposal: EnrollmentProposal,
     ) -> Result<PairingExecution, PairingFailure> {
@@ -172,7 +181,7 @@ impl PairingService {
         let service = self.clone();
         self.actor
             .execute(
-                PairingActorRequest::Operation(request),
+                PairingActorRequest::Ordinary { principal, request },
                 Box::new(move |context: &mut dyn PairingMutationContext| {
                     let state = context.snapshot();
                     let policy = PairingPolicy::default();
@@ -336,6 +345,7 @@ impl PairingService {
                 .outcome
             {
                 PairingOutcome::Enrolled(receipt) => Some(receipt),
+                PairingOutcome::Failed(error) => return Err(server_failure(error)),
                 _ => return Err(server_failure(PairingFailure::InvalidDurableState)),
             },
             VerifiedEnrollmentRequest::Lookup(_) => self
@@ -517,13 +527,14 @@ impl PairingService {
     }
     pub async fn bind_additional_client(
         &self,
+        principal: VerifiedPrincipal,
         operation: OperationId,
         target: PairingTarget,
         expected: FieldVersion,
         claim_digest: RequestDigest,
-        device_proof: [u8; 64],
-        auth_proof: [u8; 64],
+        proofs: ([u8; 64], [u8; 64]),
     ) -> Result<PairingExecution, PairingFailure> {
+        let (device_proof, auth_proof) = proofs;
         let request = self.operation(
             operation,
             PairingCommand::BindAdditionalClient {
@@ -536,7 +547,7 @@ impl PairingService {
         let service = self.clone();
         self.actor
             .execute(
-                PairingActorRequest::Operation(request),
+                PairingActorRequest::Ordinary { principal, request },
                 Box::new(move |context: &mut dyn PairingMutationContext| {
                     let state = context.snapshot();
                     let policy = PairingPolicy::default();
@@ -601,6 +612,7 @@ impl PairingService {
     }
     pub async fn assess_unpair(
         &self,
+        principal: VerifiedPrincipal,
         operation: OperationId,
         target: PairingTarget,
     ) -> Result<PairingExecution, PairingFailure> {
@@ -613,7 +625,7 @@ impl PairingService {
         let binding = request.binding();
         self.actor
             .execute(
-                PairingActorRequest::Operation(request),
+                PairingActorRequest::Ordinary { principal, request },
                 Box::new(move |context: &mut dyn PairingMutationContext| {
                     let state = context.snapshot();
                     let policy = PairingPolicy::default();
@@ -641,6 +653,7 @@ impl PairingService {
     }
     pub async fn unpair(
         &self,
+        principal: VerifiedPrincipal,
         operation: OperationId,
         assessment: UnpairAssessment,
     ) -> Result<PairingExecution, PairingFailure> {
@@ -654,7 +667,7 @@ impl PairingService {
         let service = self.clone();
         self.actor
             .execute(
-                PairingActorRequest::Operation(request),
+                PairingActorRequest::Ordinary { principal, request },
                 Box::new(move |context: &mut dyn PairingMutationContext| {
                     let state = context.snapshot();
                     let policy = PairingPolicy::default();
@@ -709,6 +722,9 @@ impl PairingService {
                 self.signer.as_ref(),
             )
             .map_err(|_| PairingFailure::ReceiptInvalid)
+    }
+    pub(crate) fn ledger_codec(&self) -> &dyn LedgerCodec {
+        self.codec.as_ref()
     }
     pub(crate) fn pin(&self) -> ServerPin {
         self.pin

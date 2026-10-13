@@ -9,3 +9,7 @@ pub mod restricted;
 pub mod service;
 
 pub mod store_projection;
+
+pub mod bridge;
+
+pub mod dispatch;

@@ -33,6 +33,16 @@ pub const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(5);
 /// Registration is serialized with revocation by the authoritative actor.
 /// A test may supply an in-crate fake of this port, never a production credential.
 pub trait ConnectionAuthorityPort: Send + Sync {
+    /// Production composition registers the owning transport registry with the
+    /// actor before readiness, so revocation can join every ordinary teardown.
+    fn bind_pairing_connections(
+        &self,
+        _server: ServerId,
+        _epoch: ServerEpoch,
+        _authenticator: Authenticator,
+    ) -> Result<(), ServerFailure> {
+        Ok(())
+    }
     /// Success installs the exact binding; rejection installs nothing. The caller
     /// retains a submitted registration future until its result settles.
     fn register(&self, principal: VerifiedPrincipal)
@@ -45,6 +55,20 @@ pub trait ConnectionAuthorityPort: Send + Sync {
     ) -> ServerFuture<'_, Result<(), ServerFailure>>;
 }
 impl ConnectionAuthorityPort for ServerHandle {
+    fn bind_pairing_connections(
+        &self,
+        server: ServerId,
+        epoch: ServerEpoch,
+        authenticator: Authenticator,
+    ) -> Result<(), ServerFailure> {
+        self.send(crate::service::ActorRequest::Pairing(
+            crate::service::pairing_actor::PairingActorMessage::Connections {
+                server,
+                epoch,
+                authenticator,
+            },
+        ))
+    }
     fn register(
         &self,
         principal: VerifiedPrincipal,
@@ -214,7 +238,7 @@ impl Authenticator {
             .limits
             .validate()
             .map_err(protocol_failure)?;
-        Ok(Self(Arc::new(Shared {
+        let authenticator = Self(Arc::new(Shared {
             unauthenticated: Arc::new(Semaphore::new(config.unauthenticated_limit)),
             authenticated: Arc::new(Semaphore::new(config.authenticated_limit)),
             generations: AtomicU64::new(0),
@@ -226,7 +250,13 @@ impl Authenticator {
             handshakes_finished: tokio::sync::Notify::new(),
             config,
             enrollment,
-        })))
+        }));
+        authenticator.0.config.authority.bind_pairing_connections(
+            authenticator.0.config.server,
+            authenticator.0.config.epoch,
+            authenticator.clone(),
+        )?;
+        Ok(authenticator)
     }
     pub fn try_admit(&self) -> Result<UnauthenticatedPermit, ServerFailure> {
         if *self.0.closed.borrow() {

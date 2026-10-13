@@ -2,6 +2,9 @@
 //! registry. Awaited database, process, launch and transport work runs outside
 //! this loop. Lifecycle requests have independent reserved ingress.
 
+#[path = "pairing/actor.rs"]
+pub(crate) mod pairing_actor;
+
 use crate::{
     adapters::{
         core::*,
@@ -33,14 +36,21 @@ use std::{
 use tokio::sync::{mpsc, oneshot, watch};
 
 type Reply<T> = oneshot::Sender<Result<T, ServerFailure>>;
+enum OperationReplySender {
+    Ordinary(Reply<OperationResponse>),
+    Pairing {
+        sender: pairing_actor::PairingReply,
+        authorization: Option<spaceterm_protocol::pairing_adapter::EnrollmentAuthorization>,
+    },
+}
 struct OperationReply {
-    sender: Reply<OperationResponse>,
+    sender: OperationReplySender,
     permit: Option<Box<dyn ReliableOutcomePermit>>,
 }
 impl OperationReply {
     fn service(sender: Reply<OperationResponse>) -> Self {
         Self {
-            sender,
+            sender: OperationReplySender::Ordinary(sender),
             permit: None,
         }
     }
@@ -51,7 +61,30 @@ impl OperationReply {
         {
             value = Err(error);
         }
-        let _ = self.sender.send(value);
+        match self.sender {
+            OperationReplySender::Ordinary(sender) => {
+                let _ = sender.send(value);
+            }
+            OperationReplySender::Pairing {
+                sender,
+                authorization,
+            } => {
+                let result = match value {
+                    Ok(OperationResponse::Completed {
+                        outcome: Outcome::Pairing(outcome),
+                        ..
+                    }) => Ok(crate::pairing::service::PairingExecution {
+                        outcome: *outcome,
+                        authorization,
+                    }),
+                    Ok(OperationResponse::Pending(_)) => Err(PairingFailure::StorageUnavailable),
+                    Ok(OperationResponse::Retired) => Err(PairingFailure::AuthorizationConsumed),
+                    Ok(_) => Err(PairingFailure::InvalidDurableState),
+                    Err(error) => Err(pairing_actor::pairing_failure(error)),
+                };
+                let _ = sender.send(result);
+            }
+        }
     }
 }
 pub(crate) enum ActorRequest {
@@ -110,6 +143,7 @@ pub(crate) enum ActorRequest {
         completion: PairingCompletionRequest,
         reply: Reply<OperationResponse>,
     },
+    Pairing(pairing_actor::PairingActorMessage),
     Observe {
         reply: Reply<()>,
     },
@@ -246,6 +280,20 @@ struct PendingCommit {
     action: CommitAction,
 }
 enum CommitAction {
+    PairingAdmission {
+        principal: Option<VerifiedPrincipal>,
+        request: CanonicalOperationRequest,
+        mutation: Box<dyn crate::pairing::service::PairingMutation>,
+        reply: OperationReply,
+    },
+    PairingReserved {
+        execution: crate::pairing::service::PairingExecution,
+        reply: pairing_actor::PairingReply,
+    },
+    PairingInvalidated {
+        continuation: Option<pairing_actor::PairingActorMessage>,
+        reply: Option<Reply<CommitReceipt>>,
+    },
     Admission {
         principal: VerifiedPrincipal,
         request: CanonicalOperationRequest,
@@ -338,7 +386,7 @@ impl RecoveredServer {
             clock,
         } = dependencies;
         let worker = StoreWorker::new(store)?;
-        let recovered = crate::recovery::recover(
+        let mut recovered = crate::recovery::recover(
             &mut config,
             credentials.as_ref(),
             external_work.as_ref(),
@@ -346,6 +394,24 @@ impl RecoveredServer {
             worker,
         )
         .await?;
+        pairing_actor::invalidate_recovered_tickets(&mut config, &mut recovered, clock.as_ref())
+            .await?;
+        let retained_pairing = recovered
+            .recovered
+            .pairing
+            .clone()
+            .map(|pairing| {
+                spaceterm_core::pairing::policy::PairingSnapshot::new(
+                    recovered.cursor.server,
+                    recovered.cursor.epoch,
+                    recovered.cursor.store,
+                    recovered.cursor.high_water,
+                    pairing,
+                )
+                .map_err(crate::pairing::service::server_failure)
+            })
+            .transpose()?;
+        let (pairing_state, pairing_snapshot) = watch::channel(retained_pairing);
         let registry = RuntimeRegistry::new(config.limits.runtime_owners, config.cleanup.clone())?;
         let (requests, incoming) = mpsc::channel(config.limits.actor_requests);
         let (lifecycle, lifecycle_incoming) = mpsc::channel(64);
@@ -358,12 +424,16 @@ impl RecoveredServer {
             lifecycle,
             phase: phase_received,
             snapshot: snapshot_received,
+            pairing_snapshot,
         };
         let actor = Actor {
             config,
             store: Some(recovered.store),
             cursor: recovered.cursor,
             pairing,
+            pairing_state,
+            pairing_connections: Vec::new(),
+            pairing_assessments: BTreeMap::new(),
             runtime,
             external_work,
             clock,
@@ -480,6 +550,9 @@ struct Actor {
     store: Option<StoreWorker>,
     cursor: CommitCursor,
     pairing: Arc<dyn PairingAuthorizationPort>,
+    pairing_state: watch::Sender<Option<spaceterm_core::pairing::policy::PairingSnapshot>>,
+    pairing_connections: Vec<crate::connection::Authenticator>,
+    pairing_assessments: BTreeMap<OperationId, (UnpairAssessment, u64)>,
     runtime: Arc<dyn RuntimeFactoryPort>,
     external_work: Arc<dyn ExternalWorkPort>,
     clock: Arc<dyn ServerClock>,
@@ -656,18 +729,21 @@ impl Actor {
         {
             return Err(failure(ServerFailureClass::StaleAuthority));
         }
-        let record = self
-            .pairing
-            .lookup(
-                principal.server().bytes(),
-                encode_local(principal.pairing().local()),
-                encode_local(principal.client().local()),
-            )
-            .map_err(|_| failure(ServerFailureClass::Authentication))?;
+        let record = self.pairing_record(principal)?;
         if !record.active || record.principal.device != principal.device().bytes() {
             return Err(failure(ServerFailureClass::Authentication));
         }
         Ok(())
+    }
+    fn is_enrollment_stream(&self, stream: OperationStreamId) -> bool {
+        self.pairing_state.borrow().as_ref().is_some_and(|state| {
+            state
+                .recovery()
+                .parts()
+                .enrollments
+                .iter()
+                .any(|reservation| reservation.parts().enrollment_stream == stream)
+        })
     }
     fn check_binding(
         &self,
@@ -679,6 +755,9 @@ impl Actor {
             || stream.pairing() != principal.pairing()
             || stream.client() != principal.client()
         {
+            return Err(failure(ServerFailureClass::ScopeMismatch));
+        }
+        if self.is_enrollment_stream(stream) {
             return Err(failure(ServerFailureClass::ScopeMismatch));
         }
         Ok(())
@@ -739,6 +818,9 @@ impl Actor {
                     if stream.client() != principal.client()
                         || stream.pairing() != principal.pairing()
                     {
+                        return Err(failure(ServerFailureClass::ScopeMismatch));
+                    }
+                    if self.is_enrollment_stream(stream) {
                         return Err(failure(ServerFailureClass::ScopeMismatch));
                     }
                     let projection = self.config.core.ledger.prepare_acknowledgement(
@@ -825,6 +907,7 @@ impl Actor {
             } => {
                 self.complete_pairing(request, completion, OperationReply::service(reply));
             }
+            ActorRequest::Pairing(message) => self.pairing_request(message),
             ActorRequest::Observe { reply } => {
                 if self.inspection_inflight {
                     let _ = reply.send(Err(failure(ServerFailureClass::Capacity)));
@@ -920,14 +1003,7 @@ impl Actor {
         {
             return Err(failure(ServerFailureClass::Authentication));
         }
-        let record = self
-            .pairing
-            .lookup(
-                principal.server().bytes(),
-                encode_local(principal.pairing().local()),
-                encode_local(principal.client().local()),
-            )
-            .map_err(|_| failure(ServerFailureClass::Authentication))?;
+        let record = self.pairing_record(principal)?;
         if !record.active || record.principal.device != principal.device().bytes() {
             return Err(failure(ServerFailureClass::Authentication));
         }
@@ -1171,7 +1247,7 @@ impl Actor {
             }
         };
         let reply = OperationReply {
-            sender,
+            sender: OperationReplySender::Ordinary(sender),
             permit: Some(permit),
         };
         let preflight = (|| {
@@ -2741,6 +2817,17 @@ impl Actor {
                     self.enter_recovery();
                     return;
                 }
+                if self
+                    .install_pairing_writes(pending.transaction.parts())
+                    .is_err()
+                {
+                    reject_action(
+                        pending.action,
+                        failure(ServerFailureClass::RecoveryRequired),
+                    );
+                    self.enter_recovery();
+                    return;
+                }
                 let publication_barrier = matches!(&pending.action, CommitAction::PairingCompleted { revoked_clients, .. } if !revoked_clients.is_empty())
                     || matches!(&pending.action, CommitAction::Completed { control: Some(pane), .. } if self.registry.as_ref().is_some_and(|v| v.contains_pane(*pane)))
                     || matches!(
@@ -2758,6 +2845,29 @@ impl Actor {
                 }
                 self.busy = publication_barrier;
                 match pending.action {
+                    CommitAction::PairingAdmission {
+                        principal,
+                        request,
+                        mutation,
+                        reply,
+                    } => {
+                        self.busy = false;
+                        self.prepare_pairing_mutation(principal, request, mutation, reply);
+                    }
+                    CommitAction::PairingReserved { execution, reply } => {
+                        let _ = reply.send(Ok(execution));
+                    }
+                    CommitAction::PairingInvalidated {
+                        continuation,
+                        reply,
+                    } => {
+                        if let Some(reply) = reply {
+                            let _ = reply.send(Ok(receipt));
+                        }
+                        if let Some(message) = continuation {
+                            self.pairing_request(message);
+                        }
+                    }
                     CommitAction::Admission {
                         principal,
                         request,
@@ -2962,6 +3072,11 @@ impl Actor {
                         revoked_clients,
                         reply,
                     } => {
+                        if let Err(error) = self.retain_pairing_assessment(&reduction.outcome) {
+                            reply.send(Err(error));
+                            self.enter_recovery();
+                            return;
+                        }
                         let response = OperationResponse::Completed {
                             binding,
                             revision: reduction.snapshot.state().revision,
@@ -3299,6 +3414,8 @@ impl Actor {
         if let OperationResponse::Completed { binding, .. } = &response {
             self.delivery_pending = Some(*binding);
         }
+        let authenticators = self.pairing_connections.clone();
+        let disconnected_clients = clients.clone();
         let prepared = (|| {
             let sessions = self.pairing_sessions(&clients);
             let mut tasks = Vec::new();
@@ -3320,6 +3437,9 @@ impl Actor {
         tokio::spawn(async move {
             let result = async {
                 let mut applied = Vec::new();
+                for authenticator in authenticators {
+                    authenticator.close_clients(&disconnected_clients).await?;
+                }
                 for task in prepared? {
                     applied.push(
                         task.await
@@ -4301,8 +4421,23 @@ fn reject_action(action: CommitAction, error: ServerFailure) {
         | CommitAction::Completed { reply, .. }
         | CommitAction::Startup { reply, .. }
         | CommitAction::AcceptedRetirement { reply, .. }
-        | CommitAction::PairingCompleted { reply, .. } => {
+        | CommitAction::PairingCompleted { reply, .. }
+        | CommitAction::PairingAdmission { reply, .. } => {
             reply.send(Err(error));
+        }
+        CommitAction::PairingReserved { reply, .. } => {
+            let _ = reply.send(Err(pairing_actor::pairing_failure(error)));
+        }
+        CommitAction::PairingInvalidated {
+            continuation,
+            reply,
+        } => {
+            if let Some(reply) = reply {
+                let _ = reply.send(Err(error));
+            }
+            if let Some(message) = continuation {
+                message.reject(error);
+            }
         }
         CommitAction::Allocated { reply, .. } => {
             let _ = reply.send(Err(error));
