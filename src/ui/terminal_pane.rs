@@ -5251,17 +5251,24 @@ impl TerminalPane {
         let Some(screen) = server.snapshot(&update) else {
             return;
         };
-        let Some(accessibility) = server.accessibility_model() else {
-            return;
+        // A visible unfocused Pane can paint without permission to publish native content.
+        let accessibility = match server.accessibility_model() {
+            Some(accessibility) => accessibility,
+            None => {
+                self.accessibility_element.set_hierarchy(false);
+                TerminalAccessibilityModel::from_screen(&ScreenSnapshot::empty_with_appearance(
+                    self.file_insertion.paths,
+                    &update,
+                ))
+            }
         };
-        self.accessibility = Arc::new(accessibility);
-        self.accessibility_needs_presentation = true;
         let _ = self.render_lifecycle.observe_snapshot(screen.generation);
         self.server_screen_frame = server.channel().current_frame();
         self.server_screen_session = self
             .server_screen_frame
             .as_ref()
             .and_then(|frame| frame.frame().map(|frame| frame.base().session));
+        self.handle_accessibility(Arc::new(accessibility));
         self.hidden_input = screen.cursor.password_input;
         self.sync_secure_input();
         self.screen = screen;

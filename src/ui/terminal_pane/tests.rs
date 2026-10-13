@@ -10089,6 +10089,99 @@ fn mount_server_pane(
 }
 
 #[gpui::test]
+fn desktop_server_visible_unfocused_pane_paints_new_content_without_native_permission(
+    cx: &mut TestAppContext,
+) {
+    let (fixture, _content, pane, cx) = server_pane_with_content(cx);
+    let accessibility_record = prepare_accessibility_presentation(&pane, cx);
+    assert_eq!(accessibility_record.borrow().model.text(), "priva");
+    pane.update(cx, |pane, cx| {
+        pane.set_product_focus(
+            TerminalProductFocus {
+                focused_pane: false,
+                ..pane.product_focus
+            },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    fixture.publish_base(2);
+    let session = pane.read_with(cx, |pane, _| pane.server_session_handle().unwrap());
+    session.request_frame().unwrap();
+    cx.run_until_parked();
+    pane.update(cx, |pane, cx| {
+        pane.sync_server_screen(cx);
+        assert!(pane.render_lifecycle.can_present());
+        assert!(session.native_permit().is_none());
+        assert!(session.accessibility_model().is_none());
+        assert_eq!(pane.screen.rows[0][0].text, "R");
+        let frame = pane.server_screen_frame.as_ref().unwrap();
+        assert_eq!(frame.frame().unwrap().base().revision.get(), 2);
+        assert!(frame.is_paintable());
+        assert!(!frame.permits_native_content_use());
+        assert!(pane.accessibility.text().is_empty());
+    });
+    cx.run_until_parked();
+    pane.read_with(cx, |pane, _| {
+        assert_eq!(pane.last_valid_screen.rows[0][0].text, "R");
+        assert_eq!(
+            pane.server_last_valid_frame
+                .as_ref()
+                .unwrap()
+                .frame()
+                .unwrap()
+                .base()
+                .revision
+                .get(),
+            2,
+        );
+    });
+    assert!(accessibility_record.borrow().model.text().is_empty());
+    assert!(!accessibility_record.borrow().presented);
+}
+
+#[gpui::test]
+fn desktop_server_text_change_queues_accessibility_value_without_focus_change(
+    cx: &mut TestAppContext,
+) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let focus = pane.read_with(cx, |pane, _| pane.product_focus);
+    assert_eq!(pane.read_with(cx, |pane, _| pane.accessibility.text().to_owned()), "priva");
+    pane.update(cx, |pane, _| {
+        pane.pending_accessibility_notifications.take();
+    });
+    fixture.publish_base(2);
+    fixture.frame_with_text(["n", "e", "w", "!", "!"]);
+    pane.update(cx, |pane, cx| {
+        pane.sync_server_screen(cx);
+        assert_eq!(pane.product_focus, focus);
+        assert_eq!(pane.accessibility.text(), "new!!");
+        assert!(pane.pending_accessibility_notifications.contains(AccessibilityNotification::Value));
+    });
+}
+
+#[gpui::test]
+fn desktop_server_selection_change_queues_accessibility_selection_without_focus_change(
+    cx: &mut TestAppContext,
+) {
+    let (fixture, pane, cx) = server_pane(cx, true);
+    let focus = pane.read_with(cx, |pane, _| pane.product_focus);
+    let previous_range = pane.read_with(cx, |pane, _| pane.accessibility.selected_or_cursor_range());
+    pane.update(cx, |pane, _| {
+        pane.pending_accessibility_notifications.take();
+    });
+    server_selection(&fixture);
+    pane.update(cx, |pane, cx| {
+        pane.sync_server_screen(cx);
+        assert_eq!(pane.product_focus, focus);
+        assert_eq!(pane.accessibility.text(), "priva");
+        assert_ne!(pane.accessibility.selected_or_cursor_range(), previous_range);
+        assert_eq!(pane.accessibility.selected_or_cursor_range(), 0..5);
+        assert!(pane.pending_accessibility_notifications.contains(AccessibilityNotification::Selection));
+    });
+}
+
+#[gpui::test]
 fn desktop_server_measurement_without_explicit_use_starts_nothing(cx: &mut TestAppContext) {
     let (fixture, pane, cx) = server_pane(cx, false);
     pane.update(cx, |pane, cx| {
@@ -10175,9 +10268,13 @@ fn desktop_server_takeover_removes_paint_ax_copy_services_and_ime(cx: &mut TestA
             cx,
         )
         .unwrap();
+        pane.sync_server_screen(cx);
         assert!(pane.screen.rows.is_empty());
         assert!(pane.last_valid_screen.rows.is_empty());
+        assert!(pane.server_screen_frame.is_none());
+        assert!(pane.server_last_valid_frame.is_none());
         assert!(pane.accessibility.text().is_empty());
+        assert!(pane.server_session_handle().unwrap().accessibility_model().is_none());
         assert!(pane.ime.marked_text().is_none());
         assert!(pane.ordered_selection_copy(cx).is_none());
         assert!(!pane.native_context_actions().copy);
