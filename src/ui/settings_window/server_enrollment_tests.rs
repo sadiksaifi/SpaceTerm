@@ -238,6 +238,7 @@ impl Fixture {
                         public_key: None,
                         route_reference: None,
                         route: None,
+                        ssh_capture: None,
                         generation: LocalPairingGeneration::new(generation).unwrap(),
                     },
                 ));
