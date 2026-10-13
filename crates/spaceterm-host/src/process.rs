@@ -35,6 +35,41 @@ pub fn spawn(command: &mut Command) -> Result<Child, SpawnError> {
         })
 }
 
+/// Creates a blocking anonymous pipe with close-on-exec on both ends.
+///
+/// macOS does not expose pipe2. The descriptor guard excludes process creation
+/// until both descriptors have close-on-exec set. Owned descriptors close both
+/// ends if any part of setup fails.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub fn anonymous_pipe() -> io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+    #[cfg(target_os = "macos")]
+    use std::os::fd::AsRawFd;
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    let _guard = descriptor_guard()?;
+    let mut descriptors = [-1; 2];
+    // SAFETY: the array holds two writable entries. Successful allocation returns
+    // two fresh descriptors, which are immediately transferred to OwnedFd.
+    #[cfg(target_os = "linux")]
+    let result = unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) };
+    #[cfg(target_os = "macos")]
+    let result = unsafe { libc::pipe(descriptors.as_mut_ptr()) };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a successful pipe operation initialized both fresh descriptors.
+    let read = unsafe { OwnedFd::from_raw_fd(descriptors[0]) };
+    let write = unsafe { OwnedFd::from_raw_fd(descriptors[1]) };
+    #[cfg(target_os = "macos")]
+    for fd in [&read, &write] {
+        // SAFETY: both descriptors remain owned and open throughout setup.
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok((read, write))
+}
+
 #[cfg(target_os = "macos")]
 static DESCRIPTORS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

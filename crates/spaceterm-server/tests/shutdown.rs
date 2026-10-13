@@ -3519,3 +3519,167 @@ async fn stop_acceptance_in_flight_retains_late_cleanup_for_an_already_failed_se
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_joins_a_long_native_git_write_before_retiring_sessions() {
+    use spaceterm_host::git::{
+        CancellationToken, ProgramRequest, RepositoryProgramRunner, UnixRepositoryProgramRunner,
+    };
+    use spaceterm_server::contracts::{
+        ExternalWorkPort, RecoveryEdits, ServerFailure, ServerFuture,
+    };
+    use std::{fs, os::unix::fs::PermissionsExt as _, process::Stdio, sync::Arc, time::Duration};
+
+    struct NativeWrite {
+        read_cancellation: CancellationToken,
+        write: tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<(), ServerFailure>>>>,
+    }
+    impl ExternalWorkPort for NativeWrite {
+        fn cancel_reads(&self) {
+            // The read token must never become the started write's token.
+            self.read_cancellation.cancel();
+        }
+        fn finish_started_writes(&self) -> ServerFuture<'_, Result<(), ServerFailure>> {
+            Box::pin(async move {
+                let write = self.write.lock().await.take();
+                match write {
+                    Some(write) => write.await.map_err(|_| {
+                        spaceterm_server::failure::failure(ServerFailureClass::CleanupIncomplete)
+                    })?,
+                    None => Ok(()),
+                }
+            })
+        }
+        fn reconcile<'a>(
+            &'a self,
+            _recovered: &'a spaceterm_core::storage::RecoveredState,
+        ) -> ServerFuture<'a, Result<RecoveryEdits, ServerFailure>> {
+            Box::pin(async {
+                Ok(RecoveryEdits {
+                    transactions: Vec::new(),
+                })
+            })
+        }
+    }
+    struct ReleaseWrite(std::path::PathBuf);
+    impl Drop for ReleaseWrite {
+        fn drop(&mut self) {
+            let _ = fs::write(&self.0, []);
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let release = ReleaseWrite(directory.path().join("release"));
+    let mut init = std::process::Command::new("/usr/bin/git");
+    init.args(["init", "-q"])
+        .current_dir(directory.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    assert!(
+        spaceterm_host::process::spawn(&mut init)
+            .unwrap()
+            .wait()
+            .unwrap()
+            .success()
+    );
+    let script = directory.path().join("long-write");
+    fs::write(
+        &script,
+        b"#!/bin/sh\n: > started\nwhile [ ! -e release ]; do sleep 0.02; done\nexec /usr/bin/git -c user.name=Fixture -c user.email=fixture@invalid commit -q --allow-empty -m completed\n",
+    )
+    .unwrap();
+    fs::set_permissions(script, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let mut fixture = Fixture::new();
+    let principal = fixture.principal(1, 1);
+    let codec = fixture.codec.clone();
+    let host = fixture.host.clone();
+    let factory = fixture.factory.clone();
+    let external = Arc::new(NativeWrite {
+        read_cancellation: CancellationToken::default(),
+        write: tokio::sync::Mutex::new(None),
+    });
+    fixture.dependencies.external_work = external.clone();
+    let server = RecoveredServer::recover(fixture.config, fixture.dependencies)
+        .await
+        .unwrap();
+    let handle = server.handle();
+    connect(&handle, principal).await;
+    let grant = acquire(&handle, principal, &codec).await;
+    start(&handle, principal, &codec, grant).await;
+
+    let request = ProgramRequest {
+        executable: "/usr/bin/git".into(),
+        arguments: ["-c", "alias.finish=!./long-write", "finish"]
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+        directory: directory.path().to_owned(),
+        environment: spaceterm_host::git::local_read::git_environment(
+            std::path::Path::new("/usr/bin/git"),
+            directory.path(),
+        ),
+        stdout_limit: Some(64 * 1024),
+        deadline: None,
+        keep_process_group_on_exit: false,
+    };
+    *external.write.lock().await = Some(tokio::task::spawn_blocking(move || {
+        let result = UnixRepositoryProgramRunner::new().run(
+            &request,
+            &mut |_| {},
+            &CancellationToken::default(),
+        );
+        match result {
+            Ok(exit) if exit.success() => Ok(()),
+            _ => Err(spaceterm_server::failure::failure(
+                ServerFailureClass::CleanupIncomplete,
+            )),
+        }
+    }));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !directory.path().join("started").exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let shutdown = tokio::spawn(async move { stop(&handle, host).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !external.read_cancellation.is_cancelled() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!shutdown.is_finished());
+    assert_eq!(
+        factory.states.lock().unwrap()[0]
+            .lock()
+            .unwrap()
+            .retire_calls,
+        0
+    );
+    fs::write(&release.0, []).unwrap();
+    let report = shutdown.await.unwrap().unwrap();
+    server.wait().await.unwrap();
+    assert!(report.started_writes_finished && report.cleanup_confirmed);
+    assert_eq!(
+        factory.states.lock().unwrap()[0]
+            .lock()
+            .unwrap()
+            .retire_calls,
+        1
+    );
+    let mut count = std::process::Command::new("/usr/bin/git");
+    count
+        .args(["rev-list", "--count", "HEAD"])
+        .current_dir(directory.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let output = spaceterm_host::process::spawn(&mut count)
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"1\n");
+}

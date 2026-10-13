@@ -7,7 +7,7 @@ use std::{
     ffi::OsString,
     io::{self, BufRead, BufReader, Read, Write},
     mem::MaybeUninit,
-    os::{fd::AsRawFd, unix::process::CommandExt},
+    os::unix::process::CommandExt,
     path::Path,
     process::{Command, Stdio},
     sync::{Arc, OnceLock, mpsc},
@@ -15,7 +15,6 @@ use std::{
 };
 
 use spaceterm_host::{
-    native_spawn::{CredentialFreePtyAdapterFactory, CredentialFreeSpawner},
     process::spawn,
     pty::{
         NativePtyAdapterFactory, NativePtyExit, NativePtySize, UnixNativePtyAdapterFactory,
@@ -24,7 +23,6 @@ use spaceterm_host::{
     shell_launch::{
         PreparedRemoteShellCommand, PreparedShellLaunch, RemoteShellLaunchParts, ShellLaunchFailure,
     },
-    startup_exchange::unix::{ExactChild, process_identity},
 };
 
 const FIXTURE: &str = "SPACETERM_PTY_INHERITANCE_FIXTURE";
@@ -105,7 +103,7 @@ fn server_pty_allocation_excludes_unrelated_child_inheritance() {
         return;
     }
     assert_allocation_excludes_inheritance(
-        Arc::new(CredentialFreePtyAdapterFactory::new(spawner())),
+        Arc::new(UnixNativePtyAdapterFactory::new(Arc::new(MacosPtyHost))),
         "server_pty_allocation_excludes_unrelated_child_inheritance",
     );
 }
@@ -251,28 +249,4 @@ impl PreparedRemoteShellCommand for Launch {
 
 fn launch() -> PreparedShellLaunch {
     PreparedShellLaunch::remote(Path::new("/tmp"), Launch).unwrap()
-}
-
-fn spawner() -> CredentialFreeSpawner {
-    let (server, peer) = std::os::unix::net::UnixStream::pair().unwrap();
-    let fd = peer.as_raw_fd();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_spaceterm-server-spawner"));
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    // SAFETY: this injected account launcher uses only native descriptor operations before exec.
-    unsafe {
-        command.pre_exec(move || {
-            if libc::dup2(fd, 3) < 0 || libc::fcntl(3, libc::F_SETFD, 0) < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let child = spawn(&mut command).unwrap();
-    drop(peer);
-    let identity = process_identity(child.id()).unwrap();
-    let exact = ExactChild::take(&mut Some(child), identity).unwrap();
-    CredentialFreeSpawner::connect(server, exact).unwrap()
 }

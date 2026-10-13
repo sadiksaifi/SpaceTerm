@@ -251,6 +251,24 @@ pub struct NativeServerGitHost {
     inventory_identities: Arc<Mutex<InventoryIdentities>>,
 }
 impl NativeServerGitHost {
+    /// Production account composition runs hardened Git directly. Native spawning
+    /// retains the descriptor guard and isolated process-group cleanup; no
+    /// privileged spawner or credential receiver participates.
+    pub fn for_account(
+        git: PathBuf,
+        home: PathBuf,
+        version: native::ToolVersion,
+        directories: Arc<NativeDirectoryProvider>,
+    ) -> Self {
+        Self::new(
+            Arc::new(native::UnixRepositoryProgramRunner::new()),
+            git,
+            home,
+            version,
+            directories,
+        )
+    }
+
     pub fn new(
         runner: Arc<dyn native::RepositoryProgramRunner>,
         git: PathBuf,

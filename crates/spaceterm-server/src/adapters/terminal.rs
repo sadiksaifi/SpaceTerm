@@ -5,7 +5,16 @@ use crate::contracts::{RuntimeFactoryPort, RuntimeOwnerPort, ServerFailure, Serv
 use spaceterm_core::{
     observations::*, retirement::SessionCleanupObservation, runtime_authority::RuntimeLifecycle,
 };
-use spaceterm_terminal::runtime_contracts::RuntimeStartRequest;
+use spaceterm_host::{
+    git::filesystem::RetainedDirectory,
+    pty::{
+        NativePtyCloseHandle, NativePtyOutputSink, NativePtyOwner, NativePtySize,
+        UnixNativePtyAdapterFactory,
+    },
+    server_directories::native::NativeDirectoryProvider,
+    shell_launch::{PreparedShellLaunch, ShellLaunchPlanner},
+};
+use spaceterm_terminal::{metadata::PromptOwner, runtime_contracts::RuntimeStartRequest};
 use std::sync::{
     Arc,
     atomic::{AtomicU8, Ordering},
@@ -38,6 +47,86 @@ impl LaunchGate {
             .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire);
     }
 }
+/// Direct account PTY preparation for the runtime provider. The actor must reserve
+/// aggregate grid residency and commit StartupReserved before invoking this path.
+/// This value is neither a protocol request nor a replacement runtime owner.
+pub struct AccountShellLaunch {
+    launch: PreparedShellLaunch,
+    directory: Arc<dyn RetainedDirectory>,
+    size: NativePtySize,
+}
+impl std::fmt::Debug for AccountShellLaunch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AccountShellLaunch([redacted])")
+    }
+}
+impl AccountShellLaunch {
+    /// The runtime supplies its fresh per-Session owner and retains the same value
+    /// in terminal metadata. It is host-only launch authority, never request data.
+    pub fn prepare(
+        planner: &ShellLaunchPlanner,
+        directories: &NativeDirectoryProvider,
+        request: &RuntimeStartRequest,
+        prompt_owner: &PromptOwner,
+    ) -> Result<Self, ServerFailure> {
+        let grid = request.reservation().grid();
+        let directory = directories.retain(request.directory()).map_err(|error| {
+            use spaceterm_core::server_directories::DirectoryFailure;
+            crate::failure::failure(match error {
+                DirectoryFailure::WrongServer => {
+                    crate::contracts::ServerFailureClass::ScopeMismatch
+                }
+                DirectoryFailure::Capacity => crate::contracts::ServerFailureClass::Capacity,
+                _ => crate::contracts::ServerFailureClass::RuntimeUnavailable,
+            })
+        })?;
+        let launch = planner
+            .local(directory.path())
+            .map_err(|_| {
+                crate::failure::failure(crate::contracts::ServerFailureClass::RuntimeUnavailable)
+            })?
+            .with_environment_value(PromptOwner::ENVIRONMENT, prompt_owner.value());
+        let (pixel_width, pixel_height) = grid.pty_pixels();
+        Ok(Self {
+            launch,
+            directory,
+            size: NativePtySize {
+                rows: grid.rows(),
+                columns: grid.columns(),
+                pixel_width,
+                pixel_height,
+            },
+        })
+    }
+
+    pub fn size(&self) -> NativePtySize {
+        self.size
+    }
+
+    /// Runs on the runtime's blocking worker, never a transport task. The existing
+    /// Unix PTY adapter preserves ordinary account groups, shell integration and
+    /// the process descriptor guard. The returned owner joins native cleanup.
+    pub fn start(
+        self,
+        gate: &LaunchGate,
+        output: Arc<dyn NativePtyOutputSink>,
+        close: &NativePtyCloseHandle,
+    ) -> Result<NativePtyOwner, ServerFailure> {
+        self.directory.revalidate().map_err(|_| {
+            crate::failure::failure(crate::contracts::ServerFailureClass::RuntimeUnavailable)
+        })?;
+        gate.admit_process()?;
+        #[cfg(target_os = "macos")]
+        let host = spaceterm_host::pty::macos_pty_host::MacosPtyHost;
+        #[cfg(target_os = "linux")]
+        let host = spaceterm_host::pty::linux_pty_host::LinuxPtyHost;
+        let factory = UnixNativePtyAdapterFactory::new(Arc::new(host));
+        NativePtyOwner::start(&factory, self.launch, self.size, output, close).map_err(|_| {
+            crate::failure::failure(crate::contracts::ServerFailureClass::RuntimeUnavailable)
+        })
+    }
+}
+
 /// Returned only after owning-filesystem validation and aggregate geometry
 /// reservation. It is consumed at the final launch boundary and is never wire data.
 /// The provider must admit the gate before creating a process and release its

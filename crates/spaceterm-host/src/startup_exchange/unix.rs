@@ -7,7 +7,7 @@
 
 use std::fmt;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::process::ExitStatusExt;
 use std::ptr::NonNull;
 use std::time::Duration;
@@ -158,27 +158,7 @@ impl PipeEndpoint {
 
 /// Creates a private anonymous pipe with CLOEXEC on both ends.
 pub fn anonymous_pipe() -> Result<(OwnedFd, OwnedFd), NativeFailure> {
-    let _guard = crate::process::descriptor_guard().map_err(|_| NativeFailure::IoUnavailable)?;
-    let mut descriptors = [-1; 2];
-    // SAFETY: pipe initializes both entries on success. The guard excludes concurrent spawn
-    // through CLOEXEC setup, including calls from the multithreaded native spawn client.
-    #[cfg(target_os = "linux")]
-    let result = unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) };
-    #[cfg(target_os = "macos")]
-    let result = unsafe { libc::pipe(descriptors.as_mut_ptr()) };
-    if result != 0 {
-        return Err(NativeFailure::IoUnavailable);
-    }
-    // SAFETY: successful pipe returned two fresh owned descriptors.
-    let read = unsafe { OwnedFd::from_raw_fd(descriptors[0]) };
-    let write = unsafe { OwnedFd::from_raw_fd(descriptors[1]) };
-    for fd in [&read, &write] {
-        let raw = fd.as_raw_fd();
-        if unsafe { libc::fcntl(raw, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
-            return Err(NativeFailure::IoUnavailable);
-        }
-    }
-    Ok((read, write))
+    crate::process::anonymous_pipe().map_err(|_| NativeFailure::IoUnavailable)
 }
 
 /// Locked, anonymous, noncloneable bytes. No debug output exposes contents.
