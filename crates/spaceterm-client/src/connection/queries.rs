@@ -269,6 +269,16 @@ impl Drop for ReadGuard {
     }
 }
 
+/// One bounded page from the current authenticated pairing owner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PairedDevicePage {
+    pub version: spaceterm_core::authority::FieldVersion,
+    pub this_device: spaceterm_core::identity::DeviceId,
+    pub total: u64,
+    pub devices: Vec<spaceterm_core::pairing::PairingTarget>,
+    pub next: Option<spaceterm_core::identity::PairingId>,
+}
+
 /// Queries use this handle's connection, canonical journal and response owner.
 /// No transport, credential provider or retry ledger is created here.
 #[derive(Clone)]
@@ -400,6 +410,143 @@ impl ServerQueries {
             first: true,
         }))
     }
+    /// Reads authorized devices through this worker. Continuations retain the original store revision.
+    pub async fn paired_devices(
+        &self,
+        after: Option<spaceterm_core::identity::PairingId>,
+        version: Option<spaceterm_core::authority::FieldVersion>,
+    ) -> Result<PairedDevicePage, ManagementFailure> {
+        use spaceterm_core::{identity::*, pairing::*};
+        let info = self.info().map_err(management_failure)?;
+        if after.is_some() != version.is_some()
+            || after.is_some_and(|id| id.server() != info.server)
+            || version.is_some_and(|version| version.get() == 0)
+        {
+            return Err(ManagementFailure::Usage);
+        }
+        let reply = self
+            .request(info, |request| {
+                macro_rules! query {
+                    ($p:ident, $variant:ident) => {
+                        Payload::$variant($p::Message {
+                            kind: Some($p::message::Kind::PairingRequest($p::PairingRequest {
+                                request,
+                                action: Some($p::pairing_request::Action::List(true)),
+                                inventory_after: after.map_or(0, PairingId::local),
+                                inventory_version: version
+                                    .map_or(0, spaceterm_core::authority::FieldVersion::get),
+                                request_generation: info.attempt,
+                                ..Default::default()
+                            })),
+                        })
+                    };
+                }
+                match info.major {
+                    1 => Ok(query!(v1, Major1)),
+                    2 => Ok(query!(v2, Major2)),
+                    _ => Err(invalid_peer()),
+                }
+            })
+            .await
+            .map_err(management_failure)?;
+        if !same_connection(info, self.info().map_err(management_failure)?) {
+            return Err(ManagementFailure::Offline);
+        }
+        macro_rules! decode {
+            ($value:ident) => {{
+                if $value.classified_failure
+                    == spaceterm_protocol::wire::pairing::PairingFailure::PairingStaleAssessment
+                        as i32
+                {
+                    return Err(ManagementFailure::StaleAssessment);
+                }
+                if $value.classified_failure != 0 {
+                    return Err(ManagementFailure::UnsafeNativeState);
+                }
+                if $value.failure.is_some()
+                    || $value.operation.is_some()
+                    || $value.inventory_version == 0
+                    || $value.devices.len() > 128
+                    || $value.inventory_total < $value.devices.len() as u64
+                    || $value.inventory_total > spaceterm_core::pairing::MAX_ACTIVE_PAIRINGS as u64
+                    || version.is_some_and(|version| version.get() != $value.inventory_version)
+                {
+                    return Err(ManagementFailure::UnsafeNativeState);
+                }
+                let this_device = DeviceId::new(
+                    inventory_identity($value.this_device.as_ref())
+                        .map_err(|_| ManagementFailure::UnsafeNativeState)?,
+                );
+                if this_device != self.server.binding.target().device() {
+                    return Err(ManagementFailure::UnsafeNativeState);
+                }
+                let mut devices = Vec::with_capacity($value.devices.len());
+                let mut previous = after.map_or(0, PairingId::local);
+                for value in &$value.devices {
+                    let id = inventory_identity(value.pairing.as_ref())
+                        .map_err(|_| ManagementFailure::UnsafeNativeState)?;
+                    if id[..8] != [0; 8] {
+                        return Err(ManagementFailure::UnsafeNativeState);
+                    }
+                    let local = u64::from_be_bytes(
+                        id[8..]
+                            .try_into()
+                            .map_err(|_| ManagementFailure::UnsafeNativeState)?,
+                    );
+                    if local <= previous {
+                        return Err(ManagementFailure::UnsafeNativeState);
+                    }
+                    previous = local;
+                    let device = DeviceId::new(
+                        inventory_identity(value.device.as_ref())
+                            .map_err(|_| ManagementFailure::UnsafeNativeState)?,
+                    );
+                    let pairing = PairingId::new(info.server, local)
+                        .map_err(|_| ManagementFailure::UnsafeNativeState)?;
+                    devices.push(
+                        PairingTarget::new(PairingTargetParts {
+                            server: info.server,
+                            device,
+                            pairing,
+                        })
+                        .map_err(|_| ManagementFailure::UnsafeNativeState)?,
+                    );
+                }
+                let next = if $value.inventory_next == 0 {
+                    None
+                } else {
+                    if devices
+                        .last()
+                        .is_none_or(|value| value.parts().pairing.local() != $value.inventory_next)
+                        || $value.inventory_total <= devices.len() as u64
+                    {
+                        return Err(ManagementFailure::UnsafeNativeState);
+                    }
+                    Some(
+                        PairingId::new(info.server, $value.inventory_next)
+                            .map_err(|_| ManagementFailure::UnsafeNativeState)?,
+                    )
+                };
+                Ok(PairedDevicePage {
+                    version: spaceterm_core::authority::FieldVersion::new($value.inventory_version),
+                    this_device,
+                    total: $value.inventory_total,
+                    devices,
+                    next,
+                })
+            }};
+        }
+        match reply {
+            Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::PairingOutcome(value)),
+            }) => decode!(value),
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::PairingOutcome(value)),
+            }) => decode!(value),
+            _ => Err(ManagementFailure::UnsafeNativeState),
+        }
+    }
+
     pub async fn status(&self) -> Result<ServerStatus, ManagementFailure> {
         let info = self.info().map_err(management_failure)?;
         let reply = self
@@ -773,6 +920,12 @@ fn query_correlation(message: &Payload) -> Option<(u64, u64)> {
                 Some($p::message::Kind::ServerDirectoryQuery(value)) => {
                     Some((value.request, value.request_generation))
                 }
+                Some($p::message::Kind::PairingRequest(value))
+                    if matches!(value.action, Some($p::pairing_request::Action::List(true)))
+                        && value.operation.is_none() =>
+                {
+                    Some((value.request, value.request_generation))
+                }
                 Some($p::message::Kind::StatusQuery(value)) => {
                     Some((value.request, value.request_generation))
                 }
@@ -793,6 +946,9 @@ fn response_correlation(message: &Payload) -> Option<(u64, u64)> {
                     Some((value.request, value.request_generation))
                 }
                 Some($p::message::Kind::ServerDirectoryResult(value)) => {
+                    Some((value.request, value.request_generation))
+                }
+                Some($p::message::Kind::PairingOutcome(value)) if value.operation.is_none() => {
                     Some((value.request, value.request_generation))
                 }
                 Some($p::message::Kind::StatusPublication(value)) => {
@@ -821,6 +977,9 @@ fn matching_reply(query: &Payload, reply: &Payload) -> bool {
                 ) | (
                     Some($p::message::Kind::StatusQuery(_)),
                     Some($p::message::Kind::StatusPublication(_))
+                ) | (
+                    Some($p::message::Kind::PairingRequest(_)),
+                    Some($p::message::Kind::PairingOutcome(_))
                 )
             )
         };
@@ -871,4 +1030,12 @@ fn management_failure(error: ClientFailure) -> ManagementFailure {
         }
         _ => ManagementFailure::Offline,
     }
+}
+
+fn inventory_identity(
+    value: Option<&spaceterm_protocol::wire::common::Identity>,
+) -> Result<[u8; 16], spaceterm_protocol::ProtocolError> {
+    spaceterm_protocol::convert::identity::decode_global(
+        value.ok_or(spaceterm_protocol::ProtocolError::Malformed)?,
+    )
 }

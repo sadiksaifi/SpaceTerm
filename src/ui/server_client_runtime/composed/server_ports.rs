@@ -134,10 +134,10 @@ pub(super) fn directory_connection(
     let queries = handle
         .queries(inner.tracker.journal().clone())
         .map_err(DesktopClientError::from)?;
-    Ok(Arc::new(native_ports::DirectoryPort {
-        queries,
-        executor: inner.executor.clone(),
-    }))
+    Ok(crate::ui::directory_picker::server_source::on_executor(
+        Arc::new(queries),
+        inner.executor.clone(),
+    ))
 }
 
 pub(super) fn retained_pane_repair(

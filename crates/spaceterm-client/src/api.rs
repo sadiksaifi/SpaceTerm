@@ -291,4 +291,4 @@ pub struct ServerSummary {
     pub state: ConnectionState,
 }
 
-pub use crate::connection::queries::{ServerQueries, ServerStatusBackend};
+pub use crate::connection::queries::{PairedDevicePage, ServerQueries, ServerStatusBackend};

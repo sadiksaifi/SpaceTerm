@@ -1032,3 +1032,87 @@ async fn companion_status_decodes_other_client_and_compacted_operation_progress_
         }
     }
 }
+
+fn pairing_inventory_reply(payload: &Payload, target: &ConnectionTarget) -> Option<Payload> {
+    macro_rules! reply {
+        ($p:ident, $variant:ident, $query:ident) => {{
+            if !matches!($query.action, Some($p::pairing_request::Action::List(true)))
+                || $query.operation.is_some()
+            {
+                return None;
+            }
+            Some(Payload::$variant($p::Message {
+                kind: Some($p::message::Kind::PairingOutcome($p::PairingOutcome {
+                    request: $query.request,
+                    request_generation: $query.request_generation,
+                    inventory_version: if $query.inventory_after == 0 { 7 } else { 8 },
+                    inventory_total: 2,
+                    inventory_next: if $query.inventory_after == 0 { 1 } else { 0 },
+                    this_device: Some(spaceterm_protocol::convert::identity::encode_global(
+                        target.device().bytes(),
+                    )),
+                    devices: vec![$p::PairedDevice {
+                        device: Some(spaceterm_protocol::convert::identity::encode_global(
+                            target.device().bytes(),
+                        )),
+                        pairing: Some(spaceterm_protocol::convert::identity::encode_local(
+                            if $query.inventory_after == 0 { 1 } else { 2 },
+                        )),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })),
+            }))
+        }};
+    }
+    match payload {
+        Payload::Major1(spaceterm_protocol::wire::v1::Message {
+            kind: Some(spaceterm_protocol::wire::v1::message::Kind::PairingRequest(query)),
+        }) => {
+            use spaceterm_protocol::wire::v1;
+            reply!(v1, Major1, query)
+        }
+        Payload::Major2(spaceterm_protocol::wire::v2::Message {
+            kind: Some(spaceterm_protocol::wire::v2::message::Kind::PairingRequest(query)),
+        }) => {
+            use spaceterm_protocol::wire::v2;
+            reply!(v2, Major2, query)
+        }
+        _ => None,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn paired_device_inventory_uses_the_authenticated_worker_in_both_majors() {
+    for major in [1, 2] {
+        let (server, runtime, journal, plan) = setup(major, Some(pairing_inventory_reply)).await;
+        let page = server
+            .queries(journal)
+            .unwrap()
+            .paired_devices(None, None)
+            .await
+            .unwrap();
+        assert_eq!(page.version.get(), 7);
+        assert_eq!(page.this_device, binding(1).target().device());
+        assert_eq!(page.total, 2);
+        assert_eq!(page.devices.len(), 1);
+        assert_eq!(page.devices[0].parts().server, server.identity());
+        assert_eq!(page.next, Some(page.devices[0].parts().pairing));
+        assert_eq!(plan.opens.load(std::sync::atomic::Ordering::SeqCst), 1);
+        runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn paired_device_inventory_never_combines_pages_from_different_revisions() {
+    for major in [1, 2] {
+        let (server, runtime, journal, _) = setup(major, Some(pairing_inventory_reply)).await;
+        let queries = server.queries(journal).unwrap();
+        let page = queries.paired_devices(None, None).await.unwrap();
+        assert_eq!(
+            queries.paired_devices(page.next, Some(page.version)).await,
+            Err(spaceterm_client::management_cli::ManagementFailure::UnsafeNativeState)
+        );
+        runtime.shutdown().await.unwrap();
+    }
+}

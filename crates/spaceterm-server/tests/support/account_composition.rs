@@ -86,6 +86,7 @@ struct ObservedProcesses {
     sessions: Vec<SessionKey>,
     pid: Option<u32>,
     reserved: Mutex<Option<RuntimeAssessment>>,
+    original: Mutex<Option<RuntimeAssessment>>,
 }
 impl ObservedProcesses {
     fn new(epoch: ServerEpoch, sessions: Vec<SessionKey>, pid: Option<u32>) -> Arc<Self> {
@@ -94,6 +95,7 @@ impl ObservedProcesses {
             sessions,
             pid,
             reserved: Mutex::default(),
+            original: Mutex::default(),
         })
     }
     fn absent(&self, registration: &RegisteredServer) -> Result<(), ServiceFailure> {
@@ -117,6 +119,9 @@ impl ServiceProcesses for ObservedProcesses {
         registration: &'a RegisteredServer,
     ) -> ServiceFuture<'a, RuntimeAssessment> {
         Box::pin(async move {
+            if let Some(original) = self.original.lock().unwrap().clone() {
+                return Ok(original);
+            }
             Ok(RuntimeAssessment {
                 server: ServerId::new(registration.server_pin().identity),
                 epoch: Some(self.epoch),
@@ -210,7 +215,54 @@ impl ServiceProcesses for ObservedProcesses {
     }
 }
 async fn stop(seed: &Seed, epoch: ServerEpoch, sessions: Vec<SessionKey>, pid: Option<u32>) {
-    let supervisor = seed.supervisor(ObservedProcesses::new(epoch, sessions, pid));
+    use spaceterm_host::account_service::runtime_inventory::{
+        AccountRuntimeCall, AccountRuntimeReply,
+    };
+    let transport = spaceterm_host::ipc::IpcTransport::connect(
+        &seed.registration.endpoint().unwrap(),
+        spaceterm_host::transport::MessageLimit::envelope(),
+    )
+    .await
+    .unwrap();
+    let mut codec = handshake(
+        &transport,
+        seed.identity.pin(),
+        seed.principal,
+        seed.key.clone(),
+        2,
+    )
+    .await;
+    let payload = |request, call| {
+        Payload::Major2(v2::Message {
+            kind: Some(v2::message::Kind::AccountRuntimeRequest(
+                spaceterm_protocol::wire::common::AccountRuntimeMessage {
+                    request,
+                    body: serde_json::to_vec(&call).unwrap(),
+                },
+            )),
+        })
+    };
+    let response = round_trip(
+        &transport,
+        &mut codec,
+        payload(1, AccountRuntimeCall::Assess),
+    )
+    .await;
+    let Payload::Major2(v2::Message {
+        kind: Some(v2::message::Kind::AccountRuntimeReply(value)),
+    }) = response
+    else {
+        panic!("runtime reply");
+    };
+    let AccountRuntimeReply::Assessment(original) = serde_json::from_slice(&value.body).unwrap()
+    else {
+        panic!("runtime assessment");
+    };
+    assert_eq!(original.epoch, Some(epoch));
+    assert_eq!(original.sessions, sessions);
+    let processes = ObservedProcesses::new(epoch, sessions, pid);
+    *processes.original.lock().unwrap() = Some(original.clone());
+    let supervisor = seed.supervisor(processes);
     let request = supervisor.allocate_request().unwrap();
     let action = supervisor
         .assess(request, ServiceAction::Stop)
@@ -218,6 +270,23 @@ async fn stop(seed: &Seed, epoch: ServerEpoch, sessions: Vec<SessionKey>, pid: O
         .unwrap()
         .confirm()
         .unwrap();
+    let response = round_trip(
+        &transport,
+        &mut codec,
+        payload(2, AccountRuntimeCall::Reserve(original)),
+    )
+    .await;
+    let Payload::Major2(v2::Message {
+        kind: Some(v2::message::Kind::AccountRuntimeReply(value)),
+    }) = response
+    else {
+        panic!("runtime reply");
+    };
+    assert_eq!(
+        serde_json::from_slice::<AccountRuntimeReply>(&value.body).unwrap(),
+        AccountRuntimeReply::Reserved
+    );
+    transport.close().await.unwrap();
     let progress = supervisor.stop(action).await.unwrap();
     assert_eq!(
         progress.phase,
@@ -228,6 +297,7 @@ async fn stop(seed: &Seed, epoch: ServerEpoch, sessions: Vec<SessionKey>, pid: O
         DesiredServerState::Stopped
     );
 }
+
 async fn operation(
     seed: &Seed,
     transport: &dyn MessageTransport,

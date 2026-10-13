@@ -209,6 +209,62 @@ class AccountCheckTests(unittest.TestCase):
                 checks.run(["bootstrap"])
         self.assertEqual(run.call_count, 2)
 
+    def test_startup_gate_requires_real_account_and_binary_composition_tests(self):
+        output = (
+            b"running 1 test\n"
+            b"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; "
+            b"finished in 0.01s\n"
+        )
+        executable = Path("/approved/server")
+        with (
+            patch.object(checks, "check_startup") as query,
+            patch.object(checks.package_server, "build") as build,
+            patch.object(checks.package_server, "build_executable") as compile_fixture,
+            patch.object(checks.native, "run_tool", return_value=output) as run,
+        ):
+            self.assertEqual(checks.run(["startup", "--executable", str(executable)]), 0)
+        build.assert_not_called()
+        query.assert_called_once()
+        compile_fixture.assert_called_once()
+        self.assertEqual(
+            compile_fixture.call_args.args,
+            ("--locked", "-p", "spaceterm-server", "--features", "test-support"),
+        )
+        self.assertEqual(compile_fixture.call_args.kwargs["binary"], "spaceterm-server")
+        self.assertEqual(compile_fixture.call_args.kwargs["env"]["CARGO_BUILD_JOBS"], "4")
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                [
+                    "cargo",
+                    "test",
+                    "--quiet",
+                    "--locked",
+                    "-p",
+                    "spaceterm-server",
+                    "--test",
+                    target,
+                    "--features",
+                    "test-support",
+                ]
+                for target in ("account_startup", "production_listeners")
+            ],
+        )
+
+    def test_startup_gate_rejects_empty_runtime_composition_evidence(self):
+        empty = (
+            b"running 0 tests\n"
+            b"test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; "
+            b"finished in 0.01s\n"
+        )
+        with (
+            patch.object(checks, "check_startup"),
+            patch.object(checks.package_server, "build_executable"),
+            patch.object(checks.native, "run_tool", return_value=empty),
+            self.assertRaises(TaskError),
+        ):
+            checks.run(["startup", "--executable", "/approved/server"])
+
     def test_startup_metadata_checks_run_without_serving_or_native_admission(self):
         with tempfile.TemporaryDirectory() as temporary:
             executable = Path(temporary) / "server"

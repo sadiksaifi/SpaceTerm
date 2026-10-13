@@ -33,6 +33,9 @@ GATES = {
             "terminal_resources_wss",
         ),
     },
+    # Real keys, SQLite, IPC and shell startup. Only service-manager and
+    # authorization boundaries use fixtures; no installed service is touched.
+    "startup": {"spaceterm-server": ("account_startup", "production_listeners")},
     "cli": {"spaceterm-client-native": ("cli_arguments", "cli_management", "cli_protocol")},
     "bootstrap": {
         "spaceterm-client-native": ("bootstrap",),
@@ -84,6 +87,18 @@ def require_nonempty(output):
 def test_gate(name):
     environment = signing_environment(os.environ)
     environment["CARGO_BUILD_JOBS"] = "4"
+    if name == "startup":
+        # Compile the fixture dependency graph before the bounded test runs.
+        # A cold build is not evidence that runtime startup exceeded its bound.
+        package_server.build_executable(
+            "--locked",
+            "-p",
+            "spaceterm-server",
+            "--features",
+            "test-support",
+            binary="spaceterm-server",
+            env=environment,
+        )
     total = 0
     target_count = 0
     for package, targets in GATES[name].items():
@@ -91,7 +106,7 @@ def test_gate(name):
             if name == "account" and target == "pty_inheritance" and sys.platform != "darwin":
                 continue
             command = ["cargo", "test", "--quiet", "--locked", "-p", package, "--test", target]
-            if name in {"account", "update"}:
+            if name in {"account", "update", "startup"}:
                 command.extend(("--features", "test-support"))
             output = native.run_tool(
                 command, cwd=ROOT, environment=environment, timeout=300, maximum=1024 * 1024
@@ -155,13 +170,13 @@ def lifecycle(executable, operation, platform, build, *, allow_mutation=False):
 
 def run(arguments):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=(*GATES, "startup", "lifecycle"))
+    parser.add_argument("mode", choices=(*GATES, "lifecycle"))
     parser.add_argument("--executable", type=Path)
     parser.add_argument("--build", choices=server_artifacts.BUILDS, default="preflight")
     parser.add_argument("--operation", choices=sorted(MUTATIONS | {"status"}), default="status")
     parser.add_argument("--allow-mutation", action="store_true")
     args = parser.parse_args(arguments)
-    if args.mode in GATES:
+    if args.mode in GATES and args.mode != "startup":
         test_gate(args.mode)
     else:
         if args.mode == "lifecycle" and args.executable is None:
@@ -170,6 +185,7 @@ def run(arguments):
         platform = "darwin-arm64" if sys.platform == "darwin" else "linux-x86_64"
         if args.mode == "startup":
             check_startup(executable, platform, args.build)
+            test_gate("startup")
         else:
             lifecycle(
                 executable, args.operation, platform, args.build, allow_mutation=args.allow_mutation

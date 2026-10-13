@@ -2084,12 +2084,13 @@ fn desktop_server_settings_from_pane_keeps_the_owning_machine_through_late_publi
 ) {
     let wanted = ssh();
     let mut fixture = open(Appearance::Dark, snapshot(vec![local()]), cx);
-    let window = fixture.window.clone();
-    fixture.cx.update(|_, cx| {
-        window.update(cx, |settings, cx| {
-            settings.select_server_id(wanted.pairing.parts().server, cx)
-        })
+    fixture.cx.update(|window, cx| {
+        cx.set_global(crate::ui::settings_window::OpenSettingsWindow(
+            window.window_handle().downcast::<SettingsWindow>().unwrap(),
+        ));
+        crate::ui::settings_window::open_for_server(wanted.pairing.parts().server, cx);
     });
+    fixture.cx.run_until_parked();
     assert_eq!(fixture.selected(), None);
     fixture.publish(snapshot(vec![local(), wanted.clone()]));
     assert_eq!(fixture.selected(), Some(wanted.key));

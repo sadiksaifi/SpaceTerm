@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod account_owner_enrollment;
+pub mod account_runtime;
 pub mod account_startup;
 pub mod deployment;
 pub mod distribution_metadata;

@@ -63,6 +63,9 @@ impl ConnectionCodec {
             return Err(ProtocolError::LimitExceeded);
         }
         let bytes = body.encode_to_vec();
+        // The envelope now owns the encoded payload. Release its unsigned copy
+        // before allocating the signing transcript and signed envelope.
+        drop(body);
         let signature = sign(
             self.parameters.signer.as_ref(),
             b"authenticated-envelope",

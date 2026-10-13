@@ -170,6 +170,13 @@ def run(archive, source_commit, *, require_baseline_host=False):
         )
         if actual != expected:
             raise TaskError("packaged-metadata-mismatch")
+        help_text = query(["--help"], reject_stderr=True)
+        version = query(["--version"], reject_stderr=True)
+        if (
+            b"usage: spaceterm-server" not in help_text
+            or version != ("spaceterm-server " + expected["version"] + "\n").encode()
+        ):
+            raise TaskError("packaged-query-mismatch")
         invalid = (
             [],
             ["--unknown"],
@@ -196,7 +203,7 @@ def run(archive, source_commit, *, require_baseline_host=False):
             "baseline_host": is_baseline,
             "uid": os.getuid(),
             "libraries": sorted(libraries),
-            "queries": 1 + len(invalid),
+            "queries": 3 + len(invalid),
             "service_lifecycle_tested": False,
             "runtime_readiness_tested": False,
         }

@@ -59,6 +59,9 @@ pub const CAPABILITY_TERMINAL_STREAMS: u32 = 520_005;
 /// Content-free native bell and command-completion notices.
 pub const CAPABILITY_NATIVE_NOTIFICATIONS: u32 = 520_006;
 
+/// Native account lifecycle comparisons on paired local connections.
+pub const CAPABILITY_ACCOUNT_RUNTIME: u32 = 520_007;
+
 /// Additive envelope registration: tag, authenticated capability, permitted directions.
 pub const EXTENSION_ENVELOPES: &[(u32, u32, bool, bool)] = &[
     (32, CAPABILITY_SERVER_GIT, true, false),
@@ -80,4 +83,6 @@ pub const EXTENSION_ENVELOPES: &[(u32, u32, bool, bool)] = &[
     (48, CAPABILITY_TERMINAL_STREAMS, true, true),
     (49, CAPABILITY_TERMINAL_STREAMS, true, false),
     (50, CAPABILITY_TERMINAL_STREAMS, false, true),
+    (51, CAPABILITY_ACCOUNT_RUNTIME, true, false),
+    (52, CAPABILITY_ACCOUNT_RUNTIME, false, true),
 ];

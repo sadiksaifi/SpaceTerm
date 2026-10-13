@@ -649,6 +649,32 @@ impl WorkspaceManager {
                 {
                     attach.push(workspace);
                 }
+            } else if matches!(
+                pending.request,
+                DesktopRequest::Shared {
+                    command: Command::SetPinnedDirectory { .. },
+                    ..
+                }
+            ) {
+                let Some(outcome) = pending
+                    .operation
+                    .and_then(|operation| server.runtime.read(cx).outcome(operation))
+                else {
+                    continue;
+                };
+                finished.push(*id);
+                match outcome.as_ref() {
+                    Outcome::Applied => {}
+                    Outcome::Failed(failure) => {
+                        errors.push(DesktopClientError::SharedOperationRejected(*failure))
+                    }
+                    Outcome::Conflict(_) => {
+                        errors.push(DesktopClientError::SharedOperationRejected(
+                            OperationFailure::StaleValidation,
+                        ))
+                    }
+                    _ => errors.push(DesktopClientError::UnsupportedCapability),
+                }
             } else if pending.settled(&server.frames) {
                 finished.push(*id);
                 if let DesktopRequest::AttachWorkspace(workspace) = pending.request
@@ -693,7 +719,7 @@ impl WorkspaceManager {
                 | DesktopRequest::DetachWorkspace(_)
                 | DesktopRequest::RetryDetachWorkspace { .. }
                 | DesktopRequest::Shared {
-                    command: Command::CreateWorkspace { .. },
+                    command: Command::CreateWorkspace { .. } | Command::SetPinnedDirectory { .. },
                     ..
                 }
         );
@@ -785,6 +811,12 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         match event {
+            ServerSidebarEvent::Settings(server) => {
+                crate::ui::settings_window::open_for_server(server, cx);
+            }
+            ServerSidebarEvent::StartingDirectory(workspace) => {
+                self.open_server_starting_directory(workspace, window, cx);
+            }
             ServerSidebarEvent::NewWorktree(workspace) => {
                 self.new_server_worktree(workspace, window, cx);
             }
@@ -820,6 +852,125 @@ impl WorkspaceManager {
                 self.request_server_close(AssessmentTarget::KillWorkspace(workspace), window, cx)
             }
         }
+    }
+
+    fn open_server_starting_directory(
+        &mut self,
+        workspace: QualifiedWorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if spaceterm_ui::window_menu_is_open(window, cx) {
+            let owner = cx.entity();
+            window.defer(cx, move |window, cx| {
+                spaceterm_ui::dismiss_active_menu(window, cx);
+                owner.update(cx, |manager, cx| {
+                    manager.open_server_starting_directory(workspace, window, cx);
+                });
+            });
+            return;
+        }
+        if window_modal_is_open(window, cx) {
+            return;
+        }
+        if let Some(picker) = &self.pin_picker {
+            picker.update(cx, |picker, cx| picker.refocus_path(window, cx));
+            return;
+        }
+        let Some(server) = &self.server else { return };
+        if server
+            .repair
+            .as_ref()
+            .is_some_and(|repair| repair.read(cx).picker().read(cx).blocks_terminal_input())
+        {
+            return;
+        }
+        let Some(frame) = server.frames.get(&workspace.server()) else {
+            return;
+        };
+        if !shared_ready(frame) {
+            self.show_server_error(frame_refusal(frame), window, cx);
+            return;
+        }
+        let ConnectionState::Connected { info } = frame.connection else {
+            return;
+        };
+        let Some(record) = frame
+            .organization
+            .state()
+            .workspaces
+            .iter()
+            .find(|record| record.id == workspace)
+        else {
+            return;
+        };
+        let version = record.pinned_directory.version;
+        let source = match server.runtime.read(cx).directory_source(workspace.server()) {
+            Ok(source) => source,
+            Err(error) => {
+                self.show_server_error(error, window, cx);
+                return;
+            }
+        };
+        self.pin_operation = self.pin_operation.wrapping_add(1);
+        let operation = self.pin_operation;
+        let picker = cx.new(|cx| DirectoryPicker::new(source, "Starting Directory", window, cx));
+        cx.subscribe_in(&picker, window, move |manager, picker, event: &DirectoryPickerEvent, window, cx| {
+            if manager.pin_picker.as_ref() != Some(picker) || manager.pin_operation != operation {
+                return;
+            }
+            match event {
+                DirectoryPickerEvent::ConfirmedServer(directory) => {
+                    // A server path is an observation. Only the original owning-server
+                    // context and field version can admit the shared mutation.
+                    let current = directory.server() == workspace.server()
+                        && manager.server.as_ref().and_then(|server| server.frames.get(&workspace.server()))
+                            .is_some_and(|frame| {
+                                shared_ready(frame)
+                                    && matches!(frame.connection, ConnectionState::Connected { info: current }
+                                        if current.binding == info.binding && current.epoch == info.epoch
+                                            && current.client == info.client && current.pairing == info.pairing
+                                            && current.attempt == info.attempt)
+                                    && frame.organization.state().workspaces.iter().any(|record| {
+                                        record.id == workspace && record.pinned_directory.version == version
+                                    })
+                            });
+                    let admitted = current && manager.submit_server(DesktopRequest::Shared {
+                        server: workspace.server(),
+                        command: Command::SetPinnedDirectory {
+                            workspace, expected_version: version, value: Some(directory.clone()),
+                        },
+                    }, window, cx).is_some();
+                    let picker = picker.clone();
+                    let owner = cx.entity();
+                    window.defer(cx, move |window, cx| {
+                        picker.update(cx, |picker, cx| {
+                            if admitted { picker.complete_activation(window, cx); }
+                            else { picker.activation_failed(window, cx); }
+                        });
+                        owner.update(cx, |manager, cx| {
+                            if admitted && manager.pin_picker.as_ref() == Some(&picker) {
+                                manager.pin_picker = None;
+                            }
+                            manager.sync_terminal_focus_blocker(window, cx);
+                            if admitted { manager.focus(window, cx); }
+                            cx.notify();
+                        });
+                    });
+                }
+                DirectoryPickerEvent::Dismissed => manager.pin_picker = None,
+                DirectoryPickerEvent::Confirmed(_) | DirectoryPickerEvent::SystemSelectionRequested
+                    | DirectoryPickerEvent::StateChanged => {}
+            }
+            manager.sync_terminal_focus_blocker(window, cx);
+            cx.notify();
+        }).detach();
+        self.pin_picker = Some(picker.clone());
+        picker.update(cx, |picker, cx| {
+            picker.open(window, cx);
+        });
+        self.sync_terminal_focus_blocker(window, cx);
+        cx.notify();
     }
 
     fn server_tab_event(
@@ -1011,6 +1162,9 @@ impl WorkspaceManager {
     ) {
         if window_modal_is_open(window, cx) {
             return;
+        }
+        if let Some(picker) = self.pin_picker.take() {
+            picker.update(cx, |picker, cx| picker.cancel(window, cx));
         }
         if let Some(server) = &mut self.server {
             server.scope = scope;
@@ -1751,6 +1905,7 @@ impl WorkspaceManager {
             .child(Self::render_top_left_chrome_surface(chrome, window, cx))
             .child(div().relative().size_full().child(content))
             .children(server.repair.iter().map(|repair| repair.read(cx).picker()))
+            .children(self.pin_picker.iter().cloned())
             .when(sidebar_visible, |root| root.child(self.sidebar.clone()))
             .child(self.sidebar.read(cx).render_resize_handle(
                 self.sidebar.downgrade(),
@@ -1874,6 +2029,9 @@ fn frame_refusal(frame: &DesktopServerFrame) -> DesktopClientError {
 
 fn server_error_message(error: DesktopClientError) -> &'static str {
     match error {
+        DesktopClientError::SharedOperationRejected(OperationFailure::StaleValidation) => {
+            "The server state changed before the directory could be saved. Choose the directory again."
+        }
         DesktopClientError::Offline => "The server is offline. Nothing changed.",
         DesktopClientError::Stopped => "The server is stopped. Nothing changed.",
         DesktopClientError::Incompatible => "The server needs an update first. Nothing changed.",

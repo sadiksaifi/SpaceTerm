@@ -1058,6 +1058,31 @@ impl Inner {
 }
 
 impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProvider<S> {
+    fn directory_source(
+        &self,
+        server: ServerId,
+    ) -> Result<Rc<dyn crate::ui::directory_picker::DirectorySource>, DesktopClientError> {
+        let source = self
+            .inner
+            .sources
+            .get(&server)
+            .ok_or(DesktopClientError::TargetGone)?;
+        let name = source
+            .name
+            .name
+            .get()
+            .map_or("Unnamed Server", |name| name.as_ref());
+        let port = self.directory_connection(server)?;
+        crate::ui::directory_picker::ServerDirectorySource::new(
+            server,
+            name,
+            port,
+            spaceterm_core::server_directories::DirectoryPurpose::WorkspacePin,
+        )
+        .map(|source| Rc::new(source) as Rc<dyn crate::ui::directory_picker::DirectorySource>)
+        .map_err(|_| DesktopClientError::Offline)
+    }
+
     fn directory_connection(
         &self,
         server: ServerId,

@@ -86,6 +86,7 @@ impl Fixture {
             native: None,
             lifecycle: None,
             inventory: None,
+            machine: None,
         }];
         let secondary = multiple.then(|| {
             let server = spaceterm_client::testing::FakeServer::new(7, vec![2, 1]).unwrap();
@@ -121,6 +122,7 @@ impl Fixture {
                 native: None,
                 lifecycle: None,
                 inventory: None,
+                machine: None,
             });
             // The test has no changing second transport. Its retained watches still expose the exact frame.
             drop((state_sender, replica_sender));

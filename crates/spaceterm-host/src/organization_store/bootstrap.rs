@@ -27,6 +27,11 @@ impl std::fmt::Debug for LegacyWorktreeLocation {
     }
 }
 impl LegacyWorktreeLocation {
+    /// Returns validated initialization data, never filesystem authority.
+    pub fn template(&self) -> &WorktreeLocationTemplate {
+        &self.0
+    }
+
     /// Applies the owning-host template policy and the core's content-free bound.
     pub fn parse(value: String) -> Result<Self, SeedFailure> {
         path_template::validate(&value).map_err(|_| SeedFailure)?;

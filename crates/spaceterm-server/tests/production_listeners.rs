@@ -346,6 +346,8 @@ async fn handshake(
             spaceterm_protocol::negotiation::CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
             spaceterm_protocol::negotiation::CAPABILITY_CANONICAL_DOMAIN,
             spaceterm_protocol::negotiation::CAPABILITY_ORGANIZATION_COMPARISONS,
+            spaceterm_protocol::negotiation::CAPABILITY_NATIVE_NOTIFICATIONS,
+            spaceterm_protocol::negotiation::CAPABILITY_ACCOUNT_RUNTIME,
         ],
         ..Default::default()
     };
@@ -372,6 +374,11 @@ async fn handshake(
         codec
             .capabilities()
             .contains(&spaceterm_protocol::negotiation::CAPABILITY_CANONICAL_DOMAIN)
+    );
+    assert!(
+        codec
+            .capabilities()
+            .contains(&spaceterm_protocol::negotiation::CAPABILITY_NATIVE_NOTIFICATIONS)
     );
     codec
 }
@@ -530,6 +537,164 @@ async fn query_status(
         panic!("snapshot");
     };
     status
+}
+
+async fn inventory_query(
+    transport: &dyn MessageTransport,
+    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    after: u64,
+    version: u64,
+) -> (u64, u64, Vec<u64>, i32) {
+    macro_rules! query {
+        ($p:ident, $variant:ident) => {
+            Payload::$variant($p::Message {
+                kind: Some($p::message::Kind::PairingRequest($p::PairingRequest {
+                    request: 99,
+                    action: Some($p::pairing_request::Action::List(true)),
+                    inventory_after: after,
+                    inventory_version: version,
+                    request_generation: 1,
+                    ..Default::default()
+                })),
+            })
+        };
+    }
+    let request = if codec.major() == 1 {
+        query!(v1, Major1)
+    } else {
+        query!(v2, Major2)
+    };
+    transport
+        .send(&codec.encode(&request).unwrap())
+        .await
+        .unwrap();
+    loop {
+        let reply = codec
+            .decode(&transport.recv().await.unwrap().unwrap())
+            .unwrap();
+        macro_rules! page {
+            ($value:ident) => {{
+                assert_eq!($value.request, 99);
+                assert_eq!($value.request_generation, 1);
+                assert_eq!(
+                    spaceterm_protocol::convert::identity::decode_global(
+                        $value.this_device.as_ref().unwrap()
+                    )
+                    .unwrap(),
+                    codec.principal().device
+                );
+                return (
+                    $value.inventory_version,
+                    $value.inventory_total,
+                    $value
+                        .devices
+                        .iter()
+                        .map(|value| {
+                            spaceterm_protocol::convert::identity::decode_local(
+                                value.pairing.as_ref().unwrap(),
+                            )
+                            .unwrap()
+                        })
+                        .collect(),
+                    $value.classified_failure,
+                );
+            }};
+        }
+        match reply {
+            Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::PairingOutcome(value)),
+            }) => page!(value),
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::PairingOutcome(value)),
+            }) => page!(value),
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn servers_settings_paired_device_pages_remain_revision_coherent() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        for major in [1, 2] {
+            let fixture = Fixture::new().await;
+            let (first, principal, device) = fixture.enroll(major).await;
+            let (second, _, _) = fixture.enroll_with_seed(major, 81).await;
+            let handle = fixture.server.handle();
+            let endpoint = fixture.registration.endpoint().unwrap();
+            let factories = production_listener_factories(
+                handle.clone(),
+                ProductionListenerConfig {
+                    registration: &fixture.registration,
+                    identity: fixture.identity.clone(),
+                    running: spaceterm_distribution::BuildVersion::parse("1.2.3").unwrap(),
+                    codec: Arc::new(CanonicalCodec),
+                    pairing: fixture.service.clone(),
+                    ports: fixture.ports.clone(),
+                },
+                Arc::new(PairingProtocolLookup::new(handle.clone())),
+            )
+            .unwrap();
+            let stop = fixture.stop.clone();
+            let run = tokio::spawn(fixture.server.run(factories));
+            while !endpoint.path().exists() {
+                tokio::task::yield_now().await;
+            }
+            let ipc = IpcTransport::connect(&endpoint, MessageLimit::envelope())
+                .await
+                .unwrap();
+            let mut codec = handshake(&ipc, fixture.identity.pin(), principal, device, major).await;
+            reconcile(&ipc, &mut codec, &handle).await;
+            let (version, total, devices, failure) = inventory_query(&ipc, &mut codec, 0, 0).await;
+            assert_eq!((total, failure), (2, 0));
+            assert_eq!(
+                devices,
+                vec![
+                    first.parts().client.pairing.local(),
+                    second.parts().client.pairing.local()
+                ]
+            );
+            let (same, total, devices, failure) =
+                inventory_query(&ipc, &mut codec, devices[0], version).await;
+            assert_eq!((same, total, failure), (version, 2, 0));
+            assert_eq!(devices, vec![second.parts().client.pairing.local()]);
+            let changed = CanonicalOperationRequest::new(
+                OperationId::new(first.parts().ordinary, OperationSequence::new(1).unwrap()),
+                Command::CreateWorkspace {
+                    server: ServerId::new(fixture.identity.pin().identity),
+                    source: WorkspaceCreationSource::ServerHome {
+                        server: ServerId::new(fixture.identity.pin().identity),
+                    },
+                    name: NameDraft::Automatic,
+                },
+                &CanonicalCodec,
+            )
+            .unwrap();
+            let _ = decode_outcome(
+                round_trip(&ipc, &mut codec, request_payload(&changed, major)).await,
+                changed.binding().id,
+            );
+            let (_, _, devices, failure) = inventory_query(
+                &ipc,
+                &mut codec,
+                first.parts().client.pairing.local(),
+                version,
+            )
+            .await;
+            assert!(devices.is_empty());
+            assert_eq!(
+                failure,
+                spaceterm_protocol::wire::pairing::PairingFailure::PairingStaleAssessment as i32
+            );
+            ipc.close().await.unwrap();
+            handle
+                .shutdown(TrustedShutdownRequest { authority: stop })
+                .await
+                .unwrap();
+            run.await.unwrap().unwrap();
+        }
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

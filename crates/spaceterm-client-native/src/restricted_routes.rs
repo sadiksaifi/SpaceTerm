@@ -30,11 +30,18 @@ use zeroize::Zeroizing;
 
 pub struct NativePairingConnector {
     journal: Arc<dyn ClientJournal>,
-    routes: NativeRouteConnector,
+    routes: Arc<NativeRouteConnector>,
 }
 impl NativePairingConnector {
     /// Supply the same journal controller used by enrollment and pending work.
     pub fn new(journal: Arc<dyn ClientJournal>, routes: NativeRouteConnector) -> Self {
+        Self::with_shared_routes(journal, Arc::new(routes))
+    }
+    /// Ordinary and restricted consumers share the same trusted local routes.
+    pub fn with_shared_routes(
+        journal: Arc<dyn ClientJournal>,
+        routes: Arc<NativeRouteConnector>,
+    ) -> Self {
         Self { journal, routes }
     }
     /// Called only in foreground route preparation, before enrollment. Captures effective SSH host, account, trust configuration

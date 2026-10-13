@@ -14,6 +14,7 @@ mod linger;
 mod native_processes;
 mod owner_enrollment;
 mod processes;
+pub mod runtime_inventory;
 pub use installations::NativeServiceInstallations;
 pub use native_processes::{
     NativeServiceProcessTable, NativeServiceProcesses, ServiceProcessIdentity,

@@ -87,6 +87,7 @@ impl Drop for Charge {
 pub struct EgressReservation {
     charge: Arc<Charge>,
     maximum: usize,
+    owned_native: bool,
 }
 impl EgressReservation {
     /// Retain one reply's charge across the actor and its connection sender.
@@ -95,6 +96,7 @@ impl EgressReservation {
         Self {
             charge: self.charge.clone(),
             maximum: self.maximum,
+            owned_native: self.owned_native,
         }
     }
 }
@@ -195,11 +197,23 @@ impl ConnectionEgress {
         })
     }
     fn reserve(&self, maximum: usize, reliable: bool) -> Result<EgressReservation, EgressFailure> {
+        self.reserve_residency(maximum, reliable, false)
+    }
+    fn reserve_residency(
+        &self,
+        maximum: usize,
+        reliable: bool,
+        owned_native: bool,
+    ) -> Result<EgressReservation, EgressFailure> {
         if self.closed {
             return Err(EgressFailure::Closed);
         }
         let bytes = maximum
-            .checked_mul(SEND_RESIDENCY_MULTIPLIER)
+            .checked_mul(if owned_native {
+                3
+            } else {
+                SEND_RESIDENCY_MULTIPLIER
+            })
             .filter(|n| *n > 0)
             .ok_or(EgressFailure::Capacity)?;
         let mut global = self
@@ -245,6 +259,7 @@ impl ConnectionEgress {
                 reliable,
             }),
             maximum,
+            owned_native,
         })
     }
     /// Reserve before ordinary operation admission, including the authenticated
@@ -264,6 +279,46 @@ impl ConnectionEgress {
             .ok_or(EgressFailure::Capacity)?;
         self.reserve(maximum, false)
     }
+    /// The consuming native sender releases the source text before encoding,
+    /// the unsigned DTO before writing, and each codec scratch buffer before
+    /// the next stage. Three copies cover DTO/encoding/signing or wire/WSS
+    /// framing/native buffered write without using the lifecycle reserve.
+    pub(crate) fn reserve_native_reply(
+        &self,
+        text_bytes: usize,
+    ) -> Result<EgressReservation, EgressFailure> {
+        if text_bytes > spaceterm_core::native_requests::MAX_NATIVE_TEXT_BYTES {
+            return Err(EgressFailure::Capacity);
+        }
+        self.reserve_residency(text_bytes + 4096 + AUTHENTICATED_FRAMING_BYTES, false, true)
+    }
+    pub(crate) fn validate_native_reply_reservation(
+        &self,
+        payload: &spaceterm_protocol::codec::Payload,
+        reservation: &EgressReservation,
+    ) -> Result<(), EgressFailure> {
+        use spaceterm_protocol::{
+            codec::Payload,
+            wire::{v1, v2},
+        };
+        let native = matches!(
+            payload,
+            Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::NativeRequest(_)),
+            }) | Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::NativeRequest(_)),
+            })
+        );
+        if !native
+            || !reservation.owned_native
+            || !Arc::ptr_eq(&reservation.charge.budget, &self.budget)
+            || reservation.charge.reliable
+            || reservation.maximum < reply_bytes(payload)?
+        {
+            return Err(EgressFailure::ReservationMismatch);
+        }
+        Ok(())
+    }
     pub fn reserve_reply(
         &self,
         payload: &spaceterm_protocol::codec::Payload,
@@ -276,7 +331,8 @@ impl ConnectionEgress {
         payload: &spaceterm_protocol::codec::Payload,
         reservation: &EgressReservation,
     ) -> Result<(), EgressFailure> {
-        if !Arc::ptr_eq(&reservation.charge.budget, &self.budget)
+        if reservation.owned_native
+            || !Arc::ptr_eq(&reservation.charge.budget, &self.budget)
             || reservation.charge.reliable != reply_policy(payload)?
             || reservation.maximum < reply_bytes(payload)?
         {
@@ -300,7 +356,8 @@ impl ConnectionEgress {
         }
         let (reliable, maximum) = policy(&message);
         if let Some(reservation) = &reservation
-            && (!Arc::ptr_eq(&reservation.charge.budget, &self.budget)
+            && (reservation.owned_native
+                || !Arc::ptr_eq(&reservation.charge.budget, &self.budget)
                 || reservation.charge.reliable != reliable
                 || reservation.maximum < maximum)
         {
@@ -448,7 +505,8 @@ fn reply_policy(payload: &spaceterm_protocol::codec::Payload) -> Result<bool, Eg
                     | Kind::ResourceCancel(_)
                     | Kind::RuntimeOutcome(_)
                     | Kind::PairingOutcome(_)
-                    | Kind::ClientContext(_),
+                    | Kind::ClientContext(_)
+                    | Kind::AccountRuntimeReply(_),
                 ) => Ok(true),
                 Some(
                     Kind::OrganizationSnapshot(_)
@@ -603,6 +661,41 @@ mod tests {
         );
         assert_eq!(first.usage().envelopes, 128);
     }
+    #[test]
+    fn maximum_owned_native_reply_preserves_lifecycle_capacity_and_cannot_be_reused() {
+        let global = EgressBudget::new();
+        let mut queue = ConnectionEgress::new(global.clone());
+        let reservation = queue
+            .reserve_native_reply(spaceterm_core::native_requests::MAX_NATIVE_TEXT_BYTES)
+            .unwrap();
+        assert!(queue.usage().bytes < MAX_EGRESS_BYTES - local_lifecycle_residency());
+        assert_eq!(
+            queue
+                .reserve_native_reply(spaceterm_core::native_requests::MAX_NATIVE_TEXT_BYTES + 1,)
+                .err(),
+            Some(EgressFailure::Capacity)
+        );
+        assert_eq!(
+            queue
+                .reserve_native_reply(spaceterm_core::native_requests::MAX_NATIVE_TEXT_BYTES,)
+                .err(),
+            Some(EgressFailure::Capacity)
+        );
+        let operation = queue.reserve_operation_reply().unwrap();
+        assert_eq!(
+            queue.enqueue(
+                OutboundMessage::ResyncRequired {
+                    epoch: ServerEpoch::new(1),
+                    revision: OrganizationRevision::new(2),
+                },
+                Some(reservation)
+            ),
+            Err(EgressFailure::ReservationMismatch)
+        );
+        drop(operation);
+        assert_eq!(global.usage().bytes, 0);
+    }
+
     #[test]
     fn egress_exact_byte_limit_and_limit_plus_one() {
         let global = EgressBudget::new();

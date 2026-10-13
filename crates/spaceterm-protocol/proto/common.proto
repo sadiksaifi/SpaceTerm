@@ -307,3 +307,7 @@ message OperationStream {
   Entity client = 3;
 }
 message QualifiedOperationId { OperationStream stream = 1; uint64 sequence = 2; }
+
+// Account lifecycle comparisons on paired local connections. Native custody
+// observations and authorization proofs never cross this wire.
+message AccountRuntimeMessage { uint64 request = 1; bytes body = 2; }

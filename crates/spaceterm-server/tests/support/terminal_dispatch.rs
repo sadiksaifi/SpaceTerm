@@ -21,7 +21,12 @@ use spaceterm_server::{
     service::RecoveredServer,
 };
 use spaceterm_terminal::{runtime::budget::RuntimeLimits, runtime_contracts::*};
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 struct Account(PathBuf, u32);
 impl AccountLaunchProvider for Account {
@@ -53,6 +58,7 @@ struct Peer {
     pages: Vec<spaceterm_core::content::ContentPage>,
     page_complete: bool,
     native_seen: usize,
+    native_pending: VecDeque<spaceterm_core::native_requests::NativeRequest>,
 }
 impl Peer {
     async fn send(&mut self, payload: Payload) {
@@ -158,11 +164,29 @@ impl Peer {
                 );
             }
             Payload::Major1(v1::Message {
-                kind: Some(v1::message::Kind::NativeRequest(_)),
-            })
-            | Payload::Major2(v2::Message {
-                kind: Some(v2::message::Kind::NativeRequest(_)),
-            }) => self.native_seen += 1,
+                kind: Some(v1::message::Kind::NativeRequest(value)),
+            }) => {
+                self.native_seen += 1;
+                self.native_pending.push_back(
+                    spaceterm_protocol::convert::native_requests::v1::decode_request(
+                        value,
+                        spaceterm_core::observations::MonotonicTick::new(0),
+                    )
+                    .unwrap(),
+                );
+            }
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::NativeRequest(value)),
+            }) => {
+                self.native_seen += 1;
+                self.native_pending.push_back(
+                    spaceterm_protocol::convert::native_requests::v2::decode_request(
+                        value,
+                        spaceterm_core::observations::MonotonicTick::new(0),
+                    )
+                    .unwrap(),
+                );
+            }
             _ => {}
         }
         payload
@@ -249,6 +273,40 @@ impl Peer {
                     return operations::v2::decode_outcome(&value, request.binding().id)
                         .unwrap()
                         .1;
+                }
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::OperationLookupResult(value)),
+                }) => {
+                    match operations::v1::decode_lookup_result(&value, request.binding()).unwrap() {
+                        OperationLookup::Completed { result, .. } => return result,
+                        OperationLookup::Pending => {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                            self.send(Payload::Major1(v1::Message {
+                                kind: Some(v1::message::Kind::OperationLookupRequest(
+                                    operations::v1::encode_lookup_request(request.binding()),
+                                )),
+                            }))
+                            .await;
+                        }
+                        _ => panic!("identified operation must complete"),
+                    }
+                }
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::OperationLookupResult(value)),
+                }) => {
+                    match operations::v2::decode_lookup_result(&value, request.binding()).unwrap() {
+                        OperationLookup::Completed { result, .. } => return result,
+                        OperationLookup::Pending => {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                            self.send(Payload::Major2(v2::Message {
+                                kind: Some(v2::message::Kind::OperationLookupRequest(
+                                    operations::v2::encode_lookup_request(request.binding()),
+                                )),
+                            }))
+                            .await;
+                        }
+                        _ => panic!("identified operation must complete"),
+                    }
                 }
                 _ => {}
             }
@@ -369,27 +427,12 @@ impl Peer {
     }
     async fn native_request(&mut self) -> spaceterm_core::native_requests::NativeRequest {
         loop {
-            match self.recv().await {
-                Payload::Major1(v1::Message {
-                    kind: Some(v1::message::Kind::NativeRequest(value)),
-                }) => {
-                    return spaceterm_protocol::convert::native_requests::v1::decode_request(
-                        &value,
-                        spaceterm_core::observations::MonotonicTick::new(0),
-                    )
-                    .unwrap();
-                }
-                Payload::Major2(v2::Message {
-                    kind: Some(v2::message::Kind::NativeRequest(value)),
-                }) => {
-                    return spaceterm_protocol::convert::native_requests::v2::decode_request(
-                        &value,
-                        spaceterm_core::observations::MonotonicTick::new(0),
-                    )
-                    .unwrap();
-                }
-                _ => {}
+            // Native work may precede the runtime input acknowledgement. A
+            // helper waiting for another reply must not discard that work.
+            if let Some(request) = self.native_pending.pop_front() {
+                return request;
             }
+            self.recv().await;
         }
     }
     async fn complete_native(
@@ -511,6 +554,7 @@ async fn peer(
         pages: vec![],
         page_complete: false,
         native_seen: 0,
+        native_pending: VecDeque::new(),
     }
 }
 fn client_replica(
@@ -563,174 +607,258 @@ fn fence(
     .unwrap()
 }
 
+struct StartedTerminal {
+    directory: physical::Directory,
+    stream2: OperationStreamId,
+    keys: Arc<Key>,
+    ipc: authentication_fixture::Directory,
+    listener: spaceterm_host::ipc::IpcListener,
+    host: Arc<actor_fixture::Host>,
+    server: RecoveredServer,
+    handle: ServerHandle,
+    handshake: HandshakeConfig,
+    authenticator: Authenticator,
+    dispatcher: Arc<ProtocolDispatcher>,
+    first: Peer,
+    created: CreatedOrganization,
+    pane: PaneId,
+    session: SessionKey,
+}
+
+async fn started_terminal(major: u32) -> StartedTerminal {
+    started_terminal_with_limits(major, Default::default()).await
+}
+
+impl spaceterm_core::observations::RuntimeClock for actor_fixture::Clock {
+    fn now(
+        &self,
+    ) -> Result<
+        spaceterm_core::observations::MonotonicTick,
+        spaceterm_core::observations::ObservationError,
+    > {
+        ServerClock::now(self)
+            .map_err(|_| spaceterm_core::observations::ObservationError::ZeroCounter)
+    }
+}
+
+async fn started_terminal_with_limits(
+    major: u32,
+    limits: spaceterm_protocol::limits::NegotiatedLimits,
+) -> StartedTerminal {
+    started_terminal_with_clock(major, limits, Arc::new(NativeRuntimeClock::default())).await
+}
+
+async fn started_terminal_with_clock<C>(
+    major: u32,
+    limits: spaceterm_protocol::limits::NegotiatedLimits,
+    clock: Arc<C>,
+) -> StartedTerminal
+where
+    C: ServerClock + spaceterm_core::observations::RuntimeClock + 'static,
+{
+    let directory = physical::Directory::new();
+    let mut storage = physical::Fixture::new(&directory.0);
+    storage.enroll(42);
+    storage.enroll(44);
+    let recovered = storage.recovered();
+    let stream1 = recovered.pairing.as_ref().unwrap().parts().authorizations[0]
+        .parts()
+        .clients[0]
+        .parts()
+        .ordinary;
+    let stream2 = recovered.pairing.as_ref().unwrap().parts().authorizations[1]
+        .parts()
+        .clients[0]
+        .parts()
+        .ordinary;
+    let snapshot = storage.snapshot();
+    let pairings = Arc::new(PhysicalPairings(snapshot));
+    let keys = Arc::new(Key::new(71));
+    let ipc = authentication_fixture::Directory::new();
+    let listener = ipc.listener();
+    let probe = ipc.connect().await;
+    let uid = probe.peer_facts().local_uid.unwrap();
+    let pending_probe = listener.accept().await.unwrap();
+    probe.close().await.unwrap();
+    drop(pending_probe);
+    let native = NativeRuntime::new(
+        physical::identity().server,
+        uid,
+        Arc::new(Account(directory.0.clone(), uid)),
+        clock.clone(),
+        RuntimeLimits::default(),
+    )
+    .unwrap();
+    let mut config = actor_fixture::Fixture::new();
+    let host = config.host.clone();
+    config.config.host.authority = Arc::new(PhysicalStartup);
+    config.config.core = CorePorts::production(
+        physical::identity(),
+        ServerDirectory::new(
+            physical::identity().server,
+            directory.0.as_os_str().as_encoded_bytes().to_vec(),
+        )
+        .unwrap(),
+        clock.clone(),
+    )
+    .unwrap();
+    config.config.launch = native.clone();
+    config.config.cleanup = native.clone();
+    config.dependencies.runtime = native;
+    config.dependencies.clock = clock.clone();
+    config.dependencies.store = Box::new(storage.store);
+    config.dependencies.credentials = keys.clone();
+    config.dependencies.pairing = pairings.clone();
+    let server = RecoveredServer::recover(config.config, config.dependencies)
+        .await
+        .unwrap();
+    let handle = server.handle();
+    let handshake = HandshakeConfig {
+        majors: vec![major],
+        limits: spaceterm_protocol::limits::NegotiatedLimits {
+            resource_chunk_bytes: if major == 1 {
+                limits.resource_chunk_bytes
+            } else {
+                limits.resource_chunk_bytes.min(64 * 1024)
+            },
+            ..limits
+        },
+        capabilities: vec![
+            spaceterm_protocol::negotiation::CAPABILITY_CANONICAL_DOMAIN,
+            spaceterm_protocol::negotiation::CAPABILITY_TERMINAL_STREAMS,
+            spaceterm_protocol::negotiation::CAPABILITY_NATIVE_NOTIFICATIONS,
+        ],
+    };
+    let authenticator = Authenticator::new(AuthenticationConfig {
+        server: physical::identity().server,
+        epoch: handle.snapshot().epoch(),
+        owning_uid: uid,
+        handshake: handshake.clone(),
+        credentials: keys.clone(),
+        pairing: pairings,
+        authority: Arc::new(handle.clone()),
+        unauthenticated_limit: 16,
+        authenticated_limit: 32,
+        deadline: Duration::from_secs(5),
+    })
+    .unwrap();
+    let (_, status) = tokio::sync::watch::channel(authentication_fixture::status(1));
+    let dispatcher = Arc::new(
+        ProtocolDispatcher::new(
+            authenticator.clone(),
+            status,
+            Arc::new(ActorOrdinaryDispatch::new(Arc::new(
+                spaceterm_core::operation_ledger::canonical::CanonicalCodec,
+            ))),
+            Arc::new(RejectRestricted),
+        )
+        .with_clock(clock),
+    );
+    let mut first = peer(
+        &ipc,
+        &listener,
+        &authenticator,
+        dispatcher.clone(),
+        handle.clone(),
+        (keys.clone(), handshake.clone()),
+        (stream1, 42),
+    )
+    .await;
+    first.reconcile(handle.snapshot().state().revision).await;
+    let Outcome::CreatedWithControl(created) = first
+        .operation(
+            1,
+            Command::CreateWorkspace {
+                server: physical::identity().server,
+                source: WorkspaceCreationSource::ServerHome {
+                    server: physical::identity().server,
+                },
+                name: NameDraft::Custom(NameText::new("terminal vertical".into()).unwrap()),
+            },
+        )
+        .await
+    else {
+        panic!("created with control")
+    };
+    let pane = created.entities().pane();
+    first.context(pane, 2, true).await;
+    let pre_session = SessionKey {
+        pane,
+        epoch: first.principal.epoch(),
+        generation: handle.snapshot().runtime()[0].session_generation,
+    };
+    let startup_fence = fence(first.principal, pre_session, created.control(), 2);
+    let intent = StartupIntent::new(
+        OperationId::new(stream1, OperationSequence::new(2).unwrap()),
+        startup_fence,
+        StartupSource::ExplicitSelection,
+    )
+    .unwrap();
+    assert!(matches!(
+        first.operation(2, Command::BeginStartup(intent)).await,
+        Outcome::StartupAwaitingMeasurement { .. }
+    ));
+    let grid = spaceterm_core::geometry::MeasuredGrid::new(
+        37,
+        113,
+        spaceterm_core::geometry::CellPixels::new(9, 18).unwrap(),
+        spaceterm_core::geometry::SUPPORTED_GRID_LIMITS,
+    )
+    .unwrap();
+    let Outcome::SessionStarted(session) = first
+        .operation(
+            3,
+            Command::CompleteMeasuredStartup(MeasuredStartupMeasurement {
+                intent: intent.id(),
+                fence: startup_fence,
+                grid,
+            }),
+        )
+        .await
+    else {
+        panic!("session started")
+    };
+    let mut snapshots = handle.subscribe_snapshot();
+    while !snapshots.borrow().runtime().iter().any(|runtime| matches!(runtime.phase, SessionPhase::Running { generation } if generation == session.generation)) { snapshots.changed().await.unwrap(); }
+    StartedTerminal {
+        directory,
+        stream2,
+        keys,
+        ipc,
+        listener,
+        host,
+        server,
+        handle,
+        handshake,
+        authenticator,
+        dispatcher,
+        first,
+        created,
+        pane,
+        session,
+    }
+}
+
 #[tokio::test]
 async fn authenticated_ipc_terminal_input_pages_and_two_client_takeover_both_majors() {
     for major in [1, 2] {
-        let directory = physical::Directory::new();
-        let mut storage = physical::Fixture::new(&directory.0);
-        storage.enroll(42);
-        storage.enroll(44);
-        let recovered = storage.recovered();
-        let stream1 = recovered.pairing.as_ref().unwrap().parts().authorizations[0]
-            .parts()
-            .clients[0]
-            .parts()
-            .ordinary;
-        let stream2 = recovered.pairing.as_ref().unwrap().parts().authorizations[1]
-            .parts()
-            .clients[0]
-            .parts()
-            .ordinary;
-        let snapshot = storage.snapshot();
-        let pairings = Arc::new(PhysicalPairings(snapshot));
-        let keys = Arc::new(Key::new(71));
-        let ipc = authentication_fixture::Directory::new();
-        let listener = ipc.listener();
-        let probe = ipc.connect().await;
-        let uid = probe.peer_facts().local_uid.unwrap();
-        let pending_probe = listener.accept().await.unwrap();
-        probe.close().await.unwrap();
-        drop(pending_probe);
-        let clock = Arc::new(NativeRuntimeClock::default());
-        let native = NativeRuntime::new(
-            physical::identity().server,
-            uid,
-            Arc::new(Account(directory.0.clone(), uid)),
-            clock.clone(),
-            RuntimeLimits::default(),
-        )
-        .unwrap();
-        let mut config = actor_fixture::Fixture::new();
-        let host = config.host.clone();
-        config.config.host.authority = Arc::new(PhysicalStartup);
-        config.config.core = CorePorts::production(
-            physical::identity(),
-            ServerDirectory::new(
-                physical::identity().server,
-                directory.0.as_os_str().as_encoded_bytes().to_vec(),
-            )
-            .unwrap(),
-            clock.clone(),
-        )
-        .unwrap();
-        config.config.launch = native.clone();
-        config.config.cleanup = native.clone();
-        config.dependencies.runtime = native;
-        config.dependencies.clock = clock.clone();
-        config.dependencies.store = Box::new(storage.store);
-        config.dependencies.credentials = keys.clone();
-        config.dependencies.pairing = pairings.clone();
-        let server = RecoveredServer::recover(config.config, config.dependencies)
-            .await
-            .unwrap();
-        let handle = server.handle();
-        let handshake = HandshakeConfig {
-            majors: vec![major],
-            limits: spaceterm_protocol::limits::NegotiatedLimits {
-                resource_chunk_bytes: if major == 1 {
-                    MAX_RESOURCE_CHUNK_BYTES
-                } else {
-                    64 * 1024
-                },
-                ..Default::default()
-            },
-            capabilities: vec![
-                spaceterm_protocol::negotiation::CAPABILITY_CANONICAL_DOMAIN,
-                spaceterm_protocol::negotiation::CAPABILITY_TERMINAL_STREAMS,
-                spaceterm_protocol::negotiation::CAPABILITY_NATIVE_NOTIFICATIONS,
-            ],
-        };
-        let authenticator = Authenticator::new(AuthenticationConfig {
-            server: physical::identity().server,
-            epoch: handle.snapshot().epoch(),
-            owning_uid: uid,
-            handshake: handshake.clone(),
-            credentials: keys.clone(),
-            pairing: pairings,
-            authority: Arc::new(handle.clone()),
-            unauthenticated_limit: 16,
-            authenticated_limit: 32,
-            deadline: Duration::from_secs(5),
-        })
-        .unwrap();
-        let (_, status) = tokio::sync::watch::channel(authentication_fixture::status(1));
-        let dispatcher = Arc::new(
-            ProtocolDispatcher::new(
-                authenticator.clone(),
-                status,
-                Arc::new(ActorOrdinaryDispatch::new(Arc::new(
-                    spaceterm_core::operation_ledger::canonical::CanonicalCodec,
-                ))),
-                Arc::new(RejectRestricted),
-            )
-            .with_clock(clock),
-        );
-        let mut first = peer(
-            &ipc,
-            &listener,
-            &authenticator,
-            dispatcher.clone(),
-            handle.clone(),
-            (keys.clone(), handshake.clone()),
-            (stream1, 42),
-        )
-        .await;
-        first.reconcile(handle.snapshot().state().revision).await;
-        let Outcome::CreatedWithControl(created) = first
-            .operation(
-                1,
-                Command::CreateWorkspace {
-                    server: physical::identity().server,
-                    source: WorkspaceCreationSource::ServerHome {
-                        server: physical::identity().server,
-                    },
-                    name: NameDraft::Custom(NameText::new("terminal vertical".into()).unwrap()),
-                },
-            )
-            .await
-        else {
-            panic!("created with control")
-        };
-        let pane = created.entities().pane();
-        first.context(pane, 2, true).await;
-        let pre_session = SessionKey {
+        let StartedTerminal {
+            directory,
+            stream2,
+            keys,
+            ipc,
+            listener,
+            host,
+            server,
+            handle,
+            handshake,
+            authenticator,
+            dispatcher,
+            mut first,
+            created,
             pane,
-            epoch: first.principal.epoch(),
-            generation: handle.snapshot().runtime()[0].session_generation,
-        };
-        let startup_fence = fence(first.principal, pre_session, created.control(), 2);
-        let intent = StartupIntent::new(
-            OperationId::new(stream1, OperationSequence::new(2).unwrap()),
-            startup_fence,
-            StartupSource::ExplicitSelection,
-        )
-        .unwrap();
-        assert!(matches!(
-            first.operation(2, Command::BeginStartup(intent)).await,
-            Outcome::StartupAwaitingMeasurement { .. }
-        ));
-        let grid = spaceterm_core::geometry::MeasuredGrid::new(
-            37,
-            113,
-            spaceterm_core::geometry::CellPixels::new(9, 18).unwrap(),
-            spaceterm_core::geometry::SUPPORTED_GRID_LIMITS,
-        )
-        .unwrap();
-        let Outcome::SessionStarted(session) = first
-            .operation(
-                3,
-                Command::CompleteMeasuredStartup(MeasuredStartupMeasurement {
-                    intent: intent.id(),
-                    fence: startup_fence,
-                    grid,
-                }),
-            )
-            .await
-        else {
-            panic!("session started")
-        };
-        let mut snapshots = handle.subscribe_snapshot();
-        while !snapshots.borrow().runtime().iter().any(|runtime| matches!(runtime.phase, SessionPhase::Running { generation } if generation == session.generation)) { snapshots.changed().await.unwrap(); }
+            session,
+        } = started_terminal(major).await;
         let mut original = fence(first.principal, session, created.control(), 2);
         first.subscribe(original, 1, false).await;
         first.line(1, original, "PS1=; echo spaceterm-ok").await;
@@ -1031,29 +1159,7 @@ async fn authenticated_ipc_terminal_input_pages_and_two_client_takeover_both_maj
                 }),
             })
             .await;
-        let native = loop {
-            match first.recv().await {
-                Payload::Major1(v1::Message {
-                    kind: Some(v1::message::Kind::NativeRequest(value)),
-                }) => {
-                    break spaceterm_protocol::convert::native_requests::v1::decode_request(
-                        &value,
-                        spaceterm_core::observations::MonotonicTick::new(0),
-                    )
-                    .unwrap();
-                }
-                Payload::Major2(v2::Message {
-                    kind: Some(v2::message::Kind::NativeRequest(value)),
-                }) => {
-                    break spaceterm_protocol::convert::native_requests::v2::decode_request(
-                        &value,
-                        spaceterm_core::observations::MonotonicTick::new(0),
-                    )
-                    .unwrap();
-                }
-                _ => {}
-            }
-        };
+        let native = first.native_request().await;
         assert_eq!(
             first
                 .effect(
@@ -1359,5 +1465,454 @@ async fn authenticated_ipc_terminal_input_pages_and_two_client_takeover_both_maj
         stop_physical_server(&handle, host).await;
         server.wait().await.unwrap();
         listener.close().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn authenticated_ipc_one_mib_unsafe_paste_approval() {
+    use spaceterm_core::native_requests::{NativeCompletionKind, NativeRequestKind, PasteDecision};
+    for major in [1, 2] {
+        // Isolate text admission from wall-clock expiry. The deadline and
+        // permission-delay vertical above still uses the real epoch clock.
+        let fixture =
+            started_terminal_with_clock(major, Default::default(), Arc::new(actor_fixture::Clock))
+                .await;
+        let mut first = fixture.first;
+        let original = fence(
+            first.principal,
+            fixture.session,
+            fixture.created.control(),
+            2,
+        );
+        first.subscribe(original, 1, false).await;
+        first
+            .line(1, original, "PS1=; echo maximum-paste-ready")
+            .await;
+        first.output("maximum-paste-ready").await;
+        let text = format!(
+            "echo must-not-run\n#{}",
+            "x".repeat(spaceterm_protocol::limits::MAX_PASTE_BYTES - 19)
+        );
+        assert_eq!(text.len(), spaceterm_protocol::limits::MAX_PASTE_BYTES);
+        let pending = FencedRuntimeCommand {
+            fence: original,
+            command: RuntimeCommand::RequestPaste(BoundedPaste::new(text.clone()).unwrap()),
+        };
+        first
+            .send(match major {
+                1 => Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::RuntimeCommand(
+                        runtime::v1::encode_command(100, &pending).unwrap(),
+                    )),
+                }),
+                _ => Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::RuntimeCommand(
+                        runtime::v2::encode_command(100, &pending).unwrap(),
+                    )),
+                }),
+            })
+            .await;
+        let approval = first.native_request().await;
+        let NativeRequestKind::UnsafePaste {
+            approval: id,
+            text: delivered,
+        } = approval.kind()
+        else {
+            panic!("full unsafe paste approval");
+        };
+        assert!(
+            delivered.as_str() == text,
+            "unsafe paste text must arrive unchanged and untruncated"
+        );
+        assert_eq!(
+            first
+                .complete_native(
+                    &approval,
+                    NativeCompletionKind::Paste {
+                        approval: *id,
+                        decision: PasteDecision::Cancel,
+                    }
+                )
+                .await,
+            Some(spaceterm_protocol::wire::common::FailureClass::Stale as i32)
+        );
+        while !first.outcomes.contains_key(&100) {
+            first.recv().await;
+        }
+        assert_eq!(first.outcomes.remove(&100), Some(None));
+        first
+            .line(101, original, "echo maximum-paste-cancelled")
+            .await;
+        first.output("maximum-paste-cancelled").await;
+        assert!(!first.text.contains("must-not-run"));
+        first.close().await;
+        fixture.authenticator.close().await.unwrap();
+        stop_physical_server(&fixture.handle, fixture.host).await;
+        fixture.server.wait().await.unwrap();
+        fixture.listener.close().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn authenticated_ipc_one_mib_clipboard_write() {
+    use spaceterm_core::native_requests::{NativeCompletionKind, NativeRequestKind};
+    for major in [1, 2] {
+        // Isolate text admission from wall-clock expiry. The deadline and
+        // permission-delay vertical above still uses the real epoch clock.
+        let fixture =
+            started_terminal_with_clock(major, Default::default(), Arc::new(actor_fixture::Clock))
+                .await;
+        let mut first = fixture.first;
+        let original = fence(
+            first.principal,
+            fixture.session,
+            fixture.created.control(),
+            2,
+        );
+        first.subscribe(original, 1, false).await;
+        first
+            .line(1, original, "PS1=; echo maximum-clipboard-ready")
+            .await;
+        first.output("maximum-clipboard-ready").await;
+        first
+            .line(
+                3,
+                original,
+                r"printf '\033]52;c;'; head -c 1048576 /dev/zero | tr '\000' x | base64 | tr -d '\n'; printf '\033\\\n'; echo maximum-clipboard-done",
+            )
+            .await;
+        let request = first.native_request().await;
+        let NativeRequestKind::ClipboardWrite(text) = request.kind() else {
+            panic!("clipboard write request");
+        };
+        assert_eq!(
+            text.as_str().len(),
+            spaceterm_protocol::limits::MAX_CLIPBOARD_BYTES
+        );
+        assert!(text.as_str().bytes().all(|byte| byte == b'x'));
+        assert_eq!(
+            first
+                .complete_native(&request, NativeCompletionKind::ClipboardWritten)
+                .await,
+            None
+        );
+        first.output("maximum-clipboard-done").await;
+        first.close().await;
+        fixture.authenticator.close().await.unwrap();
+        stop_physical_server(&fixture.handle, fixture.host).await;
+        fixture.server.wait().await.unwrap();
+        fixture.listener.close().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn authenticated_ipc_end_all_retires_content_and_approvals_without_deleting_organization() {
+    use spaceterm_core::native_requests::{NativeCompletionKind, NativeRequestKind, PasteDecision};
+    for major in [1, 2] {
+        let fixture = started_terminal(major).await;
+        let mut first = fixture.first;
+        let original = fence(
+            first.principal,
+            fixture.session,
+            fixture.created.control(),
+            2,
+        );
+        first.subscribe(original, 1, false).await;
+        first.line(1, original, "PS1=; i=0; while [ $i -lt 100 ]; do echo retired-output-$i; i=$((i+1)); done; echo history-ready").await;
+        first.output("history-ready").await;
+        first.line(3, original, r"printf '\033_Ga=T,f=32,s=1,v=1,i=7,q=2;AQID/w==\033\\\n'; echo retired-image-ready").await;
+        first.output("retired-image-ready").await;
+        let (mut old_stamp, resource) = first.resource.expect("live image before retirement");
+        let access = fixture
+            .handle
+            .runtime_access(first.principal, fixture.session)
+            .await
+            .unwrap();
+        let limits = PageLimits::new(256, 16384, 128 * 1024).unwrap();
+        loop {
+            let request = TopologyPageRequest::new(old_stamp, None, limits).unwrap();
+            match access.handle.read_topology(request).unwrap().await.unwrap() {
+                ContentReadResult::Ready(topology) => {
+                    assert!(topology.rows().len() > 37, "live session has scrollback");
+                    break;
+                }
+                ContentReadResult::ResyncRequired { current, .. } => {
+                    old_stamp = QueryStamp::new(
+                        EffectFence::new(
+                            original.session(),
+                            original.grant(),
+                            original.connection(),
+                            original.context(),
+                            Some(current.revision),
+                        )
+                        .unwrap(),
+                        current,
+                        old_stamp.request(),
+                        old_stamp.generation(),
+                    )
+                    .unwrap();
+                }
+                ContentReadResult::Rejected { .. } => panic!("live topology"),
+            }
+        }
+        let pending = FencedRuntimeCommand {
+            fence: original,
+            command: RuntimeCommand::RequestPaste(
+                BoundedPaste::new("echo retired-paste\n".into()).unwrap(),
+            ),
+        };
+        first
+            .send(match major {
+                1 => Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::RuntimeCommand(
+                        runtime::v1::encode_command(100, &pending).unwrap(),
+                    )),
+                }),
+                _ => Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::RuntimeCommand(
+                        runtime::v2::encode_command(100, &pending).unwrap(),
+                    )),
+                }),
+            })
+            .await;
+        let approval = first.native_request().await;
+        let NativeRequestKind::UnsafePaste {
+            approval: approval_id,
+            ..
+        } = approval.kind()
+        else {
+            panic!("paste approval before retirement");
+        };
+        let before = fixture.handle.snapshot();
+        let Outcome::Assessment(assessment) = first
+            .operation(
+                4,
+                Command::AssessEndAllSessions {
+                    server: first.principal.server(),
+                },
+            )
+            .await
+        else {
+            panic!("End All assessment");
+        };
+        assert_eq!(assessment.summary().live_session_count(), 1);
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(120),
+                first.operation(
+                    5,
+                    Command::EndAllSessions {
+                        server: first.principal.server(),
+                        assessment: assessment.reference(),
+                    }
+                )
+            )
+            .await
+            .unwrap(),
+            Outcome::Applied
+        );
+        let ended = fixture.handle.snapshot();
+        assert!(
+            ended.state().workspaces == before.state().workspaces,
+            "End All preserves workspaces"
+        );
+        assert!(
+            ended.state().tabs == before.state().tabs,
+            "End All preserves tabs"
+        );
+        assert!(
+            ended.state().panes == before.state().panes,
+            "End All preserves panes"
+        );
+        assert_eq!(ended.runtime()[0].control, before.runtime()[0].control);
+        assert_eq!(
+            ended.runtime()[0].phase,
+            SessionPhase::Ended {
+                reason: EndReason::EndAllSessions
+            }
+        );
+        assert_eq!(
+            first
+                .complete_native(
+                    &approval,
+                    NativeCompletionKind::Paste {
+                        approval: *approval_id,
+                        decision: PasteDecision::Confirm,
+                    }
+                )
+                .await,
+            Some(spaceterm_protocol::wire::common::FailureClass::Stale as i32)
+        );
+        assert!(
+            fixture
+                .handle
+                .runtime_access(first.principal, fixture.session)
+                .await
+                .is_err()
+        );
+        let old_read = access.handle.read_page(
+            ContentPageRequest::new(old_stamp, ContentRange::ActiveGrid, None, limits).unwrap(),
+        );
+        if let Ok(read) = old_read {
+            assert!(
+                !matches!(read.await, Ok(ContentReadResult::Ready(_))),
+                "retired accessibility rows are unavailable"
+            );
+        }
+        let old_graphics =
+            GraphicsRequest::new(old_stamp, ResourceTransferId::new(1).unwrap(), resource, 0)
+                .unwrap();
+        if let Ok(mut chunks) = access.handle.read_graphics(old_graphics) {
+            assert!(
+                !matches!(chunks.next().await, Some(Ok(_))),
+                "retired image bytes are unavailable"
+            );
+        }
+        first.reconcile(ended.state().revision).await;
+        let pre_session = SessionKey {
+            generation: ended.runtime()[0].session_generation,
+            ..fixture.session
+        };
+        let startup_fence = fence(first.principal, pre_session, fixture.created.control(), 2);
+        let intent = StartupIntent::new(
+            OperationId::new(first.stream, OperationSequence::new(6).unwrap()),
+            startup_fence,
+            StartupSource::ExplicitSelection,
+        )
+        .unwrap();
+        assert!(matches!(
+            first.operation(6, Command::BeginStartup(intent)).await,
+            Outcome::StartupAwaitingMeasurement { .. }
+        ));
+        let grid = spaceterm_core::geometry::MeasuredGrid::new(
+            37,
+            113,
+            spaceterm_core::geometry::CellPixels::new(9, 18).unwrap(),
+            spaceterm_core::geometry::SUPPORTED_GRID_LIMITS,
+        )
+        .unwrap();
+        let Outcome::SessionStarted(replacement) = first
+            .operation(
+                7,
+                Command::CompleteMeasuredStartup(MeasuredStartupMeasurement {
+                    intent: intent.id(),
+                    fence: startup_fence,
+                    grid,
+                }),
+            )
+            .await
+        else {
+            panic!("explicit replacement session");
+        };
+        assert_ne!(replacement.generation, fixture.session.generation);
+        let mut snapshots = fixture.handle.subscribe_snapshot();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !matches!(snapshots.borrow().runtime()[0].phase, SessionPhase::Running { generation } if generation == replacement.generation) {
+                snapshots.changed().await.unwrap();
+            }
+        }).await.unwrap();
+        let next = fence(first.principal, replacement, fixture.created.control(), 2);
+        first.text.clear();
+        first.pages.clear();
+        first.resource = None;
+        first.subscribe(next, 2, false).await;
+        first.line(101, next, "PS1=; echo replacement-ready").await;
+        first.output("replacement-ready").await;
+        assert!(!first.text.contains("retired-output"));
+        assert!(!first.text.contains("retired-paste"));
+        assert!(
+            first
+                .pages
+                .iter()
+                .all(|page| page.parts().resources.is_empty())
+        );
+        let base = first.pages.last().unwrap().parts().base;
+        let stamp = QueryStamp::new(
+            EffectFence::new(
+                next.session(),
+                next.grant(),
+                next.connection(),
+                next.context(),
+                Some(base.revision),
+            )
+            .unwrap(),
+            base,
+            ContentRequestId::new(200).unwrap(),
+            RequestGeneration::new(1),
+        )
+        .unwrap();
+        let access = fixture
+            .handle
+            .runtime_access(first.principal, replacement)
+            .await
+            .unwrap();
+        let ContentReadResult::Ready(topology) = access
+            .handle
+            .read_topology(TopologyPageRequest::new(stamp, None, limits).unwrap())
+            .unwrap()
+            .await
+            .unwrap()
+        else {
+            panic!("replacement topology");
+        };
+        assert_eq!(
+            topology.rows().len(),
+            37,
+            "replacement starts without old scrollback"
+        );
+        first.close().await;
+        fixture.authenticator.close().await.unwrap();
+        stop_physical_server(&fixture.handle, fixture.host).await;
+        fixture.server.wait().await.unwrap();
+        fixture.listener.close().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn authenticated_ipc_oversized_negotiated_clipboard_request_is_denied_without_disconnect() {
+    for major in [1, 2] {
+        for (limits, source_bytes) in [
+            (
+                spaceterm_protocol::limits::NegotiatedLimits {
+                    clipboard_bytes: 16,
+                    ..Default::default()
+                },
+                32,
+            ),
+            (
+                spaceterm_protocol::limits::NegotiatedLimits {
+                    frame_bytes: 16 * 1024,
+                    management_bytes: 16 * 1024,
+                    ..Default::default()
+                },
+                32 * 1024,
+            ),
+        ] {
+            let fixture = started_terminal_with_limits(major, limits).await;
+            let mut first = fixture.first;
+            let original = fence(
+                first.principal,
+                fixture.session,
+                fixture.created.control(),
+                2,
+            );
+            first.subscribe(original, 1, false).await;
+            first
+                .line(1, original, "PS1=; echo negotiated-clipboard-ready")
+                .await;
+            first.output("negotiated-clipboard-ready").await;
+            first.line(3, original, &format!(r"printf '\033]52;c;'; head -c {source_bytes} /dev/zero | tr '\000' x | base64 | tr -d '\n'; printf '\033\\\n'; echo negotiated-clipboard-denied")).await;
+            first.output("negotiated-clipboard-denied").await;
+            first
+                .line(5, original, "echo negotiated-clipboard-still-connected")
+                .await;
+            first.output("negotiated-clipboard-still-connected").await;
+            assert_eq!(first.native_seen, 0);
+            first.close().await;
+            fixture.authenticator.close().await.unwrap();
+            stop_physical_server(&fixture.handle, fixture.host).await;
+            fixture.server.wait().await.unwrap();
+            fixture.listener.close().unwrap();
+        }
     }
 }
