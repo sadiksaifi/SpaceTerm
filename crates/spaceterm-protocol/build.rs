@@ -40,6 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "FindEvent.item.chunk",
             "Message.kind.canonical_semantic_page",
             "Message.kind.content_read_response",
+            "Message.kind.content_publication",
             "ContentReadResponse.result.page",
             "PairingOutcome.operation",
             "PairingOutcome.reservation",
@@ -371,7 +372,7 @@ fn required(message: &str, field: &FieldDescriptorProto) -> bool {
         "RevocationRequest" | "RevocationStatus" | "RevocationReceipt" => true,
         "SemanticRow" => matches!(field.name(), "id" | "revision"),
         "CanonicalSemanticRow" => matches!(field.name(), "id" | "columns"),
-        "CanonicalSemanticPage" => matches!(field.name(), "stamp" | "geometry"),
+        "CanonicalSemanticPage" => field.name() == "stamp",
         "SemanticPage" => matches!(
             field.name(),
             "fence"

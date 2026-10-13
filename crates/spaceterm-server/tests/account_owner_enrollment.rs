@@ -781,6 +781,106 @@ fn archived_owner_request_replay_never_allocates_or_rewrites_authority() {
 }
 
 #[tokio::test]
+async fn consumed_stopped_owner_receipt_survives_restart_and_native_acknowledgement() {
+    use spaceterm_protocol::pairing_adapter::{EnrollmentClient, ReceiptCodec};
+    for major in [1, 2] {
+        let (_root, fixture, home) = initialized_account(DesiredServerState::Stopped);
+        let supervisor = Arc::new(fixture.reopen());
+        let registration = supervisor.discover().unwrap().unwrap();
+        let pin = registration.server_pin();
+        let request = supervisor.allocate_request().unwrap();
+        let (providers, _, _) = stopped_providers();
+        let executor = AccountOwnerRequestExecutor::stopped(
+            supervisor.clone(),
+            home.clone(),
+            request,
+            &verified_claim(ServerId::new(pin.identity), 41),
+            providers,
+        )
+        .await
+        .unwrap();
+        let original_receipt = enroll_owner(&executor, request, pin, 41, major).await;
+        let original = executor
+            .issue(request, verified_claim(ServerId::new(pin.identity), 41))
+            .await
+            .unwrap();
+        let PairingOutcome::AuthorizationReserved { ticket, .. } = &original.outcome else {
+            panic!("owner reservation");
+        };
+        let public = executor.enrollment_reservation(ticket).unwrap();
+        executor.close().await.unwrap();
+        supervisor.acknowledge_request(request).unwrap();
+        let journal = fs::read(fixture.anchor().join("requests")).unwrap();
+        assert_eq!(
+            supervisor.owner_enrollment_digest(
+                request,
+                ServerId::new(pin.identity),
+                enrollment_proposal_digest(
+                    verified_claim(ServerId::new(pin.identity), 41).proposal()
+                )
+                .unwrap(),
+            ),
+            Err(spaceterm_host::account_service::ServiceFailure::RequestRetired)
+        );
+        let (providers, runtime, _) = stopped_providers();
+        let executor = AccountOwnerRequestExecutor::stopped(
+            Arc::new(fixture.reopen()),
+            home,
+            request,
+            &verified_claim(ServerId::new(pin.identity), 41),
+            providers,
+        )
+        .await
+        .unwrap();
+        let replay = executor
+            .issue(request, verified_claim(ServerId::new(pin.identity), 41))
+            .await
+            .unwrap();
+        assert_eq!(replay.outcome, original.outcome);
+        assert!(replay.authorization.is_none());
+        let (client, hello) = EnrollmentClient::begin(
+            pin,
+            public,
+            vec![major],
+            Arc::new(DeviceKey::new(41)),
+            Arc::new(DeviceKey::new(42)),
+        )
+        .unwrap();
+        let (server, hello) = executor.accept_enrollment(&hello).unwrap();
+        let (client, proof) = client.receive_server(&hello).unwrap();
+        let (mut server, ready) = server.receive_proof(&proof).unwrap();
+        let mut client = client.receive_ready(&ready).unwrap();
+        let lookup = client.lookup_message().unwrap();
+        let reply = executor
+            .enrollment_frame(&mut server, &lookup)
+            .await
+            .unwrap();
+        let spaceterm_protocol::wire::pairing::enrollment_message::Kind::Result(result) =
+            client.decode(&reply).unwrap().kind.unwrap()
+        else {
+            panic!("lookup result");
+        };
+        assert_eq!(
+            ReceiptCodec::new(pin)
+                .from_wire(&result.receipt.unwrap())
+                .unwrap(),
+            original_receipt
+        );
+        executor.close().await.unwrap();
+        assert_eq!(
+            fs::read(fixture.anchor().join("requests")).unwrap(),
+            journal
+        );
+        assert!(runtime.starts.lock().unwrap().is_empty());
+        assert!(!registration.endpoint().unwrap().path().exists());
+        let retained = supervisor.discover().unwrap().unwrap();
+        assert_eq!(retained.server_pin(), pin);
+        assert_eq!(retained.generation(), registration.generation());
+        assert_eq!(retained.desired_state(), DesiredServerState::Stopped);
+    }
+}
+
+#[tokio::test]
 async fn owner_consumption_revalidates_stopped_registration_inside_actor() {
     use spaceterm_protocol::pairing_adapter::EnrollmentClient;
     let (_root, fixture, home) = initialized_account(DesiredServerState::Stopped);

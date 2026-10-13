@@ -456,6 +456,7 @@ impl ApplicationQuitCoordinator {
                     .is_ok_and(WorkspaceManager::is_server_backed)
             })
         {
+            crate::platform::desktop_client_startup::cancel_for_quit(cx);
             if let Some(adapter) = self.adapter.upgrade() {
                 adapter.confirm_quit(cx);
             }
@@ -609,9 +610,18 @@ pub(crate) fn open(
     {
         return Err(RuntimeError::Initialization);
     }
+    if cx
+        .try_global::<crate::platform::desktop_client_startup::DesktopStartupState>()
+        .is_some_and(|state| state.pending || state.failure.is_some())
+    {
+        return Err(RuntimeError::Initialization);
+    }
     let client_runtime = cx
         .try_global::<crate::ui::server_client_runtime::InstalledDesktopClient>()
         .map(|client| client.0.clone());
+    if host.desktop_client_startup.is_some() && client_runtime.is_none() {
+        return Err(RuntimeError::Initialization);
+    }
     if client_runtime.is_some()
         && let Some(window) = workspace_windows(cx).into_iter().next()
     {
@@ -619,10 +629,7 @@ pub(crate) fn open(
         return Ok(window);
     }
     #[cfg(not(test))]
-    if client_runtime.is_none() {
-        // Missing native credentials or journal authority cannot select a desktop-owned PTY.
-        return Err(RuntimeError::Initialization);
-    }
+    let client_runtime = client_runtime.ok_or(RuntimeError::Initialization)?;
     let adapters = crate::ui::WorkspaceManagerAdapters {
         local_filesystem: host.adapters.local_filesystem.clone(),
         key_input: Rc::clone(&host.adapters.key_input),
@@ -636,7 +643,9 @@ pub(crate) fn open(
         remote_workspace: Arc::clone(&host.adapters.remote_workspace),
         window_drag: host.window_movement.create(),
     };
+    #[cfg(test)]
     let session_factory = Rc::clone(&host.session_factory);
+    #[cfg(test)]
     let home_directory = host.home_directory.clone();
     let default_sidebar = cx
         .try_global::<crate::ui::appearance_runtime::AppearanceRuntime>()
@@ -644,6 +653,11 @@ pub(crate) fn open(
         .unwrap_or_default();
     let result = cx.open_window(workspace_window_options(host, cx), |window, cx| {
         let workspace_manager = cx.new(|cx| {
+            #[cfg(not(test))]
+            {
+                WorkspaceManager::new_server(client_runtime, adapters, default_sidebar, window, cx)
+            }
+            #[cfg(test)]
             if let Some(runtime) = client_runtime {
                 WorkspaceManager::new_server(runtime, adapters, default_sidebar, window, cx)
             } else {
@@ -912,7 +926,9 @@ pub(crate) struct HostCompositionParts {
 pub(crate) struct HostComposition {
     modal_prompts: bool,
     profile: crate::desktop_profile::DesktopProfile,
+    #[cfg(test)]
     home_directory: PathBuf,
+    #[cfg(test)]
     session_factory: Rc<dyn TerminalSessionFactory>,
     adapters: ApplicationCapabilities,
     services: Option<Rc<dyn crate::platform::services_registration::ServicesRegistration>>,
@@ -927,8 +943,22 @@ pub(crate) struct HostComposition {
     /// composes permission access and a Setup Guide.
     permission_setup:
         std::cell::OnceCell<gpui::Entity<crate::ui::permission_setup::PermissionSetup>>,
+    desktop_client_startup:
+        Option<Rc<dyn crate::platform::desktop_client_startup::DesktopClientStartup>>,
 }
 impl HostComposition {
+    #[allow(
+        dead_code,
+        reason = "native client provider supplies this constructor handoff"
+    )]
+    pub(crate) fn with_desktop_client_startup(
+        mut self,
+        startup: Rc<dyn crate::platform::desktop_client_startup::DesktopClientStartup>,
+    ) -> Self {
+        self.desktop_client_startup = Some(startup);
+        self
+    }
+
     pub(crate) fn with_modal_prompts(mut self, enabled: bool) -> Self {
         self.modal_prompts = enabled;
         self
@@ -958,10 +988,14 @@ impl HostComposition {
         {
             return Err(DesktopProfileError::InvalidCombination);
         }
+        #[cfg(not(test))]
+        drop(parts.session_factory);
         Ok(Self {
             modal_prompts: false,
             profile: parts.profile,
+            #[cfg(test)]
             home_directory: parts.home_directory,
+            #[cfg(test)]
             session_factory: parts.session_factory,
             adapters: parts.adapters,
             services: parts.services,
@@ -970,6 +1004,7 @@ impl HostComposition {
             window_chrome: parts.window_chrome,
             appearance: None,
             permission_setup: std::cell::OnceCell::new(),
+            desktop_client_startup: None,
         })
     }
 }
@@ -1028,10 +1063,13 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
             service.update(cx, |updates, cx| {
                 updates.begin_launch(
                     Rc::new(move |cx| {
-                        if let Err(error) = open_initial_workspace(cx, &host) {
-                            reported_failure.set(Some(error));
-                            cx.quit();
-                        }
+                        let reported_failure = reported_failure.clone();
+                        begin_initial_workspace(cx, host.clone(), move |result, cx| {
+                            if let Err(error) = result {
+                                reported_failure.set(Some(error));
+                                cx.quit();
+                            }
+                        });
                     }),
                     cx,
                 );
@@ -1137,6 +1175,24 @@ fn start_application(
 ) -> Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError> {
     initialize_application(cx, host)?;
     open_initial_workspace(cx, host)
+}
+
+fn begin_initial_workspace(
+    cx: &mut App,
+    host: Rc<HostComposition>,
+    completed: impl FnOnce(Result<gpui::WindowHandle<WorkspaceManager>, RuntimeError>, &mut App)
+    + 'static,
+) {
+    if let Some(startup) = &host.desktop_client_startup {
+        crate::platform::desktop_client_startup::begin(startup.clone(), cx, move |result, cx| {
+            let result = result
+                .map_err(|_| RuntimeError::Initialization)
+                .and_then(|_| open_initial_workspace(cx, &host));
+            completed(result, cx);
+        });
+    } else {
+        completed(open_initial_workspace(cx, &host), cx);
+    }
 }
 
 fn open_initial_workspace(
@@ -2481,6 +2537,170 @@ mod runtime_tests {
         };
         let runtime = cx.new(|cx| DesktopClientRuntime::new(dependencies, cx));
         (runtime, provider)
+    }
+
+    struct RecoveredRuntime(gpui::Entity<crate::ui::server_client_runtime::DesktopClientRuntime>);
+    impl crate::platform::desktop_client_startup::RecoveredDesktopClient for RecoveredRuntime {
+        fn install(
+            self: Box<Self>,
+            cx: &mut App,
+        ) -> Result<
+            gpui::Entity<crate::ui::server_client_runtime::DesktopClientRuntime>,
+            crate::ui::server_desktop_contracts::DesktopClientError,
+        > {
+            cx.set_global(crate::ui::server_client_runtime::InstalledDesktopClient(
+                self.0.clone(),
+            ));
+            Ok(self.0)
+        }
+    }
+
+    type NativeRecoveryResult = Result<
+        Box<dyn crate::platform::desktop_client_startup::RecoveredDesktopClient>,
+        crate::ui::server_desktop_contracts::DesktopClientError,
+    >;
+
+    struct StartupProvider {
+        recovered: std::cell::RefCell<Option<async_channel::Receiver<NativeRecoveryResult>>>,
+        calls: std::cell::Cell<usize>,
+    }
+    impl crate::platform::desktop_client_startup::DesktopClientStartup for StartupProvider {
+        fn recover(
+            &self,
+            cx: &mut App,
+        ) -> gpui::Task<
+            Result<
+                Box<dyn crate::platform::desktop_client_startup::RecoveredDesktopClient>,
+                crate::ui::server_desktop_contracts::DesktopClientError,
+            >,
+        > {
+            self.calls.set(self.calls.get() + 1);
+            let receiver = self.recovered.borrow_mut().take().expect("one recovery");
+            cx.spawn(async move |_| receiver.recv().await.unwrap())
+        }
+    }
+
+    #[gpui::test]
+    fn desktop_native_recovery_precedes_workspace_and_reopen_reuses_original_owner(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut host = host_with_settings();
+        let (runtime, provider) = desktop_client_runtime(cx);
+        let (sender, receiver) = async_channel::bounded(1);
+        let startup = Rc::new(StartupProvider {
+            recovered: std::cell::RefCell::new(Some(receiver)),
+            calls: std::cell::Cell::new(0),
+        });
+        Rc::get_mut(&mut host).unwrap().desktop_client_startup = Some(startup.clone());
+        let finished = Rc::new(std::cell::Cell::new(false));
+        let observed = finished.clone();
+        cx.update(|cx| {
+            initialize_application(cx, &host).unwrap();
+            begin_initial_workspace(cx, host.clone(), move |result, _| {
+                result.unwrap();
+                observed.set(true);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(workspace_windows(cx).is_empty());
+            assert_eq!(open(cx, &host).unwrap_err(), RuntimeError::Initialization);
+            restore_default_window(cx, &host);
+            assert!(workspace_windows(cx).is_empty());
+        });
+        sender
+            .try_send(Ok(Box::new(RecoveredRuntime(runtime.clone()))))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(finished.get());
+        assert_eq!(startup.calls.get(), 1);
+        cx.update(|cx| {
+            let first = workspace_windows(cx)[0];
+            assert_eq!(open(cx, &host).unwrap(), first);
+            assert_eq!(workspace_windows(cx).len(), 1);
+            assert_eq!(
+                cx.global::<crate::ui::server_client_runtime::InstalledDesktopClient>()
+                    .0,
+                runtime
+            );
+        });
+        assert!(provider.begun().is_empty());
+    }
+
+    #[gpui::test]
+    fn desktop_quit_during_native_recovery_does_not_install_or_open_late_client(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut host = host_with_settings();
+        let quit = Rc::new(
+            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+        );
+        let (runtime, _) = desktop_client_runtime(cx);
+        let (sender, receiver) = async_channel::bounded(1);
+        let startup = Rc::new(StartupProvider {
+            recovered: std::cell::RefCell::new(Some(receiver)),
+            calls: std::cell::Cell::new(0),
+        });
+        let host_mut = Rc::get_mut(&mut host).unwrap();
+        host_mut.desktop_client_startup = Some(startup.clone());
+        host_mut.adapters.application_quit = quit.clone();
+        let finished = Rc::new(std::cell::Cell::new(false));
+        let observed = finished.clone();
+        cx.update(|cx| {
+            initialize_application(cx, &host).unwrap();
+            begin_initial_workspace(cx, host.clone(), move |_, _| observed.set(true));
+        });
+        cx.run_until_parked();
+        cx.update(|cx| cx.dispatch_action(&QuitApplication));
+        cx.run_until_parked();
+        assert_eq!(quit.confirmations(), 1);
+        sender
+            .try_send(Ok(Box::new(RecoveredRuntime(runtime))))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(!finished.get());
+        assert_eq!(startup.calls.get(), 1);
+        cx.update(|cx| {
+            assert!(
+                cx.try_global::<crate::ui::server_client_runtime::InstalledDesktopClient>()
+                    .is_none()
+            );
+            assert!(workspace_windows(cx).is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn desktop_native_recovery_failure_never_opens_replacement_local_work(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut host = host_with_settings();
+        let (sender, receiver) = async_channel::bounded(1);
+        let startup = Rc::new(StartupProvider {
+            recovered: std::cell::RefCell::new(Some(receiver)),
+            calls: std::cell::Cell::new(0),
+        });
+        Rc::get_mut(&mut host).unwrap().desktop_client_startup = Some(startup.clone());
+        let result = Rc::new(std::cell::Cell::new(None));
+        let observed = result.clone();
+        cx.update(|cx| {
+            initialize_application(cx, &host).unwrap();
+            begin_initial_workspace(cx, host.clone(), move |result, _| {
+                observed.set(Some(result.map(|_| ())))
+            });
+        });
+        sender
+            .try_send(Err(
+                crate::ui::server_desktop_contracts::DesktopClientError::LocalStorageUnavailable,
+            ))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(result.get(), Some(Err(RuntimeError::Initialization)));
+        cx.update(|cx| {
+            restore_default_window(cx, &host);
+            assert!(workspace_windows(cx).is_empty());
+            assert_eq!(open(cx, &host).unwrap_err(), RuntimeError::Initialization);
+        });
+        assert_eq!(startup.calls.get(), 1);
     }
 
     #[gpui::test]

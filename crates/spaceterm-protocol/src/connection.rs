@@ -412,6 +412,24 @@ fn ordinary_field_capabilities(
     {
         return Err(ProtocolError::Negotiation);
     }
+    macro_rules! terminal_stream_fields {
+        ($message:expr, $p:ident) => {{
+            use crate::wire::$p;
+            match &$message.kind {
+                Some($p::message::Kind::CanonicalSemanticPage(page)) => page.columns != 0,
+                Some($p::message::Kind::ContentReadResponse(response)) => matches!(&response.result,
+                    Some($p::content_read_response::Result::Page(page)) if page.columns != 0),
+                _ => false,
+            }
+        }};
+    }
+    let terminal_fields = match payload {
+        Payload::Major1(message) => terminal_stream_fields!(message, v1),
+        Payload::Major2(message) => terminal_stream_fields!(message, v2),
+    };
+    if terminal_fields && !capabilities.contains(&crate::negotiation::CAPABILITY_TERMINAL_STREAMS) {
+        return Err(ProtocolError::Negotiation);
+    }
     macro_rules! canonical {
         ($message:expr, $p:ident) => {{
             use crate::wire::$p;
