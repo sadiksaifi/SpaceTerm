@@ -2,9 +2,9 @@
 //! registry. Awaited database, process, launch and transport work runs outside
 //! this loop. Lifecycle requests have independent reserved ingress.
 
+mod git_actor;
 #[path = "pairing/actor.rs"]
 pub(crate) mod pairing_actor;
-mod git_actor;
 pub(crate) use git_actor::{GitRequest, git_failure as classify_git_failure};
 
 use crate::{

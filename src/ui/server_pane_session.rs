@@ -367,7 +367,7 @@ impl ServerPaneSession {
                     id: crate::terminal::paste::PasteConfirmationId::new(id),
                     byte_len: text.len(),
                     line_count: text.bytes().filter(|byte| *byte == b'\n').count() + 1,
-                    risk: crate::terminal::PasteRisk {
+                    risk: crate::terminal::paste::PasteRisk {
                         multiline: text.contains('\n'),
                         control_bytes: text.chars().any(|character| character.is_control() && !matches!(character, '\n' | '\t')),
                         closing_fence: text.contains("\x1b[201~"),

@@ -769,7 +769,7 @@ impl Fixture {
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let key = Key::new();
         let device = Key::new();
-        let uid = ServiceSupervisor::current().unwrap().key().account_uid;
+        let uid = ServiceSupervisor::current(None).unwrap().key().account_uid;
         let identity = StoreIdentity {
             server: ServerId::new([tag; 16]),
             account: AccountBuildKey {

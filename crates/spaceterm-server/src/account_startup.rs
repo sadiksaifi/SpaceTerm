@@ -125,7 +125,7 @@ impl fmt::Debug for AccountStore {
 /// Resolves the current nonroot account and compiled build before reading its
 /// fixed registration. Runtime flags and caller XDG roots cannot select it.
 pub fn production_startup() -> Result<AccountStartup, StartupFailure> {
-    let supervisor = ServiceSupervisor::current().map_err(StartupFailure::Account)?;
+    let supervisor = ServiceSupervisor::current(None).map_err(StartupFailure::Account)?;
     let registration = supervisor
         .discover()
         .map_err(StartupFailure::Account)?

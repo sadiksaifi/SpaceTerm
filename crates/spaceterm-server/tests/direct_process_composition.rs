@@ -192,7 +192,7 @@ fn shell_spawns_directly_as_the_account_at_measured_geometry_and_directory() {
     let text = String::from_utf8(bytes).unwrap().replace('\r', "");
     assert!(text.contains(&format!(
         "uid={}\n",
-        ServiceSupervisor::current().unwrap().key().account_uid
+        ServiceSupervisor::current(None).unwrap().key().account_uid
     )));
     let mut id = std::process::Command::new("/usr/bin/id");
     id.arg("-G");
@@ -484,6 +484,6 @@ fn git_uses_the_direct_hardened_account_runner_without_native_spawn_authority() 
             .trim()
             .parse::<u32>()
             .unwrap(),
-        ServiceSupervisor::current().unwrap().key().account_uid
+        ServiceSupervisor::current(None).unwrap().key().account_uid
     );
 }
