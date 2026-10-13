@@ -917,6 +917,32 @@ impl TabManager {
         }
     }
 
+    /// The stage's leading margin and inset in this frame, and how far it is offset from where it
+    /// rests. The stage moves by whole device pixels from where it rests, so both edges of the
+    /// active Tab round alike and its Terminal Sessions keep their size in every frame.
+    fn stage_leading_edge(&self, window: &Window, cx: &App) -> (Pixels, Pixels, Pixels) {
+        let frame = super::workspace_frame::WorkspaceFrame::for_appearance(
+            super::appearance::chrome(cx),
+            cx,
+        );
+        // The stage's leading margin and inset beside `reveal` of the sidebar.
+        let leading_edge = |reveal: f32| {
+            let hidden = frame.stage_leading_inset(false);
+            let inset = hidden + (frame.stage_leading_inset(true) - hidden) * reveal;
+            (self.sidebar_width * reveal, inset)
+        };
+        let rest_leading = {
+            let (margin, inset) = leading_edge(if self.sidebar_visible { 1.0 } else { 0.0 });
+            margin + inset
+        };
+        let scale = window.scale_factor();
+        let snap = |length: Pixels| (length * scale).round() / scale;
+        let (leading_margin, leading_inset) = leading_edge(self.sidebar_reveal);
+        let leading_inset = snap(leading_inset);
+        let offset = snap(rest_leading - leading_margin - leading_inset);
+        (rest_leading - offset - leading_inset, leading_inset, offset)
+    }
+
     /// Presents `reveal` of the sidebar in the current frame while it shows or hides. The stage's
     /// leading edge follows the sidebar, and the active Tab keeps the width it has at rest, so its
     /// Terminal Sessions resize once per change rather than once per frame.
@@ -2458,6 +2484,9 @@ impl Render for TabManager {
         }
         let manager = cx.entity().downgrade();
         let active_tab = self.tabs.active_tab().clone();
+        let (leading_margin, leading_inset, offset) = self.stage_leading_edge(window, cx);
+        // The active Tab keeps its resting width, and its Panes stretch across the stage.
+        active_tab.update(cx, |view, cx| view.present_stage_stretch(offset, cx));
         let hovers = self.tab_hovers(window, cx);
         let appearance = super::appearance::chrome(cx);
         let presentation = TabChromePresentation::resolve(
@@ -2468,24 +2497,6 @@ impl Render for TabManager {
         let tab_bar = self.render_tab_bar(&presentation, hovers, manager.clone(), window, cx);
         let frame = super::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
         let stage_surface = super::workspace_frame::base_surface(&appearance.colors);
-        // The stage's leading margin and inset beside `reveal` of the sidebar.
-        let leading_edge = |reveal: f32| {
-            let hidden = frame.stage_leading_inset(false);
-            let inset = hidden + (frame.stage_leading_inset(true) - hidden) * reveal;
-            (self.sidebar_width * reveal, inset)
-        };
-        let rest_leading = {
-            let (margin, inset) = leading_edge(if self.sidebar_visible { 1.0 } else { 0.0 });
-            margin + inset
-        };
-        // The stage moves by whole device pixels from where it rests, so both edges of the active
-        // Tab round alike and its Terminal Sessions keep their size in every frame.
-        let scale = window.scale_factor();
-        let snap = |length: Pixels| (length * scale).round() / scale;
-        let (leading_margin, leading_inset) = leading_edge(self.sidebar_reveal);
-        let leading_inset = snap(leading_inset);
-        let offset = snap(rest_leading - leading_margin - leading_inset);
-        let leading_margin = rest_leading - offset - leading_inset;
 
         div()
             .id("tab-manager")

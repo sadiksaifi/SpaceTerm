@@ -6303,8 +6303,9 @@ fn toggling_the_sidebar_should_slide_it_while_the_terminal_resizes_once(cx: &mut
     finish_slides(cx);
     let shown = sidebar_presentation(cx);
 
-    let (Some(hiding_sidebar), hiding_stage, hiding_pane, false) = hiding else {
-        panic!("the sidebar must still show, without the collapsed identity: {hiding:?}");
+    // The collapsed Workspace name eases in as the sidebar slides out, and out as it slides in.
+    let (Some(hiding_sidebar), hiding_stage, hiding_pane, true) = hiding else {
+        panic!("the sidebar must still show beside the easing Workspace name: {hiding:?}");
     };
     assert!(
         hiding_sidebar.left() < sidebar.left() && hiding_sidebar.right() > px(0.0),
@@ -6316,19 +6317,25 @@ fn toggling_the_sidebar_should_slide_it_while_the_terminal_resizes_once(cx: &mut
         hidden.1
     );
     assert_eq!(
-        (hiding_pane.size.width, hiding_resizes),
-        (hidden.2.size.width, hidden_resizes),
-        "the Terminal must take its final size when the motion starts"
+        (hiding_pane.right(), hiding_resizes),
+        (hidden.2.right(), hidden_resizes),
+        "the Pane must keep its trailing edge while the Terminal takes its final size when the \
+         motion starts"
     );
     assert_eq!((hidden.0, hidden.3), (None, true));
     assert_eq!(hidden_resizes, before + 1, "the Terminal must resize once");
 
-    let (Some(showing_sidebar), showing_stage, _, false) = showing else {
-        panic!("the sidebar must slide in without the collapsed identity: {showing:?}");
+    let (Some(showing_sidebar), showing_stage, showing_pane, true) = showing else {
+        panic!("the sidebar must slide in beside the easing Workspace name: {showing:?}");
     };
     assert!(
         showing_sidebar.left() < sidebar.left() && showing_stage.left() < stage.left(),
         "the sidebar and stage must be sliding in: {showing:?}"
+    );
+    assert_eq!(
+        showing_pane.right(),
+        pane.right(),
+        "the Pane must keep its trailing edge while the sidebar slides in"
     );
     assert_eq!(shown, (Some(sidebar), stage, pane, false));
     assert_eq!(resizes(), before + 2);
@@ -6480,6 +6487,98 @@ fn a_toggle_during_a_resize_drag_should_end_the_drag(cx: &mut TestAppContext) {
         (false, (false, false)),
         "moving the held pointer must not undo the toggle"
     );
+}
+
+#[gpui::test]
+fn split_panes_should_stretch_across_the_stage_while_the_sidebar_slides(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-d");
+    cx.run_until_parked();
+    let resizes = || {
+        records
+            .commands()
+            .iter()
+            .filter(|call| matches!(call.command, RecordedCommand::Resize(_)))
+            .count()
+    };
+    let panes = |cx: &mut VisualTestContext| {
+        ["pane-surface-1", "pane-surface-2"].map(|selector| cx.debug_bounds(selector).unwrap())
+    };
+    let shown = panes(cx);
+    let before = resizes();
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    let (_, hiding_stage, _, _) = sidebar_motion_frame(cx);
+    let hiding = panes(cx);
+    finish_slides(cx);
+    let hidden = panes(cx);
+
+    assert!(
+        hiding[0].left() < shown[0].left() && hiding[0].left() > hidden[0].left(),
+        "the leading Pane must move with the stage {hiding_stage:?}: {hiding:?}"
+    );
+    assert!(
+        hiding[0].size.width > shown[0].size.width && hiding[0].size.width < hidden[0].size.width,
+        "the leading Pane must widen toward its final width: {hiding:?} from {shown:?} to \
+         {hidden:?}"
+    );
+    assert_eq!(
+        hiding[1].right(),
+        hidden[1].right(),
+        "the trailing Pane must keep its trailing edge"
+    );
+    assert_eq!(resizes(), before + 2, "each Terminal must resize once");
+}
+
+#[gpui::test]
+fn the_workspace_glyph_should_glide_while_the_sidebar_slides(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    let glyph = |cx: &mut VisualTestContext| {
+        cx.debug_bounds("workspace-switcher-icon")
+            .expect("the Workspace glyph shows in every frame")
+            .left()
+    };
+    let expanded = glyph(cx);
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    for hidden in [true, false] {
+        let from = glyph(cx);
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx))
+        });
+        cx.run_until_parked();
+        let mut frames = vec![from];
+        let mut labelled = Vec::new();
+        for _ in 0..60 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(8));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+            frames.push(glyph(cx));
+            labelled.push(cx.debug_bounds("workspace-chip-label").is_some());
+        }
+        let to = *frames.last().unwrap();
+        let travel = (to - from).abs();
+        let largest_step = frames
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(px(0.0), Pixels::max);
+        assert!(
+            travel > px(0.0) && largest_step < travel / 4.0,
+            "the glyph must glide from {from:?} to {to:?}, not jump: {frames:?}"
+        );
+        assert_eq!(
+            (labelled[0], *labelled.last().unwrap()),
+            (true, hidden),
+            "the Workspace name must ease in or out as the sidebar moves: {labelled:?}"
+        );
+    }
+    assert_eq!(glyph(cx), expanded);
 }
 
 /// The Workspace identity keeps its glyph in both sidebar states.
