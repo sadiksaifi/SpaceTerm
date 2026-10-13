@@ -2,6 +2,8 @@
 
 import json
 import shlex
+import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -15,6 +17,19 @@ from tests.test_package_server import metadata
 
 
 class AccountCheckTests(unittest.TestCase):
+    def test_update_entry_point_rejects_arguments_without_echoing_them(self):
+        marker = "private-argument-marker"
+        result = subprocess.run(
+            [sys.executable, "-I", str(ROOT / "mise-tasks/test/server/update.py"), marker],
+            cwd=ROOT,
+            capture_output=True,
+            timeout=5,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"")
+        self.assertNotIn(marker.encode(), result.stderr)
+        self.assertEqual(result.stderr, b"unsupported-update-test-arguments\n")
+
     def test_lifecycle_mutations_require_approval_before_any_provider_call(self):
         for operation in checks.MUTATIONS:
             with (
