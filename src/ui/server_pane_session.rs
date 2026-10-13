@@ -45,6 +45,14 @@ struct FrameRequests {
     failed: Option<(FrameIdentity, Instant)>,
 }
 
+#[derive(Clone, Copy)]
+struct ScrollbarFacts {
+    base: content::ContentBase,
+    viewport: Viewport,
+    total_rows: u64,
+    first_row: Option<u64>,
+}
+
 pub(crate) struct ServerPaneSession {
     channel: PaneChannel,
     token: Cell<PaneViewToken>,
@@ -55,14 +63,19 @@ pub(crate) struct ServerPaneSession {
     updates: async_channel::Sender<()>,
     receiver: async_channel::Receiver<()>,
     frame_task: RefCell<Option<Task<()>>>,
+    accessibility_copy_task: RefCell<Option<CopyPreparationTicket>>,
     find_task: RefCell<Option<Task<()>>>,
     find_navigation_task: RefCell<Option<Task<()>>>,
     displayed: RefCell<Option<(PresentationGeneration, FrameLease, Vec<CellRef>)>>,
     geometry: Cell<Option<TerminalGeometry>>,
     presentation_generation: Cell<PresentationGeneration>,
     frame_requests: Arc<Mutex<FrameRequests>>,
+    scrollbar_facts: Arc<Mutex<Option<ScrollbarFacts>>>,
     find_generation: Cell<FindQueryGeneration>,
     selection_drag: Cell<Option<(QueryStamp, ContentSelection)>>,
+    accessibility_model: RefCell<Option<crate::terminal::TerminalAccessibilityModel>>,
+    accessibility_publication:
+        RefCell<Option<crate::platform::terminal_accessibility::AccessibilityPublication>>,
 }
 
 impl ServerPaneSession {
@@ -87,14 +100,18 @@ impl ServerPaneSession {
             updates,
             receiver,
             frame_task: RefCell::new(None),
+            accessibility_copy_task: RefCell::new(None),
             find_task: RefCell::new(None),
             find_navigation_task: RefCell::new(None),
             displayed: RefCell::new(None),
             geometry: Cell::new(None),
             presentation_generation: Cell::new(PresentationGeneration::default()),
             frame_requests: Arc::new(Mutex::new(FrameRequests::default())),
+            scrollbar_facts: Arc::new(Mutex::new(None)),
             find_generation: Cell::new(FindQueryGeneration::default()),
             selection_drag: Cell::new(None),
+            accessibility_publication: RefCell::new(None),
+            accessibility_model: RefCell::new(None),
         }))
     }
     pub(crate) fn own_client(&self) -> Option<spaceterm_core::identity::ClientId> {
@@ -154,6 +171,34 @@ impl ServerPaneSession {
         }
         self.channel.permit(EffectKind::Read).ok()
     }
+    pub(crate) fn accessibility_model(
+        &self,
+    ) -> Option<crate::terminal::TerminalAccessibilityModel> {
+        self.native_permit()?;
+        self.accessibility_model.borrow().clone()
+    }
+    pub(crate) fn accessibility_publication(
+        &self,
+        generation: PresentationGeneration,
+    ) -> Option<crate::platform::terminal_accessibility::AccessibilityPublication> {
+        let displayed = self.displayed.borrow();
+        let (current, frame, _) = displayed.as_ref()?;
+        if generation != *current {
+            return None;
+        }
+        let permit = self.native_permit()?;
+        let mut publication = self.accessibility_publication.borrow_mut();
+        if let Some(previous) = publication.take() {
+            previous.revoke();
+        }
+        let next = crate::platform::terminal_accessibility::AccessibilityPublication::new(
+            permit,
+            frame.clone(),
+            generation,
+        );
+        *publication = Some(next.clone());
+        Some(next)
+    }
     pub(crate) fn accepts_input(&self) -> bool {
         !self.closed.load(Ordering::Acquire)
             && self.enabled.get()
@@ -181,14 +226,22 @@ impl ServerPaneSession {
         let _ = self.updates.try_send(());
     }
     pub(crate) fn cancel_content_tasks(&self) {
+        if let Some(publication) = self.accessibility_publication.borrow_mut().take() {
+            publication.revoke();
+        }
         self.frame_task.borrow_mut().take();
         if let Ok(mut requests) = self.frame_requests.lock() {
             *requests = FrameRequests::default();
         }
+        self.accessibility_copy_task.borrow_mut().take();
         self.find_task.borrow_mut().take();
         self.find_navigation_task.borrow_mut().take();
         self.displayed.borrow_mut().take();
+        self.accessibility_model.borrow_mut().take();
         self.selection_drag.set(None);
+        if let Ok(mut facts) = self.scrollbar_facts.lock() {
+            *facts = None;
+        }
     }
     pub(crate) fn close_presentation(&self) {
         if self.closed.swap(true, Ordering::AcqRel) {
@@ -248,6 +301,7 @@ impl ServerPaneSession {
         let closed = Arc::clone(&self.closed);
         let updates = self.updates.clone();
         let requests = Arc::clone(&self.frame_requests);
+        let scrollbar = Arc::clone(&self.scrollbar_facts);
         let clock = executor.clone();
         *self.frame_task.borrow_mut() = Some(executor.spawn(async move {
             let mut result = Err(DesktopClientError::StaleContext);
@@ -266,7 +320,7 @@ impl ServerPaneSession {
                         }
                     }
                 }
-                result = read_frame(&channel, &permit, stamp, viewport).await;
+                result = read_frame(&channel, &permit, stamp, viewport, &scrollbar, &updates).await;
                 if result != Err(DesktopClientError::LimitReached) || attempt == 2 {
                     break;
                 }
@@ -313,6 +367,7 @@ impl ServerPaneSession {
         if let Ok(mut requests) = self.frame_requests.lock() {
             *requests = FrameRequests::default();
         }
+        let scrollbar = Arc::clone(&self.scrollbar_facts);
         *self.frame_task.borrow_mut() = Some(executor.spawn(async move {
             let Ok(rows) = topology_rows(&channel, &permit, stamp).await else {
                 return;
@@ -357,6 +412,14 @@ impl ServerPaneSession {
             {
                 return;
             }
+            if let Ok(mut facts) = scrollbar.lock() {
+                *facts = Some(ScrollbarFacts {
+                    base: stamp.base(),
+                    viewport,
+                    total_rows: rows.len() as u64,
+                    first_row: Some(first as u64),
+                });
+            }
             let range = ContentRange::History {
                 first: Some(rows[first].row()),
                 last: Some(rows[last].row()),
@@ -395,6 +458,7 @@ impl ServerPaneSession {
             .map_err(|_| DesktopClientError::StaleContext)?
             .begin_copy(request)
             .map_err(DesktopClientError::from)?;
+        self.accessibility_copy_task.borrow_mut().take();
         let channel = self.channel.clone();
         let closed = Arc::clone(&self.closed);
         let updates = self.updates.clone();
@@ -617,6 +681,9 @@ impl ServerPaneSession {
             appearance,
         ))
         .clone();
+        if let Some(publication) = self.accessibility_publication.borrow_mut().take() {
+            publication.revoke();
+        }
         let generation = self.presentation_generation.get().next();
         self.presentation_generation.set(generation);
         let mut rows: Vec<crate::terminal::RowSnapshot> = Vec::new();
@@ -709,11 +776,31 @@ impl ServerPaneSession {
         };
         screen.scrollbar.visible_rows = screen.rows.len() as u64;
         screen.scrollbar.total_rows = screen.rows.len() as u64;
+        if let Some(facts) = self
+            .scrollbar_facts
+            .lock()
+            .ok()
+            .and_then(|facts| *facts)
+            .filter(|facts| {
+                facts.base == semantic.base() && facts.viewport == projection.viewport()
+            })
+        {
+            screen.scrollbar.total_rows = facts.total_rows.max(screen.scrollbar.visible_rows);
+            screen.scrollbar.offset_rows = facts.first_row.map_or(0, |first| {
+                facts
+                    .total_rows
+                    .saturating_sub(screen.scrollbar.visible_rows)
+                    .saturating_sub(first)
+            });
+        }
         screen.damage.content = spaceterm_terminal::snapshot::ContentDamageSnapshot::Full;
         drop(projection);
         if !frame.is_paintable() {
             return None;
         }
+        *self.accessibility_model.borrow_mut() = Some(
+            crate::terminal::TerminalAccessibilityModel::from_screen(&screen),
+        );
         *self.displayed.borrow_mut() = Some((generation, frame, references));
         Some(Arc::new(screen))
     }
@@ -817,20 +904,51 @@ async fn read_frame(
     permit: &EffectPermit,
     stamp: QueryStamp,
     viewport: Viewport,
+    scrollbar: &Mutex<Option<ScrollbarFacts>>,
+    updates: &async_channel::Sender<()>,
 ) -> Result<(), DesktopClientError> {
+    let mut topology = None;
+    let mut first_row = None;
     let range = if let Some(anchor) = viewport.anchor {
         let rows = topology_rows(channel, permit, stamp).await?;
-        let first = rows.iter().position(|row| row.row() == anchor).unwrap_or(0);
+        let first = rows
+            .iter()
+            .position(|row| row.row() == anchor)
+            .ok_or(DesktopClientError::StaleContext)?;
         let last = (first + usize::from(viewport.rows).saturating_sub(1))
             .min(rows.len().saturating_sub(1));
-        ContentRange::History {
+        let range = ContentRange::History {
             first: rows.get(first).map(|row| row.row()),
             last: rows.get(last).map(|row| row.row()),
-        }
+        };
+        first_row = Some(first as u64);
+        topology = Some(rows);
+        range
     } else {
         ContentRange::ActiveGrid
     };
-    read_pages(channel, permit, stamp, range).await
+    read_pages(channel, permit, stamp, range).await?;
+    // Paint need not wait for the history inventory. Its separately qualified totals replace
+    // the conservative visible-row count once every topology page has arrived.
+    let _ = updates.try_send(());
+    let rows = match topology {
+        Some(rows) => rows,
+        None => match topology_rows(channel, permit, stamp).await {
+            Ok(rows) => rows,
+            Err(_) => return Ok(()),
+        },
+    };
+    if permit.is_current() {
+        *scrollbar
+            .lock()
+            .map_err(|_| DesktopClientError::StaleContext)? = Some(ScrollbarFacts {
+            base: stamp.base(),
+            viewport,
+            total_rows: rows.len() as u64,
+            first_row,
+        });
+    }
+    Ok(())
 }
 
 async fn topology_rows(
@@ -1023,6 +1141,20 @@ fn snapshot_color(color: content::TerminalColor) -> crate::terminal::TerminalCol
         ),
     }
 }
+fn accessibility_cell(
+    model: &crate::terminal::TerminalAccessibilityModel,
+    references: &[CellRef],
+    index: usize,
+) -> Option<CellRef> {
+    let line = model.line_for_index(index)?;
+    let row = model.row(line)?;
+    let local = index.checked_sub(row.range.start)?;
+    let cell = row.cells().find(|cell| cell.utf16.contains(&local))?;
+    let mut reference = *references.get(line)?;
+    reference.column = cell.columns.start;
+    Some(reference)
+}
+
 fn selection_contains(
     selection: ContentSelection,
     rows: &[CellRef],
@@ -1322,12 +1454,31 @@ impl TerminalSessionHandle for Rc<ServerPaneSession> {
     }
     fn request_paste(
         &self,
-        _text: PastePayload,
+        text: PastePayload,
     ) -> async_channel::Receiver<Result<PasteRequestOutcome, String>> {
         // PaneChannel has no paste acknowledgement stream yet. Never claim a queued effect was
         // written or bypass the runtime's unsafe-paste approval policy.
         let (sender, receiver) = async_channel::bounded(1);
-        let _ = sender.try_send(Err("server paste acknowledgement is unavailable".to_owned()));
+        use crate::terminal::paste::PasteRejection;
+        let rejection = if text.text().len() > crate::terminal::MAX_PASTE_BYTES {
+            Some(PasteRejection::TooLarge {
+                limit: crate::terminal::MAX_PASTE_BYTES,
+            })
+        } else if text.text().is_empty() {
+            Some(PasteRejection::Empty)
+        } else if self.closed.load(Ordering::Acquire)
+            || !self.enabled.get()
+            || self.channel.permit(EffectKind::Paste).is_err()
+        {
+            Some(PasteRejection::TerminalUnfocused)
+        } else {
+            None
+        };
+        let result = rejection.map_or_else(
+            || Err("server paste acknowledgement is unavailable".to_owned()),
+            |rejection| Ok(PasteRequestOutcome::Rejected(rejection)),
+        );
+        let _ = sender.try_send(result);
         receiver
     }
     fn resolve_paste(
@@ -1368,6 +1519,96 @@ impl TerminalSessionHandle for Rc<ServerPaneSession> {
         // Forwarding Copy requires the runtime's enhanced-keyboard-only operation. A generic key
         // effect would send legacy text and is not a substitute for that missing port.
         Ok(None)
+    }
+    fn accessibility_selection_sender(
+        &self,
+    ) -> Option<crate::terminal::AccessibilitySelectionSender> {
+        let publication = self.accessibility_publication.borrow().clone()?;
+        let displayed = self.displayed.borrow();
+        let (generation, frame, references) = displayed.as_ref()?;
+        if !publication.is_current() || !frame.permits_native_content_use() {
+            return None;
+        }
+        // Bind the UTF-16 document and physical cell references together. A callback may never
+        // reinterpret offsets against the document produced by a later snapshot.
+        let permit = self.native_permit()?;
+        let model = self.accessibility_model.borrow().clone()?;
+        let generation = *generation;
+        let frame = frame.clone();
+        let references = references.clone();
+        let weak = Rc::downgrade(self);
+        Some(crate::terminal::AccessibilitySelectionSender::callback(
+            move |request| {
+                let Some(session) = weak.upgrade() else {
+                    return;
+                };
+                if !publication.is_current() || request.generation != generation {
+                    return;
+                }
+                if model.selection_request(request.range.clone()).as_ref() != Some(&request) {
+                    return;
+                }
+                let Ok(stamp) = session
+                    .channel
+                    .query_stamp(&permit, RequestGeneration::new(0))
+                else {
+                    return;
+                };
+                let selection = if request.range.is_empty() {
+                    None
+                } else {
+                    let Some(start) = accessibility_cell(&model, &references, request.range.start)
+                    else {
+                        return;
+                    };
+                    let Some(end) = accessibility_cell(&model, &references, request.range.end - 1)
+                    else {
+                        return;
+                    };
+                    let Ok(selection) = ContentSelection::new(stamp, start, end, false) else {
+                        return;
+                    };
+                    Some(selection)
+                };
+                if !publication.is_current() {
+                    return;
+                }
+                // Publication holds channel state before projection. Never acquire channel state
+                // while holding projection here. The captured frame checks projection eligibility;
+                // the original permit is checked again after releasing the projection lock.
+                let selected = session
+                    .channel
+                    .projection()
+                    .lock()
+                    .is_ok_and(|mut projection| {
+                        frame.permits_native_content_use()
+                            && projection.set_selection(selection).is_ok()
+                    });
+                if selected && publication.is_current() {
+                    session.accessibility_copy_task.borrow_mut().take();
+                    if let Ok(Some(request)) = session.copy_request()
+                        && request.stamp().fence() == permit.fence()
+                        && let Ok(preparation) = session.prepare_copy(request)
+                    {
+                        *session.accessibility_copy_task.borrow_mut() = Some(preparation);
+                    }
+                    session.wake();
+                }
+            },
+        ))
+    }
+    fn accessibility_demand_sender(&self) -> Option<crate::terminal::AccessibilityDemandSender> {
+        let publication = self.accessibility_publication.borrow().clone()?;
+        let weak = Rc::downgrade(self);
+        Some(crate::terminal::AccessibilityDemandSender::callback(
+            move || {
+                if publication.is_current()
+                    && let Some(session) = weak.upgrade()
+                {
+                    let _ = session.request_frame();
+                }
+            },
+        ))
     }
     fn set_presentable(&self, _presentable: bool) {}
     fn update_appearance(&self, update: TerminalAppearanceUpdate) {

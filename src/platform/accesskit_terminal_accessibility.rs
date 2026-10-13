@@ -14,8 +14,8 @@ use gpui::{
 };
 
 use super::terminal_accessibility::{
-    AccessibilityFocusSender, TerminalAccessibilityAdapter, TerminalAccessibilityAdapterFactory,
-    TerminalAccessibilityUpdate,
+    AccessibilityFocusSender, AccessibilityPublication, TerminalAccessibilityAdapter,
+    TerminalAccessibilityAdapterFactory, TerminalAccessibilityUpdate, empty_accessibility_model,
 };
 use crate::terminal::{
     AccessibilityDemandSender, AccessibilityGeometry, AccessibilityNotifications,
@@ -38,6 +38,7 @@ impl TerminalAccessibilityAdapterFactory for AccessKitTerminalAccessibilityAdapt
                 presented: false,
                 visible: false,
                 model,
+                publication: None,
                 font_family: font.primary_family.clone(),
                 font_size: f32::from(font_size),
                 geometry: Geometry {
@@ -58,11 +59,18 @@ impl TerminalAccessibilityAdapterFactory for AccessKitTerminalAccessibilityAdapt
 struct AccessKitTerminalAccessibility(Rc<RefCell<PaneTree>>);
 
 impl TerminalAccessibilityAdapter for AccessKitTerminalAccessibility {
+    // GPUI publishes immutable text nodes to AccessKit. This adapter can fence publication
+    // and callbacks, but has no hook to validate a retained platform node's final text read.
+    // Keep server text unavailable until that native hook exists.
     fn set_hierarchy(&mut self, presented: bool) {
         let mut tree = self.0.borrow_mut();
         tree.presented = presented;
         tree.visible &= presented;
         if !presented {
+            if let Some(publication) = tree.publication.take() {
+                publication.revoke();
+            }
+            tree.model = empty_accessibility_model();
             tree.selection_sender = None;
             tree.demand_sender = None;
             tree.focus_sender = None;
@@ -73,7 +81,17 @@ impl TerminalAccessibilityAdapter for AccessKitTerminalAccessibility {
 
     fn update(&mut self, update: TerminalAccessibilityUpdate<'_>) -> AccessibilityNotifications {
         let mut tree = self.0.borrow_mut();
-        tree.model = update.model.clone();
+        tree.publication = update.publication;
+        tree.model = if tree.presented
+            && tree
+                .publication
+                .as_ref()
+                .is_none_or(|publication| publication.permits(update.model))
+        {
+            update.model.clone()
+        } else {
+            empty_accessibility_model()
+        };
         tree.visible = tree.presented && update.bounds.is_some();
         tree.font_family.clone_from(&update.font.primary_family);
         tree.font_size = f32::from(update.font_size);
@@ -124,10 +142,19 @@ impl TerminalAccessibilityAdapter for AccessKitTerminalAccessibility {
             })
             // The Pane holds the focus handle, so it takes focus on the Terminal's behalf.
             .on_a11y_action(Action::Focus, move |_, _, _| {
-                if let Some(sender) = &focus.borrow().focus_sender {
+                let tree = focus.borrow();
+                if tree.permits_content()
+                    && let Some(sender) = &tree.focus_sender
+                {
                     sender.request();
                 }
             })
+    }
+}
+
+impl Drop for AccessKitTerminalAccessibility {
+    fn drop(&mut self) {
+        self.set_hierarchy(false);
     }
 }
 
@@ -205,6 +232,7 @@ struct PaneTree {
     presented: bool,
     visible: bool,
     model: TerminalAccessibilityModel,
+    publication: Option<AccessibilityPublication>,
     font_family: String,
     font_size: f32,
     geometry: Geometry,
@@ -217,6 +245,24 @@ struct PaneTree {
 }
 
 impl PaneTree {
+    fn permits_content(&self) -> bool {
+        self.presented
+            && self.visible
+            && self
+                .publication
+                .as_ref()
+                .is_none_or(|publication| publication.permits(&self.model))
+    }
+
+    fn revoke_content(&mut self) {
+        self.model = empty_accessibility_model();
+        self.published = None;
+        self.runs.clear();
+        self.selection_sender = None;
+        self.demand_sender = None;
+        self.focus_sender = None;
+    }
+
     fn caret_bounds(&self) -> Option<Rect> {
         let geometry = AccessibilityGeometry::new(
             self.geometry.origin.0,
@@ -240,6 +286,10 @@ impl PaneTree {
         namespace: NodeId,
         id: impl Fn(AccessibilityRowId) -> NodeId,
     ) -> Vec<(NodeId, Node)> {
+        if !self.permits_content() {
+            self.revoke_content();
+            return Vec::new();
+        }
         let mut published = self.published.take();
         let changes = published.as_ref().and_then(|old| {
             (old.namespace == namespace)
@@ -377,11 +427,20 @@ impl PaneTree {
         }
         document.geometry = self.geometry;
         document.model = self.model.clone();
+        if !self.permits_content() {
+            self.revoke_content();
+            return Vec::new();
+        }
         self.published = published;
         nodes
     }
 
     fn publish(&mut self, builder: &mut A11ySubtreeBuilder<'_>) {
+        if !self.permits_content() {
+            self.revoke_content();
+            builder.parent_node().set_hidden();
+            return;
+        }
         if self.visible
             && let Some(demand) = &self.demand_sender
         {
@@ -393,6 +452,11 @@ impl PaneTree {
         );
         let namespace = builder.synthetic_node_id(());
         let nodes = self.project(namespace, |row| builder.synthetic_node_id(row));
+        if !self.permits_content() {
+            self.revoke_content();
+            builder.parent_node().set_hidden();
+            return;
+        }
         let caret_bounds = self.caret_bounds();
         let parent = builder.parent_node();
         parent.set_clips_children();
@@ -430,7 +494,7 @@ impl PaneTree {
     }
 
     fn select(&self, data: Option<&ActionData>) {
-        if !self.visible {
+        if !self.permits_content() {
             return;
         }
         let (Some(ActionData::SetTextSelection(selection)), Some(published), Some(sender)) =
@@ -567,6 +631,7 @@ mod tests {
             presented: true,
             visible: true,
             model,
+            publication: None,
             font_family: "SpaceTerm Default".into(),
             font_size: 14.0,
             geometry: Geometry {
@@ -1965,6 +2030,7 @@ mod tests {
             adapter.update(TerminalAccessibilityUpdate {
                 window,
                 model: &model,
+                publication: None,
                 bounds,
                 cell_width: gpui::px(8.0),
                 line_height: gpui::px(18.0),
@@ -1990,5 +2056,71 @@ mod tests {
             assert_eq!(publish(&mut adapter, bounds, window), notifications);
             assert!(adapter.0.borrow().selection_sender.is_none());
         });
+    }
+    #[test]
+    fn accesskit_retained_document_rejects_revoked_server_generations_at_publication() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for transition in 0..4 {
+            let fixture =
+                runtime.block_on(crate::ui::server_pane_session::tests::Fixture::new(true));
+            fixture.frame();
+            let session = crate::ui::server_pane_session::ServerPaneSession::bind(
+                fixture.channel.clone(),
+                fixture.token,
+            )
+            .unwrap();
+            let screen = session
+                .snapshot(&crate::terminal::test_terminal_appearance_update())
+                .unwrap();
+            let model = TerminalAccessibilityModel::from_screen(&screen);
+            let mut tree = pane_tree(model);
+            tree.publication = session.accessibility_publication(screen.generation);
+            assert_eq!(tree.project(NodeId(1), row_id).len(), 1);
+            match transition {
+                0 => fixture.take_over(),
+                1 => fixture.publish_ended(),
+                2 => {
+                    fixture.channel.update_context(Default::default()).unwrap();
+                }
+                // The generation changes during node construction, before final publication.
+                _ => {
+                    tree.geometry.scale = 3.0;
+                    assert!(
+                        tree.project(NodeId(1), |row| {
+                            fixture.channel.update_context(Default::default()).unwrap();
+                            row_id(row)
+                        })
+                        .is_empty()
+                    );
+                }
+            }
+            assert!(tree.project(NodeId(1), row_id).is_empty());
+            assert!(tree.model.text().is_empty());
+            assert!(tree.published.is_none());
+            assert!(tree.runs.is_empty());
+        }
+    }
+    #[test]
+    fn accesskit_adapter_drop_revokes_models_retained_by_native_callbacks() {
+        let model = TerminalAccessibilityModel::new(
+            vec![AccessibilityLine::new(
+                vec![AccessibilityCell::new("retained", 1, false)],
+                false,
+            )],
+            0..1,
+            None,
+        );
+        let retained = Rc::new(RefCell::new(pane_tree(model)));
+        let adapter = AccessKitTerminalAccessibility(Rc::clone(&retained));
+        assert!(!retained.borrow_mut().project(NodeId(1), row_id).is_empty());
+        drop(adapter);
+        let tree = retained.borrow();
+        assert!(!tree.presented);
+        assert!(tree.model.text().is_empty());
+        assert!(tree.published.is_none());
+        assert!(tree.runs.is_empty());
     }
 }

@@ -11561,7 +11561,7 @@ fn desktop_server_take_over_waits_for_reconciled_content_without_restarting(
 }
 
 #[gpui::test]
-fn desktop_server_unfenced_accessibility_adapter_never_retains_terminal_text(
+fn desktop_server_accessibility_publication_is_revoked_with_native_context(
     cx: &mut TestAppContext,
 ) {
     use super::super::pane_presentation::{DisplayName, SessionEndReason};
@@ -11571,21 +11571,22 @@ fn desktop_server_unfenced_accessibility_adapter_never_retains_terminal_text(
     let (fixture, pane, cx) = server_pane_with_accessibility(cx, true, factory.clone());
     cx.run_until_parked();
     let retained = factory.records.borrow()[0].clone();
-    assert!(
-        retained.borrow().model.text().is_empty(),
-        "an adapter without final-use fences must never receive server terminal text"
-    );
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, _| {
+            pane.set_accessibility_hierarchy(true);
+            pane.sync_native_accessibility(window, true);
+        });
+    });
+    assert_eq!(retained.borrow().model.text(), "priva");
     for presentation in [
         PanePresentation::Takeover(DisplayName::unnamed()),
         PanePresentation::Ended {
             reason: SessionEndReason::EndAllSessions,
         },
-        PanePresentation::Live,
     ] {
         pane.update(cx, |pane, cx| {
             pane.set_presentation(presentation, cx).unwrap()
         });
-        cx.run_until_parked();
         assert!(retained.borrow().model.text().is_empty());
         assert!(!retained.borrow().presented);
     }
@@ -11603,7 +11604,6 @@ fn desktop_server_unfenced_accessibility_adapter_never_retains_terminal_text(
         )
         .unwrap();
     });
-    cx.run_until_parked();
     assert!(retained.borrow().model.text().is_empty());
     assert!(!retained.borrow().presented);
 }
@@ -12325,4 +12325,230 @@ fn desktop_server_release_copy_cannot_replace_a_new_selection(cx: &mut TestAppCo
     cx.run_until_parked();
     assert!(pasteboard.0.borrow().is_empty());
     assert!(primary.0.borrow().is_empty());
+}
+
+#[gpui::test]
+fn desktop_server_scrollbar_totals_follow_paged_topology_and_personal_viewport(
+    cx: &mut TestAppContext,
+) {
+    let (fixture, _content, pane, cx) = server_pane_with_content(cx);
+    cx.run_until_parked();
+    let session = pane.read_with(cx, |pane, _| pane.server_session_handle().unwrap());
+    let screen = pane.read_with(cx, |pane, _| pane.screen.clone());
+    assert_eq!(screen.scrollbar.total_rows, 300);
+    assert_eq!(screen.scrollbar.visible_rows, screen.rows.len() as u64);
+    assert_eq!(screen.scrollbar.offset_rows, 0);
+    session.scroll_scrollback(ScrollbackMovement::Top);
+    cx.run_until_parked();
+    let screen = pane.read_with(cx, |pane, _| pane.screen.clone());
+    assert_eq!(screen.scrollbar.total_rows, 300);
+    assert_eq!(
+        screen.scrollbar.offset_rows,
+        300 - screen.scrollbar.visible_rows
+    );
+    fixture.take_over();
+    assert!(
+        session
+            .snapshot(&crate::terminal::test_terminal_appearance_update())
+            .is_none()
+    );
+}
+
+#[gpui::test]
+fn desktop_server_unqualified_metadata_cannot_replace_server_facts(cx: &mut TestAppContext) {
+    let (_fixture, pane, cx) = server_pane(cx, true);
+    pane.update(cx, |pane, _| {
+        let mut delayed = (*pane.screen.metadata).clone();
+        delayed.revision = 999;
+        delayed.title.value = Arc::from("replacement-session title");
+        assert!(!pane.accept_metadata(Arc::new(delayed)));
+        assert!(pane.terminal_session.metadata.is_none());
+        assert!(pane.terminal_session.current_directory.is_none());
+    });
+}
+
+#[gpui::test]
+fn desktop_server_permission_notice_is_denied_without_owning_native_provider(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_client::pane_channel::{EffectKind, NativeTiming, RuntimeEffect};
+    use spaceterm_core::{native_requests::*, observations::MonotonicTick};
+    let (fixture, pane, cx) = server_pane(cx, true);
+    fixture.peer.flush_effects().unwrap();
+    let fence = fixture.channel.permit(EffectKind::Read).unwrap().fence();
+    let request = NativeRequest::new(
+        fence,
+        NativeRequestId::new(1).unwrap(),
+        MonotonicTick::new(0),
+        MonotonicTick::new(500),
+        None,
+        NativeRequestKind::Permission(PermissionNotice::new(true, true).unwrap()),
+    )
+    .unwrap();
+    // The server has already observed the delay. The desktop still cannot substitute its own
+    // process's privacy provider for the provider belonging to this request's server.
+    fixture
+        .channel
+        .receive_native(
+            request,
+            NativeTiming {
+                not_before: Duration::ZERO,
+                expires_after: None,
+            },
+        )
+        .unwrap();
+    cx.run_until_parked();
+    let effects = fixture.peer.flush_effects().unwrap();
+    assert_eq!(effects.len(), 1);
+    let RuntimeEffect::CompleteNativeRequest(completion) = &effects[0].command else {
+        panic!("permission notice must receive a classified denial");
+    };
+    assert_eq!(completion.fence(), fence);
+    assert_eq!(completion.id(), NativeRequestId::new(1).unwrap());
+    assert_eq!(completion.kind(), &NativeCompletionKind::Denied);
+    pane.read_with(cx, |pane, _| {
+        assert!(pane.requested_permissions.is_empty());
+        assert!(pane.permission_request.is_empty());
+        assert!(pane._permission_setup.is_none());
+    });
+    cx.update(|window, cx| assert!(pane.read(cx).is_focused(window)));
+
+    let delayed = NativeRequest::new(
+        fence,
+        NativeRequestId::new(2).unwrap(),
+        MonotonicTick::new(0),
+        MonotonicTick::new(500),
+        None,
+        NativeRequestKind::Permission(PermissionNotice::new(false, true).unwrap()),
+    )
+    .unwrap();
+    fixture
+        .channel
+        .receive_native(
+            delayed,
+            NativeTiming {
+                not_before: Duration::from_millis(500),
+                expires_after: None,
+            },
+        )
+        .unwrap();
+    fixture.channel.update_context(Default::default()).unwrap();
+    cx.executor().advance_clock(Duration::from_millis(500));
+    cx.run_until_parked();
+    assert!(fixture.peer.flush_effects().unwrap().is_empty());
+}
+
+#[gpui::test]
+fn desktop_server_accesskit_withholds_text_without_a_final_native_read_fence(
+    cx: &mut TestAppContext,
+) {
+    let (_fixture, pane, cx) = server_pane_with_accessibility(
+        cx, true,
+        Rc::new(crate::platform::accesskit_terminal_accessibility::AccessKitTerminalAccessibilityAdapterFactory),
+    );
+    pane.update(cx, |pane, cx| {
+        pane.set_accessibility_hierarchy(true);
+        cx.notify();
+    });
+    cx.activate_accessibility();
+    cx.run_until_parked();
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.accessibility.text().to_owned()),
+        "priva"
+    );
+    let tree = cx.update(|window, _| window.debug_a11y_tree_json().unwrap());
+    assert!(!tree.contains("priva"));
+}
+
+#[gpui::test]
+fn desktop_server_queued_accessibility_focus_does_not_survive_context_replacement(
+    cx: &mut TestAppContext,
+) {
+    let factory = Rc::new(
+        crate::platform::terminal_accessibility::testing::RecordingAccessibilityFactory::default(),
+    );
+    let (fixture, pane, cx) = server_pane_with_accessibility(cx, true, factory.clone());
+    let requests = Rc::new(std::cell::Cell::new(0));
+    let recorded = requests.clone();
+    cx.update(|window, cx| {
+        cx.subscribe(&pane, move |_, event, _| {
+            if matches!(
+                event,
+                TerminalPaneEvent::FocusRequested | TerminalPaneEvent::SelectionRequested(_)
+            ) {
+                recorded.set(recorded.get() + 1);
+            }
+        })
+        .detach();
+        pane.update(cx, |pane, _| {
+            pane.set_accessibility_hierarchy(true);
+            pane.sync_native_accessibility(window, true);
+        });
+    });
+    let sender = factory.records.borrow()[0]
+        .borrow()
+        .focus_sender
+        .clone()
+        .unwrap();
+    sender.request();
+    fixture.channel.update_context(Default::default()).unwrap();
+    cx.run_until_parked();
+    assert_eq!(requests.get(), 0);
+}
+
+#[gpui::test]
+fn desktop_server_accessibility_selection_prepares_complete_copy_for_services(
+    cx: &mut TestAppContext,
+) {
+    let (fixture, content, pane, cx) = server_pane_with_content(cx);
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    *content.copy_gate.lock().unwrap() = Some(gate.clone());
+    let session = pane.read_with(cx, |pane, _| pane.server_session_handle().unwrap());
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, _| {
+            pane.set_accessibility_hierarchy(true);
+            pane.sync_native_accessibility(window, true);
+        });
+    });
+    let request = session
+        .accessibility_model()
+        .unwrap()
+        .selection_request(0..5)
+        .unwrap();
+    session
+        .accessibility_selection_sender()
+        .unwrap()
+        .request(request);
+    cx.run_until_parked();
+    assert_eq!(session.copy_selection().unwrap(), None);
+    gate.add_permits(1);
+    cx.run_until_parked();
+    assert_eq!(
+        session.copy_selection().unwrap().unwrap().plain_text,
+        "priva"
+    );
+    let request = session
+        .accessibility_model()
+        .unwrap()
+        .selection_request(1..4)
+        .unwrap();
+    session
+        .accessibility_selection_sender()
+        .unwrap()
+        .request(request);
+    cx.run_until_parked();
+    assert_eq!(session.copy_selection().unwrap(), None);
+    fixture.take_over();
+    gate.add_permits(1);
+    cx.run_until_parked();
+    assert_eq!(session.copy_selection().unwrap(), None);
+    assert!(
+        session
+            .channel()
+            .projection()
+            .lock()
+            .unwrap()
+            .prepared_copy()
+            .is_none()
+    );
 }

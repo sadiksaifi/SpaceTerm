@@ -161,7 +161,7 @@ impl Fixture {
             .channel
             .query_stamp(
                 &permit,
-                spaceterm_core::content_queries::RequestGeneration::new(1),
+                spaceterm_core::content_queries::RequestGeneration::new(0),
             )
             .unwrap();
         let base = stamp.base();
@@ -317,6 +317,38 @@ impl PaneConnectionPort for EchoContentConnection {
                     None,
                 )
             }
+            PaneReadRequest::Topology(request) => {
+                let base = request.stamp().base();
+                let first = request
+                    .continuation()
+                    .map_or(0, |after| after.after().row().node_serial as usize);
+                let end = (first + usize::from(request.limits().rows())).min(300);
+                let rows: Vec<_> = (first..end)
+                    .map(|index| {
+                        TopologyRow::new(
+                            RowId {
+                                screen: base.screen,
+                                screen_generation: base.screen_generation,
+                                node_serial: index as u64 + 1,
+                                page_row: 0,
+                            },
+                            1,
+                            5,
+                            false,
+                        )
+                        .unwrap()
+                    })
+                    .collect();
+                let continuation = (end < 300).then(|| {
+                    TopologyContinuation::new(request.stamp(), *rows.last().unwrap()).unwrap()
+                });
+                (
+                    vec![PaneReadItem::Topology(ContentReadResult::Ready(
+                        TopologyPage::new(&request, rows, continuation).unwrap(),
+                    ))],
+                    None,
+                )
+            }
             PaneReadRequest::Copy(request) => {
                 let transfer = ResourceTransferId::new(1).unwrap();
                 (
@@ -369,4 +401,164 @@ impl PaneReadSource for EchoContentRead {
             Ok(self.items.pop_front())
         })
     }
+}
+
+impl Fixture {
+    pub(crate) fn take_over(&self) {
+        let binding = self.server.add_client(2).unwrap();
+        self.server
+            .command(
+                self.server.next_operation(2).unwrap(),
+                Command::TakeOver(spaceterm_core::control::TakeOverRequest {
+                    epoch: ServerEpoch::new(1),
+                    pane: self.channel.pane(),
+                    client: binding.target().client(),
+                }),
+            )
+            .unwrap();
+        self.peer.publish().unwrap();
+        self.channels
+            .publish(
+                self.server.connected_info(1, 2, 1, 1).unwrap(),
+                self.server.replica().unwrap(),
+            )
+            .unwrap();
+    }
+
+    pub(crate) fn publish_ended(&self) {
+        use spaceterm_client::replica::{OrganizationResidency, Replica};
+        let snapshot = self.server.snapshot().unwrap();
+        let mut runtime = snapshot.runtime().to_vec();
+        runtime[0].phase = SessionPhase::Ended {
+            reason: EndReason::EndAllSessions,
+        };
+        let ended =
+            OrganizationSnapshot::new(snapshot.epoch(), snapshot.state().clone(), runtime).unwrap();
+        let mut replica = Replica::new(
+            self.server.server(),
+            Arc::new(
+                OrganizationResidency::new(spaceterm_client::limits::ClientLimits::default())
+                    .unwrap(),
+            ),
+        );
+        let token = replica.begin_resync(ended.epoch()).unwrap();
+        replica.install_snapshot(token, ended).unwrap();
+        let info = self.server.connected_info(1, 2, 1, 1).unwrap();
+        let publication = replica.subscribe().borrow().retained().cloned().unwrap();
+        self.channels.publish(info, publication).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn desktop_server_accessibility_selection_uses_the_published_document_and_original_authority()
+{
+    for transition in 0..4 {
+        let fixture = Fixture::new(true).await;
+        fixture.frame();
+        let session = ServerPaneSession::bind(fixture.channel.clone(), fixture.token).unwrap();
+        let screen = session
+            .snapshot(&crate::terminal::test_terminal_appearance_update())
+            .unwrap();
+        let model = crate::terminal::TerminalAccessibilityModel::from_screen(&screen);
+        let publication = session
+            .accessibility_publication(screen.generation)
+            .unwrap();
+        let selection = session.accessibility_selection_sender().unwrap();
+        let demand = session.accessibility_demand_sender().unwrap();
+        let request = model.selection_request(1..4).unwrap();
+        selection.request(request.clone());
+        let selected = fixture
+            .channel
+            .projection()
+            .lock()
+            .unwrap()
+            .selection()
+            .unwrap();
+        assert_eq!(selected.start().column, 1);
+        assert_eq!(selected.end().column, 3);
+        fixture
+            .channel
+            .projection()
+            .lock()
+            .unwrap()
+            .set_selection(None)
+            .unwrap();
+        match transition {
+            0 => fixture.take_over(),
+            1 => fixture.publish_ended(),
+            2 => {
+                fixture.channel.update_context(Default::default()).unwrap();
+            }
+            _ => {
+                session
+                    .snapshot(&crate::terminal::test_terminal_appearance_update())
+                    .unwrap();
+            }
+        }
+        assert!(!publication.is_current());
+        selection.request(request);
+        demand.request();
+        assert!(
+            fixture
+                .channel
+                .projection()
+                .lock()
+                .unwrap()
+                .selection()
+                .is_none()
+        );
+        assert!(fixture.peer.flush_effects().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn desktop_server_native_paste_rejects_oversize_and_stale_input_without_queueing() {
+    use crate::terminal::paste::PasteRejection;
+    let fixture = Fixture::new(true).await;
+    fixture.frame();
+    let session = ServerPaneSession::bind(fixture.channel.clone(), fixture.token).unwrap();
+    session
+        .snapshot(&crate::terminal::test_terminal_appearance_update())
+        .unwrap();
+    assert_eq!(
+        session
+            .request_paste("x".repeat(crate::terminal::MAX_PASTE_BYTES + 1).into())
+            .recv()
+            .await
+            .unwrap(),
+        Ok(PasteRequestOutcome::Rejected(PasteRejection::TooLarge {
+            limit: crate::terminal::MAX_PASTE_BYTES
+        })),
+    );
+    assert_eq!(
+        session
+            .request_paste(String::new().into())
+            .recv()
+            .await
+            .unwrap(),
+        Ok(PasteRequestOutcome::Rejected(PasteRejection::Empty)),
+    );
+    // A queued command is not a runtime acknowledgement. Until that port exists, valid text
+    // is refused rather than reporting Written or duplicating runtime-owned sanitation.
+    assert!(
+        session
+            .request_paste("x".repeat(crate::terminal::MAX_PASTE_BYTES).into())
+            .recv()
+            .await
+            .unwrap()
+            .is_err()
+    );
+    fixture.channel.update_context(Default::default()).unwrap();
+    assert_eq!(
+        session
+            .request_paste("discarded".to_owned().into())
+            .recv()
+            .await
+            .unwrap(),
+        Ok(PasteRequestOutcome::Rejected(
+            PasteRejection::TerminalUnfocused
+        )),
+    );
+    session.copy_or_forward(InputModifiers::default()).unwrap();
+    assert!(fixture.peer.flush_effects().unwrap().is_empty());
 }

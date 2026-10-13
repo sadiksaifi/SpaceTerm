@@ -4,9 +4,72 @@ use crate::terminal::{
     TerminalAccessibilityModel,
 };
 use gpui::{Bounds, Div, Pixels, Stateful, Window};
+use spaceterm_client::{pane_channel::EffectPermit, projection::FrameLease};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
+/// Authority for exactly the document handed to a native accessibility adapter.
+/// Native reads and callbacks validate it again after resolving their result.
+#[derive(Clone)]
+pub(crate) struct AccessibilityPublication(Arc<PublicationAuthority>);
+
+struct PublicationAuthority {
+    permit: EffectPermit,
+    frame: FrameLease,
+    generation: crate::terminal::PresentationGeneration,
+    revoked: AtomicBool,
+}
+
+impl AccessibilityPublication {
+    pub(crate) fn new(
+        permit: EffectPermit,
+        frame: FrameLease,
+        generation: crate::terminal::PresentationGeneration,
+    ) -> Self {
+        Self(Arc::new(PublicationAuthority {
+            permit,
+            frame,
+            generation,
+            revoked: AtomicBool::new(false),
+        }))
+    }
+
+    pub(crate) fn is_current(&self) -> bool {
+        !self.0.revoked.load(Ordering::Acquire)
+            && self.0.permit.is_current()
+            && self.0.frame.permits_native_content_use()
+    }
+
+    pub(crate) fn permits(&self, model: &TerminalAccessibilityModel) -> bool {
+        model.generation() == self.0.generation && self.is_current()
+    }
+
+    pub(crate) fn revoke(&self) {
+        self.0.revoked.store(true, Ordering::Release);
+    }
+}
+
+impl std::fmt::Debug for AccessibilityPublication {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AccessibilityPublication")
+    }
+}
+
+pub(crate) fn empty_accessibility_model() -> TerminalAccessibilityModel {
+    TerminalAccessibilityModel::from_screen(&crate::terminal::ScreenSnapshot::empty(
+        spaceterm_terminal::local_path::LocalPathSemantics::Posix,
+    ))
+}
 
 /// Owns one Pane's native accessibility resources. Dropping it retires those resources.
 pub(crate) trait TerminalAccessibilityAdapter {
+    /// True only when retained native elements validate authority at the final text read.
+    /// Publication-time validation alone cannot revoke a platform's cached text nodes.
+    fn supports_generation_bound_content(&self) -> bool {
+        false
+    }
     /// Updates layout membership synchronously. Hidden elements must reject Selection requests.
     fn set_hierarchy(&mut self, presented: bool);
     /// Publishes current facts and returns notifications that could not yet be delivered.
@@ -37,6 +100,7 @@ pub(crate) trait TerminalAccessibilityAdapterFactory {
 pub(crate) struct TerminalAccessibilityUpdate<'a> {
     pub(crate) window: &'a Window,
     pub(crate) model: &'a TerminalAccessibilityModel,
+    pub(crate) publication: Option<AccessibilityPublication>,
     pub(crate) bounds: Option<Bounds<Pixels>>,
     pub(crate) cell_width: Pixels,
     pub(crate) line_height: Pixels,
@@ -59,16 +123,41 @@ pub(crate) struct TerminalAccessibilityUpdate<'a> {
 /// Asks one Pane to take focus on behalf of an accessibility client. Requests carry no content
 /// and coalesce until the Pane handles them.
 #[derive(Clone, Debug)]
-pub(crate) struct AccessibilityFocusSender(async_channel::Sender<()>);
+pub(crate) struct AccessibilityFocusSender {
+    sender: async_channel::Sender<Option<AccessibilityPublication>>,
+    publication: Option<AccessibilityPublication>,
+}
 
 impl AccessibilityFocusSender {
-    pub(crate) fn channel() -> (Self, async_channel::Receiver<()>) {
+    pub(crate) fn channel() -> (
+        Self,
+        async_channel::Receiver<Option<AccessibilityPublication>>,
+    ) {
         let (sender, receiver) = async_channel::bounded(1);
-        (Self(sender), receiver)
+        (
+            Self {
+                sender,
+                publication: None,
+            },
+            receiver,
+        )
+    }
+
+    pub(crate) fn bound(&self, publication: AccessibilityPublication) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            publication: Some(publication),
+        }
     }
 
     pub(crate) fn request(&self) {
-        let _ = self.0.try_send(());
+        if self
+            .publication
+            .as_ref()
+            .is_none_or(AccessibilityPublication::is_current)
+        {
+            let _ = self.sender.try_send(self.publication.clone());
+        }
     }
 }
 
@@ -85,6 +174,7 @@ pub(crate) mod testing {
 
     pub(crate) struct AccessibilityRecord {
         pub(crate) model: TerminalAccessibilityModel,
+        pub(crate) publication: Option<AccessibilityPublication>,
         pub(crate) font_family: String,
         pub(crate) font: crate::appearance::ResolvedFontDescriptor,
         pub(crate) font_size: Pixels,
@@ -98,6 +188,7 @@ pub(crate) mod testing {
         pub(crate) delivered: AccessibilityNotifications,
         pub(crate) selection_sender: Option<AccessibilitySelectionSender>,
         pub(crate) demand_sender: Option<AccessibilityDemandSender>,
+        pub(crate) focus_sender: Option<AccessibilityFocusSender>,
         pub(crate) dropped: bool,
     }
 
@@ -111,6 +202,7 @@ pub(crate) mod testing {
         ) -> Box<dyn TerminalAccessibilityAdapter> {
             let record = Rc::new(RefCell::new(AccessibilityRecord {
                 model,
+                publication: None,
                 font_family: font.primary_family.clone(),
                 font: font.clone(),
                 font_size,
@@ -124,6 +216,7 @@ pub(crate) mod testing {
                 delivered: AccessibilityNotifications::default(),
                 selection_sender: None,
                 demand_sender: None,
+                focus_sender: None,
                 dropped: false,
             }));
             self.records.borrow_mut().push(Rc::clone(&record));
@@ -134,6 +227,9 @@ pub(crate) mod testing {
     struct RecordingAccessibilityAdapter(Rc<RefCell<AccessibilityRecord>>);
 
     impl TerminalAccessibilityAdapter for RecordingAccessibilityAdapter {
+        fn supports_generation_bound_content(&self) -> bool {
+            true
+        }
         fn set_hierarchy(&mut self, presented: bool) {
             let mut record = self.0.borrow_mut();
             record.hierarchy.push(presented);
@@ -141,8 +237,13 @@ pub(crate) mod testing {
             record.visible &= presented;
             record.focused &= presented;
             if !presented {
+                if let Some(publication) = record.publication.take() {
+                    publication.revoke();
+                }
+                record.model = empty_accessibility_model();
                 record.selection_sender = None;
                 record.demand_sender = None;
+                record.focus_sender = None;
             }
         }
 
@@ -153,7 +254,17 @@ pub(crate) mod testing {
             let _ = update.window;
             let mut record = self.0.borrow_mut();
             let was_focused = record.focused;
-            record.model = update.model.clone();
+            record.publication = update.publication;
+            record.model = if record.presented
+                && record
+                    .publication
+                    .as_ref()
+                    .is_none_or(|publication| publication.permits(update.model))
+            {
+                update.model.clone()
+            } else {
+                empty_accessibility_model()
+            };
             record.font_family = update.font.primary_family.clone();
             record.font = update.font.clone();
             record.font_size = update.font_size;
@@ -162,6 +273,7 @@ pub(crate) mod testing {
             record.line_height = update.line_height;
             record.selection_sender = update.selection_sender.filter(|_| record.presented);
             record.demand_sender = update.demand_sender.filter(|_| record.presented);
+            record.focus_sender = update.focus_sender.filter(|_| record.presented);
             record.visible = record.presented && update.bounds.is_some();
             record.focused = record.visible && update.focused;
             record.delivered = AccessibilityNotifications::default();
@@ -186,12 +298,17 @@ pub(crate) mod testing {
     impl Drop for RecordingAccessibilityAdapter {
         fn drop(&mut self) {
             let mut record = self.0.borrow_mut();
+            if let Some(publication) = record.publication.take() {
+                publication.revoke();
+            }
+            record.model = empty_accessibility_model();
             record.dropped = true;
             record.presented = false;
             record.visible = false;
             record.focused = false;
             record.selection_sender = None;
             record.demand_sender = None;
+            record.focus_sender = None;
         }
     }
 }
