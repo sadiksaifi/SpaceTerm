@@ -70,3 +70,6 @@ pub mod account_service;
 mod private_filesystem;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod server_keys;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod server_installation;

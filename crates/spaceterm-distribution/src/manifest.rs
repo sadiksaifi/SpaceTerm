@@ -227,15 +227,15 @@ pub fn verify_installation_manifest(
     {
         return Err(DistributionFailure::ManifestRejected);
     }
-    validate_archive(&archive.bytes, &document, manifest_bytes)?;
+    validate_archive(&archive.bytes, &document.files, manifest_bytes)?;
     Ok(VerifiedInstallationManifest { document })
 }
 
 /// Checks all expanded bytes without writing or executing archive contents.
 /// GNU long names are bounded; PAX overrides and other special records are rejected.
-fn validate_archive(
+pub(crate) fn validate_archive(
     bytes: &[u8],
-    manifest: &InstallationManifestV1,
+    files: &[InstallationFile],
     manifest_bytes: &[u8],
 ) -> Result<(), DistributionFailure> {
     use sha2::{Digest as _, Sha256};
@@ -337,10 +337,7 @@ fn validate_archive(
                             .strip_prefix("spaceterm-server/")
                             .is_some_and(|relative| {
                                 let prefix = format!("{relative}/");
-                                manifest
-                                    .files
-                                    .iter()
-                                    .any(|file| file.name.starts_with(&prefix))
+                                files.iter().any(|file| file.name.starts_with(&prefix))
                             }))
                     || !seen.insert(name.to_owned())
                 {
@@ -361,11 +358,10 @@ fn validate_archive(
                         return Err(reject);
                     }
                 } else {
-                    let file = manifest
-                        .files
+                    let file = files
                         .binary_search_by(|f| f.name.as_str().cmp(name))
                         .ok()
-                        .map(|i| &manifest.files[i])
+                        .map(|i| &files[i])
                         .ok_or(reject)?;
                     if size != file.size || mode != file.mode {
                         return Err(reject);
@@ -398,12 +394,205 @@ fn validate_archive(
         }
     }
     if !seen.contains("spaceterm-server/installation.json")
-        || manifest
-            .files
+        || files
             .iter()
             .any(|f| !seen.contains(&format!("spaceterm-server/{}", f.name)))
     {
         return Err(reject);
     }
     Ok(())
+}
+
+/// The account service has one executable. It has no privileged helper or credential tool.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountEntryPoints {
+    pub server: String,
+}
+
+/// Schema 2 installs into account-private storage, independently of client assets.
+/// Schema 1 remains readable for retained server artifacts.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountInstallationManifestV2 {
+    pub schema_version: u16,
+    pub component: ServerComponent,
+    pub build_identity: BuildChannel,
+    pub platform: ServerPlatform,
+    pub version: BuildVersion,
+    #[serde(with = "crate::encoding::commit")]
+    pub build_commit: [u8; 20],
+    pub protocol_majors: Vec<u16>,
+    pub storage: StorageCompatibility,
+    pub native_identifier: String,
+    pub entry_points: AccountEntryPoints,
+    pub files: Vec<InstallationFile>,
+    pub dependencies: Vec<BundledDependency>,
+}
+
+impl AccountInstallationManifestV2 {
+    /// Checks schema and layout, not signature authority.
+    pub fn validate(&self) -> Result<(), DistributionFailure> {
+        if self.schema_version != 2 {
+            return Err(DistributionFailure::UnsupportedSchema);
+        }
+        let rejected = DistributionFailure::ManifestRejected;
+        let server = match self.platform {
+            ServerPlatform::LinuxX86_64 => "bin/spaceterm-server".to_owned(),
+            ServerPlatform::DarwinArm64 => format!(
+                "{}/Contents/MacOS/spaceterm-server",
+                self.build_identity.bundle_name()
+            ),
+        };
+        if self.native_identifier != self.build_identity.native_identifier()
+            || self.entry_points.server != server
+            || !crate::server_feed::sorted_nonzero(&self.protocol_majors, 8, false)
+            || !self.storage.validate()
+            || self.build_commit == [0; 20]
+            || (self.build_identity == BuildChannel::Release
+                && crate::version::stable_version(self.version.as_str()).is_none())
+        {
+            return Err(rejected);
+        }
+        if self.version.as_str().starts_with("dev.") {
+            let commit: String = self
+                .build_commit
+                .iter()
+                .map(|v| format!("{v:02x}"))
+                .collect();
+            let expected = format!("dev.{}", &commit[..12]);
+            if self.version.as_str() != expected
+                && self.version.as_str() != format!("{expected}.dirty")
+            {
+                return Err(rejected);
+            }
+        }
+        if self.files.is_empty() || self.files.len() > MAX_FILES || self.dependencies.len() > 128 {
+            return Err(DistributionFailure::LimitExceeded);
+        }
+        if !self.files.windows(2).all(|p| p[0].name < p[1].name) {
+            return Err(rejected);
+        }
+        let names: std::collections::BTreeSet<_> =
+            self.files.iter().map(|f| f.name.as_str()).collect();
+        let mut total = 0_u64;
+        let mut entries = names.clone();
+        for file in &self.files {
+            if !relative_name(&file.name)
+                || matches!(
+                    file.name.as_str(),
+                    "installation.json" | "feed.json" | "feed.sig"
+                )
+                || file.mode & !0o777 != 0
+                || file.mode & 0o022 != 0
+                || file.mode & 0o400 == 0
+                || file.size > MAX_EXPANDED_BYTES
+                || file.name.starts_with("libexec/")
+                || file.name.split('/').count() > 32
+                || file.name.split('/').any(|part| part.len() > 255)
+            {
+                return Err(rejected);
+            }
+            total = total
+                .checked_add(file.size)
+                .ok_or(DistributionFailure::LimitExceeded)?;
+            let mut name = file.name.as_str();
+            while let Some((parent, _)) = name.rsplit_once('/') {
+                if names.contains(parent) {
+                    return Err(rejected);
+                }
+                entries.insert(parent);
+                name = parent;
+            }
+        }
+        if entries.len() + 1 > MAX_FILES {
+            return Err(DistributionFailure::LimitExceeded);
+        }
+        if total > MAX_EXPANDED_BYTES {
+            return Err(DistributionFailure::LimitExceeded);
+        }
+        let executable = self
+            .files
+            .iter()
+            .find(|f| f.name == server)
+            .ok_or(rejected)?;
+        if executable.size == 0 || executable.mode & 0o100 == 0 {
+            return Err(rejected);
+        }
+        // The runtime owns these resources independently of any desktop install.
+        let resources = match self.platform {
+            ServerPlatform::LinuxX86_64 => "share/spaceterm-server".to_owned(),
+            ServerPlatform::DarwinArm64 => {
+                format!("{}/Contents/Resources", self.build_identity.bundle_name())
+            }
+        };
+        for required in [
+            "shell-integration/VERSION",
+            "shell-integration/bash/spaceterm.bash",
+            "shell-integration/sh/spaceterm.sh",
+            "shell-integration/zsh/.zshenv",
+            "shell-integration/zsh/spaceterm-integration",
+            "THIRD-PARTY-NOTICES.txt",
+        ] {
+            let name = format!("{resources}/{required}");
+            if !self.files.iter().any(|f| f.name == name && f.size != 0) {
+                return Err(rejected);
+            }
+        }
+        // ncurses may use the initial character or its hexadecimal encoding.
+        if !["x", "78"].iter().any(|directory| {
+            self.files.iter().any(|f| {
+                f.name == format!("{resources}/terminfo/{directory}/xterm-spaceterm") && f.size != 0
+            })
+        }) {
+            return Err(rejected);
+        }
+        let mut dependencies = std::collections::BTreeSet::new();
+        for dependency in &self.dependencies {
+            if !dependencies.insert(&dependency.name)
+                || [
+                    &dependency.name,
+                    &dependency.version,
+                    &dependency.source_identity,
+                    &dependency.license,
+                ]
+                .iter()
+                .any(|v| v.is_empty() || v.len() > 1024 || v.chars().any(char::is_control))
+                || [&dependency.notice_file, &dependency.corresponding_source]
+                    .iter()
+                    .any(|v| !relative_name(v) || !names.contains(v.as_str()))
+            {
+                return Err(rejected);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The signed feed authenticates the manifest digest before decoding installed metadata.
+pub fn verify_account_installation_manifest(
+    feed: &crate::server_feed::VerifiedAccountServerFeed,
+    bytes: &[u8],
+) -> Result<AccountInstallationManifestV2, DistributionFailure> {
+    use sha2::{Digest as _, Sha256};
+    if bytes.len() > MAX_MANIFEST_BYTES {
+        return Err(DistributionFailure::LimitExceeded);
+    }
+    if <[u8; 32]>::from(Sha256::digest(bytes)) != feed.document().archive.manifest_sha256 {
+        return Err(DistributionFailure::ManifestRejected);
+    }
+    let document: AccountInstallationManifestV2 =
+        serde_json::from_slice(bytes).map_err(|_| DistributionFailure::InvalidRecord)?;
+    document.validate()?;
+    let expected = feed.document();
+    if document.build_identity != expected.build_identity
+        || document.platform != expected.platform
+        || document.version != expected.version
+        || document.protocol_majors != expected.protocol_majors
+        || document.storage != expected.storage
+        || document.component != expected.component
+    {
+        return Err(DistributionFailure::ManifestRejected);
+    }
+    Ok(document)
 }

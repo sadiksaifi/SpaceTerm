@@ -1,7 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 /// The Ed25519 public key installed releases trust.
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct UpdateKey([u8; 32]);
 
 impl UpdateKey {
