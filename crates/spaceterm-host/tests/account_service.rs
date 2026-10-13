@@ -277,7 +277,7 @@ fn symlink_registration_anchor_is_not_followed_or_modified() {
 
 #[test]
 fn current_provider_uses_actual_uid_and_compiled_build_identity() {
-    let provider = ServiceSupervisor::current().unwrap();
+    let provider = ServiceSupervisor::current(None).unwrap();
     assert_eq!(provider.key().account_uid, unsafe { libc::geteuid() });
     let compiled = match env!("SPACETERM_HOST_BUILD") {
         "release" => BuildIdentity::Release,
@@ -574,4 +574,98 @@ fn a_readable_clean_byte_without_this_operations_checkpoint_is_not_recovery() {
         Err(ServiceFailure::Indeterminate)
     );
     assert_eq!(fs::read(fixture.anchor().join("requests")).unwrap(), before);
+}
+
+#[test]
+fn explicit_original_directory_reconciliation_never_creates_missing_children() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+    spaceterm_host::account_service::test_support::fail_next_creation_parent_sync();
+    assert_eq!(
+        fixture.reopen().allocate_request(),
+        Err(ServiceFailure::Indeterminate)
+    );
+    assert_eq!(
+        fixture.reopen().allocate_request(),
+        Err(ServiceFailure::Indeterminate)
+    );
+    assert!(!fixture.anchor().exists());
+    fixture.reconcile_initialization().unwrap();
+    assert!(!fixture.anchor().exists());
+    let request = fixture.reopen().allocate_request().unwrap();
+    assert_ne!(request.as_bytes(), &[0; 16]);
+    assert!(!fixture.data_directory().exists());
+}
+
+#[test]
+fn pending_initialization_before_mkdir_reconciles_without_creating_the_child() {
+    let root = tempfile::tempdir().unwrap();
+    let fixture = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+    spaceterm_host::account_service::test_support::fail_next_creation_before_effect();
+    assert_eq!(
+        fixture.reopen().allocate_request(),
+        Err(ServiceFailure::Indeterminate)
+    );
+    assert!(!fixture.anchor().parent().unwrap().exists());
+    assert_eq!(
+        fixture.reopen().allocate_request(),
+        Err(ServiceFailure::Indeterminate)
+    );
+    fixture.reconcile_initialization().unwrap();
+    assert!(!fixture.anchor().parent().unwrap().exists());
+    fixture.reopen().allocate_request().unwrap();
+    assert!(!fixture.data_directory().exists());
+}
+
+#[test]
+fn original_owner_archive_publication_recovers_without_reissuing_authority() {
+    use spaceterm_core::{identity::ServerId, operations::RequestDigest};
+    for before_effect in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registration = fixture.initialize(DesiredServerState::Stopped).unwrap();
+        let server = ServerId::new(registration.server_pin().identity);
+        let claim = RequestDigest::from_bytes([23; 32]);
+        let supervisor = fixture.reopen();
+        let request = supervisor.allocate_request().unwrap();
+        let digest = supervisor
+            .owner_enrollment_digest(request, server, claim)
+            .unwrap();
+        supervisor
+            .record_owner_enrollment(request, digest, server, claim)
+            .unwrap();
+        if before_effect {
+            spaceterm_host::account_service::test_support::fail_next_publication_before_effect();
+        } else {
+            spaceterm_host::account_service::test_support::fail_next_mutation_completion_sync();
+        }
+        assert_eq!(
+            supervisor.acknowledge_request(request),
+            Err(ServiceFailure::Indeterminate)
+        );
+        drop(supervisor);
+        let identity = fs::read(fixture.data_directory().join("identity")).unwrap();
+        assert_eq!(
+            fixture.reopen().discover().unwrap_err(),
+            ServiceFailure::Indeterminate
+        );
+        fixture.reopen().acknowledge_request(request).unwrap();
+        fixture
+            .reopen()
+            .validate_owner_enrollment(&request, digest, server, claim)
+            .unwrap();
+        assert_eq!(
+            fs::read(fixture.data_directory().join("identity")).unwrap(),
+            identity
+        );
+        assert_eq!(
+            fixture
+                .reopen()
+                .discover()
+                .unwrap()
+                .unwrap()
+                .desired_state(),
+            DesiredServerState::Stopped
+        );
+    }
 }

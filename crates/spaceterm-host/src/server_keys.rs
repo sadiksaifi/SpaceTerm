@@ -66,6 +66,7 @@ impl From<Failure> for KeyStoreFailure {
             Failure::Unsafe => Self::UnsafeStorage,
             Failure::Unavailable => Self::StorageUnavailable,
             Failure::Indeterminate => Self::Indeterminate,
+            Failure::Busy => Self::Conflict,
         }
     }
 }
@@ -179,7 +180,6 @@ impl ServerKeyStore {
     }
 
     // The initial-install owner must hold its mutation lock before calling this.
-    #[cfg(feature = "test-support")]
     pub(crate) fn initial(
         directory: Directory,
         key: AccountBuildKey,
@@ -199,7 +199,6 @@ impl ServerKeyStore {
         (store, IdentityCreatePermit(initialization))
     }
 
-    #[cfg(feature = "test-support")]
     pub(crate) fn load_initial_identity(&self) -> Result<Arc<ServerIdentity>, KeyStoreFailure> {
         self.available()?;
         if self.initialization.is_none() {
@@ -349,6 +348,52 @@ impl ServerKeyStore {
         result.map_err(Into::into)
     }
 
+    /// Explicitly reconciles only this ticket's original pending removal. A
+    /// replaced secret is preserved. Normal reads never invoke this recovery.
+    pub fn resolve_pairing_secret_removal(
+        &self,
+        ticket: EnrollmentTicketId,
+    ) -> Result<(), KeyStoreFailure> {
+        self.validate_ticket(&ticket)?;
+        self.directory.reconcile_removal(
+            &secret_name(&ticket),
+            SECRET_HEADER_BYTES + MAX_SECRET_BYTES,
+            |bytes| validate_secret_record(bytes, &ticket),
+        )?;
+        self.indeterminate.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    /// Explicitly recovers the original registered identity, never a new seed or pin.
+    pub fn resolve_identity_publication(&self, expected: ServerPin) -> Result<(), KeyStoreFailure> {
+        if self.expected != Some(expected) {
+            return Err(KeyStoreFailure::IdentityMismatch);
+        }
+        reconcile_identity_publication(&self.directory, self.key, Some(expected))?;
+        self.indeterminate.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    /// Recovers this exact ticket's original publication without issuing a new secret.
+    pub fn resolve_pairing_secret_publication(
+        &self,
+        ticket: EnrollmentTicketId,
+    ) -> Result<(), KeyStoreFailure> {
+        self.validate_ticket(&ticket)?;
+        verify_recovery_identity(
+            &self.directory,
+            self.key,
+            self.expected.ok_or(KeyStoreFailure::IdentityMismatch)?,
+        )?;
+        self.directory.reconcile_retained_publication(
+            &secret_name(&ticket),
+            SECRET_HEADER_BYTES + MAX_SECRET_BYTES,
+            |bytes| validate_secret_record(bytes, &ticket),
+        )?;
+        self.indeterminate.store(false, Ordering::Release);
+        Ok(())
+    }
+
     fn available(&self) -> Result<(), KeyStoreFailure> {
         if self.indeterminate.load(Ordering::Acquire) {
             return Err(KeyStoreFailure::Indeterminate);
@@ -463,4 +508,103 @@ fn secret_name(ticket: &EnrollmentTicketId) -> String {
         let _ = write!(name, "{byte:02x}");
     }
     name
+}
+
+pub(crate) fn reconcile_registered_removal(
+    key: AccountBuildKey,
+    data: &std::path::Path,
+    pin: ServerPin,
+    ticket: EnrollmentTicketId,
+) -> Result<(), KeyStoreFailure> {
+    if ticket.parts().server.bytes() != pin.identity {
+        return Err(KeyStoreFailure::IdentityMismatch);
+    }
+    let directory = Directory::open_for_recovery(data)?.ok_or(KeyStoreFailure::Missing)?;
+    verify_recovery_identity(&directory, key, pin)?;
+    directory
+        .reconcile_removal(
+            &secret_name(&ticket),
+            SECRET_HEADER_BYTES + MAX_SECRET_BYTES,
+            |bytes| validate_secret_record(bytes, &ticket),
+        )
+        .map_err(Into::into)
+}
+
+fn validate_secret_record(bytes: &[u8], ticket: &EnrollmentTicketId) -> Result<(), Failure> {
+    if bytes.len() <= SECRET_HEADER_BYTES
+        || bytes.len() > SECRET_HEADER_BYTES + MAX_SECRET_BYTES
+        || bytes[..8] != *b"STPS\x01\0\0\0"
+        || bytes[8..24] != ticket.parts().server.bytes()
+        || bytes[24..40] != ticket.parts().nonce
+    {
+        return Err(Failure::Unsafe);
+    }
+    Ok(())
+}
+
+fn verify_recovery_identity(
+    directory: &Directory,
+    key: AccountBuildKey,
+    pin: ServerPin,
+) -> Result<(), KeyStoreFailure> {
+    let identity = directory
+        .read_for_recovery(IDENTITY_NAME, IDENTITY_BYTES)?
+        .ok_or(KeyStoreFailure::Missing)?;
+    if decode_identity(&identity.bytes, key)?.pin() != pin {
+        return Err(KeyStoreFailure::IdentityMismatch);
+    }
+    Ok(())
+}
+
+fn reconcile_identity_publication(
+    directory: &Directory,
+    key: AccountBuildKey,
+    expected: Option<ServerPin>,
+) -> Result<(), KeyStoreFailure> {
+    directory
+        .reconcile_retained_publication(IDENTITY_NAME, IDENTITY_BYTES, |bytes| {
+            let identity = decode_identity(bytes, key).map_err(|_| Failure::Unsafe)?;
+            if expected.is_some_and(|pin| identity.pin() != pin) {
+                return Err(Failure::Unsafe);
+            }
+            Ok(())
+        })
+        .map_err(Into::into)
+}
+
+pub(crate) fn reconcile_initial_identity_publication(
+    data: &std::path::Path,
+    key: AccountBuildKey,
+) -> Result<(), KeyStoreFailure> {
+    let directory = Directory::open_for_recovery(data)?.ok_or(KeyStoreFailure::Missing)?;
+    reconcile_identity_publication(&directory, key, None)
+}
+
+pub(crate) fn reconcile_registered_identity_publication(
+    key: AccountBuildKey,
+    data: &std::path::Path,
+    pin: ServerPin,
+) -> Result<(), KeyStoreFailure> {
+    let directory = Directory::open_for_recovery(data)?.ok_or(KeyStoreFailure::Missing)?;
+    reconcile_identity_publication(&directory, key, Some(pin))
+}
+
+pub(crate) fn reconcile_registered_secret_publication(
+    key: AccountBuildKey,
+    data: &std::path::Path,
+    pin: ServerPin,
+    ticket: EnrollmentTicketId,
+) -> Result<(), KeyStoreFailure> {
+    if ticket.parts().server.bytes() != pin.identity {
+        return Err(KeyStoreFailure::IdentityMismatch);
+    }
+    let directory = Directory::open_for_recovery(data)?.ok_or(KeyStoreFailure::Missing)?;
+    verify_recovery_identity(&directory, key, pin)?;
+    directory
+        .reconcile_retained_publication(
+            &secret_name(&ticket),
+            SECRET_HEADER_BYTES + MAX_SECRET_BYTES,
+            |bytes| validate_secret_record(bytes, &ticket),
+        )
+        .map_err(Into::into)
 }

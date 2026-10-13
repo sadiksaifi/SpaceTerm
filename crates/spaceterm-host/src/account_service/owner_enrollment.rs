@@ -68,6 +68,9 @@ impl ServiceSupervisor {
             return Err(ServiceFailure::IdentityMismatch);
         }
         self.mutate_request(request, |journal, index| {
+            if journal.reservations[index].service.is_some() {
+                return Err(ServiceFailure::RequestConflict);
+            }
             let retained = &mut journal.reservations[index].owner;
             match retained {
                 Some(original) if original == &owner => Ok(()),
@@ -162,6 +165,56 @@ fn read_archived_owner(
 }
 
 impl ServiceSupervisor {
+    pub(super) fn reconcile_owner_archive(
+        &self,
+        request: NativeRequestId,
+    ) -> Result<(), ServiceFailure> {
+        use super::registration::{REGISTRATION_LIMIT, Registration};
+        use super::supervisor::{Journal, decode};
+        use crate::private_filesystem::{Directory, Failure};
+        let directory =
+            Directory::open_for_recovery(&self.anchor)?.ok_or(ServiceFailure::Missing)?;
+        let snapshot = directory
+            .read_for_recovery("requests", super::supervisor::JOURNAL_LIMIT)?
+            .ok_or(ServiceFailure::UnknownRequest)?;
+        let journal: Journal = decode(&snapshot.bytes, super::supervisor::JOURNAL_LIMIT)?;
+        journal.validate(self.key)?;
+        let index = journal.reservation(request)?;
+        let owner = journal.reservations[index]
+            .owner
+            .as_ref()
+            .ok_or(ServiceFailure::Indeterminate)?;
+        let snapshot = directory
+            .read_for_recovery("registration", REGISTRATION_LIMIT)?
+            .ok_or(ServiceFailure::Missing)?;
+        let registration: Registration = decode(&snapshot.bytes, REGISTRATION_LIMIT)?;
+        registration.validate(self.key)?;
+        if owner.server.bytes() != registration.server {
+            return Err(ServiceFailure::IdentityMismatch);
+        }
+        Directory::reconcile_publication(
+            &self.anchor,
+            &owner_record_name(request),
+            OWNER_RECORD_LIMIT,
+            |bytes| {
+                let record: ArchivedOwner =
+                    decode(bytes, OWNER_RECORD_LIMIT).map_err(|_| Failure::Unsafe)?;
+                if record.schema != 1
+                    || record.key != self.key
+                    || record.request != request
+                    || &record.owner != owner
+                {
+                    return Err(Failure::Unsafe);
+                }
+                record
+                    .owner
+                    .validate(self.key, request)
+                    .map_err(|_| Failure::Unsafe)
+            },
+        )
+        .map_err(Into::into)
+    }
+
     pub(super) fn acknowledge_owner_request(
         &self,
         request: NativeRequestId,

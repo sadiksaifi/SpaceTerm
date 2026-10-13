@@ -6,7 +6,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use spaceterm_protocol::authentication::ServerPin;
 
-use super::ServiceFailure;
+use super::{InstallationStatus, ServiceFailure};
 use crate::{
     private_filesystem::Directory,
     startup::{AccountBuildKey, DesiredServerState},
@@ -26,6 +26,19 @@ pub(super) struct Registration {
     pub(super) data: PathBuf,
     pub(super) organization: PathBuf,
     pub(super) runtime: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) approved: Option<InstallationStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) staged: Option<InstallationStatus>,
+    #[serde(default = "installed_default", skip_serializing_if = "is_installed")]
+    pub(super) installed: bool,
+}
+
+fn installed_default() -> bool {
+    true
+}
+fn is_installed(value: &bool) -> bool {
+    *value
 }
 
 impl Registration {
@@ -40,6 +53,19 @@ impl Registration {
             || self.server == [0; 16]
             || self.public_key == [0; 32]
             || self.organization != self.data.join("organization")
+        {
+            return Err(ServiceFailure::InvalidRecord);
+        }
+        if self
+            .approved
+            .iter()
+            .chain(self.staged.iter())
+            .any(|installation| installation.artifact_sha256 == [0; 32])
+            || self
+                .approved
+                .as_ref()
+                .zip(self.staged.as_ref())
+                .is_some_and(|(a, b)| a.installation == b.installation)
         {
             return Err(ServiceFailure::InvalidRecord);
         }
@@ -101,6 +127,18 @@ impl RegisteredServer {
     /// Returns the organization directory, whose store has separate authority.
     pub fn organization_directory(&self) -> &Path {
         &self.record.organization
+    }
+    /// Returns the exact approved artifact facts, without executable authority.
+    pub fn approved_installation(&self) -> Option<&InstallationStatus> {
+        self.record.approved.as_ref()
+    }
+    /// Returns separately staged artifact facts.
+    pub fn staged_installation(&self) -> Option<&InstallationStatus> {
+        self.record.staged.as_ref()
+    }
+    /// Reports whether service configuration and installed code remain registered.
+    pub fn is_installed(&self) -> bool {
+        self.record.installed
     }
     /// Opens the registered private runtime route without creating or removing it.
     pub fn endpoint(&self) -> Result<crate::ipc::IpcEndpoint, ServiceFailure> {
