@@ -229,6 +229,18 @@ pub trait ReducerPort: Send {
         request: ReductionRequest<'_>,
         cursor: CommitCursor,
     ) -> Result<PreparedReduction, ServerFailure>;
+    /// Pairing advances only its identity marks and exact control-release scope.
+    fn prepare_pairing_mutation(
+        &mut self,
+        _binding: Option<OperationBinding>,
+        _high_water: IdentityHighWater,
+        _clients: &[ClientId],
+        _cursor: CommitCursor,
+    ) -> Result<PreparedReduction, ServerFailure> {
+        Err(crate::failure::failure(
+            crate::contracts::ServerFailureClass::RuntimeUnavailable,
+        ))
+    }
     /// Includes store-only receipts, so the next reduction has the current CAS.
     fn committed(&mut self, receipt: CommitReceipt) -> Result<(), ServerFailure>;
     fn not_applied(&mut self);
@@ -287,6 +299,33 @@ pub trait LedgerPort: Send {
         through: OperationSequence,
         context: TransactionContext,
     ) -> Result<LedgerProjection, ServerFailure>;
+    /// Comparison and capacity for purpose-bound pairing admission. No unknown
+    /// stream is registered by submitting an operation.
+    fn pairing_stream(&self, _binding: StreamBinding) -> Result<StreamRecord, ServerFailure> {
+        Err(crate::failure::failure(
+            crate::contracts::ServerFailureClass::RuntimeUnavailable,
+        ))
+    }
+    fn check_pairing_capacity(
+        &self,
+        _streams: &[StreamRecord],
+        _context: TransactionContext,
+    ) -> Result<(), ServerFailure> {
+        Err(crate::failure::failure(
+            crate::contracts::ServerFailureClass::RuntimeUnavailable,
+        ))
+    }
+    /// Native issuance and ticket invalidation have no pairing-bound operation.
+    fn prepare_pairing_stream_changes(
+        &mut self,
+        _streams: &[StreamRecord],
+        _retired: &[StreamBinding],
+        _context: TransactionContext,
+    ) -> Result<LedgerProjection, ServerFailure> {
+        Err(crate::failure::failure(
+            crate::contracts::ServerFailureClass::RuntimeUnavailable,
+        ))
+    }
     /// Must accept every durable receipt, including non-ledger commits.
     fn committed(&mut self, receipt: CommitReceipt) -> Result<(), ServerFailure>;
     fn not_applied(&mut self);
@@ -822,6 +861,22 @@ impl ReducerPort for OrganizationReducerAdapter {
         .map_err(reducer_failure)?;
         self.stage(candidate)
     }
+    fn prepare_pairing_mutation(
+        &mut self,
+        binding: Option<OperationBinding>,
+        high_water: IdentityHighWater,
+        clients: &[ClientId],
+        cursor: CommitCursor,
+    ) -> Result<PreparedReduction, ServerFailure> {
+        if !high_water.dominates(cursor.high_water) {
+            return Err(recovery_failure());
+        }
+        let candidate = self
+            .reducer()?
+            .prepare_principal_change(binding, high_water, clients)
+            .map_err(reducer_failure)?;
+        self.stage(candidate)
+    }
     fn committed(&mut self, receipt: CommitReceipt) -> Result<(), ServerFailure> {
         let reducer = self.installed.as_mut().ok_or_else(recovery_failure)?;
         if let Some((candidate, snapshot)) = self.staged.take() {
@@ -1037,6 +1092,35 @@ impl LedgerPort for OperationLedgerAdapter {
         }
         self.stage(transition)
     }
+    fn pairing_stream(&self, binding: StreamBinding) -> Result<StreamRecord, ServerFailure> {
+        self.ledger()?
+            .stream(&binding)
+            .cloned()
+            .map_err(crate::failure::ledger_failure)
+    }
+    fn check_pairing_capacity(
+        &self,
+        streams: &[StreamRecord],
+        context: TransactionContext,
+    ) -> Result<(), ServerFailure> {
+        if streams.is_empty() {
+            return Ok(());
+        }
+        let mut preview =
+            DomainLedger::recover(streams[0].binding.server(), self.ledger()?.retained())
+                .map_err(crate::failure::ledger_failure)?;
+        pairing_stream_changes(&mut preview, streams, &[], context)?;
+        Ok(())
+    }
+    fn prepare_pairing_stream_changes(
+        &mut self,
+        streams: &[StreamRecord],
+        retired: &[StreamBinding],
+        context: TransactionContext,
+    ) -> Result<LedgerProjection, ServerFailure> {
+        let candidate = pairing_stream_changes(self.ledger_mut()?, streams, retired, context)?;
+        self.stage(candidate)
+    }
     fn prepare_acknowledgement(
         &mut self,
         binding: StreamBinding,
@@ -1087,6 +1171,43 @@ impl LedgerPort for OperationLedgerAdapter {
             );
         }
     }
+}
+fn pairing_stream_changes(
+    ledger: &mut DomainLedger,
+    streams: &[StreamRecord],
+    retired: &[StreamBinding],
+    context: TransactionContext,
+) -> Result<DomainLedgerTransition, ServerFailure> {
+    let mut candidate = if let Some(first) = streams.first() {
+        ledger.prepare_register_stream_with_purpose(first.binding, first.purpose, context)
+    } else {
+        ledger.prepare_retirement(retired, StreamRetirementReason::Expired, context)
+    }
+    .map_err(crate::failure::ledger_failure)?;
+    let additions = streams
+        .iter()
+        .skip(1)
+        .cloned()
+        .map(LedgerWrite::RegisterStream)
+        .chain(
+            if streams.is_empty() { &[][..] } else { retired }
+                .iter()
+                .map(|binding| LedgerWrite::RetireStream {
+                    binding: *binding,
+                    reason: StreamRetirementReason::Expired,
+                }),
+        )
+        .collect();
+    if let Err(error) = ledger.extend_prepared(&mut candidate, additions) {
+        ledger
+            .resolve_commit(
+                candidate,
+                CommitDisposition::NotApplied(StoreFailure::InvalidTransaction),
+            )
+            .map_err(crate::failure::ledger_failure)?;
+        return Err(crate::failure::ledger_failure(error));
+    }
+    Ok(candidate)
 }
 fn recovery_failure() -> ServerFailure {
     crate::failure::failure(crate::contracts::ServerFailureClass::RecoveryRequired)

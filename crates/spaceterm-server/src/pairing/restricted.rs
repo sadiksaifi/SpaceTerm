@@ -125,6 +125,7 @@ impl PairingService {
             PairingOutcome::AlreadyRevoked(receipt) => {
                 Ok(RestrictedRevocationResult::AlreadyRevoked(receipt))
             }
+            PairingOutcome::Failed(error) => Err(error),
             _ => Err(PairingFailure::InvalidDurableState),
         }
     }

@@ -117,7 +117,8 @@ impl PairingActorPort for Actor {
             let mut s = self.state.lock().unwrap();
             let mut native = None;
             let binding = match request {
-                PairingActorRequest::Operation(request) => {
+                PairingActorRequest::Operation(request)
+                | PairingActorRequest::Ordinary { request, .. } => {
                     let binding = request.binding();
                     if let Some((digest, outcome)) = s.outcomes.get(&binding.id) {
                         if *digest != binding.digest {
@@ -330,6 +331,55 @@ impl Fixture {
             pin,
         }
     }
+    fn principal(
+        &self,
+        binding: &PairingClientStreams,
+    ) -> spaceterm_server::api::VerifiedPrincipal {
+        use spaceterm_protocol::authentication::*;
+        let local = |value: u64| {
+            let mut bytes = [0; 16];
+            bytes[8..].copy_from_slice(&value.to_be_bytes());
+            bytes
+        };
+        let principal = Principal {
+            server: self.pin.identity,
+            device: [4; 16],
+            pairing: local(binding.parts().client.pairing.local()),
+            client: local(binding.parts().client.id.local()),
+        };
+        let lookup = spaceterm_server::pairing::protocol_lookup::PairingProtocolLookup::new(
+            Source(self.actor.clone()),
+        );
+        let config = HandshakeConfig::default();
+        let (client, hello) = ClientHandshake::begin(
+            self.pin,
+            principal,
+            Purpose::Ordinary,
+            config.clone(),
+            self.auth.clone(),
+        )
+        .unwrap();
+        let (server, hello) = ServerHandshake::accept(
+            self.pin.identity,
+            1,
+            config,
+            self.server.clone(),
+            &lookup,
+            &hello,
+        )
+        .unwrap();
+        let (client, proof) = client.receive_server(&hello).unwrap();
+        let (server, ready) = server.receive_device(&lookup, &proof).unwrap();
+        client.receive_ready(&ready).unwrap();
+        let Established::Ordinary(server) = server else {
+            panic!("ordinary")
+        };
+        spaceterm_server::api::VerifiedPrincipal::from_authenticated(
+            &server,
+            spaceterm_core::authority::ConnectionGeneration::new(1),
+        )
+        .unwrap()
+    }
     fn claim(&self) -> VerifiedDeviceClaim {
         let proposal = EnrollmentProposal::new(EnrollmentProposalParts {
             server: ServerId::new(self.pin.identity),
@@ -502,7 +552,14 @@ async fn additional_client_binding_reserves_distinct_identity_and_streams() {
     .unwrap();
     let result = f
         .service
-        .bind_additional_client(operation, target, version, claim, device, auth)
+        .bind_additional_client(
+            f.principal(&client),
+            operation,
+            target,
+            version,
+            claim,
+            (device, auth),
+        )
         .await
         .unwrap();
     let proof = match result.outcome {
@@ -599,7 +656,7 @@ async fn revoke(
         OperationId::new(client.parts().ordinary, OperationSequence::new(1).unwrap());
     let assessed = f
         .service
-        .assess_unpair(assessment_id, target)
+        .assess_unpair(f.principal(client), assessment_id, target)
         .await
         .unwrap();
     let assessment = match assessed.outcome {
@@ -609,7 +666,7 @@ async fn revoke(
     let operation = OperationId::new(client.parts().ordinary, OperationSequence::new(2).unwrap());
     match f
         .service
-        .unpair(operation, assessment)
+        .unpair(f.principal(client), operation, assessment)
         .await
         .unwrap()
         .outcome
@@ -654,10 +711,11 @@ async fn revoked_stream_cannot_execute_another_operation() {
     let f = Fixture::new();
     let receipt = f.enroll().await;
     let (target, client) = receipt_target(&receipt);
+    let principal = f.principal(&client);
     let _proof = revoke(&f, target.clone(), &client).await;
     let operation = OperationId::new(client.parts().ordinary, OperationSequence::new(3).unwrap());
     assert!(matches!(
-        f.service.assess_unpair(operation, target).await,
+        f.service.assess_unpair(principal, operation, target).await,
         Err(PairingFailure::PairingRevoked)
     ));
 }
@@ -1211,7 +1269,11 @@ async fn paired_issuance_to_enrollment_and_historical_lookup_from_serialized_mes
             paired_issue_from_wire(&f, &initial, &proposal, versions.clone());
         let issued = f
             .service
-            .issue_direct_authorization(operation, received)
+            .issue_direct_authorization(
+                f.principal(&receipt_target(&initial).1),
+                operation,
+                received,
+            )
             .await
             .unwrap();
         let (public, authorization) = delivered_candidate(&f, &issued);
@@ -1271,7 +1333,11 @@ async fn revoked_paired_issuer_cannot_activate_wire_authorization() {
             paired_issue_from_wire(&f, &initial, &proposal, versions.clone());
         let issued = f
             .service
-            .issue_direct_authorization(operation, proposal)
+            .issue_direct_authorization(
+                f.principal(&receipt_target(&initial).1),
+                operation,
+                proposal,
+            )
             .await
             .unwrap();
         let (public, authorization) = delivered_candidate(&f, &issued);
