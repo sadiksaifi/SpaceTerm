@@ -2474,12 +2474,18 @@ impl Render for TabManager {
             let inset = hidden + (frame.stage_leading_inset(true) - hidden) * reveal;
             (self.sidebar_width * reveal, inset)
         };
-        let (leading_margin, leading_inset) = leading_edge(self.sidebar_reveal);
-        let leading = leading_margin + leading_inset;
         let rest_leading = {
             let (margin, inset) = leading_edge(if self.sidebar_visible { 1.0 } else { 0.0 });
             margin + inset
         };
+        // The stage moves by whole device pixels from where it rests, so both edges of the active
+        // Tab round alike and its Terminal Sessions keep their size in every frame.
+        let scale = window.scale_factor();
+        let snap = |length: Pixels| (length * scale).round() / scale;
+        let (leading_margin, leading_inset) = leading_edge(self.sidebar_reveal);
+        let leading_inset = snap(leading_inset);
+        let offset = snap(rest_leading - leading_margin - leading_inset);
+        let leading_margin = rest_leading - offset - leading_inset;
 
         div()
             .id("tab-manager")
@@ -2560,7 +2566,7 @@ impl Render for TabManager {
                             .absolute()
                             .inset_0(),
                     )
-                    .child(div().h_full().mr(rest_leading - leading).child(active_tab)),
+                    .child(div().h_full().mr(offset).child(active_tab)),
             )
     }
 }

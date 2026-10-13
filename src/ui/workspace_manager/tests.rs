@@ -6334,6 +6334,154 @@ fn toggling_the_sidebar_should_slide_it_while_the_terminal_resizes_once(cx: &mut
     assert_eq!(resizes(), before + 2);
 }
 
+#[gpui::test]
+fn every_frame_of_a_sidebar_toggle_should_keep_the_terminal_size(cx: &mut TestAppContext) {
+    toggle_the_sidebar_frame_by_frame(None, cx);
+}
+
+#[gpui::test]
+fn every_frame_of_a_sidebar_toggle_should_keep_the_terminal_size_beside_a_fractional_width(
+    cx: &mut TestAppContext,
+) {
+    toggle_the_sidebar_frame_by_frame(Some(px(251.3)), cx);
+}
+
+/// Toggles the sidebar twice, drawing every frame, and asserts the Terminal resizes once per
+/// toggle.
+fn toggle_the_sidebar_frame_by_frame(sidebar_width: Option<Pixels>, cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, records, cx) = workspace_manager(cx);
+    // A width where the stage's fractional edges round across a Terminal cell boundary.
+    cx.simulate_resize(gpui::size(px(804.0), px(600.0)));
+    if let Some(width) = sidebar_width {
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.set_layout(true, width, window, cx)
+                })
+            })
+        });
+    }
+    cx.run_until_parked();
+    let resizes = || {
+        records
+            .commands()
+            .into_iter()
+            .filter_map(|call| match call.command {
+                RecordedCommand::Resize(geometry) => Some(geometry),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = resizes().len();
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    for _ in 0..2 {
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx))
+        });
+        cx.run_until_parked();
+        for _ in 0..60 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(8));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+        }
+    }
+
+    let after = resizes();
+    assert_eq!(
+        after.len(),
+        before + 2,
+        "the Terminal must resize once per toggle beside a {sidebar_width:?} sidebar: {:?}",
+        &after[before..]
+    );
+}
+
+#[gpui::test]
+fn a_closing_sidebar_should_not_take_input(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    sidebar_motion_frame(cx);
+    let row = cx
+        .debug_bounds("workspace-row-1-active")
+        .expect("the closing sidebar still draws its rows");
+    let position = point(row.right() - px(12.0), row.center().y);
+    assert!(
+        position.x > px(0.0),
+        "the row must still be on screen: {row:?}"
+    );
+
+    cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+    let menu = cx.debug_bounds("workspace-menu-row-rename");
+    finish_slides(cx);
+
+    let focus = cx.update(|window, cx| {
+        let manager = manager.read(cx);
+        (
+            manager.sidebar.read(cx).is_focused(window),
+            manager
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .focused_terminal_is_focused(window, cx),
+        )
+    });
+    assert_eq!(
+        (menu, focus),
+        (None, (false, true)),
+        "a press on a closing sidebar must reach neither its rows nor its menu"
+    );
+}
+
+#[gpui::test]
+fn a_toggle_during_a_resize_drag_should_end_the_drag(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+    let start = cx
+        .debug_bounds("workspace-sidebar-resize-handle-hitbox")
+        .expect("the shown sidebar has a resize handle")
+        .center();
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    sidebar_motion_frame(cx);
+
+    cx.simulate_mouse_move(
+        point(start.x + px(30.0), start.y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    finish_slides(cx);
+    let during = manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible);
+    cx.simulate_mouse_up(
+        point(start.x + px(30.0), start.y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    let after = manager.read_with(cx, |manager, cx| {
+        let sidebar = manager.sidebar.read(cx);
+        (sidebar.layout().visible, sidebar.is_resizing())
+    });
+
+    assert_eq!(
+        (during, after),
+        (false, (false, false)),
+        "moving the held pointer must not undo the toggle"
+    );
+}
+
 /// The Workspace identity keeps its glyph in both sidebar states.
 #[gpui::test]
 fn workspace_identity_should_keep_its_icon_when_the_sidebar_is_hidden(cx: &mut TestAppContext) {
@@ -12527,6 +12675,39 @@ fn sidebar_splitter_range(cx: &mut VisualTestContext) -> (f64, f64, f64) {
         number("min_numeric_value"),
         number("max_numeric_value"),
     )
+}
+
+#[gpui::test]
+fn an_opening_sidebar_should_publish_its_resting_width(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    let width = |cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| {
+            f64::from(f32::from(manager.sidebar.read(cx).layout().width))
+        })
+    };
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    sidebar_motion_frame(cx);
+    let rest = width(cx);
+
+    let published = sidebar_splitter_range(cx).0;
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+    spaceterm_ui::a11y_testing::perform(
+        cx,
+        tree.node("Resize Workspace sidebar"),
+        gpui::accesskit::Action::Increment,
+    );
+    cx.run_until_parked();
+
+    assert_eq!(
+        published, rest,
+        "the splitter must publish the sidebar's model width"
+    );
+    assert!(width(cx) > rest, "Increment must widen the sidebar");
 }
 
 #[gpui::test]

@@ -1045,6 +1045,10 @@ impl WorkspaceSidebar {
                     .child(new_workspace_menu),
             )
             .child(scrollbar)
+            // A sidebar that is hiding still draws as it slides out, but takes no input.
+            .when(!self.layout.visible, |sidebar| {
+                sidebar.child(div().absolute().top_0().left_0().size_full().occlude())
+            })
             .into_any_element();
         spaceterm_ui::ControlHost::Panel
             .mount(sidebar)
@@ -1054,13 +1058,16 @@ impl WorkspaceSidebar {
     pub(in crate::ui) fn render_resize_handle(
         &self,
         sidebar: WeakEntity<Self>,
+        resting_width: Pixels,
         handle_width: Pixels,
         pointer_input: bool,
         top_chrome_height: Pixels,
     ) -> AnyElement {
         let pointer_guard = Self::pointer_guard(sidebar.clone());
         let selector = "workspace-sidebar-resize-handle";
-        let current_width = f32::from(handle_width);
+        // The handle resizes from the width the sidebar rests at, while it sits where a moving
+        // sidebar is drawn.
+        let current_width = f32::from(resting_width);
         let handle = ResizeHandle::new(
             selector,
             "Resize Workspace sidebar",

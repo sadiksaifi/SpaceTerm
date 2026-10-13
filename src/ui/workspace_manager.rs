@@ -3621,13 +3621,10 @@ impl WorkspaceManager {
         if sidebar_frame.moving {
             window.request_animation_frame();
         }
-        let chrome = WorkspaceChromeLayout::presented(
-            sidebar_layout,
-            sidebar_frame,
-            &self.chrome_identity(workspace.id(), cx),
-            window,
-            cx,
-        );
+        let identity = self.chrome_identity(workspace.id(), cx);
+        let resting_chrome = WorkspaceChromeLayout::resolve(sidebar_layout, &identity, window, cx);
+        let chrome =
+            WorkspaceChromeLayout::presented(sidebar_layout, sidebar_frame, &identity, window, cx);
         let update_control = gpui::AnyView::from(self.update_control.clone());
         let close_owner = cx.weak_entity();
         let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
@@ -3690,6 +3687,7 @@ impl WorkspaceManager {
             .child(
                 self.sidebar.read(cx).render_resize_handle(
                     self.sidebar.downgrade(),
+                    resting_chrome.width,
                     chrome.width,
                     !sidebar_frame.moving,
                     super::workspace_frame::WorkspaceFrame::for_appearance(

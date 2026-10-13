@@ -378,6 +378,12 @@ impl WorkspaceSidebar {
         }
     }
 
+    /// Ends a resize when a toggle takes the sidebar's width from it. The handle's remaining events
+    /// for that interaction change nothing.
+    fn end_resize(&mut self) {
+        self.resize_origin = None;
+    }
+
     fn finish_resize(
         &mut self,
         source: ResizeInputSource,
@@ -983,7 +989,7 @@ impl WorkspaceSidebar {
                 source,
                 requested_value,
                 ..
-            } => {
+            } if source != ResizeInputSource::Pointer || self.is_resizing() => {
                 let reveal_width = self
                     .collapsed_top_chrome_width(window, cx)
                     .max(px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH));
@@ -995,6 +1001,7 @@ impl WorkspaceSidebar {
                     self.resize(self.layout.width.max(px(requested_value)), window, cx);
                 }
             }
+            ResizeHandleEvent::ResizeRequested { .. } => {}
             ResizeHandleEvent::ResetRequested { source } => {
                 self.resize(px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH), window, cx);
                 if source == ResizeInputSource::Pointer {
@@ -1292,6 +1299,7 @@ impl WorkspaceSidebar {
         }
         self.cancel_rename(cx);
         self.motion.expect_change();
+        self.end_resize();
         self.set_layout(!self.layout.visible, self.layout.width, window, cx);
         if !self.layout.visible && restore {
             cx.emit(SidebarEvent::FocusPane);
@@ -1304,6 +1312,7 @@ impl WorkspaceSidebar {
         } else {
             if !self.layout.visible {
                 self.motion.expect_change();
+                self.end_resize();
             }
             self.set_layout(true, self.layout.width, window, cx);
             if let Some(index) = self.rows.iter().position(|row| row.active) {
