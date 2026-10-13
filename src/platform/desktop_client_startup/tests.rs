@@ -99,11 +99,11 @@ impl LocalUseInvalidator for Invalidator {
         Box::pin(async { panic!("recovery removed a pairing") })
     }
 }
-struct MemoryView {
-    bytes: Option<Vec<u8>>,
-    failure: Option<ViewStoreFailureClass>,
-    writes: Arc<AtomicUsize>,
-    saved: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+pub(super) struct MemoryView {
+    pub(super) bytes: Option<Vec<u8>>,
+    pub(super) failure: Option<ViewStoreFailureClass>,
+    pub(super) writes: Arc<AtomicUsize>,
+    pub(super) saved: Arc<std::sync::Mutex<Option<Vec<u8>>>>,
 }
 impl ViewStore for MemoryView {
     type Version = u64;
@@ -206,6 +206,8 @@ impl Fixture {
             operations: self.server.clone(),
             invalidator: Arc::new(Invalidator(self.channels.clone())),
             local_server: Some(self.server.server()),
+            tracker: None,
+            registry_binding: None,
         }
     }
     fn store(&self) -> MemoryView {
