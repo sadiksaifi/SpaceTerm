@@ -400,3 +400,202 @@ async fn cli_status_reports_the_authenticated_negotiated_major_not_an_observed_p
         assert_eq!(output["result"]["native"]["verified"], false);
     }
 }
+
+struct CompanionBackend {
+    context: AuthenticatedManagementContext,
+    reads: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl StatusBackend for CompanionBackend {
+    fn context(&self) -> Result<AuthenticatedManagementContext, ManagementFailure> {
+        Ok(self.context)
+    }
+    fn status(&self) -> ManagementFuture<'_, ServerStatus> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async { Err(ManagementFailure::Offline) })
+    }
+    fn subscribe_status(&self) -> ManagementFuture<'_, StatusSubscription> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async { Err(ManagementFailure::Offline) })
+    }
+}
+
+#[tokio::test]
+async fn native_companion_rejects_borrowed_cli_identity_and_reports_missing_setup_before_offline() {
+    for major in [1, 2] {
+        let root = tempfile::tempdir().unwrap();
+        let account = spaceterm_host::account_service::test_support::AccountServiceFixture::new(
+            root.path(),
+            BuildIdentity::Development,
+        )
+        .unwrap();
+        let provider =
+            spaceterm_client_native::NativeClientProvider::from_supervisor(account.reopen());
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let backend = |kind| CompanionBackend {
+            context: AuthenticatedManagementContext::from_connection(
+                &authenticated(major, true, true).unwrap(),
+                stream(),
+                kind,
+            )
+            .unwrap(),
+            reads: reads.clone(),
+        };
+        assert!(matches!(
+            provider.clone().with_companion_backend(
+                companion_saved(4, true),
+                &ReceiptVerifier,
+                backend(ManagementClientKind::Cli)
+            ),
+            Err(ManagementFailure::AuthorizationDenied)
+        ));
+        for saved in [companion_saved(4, false), companion_saved(7, true)] {
+            assert!(matches!(
+                provider.clone().with_companion_backend(
+                    saved,
+                    &ReceiptVerifier,
+                    backend(ManagementClientKind::StatusCompanion)
+                ),
+                Err(ManagementFailure::AuthorizationDenied)
+            ));
+        }
+        let provider = provider
+            .with_companion_backend(
+                companion_saved(4, true),
+                &ReceiptVerifier,
+                backend(ManagementClientKind::StatusCompanion),
+            )
+            .unwrap();
+        let status = provider.companion_status().unwrap();
+        assert_eq!(
+            status.status().await,
+            Err(ManagementFailure::NativeUnavailable)
+        );
+        assert!(matches!(
+            status.subscribe_status().await,
+            Err(ManagementFailure::NativeUnavailable)
+        ));
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(!account.anchor().exists());
+    }
+}
+
+struct ReceiptVerifier;
+impl spaceterm_client::journal::ReceiptVerifier for ReceiptVerifier {
+    fn verify(
+        &self,
+        pin: ServerPin,
+        receipt: &spaceterm_core::pairing::SignedPairingReceipt,
+    ) -> Result<(), spaceterm_client::failure::ClientFailure> {
+        let failure = || {
+            spaceterm_client::failure::ClientFailure::new(
+                spaceterm_client::failure::ClientFailureClass::InvalidPeer,
+            )
+        };
+        let canonical = serde_json::to_vec(&receipt.parts().claims).map_err(|_| failure())?;
+        if canonical != receipt.parts().canonical_body {
+            return Err(failure());
+        }
+        ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, pin.public_key)
+            .verify(&canonical, &receipt.parts().signature)
+            .map_err(|_| failure())
+    }
+}
+fn companion_saved(client_local: u64, additional: bool) -> spaceterm_client::journal::SavedBinding {
+    use spaceterm_client::api::{
+        ConnectionTarget, PairedServerBinding, RouteDescription, RouteParts,
+    };
+    use spaceterm_core::authority::StoreRevision;
+    use spaceterm_core::pairing::*;
+    let issuer = Ed25519KeyPair::from_seed_unchecked(&[51; 32]).unwrap();
+    let original = stream();
+    let client = ClientId::new(original.server(), client_local).unwrap();
+    let streams = PairingClientStreams::new(PairingClientStreamsParts {
+        client: ClientRecord {
+            id: client,
+            pairing: original.pairing(),
+        },
+        ordinary: OperationStreamId::new(original.key(), original.pairing(), client).unwrap(),
+        self_revocation: OperationStreamId::new(
+            OperationStreamKey::new(original.server(), 6).unwrap(),
+            original.pairing(),
+            client,
+        )
+        .unwrap(),
+    })
+    .unwrap();
+    let pin = ServerPin {
+        identity: original.server().bytes(),
+        public_key: issuer.public_key().as_ref().try_into().unwrap(),
+    };
+    let device = DeviceId::new([2; 16]);
+    let target = ConnectionTarget::new(
+        pin,
+        device,
+        original.pairing(),
+        client,
+        RouteDescription::new(RouteParts::Ipc {
+            directory: "/private/local".into(),
+            name: "s".into(),
+        })
+        .unwrap(),
+        CredentialReference::new([4; 16]),
+        LocalPairingGeneration::new(1).unwrap(),
+    )
+    .unwrap();
+    let pairing = PairingTarget::new(PairingTargetParts {
+        server: original.server(),
+        device,
+        pairing: original.pairing(),
+    })
+    .unwrap();
+    let keys = PairingKeys::new(PairingKeysParts {
+        device_identity_public_key: [5; 32],
+        pairing_authentication_public_key: [6; 32],
+    })
+    .unwrap();
+    let operation = OperationBinding {
+        id: OperationId::new(
+            OperationStreamId::new(
+                OperationStreamKey::new(original.server(), 8).unwrap(),
+                original.pairing(),
+                client,
+            )
+            .unwrap(),
+            OperationSequence::new(1).unwrap(),
+        ),
+        digest: RequestDigest::from_bytes([7; 32]),
+    };
+    let claims = if additional {
+        PairingReceiptBody::ClientBinding {
+            target: pairing,
+            keys,
+            client: streams.clone(),
+            operation,
+            revision: StoreRevision::new(1),
+        }
+    } else {
+        PairingReceiptBody::Enrollment {
+            target: pairing,
+            keys,
+            client: streams.clone(),
+            enrollment: operation,
+            revision: StoreRevision::new(1),
+        }
+    };
+    let canonical = serde_json::to_vec(&claims).unwrap();
+    let signature = issuer.sign(&canonical).as_ref().to_vec();
+    let receipt = SignedPairingReceipt::new(SignedPairingReceiptParts {
+        schema: 1,
+        claims,
+        canonical_body: canonical,
+        signature,
+    })
+    .unwrap();
+    spaceterm_client::journal::SavedBinding::verified(
+        PairedServerBinding::new(target),
+        streams,
+        receipt,
+        &ReceiptVerifier,
+    )
+    .unwrap()
+}

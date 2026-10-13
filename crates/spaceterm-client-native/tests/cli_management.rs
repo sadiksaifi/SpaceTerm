@@ -50,8 +50,11 @@ impl NativeCommandBindings for Native {
     ) -> ManagementFuture<'a, CliOutput> {
         self.calls.0.lock().unwrap().push(match command {
             NativeCliCommand::Resolve { .. } => "resolve",
+            NativeCliCommand::Install { .. } => "install",
             NativeCliCommand::Start => "start",
             NativeCliCommand::Stop => "stop",
+            NativeCliCommand::Restart => "restart",
+            NativeCliCommand::Uninstall => "uninstall",
             NativeCliCommand::RemoteAccess { .. } => "remote_access",
             NativeCliCommand::UpdateCheck => "update_check",
             NativeCliCommand::UpdateStage { .. } => "update_stage",
