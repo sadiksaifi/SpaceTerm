@@ -1,6 +1,7 @@
 //! One cancellable authenticated worker per saved server. Reachability grants no
 //! authorization, and interruption never preserves an ephemeral outbound queue.
 
+pub(crate) mod queries;
 pub(crate) mod writer;
 
 use crate::{
@@ -42,6 +43,7 @@ pub(crate) struct ConnectRequest {
 }
 pub(crate) struct DispatchRequest {
     pub captured: ConnectedInfo,
+    pub query: bool,
     pub message: Payload,
     pub completion: oneshot::Sender<Result<(), ClientFailure>>,
     pub _reservation: EgressReservation,
@@ -52,9 +54,11 @@ pub(crate) struct WorkerChannels {
     pub outgoing: mpsc::Receiver<DispatchRequest>,
     pub shutdown: watch::Receiver<bool>,
     pub egress: Arc<EgressBudget>,
+    pub queries: Arc<queries::QueryHub>,
 }
 
 struct AttemptResources {
+    queries: Arc<queries::QueryHub>,
     egress: Arc<EgressBudget>,
     writer_done: Option<watch::Receiver<bool>>,
     opening: Option<tokio::task::JoinHandle<Result<ConnectedRoute, ClientFailure>>>,
@@ -62,8 +66,9 @@ struct AttemptResources {
     slot: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 impl AttemptResources {
-    fn new(egress: Arc<EgressBudget>) -> Self {
+    fn new(egress: Arc<EgressBudget>, queries: Arc<queries::QueryHub>) -> Self {
         Self {
+            queries,
             egress,
             writer_done: None,
             opening: None,
@@ -113,6 +118,7 @@ pub(crate) async fn run(
         mut outgoing,
         mut shutdown,
         egress,
+        queries,
     } = channels;
     let mut retry_at: Option<Instant> = None;
     let mut attempt = 0u64;
@@ -141,13 +147,14 @@ pub(crate) async fn run(
                 continue;
             }
         };
+        queries.invalidate();
         shared
             .services
             .delegate
             .invalidate(&binding, ConnectionInvalidation::Reconciliation);
         replica.invalidate(ResyncReason::ConnectionLost);
         reject_outgoing(&mut outgoing);
-        let mut resources = AttemptResources::new(Arc::clone(&egress));
+        let mut resources = AttemptResources::new(Arc::clone(&egress), Arc::clone(&queries));
         let end = {
             let pending = run_attempt(
                 &shared,
@@ -182,6 +189,7 @@ pub(crate) async fn run(
             AttemptEnd::Shutdown => ConnectionInvalidation::Shutdown,
             _ => ConnectionInvalidation::ConnectionLost,
         };
+        queries.invalidate();
         shared.services.delegate.invalidate(&binding, reason);
         replica.invalidate(ResyncReason::ConnectionLost);
         reject_outgoing(&mut outgoing);
@@ -278,6 +286,7 @@ async fn run_attempt(
 ) -> Result<(), ClientFailure> {
     let services = &shared.services;
     let target = binding.target();
+    let queries = Arc::clone(&resources.queries);
     state.send_replace(ConnectionState::Connecting {
         phase: ConnectingPhase::Dialing,
     });
@@ -336,6 +345,7 @@ async fn run_attempt(
     )
     .await
     .map_err(|_| crate::protocol_adapter::unavailable())??;
+    queries.authenticated(info, &session.codec)?;
     state.send_replace(ConnectionState::Connected { info });
     let mut publication_deadline = None;
     loop {
@@ -350,7 +360,7 @@ async fn run_attempt(
                 let admission = if matches!(*state.borrow(), ConnectionState::Connected { .. })
                     && same_connection(info, request.captured)
                 {
-                    services.delegate.admit(info, &request.message).map(|_| ())
+                    if request.query { queries.admit(info, &request.message, binding) } else { services.delegate.admit(info, &request.message).map(|_| ()) }
                 } else {
                     Err(stale())
                 };
@@ -362,6 +372,8 @@ async fn run_attempt(
                     request,
                     Arc::clone(&services.delegate),
                     state.subscribe(),
+                    Arc::clone(&queries),
+                    binding.clone(),
                 )?;
                 continue;
             },
@@ -371,6 +383,7 @@ async fn run_attempt(
             services
                 .delegate
                 .invalidate(binding, ConnectionInvalidation::Stopped);
+            queries.invalidate();
             state.send_replace(ConnectionState::Stopped);
             return Ok(());
         }
@@ -409,6 +422,7 @@ async fn run_attempt(
             } else if matches!(update, Ok(ReplicaUpdate::Ignored)) {
                 continue;
             } else {
+                queries.invalidate();
                 reject_outgoing(outgoing);
                 publication_deadline = None;
                 info = timeout(
@@ -425,12 +439,14 @@ async fn run_attempt(
                 )
                 .await
                 .map_err(|_| crate::protocol_adapter::unavailable())??;
+                queries.authenticated(info, &session.codec)?;
                 state.send_replace(ConnectionState::Connected { info });
             }
         } else if is_resync(&message) {
             services
                 .delegate
                 .invalidate(binding, ConnectionInvalidation::Reconciliation);
+            queries.invalidate();
             reject_outgoing(outgoing);
             publication_deadline = None;
             info = timeout(
@@ -447,7 +463,10 @@ async fn run_attempt(
             )
             .await
             .map_err(|_| crate::protocol_adapter::unavailable())??;
+            queries.authenticated(info, &session.codec)?;
             state.send_replace(ConnectionState::Connected { info });
+        } else if queries.receive(info, &message)? {
+            continue;
         } else {
             session.bind_delegate(Arc::clone(&services.delegate), info);
             timeout(

@@ -34,7 +34,7 @@ struct Owner {
     codec: Arc<dyn LedgerCodec>,
     verifier: Arc<dyn ReceiptVerifier>,
     limits: JournalLimits,
-    poisoned: bool,
+    closed: Arc<spaceterm_client::journal::JournalAdmission>,
 }
 /// The supplied directory is explicitly provisioned local client-state authority,
 /// never route/path data received from a server. Production composition chooses
@@ -43,6 +43,9 @@ struct Owner {
 #[derive(Clone)]
 pub struct NativeClientJournal {
     owner: Arc<Mutex<Owner>>,
+    fence: Arc<spaceterm_client::pairing::credentials::PairingAuthorityFence>,
+    scheduler: Arc<std::sync::atomic::AtomicBool>,
+    closed: Arc<spaceterm_client::journal::JournalAdmission>,
 }
 impl NativeClientJournal {
     /// Explicit first-use initialization. Existing state is never overwritten.
@@ -84,13 +87,23 @@ impl NativeClientJournal {
                 });
                 match result { CommitDisposition::Durable(()) => {}, CommitDisposition::NotApplied(error) => return Err(classify(error)), CommitDisposition::Indeterminate => return Err(ClientFailure::new(ClientFailureClass::RecoveryRequired)) }
             }
-            let owner = Owner { database, codec, verifier, limits, poisoned: false };
+            let closed = Arc::default();
+            let owner = Owner { database, codec, verifier, limits, closed: Arc::clone(&closed) };
             read(&owner)?;
-            Ok(Self { owner: Arc::new(Mutex::new(owner)) })
+            Ok(Self { owner: Arc::new(Mutex::new(owner)), fence: Arc::default(), scheduler: Arc::default(), closed })
         }).await.map_err(|_| ClientFailure::new(ClientFailureClass::RecoveryRequired))?
     }
 }
 impl ClientJournal for NativeClientJournal {
+    fn admission_latch(&self) -> Arc<spaceterm_client::journal::JournalAdmission> {
+        Arc::clone(&self.closed)
+    }
+    fn scheduler_claim(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.scheduler)
+    }
+    fn authority_fence(&self) -> &spaceterm_client::pairing::credentials::PairingAuthorityFence {
+        &self.fence
+    }
     fn recover(&self) -> ClientFuture<'_, RecoveredClientState> {
         let owner = Arc::clone(&self.owner);
         Box::pin(async move {
@@ -110,12 +123,23 @@ impl ClientJournal for NativeClientJournal {
     ) -> ClientFuture<'a, JournalCommitDisposition> {
         let owner = Arc::clone(&self.owner);
         let transaction = transaction.clone();
+        let fence = Arc::clone(&self.fence);
         Box::pin(async move {
+            for change in &transaction.changes {
+                if let spaceterm_client::journal::ClientJournalChange::BeginRevocation(record) =
+                    change
+                {
+                    spaceterm_client::pairing::journal::seal_journal_pairing(
+                        fence.as_ref(),
+                        &record.task.parts().local_pairing,
+                    );
+                }
+            }
             // Dropping the async caller leaves this one blocking owner responsible
             // for the same physical commit. The portable controller drains it.
             tokio::task::spawn_blocking(move || {
                 let mut owner = owner.lock().map_err(|_| ClientFailure::new(ClientFailureClass::RecoveryRequired))?;
-                if owner.poisoned { return Ok(JournalCommitDisposition::NotApplied(JournalFailure::RecoveryRequired)); }
+                if owner.closed.is_closed() { return Ok(JournalCommitDisposition::NotApplied(JournalFailure::RecoveryRequired)); }
                 let state = match read(&owner) { Ok(state) => state, Err(error) => return Ok(JournalCommitDisposition::NotApplied(journal_failure(error))) };
                 if transaction.expected_revision != state.revision() { return Ok(JournalCommitDisposition::NotApplied(JournalFailure::Conflict)); }
                 let candidate = match state.apply(&transaction, owner.codec.as_ref(), owner.verifier.as_ref(), owner.limits) {
@@ -133,7 +157,16 @@ impl ClientJournal for NativeClientJournal {
                 Ok(match result {
                     CommitDisposition::Durable(()) => JournalCommitDisposition::Durable(JournalReceipt::new(candidate.revision())),
                     CommitDisposition::NotApplied(error) => JournalCommitDisposition::NotApplied(journal_failure(classify(error))),
-                    CommitDisposition::Indeterminate => { owner.poisoned = true; JournalCommitDisposition::Indeterminate },
+                    CommitDisposition::Indeterminate => {
+                        owner.closed.close();
+                        // The same fence seals cached native leases and delayed first issuance.
+                        for binding in state.bindings() {
+                            if let Ok(key) = binding.binding().and_then(|binding| binding.target().local_pairing()) {
+                                spaceterm_client::pairing::journal::seal_journal_pairing(fence.as_ref(), &key);
+                            }
+                        }
+                        JournalCommitDisposition::Indeterminate
+                    },
                 })
             }).await.map_err(|_| ClientFailure::new(ClientFailureClass::RecoveryRequired))?
         })
@@ -141,7 +174,7 @@ impl ClientJournal for NativeClientJournal {
 }
 
 fn read(owner: &Owner) -> Result<RecoveredClientState, ClientFailure> {
-    if owner.poisoned {
+    if owner.closed.is_closed() {
         return Err(ClientFailure::new(ClientFailureClass::RecoveryRequired));
     }
     let limit = i64::try_from(owner.limits.retained_bytes)
@@ -977,6 +1010,7 @@ mod tests {
                     reference: target.credential(),
                     public_key: None,
                     route_reference: None,
+                    route: None,
                     generation: LocalPairingGeneration::new(1).unwrap(),
                 }),
                 ClientJournalChange::RecordCredentialPublicKey {
@@ -989,6 +1023,7 @@ mod tests {
                     reference: device_credential,
                     public_key: None,
                     route_reference: None,
+                    route: None,
                     generation: LocalPairingGeneration::new(2).unwrap(),
                 }),
                 ClientJournalChange::RecordCredentialPublicKey {

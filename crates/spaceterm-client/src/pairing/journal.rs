@@ -551,6 +551,9 @@ impl<J: PairingClientJournal + ?Sized> LocalPairingStore for JournalPairingStore
                 Ok(recovered) => recovered,
                 Err(failure) => return PairingCommitDisposition::NotApplied(failure),
             };
+            if recovered.revision != transaction.expected_revision {
+                return PairingCommitDisposition::NotApplied(PairingFailure::StaleAssessment);
+            }
             let validation = match &transaction.change {
                 PairingJournalChange::ReserveCredential(preparation) => recovered
                     .reserve_credential(&preparation.scope)
@@ -635,7 +638,7 @@ pub fn require_durable(
 ) -> Result<(), PairingFailure> {
     match disposition {
         PairingCommitDisposition::Durable(receipt)
-            if expected_revision.checked_add(1) == Some(receipt.revision) =>
+            if expected_revision.checked_add(1) == Some(receipt.revision().get()) =>
         {
             Ok(())
         }
@@ -719,4 +722,12 @@ pub async fn prepare_native_credential(
     let credential = native.create(reservation).await?;
     record_prepared_credential(store, generation, credential.clone()).await?;
     Ok((generation, credential))
+}
+
+/// Native journal uncertainty revokes the same process-local pairing fence.
+pub fn seal_journal_pairing(
+    fence: &super::credentials::PairingAuthorityFence,
+    key: &LocalPairingKey,
+) {
+    fence.seal(key);
 }

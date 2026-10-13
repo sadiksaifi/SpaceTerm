@@ -9,7 +9,10 @@ use spaceterm_protocol::{
 use std::collections::BTreeMap;
 use tokio::sync::{Semaphore, mpsc};
 
+pub type QueryHandler = fn(&Payload, &ConnectionTarget) -> Option<Payload>;
+
 pub struct PeerPlan {
+    pub query_handler: Option<QueryHandler>,
     pub majors: Vec<u32>,
     pub capabilities: Vec<u32>,
     pub snapshot_gate: Arc<Semaphore>,
@@ -21,6 +24,7 @@ pub struct PeerPlan {
     pub reconciliation_revisions: Mutex<Vec<u64>>,
     pub suffix_before_reconciliation: Mutex<Option<(u64, u64)>>,
     pub received: Mutex<Vec<u32>>,
+    pub messages: Mutex<Vec<Payload>>,
     pub dispatch_and_ack: Mutex<Vec<&'static str>>,
     pub sends_started: Arc<AtomicUsize>,
     pub controls: Mutex<Vec<mpsc::Sender<PeerControl>>>,
@@ -29,6 +33,7 @@ pub struct PeerPlan {
 impl PeerPlan {
     pub fn new(majors: Vec<u32>) -> Self {
         Self {
+            query_handler: None,
             majors,
             capabilities: vec![
                 CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
@@ -43,6 +48,7 @@ impl PeerPlan {
             reconciliation_revisions: Mutex::new(vec![]),
             suffix_before_reconciliation: Mutex::new(None),
             received: Mutex::new(vec![]),
+            messages: Mutex::new(vec![]),
             dispatch_and_ack: Mutex::new(vec![]),
             sends_started: Arc::new(AtomicUsize::new(0)),
             controls: Mutex::new(vec![]),
@@ -60,6 +66,12 @@ pub enum PeerControl {
     Gap { base: u64, revision: u64 },
     InvalidEnvelope,
     Callback,
+    Publication(Box<Payload>),
+}
+impl PeerControl {
+    pub fn publication(payload: Payload) -> Self {
+        Self::Publication(Box::new(payload))
+    }
 }
 pub struct Peers(pub BTreeMap<ServerId, Arc<PeerPlan>>);
 impl Peers {
@@ -292,6 +304,15 @@ async fn peer(
                     break;
                 }
             }
+            Event::Control(Some(PeerControl::Publication(payload))) => {
+                if outgoing
+                    .send(codec.encode(&payload).unwrap())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
             Event::Control(Some(PeerControl::InvalidEnvelope)) => {
                 outgoing.send(vec![1, 2, 3]).await.unwrap();
             }
@@ -313,6 +334,20 @@ async fn peer(
                     Err(_) => break,
                 };
                 plan.received.lock().unwrap().push(payload.major());
+                plan.messages.lock().unwrap().push(payload.clone());
+                if let Some(response) = plan
+                    .query_handler
+                    .and_then(|handler| handler(&payload, &target))
+                {
+                    if outgoing
+                        .send(codec.encode(&response).unwrap())
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
                 macro_rules! respond {
                     ($message:expr, $p:ident, $variant:ident) => {
                         match $message.kind {

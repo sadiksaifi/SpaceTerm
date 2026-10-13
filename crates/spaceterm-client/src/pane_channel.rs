@@ -6,7 +6,9 @@ pub use crate::projection::FrameLease;
 pub use events::{NativeRequestLease, NativeTiming, PaneEvent, PaneEvents};
 pub use reads::{PaneReadItem, PaneReadRequest, PaneReadSource, PaneReadStream};
 pub use spaceterm_core::control::StartupSource as ExplicitUseSource;
-pub use spaceterm_terminal::runtime_contracts::RuntimeCommand as RuntimeEffect;
+pub use spaceterm_terminal::runtime_contracts::{
+    FencedRuntimeCommand, RuntimeCommand as RuntimeEffect,
+};
 
 use crate::{
     api::ConnectedInfo,
@@ -27,7 +29,6 @@ use spaceterm_core::{
     native_requests::{NativeCompletion, NativeRequest},
     organization::{ControlRecord, PaneRuntimeRecord, SessionPhase},
 };
-use spaceterm_terminal::runtime_contracts::FencedRuntimeCommand;
 use std::{
     collections::BTreeMap,
     sync::{
@@ -137,6 +138,7 @@ pub struct PaneChannelState {
     pub content: Option<ContentBase>,
 }
 struct ChannelInner {
+    authority: ConnectedInfo,
     pane: PaneId,
     tab: TabId,
     lease: Weak<LeaseInner>,
@@ -170,6 +172,7 @@ struct ServerState {
     requests: Arc<AtomicU64>,
 }
 struct Shared {
+    admission: Mutex<Option<crate::journal::PaneJournalAdmission>>,
     peer: Arc<dyn PaneConnectionPort>,
     budgets: ProjectionBudgets,
     native_residency: Arc<crate::projection::budget::Residency>,
@@ -181,6 +184,11 @@ struct Shared {
     leases: Mutex<BTreeMap<(WorkspaceId, AttachmentIncarnation), Weak<LeaseInner>>>,
 }
 impl Shared {
+    fn admitted(&self, info: ConnectedInfo) -> bool {
+        self.admission
+            .lock()
+            .is_ok_and(|gate| gate.as_ref().is_none_or(|gate| gate.allows(info)))
+    }
     fn next_context(&self) -> Result<ContextGeneration, ClientFailure> {
         self.context_high_water
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
@@ -202,6 +210,7 @@ impl PaneChannels {
         budgets.validate()?;
         Ok(Self {
             shared: Arc::new(Shared {
+                admission: Mutex::new(None),
                 peer,
                 budgets,
                 native_residency: crate::projection::budget::Residency::new(
@@ -214,6 +223,17 @@ impl PaneChannels {
                 leases: Mutex::new(BTreeMap::new()),
             }),
         })
+    }
+    pub(crate) fn bind_journal_admission(
+        &self,
+        gate: crate::journal::PaneJournalAdmission,
+    ) -> Result<(), ClientFailure> {
+        let mut owner = self.shared.admission.lock().map_err(|_| stale())?;
+        if owner.is_some() {
+            return Err(resource_limit());
+        }
+        *owner = Some(gate);
+        Ok(())
     }
     /// Only the local attachment owner calls this after its suppression gate.
     /// Server publication can never create an attachment or its incarnation.
@@ -250,6 +270,9 @@ impl PaneChannels {
         info: ConnectedInfo,
         snapshot: Arc<ReplicaSnapshot>,
     ) -> Result<(), ClientFailure> {
+        if !self.shared.admitted(info) {
+            return Err(stale());
+        }
         if snapshot.cursor.server != info.server
             || snapshot.cursor.epoch != info.epoch
             || snapshot.cursor.revision != info.organization_revision
@@ -298,6 +321,64 @@ impl PaneChannels {
             channel.apply(info, &snapshot)?;
         }
         Ok(())
+    }
+    /// The attachment owner invalidates and captures grants under the exact
+    /// incarnation. A delayed task cannot touch a later live attachment.
+    pub fn invalidate_attachment(
+        &self,
+        pairing: &spaceterm_core::pairing::LocalPairingKey,
+        attachment: crate::view::WorkspaceAttachment,
+    ) -> Result<Vec<GrantedControl>, ClientFailure> {
+        if pairing.parts().pairing != attachment.pairing()
+            || pairing.parts().server != attachment.workspace().server()
+        {
+            return Err(stale());
+        }
+        let leases = self.shared.leases.lock().map_err(|_| stale())?;
+        let current = leases
+            .iter()
+            .filter(|((workspace, _), _)| *workspace == attachment.workspace())
+            .filter_map(|(_, lease)| lease.upgrade())
+            .filter(|lease| lease.active.load(Ordering::Acquire))
+            .max_by_key(|lease| lease.incarnation)
+            .ok_or_else(stale)?;
+        if current.incarnation != attachment.incarnation() {
+            return Err(stale());
+        }
+        let channels: Vec<_> = current
+            .channels
+            .lock()
+            .map_err(|_| stale())?
+            .values()
+            .filter_map(Weak::upgrade)
+            .collect();
+        if channels.iter().any(|channel| {
+            channel.authority.pairing != attachment.pairing()
+                || channel.authority.client != attachment.client()
+        }) {
+            return Err(stale());
+        }
+        current.active.store(false, Ordering::Release);
+        let mut grants = Vec::new();
+        for channel in channels {
+            let state = channel.state.lock().map_err(|_| stale())?;
+            if let Some(runtime) = state.facts.runtime
+                && let Some(info) = state.facts.connection
+                && let ControlRecord::Held { client, generation } = runtime.control
+                && client == attachment.client()
+            {
+                grants.push(
+                    GrantedControl::new(
+                        info.epoch,
+                        ControlGrant::new(channel.pane, client, generation)
+                            .map_err(|_| invalid_peer())?,
+                    )
+                    .map_err(|_| invalid_peer())?,
+                );
+            }
+        }
+        WorkspaceLease(current).invalidate()?;
+        Ok(grants)
     }
     pub fn invalidate(
         &self,
@@ -433,7 +514,11 @@ impl WorkspaceLease {
             facts: PaneContextFacts::default(),
             content: None,
         };
+        let projection = TerminalProjection::new(self.0.shared.budgets.clone())?;
+        let shared = Arc::clone(&self.0.shared);
+        projection.bind_admission(Arc::new(move || shared.admitted(info)));
         let channel = Arc::new(ChannelInner {
+            authority: info,
             pane,
             tab,
             lease: Arc::downgrade(&self.0),
@@ -449,9 +534,7 @@ impl WorkspaceLease {
                 native: BTreeMap::new(),
             }),
             published: watch::channel(facts).0,
-            projection: Arc::new(Mutex::new(TerminalProjection::new(
-                self.0.shared.budgets.clone(),
-            )?)),
+            projection: Arc::new(Mutex::new(projection)),
             _slot: Arc::clone(&self.0.shared.slots)
                 .try_acquire_owned()
                 .map_err(|_| resource_limit())?,
@@ -510,6 +593,9 @@ impl PaneChannel {
         &self,
         facts: PaneContextFacts,
     ) -> Result<ContextGeneration, ClientFailure> {
+        if !self.inner.admitted() {
+            return Err(stale());
+        }
         let mut state = self.inner.state.lock().map_err(|_| stale())?;
         if !self.lease.active.load(Ordering::Acquire) {
             return Err(stale());
@@ -530,6 +616,9 @@ impl PaneChannel {
         fence: EffectFence,
         base: ContentBase,
     ) -> Result<(), ClientFailure> {
+        if !self.inner.admitted() {
+            return Err(stale());
+        }
         let mut state = self.inner.state.lock().map_err(|_| stale())?;
         if !matches!(
             state.facts.readiness,
@@ -558,6 +647,9 @@ impl PaneChannel {
         Ok(())
     }
     pub fn permit(&self, kind: EffectKind) -> Result<EffectPermit, ClientFailure> {
+        if !self.inner.admitted() {
+            return Err(stale());
+        }
         let state = self.inner.state.lock().map_err(|_| stale())?;
         let fence = current_fence(
             &state.facts,
@@ -632,15 +724,75 @@ impl PaneChannel {
             },
         )
     }
+    /// Reject a delayed view action before it can rebuild current authority.
+    pub fn validate_use_context(
+        &self,
+        context: &crate::view::UseContext,
+    ) -> Result<(), ClientFailure> {
+        if !self.inner.admitted() {
+            return Err(stale());
+        }
+        let state = self.inner.state.lock().map_err(|_| stale())?;
+        self.check_use_context(&state.facts, context)
+    }
+    fn check_use_context(
+        &self,
+        state: &PaneChannelState,
+        context: &crate::view::UseContext,
+    ) -> Result<(), ClientFailure> {
+        let target = context.target();
+        if !self.lease.active.load(Ordering::Acquire)
+            || target.workspace != self.lease.workspace
+            || target.tab != self.inner.tab
+            || target.pane != self.inner.pane
+            || context.attachment().workspace() != self.lease.workspace
+            || context.attachment().incarnation() != self.lease.incarnation
+            || context.attachment().client() != context.connection().client
+            || state.context != context.context()
+            || state.connection.is_none_or(|info| {
+                info.binding != context.connection() || info.epoch != context.session().epoch
+            })
+            || state.runtime.is_none_or(|runtime| {
+                runtime.pane != context.session().pane
+                    || runtime.session_generation != context.session().generation
+                    || runtime.phase != context.phase()
+                    || runtime.control != context.control()
+                    || runtime.control_generation != context.control_generation()
+            })
+        {
+            return Err(stale());
+        }
+        Ok(())
+    }
+    pub async fn explicit_use_context(
+        &self,
+        source: ExplicitUseSource,
+        context: crate::view::UseContext,
+    ) -> Result<ExplicitUseOutcome, ClientFailure> {
+        self.explicit_use_inner(source, Some(context)).await
+    }
     pub async fn explicit_use(
         &self,
         source: ExplicitUseSource,
     ) -> Result<ExplicitUseOutcome, ClientFailure> {
+        self.explicit_use_inner(source, None).await
+    }
+    async fn explicit_use_inner(
+        &self,
+        source: ExplicitUseSource,
+        captured: Option<crate::view::UseContext>,
+    ) -> Result<ExplicitUseOutcome, ClientFailure> {
+        if !self.inner.admitted() {
+            return Err(stale());
+        }
         let marker = Arc::new(());
         let request = {
             let mut state = self.inner.state.lock().map_err(|_| stale())?;
             let info = state.facts.connection.ok_or_else(stale)?;
             let runtime = state.facts.runtime.ok_or_else(missing)?;
+            if let Some(context) = captured {
+                self.check_use_context(&state.facts, &context)?;
+            }
             if !self.lease.active.load(Ordering::Acquire)
                 || !state.facts.facts.focused_pane
                 || !state.facts.facts.presentable
@@ -728,6 +880,9 @@ impl PaneChannel {
         token: &IntentToken,
         grid: impl Into<MeasuredGrid>,
     ) -> Result<OperationTicket, ClientFailure> {
+        if !self.inner.admitted() {
+            return Err(stale());
+        }
         let measurement = {
             let mut state = self.inner.state.lock().map_err(|_| stale())?;
             if !Weak::ptr_eq(&token.channel, &Arc::downgrade(&self.inner))
@@ -777,6 +932,9 @@ impl PaneChannel {
         }
     }
     pub async fn take_over(&self) -> Result<OperationTicket, ClientFailure> {
+        if !self.inner.admitted() {
+            return Err(stale());
+        }
         let state = self.inner.state.lock().map_err(|_| stale())?.facts;
         let info = state.connection.ok_or_else(stale)?;
         if !self.lease.active.load(Ordering::Acquire)
@@ -868,6 +1026,9 @@ impl EffectPermit {
             return false;
         };
         let _keep_lease = lease;
+        if !channel.admitted() {
+            return false;
+        }
         channel.state.lock().is_ok_and(|state| {
             allows(self.kind, state.facts.facts)
                 && self.native.is_none_or(|guard| guard.allows(&channel))
@@ -909,7 +1070,16 @@ impl Drop for PendingIntent {
     }
 }
 impl ChannelInner {
+    fn admitted(&self) -> bool {
+        self.shared.admitted(self.authority)
+    }
     fn apply(&self, info: ConnectedInfo, snapshot: &ReplicaSnapshot) -> Result<(), ClientFailure> {
+        if !self.admitted()
+            || info.pairing != self.authority.pairing
+            || info.client != self.authority.client
+        {
+            return Err(stale());
+        }
         let mut state = self.state.lock().map_err(|_| stale())?;
         let present = snapshot
             .organization

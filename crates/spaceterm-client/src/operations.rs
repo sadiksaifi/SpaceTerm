@@ -119,7 +119,7 @@ impl OperationTracker {
         let request = CanonicalOperationRequest::decode(&record.request, self.journal.codec())
             .map_err(|_| invalid_peer())?;
         self.journal.ensure_healthy()?;
-        if !self.journal.snapshot()?.ordinary_use_allowed(binding) {
+        if !self.journal.ordinary_use_allowed(binding)? {
             return Ok(ticket);
         }
         if peer
@@ -148,7 +148,7 @@ impl OperationTracker {
         let journal = Arc::clone(&self.journal);
         self.journal
             .update(move |state| {
-                if !state.ordinary_use_allowed(&binding) {
+                if !journal.ordinary_use_allowed_in(state, &binding)? {
                     return Err(ClientFailure::new(ClientFailureClass::AuthorizationDenied));
                 }
                 let stream = state
@@ -214,7 +214,7 @@ impl OperationTracker {
             .find(|saved| saved.streams().parts().ordinary == binding.id.stream())
             .ok_or_else(invalid_peer)?
             .binding()?;
-        if !state.ordinary_use_allowed(&saved) {
+        if !self.journal.ordinary_use_allowed_in(&state, &saved)? {
             return Err(ClientFailure::new(ClientFailureClass::AuthorizationDenied));
         }
         CanonicalOperationRequest::decode(&record.request, self.journal.codec())

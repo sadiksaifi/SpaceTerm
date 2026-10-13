@@ -1,9 +1,13 @@
 //! The one durable client journal. Native adapters persist this checked projection;
 //! pairing, operations and cleanup share its physical transaction and health latch.
 
+mod attachments;
 mod controller;
 pub(crate) mod model;
+mod pairing_port;
 mod pairing_projection;
+pub use attachments::JournalAttachment;
+pub(crate) use controller::PaneJournalAdmission;
 pub use controller::{JournalController, JournalHealth};
 pub use pairing_projection::{
     JournalCredentialSlot, JournalEnrollment, JournalEnrollmentAcknowledgement,
@@ -90,7 +94,50 @@ pub enum JournalCommitDisposition {
     Indeterminate,
 }
 
+/// One monotonic admission latch for a native journal lifetime. Only a fresh,
+/// validated native reopen can supply a new ready latch; there is no reset.
+#[derive(Default)]
+pub struct JournalAdmission {
+    closed: std::sync::atomic::AtomicBool,
+    owners: std::sync::Mutex<Vec<std::sync::Weak<controller::Shared>>>,
+}
+impl JournalAdmission {
+    pub fn close(&self) {
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Release);
+        // Native uncertainty closes dispatch synchronously, even if the caller
+        // is cancelled or has not received the storage result yet.
+        let owners = self
+            .owners
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for owner in owners.iter().filter_map(std::sync::Weak::upgrade) {
+            owner.revoke();
+        }
+    }
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::Acquire)
+    }
+    fn register(&self, owner: &std::sync::Arc<controller::Shared>) -> Result<(), ClientFailure> {
+        let mut owners = self.owners.lock().map_err(|_| invalid())?;
+        if self.is_closed() {
+            return Err(JournalFailure::RecoveryRequired.into());
+        }
+        owners.retain(|owner| owner.strong_count() != 0);
+        owners
+            .try_reserve(1)
+            .map_err(|_| crate::failure::resource_limit())?;
+        owners.push(std::sync::Arc::downgrade(owner));
+        Ok(())
+    }
+}
+
 pub trait ClientJournal: Send + Sync {
+    /// Shared by the native owner, operation controller and pairing facade.
+    fn authority_fence(&self) -> &PairingAuthorityFence;
+    /// Shared native uncertainty latch; reopening creates a new validated lifetime.
+    fn admission_latch(&self) -> std::sync::Arc<JournalAdmission>;
+    fn scheduler_claim(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool>;
     fn recover(&self) -> ClientFuture<'_, RecoveredClientState>;
     fn commit<'a>(
         &'a self,
@@ -368,6 +415,10 @@ pub struct RecoveredClientState {
     revocations: Vec<JournalRevocation>,
     #[serde(default)]
     pairing: PairingJournalProjection,
+    #[serde(default, with = "fixed_u64")]
+    attachment_incarnation_high_water: u64,
+    #[serde(default, deserialize_with = "bounded::headers")]
+    suppressed_attachments: Vec<JournalAttachment>,
 }
 impl std::fmt::Debug for RecoveredClientState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -389,6 +440,8 @@ impl RecoveredClientState {
             detaches: vec![],
             revocations: vec![],
             pairing: PairingJournalProjection::default(),
+            attachment_incarnation_high_water: 0,
+            suppressed_attachments: vec![],
         }
     }
     pub fn pairing(&self) -> &PairingJournalProjection {
@@ -471,7 +524,16 @@ pub struct ClientJournalTransaction {
 }
 #[derive(Clone)]
 pub enum ClientJournalChange {
+    RecordAttachment(JournalAttachment),
+    SuppressAttachment(JournalAttachment),
     ReserveCredential(JournalCredentialSlot),
+    /// Captures a foreground-selected route before enrollment. A remote route
+    /// reference alone cannot select a client-local transport.
+    BindCredentialRoute {
+        reference: CredentialReference,
+        route_reference: spaceterm_core::pairing::RevocationRouteReference,
+        route: RouteDescription,
+    },
     RecordCredentialPublicKey {
         reference: CredentialReference,
         public_key: [u8; 32],
@@ -597,10 +659,8 @@ mod bounded {
 // Pairing projection port. Pairing's facades and adapters depend on this trait;
 // the canonical journal implements it without a second durable format.
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PairingJournalReceipt {
-    pub revision: u64,
-}
+/// Compatibility name for the canonical aggregate commit receipt.
+pub type PairingJournalReceipt = JournalReceipt;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PairingCommitDisposition {
     Durable(PairingJournalReceipt),
@@ -609,7 +669,7 @@ pub enum PairingCommitDisposition {
 }
 
 /// Pairing-specific projection of the one client journal, not a second store.
-/// Phase 2 implements it over the canonical journal and its health latch.
+/// The canonical journal implements it with its shared health latch.
 /// Commit applies the complete typed change atomically with a revision CAS.
 /// Recovery validates bounds, receipts and suppression before exposing bindings.
 pub trait PairingClientJournal: Send + Sync {

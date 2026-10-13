@@ -1,6 +1,6 @@
 //! Relational projection of pairing's public recovery facts, not credential authority.
 //!
-//! Phase 2 maps CredentialScope to the namespace/server/reference columns below,
+//! The pairing port maps CredentialScope to the namespace/server/reference columns below,
 //! PreparedCredential to those columns plus public_key, and PreparedEnrollment to
 //! JournalEnrollment. The pairing facade uses the aggregate journal revision for
 //! every CAS. Saved bindings, suppression and revocation phases stay in their
@@ -31,6 +31,9 @@ pub struct JournalCredentialSlot {
     pub public_key: Option<[u8; 32]>,
     #[serde(default)]
     pub route_reference: Option<RevocationRouteReference>,
+    /// Present only before enrollment transfers this route into SavedTarget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<RouteDescription>,
     pub generation: LocalPairingGeneration,
 }
 impl std::fmt::Debug for JournalCredentialSlot {
@@ -108,9 +111,9 @@ pub struct PairingJournalProjection {
     #[serde(with = "fixed_u64")]
     generation_high_water: u64,
     #[serde(deserialize_with = "bounded::headers")]
-    slots: Vec<JournalCredentialSlot>,
+    pub(super) slots: Vec<JournalCredentialSlot>,
     #[serde(deserialize_with = "bounded::revocations")]
-    credential_preparations: Vec<CredentialReference>,
+    pub(super) credential_preparations: Vec<CredentialReference>,
     #[serde(deserialize_with = "bounded::revocations")]
     prepared: Vec<JournalEnrollment>,
     #[serde(deserialize_with = "bounded::revocations")]
@@ -292,6 +295,7 @@ impl PairingJournalProjection {
                 let projection = &mut state.pairing;
                 if slot.public_key.is_some()
                     || slot.route_reference.is_some()
+                    || slot.route.is_some()
                     || projection.slot(slot.reference).is_some()
                     || projection.generation_high_water.checked_add(1)
                         != Some(slot.generation.get())
@@ -301,6 +305,32 @@ impl PairingJournalProjection {
                 projection.generation_high_water = slot.generation.get();
                 projection.credential_preparations.push(slot.reference);
                 projection.slots.push(slot.clone());
+            }
+            ClientJournalChange::BindCredentialRoute {
+                reference,
+                route_reference,
+                route,
+            } => {
+                let projection = &mut state.pairing;
+                if !projection.credential_preparations.contains(reference)
+                    || route_reference.opaque() == [0; 16]
+                {
+                    return Err(invalid());
+                }
+                let slot = projection
+                    .slots
+                    .iter_mut()
+                    .find(|slot| slot.reference == *reference && slot.server.is_some())
+                    .ok_or_else(invalid)?;
+                if slot
+                    .route_reference
+                    .is_some_and(|old| old != *route_reference)
+                    || slot.route.as_ref().is_some_and(|old| old != route)
+                {
+                    return Err(invalid());
+                }
+                slot.route_reference = Some(*route_reference);
+                slot.route = Some(route.clone());
             }
             ClientJournalChange::RecordCredentialPublicKey {
                 reference,
@@ -342,6 +372,7 @@ impl PairingJournalProjection {
                     return Err(invalid());
                 }
                 slot.route_reference = Some(prepared.route_reference);
+                slot.route = None;
                 projection.credential_preparations.remove(index);
                 projection.prepared.push(*prepared.clone());
             }

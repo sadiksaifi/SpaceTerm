@@ -217,6 +217,10 @@ impl TerminalProjection {
             .map_err(|_| exhausted())?;
         Ok(())
     }
+    pub(crate) fn bind_admission(&self, gate: Arc<dyn Fn() -> bool + Send + Sync>) {
+        self.eligibility.bind_admission(Arc::clone(&gate));
+        self.paint.bind_admission(gate);
+    }
     pub fn current_frame(&self) -> Option<FrameLease> {
         self.frame
             .as_ref()
@@ -264,7 +268,7 @@ impl TerminalProjection {
         if let Some(frame) = self.cache.push(stamp, page)? {
             self.paint.revoke();
             self.graphics.clear();
-            self.paint = Eligibility::default();
+            self.paint = self.eligibility.fresh()?;
             self.paint.online(
                 stamp.fence(),
                 true,

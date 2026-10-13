@@ -7,7 +7,7 @@ use super::{
 };
 use spaceterm_client::{
     failure::{ClientFailure, ClientFailureClass},
-    journal::{ClientJournal, JournalLimits, ReceiptVerifier},
+    journal::{JournalController, JournalLimits, ReceiptVerifier},
 };
 use spaceterm_client_native::journal::NativeClientJournal;
 use spaceterm_core::operation_ledger_contracts::LedgerCodec;
@@ -42,7 +42,7 @@ pub(crate) async fn open(
     codec: Arc<dyn LedgerCodec>,
     verifier: Arc<dyn ReceiptVerifier>,
     limits: JournalLimits,
-) -> Result<Arc<dyn ClientJournal>, ClientFailure> {
+) -> Result<Arc<JournalController>, ClientFailure> {
     let filesystem = Arc::clone(paths.filesystem());
     let state = paths
         .directories()
@@ -81,10 +81,17 @@ pub(crate) async fn open(
     .map_err(|_| ClientFailure::new(ClientFailureClass::RecoveryRequired))??;
     let journal = match mode {
         JournalOpenMode::Initialize => {
-            NativeClientJournal::create(desktop, codec, verifier, limits).await?
+            NativeClientJournal::create(desktop, Arc::clone(&codec), Arc::clone(&verifier), limits)
+                .await?
         }
         JournalOpenMode::Existing => {
-            NativeClientJournal::open_existing(desktop, codec, verifier, limits).await?
+            NativeClientJournal::open_existing(
+                desktop,
+                Arc::clone(&codec),
+                Arc::clone(&verifier),
+                limits,
+            )
+            .await?
         }
     };
     tokio::task::spawn_blocking(move || {
@@ -93,7 +100,9 @@ pub(crate) async fn open(
     })
     .await
     .map_err(|_| ClientFailure::new(ClientFailureClass::RecoveryRequired))??;
-    Ok(Arc::new(journal))
+    Ok(Arc::new(
+        JournalController::recover(Arc::new(journal), codec, verifier, limits).await?,
+    ))
 }
 fn classify(error: SecureFilesystemError) -> ClientFailure {
     ClientFailure::new(match error {
@@ -106,3 +115,17 @@ fn classify(error: SecureFilesystemError) -> ClientFailure {
 
 #[cfg(test)]
 mod tests;
+
+/// Uses the operation controller and its existing fence and scheduler claim.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "desktop composition consumes the canonical pairing facade"
+    )
+)]
+pub(crate) fn pairing_store(
+    journal: Arc<JournalController>,
+) -> spaceterm_client::pairing::journal::JournalPairingStore<JournalController> {
+    spaceterm_client::pairing::journal::JournalPairingStore::new(journal)
+}

@@ -220,6 +220,7 @@ pub struct RetryState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConnectionCapabilities(u8);
 impl ConnectionCapabilities {
+    pub const NONE: Self = Self(0);
     pub(crate) fn from_advertisement(values: &[u32]) -> Self {
         use spaceterm_protocol::negotiation::*;
         let mut flags = 0;
@@ -289,3 +290,5 @@ pub struct ServerSummary {
     pub server: ServerId,
     pub state: ConnectionState,
 }
+
+pub use crate::connection::queries::{ServerQueries, ServerStatusBackend};

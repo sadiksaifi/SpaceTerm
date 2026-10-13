@@ -1,10 +1,17 @@
-//! Pairing's desktop facade receives the native client journal at composition.
-//! It opens no database, owns no task loop and cannot restore ordinary access.
+//! Pairing delegates to the desktop's one journal controller.
 
+use spaceterm_client::{journal::JournalController, pairing::journal::JournalPairingStore};
 use std::sync::Arc;
-use spaceterm_client::{journal::PairingClientJournal, pairing::journal::JournalPairingStore};
 
-#[allow(dead_code, reason = "the native client journal and desktop composition are owned by other Wave 2 tracks")]
-pub(crate) fn from_client_journal(journal: Arc<dyn PairingClientJournal>) -> JournalPairingStore<dyn PairingClientJournal> {
-    JournalPairingStore::new(journal)
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "desktop composition installs the canonical pairing facade"
+    )
+)]
+pub(crate) fn from_client_journal(
+    journal: Arc<JournalController>,
+) -> JournalPairingStore<JournalController> {
+    super::client_journal::pairing_store(journal)
 }

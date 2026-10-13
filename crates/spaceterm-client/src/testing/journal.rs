@@ -15,8 +15,21 @@ impl ReceiptVerifier for Verifier {
             .map_err(Into::into)
     }
 }
-pub(super) struct MemoryJournal(Mutex<RecoveredClientState>);
+pub(super) struct MemoryJournal(
+    Mutex<RecoveredClientState>,
+    crate::pairing::credentials::PairingAuthorityFence,
+    Arc<std::sync::atomic::AtomicBool>,
+);
 impl ClientJournal for MemoryJournal {
+    fn admission_latch(&self) -> Arc<JournalAdmission> {
+        Arc::default()
+    }
+    fn scheduler_claim(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.2)
+    }
+    fn authority_fence(&self) -> &crate::pairing::credentials::PairingAuthorityFence {
+        &self.1
+    }
     fn recover(&self) -> ClientFuture<'_, RecoveredClientState> {
         Box::pin(async { Ok(self.0.lock().map_err(|_| invalid_peer())?.clone()) })
     }
@@ -97,7 +110,11 @@ pub(super) async fn controller(
     };
     let proof = ReceiptCodec::new(target.pin()).sign(claims, server.signer.as_ref())?;
     let saved = SavedBinding::verified(binding, streams, proof, &Verifier)?;
-    let storage = Arc::new(MemoryJournal(Mutex::new(RecoveredClientState::empty())));
+    let storage = Arc::new(MemoryJournal(
+        Mutex::new(RecoveredClientState::empty()),
+        Default::default(),
+        Arc::default(),
+    ));
     let journal = Arc::new(
         JournalController::recover(
             storage,

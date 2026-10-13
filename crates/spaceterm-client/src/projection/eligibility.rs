@@ -6,12 +6,25 @@ use std::sync::{Arc, Mutex};
 pub(crate) struct Eligibility(Arc<Mutex<State>>);
 #[derive(Default)]
 struct State {
+    admission: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     fence: Option<EffectFence>,
     frozen: bool,
     native: bool,
     presentation: bool,
 }
 impl Eligibility {
+    pub(crate) fn bind_admission(&self, gate: Arc<dyn Fn() -> bool + Send + Sync>) {
+        if let Ok(mut state) = self.0.lock() {
+            state.admission = Some(gate);
+        }
+    }
+    pub(crate) fn fresh(&self) -> Result<Self, ClientFailure> {
+        let state = self.0.lock().map_err(|_| stale())?;
+        Ok(Self(Arc::new(Mutex::new(State {
+            admission: state.admission.clone(),
+            ..State::default()
+        }))))
+    }
     pub(crate) fn same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
@@ -44,7 +57,8 @@ impl Eligibility {
     }
     pub(crate) fn allows_presentation(&self, fence: EffectFence) -> bool {
         self.0.lock().is_ok_and(|state| {
-            !state.frozen
+            state.admission.as_ref().is_none_or(|allows| allows())
+                && !state.frozen
                 && state.presentation
                 && state
                     .fence
@@ -55,12 +69,17 @@ impl Eligibility {
         let state = self.0.lock().map_err(|_| stale())?;
         state
             .fence
-            .filter(|_| !state.frozen && state.native)
+            .filter(|_| {
+                state.admission.as_ref().is_none_or(|allows| allows())
+                    && !state.frozen
+                    && state.native
+            })
             .ok_or_else(stale)
     }
     pub(crate) fn allows(&self, fence: EffectFence, paint: bool) -> bool {
         self.0.lock().is_ok_and(|state| {
-            (paint || (!state.frozen && state.native))
+            state.admission.as_ref().is_none_or(|allows| allows())
+                && (paint || (!state.frozen && state.native))
                 && state
                     .fence
                     .is_some_and(|current| fence.is_current(&current))

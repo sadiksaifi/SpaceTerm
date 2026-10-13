@@ -36,6 +36,12 @@ pub(crate) struct Shared {
     residency: Arc<OrganizationResidency>,
 }
 
+impl Shared {
+    pub(crate) fn server(&self, server: ServerId) -> Option<ServerHandle> {
+        self.entries.lock().ok()?.get(&server).cloned()
+    }
+}
+
 type WorkerCompletion = watch::Receiver<Option<Result<(), ClientFailure>>>;
 
 #[derive(Default)]
@@ -175,7 +181,9 @@ impl ClientRegistry {
         let (shutdown, receive_shutdown) = watch::channel(false);
         let (dispatch, outgoing) = mpsc::channel(MAX_EGRESS_ENVELOPES);
         let egress = Arc::new(EgressBudget::default());
+        let queries = Arc::new(connection::queries::QueryHub::default());
         let handle = ServerHandle {
+            queries: Arc::clone(&queries),
             binding: binding.clone(),
             state: receive_state,
             replica: receive_replica,
@@ -196,6 +204,7 @@ impl ClientRegistry {
                 outgoing,
                 shutdown: receive_shutdown,
                 egress,
+                queries,
             },
         ));
         let mut tasks = self.shared.tasks.lock().map_err(|_| cancelled())?;
@@ -257,6 +266,62 @@ impl ClientRegistry {
             result?;
         }
         Ok(true)
+    }
+
+    /// Restores personal state with journal markers, then seeds every retained
+    /// replica before the frontend consumes a Ready publication.
+    pub fn restore_view<S: crate::view::ViewStore>(
+        &self,
+        persistence: &mut crate::view::ViewPersistence<S>,
+        journal: &crate::journal::JournalController,
+    ) -> Result<
+        (crate::view::ClientViewState, Vec<crate::view::ViewUpdate>),
+        crate::view::launch::LaunchFailure,
+    > {
+        use crate::view::{ReplicaFacts, ReplicaObservation, ReplicaReadiness, ServerViewStatus};
+        let entries: Vec<_> = self
+            .shared
+            .entries
+            .lock()
+            .map_err(|_| cancelled())?
+            .values()
+            .cloned()
+            .collect();
+        let retained: Vec<_> = entries
+            .iter()
+            .filter_map(|handle| {
+                handle
+                    .replica
+                    .borrow()
+                    .retained()
+                    .cloned()
+                    .map(|snapshot| (handle, snapshot))
+            })
+            .collect();
+        let observations = retained
+            .iter()
+            .map(|(handle, snapshot)| {
+                let status = match *handle.state.borrow() {
+                    ConnectionState::Connected { .. } => ServerViewStatus::Connected,
+                    ConnectionState::Connecting { .. } => ServerViewStatus::Connecting,
+                    ConnectionState::Offline { .. } => ServerViewStatus::Offline,
+                    ConnectionState::Incompatible { .. } => ServerViewStatus::Incompatible,
+                    ConnectionState::Stopped => ServerViewStatus::Stopped,
+                };
+                ReplicaObservation::new(
+                    &snapshot.organization,
+                    &[],
+                    ReplicaFacts {
+                        pairing: handle.binding.target().pairing(),
+                        client: handle.binding.target().client(),
+                        connection: None,
+                        readiness: ReplicaReadiness::Retained,
+                        status,
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        crate::view::launch::restore(persistence, journal, &observations)
     }
 
     pub fn server(&self, server: ServerId) -> Option<ServerHandle> {
@@ -336,7 +401,8 @@ pub struct ServerHandle {
     connect: mpsc::Sender<ConnectRequest>,
     dispatch: mpsc::Sender<DispatchRequest>,
     egress: Arc<EgressBudget>,
-    shared: std::sync::Weak<Shared>,
+    pub(crate) shared: std::sync::Weak<Shared>,
+    pub(crate) queries: Arc<connection::queries::QueryHub>,
     shutdown: watch::Sender<bool>,
 }
 impl ServerHandle {
@@ -374,6 +440,32 @@ impl ServerHandle {
         captured: ConnectedInfo,
         message: Payload,
     ) -> Result<(), ClientFailure> {
+        self.dispatch_inner(captured, message, false).await
+    }
+    pub fn queries(
+        &self,
+        journal: Arc<crate::journal::JournalController>,
+    ) -> Result<crate::api::ServerQueries, ClientFailure> {
+        let shared = self.shared.upgrade().ok_or_else(cancelled)?;
+        let supplied: Arc<dyn crate::ports::ConnectionJournal> = journal.clone();
+        if !Arc::ptr_eq(&supplied, &shared.services.journal) {
+            return Err(ClientFailure::new(ClientFailureClass::InvalidStorage));
+        }
+        connection::queries::ServerQueries::new(self.clone(), journal)
+    }
+    pub(crate) async fn dispatch_query(
+        &self,
+        captured: ConnectedInfo,
+        message: Payload,
+    ) -> Result<(), ClientFailure> {
+        self.dispatch_inner(captured, message, true).await
+    }
+    async fn dispatch_inner(
+        &self,
+        captured: ConnectedInfo,
+        message: Payload,
+        query: bool,
+    ) -> Result<(), ClientFailure> {
         let shared = self.shared.upgrade().ok_or_else(cancelled)?;
         if shared.stopped.load(Ordering::Acquire) {
             return Err(cancelled());
@@ -385,7 +477,12 @@ impl ServerHandle {
         if message.major() != current.major {
             return Err(ClientFailure::new(ClientFailureClass::InvalidPeer));
         }
-        let class = shared.services.delegate.admit(current, &message)?;
+        let class = if query {
+            self.queries.admit(current, &message, &self.binding)?;
+            OutboundClass::Ordinary
+        } else {
+            shared.services.delegate.admit(current, &message)?
+        };
         let bytes = message
             .encode_with_limits(current.limits)?
             .len()
@@ -396,6 +493,7 @@ impl ServerHandle {
         self.dispatch
             .try_send(DispatchRequest {
                 captured,
+                query,
                 message,
                 completion,
                 _reservation: reservation,
