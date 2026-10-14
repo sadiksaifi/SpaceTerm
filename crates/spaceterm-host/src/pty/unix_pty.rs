@@ -186,7 +186,7 @@ pub enum ProcessCreationEpoch {
 }
 
 impl ProcessCreationEpoch {
-    fn no_intervening_fork(self, after: Self) -> bool {
+    pub(crate) fn no_intervening_fork(self, after: Self) -> bool {
         match (self, after) {
             (Self::ForkCount(before), Self::ForkCount(after)) => before == after,
             (Self::FenceBirth(before), Self::FenceBirth(after)) => {

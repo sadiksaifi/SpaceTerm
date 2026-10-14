@@ -1981,6 +1981,36 @@ impl ServiceSupervisor {
         )
         .map_err(Into::into)
     }
+    /// Reconciles the validated store's exact previous-epoch retirement scope.
+    pub fn reconcile_previous_instance<'a>(
+        &'a self,
+        server: ServerId,
+        epoch: ServerEpoch,
+        expected: &'a [spaceterm_core::retirement::RetiredSession],
+    ) -> ServiceFuture<'a, Vec<SessionCleanupObservation>> {
+        Box::pin(async move {
+            let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
+            if registration.server_pin().identity != server.bytes() {
+                return Err(ServiceFailure::IdentityMismatch);
+            }
+            let sessions: Vec<_> = expected.iter().map(|value| value.session()).collect();
+            super::processes::validate_previous_scope(server, epoch, &sessions)?;
+            let observations = self
+                .processes()?
+                .reconcile_previous_instance(&registration, epoch, expected)
+                .await?;
+            cleanup_matches(&sessions, &observations)?;
+            if !expected
+                .iter()
+                .zip(&observations)
+                .all(|(expected, observed)| expected.first_reason() == observed.first_reason())
+            {
+                return Err(ServiceFailure::CleanupUnresolved);
+            }
+            Ok(observations)
+        })
+    }
+
     /// Requires trusted exact native process-scope evidence even for an empty old Session list.
     pub fn previous_instance_cleanup<'a>(
         &'a self,

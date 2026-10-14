@@ -17,7 +17,7 @@ const PROC_PIDUNIQIDENTIFIERINFO: i32 = 17;
 struct ProcessUniqueInfo {
     _uuid: [u8; 16],
     unique_id: u64,
-    _parent_unique_id: u64,
+    parent_unique_id: u64,
     _id_version: i32,
     _original_parent_version: i32,
     _reserved: [u64; 2],
@@ -183,6 +183,19 @@ fn process_birth(process: i32) -> io::Result<Option<u64>> {
 
 /// XNU searches exited, unreaped processes for this flavor only when the argument is nonzero.
 fn process_birth_including_zombies(process: i32, zombies: bool) -> io::Result<Option<u64>> {
+    process_unique_info(process, zombies).map(|info| info.map(|info| info.unique_id))
+}
+
+impl MacosPtyHost {
+    /// Immutable per-boot process and original-parent births, including after
+    /// reparenting. No PID, executable, or current parent grants ownership.
+    pub fn process_lineage(&self, process: i32) -> io::Result<Option<(u64, u64)>> {
+        process_unique_info(process, false)
+            .map(|info| info.map(|info| (info.unique_id, info.parent_unique_id)))
+    }
+}
+
+fn process_unique_info(process: i32, zombies: bool) -> io::Result<Option<ProcessUniqueInfo>> {
     let mut info = std::mem::MaybeUninit::<ProcessUniqueInfo>::zeroed();
     let expected = i32::try_from(std::mem::size_of::<ProcessUniqueInfo>())
         .map_err(|_| io::ErrorKind::InvalidData)?;
@@ -212,7 +225,7 @@ fn process_birth_including_zombies(process: i32, zombies: bool) -> io::Result<Op
     if info.unique_id == 0 {
         return Err(io::ErrorKind::InvalidData.into());
     }
-    Ok(Some(info.unique_id))
+    Ok(Some(info))
 }
 
 fn process_session(process: i32) -> io::Result<Option<i32>> {

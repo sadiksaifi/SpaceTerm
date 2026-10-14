@@ -30,6 +30,26 @@ impl Seed {
         let fixture = Fixture::new_registered(true).await;
         let (streams, principal, key) = fixture.enroll(2).await;
         let handle = fixture.server.handle();
+        let custody = spaceterm_host::account_service::runtime_inventory::RuntimeCustody::begin(
+            &fixture.registration,
+            handle.snapshot().epoch(),
+            fixture.identity.clone(),
+        )
+        .unwrap();
+        let (request, action) =
+            spaceterm_server::shutdown::StoppedAuthorizationPort::verify_stopped(
+                fixture.stop.as_ref(),
+                handle.snapshot().state().server,
+                handle.snapshot().epoch(),
+            )
+            .unwrap();
+        let assessment = RuntimeAssessment {
+            server: handle.snapshot().state().server,
+            epoch: Some(handle.snapshot().epoch()),
+            generation: 1,
+            sessions: Vec::new(),
+            token: [1; 32],
+        };
         handle
             .shutdown(TrustedShutdownRequest {
                 authority: fixture.stop,
@@ -37,6 +57,9 @@ impl Seed {
             .await
             .unwrap();
         fixture.server.wait().await.unwrap();
+        custody
+            .completed(&fixture.registration, request, action, &assessment, &[])
+            .unwrap();
         let root = fixture._root;
         fs::write(root.path().join("shell"), "#!/bin/sh\nprintf '%s' \"$$\" > shell-pid\necho ACCOUNT-SHELL-READY\nexec /bin/sh \"$@\"\n").unwrap();
         fs::set_permissions(root.path().join("shell"), fs::Permissions::from_mode(0o700)).unwrap();
@@ -215,6 +238,16 @@ impl ServiceProcesses for ObservedProcesses {
     }
 }
 async fn stop(seed: &Seed, epoch: ServerEpoch, sessions: Vec<SessionKey>, pid: Option<u32>) {
+    retire(seed, epoch, sessions, pid, ServiceAction::Stop).await;
+}
+
+async fn retire(
+    seed: &Seed,
+    epoch: ServerEpoch,
+    sessions: Vec<SessionKey>,
+    pid: Option<u32>,
+    requested: ServiceAction,
+) {
     use spaceterm_host::account_service::runtime_inventory::{
         AccountRuntimeCall, AccountRuntimeReply,
     };
@@ -242,22 +275,31 @@ async fn stop(seed: &Seed, epoch: ServerEpoch, sessions: Vec<SessionKey>, pid: O
             )),
         })
     };
-    let response = round_trip(
-        &transport,
-        &mut codec,
-        payload(1, AccountRuntimeCall::Assess),
-    )
-    .await;
-    let Payload::Major2(v2::Message {
-        kind: Some(v2::message::Kind::AccountRuntimeReply(value)),
-    }) = response
-    else {
-        panic!("runtime reply");
-    };
-    let AccountRuntimeReply::Assessment(original) = serde_json::from_slice(&value.body).unwrap()
-    else {
-        panic!("runtime assessment");
-    };
+    let original = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let response = round_trip(
+                &transport,
+                &mut codec,
+                payload(1, AccountRuntimeCall::Assess),
+            )
+            .await;
+            let Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::AccountRuntimeReply(value)),
+            }) = response
+            else {
+                panic!("runtime reply");
+            };
+            match serde_json::from_slice::<AccountRuntimeReply>(&value.body).unwrap() {
+                AccountRuntimeReply::Assessment(original) => break original,
+                AccountRuntimeReply::Failed(ServiceFailure::Pending) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                other => panic!("runtime assessment: {other:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(original.epoch, Some(epoch));
     assert_eq!(original.sessions, sessions);
     let processes = ObservedProcesses::new(epoch, sessions, pid);
@@ -265,7 +307,7 @@ async fn stop(seed: &Seed, epoch: ServerEpoch, sessions: Vec<SessionKey>, pid: O
     let supervisor = seed.supervisor(processes);
     let request = supervisor.allocate_request().unwrap();
     let action = supervisor
-        .assess(request, ServiceAction::Stop)
+        .assess(request, requested)
         .await
         .unwrap()
         .confirm()
@@ -287,14 +329,23 @@ async fn stop(seed: &Seed, epoch: ServerEpoch, sessions: Vec<SessionKey>, pid: O
         AccountRuntimeReply::Reserved
     );
     transport.close().await.unwrap();
-    let progress = supervisor.stop(action).await.unwrap();
+    let progress = match requested {
+        ServiceAction::Stop => supervisor.stop(action).await,
+        ServiceAction::Restart => supervisor.restart(action).await,
+        _ => panic!("unsupported fixture action"),
+    }
+    .unwrap();
     assert_eq!(
         progress.phase,
         spaceterm_host::account_service::ServicePhase::Completed
     );
     assert_eq!(
         supervisor.discover().unwrap().unwrap().desired_state(),
-        DesiredServerState::Stopped
+        if requested == ServiceAction::Stop {
+            DesiredServerState::Stopped
+        } else {
+            DesiredServerState::Running
+        }
     );
 }
 
@@ -807,6 +858,15 @@ async fn reconcile_snapshot(
 
 #[tokio::test]
 async fn real_binary_authenticates_starts_shell_stops_and_restores_organization() {
+    native_restart_after_live_session(false).await;
+}
+
+#[tokio::test]
+async fn real_binary_restarts_with_live_session_and_reuses_completed_custody() {
+    native_restart_after_live_session(true).await;
+}
+
+async fn native_restart_after_live_session(restart: bool) {
     tokio::time::timeout(Duration::from_secs(45), async {
         let seed = Seed::new().await;
         let mut binary = Binary::start(&seed);
@@ -857,7 +917,18 @@ async fn real_binary_authenticates_starts_shell_stops_and_restores_organization(
                 .is_some()
         );
         transport.close().await.unwrap();
-        stop(&seed, session.epoch, vec![session], Some(pid)).await;
+        retire(
+            &seed,
+            session.epoch,
+            vec![session],
+            Some(pid),
+            if restart {
+                ServiceAction::Restart
+            } else {
+                ServiceAction::Stop
+            },
+        )
+        .await;
         assert!(binary.wait().await.success());
         assert!(!seed.registration.endpoint().unwrap().path().exists());
         assert!(
@@ -867,12 +938,15 @@ async fn real_binary_authenticates_starts_shell_stops_and_restores_organization(
                 .unwrap()
                 .is_none()
         );
-        let mut stopped = Binary::start(&seed);
-        assert!(!stopped.wait().await.success());
-        assert!(!seed.registration.endpoint().unwrap().path().exists());
-        let supervisor = seed.supervisor(ObservedProcesses::new(session.epoch, Vec::new(), None));
-        let request = supervisor.allocate_request().unwrap();
-        supervisor.start(request).await.unwrap();
+        if !restart {
+            let mut stopped = Binary::start(&seed);
+            assert!(!stopped.wait().await.success());
+            assert!(!seed.registration.endpoint().unwrap().path().exists());
+            let supervisor =
+                seed.supervisor(ObservedProcesses::new(session.epoch, Vec::new(), None));
+            let request = supervisor.allocate_request().unwrap();
+            supervisor.start(request).await.unwrap();
+        }
         fs::remove_file(seed.root.path().join("shell-pid")).unwrap();
         let mut restarted = Binary::start(&seed);
         let transport = restarted.connect(&seed).await;
@@ -904,6 +978,181 @@ async fn real_binary_authenticates_starts_shell_stops_and_restores_organization(
             !seed.root.path().join("shell-pid").exists(),
             "restored panes must wait for explicit selection"
         );
+        transport.close().await.unwrap();
+        stop(&seed, ServerEpoch::new(restored.epoch), Vec::new(), None).await;
+        assert!(restarted.wait().await.success());
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn real_binary_sigterm_restarts_original_identity_and_organization_with_live_session() {
+    signal_and_restart(libc::SIGTERM, false, true).await;
+}
+
+#[tokio::test]
+async fn real_binary_sigkill_recovers_original_identity_and_organization_with_live_session() {
+    signal_and_restart(libc::SIGKILL, false, true).await;
+}
+
+#[tokio::test]
+async fn account_startup_reboot_recovery_reopens_original_organization_and_identity() {
+    signal_and_restart(libc::SIGKILL, true, true).await;
+}
+
+struct RebootClock([u8; 32]);
+impl spaceterm_host::account_service::ServiceClock for RebootClock {
+    fn now(&self) -> Result<spaceterm_host::account_service::ServiceTime, ServiceFailure> {
+        Ok(spaceterm_host::account_service::ServiceTime {
+            boot: self.0,
+            millis: 1,
+        })
+    }
+}
+
+#[tokio::test]
+async fn real_binary_sigkill_recovers_with_no_live_sessions() {
+    signal_and_restart(libc::SIGKILL, false, false).await;
+}
+
+async fn signal_and_restart(signal: i32, reboot: bool, live: bool) {
+    tokio::time::timeout(Duration::from_secs(45), async {
+        let seed = Seed::new().await;
+        let mut binary = Binary::start(&seed);
+        let transport = binary.connect(&seed).await;
+        let mut codec = handshake(
+            &transport,
+            seed.identity.pin(),
+            seed.principal,
+            seed.key.clone(),
+            2,
+        )
+        .await;
+        let before = snapshot(&transport, &mut codec, 1).await;
+        let connection = reconcile_snapshot(&transport, &mut codec, &before).await;
+        let (workspace, pane, grant) = create(&seed, &transport, &mut codec).await;
+        let created = snapshot(&transport, &mut codec, 2).await;
+        let (_, record) =
+            spaceterm_protocol::convert::organization::v2::decode_pane_record(&created.panes[0])
+                .unwrap();
+        let pid = if live {
+            start_shell(
+                &seed,
+                &transport,
+                &mut codec,
+                ServerEpoch::new(created.epoch),
+                record.session_generation,
+                connection,
+                grant,
+            )
+            .await;
+            Some(wait_pid(&seed).await)
+        } else {
+            None
+        };
+        transport.close().await.unwrap();
+        // This is an OS signal, not a native Stop or a synthetic retirement.
+        assert_eq!(unsafe { libc::kill(binary.0.id() as i32, signal) }, 0);
+        let status = binary.wait().await;
+        let mut diagnostic = String::new();
+        std::io::Read::read_to_string(binary.0.stderr.as_mut().unwrap(), &mut diagnostic).unwrap();
+        assert_eq!(
+            status.success(),
+            signal == libc::SIGTERM,
+            "{status}: {diagnostic}"
+        );
+        if let Some(pid) = pid {
+            assert!(
+                NativeServiceProcessTable::current()
+                    .unwrap()
+                    .observe(pid)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let supervisor = test_support::retained_supervisor(seed.root.path()).unwrap();
+        assert_eq!(
+            supervisor.discover().unwrap().unwrap().desired_state(),
+            DesiredServerState::Running
+        );
+        if live {
+            fs::remove_file(seed.root.path().join("shell-pid")).unwrap();
+        }
+        if reboot {
+            let signed: serde_json::Value = serde_json::from_slice(
+                &fs::read(seed.registration.data_directory().join("runtime-custody")).unwrap(),
+            )
+            .unwrap();
+            let bytes: Vec<u8> = serde_json::from_value(signed["body"].clone()).unwrap();
+            let state: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let mut boot: [u8; 32] =
+                serde_json::from_value(state["owner"]["boot"].clone()).unwrap();
+            boot[0] ^= 1;
+            let supervisor = test_support::retained_supervisor_with_clock(
+                seed.root.path(),
+                Some(Arc::new(RebootClock(boot))),
+            )
+            .unwrap();
+            let startup = AccountStartup::admit(&supervisor).unwrap();
+            let server =
+                RecoveredAccountServer::recover(supervisor.clone(), startup, seed.launch())
+                    .await
+                    .unwrap();
+            let restored = server.handle().snapshot();
+            assert!(restored.epoch().get() > created.epoch);
+            assert!(
+                restored
+                    .state()
+                    .workspaces
+                    .iter()
+                    .any(|value| value.id == workspace)
+            );
+            assert!(restored.state().panes.iter().any(|value| value.id == pane));
+            assert_eq!(
+                supervisor.discover().unwrap().unwrap().server_pin(),
+                seed.identity.pin()
+            );
+            assert!(!seed.root.path().join("shell-pid").exists());
+            let report = server.run_until(async {}).await.unwrap();
+            assert!(
+                report.cleanup_confirmed
+                    && report.started_writes_finished
+                    && report.listeners_closed
+            );
+            assert_eq!(
+                supervisor.discover().unwrap().unwrap().desired_state(),
+                DesiredServerState::Running
+            );
+            return;
+        }
+        let mut restarted = Binary::start(&seed);
+        let transport = restarted.connect(&seed).await;
+        let mut codec = handshake(
+            &transport,
+            seed.identity.pin(),
+            seed.principal,
+            seed.key.clone(),
+            2,
+        )
+        .await;
+        let restored = snapshot(&transport, &mut codec, 1).await;
+        assert!(restored.epoch > created.epoch);
+        assert_eq!(
+            spaceterm_protocol::convert::identity::decode_workspace(
+                restored.workspaces[0].id.as_ref().unwrap()
+            )
+            .unwrap(),
+            workspace
+        );
+        assert_eq!(
+            spaceterm_protocol::convert::identity::decode_pane(
+                restored.panes[0].id.as_ref().unwrap()
+            )
+            .unwrap(),
+            pane
+        );
+        assert!(!seed.root.path().join("shell-pid").exists());
         transport.close().await.unwrap();
         stop(&seed, ServerEpoch::new(restored.epoch), Vec::new(), None).await;
         assert!(restarted.wait().await.success());
@@ -1026,7 +1275,17 @@ async fn real_binary_retains_only_explicit_remote_scope_across_stop_start_and_di
         .await;
         let restored = snapshot(&transport, &mut codec, 2).await;
         reconcile_snapshot(&transport, &mut codec, &restored).await;
-        let status = query_status(&transport, &mut codec).await;
+        let status = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let status = query_status(&transport, &mut codec).await;
+                if status.parts().listeners.len() == endpoints.len() {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
         assert_eq!(status.parts().remote_access, enabled.parts().remote_access);
         assert!(status.parts().epoch > enabled.parts().epoch);
         assert_eq!(status.parts().listeners.len(), endpoints.len());

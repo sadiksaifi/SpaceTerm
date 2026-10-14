@@ -203,6 +203,8 @@ pub(crate) enum LifecycleRequest {
     },
     Listeners(Arc<dyn ListenerLifecyclePort>, Reply<()>),
     CloseOwnerEnrollment(Reply<ShutdownReport>),
+    // Composition-only graceful process exit. It does not authorize native Stop.
+    CloseInstance,
 }
 enum RetirementReply {
     Operation(OperationReply),
@@ -591,9 +593,9 @@ impl RecoveredServer {
         let result = tokio::select! {
             result = &mut join => result,
             () = shutdown => {
-                if let Some(sender) = self.owner_drop.take() {
-                    let _ = sender.send(());
-                }
+                // A delivered OS signal is an intentional instance close, not
+                // loss of the actor owner. Keep the owner until all joins finish.
+                let _ = self.handle.lifecycle.send(LifecycleRequest::CloseInstance).await;
                 join.await
             }
         }
@@ -3669,6 +3671,16 @@ impl Actor {
                     _ => {
                         let _ = reply.send(Err(failure(ServerFailureClass::NativeUnavailable)));
                     }
+                }
+            }
+            LifecycleRequest::CloseInstance => {
+                if self.shutdown.is_none() {
+                    self.shutdown = Some(ShutdownState {
+                        request: None,
+                        replies: Vec::new(),
+                    });
+                    self.native_completed = true;
+                    self.begin_quiescence();
                 }
             }
             LifecycleRequest::CloseOwnerEnrollment(reply) => {
