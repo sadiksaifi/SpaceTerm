@@ -601,6 +601,7 @@ pub fn verify_account_installation_manifest(
     document.validate()?;
     let expected = feed.document();
     if document.build_identity != expected.build_identity
+        || document.build_commit != expected.build_commit
         || document.platform != expected.platform
         || document.version != expected.version
         || document.protocol_majors != expected.protocol_majors

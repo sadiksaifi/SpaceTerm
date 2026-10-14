@@ -101,6 +101,7 @@ pub fn artifact_fixture_with_payload(
         build_identity: build,
         platform,
         version: BuildVersion::parse(version).unwrap(),
+        build_commit: [1; 20],
         published_at,
         protocol_majors: vec![1, 2],
         storage: StorageCompatibility {
