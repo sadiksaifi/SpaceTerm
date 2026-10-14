@@ -1133,3 +1133,33 @@ async fn fake_startup_does_not_report_started_when_prior_runtime_cleanup_blocks_
         failed.session_generation
     );
 }
+
+#[tokio::test]
+async fn organization_publication_preserves_the_original_pending_startup_request() {
+    let fixture = Fixture::new(false).await;
+    let response = fixture.peer.delay_next_intent_response().unwrap();
+    let pane = fixture.pane.clone();
+    let pending =
+        tokio::spawn(async move { pane.explicit_use(ExplicitUseSource::StartSession).await });
+    wait_for_operations(&fixture, 2).await;
+    let original = *fixture.pane.state().borrow();
+    fixture
+        .channels
+        .invalidate(fixture.server.server(), ConnectionInvalidation::Publication)
+        .unwrap();
+    assert!(fixture.pane.permit(EffectKind::Read).is_err());
+    fixture.peer.publish().unwrap();
+    assert_eq!(fixture.pane.state().borrow().context, original.context);
+    response.add_permits(1);
+    let token = pending
+        .await
+        .unwrap()
+        .expect("an unchanged authenticated publication cannot cancel the user's pending request")
+        .startup()
+        .unwrap();
+    fixture.pane.complete_intent(&token, grid()).await.unwrap();
+    assert!(matches!(
+        fixture.pane.state().borrow().runtime.unwrap().phase,
+        SessionPhase::Running { .. }
+    ));
+}

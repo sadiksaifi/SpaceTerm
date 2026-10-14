@@ -187,6 +187,7 @@ struct State {
     executors: HashMap<ServerId, Arc<tokio::sync::Mutex<view::launch::StartupExecutor>>>,
     startup_channels: HashMap<(ServerId, view::UseTicket), PaneChannel>,
     measurements: HashMap<PaneId, PaneMeasurementRequest>,
+    measurement_admissions: HashMap<PaneId, PaneMeasurementRequest>,
     presentations: HashMap<PaneId, PresentationState>,
     revalidated: HashMap<PaneId, (PaneViewToken, view::ViewRevision)>,
     outcomes: HashMap<OperationId, (Arc<Outcome>, OrganizationRevision)>,
@@ -211,6 +212,27 @@ struct Inner {
     state: RefCell<State>,
     tasks: RefCell<Vec<Task<()>>>,
     edits: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// Keeps one exact measurement owned while a personal-view save holds the edit lock.
+/// Dropping the request releases admission without requesting another redraw.
+struct MeasurementAdmission {
+    request: PaneMeasurementRequest,
+    owner: std::rc::Weak<Inner>,
+}
+
+impl Drop for MeasurementAdmission {
+    fn drop(&mut self) {
+        let Some(inner) = self.owner.upgrade() else {
+            return;
+        };
+        let mut state = inner.state.borrow_mut();
+        if state.measurement_admissions.get(&self.request.token.pane) == Some(&self.request) {
+            state
+                .measurement_admissions
+                .remove(&self.request.token.pane);
+        }
+    }
 }
 
 impl<S: ViewStore + 'static> ComposedDesktopClientProvider<S> {
@@ -990,7 +1012,57 @@ impl Inner {
             self.publish_frames(&mut state)?;
             return Ok(Vec::new());
         }
-        let context = channel.state().borrow().context;
+        let target = view::SelectionTarget {
+            workspace,
+            tab,
+            pane,
+        };
+        let current = *channel.state().borrow();
+        let selected =
+            view::UseContext::observe(&state.view, &observation, target, current.context)
+                .map_err(view_error)?;
+        channel
+            .validate_use_context(&selected)
+            .map_err(DesktopClientError::from)?;
+        // Deliberate selection establishes product focus before capturing startup context.
+        // A fresh attachment has no rendered Pane yet; painting must not be its authority source.
+        let presented = self
+            .channels
+            .presentation_channels(pane.server())
+            .map_err(DesktopClientError::from)?;
+        for other in &presented {
+            let facts = other.state().borrow().facts;
+            if other.pane() != pane && facts.focused_pane {
+                other
+                    .update_context(spaceterm_client::pane_channel::PaneContextFacts {
+                        focused_pane: false,
+                        terminal_input_focus: false,
+                        ..facts
+                    })
+                    .map_err(DesktopClientError::from)?;
+            }
+        }
+        let context = channel
+            .update_context(spaceterm_client::pane_channel::PaneContextFacts {
+                focused_pane: true,
+                terminal_input_focus: current.facts.terminal_input_focus,
+                presentable: true,
+            })
+            .map_err(DesktopClientError::from)?;
+        // Align before capturing ownership, but preserve an unchanged pending use.
+        let context = presented
+            .iter()
+            .map(|channel| channel.state().borrow().context)
+            .max()
+            .map_or(context, |maximum| maximum.max(context));
+        self.channels
+            .align_connection_context(pane.server(), context)
+            .map_err(DesktopClientError::from)?;
+        let selected = view::UseContext::observe(&state.view, &observation, target, context)
+            .map_err(view_error)?;
+        channel
+            .validate_use_context(&selected)
+            .map_err(DesktopClientError::from)?;
         let view = state.view.clone();
         let effects = state
             .startup
@@ -1002,11 +1074,7 @@ impl Inner {
                     replica: &observation,
                     context,
                 },
-                view::SelectionTarget {
-                    workspace,
-                    tab,
-                    pane,
-                },
+                target,
                 source,
             )
             .map_err(view_error)?
@@ -1015,13 +1083,34 @@ impl Inner {
         Ok(effects)
     }
 
+    fn validate_measurement(
+        &self,
+        measurement: PaneMeasurement,
+    ) -> Result<PaneMeasurementRequest, DesktopClientError> {
+        let request = PaneMeasurementRequest {
+            token: measurement.token,
+            ticket: measurement.ticket,
+            layout: measurement.layout,
+        };
+        if self.token(measurement.token.pane)? != measurement.token
+            || self
+                .state
+                .borrow()
+                .measurements
+                .get(&measurement.token.pane)
+                != Some(&request)
+        {
+            return Err(DesktopClientError::StaleContext);
+        }
+        measurement.view_measurement()?;
+        Ok(request)
+    }
+
     fn measured(
         &self,
         measurement: PaneMeasurement,
     ) -> Result<Vec<StartupEffect>, DesktopClientError> {
-        if self.token(measurement.token.pane)? != measurement.token {
-            return Err(DesktopClientError::StaleContext);
-        }
+        self.validate_measurement(measurement)?;
         let server = measurement.token.pane.server();
         let snapshot = self.snapshot(server)?;
         let observation = self.observation(server, &snapshot, false)?;
@@ -1041,6 +1130,7 @@ impl Inner {
             )
             .map_err(view_error)?
             .effects;
+        state.measurements.remove(&measurement.token.pane);
         self.publish_frames(&mut state)?;
         Ok(effects)
     }
@@ -1415,6 +1505,35 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
         cx: &mut App,
     ) -> Result<Task<Result<Option<OperationId>, DesktopClientError>>, DesktopClientError> {
         let inner = self.inner.clone();
+        if let DesktopRequest::Measured(measurement) = request {
+            let original = inner.validate_measurement(measurement)?;
+            {
+                let mut state = inner.state.borrow_mut();
+                if state
+                    .measurement_admissions
+                    .contains_key(&original.token.pane)
+                    || state.measurement_admissions.len() >= super::MAX_PENDING_UI_REQUESTS
+                {
+                    return Err(DesktopClientError::AdmissionFull);
+                }
+                state
+                    .measurement_admissions
+                    .insert(original.token.pane, original);
+            }
+            let reservation = MeasurementAdmission {
+                request: original,
+                owner: Rc::downgrade(&inner),
+            };
+            // Own this callback once, rather than asking rendering to emit it until a save ends.
+            // Recheck its original tags after the save, never rebuild them from current context.
+            return Ok(cx.spawn(async move |cx| {
+                let _reservation = reservation;
+                let edit = inner.edits.lock().await;
+                let effects = inner.measured(measurement)?;
+                drop(edit);
+                inner.execute(effects, cx).await
+            }));
+        }
         // Reserve the personal-state transaction at admission, not at the task's first
         // poll. GPUI may poll later requests first; they must not overwrite an earlier save.
         let admission = self
@@ -1429,10 +1548,6 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
             | DesktopRequest::StartSession { .. }
             | DesktopRequest::Retry { .. }) => {
                 let effects = inner.use_request(&request)?;
-                Ok(cx.spawn(async move |cx| inner.execute(effects, cx).await))
-            }
-            DesktopRequest::Measured(measurement) => {
-                let effects = inner.measured(measurement)?;
                 Ok(cx.spawn(async move |cx| inner.execute(effects, cx).await))
             }
             DesktopRequest::TakeOver { pane, .. } => {
@@ -1474,6 +1589,7 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
                     ReplicaStatus::Resynchronizing => return Err(DesktopClientError::Reconciling),
                     ReplicaStatus::RetainedOffline => return Err(DesktopClientError::Offline),
                 }
+                let workspace = shared_command_workspace(&command, &frame.organization)?;
                 let binding = inner
                     .source(&server)
                     .ok_or(DesktopClientError::TargetGone)?
@@ -1500,7 +1616,9 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
                     let ticket = inner
                         .executor
                         .spawn(async move {
-                            tracker.submit(&binding, command, None, peer.as_ref()).await
+                            tracker
+                                .submit(&binding, command, workspace, peer.as_ref())
+                                .await
                         })
                         .await
                         .map_err(|_| DesktopClientError::Cancelled)?
@@ -1522,21 +1640,31 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
                             apply_edit(&inner, &mut candidate, edit)?
                         }
                         DesktopRequest::AttachWorkspace(workspace) => {
-                            let snapshot = inner.snapshot(workspace.server())?;
-                            let observation =
-                                inner.observation(workspace.server(), &snapshot, false)?;
-                            let facts = ReplicaFacts {
-                                pairing: observation.pairing(),
-                                client: observation.client(),
-                                connection: observation.connection(),
-                                readiness: observation.readiness(),
-                                status: observation.status(),
-                            };
-                            let binding = inner
+                            let source = inner
                                 .source(&workspace.server())
-                                .ok_or(DesktopClientError::TargetGone)?
-                                .binding
-                                .clone();
+                                .ok_or(DesktopClientError::TargetGone)?;
+                            let binding = source.binding;
+                            let (snapshot, info) = inner
+                                .executor
+                                .spawn(ready_attachment_snapshot(source.state, source.replica))
+                                .await
+                                .map_err(|_| DesktopClientError::Cancelled)??;
+                            if info.server != workspace.server()
+                                || info.client != binding.target().client()
+                                || info.pairing != binding.target().pairing()
+                                || inner
+                                    .source(&workspace.server())
+                                    .is_none_or(|current| current.binding != binding)
+                            {
+                                return Err(DesktopClientError::StaleContext);
+                            }
+                            let facts = ReplicaFacts {
+                                pairing: binding.target().pairing(),
+                                client: binding.target().client(),
+                                connection: Some(info.binding),
+                                readiness: ReplicaReadiness::Ready,
+                                status: ServerViewStatus::Connected,
+                            };
                             let journal = inner.tracker.journal().clone();
                             let channels = inner.channels.clone();
                             let attached = inner
@@ -1732,7 +1860,9 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
                     Ok(None)
                 }))
             }
-            DesktopRequest::ServerAction(_) => Err(DesktopClientError::UnsupportedCapability),
+            DesktopRequest::Measured(_) | DesktopRequest::ServerAction(_) => {
+                Err(DesktopClientError::UnsupportedCapability)
+            }
         }
     }
     fn save_view(&self, cx: &mut App) -> Task<Result<(), DesktopClientError>> {
@@ -1789,6 +1919,125 @@ pub(crate) async fn drain_original_detach(
         }
     }
     Ok(false)
+}
+
+/// Snapshot and connection watches publish separately. Attachment waits for the
+/// same authenticated cursor instead of treating that publication interval as offline.
+async fn ready_attachment_snapshot(
+    mut connection: watch::Receiver<ConnectionState>,
+    mut replica: watch::Receiver<ReplicaState>,
+) -> Result<(Arc<ReplicaSnapshot>, spaceterm_client::api::ConnectedInfo), DesktopClientError> {
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let state = connection.borrow_and_update().clone();
+            let observed = replica.borrow_and_update().clone();
+            match state {
+                ConnectionState::Connected { info } => {
+                    if let ReplicaState::Ready { snapshot } = observed
+                        && snapshot.cursor.server == info.server
+                        && snapshot.cursor.epoch == info.epoch
+                        && snapshot.cursor.revision == info.organization_revision
+                    {
+                        return Ok((snapshot, info));
+                    }
+                }
+                ConnectionState::Connecting { .. } => {}
+                ConnectionState::Offline { .. } | ConnectionState::Stopped => {
+                    return Err(DesktopClientError::Offline);
+                }
+                ConnectionState::Incompatible { .. } => {
+                    return Err(DesktopClientError::Incompatible);
+                }
+            }
+            tokio::select! {
+                result = connection.changed() => result.map_err(|_| DesktopClientError::Cancelled)?,
+                result = replica.changed() => result.map_err(|_| DesktopClientError::Cancelled)?,
+            }
+        }
+    })
+    .await
+    .map_err(|_| DesktopClientError::Reconciling)?
+}
+
+/// The durable journal scopes deferred release and grant admission to the owning
+/// Workspace, never to whichever Workspace this client happens to have active.
+pub(crate) fn shared_command_workspace(
+    command: &Command,
+    organization: &spaceterm_core::organization::OrganizationSnapshot,
+) -> Result<Option<WorkspaceId>, DesktopClientError> {
+    use spaceterm_core::operations::CloseTarget;
+    let tab_workspace = |tab: TabId| {
+        organization
+            .state()
+            .tabs
+            .iter()
+            .find(|record| record.id == tab)
+            .map(|record| record.workspace)
+            .ok_or(DesktopClientError::TargetGone)
+    };
+    let pane_workspace = |pane: PaneId| {
+        let tab = organization
+            .state()
+            .panes
+            .iter()
+            .find(|record| record.id == pane)
+            .ok_or(DesktopClientError::TargetGone)?
+            .tab;
+        tab_workspace(tab)
+    };
+    let workspace =
+        match command {
+            Command::CreateTab { workspace, .. }
+            | Command::RenameWorkspace { workspace, .. }
+            | Command::SetPinnedDirectory { workspace, .. }
+            | Command::KillWorkspaceConfirmed { workspace, .. }
+            | Command::AssessKillWorkspace { workspace } => Some(*workspace),
+            Command::CreatePane { tab, .. } => Some(tab_workspace(*tab)?),
+            Command::RepairPaneDirectory { pane, .. }
+            | Command::RetryPaneDirectory { pane, .. } => Some(pane_workspace(*pane)?),
+            Command::AssessClose { target } | Command::CloseConfirmed { target, .. } => {
+                Some(match target {
+                    CloseTarget::Workspace(workspace)
+                    | CloseTarget::WorktreeTabs { workspace, .. } => *workspace,
+                    CloseTarget::Tab(tab) => tab_workspace(*tab)?,
+                    CloseTarget::Pane(pane) => pane_workspace(*pane)?,
+                })
+            }
+            Command::CompareAcquire(request) => Some(pane_workspace(request.pane)?),
+            Command::TakeOver(request) => Some(pane_workspace(request.pane)?),
+            Command::ReleaseControl(request) => Some(pane_workspace(request.grant.pane())?),
+            Command::BeginStartup(intent) => Some(pane_workspace(intent.fence().session().pane)?),
+            Command::CompleteStartup(measurement) => {
+                Some(pane_workspace(measurement.fence.session().pane)?)
+            }
+            Command::CompleteMeasuredStartup(measurement) => {
+                Some(pane_workspace(measurement.fence.session().pane)?)
+            }
+            Command::CreateWorkspace { .. }
+            | Command::SetWorktreeLocation { .. }
+            | Command::AssessEndAllSessions { .. }
+            | Command::EndAllSessions { .. }
+            | Command::CancelStartup { .. }
+            | Command::RevokePairing { .. }
+            | Command::RefreshWorktrees { .. }
+            | Command::CreateWorktree { .. }
+            | Command::AssessRemoveWorktree { .. }
+            | Command::RemoveWorktreeConfirmed { .. }
+            | Command::SetRemoteAccess { .. }
+            | Command::Pairing(_)
+            | Command::Worktree(_) => None,
+        };
+    if workspace.is_some_and(|workspace| {
+        workspace.server() != command.server()
+            || !organization
+                .state()
+                .workspaces
+                .iter()
+                .any(|record| record.id == workspace)
+    }) {
+        return Err(DesktopClientError::TargetGone);
+    }
+    Ok(workspace)
 }
 
 fn apply_edit(

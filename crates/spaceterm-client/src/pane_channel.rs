@@ -207,6 +207,13 @@ impl Shared {
             .lock()
             .is_ok_and(|gate| gate.as_ref().is_none_or(|gate| gate.allows(info)))
     }
+    fn publication_admitted(&self, info: ConnectedInfo) -> bool {
+        let Ok(gate) = self.admission.lock().map(|gate| gate.clone()) else {
+            return false;
+        };
+        gate.as_ref()
+            .is_none_or(|gate| gate.allows_publication(info))
+    }
     fn next_context(&self) -> Result<ContextGeneration, ClientFailure> {
         self.context_high_water
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
@@ -288,7 +295,7 @@ impl PaneChannels {
         info: ConnectedInfo,
         snapshot: Arc<ReplicaSnapshot>,
     ) -> Result<(), ClientFailure> {
-        if !self.shared.admitted(info) {
+        if !self.shared.publication_admitted(info) {
             return Err(stale());
         }
         if snapshot.cursor.server != info.server
@@ -446,7 +453,11 @@ impl PaneChannels {
         for channel in self.channels(server)? {
             let mut state = channel.state.lock().map_err(|_| stale())?;
             state.intent = None;
-            state.intent_pending = None;
+            // A pending request is correlation, not effect authority. Its reply
+            // still validates the installed session, connection, context and grant.
+            if reason != ConnectionInvalidation::Publication {
+                state.intent_pending = None;
+            }
             state.native.clear();
             state.effects.clear();
             state.facts.connection = None;
@@ -581,6 +592,16 @@ impl WorkspaceLease {
         if !self.0.active.load(Ordering::Acquire) {
             return Err(stale());
         }
+        let admitted_info = {
+            let servers = self.0.shared.servers.lock().map_err(|_| stale())?;
+            servers
+                .get(&self.0.workspace.server())
+                .ok_or_else(stale)?
+                .info
+        };
+        if !self.0.shared.publication_admitted(admitted_info) {
+            return Err(stale());
+        }
         let mut channels = self.0.channels.lock().map_err(|_| stale())?;
         channels.retain(|_, channel| channel.strong_count() != 0);
         if let Some(channel) = channels.get(&pane).and_then(Weak::upgrade) {
@@ -589,11 +610,16 @@ impl WorkspaceLease {
                 lease: Arc::clone(&self.0),
             });
         }
+        // A publication can finish while admission or construction is waiting.
+        // Capture its current graph under the channel insertion ordering.
         let (info, snapshot, active) = {
             let servers = self.0.shared.servers.lock().map_err(|_| stale())?;
             let server = servers.get(&self.0.workspace.server()).ok_or_else(stale)?;
             (server.info, Arc::clone(&server.snapshot), server.active)
         };
+        if info.client != admitted_info.client || info.pairing != admitted_info.pairing {
+            return Err(stale());
+        }
         let record = snapshot
             .organization
             .state()
@@ -738,7 +764,9 @@ impl PaneChannel {
         fence: EffectFence,
         snapshot: RuntimeMetadataSnapshot,
     ) -> Result<(), ClientFailure> {
-        if !self.inner.admitted() || !self.lease.active.load(Ordering::Acquire) {
+        if !self.inner.shared.publication_admitted(self.inner.authority)
+            || !self.lease.active.load(Ordering::Acquire)
+        {
             return Err(stale());
         }
         let mut state = self.inner.state.lock().map_err(|_| stale())?;
@@ -794,7 +822,7 @@ impl PaneChannel {
         fence: EffectFence,
         base: ContentBase,
     ) -> Result<(), ClientFailure> {
-        if !self.inner.admitted() {
+        if !self.inner.shared.publication_admitted(self.inner.authority) {
             return Err(stale());
         }
         let mut state = self.inner.state.lock().map_err(|_| stale())?;
@@ -1292,10 +1320,9 @@ impl ChannelInner {
         self.shared.admitted(self.authority)
     }
     fn apply(&self, info: ConnectedInfo, snapshot: &ReplicaSnapshot) -> Result<(), ClientFailure> {
-        if !self.admitted()
-            || info.pairing != self.authority.pairing
-            || info.client != self.authority.client
-        {
+        // Publication and pane construction validate journal authority before
+        // taking pane locks. Native effects retain their nonblocking gate.
+        if info.pairing != self.authority.pairing || info.client != self.authority.client {
             return Err(stale());
         }
         let mut state = self.state.lock().map_err(|_| stale())?;
@@ -1305,7 +1332,11 @@ impl ChannelInner {
             .lock()
             .map_err(|_| stale())?
             .get(&info.server)
-            .is_some_and(|server| server.active && same_attempt(server.info, info))
+            .is_some_and(|server| {
+                server.active
+                    && same_attempt(server.info, info)
+                    && server.snapshot.cursor == snapshot.cursor
+            })
         {
             return Err(stale());
         }

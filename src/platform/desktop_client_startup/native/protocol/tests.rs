@@ -226,7 +226,7 @@ async fn authenticated_case(major: u32, cx: &mut TestAppContext, terminal: bool)
         .unwrap();
     let id = ticket.id();
     assert_eq!(
-        executor.block_on(protocol.completed(ticket)).unwrap(),
+        executor.block_on(protocol.completed(ticket, info)).unwrap(),
         Outcome::Applied
     );
     executor.block_on(async {
@@ -698,6 +698,85 @@ async fn terminal_acceptance(
         .await
         .expect("initial journal persistence must release Pane admission")
     });
+    pane.update_context(PaneContextFacts {
+        focused_pane: true,
+        terminal_input_focus: false,
+        presentable: true,
+    })
+    .unwrap();
+    executor
+        .block_on(protocol.synchronize_presentation(info))
+        .unwrap();
+    assert!(
+        plan.messages
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|payload| match payload {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::ClientContext(value)),
+                }) => {
+                    value.focused_pane.is_some()
+                        && !value.terminal_input_focus
+                        && !value.native_effects_eligible
+                }
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::ClientContext(value)),
+                }) => {
+                    value.focused_pane.is_some()
+                        && !value.terminal_input_focus
+                        && !value.native_effects_eligible
+                }
+                _ => false,
+            })
+    );
+    let context_requests = || {
+        plan.messages
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|payload| {
+                matches!(
+                    payload,
+                    Payload::Major1(v1::Message {
+                        kind: Some(v1::message::Kind::ClientContext(_))
+                    }) | Payload::Major2(v2::Message {
+                        kind: Some(v2::message::Kind::ClientContext(_))
+                    })
+                )
+            })
+            .count()
+    };
+    let before_publication = context_requests();
+    let binding = protocol.binding(info.server).unwrap();
+    ConnectionDelegate::invalidate(
+        protocol.as_ref(),
+        &binding,
+        ConnectionInvalidation::Publication,
+    );
+    let retained = protocol
+        .handle(info.server)
+        .unwrap()
+        .replica()
+        .borrow()
+        .retained()
+        .cloned()
+        .unwrap();
+    ConnectionDelegate::publication(protocol.as_ref(), info, &retained).unwrap();
+    executor
+        .block_on(protocol.synchronize_presentation(info))
+        .unwrap();
+    assert_eq!(
+        context_requests(),
+        before_publication,
+        "organization publication cannot replay an already acknowledged context generation"
+    );
+    pane.update_context(PaneContextFacts {
+        focused_pane: true,
+        terminal_input_focus: true,
+        presentable: true,
+    })
+    .unwrap();
     executor.block_on(async {
         tokio::time::timeout(std::time::Duration::from_secs(15), async {
             while pane.current_frame().is_none() {
@@ -732,7 +811,7 @@ async fn terminal_acceptance(
             .lock()
             .unwrap()
             .iter()
-            .find(|payload| match payload {
+            .rfind(|payload| match payload {
                 Payload::Major1(v1::Message {
                     kind: Some(v1::message::Kind::PaneSubscription(value)),
                 }) => !value.cancel,
@@ -831,6 +910,15 @@ async fn terminal_acceptance(
         .await
         .unwrap();
         let mut events = pane.events().unwrap();
+        let Some(PaneEvent::Metadata { snapshot, .. }) =
+            tokio::time::timeout(std::time::Duration::from_secs(15), events.next())
+                .await
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("a replacement event subscriber must receive retained metadata")
+        };
+        assert_eq!(Some(snapshot), pane.metadata_snapshot());
         let permit = pane.permit(EffectKind::NativeCompletion).unwrap();
         let notice = spaceterm_core::native_requests::NativeRequest::new(
             permit.fence(),
@@ -901,6 +989,16 @@ async fn terminal_acceptance(
         .await
         .unwrap();
     });
+    let acknowledged_context = pane.state().borrow().context;
+    spaceterm_client::ports::ConnectionDelegate::invalidate(
+        protocol.as_ref(),
+        &protocol.binding(info.server).unwrap(),
+        spaceterm_client::ports::ConnectionInvalidation::Reconciliation,
+    );
+    assert!(
+        pane.state().borrow().context > acknowledged_context,
+        "same-connection resynchronization cannot replay its acknowledged context generation"
+    );
     let frame = pane.current_frame().unwrap();
     assert!(frame.is_paintable());
     assert!(!frame.frame().unwrap().pages().is_empty());
