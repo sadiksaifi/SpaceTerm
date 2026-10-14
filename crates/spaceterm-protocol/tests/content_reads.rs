@@ -178,3 +178,134 @@ fn both_majors_reject_copy_endpoints_outside_the_original_content_base() {
     check!(v1);
     check!(v2);
 }
+
+#[test]
+fn both_majors_decode_bounded_read_streams_and_reject_rebound_replies() {
+    let topology = TopologyPageRequest::new(
+        stamp(),
+        None,
+        PageLimits::new(256, 16384, 128 * 1024).unwrap(),
+    )
+    .unwrap();
+    let page = ContentReadResult::Ready(
+        TopologyPage::new(
+            &topology,
+            vec![row()],
+            Some(TopologyContinuation::new(stamp(), row()).unwrap()),
+        )
+        .unwrap(),
+    );
+    let copies = [
+        CopyStreamItem::Chunk(
+            CopyChunk::new(
+                &copy(),
+                ResourceTransferId::new(1).unwrap(),
+                CopyPart::Plain,
+                0,
+                2,
+                b"ok".to_vec(),
+            )
+            .unwrap(),
+        ),
+        CopyStreamItem::Complete(
+            CopyCompletion::new(
+                &copy(),
+                ResourceTransferId::new(1).unwrap(),
+                2,
+                [2; 32],
+                Some((0, [3; 32])),
+            )
+            .unwrap(),
+        ),
+        CopyStreamItem::Failed {
+            stamp: stamp(),
+            reason: ContentReadFailure::Cancelled,
+        },
+    ];
+    let finds = [
+        FindStreamItem::Chunk(Box::new(
+            FindChunk::new(
+                &find(),
+                0,
+                vec![FindMatch::new(stamp(), cell(), cell()).unwrap()],
+                find().continuation(),
+            )
+            .unwrap(),
+        )),
+        FindStreamItem::Complete {
+            stamp: stamp(),
+            chunks: 1,
+        },
+        FindStreamItem::Failed {
+            stamp: stamp(),
+            reason: ContentReadFailure::Retired,
+        },
+    ];
+    macro_rules! check {
+        ($p:ident) => {{
+            let encoded = content::reads::$p::encode_topology_result(&page);
+            assert_eq!(
+                content::reads::$p::decode_topology_result(&encoded, &topology).unwrap(),
+                page
+            );
+            for item in &copies {
+                let encoded = content::reads::$p::encode_copy_event(item);
+                assert_eq!(
+                    content::reads::$p::decode_copy_event(&encoded, &copy()).unwrap(),
+                    *item
+                );
+            }
+            for item in &finds {
+                let encoded = content::reads::$p::encode_find_event(item);
+                assert_eq!(
+                    content::reads::$p::decode_find_event(&encoded, &find()).unwrap(),
+                    *item
+                );
+            }
+            let mut encoded = content::reads::$p::encode_copy_event(&copies[0]);
+            let Some(spaceterm_protocol::wire::$p::copy_event::Item::Chunk(chunk)) =
+                encoded.item.as_mut()
+            else {
+                panic!("Copy chunk")
+            };
+            chunk.stamp.as_mut().unwrap().request_generation += 1;
+            assert!(content::reads::$p::decode_copy_event(&encoded, &copy()).is_err());
+            for scenario in 0..5 {
+                let mut encoded = content::reads::$p::encode_copy_event(&copies[1]);
+                let Some(spaceterm_protocol::wire::$p::copy_event::Item::Complete(value)) =
+                    encoded.item.as_mut()
+                else {
+                    panic!("Copy completion")
+                };
+                match scenario {
+                    0 => value.html_digest = None,
+                    1 => {
+                        value.plain_digest.pop();
+                    }
+                    2 => value.transfer = 0,
+                    3 => value.plain_bytes = u64::MAX,
+                    _ => value.stamp.as_mut().unwrap().request_generation += 1,
+                }
+                assert!(content::reads::$p::decode_copy_event(&encoded, &copy()).is_err());
+            }
+            let mut encoded = content::reads::$p::encode_find_event(&finds[0]);
+            let Some(spaceterm_protocol::wire::$p::find_event::Item::Chunk(chunk)) =
+                encoded.item.as_mut()
+            else {
+                panic!("Find chunk")
+            };
+            chunk.continuation.as_mut().unwrap().query_fingerprint[0] ^= 1;
+            assert!(content::reads::$p::decode_find_event(&encoded, &find()).is_err());
+            let mut encoded = content::reads::$p::encode_topology_result(&page);
+            let Some(spaceterm_protocol::wire::$p::content_read_response::Result::Topology(page)) =
+                encoded.result.as_mut()
+            else {
+                panic!("Topology page")
+            };
+            page.rows.push(page.rows[0].clone());
+            assert!(content::reads::$p::decode_topology_result(&encoded, &topology).is_err());
+        }};
+    }
+    check!(v1);
+    check!(v2);
+}
