@@ -1182,6 +1182,18 @@ impl TabManager {
         cx.emit(TabManagerEvent::PresentationChanged);
         cx.notify();
     }
+
+    /// The Terminal Pane presenting `pane` in any of this Workspace's Tabs.
+    pub(crate) fn server_terminal(
+        &self,
+        pane: crate::ui::server_desktop_contracts::PaneId,
+        cx: &gpui::App,
+    ) -> Option<Entity<crate::ui::TerminalPane>> {
+        self.tabs
+            .all_views()
+            .into_iter()
+            .find_map(|view| view.read(cx).server_terminal(pane))
+    }
 }
 
 /// Server-backed Tab Manager state, for tests that inspect it directly.
@@ -1211,18 +1223,6 @@ impl TabManager {
             Tabs::Server(server) => server.active(),
             Tabs::Local(_) => None,
         }
-    }
-
-    /// The Terminal Pane presenting `pane` in any of this Workspace's Tabs.
-    pub(crate) fn server_terminal(
-        &self,
-        pane: crate::ui::server_desktop_contracts::PaneId,
-        cx: &gpui::App,
-    ) -> Option<Entity<crate::ui::TerminalPane>> {
-        self.tabs
-            .all_views()
-            .into_iter()
-            .find_map(|view| view.read(cx).server_terminal(pane))
     }
 
     pub(crate) fn server_tab(&self, tab: TabId) -> Option<Entity<TabView>> {
