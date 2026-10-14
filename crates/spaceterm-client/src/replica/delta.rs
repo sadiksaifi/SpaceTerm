@@ -68,6 +68,9 @@ impl Replica {
         stamp: PublicationStamp,
         delta: OrganizationDelta,
     ) -> Result<ReplicaUpdate, ClientFailure> {
+        if self.staging.is_some() {
+            return Err(invalid_peer());
+        }
         if !self.state.borrow().is_ready() {
             return Ok(ReplicaUpdate::Ignored);
         }

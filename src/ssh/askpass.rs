@@ -22,6 +22,9 @@ use zeroize::Zeroizing;
 
 use prompt::{AskPassPromptKind, AskPassRequest, AskPassSecret};
 
+/// Revocable authority supplied by the foreground connection adapter, without native values.
+pub(crate) type AskPassAuthorityCheck = Arc<dyn Fn() -> bool + Send + Sync>;
+
 pub(super) const CAPABILITY_TEXT_BYTES: usize = 64;
 pub(super) const MAX_PROMPT_BYTES: usize = 4 * 1024;
 pub(super) const MAX_REQUEST_FRAME_BYTES: usize = CAPABILITY_TEXT_BYTES + MAX_PROMPT_BYTES + 8;
@@ -600,11 +603,29 @@ struct PresentationJob {
     request: AskPassRequest,
     response: mpsc::SyncSender<Result<AskPassProtocolReply, AskPassPresentationFailure>>,
     cancelled: Arc<AtomicBool>,
+    authority: Option<AskPassAuthorityCheck>,
+}
+
+fn authority_valid(authority: Option<&AskPassAuthorityCheck>) -> bool {
+    authority.is_none_or(|authority| authority())
 }
 
 enum AskPassUiCommand {
     Present { owner: u64, job: PresentationJob },
     Cancel { owner: u64 },
+}
+
+struct ActiveUiPresentation {
+    owner: u64,
+    cancelled: Arc<AtomicBool>,
+    authority: Option<AskPassAuthorityCheck>,
+    closed: async_channel::Receiver<()>,
+}
+
+impl ActiveUiPresentation {
+    fn expired(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire) || !authority_valid(self.authority.as_ref())
+    }
 }
 
 pub(super) struct GpuiAskPassBridge {
@@ -618,13 +639,46 @@ impl GpuiAskPassBridge {
         let window_handle = window.window_handle();
         let (commands, receiver) = async_channel::bounded(2);
         cx.spawn(async move |cx| {
+            let mut active: Option<ActiveUiPresentation> = None;
             while let Ok(command) = receiver.recv().await {
+                // A full command queue can delay Cancel behind a later Present.
+                // The cancelled generation itself, not queue ordering, decides
+                // whether the old prompt may still occupy the presenter.
+                let expired = active.as_ref().is_some_and(ActiveUiPresentation::expired);
+                let cancelling_active = matches!(
+                    &command,
+                    AskPassUiCommand::Cancel { owner }
+                        if active.as_ref().is_some_and(|active| active.owner == *owner)
+                );
+                if (expired || cancelling_active)
+                    && let Some(previous) = active.take()
+                {
+                    let result = window_handle.update(cx, |_, window, cx| {
+                        presenter.update(cx, |presenter, cx| {
+                            presenter.cancel_owner(previous.owner, window, cx);
+                        });
+                    });
+                    if result.is_ok() {
+                        // Modal dismissal settles through deferred lifecycle delivery.
+                        // Await that delivery before admitting another prompt.
+                        let _ = previous.closed.recv().await;
+                    }
+                }
                 match command {
                     AskPassUiCommand::Present { owner, job } => {
-                        if job.cancelled.load(Ordering::Acquire) {
+                        if job.cancelled.load(Ordering::Acquire)
+                            || !authority_valid(job.authority.as_ref())
+                        {
                             let _ = job.response.send(Ok(AskPassProtocolReply::Cancelled));
                             continue;
                         }
+                        let (closed, closure) = async_channel::bounded(1);
+                        let next_active = ActiveUiPresentation {
+                            owner,
+                            cancelled: Arc::clone(&job.cancelled),
+                            authority: job.authority.clone(),
+                            closed: closure,
+                        };
                         let response = Rc::new(RefCell::new(Some(job.response)));
                         let completion_response = Rc::clone(&response);
                         let result = window_handle.update(cx, |_, window, cx| {
@@ -636,18 +690,25 @@ impl GpuiAskPassBridge {
                                         if let Some(response) =
                                             completion_response.borrow_mut().take()
                                         {
-                                            let _ =
-                                                response.send(Ok(map_presentation_result(result)));
+                                            let answer = if job.cancelled.load(Ordering::Acquire)
+                                                || !authority_valid(job.authority.as_ref())
+                                            {
+                                                AskPassProtocolReply::Cancelled
+                                            } else {
+                                                map_presentation_result(result)
+                                            };
+                                            let _ = response.send(Ok(answer));
                                         }
+                                        let _ = closed.try_send(());
                                     }),
                                     window,
                                     cx,
                                 )
                             })
                         });
-                        if !matches!(result, Ok(Ok(())))
-                            && let Some(response) = response.borrow_mut().take()
-                        {
+                        if matches!(result, Ok(Ok(()))) {
+                            active = Some(next_active);
+                        } else if let Some(response) = response.borrow_mut().take() {
                             let _ = response.send(Err(AskPassPresentationFailure::Rejected));
                         }
                     }
@@ -669,6 +730,13 @@ impl GpuiAskPassBridge {
     }
 
     pub(super) fn presenter(&self) -> Arc<dyn AskPassPresenter> {
+        self.presenter_with_authority(None)
+    }
+
+    fn presenter_with_authority(
+        &self,
+        authority: Option<AskPassAuthorityCheck>,
+    ) -> Arc<dyn AskPassPresenter> {
         let owner = self
             .next_owner
             .fetch_add(1, Ordering::Relaxed)
@@ -678,6 +746,7 @@ impl GpuiAskPassBridge {
             owner,
             state: Arc::new(Mutex::new(ChannelPresentationState::default())),
             cancelled: Arc::new(AtomicBool::new(false)),
+            authority,
         })
     }
 }
@@ -692,6 +761,7 @@ struct ChannelAskPassPresenter {
     owner: u64,
     state: Arc<Mutex<ChannelPresentationState>>,
     cancelled: Arc<AtomicBool>,
+    authority: Option<AskPassAuthorityCheck>,
 }
 
 impl AskPassPresenter for ChannelAskPassPresenter {
@@ -704,8 +774,12 @@ impl AskPassPresenter for ChannelAskPassPresenter {
             .state
             .lock()
             .map_err(|_| AskPassPresentationFailure::Unavailable)?;
-        if state.closed {
-            return Err(AskPassPresentationFailure::Unavailable);
+        if state.closed
+            || stop.load(Ordering::Acquire)
+            || self.cancelled.load(Ordering::Acquire)
+            || !authority_valid(self.authority.as_ref())
+        {
+            return Ok(AskPassProtocolReply::Cancelled);
         }
         let (response, receiver) = mpsc::sync_channel(1);
         self.commands
@@ -715,16 +789,24 @@ impl AskPassPresenter for ChannelAskPassPresenter {
                     request,
                     response,
                     cancelled: Arc::clone(&self.cancelled),
+                    authority: self.authority.clone(),
                 },
             })
             .map_err(|_| AskPassPresentationFailure::Unavailable)?;
         drop(state);
         loop {
-            match receiver.recv_timeout(PRESENTATION_POLL_INTERVAL) {
+            let answer = receiver.recv_timeout(PRESENTATION_POLL_INTERVAL);
+            // Check after receiving too: a response already queued when an attempt
+            // expires or its pairing is sealed must never escape to OpenSSH.
+            if stop.load(Ordering::Acquire)
+                || self.cancelled.load(Ordering::Acquire)
+                || !authority_valid(self.authority.as_ref())
+            {
+                self.cancel_active();
+                return Ok(AskPassProtocolReply::Cancelled);
+            }
+            match answer {
                 Ok(answer) => return answer,
-                Err(mpsc::RecvTimeoutError::Timeout) if stop.load(Ordering::Acquire) => {
-                    return Err(AskPassPresentationFailure::Unavailable);
-                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(AskPassPresentationFailure::Unavailable);
@@ -804,6 +886,14 @@ pub(crate) trait AskPassWindowFactory: Send + Sync {
 }
 pub(crate) trait AskPassAttemptFactory: Send + Sync {
     fn start_attempt(&self, paths: &AppPaths) -> Result<AskPassAttempt, AskPassUnavailable>;
+
+    fn start_authorized_attempt(
+        &self,
+        _paths: &AppPaths,
+        _authority: AskPassAuthorityCheck,
+    ) -> Result<AskPassAttempt, AskPassUnavailable> {
+        Err(AskPassUnavailable)
+    }
 }
 pub(crate) struct AskPassAttempt {
     pub(crate) lease: AskPassBrokerLease,
@@ -952,6 +1042,21 @@ impl AskPassAttemptFactory for GpuiAskPassBrokerFactory {
             self.bridge.presenter(),
         )
     }
+
+    fn start_authorized_attempt(
+        &self,
+        paths: &AppPaths,
+        authority: AskPassAuthorityCheck,
+    ) -> Result<AskPassAttempt, AskPassUnavailable> {
+        start_attempt_with_authority(
+            paths,
+            self.helper_path.clone(),
+            self.local_ipc.as_ref(),
+            self.bridge
+                .presenter_with_authority(Some(authority.clone())),
+            Some(authority),
+        )
+    }
 }
 
 pub(crate) fn start_attempt_with_presenter(
@@ -960,7 +1065,17 @@ pub(crate) fn start_attempt_with_presenter(
     local_ipc: &dyn AskPassLocalIpc,
     presenter: Arc<dyn AskPassPresenter>,
 ) -> Result<AskPassAttempt, AskPassUnavailable> {
-    if !helper_path.is_absolute() {
+    start_attempt_with_authority(paths, helper_path, local_ipc, presenter, None)
+}
+
+fn start_attempt_with_authority(
+    paths: &AppPaths,
+    helper_path: PathBuf,
+    local_ipc: &dyn AskPassLocalIpc,
+    presenter: Arc<dyn AskPassPresenter>,
+    authority: Option<AskPassAuthorityCheck>,
+) -> Result<AskPassAttempt, AskPassUnavailable> {
+    if !helper_path.is_absolute() || !authority_valid(authority.as_ref()) {
         return Err(AskPassUnavailable);
     }
     let observation = AskPassAttemptObservation::default();
@@ -980,7 +1095,41 @@ pub(crate) fn start_attempt_with_presenter(
     let worker_presenter = Arc::clone(&presenter) as Arc<dyn AskPassPresenter>;
     let worker = thread::Builder::new()
         .name("spaceterm-askpass-broker".to_owned())
-        .spawn(move || run_broker(endpoint, capability, worker_presenter, worker_stop))
+        .spawn(move || {
+            let monitor = authority.as_ref().map(|authority| {
+                let authority = Arc::clone(authority);
+                let stop = Arc::clone(&worker_stop);
+                let presenter = Arc::clone(&worker_presenter);
+                thread::Builder::new()
+                    .name("spaceterm-askpass-authority".to_owned())
+                    .spawn(move || {
+                        while !stop.load(Ordering::Acquire) {
+                            if !authority() {
+                                stop.store(true, Ordering::Release);
+                                presenter.cancel_active();
+                                break;
+                            }
+                            thread::sleep(PRESENTATION_POLL_INTERVAL);
+                        }
+                    })
+            });
+            if matches!(monitor, Some(Err(_))) {
+                worker_stop.store(true, Ordering::Release);
+                worker_presenter.cancel_active();
+                return;
+            }
+            run_broker(
+                endpoint,
+                capability,
+                worker_presenter,
+                Arc::clone(&worker_stop),
+                authority,
+            );
+            worker_stop.store(true, Ordering::Release);
+            if let Some(Ok(monitor)) = monitor {
+                let _ = monitor.join();
+            }
+        })
         .map_err(|_| AskPassUnavailable)?;
     let cancel_presenter = Arc::clone(&presenter);
     let cancel_presentation: Arc<dyn Fn() + Send + Sync> =
@@ -1025,8 +1174,9 @@ fn run_broker(
     capability: Arc<AskPassCapability>,
     presenter: Arc<dyn AskPassPresenter>,
     stop: Arc<AtomicBool>,
+    authority: Option<AskPassAuthorityCheck>,
 ) {
-    while !stop.load(Ordering::Acquire) {
+    while !stop.load(Ordering::Acquire) && authority_valid(authority.as_ref()) {
         match endpoint.listener.accept_authenticated() {
             AskPassLocalAccept::Connected(mut stream) => {
                 let _ = handle_verified_connection(
@@ -1034,6 +1184,7 @@ fn run_broker(
                     capability.as_ref(),
                     presenter.as_ref(),
                     stop.as_ref(),
+                    authority.as_ref(),
                 );
             }
             AskPassLocalAccept::Pending | AskPassLocalAccept::Rejected => {
@@ -1049,11 +1200,20 @@ fn handle_verified_connection<S: Read + Write + ?Sized>(
     capability: &AskPassCapability,
     presenter: &dyn AskPassPresenter,
     stop: &AtomicBool,
+    authority: Option<&AskPassAuthorityCheck>,
 ) -> Result<(), AskPassProtocolError> {
     let request = read_request(stream, capability, stop)?;
+    if stop.load(Ordering::Acquire) || !authority_valid(authority) {
+        return write_reply(stream, AskPassProtocolReply::Cancelled);
+    }
     let answer = presenter
         .present(request, stop)
         .unwrap_or(AskPassProtocolReply::Failed);
+    let answer = if stop.load(Ordering::Acquire) || !authority_valid(authority) {
+        AskPassProtocolReply::Cancelled
+    } else {
+        answer
+    };
     write_reply(stream, answer)
 }
 pub(crate) trait AskPassLease: Send + Sync {
@@ -1475,6 +1635,7 @@ mod tests {
                 owner: 41,
                 state: Arc::new(Mutex::new(ChannelPresentationState::default())),
                 cancelled: Arc::new(AtomicBool::new(false)),
+                authority: None,
             }),
             observation.clone(),
         );
@@ -1507,6 +1668,7 @@ mod tests {
             owner: 41,
             state: Arc::new(Mutex::new(ChannelPresentationState::default())),
             cancelled: Arc::new(AtomicBool::new(false)),
+            authority: None,
         });
         let worker = thread::spawn({
             let presenter = Arc::clone(&presenter);
@@ -1529,11 +1691,201 @@ mod tests {
             receiver.recv_blocking(),
             Ok(AskPassUiCommand::Cancel { owner: 41 })
         ));
-        response.send(Ok(AskPassProtocolReply::Cancelled)).unwrap();
+        // Cancellation no longer needs a UI response to release the broker worker.
+        let _ = response.send(Ok(AskPassProtocolReply::Cancelled));
         assert!(matches!(
             worker.join(),
             Ok(Ok(AskPassProtocolReply::Cancelled))
         ));
+    }
+
+    #[test]
+    fn channel_rejects_late_secret_after_attempt_cancellation() {
+        let (commands, receiver) = async_channel::bounded(2);
+        let presenter = Arc::new(ChannelAskPassPresenter {
+            commands,
+            owner: 41,
+            state: Arc::new(Mutex::new(ChannelPresentationState::default())),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            authority: None,
+        });
+        let worker = thread::spawn({
+            let presenter = Arc::clone(&presenter);
+            move || {
+                presenter.present(
+                    AskPassRequest::new("Password:".to_owned(), AskPassPromptKind::Secret).unwrap(),
+                    &AtomicBool::new(false),
+                )
+            }
+        });
+        let response = match receiver.recv_blocking().unwrap() {
+            AskPassUiCommand::Present { job, .. } => job.response,
+            AskPassUiCommand::Cancel { .. } => panic!("expected presentation"),
+        };
+        presenter.cancel_active();
+        let _ = response.send(Ok(AskPassProtocolReply::Secret(
+            AskPassSecret::new(b"late response".to_vec()).unwrap(),
+        )));
+        assert!(matches!(
+            worker.join().unwrap(),
+            Ok(AskPassProtocolReply::Cancelled)
+        ));
+        assert!(matches!(
+            receiver.recv_blocking(),
+            Ok(AskPassUiCommand::Cancel { owner: 41 })
+        ));
+    }
+
+    #[test]
+    fn channel_revocation_dismisses_an_unanswered_prompt_without_a_ui_response() {
+        let valid = Arc::new(AtomicBool::new(true));
+        let authority: AskPassAuthorityCheck = {
+            let valid = Arc::clone(&valid);
+            Arc::new(move || valid.load(Ordering::Acquire))
+        };
+        let (commands, receiver) = async_channel::bounded(2);
+        let presenter = Arc::new(ChannelAskPassPresenter {
+            commands,
+            owner: 41,
+            state: Arc::new(Mutex::new(ChannelPresentationState::default())),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            authority: Some(authority),
+        });
+        let (settled, settlement) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            let answer = presenter.present(
+                AskPassRequest::new("Password:".to_owned(), AskPassPromptKind::Secret).unwrap(),
+                &AtomicBool::new(false),
+            );
+            settled.send(answer).unwrap();
+        });
+        let _unanswered = match receiver.recv_blocking().unwrap() {
+            AskPassUiCommand::Present { job, .. } => job.response,
+            AskPassUiCommand::Cancel { .. } => panic!("expected presentation"),
+        };
+        valid.store(false, Ordering::Release);
+        assert!(matches!(
+            settlement.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Ok(AskPassProtocolReply::Cancelled)
+        ));
+        assert!(matches!(
+            receiver.recv_blocking(),
+            Ok(AskPassUiCommand::Cancel { owner: 41 })
+        ));
+        worker.join().unwrap();
+    }
+
+    #[gpui::test]
+    fn saturated_ui_queue_cannot_let_retry_overtake_cancelled_prompt(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // The broker and cancellation workers cross the real native thread boundary.
+        cx.executor().allow_parking();
+        struct Harness;
+        impl gpui::Render for Harness {
+            fn render(
+                &mut self,
+                _: &mut Window,
+                _: &mut gpui::Context<Self>,
+            ) -> impl gpui::IntoElement {
+                use gpui::prelude::*;
+                spaceterm_ui::ModalLayer::new(gpui::div().size_full())
+            }
+        }
+        fn wait_until(
+            cx: &mut gpui::VisualTestContext,
+            mut condition: impl FnMut(&mut gpui::VisualTestContext) -> bool,
+        ) {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                cx.run_until_parked();
+                if condition(cx) {
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "AskPass UI fixture watchdog expired"
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        cx.update(crate::ui::init).unwrap();
+        let (_, cx) = cx.add_window_view(|_, _| Harness);
+        let bridge = cx.update(|window, cx| {
+            window.activate_window();
+            GpuiAskPassBridge::new(window, cx)
+        });
+        let original = Arc::new(ChannelAskPassPresenter {
+            commands: bridge.commands.clone(),
+            owner: 41,
+            state: Arc::new(Mutex::new(ChannelPresentationState::default())),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            authority: None,
+        });
+        let original_worker = thread::spawn({
+            let original = Arc::clone(&original);
+            move || {
+                original.present(
+                    AskPassRequest::new("Password:".to_owned(), AskPassPromptKind::Secret).unwrap(),
+                    &AtomicBool::new(false),
+                )
+            }
+        });
+        wait_until(cx, |cx| {
+            cx.debug_bounds("ssh-askpass-secret-input").is_some()
+        });
+        let original_focus = cx.update(|window, cx| window.focused(cx).unwrap());
+
+        // Hold the admission lock to keep the cancellation command deferred while
+        // its synchronous flag has already revoked the displayed generation.
+        let admission = original.state.lock().unwrap();
+        assert!(
+            bridge
+                .commands
+                .try_send(AskPassUiCommand::Cancel { owner: 99 })
+                .is_ok()
+        );
+        assert!(
+            bridge
+                .commands
+                .try_send(AskPassUiCommand::Cancel { owner: 100 })
+                .is_ok()
+        );
+        assert!(bridge.commands.is_full());
+        original.cancel_active();
+        let retry = bridge.presenter();
+        let (settled, settlement) = mpsc::sync_channel(1);
+        let retry_worker = thread::spawn(move || {
+            let answer = retry.present(
+                AskPassRequest::new("Password:".to_owned(), AskPassPromptKind::Secret).unwrap(),
+                &AtomicBool::new(false),
+            );
+            settled.send(answer).unwrap();
+        });
+        // Retry must open without receiving the old Cancel command or waiting for
+        // the caller to observe dismissal first. A Busy rejection fails this gate.
+        wait_until(cx, |cx| {
+            cx.debug_bounds("ssh-askpass-secret-input").is_some()
+                && cx.update(|window, _| !original_focus.is_focused(window))
+        });
+        cx.simulate_input("fresh response");
+        cx.simulate_keystrokes("enter");
+        let mut answer = None;
+        wait_until(cx, |_| {
+            answer = settlement.try_recv().ok();
+            answer.is_some()
+        });
+        assert!(
+            matches!(answer.unwrap(), Ok(AskPassProtocolReply::Secret(secret))
+            if secret.as_bytes() == b"fresh response")
+        );
+        drop(admission);
+        assert!(matches!(
+            original_worker.join().unwrap(),
+            Ok(AskPassProtocolReply::Cancelled)
+        ));
+        retry_worker.join().unwrap();
+        cx.run_until_parked();
     }
 
     #[test]

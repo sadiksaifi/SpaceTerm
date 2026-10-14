@@ -311,11 +311,12 @@ impl NativeOwnerFactory for Factory {
                             local_routes,
                             Some(configuration),
                         )?;
+                        let foreground = crate::platform::server_client_route::foreground_connector(
+                            shared.clone(),
+                            journal.clone(),
+                        );
                         (
-                            crate::platform::server_client_route::retain_runtime(
-                                shared.clone(),
-                                owner,
-                            ),
+                            crate::platform::server_client_route::retain_runtime(foreground, owner),
                             shared,
                         )
                     }

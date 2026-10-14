@@ -6,7 +6,7 @@ use spaceterm_client::{
     registry::ClientRegistry,
 };
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration;
@@ -239,6 +239,121 @@ async fn shutdown_during_dialing_waits_for_failed_open_cleanup() {
     assert!(routes.complete.load(Ordering::SeqCst));
 }
 
+struct ForegroundOpeningCleanup {
+    finish: tokio::sync::Semaphore,
+    attempts: Mutex<Vec<ForegroundCancellation>>,
+    completed: AtomicUsize,
+}
+impl Default for ForegroundOpeningCleanup {
+    fn default() -> Self {
+        Self {
+            finish: tokio::sync::Semaphore::new(0),
+            attempts: Mutex::new(Vec::new()),
+            completed: AtomicUsize::new(0),
+        }
+    }
+}
+impl RouteConnector for ForegroundOpeningCleanup {
+    fn open<'a>(
+        &'a self,
+        _: &'a spaceterm_client::api::ConnectionTarget,
+        _: ConnectionPurpose,
+    ) -> ClientFuture<'a, ConnectedRoute> {
+        Box::pin(async { Err(ClientFailure::new(ClientFailureClass::Unavailable)) })
+    }
+    fn open_foreground<'a>(
+        &'a self,
+        _: &'a spaceterm_client::api::ConnectionTarget,
+        cancellation: ForegroundCancellation,
+    ) -> ClientFuture<'a, ConnectedRoute> {
+        self.attempts.lock().unwrap().push(cancellation);
+        Box::pin(async {
+            // Native cleanup remains owned after foreground authority is revoked.
+            self.finish.acquire().await.unwrap().forget();
+            self.completed.fetch_add(1, Ordering::SeqCst);
+            Err(ClientFailure::new(ClientFailureClass::Unavailable))
+        })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_revokes_foreground_authority_before_dial_cleanup_finishes() {
+    let routes = Arc::new(ForegroundOpeningCleanup::default());
+    let binding = binding(1);
+    let (registry, runtime) =
+        ClientRegistry::recover(services(vec![binding.clone()], routes.clone()))
+            .await
+            .unwrap();
+    let server = registry.server(binding.target().server()).unwrap();
+    server.retry().await.unwrap();
+    settle().await;
+    let authority = routes.attempts.lock().unwrap()[0].clone();
+    assert!(!authority.is_cancelled());
+
+    let shutdown = tokio::spawn(runtime.shutdown());
+    settle().await;
+    assert!(
+        authority.is_cancelled(),
+        "shutdown retained prompt authority"
+    );
+    assert!(!shutdown.is_finished(), "shutdown detached native cleanup");
+    assert_eq!(routes.completed.load(Ordering::SeqCst), 0);
+
+    routes.finish.add_permits(1);
+    shutdown.await.unwrap().unwrap();
+    assert_eq!(routes.completed.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn replacement_retry_revokes_foreground_authority_before_dial_cleanup_finishes() {
+    let routes = Arc::new(ForegroundOpeningCleanup::default());
+    let binding = binding(1);
+    let (registry, runtime) =
+        ClientRegistry::recover(services(vec![binding.clone()], routes.clone()))
+            .await
+            .unwrap();
+    let server = registry.server(binding.target().server()).unwrap();
+    server.retry().await.unwrap();
+    settle().await;
+    let authority = routes.attempts.lock().unwrap()[0].clone();
+    assert!(!authority.is_cancelled());
+
+    server.retry().await.unwrap();
+    settle().await;
+    assert!(
+        authority.is_cancelled(),
+        "replacement Retry retained prompt authority"
+    );
+    assert_eq!(routes.completed.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        routes.attempts.lock().unwrap().len(),
+        1,
+        "replacement dial started before old native cleanup finished"
+    );
+
+    routes.finish.add_permits(1);
+    settle().await;
+    assert_eq!(routes.completed.load(Ordering::SeqCst), 1);
+    let replacement = {
+        let attempts = routes.attempts.lock().unwrap();
+        assert_eq!(attempts.len(), 2);
+        attempts[1].clone()
+    };
+    assert!(!replacement.is_cancelled());
+    assert!(
+        authority.is_cancelled(),
+        "replacement restored old prompt authority"
+    );
+
+    let shutdown = tokio::spawn(runtime.shutdown());
+    settle().await;
+    assert!(replacement.is_cancelled());
+    assert!(!shutdown.is_finished());
+    routes.finish.add_permits(1);
+    shutdown.await.unwrap().unwrap();
+    assert_eq!(routes.completed.load(Ordering::SeqCst), 2);
+}
+
 struct DeniedCredentials;
 impl CredentialSource for DeniedCredentials {
     fn signing_access<'a>(
@@ -270,5 +385,54 @@ async fn denied_credentials_pause_reconnect_without_an_enrollment_capability() {
     settle().await;
     assert_eq!(plan.opens.load(Ordering::SeqCst), 1);
     assert_eq!(plan.queries.load(Ordering::SeqCst), 0);
+    runtime.shutdown().await.unwrap();
+}
+
+struct InteractiveRoute {
+    background: AtomicUsize,
+    foreground: AtomicUsize,
+}
+impl RouteConnector for InteractiveRoute {
+    fn open<'a>(
+        &'a self,
+        _: &'a spaceterm_client::api::ConnectionTarget,
+        _: ConnectionPurpose,
+    ) -> ClientFuture<'a, ConnectedRoute> {
+        self.background.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Err(ClientFailure::new(ClientFailureClass::Unavailable)) })
+    }
+    fn open_foreground<'a>(
+        &'a self,
+        _: &'a spaceterm_client::api::ConnectionTarget,
+        _: ForegroundCancellation,
+    ) -> ClientFuture<'a, ConnectedRoute> {
+        self.foreground.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Err(ClientFailure::new(ClientFailureClass::Unavailable)) })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn foreground_retry_authorizes_only_one_dial_not_background_reconnect() {
+    let routes = Arc::new(InteractiveRoute {
+        background: AtomicUsize::new(0),
+        foreground: AtomicUsize::new(0),
+    });
+    let binding = binding(1);
+    let (registry, runtime) =
+        ClientRegistry::recover(services(vec![binding.clone()], routes.clone()))
+            .await
+            .unwrap();
+    let server = registry.server(binding.target().server()).unwrap();
+    server.connect().await.unwrap();
+    settle().await;
+    assert_eq!(routes.background.load(Ordering::SeqCst), 1);
+    assert_eq!(routes.foreground.load(Ordering::SeqCst), 0);
+    server.retry().await.unwrap();
+    settle().await;
+    assert_eq!(routes.foreground.load(Ordering::SeqCst), 1);
+    tokio::time::advance(Duration::from_secs(31)).await;
+    settle().await;
+    assert_eq!(routes.foreground.load(Ordering::SeqCst), 1);
+    assert!(routes.background.load(Ordering::SeqCst) >= 2);
     runtime.shutdown().await.unwrap();
 }

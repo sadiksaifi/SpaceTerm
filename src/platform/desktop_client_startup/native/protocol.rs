@@ -234,7 +234,7 @@ impl NativeProtocol {
             .map_err(|_| invalid())?
             .insert(info.server, info);
         if let Some(cache) = self.cache.lock().map_err(|_| invalid())?.as_ref() {
-            cache.publish(self.binding(info.server)?, retained.organization.clone())?;
+            cache.publish(self.binding(info.server)?, retained.clone())?;
         }
         self.channels()?.publish(info, retained)
     }
@@ -363,6 +363,15 @@ impl Drop for LookupCleanup<'_> {
     }
 }
 impl ConnectionDelegate for NativeProtocol {
+    fn shutdown(&self) -> ClientFuture<'_, ()> {
+        Box::pin(async move {
+            let cache = self.cache.lock().map_err(|_| invalid())?.clone();
+            if let Some(cache) = cache {
+                cache.flush().await?;
+            }
+            Ok(())
+        })
+    }
     fn invalidate(&self, binding: &PairedServerBinding, reason: ConnectionInvalidation) {
         let server = binding.target().server();
         if let Ok(channels) = self.channels() {
@@ -389,11 +398,7 @@ impl ConnectionDelegate for NativeProtocol {
         {
             metadata.remove(&server);
         }
-        if reason == ConnectionInvalidation::Publication {
-            self.terminal.invalidate_publication(server);
-        } else {
-            self.terminal.invalidate(server);
-        }
+        self.terminal.invalidate(server, reason);
     }
     fn reconcile<'a>(
         &'a self,
@@ -968,10 +973,12 @@ impl LocalUseInvalidator for NativeProtocol {
     }
     fn remove_pairing<'a>(&'a self, pairing: &'a LocalPairingKey) -> ClientFuture<'a, ()> {
         Box::pin(async move {
-            self.registry()?
-                .remove_suppressed(pairing)
-                .await
-                .map(|_| ())
+            self.registry()?.remove_suppressed(pairing).await?;
+            let cache = self.cache.lock().map_err(|_| invalid())?.clone();
+            if let Some(cache) = cache {
+                cache.remove_pairing(pairing).await?;
+            }
+            Ok(())
         })
     }
 }

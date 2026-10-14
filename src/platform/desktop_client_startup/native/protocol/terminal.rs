@@ -23,7 +23,31 @@ struct Context {
 }
 struct PendingContext {
     context: Context,
+    owner: Arc<()>,
     reply: oneshot::Sender<Result<(), ClientFailure>>,
+}
+struct PendingContextGuard<'a> {
+    transport: &'a TerminalTransport,
+    key: (ServerId, u64),
+    owner: Arc<()>,
+    received: oneshot::Receiver<Result<(), ClientFailure>>,
+}
+impl Drop for PendingContextGuard<'_> {
+    fn drop(&mut self) {
+        // Close before taking the invalidation lock: an abandoned waiter must
+        // not authorize a late acknowledgement, even while cleanup is waiting.
+        self.received.close();
+        if let Ok(mut state) = self.transport.state.lock()
+            && state
+                .pending_contexts
+                .get(&self.key)
+                .is_some_and(|pending| Arc::ptr_eq(&pending.owner, &self.owner))
+        {
+            state.pending_contexts.remove(&self.key);
+        }
+        // The dispatch may still be queued or accepted by the server. Its
+        // generation reservation belongs to the binding, not to this waiter.
+    }
 }
 struct Subscription {
     fence: EffectFence,
@@ -51,6 +75,7 @@ struct PasteCompletion {
 struct State {
     synchronizers: BTreeMap<ServerId, Arc<tokio::sync::Mutex<()>>>,
     contexts: BTreeMap<ServerId, Context>,
+    reserved_contexts: BTreeMap<ServerId, Context>,
     pending_contexts: BTreeMap<(ServerId, u64), PendingContext>,
     subscriptions: BTreeMap<PaneId, Subscription>,
     reads: BTreeMap<(ServerId, u64), PendingRead>,
@@ -64,20 +89,18 @@ pub(super) struct TerminalTransport {
     pub(super) effects_changed: Arc<Notify>,
 }
 impl TerminalTransport {
-    pub(super) fn invalidate_publication(&self, server: ServerId) {
+    pub(super) fn invalidate(&self, server: ServerId, reason: ConnectionInvalidation) {
         if let Ok(mut state) = self.state.lock() {
-            // Organization publication replaces content authority, not the
-            // connection's acknowledged native context or an in-flight update.
-            state
-                .subscriptions
-                .retain(|pane, _| pane.server() != server);
-            state.reads.retain(|(owner, _), _| *owner != server);
-        }
-    }
-    pub(super) fn invalidate(&self, server: ServerId) {
-        if let Ok(mut state) = self.state.lock() {
-            state.synchronizers.remove(&server);
-            state.contexts.remove(&server);
+            // Replica refresh does not reset the server's acknowledged context or
+            // release the owner serializing updates on this connection.
+            if !matches!(
+                reason,
+                ConnectionInvalidation::Publication | ConnectionInvalidation::Reconciliation
+            ) {
+                state.synchronizers.remove(&server);
+                state.contexts.remove(&server);
+                state.reserved_contexts.remove(&server);
+            }
             state
                 .pending_contexts
                 .retain(|(owner, _), _| *owner != server);
@@ -201,9 +224,11 @@ impl NativeProtocol {
                             tokio::time::sleep(Duration::from_millis(20)).await;
                             changed.notify_one();
                         } else if error.class() != ClientFailureClass::StaleAuthority {
-                            // Local presentation or capacity failures do not
-                            // revoke an acknowledged connection context.
-                            owner.terminal.invalidate_publication(info.server);
+                            // Local presentation failures retain the acknowledged
+                            // context while cancelling uncertain in-flight work.
+                            owner
+                                .terminal
+                                .invalidate(info.server, ConnectionInvalidation::Reconciliation);
                         } else if owner.handle(info.server).is_ok_and(|handle| {
                             !matches!(*handle.state().borrow(), ConnectionState::Connected { .. })
                         }) {
@@ -281,16 +306,29 @@ impl NativeProtocol {
         }
         let channels = self.channels()?;
         let panes = channels.presentation_channels(info.server)?;
-        let previous = self
-            .terminal
-            .state
-            .lock()
-            .map_err(|_| invalid())?
-            .contexts
-            .get(&info.server)
-            .copied();
+        let (previous, reserved) = {
+            let state = self.terminal.state.lock().map_err(|_| invalid())?;
+            (
+                state
+                    .contexts
+                    .get(&info.server)
+                    .copied()
+                    .filter(|context| context.binding == info.binding),
+                state
+                    .reserved_contexts
+                    .get(&info.server)
+                    .copied()
+                    .filter(|context| context.binding == info.binding),
+            )
+        };
         let maximum = panes.iter().map(|pane| pane.state().borrow().context).max();
-        let Some(generation) = maximum.or_else(|| previous.map(|old| old.generation)) else {
+        let Some(generation) = maximum.or_else(|| {
+            previous
+                .into_iter()
+                .chain(reserved)
+                .map(|old| old.generation)
+                .max()
+        }) else {
             return Ok(());
         };
         let focused = panes
@@ -307,46 +345,71 @@ impl NativeProtocol {
             input: facts.terminal_input_focus,
             native: facts.presentable && facts.terminal_input_focus,
         };
-        if let Some(previous) = previous
-            && previous != context
-            && context.generation <= previous.generation
+        // A confirmed context can be reused only when no newer attempt may
+        // have replaced it on the server. Ordinary unchanged publication must
+        // not replay the confirmed generation merely because it was reserved.
+        let uncertain = reserved.is_some_and(|reserved| {
+            previous.is_none_or(|previous| reserved.generation > previous.generation)
+        });
+        if (previous != Some(context) || uncertain)
+            && previous
+                .into_iter()
+                .chain(reserved)
+                .any(|old| context.generation <= old.generation)
         {
             context.generation = channels.next_connection_context()?;
         }
         channels.align_connection_context(info.server, context.generation)?;
-        if previous != Some(context) {
+        if previous != Some(context) || uncertain {
             let request = self.next()?;
-            let (reply, received) = oneshot::channel();
-            self.terminal
-                .state
-                .lock()
-                .map_err(|_| invalid())?
-                .pending_contexts
-                .insert((info.server, request), PendingContext { context, reply });
             let payload = context_payload(info.major, request, info.epoch, context)?;
-            let result = async {
-                handle.dispatch(info, payload).await?;
-                tokio::time::timeout(Duration::from_secs(15), received)
-                    .await
-                    .map_err(|_| fail(ClientFailureClass::Unavailable))?
-                    .map_err(|_| stale())?
+            let (reply, received) = oneshot::channel();
+            let owner = Arc::new(());
+            let mut pending = PendingContextGuard {
+                transport: &self.terminal,
+                key: (info.server, request),
+                owner: owner.clone(),
+                received,
+            };
+            {
+                let mut state = self.terminal.state.lock().map_err(|_| invalid())?;
+                if state
+                    .synchronizers
+                    .get(&info.server)
+                    .is_none_or(|current| !Arc::ptr_eq(current, &synchronized))
+                {
+                    return Err(stale());
+                }
+                // Reserve before dispatch, which can queue the message even if
+                // its future is later cancelled or reports an uncertain error.
+                let reserved = state
+                    .reserved_contexts
+                    .entry(info.server)
+                    .or_insert(context);
+                if reserved.binding != context.binding || reserved.generation < context.generation {
+                    *reserved = context;
+                }
+                state.pending_contexts.insert(
+                    pending.key,
+                    PendingContext {
+                        context,
+                        owner,
+                        reply,
+                    },
+                );
             }
-            .await;
-            if let Err(error) = result {
-                self.terminal
-                    .state
-                    .lock()
-                    .map_err(|_| invalid())?
-                    .pending_contexts
-                    .remove(&(info.server, request));
-                return Err(error);
-            }
-            self.terminal
-                .state
-                .lock()
-                .map_err(|_| invalid())?
-                .contexts
-                .insert(info.server, context);
+            let result = tokio::time::timeout(Duration::from_secs(15), async {
+                tokio::select! {
+                    biased;
+                    result = &mut pending.received => return result.map_err(|_| stale())?,
+                    result = handle.dispatch(info, payload) => result?,
+                }
+                (&mut pending.received).await.map_err(|_| stale())?
+            })
+            .await
+            .map_err(|_| fail(ClientFailureClass::Unavailable));
+            drop(pending);
+            result??;
         }
         let mut wanted = BTreeMap::new();
         for pane in &panes {
@@ -550,16 +613,14 @@ impl NativeProtocol {
             ($message:expr, $p:ident) => {{
                 match $message.kind.as_ref().ok_or_else(invalid)? {
                     $p::message::Kind::ClientContext(value) => {
-                        let pending = self
-                            .terminal
-                            .state
-                            .lock()
-                            .map_err(|_| invalid())?
+                        let mut state = self.terminal.state.lock().map_err(|_| invalid())?;
+                        let pending = state
                             .pending_contexts
                             .remove(&(info.server, value.request))
                             .ok_or_else(stale)?;
                         let context = pending.context;
                         if value.acknowledged != value.failure.is_none()
+                            || context.binding != info.binding
                             || value.epoch != info.epoch.get()
                             || value.connection_generation != context.binding.generation.get()
                             || value.context_generation != context.generation.get()
@@ -569,21 +630,27 @@ impl NativeProtocol {
                         {
                             return Err(invalid());
                         }
-                        let result = match value.failure.as_ref() {
-                            None => Ok(()),
-                            Some(failure)
-                                if failure.classification == spaceterm_protocol::wire::common::FailureClass::Busy as i32 =>
-                            {
-                                Err(fail(ClientFailureClass::ResourceLimit))
+                        use spaceterm_protocol::wire::common::FailureClass;
+                        let result = match (value.acknowledged, value.failure.as_ref()) {
+                            (true, None) => Ok(()),
+                            (false, Some(failure)) => {
+                                match FailureClass::try_from(failure.classification) {
+                                    Ok(FailureClass::Stale) => Err(stale()),
+                                    Ok(FailureClass::Busy) => {
+                                        Err(fail(ClientFailureClass::ResourceLimit))
+                                    }
+                                    _ => return Err(invalid()),
+                                }
                             }
-                            Some(failure)
-                                if failure.classification == spaceterm_protocol::wire::common::FailureClass::Stale as i32 =>
-                            {
-                                Err(stale())
-                            }
-                            Some(_) => return Err(invalid()),
+                            _ => return Err(invalid()),
                         };
-                        let _ = pending.reply.send(result);
+                        let acknowledged = result.is_ok();
+                        // Delivery and installation share the invalidation lock.
+                        // A closed waiter leaves only the generation reservation,
+                        // never acknowledged connection authority.
+                        if pending.reply.send(result).is_ok() && acknowledged {
+                            state.contexts.insert(info.server, context);
+                        }
                         Ok(true)
                     }
                     $p::message::Kind::ContentPublication(value) => {

@@ -1,6 +1,7 @@
 use super::*;
 use gpui::TestAppContext;
 use spaceterm_client::{
+    pane_channel::{EffectKind, ExplicitUseSource},
     ports::*,
     testing::{FakePaneConnection, FakeServer},
 };
@@ -390,6 +391,46 @@ mod terminal_fixture;
 static TERMINAL_SNAPSHOT: std::sync::OnceLock<spaceterm_core::organization::OrganizationSnapshot> =
     std::sync::OnceLock::new();
 
+fn terminal_context_response(
+    request: &Payload,
+    acknowledged: bool,
+    failure: Option<i32>,
+) -> Option<Payload> {
+    macro_rules! profile {
+        ($message:expr, $p:ident, $variant:ident) => {{
+            let Some($p::message::Kind::ClientContext(context)) = $message.kind.as_ref() else {
+                return None;
+            };
+            let mut response = context.clone();
+            response.acknowledged = acknowledged;
+            response.failure =
+                failure.map(|classification| spaceterm_protocol::wire::common::Failure {
+                    classification,
+                    retry_after_ms: 0,
+                });
+            Some(Payload::$variant($p::Message {
+                kind: Some($p::message::Kind::ClientContext(response)),
+            }))
+        }};
+    }
+    match request {
+        Payload::Major1(message) => profile!(message, v1, Major1),
+        Payload::Major2(message) => profile!(message, v2, Major2),
+    }
+}
+
+fn terminal_context_generations(request: &Payload) -> (u64, u64) {
+    match request {
+        Payload::Major1(v1::Message {
+            kind: Some(v1::message::Kind::ClientContext(context)),
+        }) => (context.connection_generation, context.context_generation),
+        Payload::Major2(v2::Message {
+            kind: Some(v2::message::Kind::ClientContext(context)),
+        }) => (context.connection_generation, context.context_generation),
+        _ => panic!("context request"),
+    }
+}
+
 fn terminal_publication(request: &Payload, target: &ConnectionTarget) -> Option<Payload> {
     use spaceterm_core::{content::*, content_queries::*};
     macro_rules! profile {
@@ -417,11 +458,15 @@ fn terminal_publication(request: &Payload, target: &ConnectionTarget) -> Option<
                 }
                 $p::message::Kind::ClientContext(context) => {
                     assert!(!context.acknowledged);
-                    let mut response = context.clone();
-                    response.acknowledged = true;
-                    Some(Payload::$variant($p::Message {
-                        kind: Some($p::message::Kind::ClientContext(response)),
-                    }))
+                    assert!(context.failure.is_none());
+                    let rejected = context.native_effects_eligible && !context.terminal_input_focus;
+                    terminal_context_response(
+                        request,
+                        !rejected,
+                        rejected.then_some(
+                            spaceterm_protocol::wire::common::FailureClass::Stale as i32,
+                        ),
+                    )
                 }
                 $p::message::Kind::PaneSubscription(subscription) if !subscription.cancel => {
                     let fence =
@@ -1435,3 +1480,904 @@ async fn graphics_read_acceptance(
 #[cfg(all(feature = "desktop-test-support", debug_assertions))]
 #[path = "production_acceptance.rs"]
 mod production_acceptance;
+
+struct NativeContextFixture {
+    protocol: Arc<NativeProtocol>,
+    plan: Arc<fixture::peer::PeerPlan>,
+    runtime: spaceterm_client::registry::ClientRuntime,
+    info: ConnectedInfo,
+    pane: spaceterm_client::pane_channel::PaneChannel,
+    _lease: spaceterm_client::pane_channel::WorkspaceLease,
+}
+impl NativeContextFixture {
+    async fn new(major: u32, handler: fixture::peer::QueryHandler) -> Self {
+        let seeded = terminal_fixture::Fixture::new(true).await;
+        TERMINAL_SNAPSHOT.get_or_init(|| seeded.server.snapshot().unwrap());
+        let server = FakeServer::new(1, vec![major]).unwrap();
+        let peer = FakePaneConnection::new(server.clone(), 1, major)
+            .await
+            .unwrap();
+        let journal = peer.journal().clone();
+        let tracker = OperationTracker::new(journal.clone());
+        let protocol = Arc::new(NativeProtocol::new(journal.clone(), tracker));
+        let channels = Arc::new(
+            PaneChannels::new(protocol.clone(), ProjectionBudgets::supported().unwrap()).unwrap(),
+        );
+        journal
+            .bind_pane_channels(channels.as_ref().clone())
+            .unwrap();
+        protocol.set_channels(channels.clone()).unwrap();
+        let binding = server.binding(1).unwrap();
+        let mut plan = fixture::peer::PeerPlan::new(vec![major]);
+        plan.query_handler = Some(handler);
+        plan.capabilities.extend([
+            spaceterm_protocol::negotiation::CAPABILITY_ORGANIZATION_COMPARISONS,
+            spaceterm_protocol::negotiation::CAPABILITY_TERMINAL_STREAMS,
+        ]);
+        let plan = Arc::new(plan);
+        let (registry, runtime) = ClientRegistry::recover(ClientServices {
+            routes: Arc::new(fixture::peer::Peers::one(&binding, plan.clone())),
+            credentials: Arc::new(fixture::Credentials),
+            journal,
+            organization: Arc::new(Decoder),
+            delegate: protocol.clone(),
+            discovery: None,
+            limits: spaceterm_client::limits::ClientLimits::default(),
+            additional_capabilities: desktop_capabilities(),
+        })
+        .await
+        .unwrap();
+        protocol.bind(registry.clone()).unwrap();
+        let handle = registry.server(binding.target().server()).unwrap();
+        handle.connect().await.unwrap();
+        let ConnectionState::Connected { info } = *handle.state().borrow() else {
+            panic!("native context fixture must connect")
+        };
+        let snapshot = TERMINAL_SNAPSHOT.get().unwrap();
+        let lease = channels
+            .attach(
+                snapshot.state().workspaces[0].id,
+                spaceterm_client::view::AttachmentIncarnation::new(900).unwrap(),
+            )
+            .unwrap();
+        let pane = lease.pane(snapshot.state().panes[0].id).unwrap();
+        pane.update_context(spaceterm_client::pane_channel::PaneContextFacts {
+            focused_pane: true,
+            terminal_input_focus: false,
+            presentable: true,
+        })
+        .unwrap();
+        Self {
+            protocol,
+            plan,
+            runtime,
+            info,
+            pane,
+            _lease: lease,
+        }
+    }
+    fn context_requests(&self) -> Vec<Payload> {
+        self.plan
+            .messages
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|payload| {
+                matches!(
+                    payload,
+                    Payload::Major1(v1::Message {
+                        kind: Some(v1::message::Kind::ClientContext(_)),
+                    }) | Payload::Major2(v2::Message {
+                        kind: Some(v2::message::Kind::ClientContext(_)),
+                    })
+                )
+            })
+            .cloned()
+            .collect()
+    }
+    async fn wait_until_presentable(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while self.pane.permit(EffectKind::Resize).is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("acknowledged presentation must become usable");
+    }
+    async fn pending_context(&self) -> Payload {
+        self.context_after(0).await
+    }
+    async fn context_after(&self, count: usize) -> Payload {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(request) = self.context_requests().get(count) {
+                    return request.clone();
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("presentation must send its next context request")
+    }
+    fn use_request(&self) -> PaneUseRequest {
+        let state = *self.pane.state().borrow();
+        PaneUseRequest {
+            workspace: self._lease.workspace(),
+            tab: TERMINAL_SNAPSHOT
+                .get()
+                .unwrap()
+                .state()
+                .panes
+                .iter()
+                .find(|pane| pane.id == self.pane.pane())
+                .unwrap()
+                .tab,
+            runtime: state.runtime.unwrap(),
+            info: state.connection.unwrap(),
+            context: state.context,
+            source: ExplicitUseSource::StartSession,
+        }
+    }
+    fn republish(&self) {
+        let replica = self
+            .protocol
+            .handle(self.info.server)
+            .unwrap()
+            .replica()
+            .borrow()
+            .retained()
+            .cloned()
+            .unwrap();
+        self.protocol.publication(self.info, &replica).unwrap();
+    }
+    async fn retry_context(&self, peer: &mut StrictContextPeer, count: usize) -> Payload {
+        let mut using = self.protocol.explicit_use(self.use_request());
+        let request = tokio::select! {
+            biased;
+            result = &mut using => panic!("explicit use completed before acknowledgement: {result:?}"),
+            request = self.context_after(count) => request,
+        };
+        self.plan
+            .control(fixture::peer::PeerControl::publication(
+                peer.accept(&request),
+            ))
+            .await;
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), using)
+                .await
+                .expect("strict peer acknowledgement must release explicit use")
+                .unwrap(),
+            PaneUseReply::ControlReady(_)
+        ));
+        self.wait_until_presentable().await;
+        assert!(matches!(
+            self.pane
+                .explicit_use(ExplicitUseSource::StartSession)
+                .await
+                .unwrap(),
+            spaceterm_client::pane_channel::ExplicitUseOutcome::ControlReady(_)
+        ));
+        request
+    }
+    fn pause_sends(&self) {
+        let available = self.plan.client_send_gate.available_permits();
+        self.plan
+            .client_send_gate
+            .try_acquire_many(available.try_into().unwrap())
+            .unwrap()
+            .forget();
+    }
+    async fn send_started_after(&self, count: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while self.plan.sends_started.load(Ordering::SeqCst) <= count {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fixture traffic must reach the stalled writer");
+    }
+    fn subscription_cancellation(&self, request: u64) -> Payload {
+        let fence = self.pane.permit(EffectKind::Resize).unwrap().fence();
+        macro_rules! profile {
+            ($p:ident, $variant:ident) => {
+                Payload::$variant($p::Message {
+                    kind: Some($p::message::Kind::PaneSubscription($p::PaneSubscription {
+                        fence: Some(identity::encode_fence(fence)),
+                        request,
+                        request_generation: fence.context().get(),
+                        cancel: true,
+                        limits: None,
+                    })),
+                })
+            };
+        }
+        match self.info.major {
+            1 => profile!(v1, Major1),
+            2 => profile!(v2, Major2),
+            _ => panic!("unsupported fixture profile"),
+        }
+    }
+    async fn assert_unchanged_publication_does_not_replay(&self) {
+        let count = self.context_requests().len();
+        let binding = self.protocol.binding(self.info.server).unwrap();
+        self.protocol
+            .invalidate(&binding, ConnectionInvalidation::Publication);
+        self.republish();
+        assert!(matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                self.pane.explicit_use(ExplicitUseSource::StartSession),
+            )
+            .await
+            .expect("unchanged publication must reuse the acknowledged context")
+            .unwrap(),
+            spaceterm_client::pane_channel::ExplicitUseOutcome::ControlReady(_)
+        ));
+        assert_eq!(self.context_requests().len(), count);
+    }
+}
+
+#[derive(Default)]
+struct StrictContextPeer {
+    connection: Option<u64>,
+    high_water: u64,
+}
+impl StrictContextPeer {
+    fn accept(&mut self, request: &Payload) -> Payload {
+        let (connection, generation) = terminal_context_generations(request);
+        if self.connection != Some(connection) {
+            self.connection = Some(connection);
+            self.high_water = 0;
+        }
+        let accepted = generation > self.high_water;
+        if accepted {
+            self.high_water = generation;
+        }
+        terminal_context_response(
+            request,
+            accepted,
+            (!accepted).then_some(spaceterm_protocol::wire::common::FailureClass::Stale as i32),
+        )
+        .unwrap()
+    }
+}
+
+fn held_context_publication(request: &Payload, target: &ConnectionTarget) -> Option<Payload> {
+    if terminal_context_response(request, true, None).is_some() {
+        None
+    } else {
+        terminal_publication(request, target)
+    }
+}
+fn stale_context_publication(request: &Payload, target: &ConnectionTarget) -> Option<Payload> {
+    terminal_context_response(
+        request,
+        false,
+        Some(spaceterm_protocol::wire::common::FailureClass::Stale as i32),
+    )
+    .or_else(|| terminal_publication(request, target))
+}
+fn busy_context_publication(request: &Payload, target: &ConnectionTarget) -> Option<Payload> {
+    terminal_context_response(
+        request,
+        false,
+        Some(spaceterm_protocol::wire::common::FailureClass::Busy as i32),
+    )
+    .or_else(|| terminal_publication(request, target))
+}
+
+struct UnusedContextChannel;
+impl ProtocolChannel for UnusedContextChannel {
+    fn send<'a>(&'a mut self, _: &'a Payload) -> ClientFuture<'a, ()> {
+        panic!("context responses must not send on the receive channel")
+    }
+    fn receive(&mut self) -> ClientFuture<'_, Payload> {
+        panic!("context responses must not read from the receive channel")
+    }
+}
+
+#[test]
+fn desktop_native_context_refusals_preserve_the_authenticated_connection() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    executor.block_on(async {
+        for major in [1, 2] {
+            for (handler, expected) in [
+                (
+                    stale_context_publication as fixture::peer::QueryHandler,
+                    ClientFailureClass::StaleAuthority,
+                ),
+                (
+                    busy_context_publication as fixture::peer::QueryHandler,
+                    ClientFailureClass::ResourceLimit,
+                ),
+            ] {
+                let case = NativeContextFixture::new(major, handler).await;
+                let result = case
+                    .pane
+                    .explicit_use(ExplicitUseSource::StartSession)
+                    .await;
+                assert_eq!(result.err().unwrap().class(), expected);
+                assert!(matches!(
+                    *case.protocol.handle(case.info.server).unwrap().state().borrow(),
+                    ConnectionState::Connected { info } if info.binding == case.info.binding
+                ));
+                case.runtime.shutdown().await.unwrap();
+            }
+        }
+    });
+}
+
+#[test]
+fn desktop_native_context_preserves_acknowledgement_across_same_connection_invalidation() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    executor.block_on(async {
+        for major in [1, 2] {
+            let case = NativeContextFixture::new(major, terminal_publication).await;
+            assert!(matches!(
+                case.pane
+                    .explicit_use(ExplicitUseSource::StartSession)
+                    .await
+                    .unwrap(),
+                spaceterm_client::pane_channel::ExplicitUseOutcome::ControlReady(_)
+            ));
+            let requests = case.context_requests();
+            assert!(!requests.is_empty());
+            for request in &requests {
+                macro_rules! check {
+                    ($message:expr, $p:ident) => {
+                        if let Some($p::message::Kind::ClientContext(context)) =
+                            $message.kind.as_ref()
+                        {
+                            assert!(!context.terminal_input_focus);
+                            assert!(!context.native_effects_eligible);
+                        }
+                    };
+                }
+                match request {
+                    Payload::Major1(message) => check!(message, v1),
+                    Payload::Major2(message) => check!(message, v2),
+                }
+            }
+            let binding = case.protocol.binding(case.info.server).unwrap();
+            for reason in [
+                ConnectionInvalidation::Publication,
+                ConnectionInvalidation::Reconciliation,
+            ] {
+                case.wait_until_presentable().await;
+                let before = case.context_requests();
+                let (_, acknowledged) = terminal_context_generations(before.last().unwrap());
+                let permit = case.pane.permit(EffectKind::Resize).unwrap();
+                case.protocol.invalidate(&binding, reason);
+                assert!(!permit.is_current());
+                let replica = case
+                    .protocol
+                    .handle(case.info.server)
+                    .unwrap()
+                    .replica()
+                    .borrow()
+                    .retained()
+                    .cloned()
+                    .unwrap();
+                case.protocol.publication(case.info, &replica).unwrap();
+                case.pane
+                    .explicit_use(ExplicitUseSource::StartSession)
+                    .await
+                    .unwrap();
+                let after = case.context_requests();
+                if reason == ConnectionInvalidation::Publication {
+                    assert_eq!(after.len(), before.len());
+                }
+                for request in after.iter().skip(before.len()) {
+                    let (connection, context) = terminal_context_generations(request);
+                    assert_eq!(connection, case.info.binding.generation.get());
+                    assert!(context > acknowledged);
+                }
+            }
+            case.runtime.shutdown().await.unwrap();
+        }
+    });
+}
+
+#[test]
+fn desktop_native_context_reacknowledges_after_connection_loss() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    executor.block_on(async {
+        for major in [1, 2] {
+            let case = NativeContextFixture::new(major, terminal_publication).await;
+            case.pane
+                .explicit_use(ExplicitUseSource::StartSession)
+                .await
+                .unwrap();
+            let count = case.context_requests().len();
+            let handle = case.protocol.handle(case.info.server).unwrap();
+            let mut states = handle.state();
+            case.plan
+                .control(fixture::peer::PeerControl::Disconnect)
+                .await;
+            let reconnected = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                loop {
+                    if let ConnectionState::Connected { info } = *states.borrow()
+                        && info.binding != case.info.binding
+                    {
+                        break info;
+                    }
+                    states.changed().await.unwrap();
+                }
+            })
+            .await
+            .expect("connection loss must establish a fresh binding");
+            case.pane
+                .explicit_use(ExplicitUseSource::StartSession)
+                .await
+                .unwrap();
+            let requests = case.context_requests();
+            assert!(requests.len() > count);
+            let generation = match requests.last().unwrap() {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::ClientContext(context)),
+                }) => context.connection_generation,
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::ClientContext(context)),
+                }) => context.connection_generation,
+                _ => unreachable!(),
+            };
+            assert_eq!(generation, reconnected.binding.generation.get());
+            case.runtime.shutdown().await.unwrap();
+        }
+    });
+}
+
+#[test]
+fn desktop_native_context_invalidation_discards_pending_acknowledgements() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    executor.block_on(async {
+        for major in [1, 2] {
+            for reason in [
+                ConnectionInvalidation::Publication,
+                ConnectionInvalidation::Reconciliation,
+                ConnectionInvalidation::ConnectionLost,
+                ConnectionInvalidation::Stopped,
+                ConnectionInvalidation::Shutdown,
+                ConnectionInvalidation::BindingRemoved,
+            ] {
+                let case = NativeContextFixture::new(major, held_context_publication).await;
+                let request = case.pending_context().await;
+                let binding = case.protocol.binding(case.info.server).unwrap();
+                case.protocol.invalidate(&binding, reason);
+                let response = terminal_context_response(&request, true, None).unwrap();
+                let result = case
+                    .protocol
+                    .receive(case.info, response, &mut UnusedContextChannel)
+                    .await;
+                result.unwrap();
+                assert!(case.pane.state().borrow().connection.is_none());
+                assert!(
+                    case.pane
+                        .explicit_use(ExplicitUseSource::StartSession)
+                        .await
+                        .is_err()
+                );
+                case.runtime.shutdown().await.unwrap();
+            }
+        }
+    });
+}
+
+async fn retry_uncertain_context_after_invalidation(reason: ConnectionInvalidation) {
+    for major in [1, 2] {
+        let case = NativeContextFixture::new(major, held_context_publication).await;
+        let mut peer = StrictContextPeer::default();
+        let mut using = case.protocol.explicit_use(case.use_request());
+        let request = tokio::select! {
+            biased;
+            result = &mut using => panic!("explicit use completed before acknowledgement: {result:?}"),
+            request = case.pending_context() => request,
+        };
+        let discarded = peer.accept(&request);
+        let (_, accepted) = terminal_context_generations(&request);
+        let count = case.context_requests().len();
+        let binding = case.protocol.binding(case.info.server).unwrap();
+        case.protocol.invalidate(&binding, reason);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), using)
+                .await
+                .expect("invalidation must promptly release the context owner")
+                .unwrap_err()
+                .class(),
+            ClientFailureClass::StaleAuthority
+        );
+        case.protocol
+            .receive(case.info, discarded, &mut UnusedContextChannel)
+            .await
+            .unwrap();
+        case.republish();
+        let retry = case.retry_context(&mut peer, count).await;
+        let (connection, retried) = terminal_context_generations(&retry);
+        assert_eq!(connection, case.info.binding.generation.get());
+        assert!(retried > accepted);
+        case.assert_unchanged_publication_does_not_replay().await;
+        case.runtime.shutdown().await.unwrap();
+    }
+}
+
+#[test]
+fn desktop_native_context_publication_retries_above_discarded_acknowledgement() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    executor.block_on(retry_uncertain_context_after_invalidation(
+        ConnectionInvalidation::Publication,
+    ));
+}
+
+#[test]
+fn desktop_native_context_reconciliation_retries_above_discarded_acknowledgement() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    executor.block_on(retry_uncertain_context_after_invalidation(
+        ConnectionInvalidation::Reconciliation,
+    ));
+}
+
+#[test]
+fn desktop_native_context_timeout_reserves_generation_without_invalidation() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    executor.block_on(async {
+        for major in [1, 2] {
+            let case = NativeContextFixture::new(major, held_context_publication).await;
+            let mut peer = StrictContextPeer::default();
+            let mut using = case.protocol.explicit_use(case.use_request());
+            let request = tokio::select! {
+                biased;
+                result = &mut using => panic!("explicit use completed before acknowledgement: {result:?}"),
+                request = case.pending_context() => request,
+            };
+            let discarded = peer.accept(&request);
+            let (_, accepted) = terminal_context_generations(&request);
+            let count = case.context_requests().len();
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(17), using)
+                    .await
+                    .expect("unacknowledged context must time out")
+                    .unwrap_err()
+                    .class(),
+                ClientFailureClass::Unavailable
+            );
+            assert!(matches!(
+                *case.protocol.handle(case.info.server).unwrap().state().borrow(),
+                ConnectionState::Connected { info } if info.binding == case.info.binding
+            ));
+            case.protocol
+                .receive(case.info, discarded, &mut UnusedContextChannel)
+                .await
+                .unwrap();
+            let retry = case.retry_context(&mut peer, count).await;
+            assert!(terminal_context_generations(&retry).1 > accepted);
+            case.assert_unchanged_publication_does_not_replay().await;
+            case.runtime.shutdown().await.unwrap();
+        }
+    });
+}
+
+#[test]
+fn desktop_native_context_dropped_waiter_discards_acknowledgement_and_reserves_generation() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    executor.block_on(async {
+        for major in [1, 2] {
+            let case = NativeContextFixture::new(major, held_context_publication).await;
+            let mut peer = StrictContextPeer::default();
+            let mut using = case.protocol.explicit_use(case.use_request());
+            let request = tokio::select! {
+                biased;
+                result = &mut using => panic!("explicit use completed before acknowledgement: {result:?}"),
+                request = case.pending_context() => request,
+            };
+            let discarded = peer.accept(&request);
+            let (_, accepted) = terminal_context_generations(&request);
+            let count = case.context_requests().len();
+            drop(using);
+            case.protocol
+                .receive(case.info, discarded, &mut UnusedContextChannel)
+                .await
+                .unwrap();
+            let retry = case.retry_context(&mut peer, count).await;
+            assert!(terminal_context_generations(&retry).1 > accepted);
+            case.assert_unchanged_publication_does_not_replay().await;
+            case.runtime.shutdown().await.unwrap();
+        }
+    });
+}
+
+#[test]
+fn desktop_native_context_clears_focus_after_uncertain_first_presentation_disappears() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    executor.block_on(async {
+        for major in [1, 2] {
+            let case = NativeContextFixture::new(major, held_context_publication).await;
+            let mut peer = StrictContextPeer::default();
+            let captured = case.use_request();
+            let mut using = case.protocol.explicit_use(captured);
+            let request = tokio::select! {
+                biased;
+                result = &mut using => panic!("explicit use completed before acknowledgement: {result:?}"),
+                request = case.pending_context() => request,
+            };
+            let discarded = peer.accept(&request);
+            let (_, accepted) = terminal_context_generations(&request);
+            let count = case.context_requests().len();
+            drop(using);
+            case._lease.invalidate().unwrap();
+            case.protocol
+                .receive(case.info, discarded, &mut UnusedContextChannel)
+                .await
+                .unwrap();
+            let cleared = case.context_after(count).await;
+            assert!(terminal_context_generations(&cleared).1 > accepted);
+            macro_rules! check {
+                ($message:expr, $p:ident) => {
+                    if let Some($p::message::Kind::ClientContext(context)) = $message.kind.as_ref() {
+                        assert!(context.focused_pane.is_none());
+                        assert!(!context.terminal_input_focus);
+                        assert!(!context.native_effects_eligible);
+                    } else {
+                        panic!("focus clearing must send a context request");
+                    }
+                };
+            }
+            match &cleared {
+                Payload::Major1(message) => check!(message, v1),
+                Payload::Major2(message) => check!(message, v2),
+            }
+            case.plan
+                .control(fixture::peer::PeerControl::publication(peer.accept(&cleared)))
+                .await;
+            assert!(matches!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    case.protocol.explicit_use(captured),
+                )
+                .await
+                .expect("focus clearing acknowledgement must release the connection owner")
+                .unwrap(),
+                PaneUseReply::ControlReady(_)
+            ));
+            case.runtime.shutdown().await.unwrap();
+        }
+    });
+}
+
+#[test]
+fn desktop_native_context_invalidation_cancels_dispatch_stalled_behind_queue_traffic() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    executor.block_on(async {
+        for major in [1, 2] {
+            for reason in [
+                ConnectionInvalidation::Publication,
+                ConnectionInvalidation::Reconciliation,
+            ] {
+                let case = NativeContextFixture::new(major, held_context_publication).await;
+                let mut peer = StrictContextPeer::default();
+                case.retry_context(&mut peer, 0).await;
+                let cancellation = case.subscription_cancellation(10_000);
+                let count = case.context_requests().len();
+                let sends = case.plan.sends_started.load(Ordering::SeqCst);
+                case.pause_sends();
+                let handle = case.protocol.handle(case.info.server).unwrap();
+                let mut traffic = Box::pin(handle.dispatch(case.info, cancellation));
+                tokio::select! {
+                    biased;
+                    result = &mut traffic => panic!("queue traffic bypassed its send gate: {result:?}"),
+                    () = case.send_started_after(sends) => {},
+                }
+                case.pane
+                    .update_context(spaceterm_client::pane_channel::PaneContextFacts {
+                        focused_pane: true,
+                        terminal_input_focus: true,
+                        presentable: true,
+                    })
+                    .unwrap();
+                let attempted = case.pane.state().borrow().context.get();
+                let mut using = case.protocol.explicit_use(case.use_request());
+                tokio::select! {
+                    biased;
+                    result = &mut using => panic!("context bypassed stalled queue traffic: {result:?}"),
+                    () = std::future::ready(()) => {},
+                }
+                let binding = case.protocol.binding(case.info.server).unwrap();
+                case.protocol.invalidate(&binding, reason);
+                assert_eq!(
+                    tokio::time::timeout(std::time::Duration::from_secs(1), using)
+                        .await
+                        .expect("invalidation must cancel dispatch without opening the send gate")
+                        .unwrap_err()
+                        .class(),
+                    ClientFailureClass::StaleAuthority
+                );
+                assert_eq!(case.context_requests().len(), count);
+                case.plan.client_send_gate.add_permits(4096);
+                tokio::time::timeout(std::time::Duration::from_secs(5), traffic)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                case.republish();
+                let retry = case.retry_context(&mut peer, count).await;
+                assert!(terminal_context_generations(&retry).1 > attempted);
+                case.assert_unchanged_publication_does_not_replay().await;
+                case.runtime.shutdown().await.unwrap();
+            }
+        }
+    });
+}
+
+#[test]
+fn desktop_native_context_timeout_bounds_dispatch_and_acknowledgement_together() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    executor.block_on(async {
+        for major in [1, 2] {
+            let case = NativeContextFixture::new(major, held_context_publication).await;
+            let mut peer = StrictContextPeer::default();
+            case.retry_context(&mut peer, 0).await;
+            let first = case.subscription_cancellation(10_000);
+            let second = case.subscription_cancellation(10_001);
+            let count = case.context_requests().len();
+            let sends = case.plan.sends_started.load(Ordering::SeqCst);
+            case.pause_sends();
+            let handle = case.protocol.handle(case.info.server).unwrap();
+            let mut first = Box::pin(handle.dispatch(case.info, first));
+            tokio::select! {
+                biased;
+                result = &mut first => panic!("queue traffic bypassed its send gate: {result:?}"),
+                () = case.send_started_after(sends) => {},
+            }
+            let mut second = Box::pin(handle.dispatch(case.info, second));
+            tokio::select! {
+                biased;
+                result = &mut second => panic!("second write bypassed the stalled writer: {result:?}"),
+                () = std::future::ready(()) => {},
+            }
+            case.pane
+                .update_context(spaceterm_client::pane_channel::PaneContextFacts {
+                    focused_pane: true,
+                    terminal_input_focus: true,
+                    presentable: true,
+                })
+                .unwrap();
+            let attempted = case.pane.state().borrow().context.get();
+            let gate = case.plan.client_send_gate.clone();
+            let release_first = tokio::spawn(async move {
+                // Keep each write below the writer's 10-second transport deadline,
+                // but keep the context behind queue traffic for its entire deadline.
+                tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+                gate.add_permits(1);
+            });
+            assert_eq!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(17),
+                    case.protocol.explicit_use(case.use_request()),
+                )
+                .await
+                .expect("context deadline must include time waiting for dispatch")
+                .unwrap_err()
+                .class(),
+                ClientFailureClass::Unavailable
+            );
+            assert_eq!(case.context_requests().len(), count);
+            assert!(matches!(
+                *handle.state().borrow(),
+                ConnectionState::Connected { info } if info.binding == case.info.binding
+            ));
+            case.plan.client_send_gate.add_permits(4096);
+            release_first.await.unwrap();
+            let (first, second) = tokio::join!(first, second);
+            first.unwrap();
+            second.unwrap();
+            let retry = case.retry_context(&mut peer, count).await;
+            assert!(terminal_context_generations(&retry).1 > attempted);
+            case.assert_unchanged_publication_does_not_replay().await;
+            case.runtime.shutdown().await.unwrap();
+        }
+    });
+}
+
+#[derive(Clone, Copy)]
+enum InvalidContextEcho {
+    Epoch,
+    Binding,
+    Generation,
+    Focus,
+    Input,
+    Native,
+}
+fn change_context_echo(payload: &mut Payload, field: InvalidContextEcho) {
+    macro_rules! profile {
+        ($message:expr, $p:ident) => {{
+            let Some($p::message::Kind::ClientContext(value)) = $message.kind.as_mut() else {
+                panic!("context response")
+            };
+            match field {
+                InvalidContextEcho::Epoch => value.epoch += 1,
+                InvalidContextEcho::Binding => value.connection_generation += 1,
+                InvalidContextEcho::Generation => value.context_generation += 1,
+                InvalidContextEcho::Focus => value.focused_pane = None,
+                InvalidContextEcho::Input => {
+                    value.terminal_input_focus = !value.terminal_input_focus
+                }
+                InvalidContextEcho::Native => {
+                    value.native_effects_eligible = !value.native_effects_eligible
+                }
+            }
+        }};
+    }
+    match payload {
+        Payload::Major1(message) => profile!(message, v1),
+        Payload::Major2(message) => profile!(message, v2),
+    }
+}
+
+#[test]
+fn desktop_native_context_wire_handler_rejects_incoherent_outcomes_and_changed_echoes() {
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    executor.block_on(async {
+        for major in [1, 2] {
+            for (acknowledged, failure, field) in [
+                (true, Some(2), None),
+                (false, None, None),
+                (false, Some(i32::MAX), None),
+                (false, Some(1), None),
+                (false, Some(2), Some(InvalidContextEcho::Epoch)),
+                (false, Some(2), Some(InvalidContextEcho::Binding)),
+                (false, Some(2), Some(InvalidContextEcho::Generation)),
+                (false, Some(2), Some(InvalidContextEcho::Focus)),
+                (false, Some(5), Some(InvalidContextEcho::Input)),
+                (false, Some(5), Some(InvalidContextEcho::Native)),
+            ] {
+                let case = NativeContextFixture::new(major, held_context_publication).await;
+                let request = case.pending_context().await;
+                let mut response =
+                    terminal_context_response(&request, acknowledged, failure).unwrap();
+                if let Some(field) = field {
+                    change_context_echo(&mut response, field);
+                }
+                let result = case
+                    .protocol
+                    .receive(case.info, response, &mut UnusedContextChannel)
+                    .await;
+                assert_eq!(result.unwrap_err().class(), ClientFailureClass::InvalidPeer);
+                case.runtime.shutdown().await.unwrap();
+            }
+        }
+    });
+}

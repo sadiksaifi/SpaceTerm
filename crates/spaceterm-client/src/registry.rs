@@ -407,7 +407,8 @@ impl ClientRuntime {
                 result = joined;
             }
         }
-        result
+        let persisted = self.shared.services.delegate.shutdown().await;
+        result.and(persisted)
     }
     fn invalidate(&self) {
         self.shared.stopped.store(true, Ordering::Release);
@@ -457,6 +458,8 @@ impl ServerHandle {
     pub async fn connect(&self) -> Result<(), ClientFailure> {
         self.request(false).await
     }
+    /// Deliberate foreground Retry. Interactive route authority applies to this dial only;
+    /// a later automatic reconnect remains noninteractive and never reenrolls.
     pub async fn retry(&self) -> Result<(), ClientFailure> {
         self.request(true).await
     }
