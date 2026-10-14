@@ -116,16 +116,31 @@ impl Pairing {
     fn new(generation: u8) -> Self {
         let original = wire::binding(1);
         let target = original.target();
-        let server = target.server();
+        Self::at_native_route(
+            generation,
+            target.pin(),
+            target.device(),
+            target.route().clone(),
+            &wire::TestKey::new(1),
+        )
+    }
+    fn at_native_route(
+        generation: u8,
+        pin: ServerPin,
+        device: DeviceId,
+        route: spaceterm_client::api::RouteDescription,
+        signer: &dyn SigningKey,
+    ) -> Self {
+        let server = ServerId::new(pin.identity);
         let pairing = PairingId::new(server, u64::from(generation)).unwrap();
         let client = ClientId::new(server, u64::from(generation)).unwrap();
         let binding = PairedServerBinding::new(
             ConnectionTarget::new(
-                target.pin(),
-                target.device(),
+                pin,
+                device,
                 pairing,
                 client,
-                target.route().clone(),
+                route,
                 CredentialReference::new([generation; 16]),
                 LocalPairingGeneration::new(u64::from(generation)).unwrap(),
             )
@@ -158,13 +173,13 @@ impl Pairing {
             .unwrap(),
             public_key: wire::TestKey::new(99).public_key(),
         };
-        let proof = ReceiptCodec::new(target.pin())
+        let proof = ReceiptCodec::new(pin)
             .sign(
                 PairingReceiptBody::ClientBinding {
                     target: PairingTarget::new(PairingTargetParts {
                         server,
                         pairing,
-                        device: target.device(),
+                        device,
                     })
                     .unwrap(),
                     keys: PairingKeys::new(PairingKeysParts {
@@ -182,7 +197,7 @@ impl Pairing {
                     },
                     revision: StoreRevision::new(1),
                 },
-                &wire::TestKey::new(1),
+                signer,
             )
             .unwrap();
         Self {
@@ -379,6 +394,7 @@ impl PairingLookup for Lookup {
 }
 struct Endpoint {
     major: u32,
+    server_key: Arc<dyn SigningKey>,
     available: AtomicBool,
     opens: AtomicUsize,
     tasks: Mutex<Vec<PendingRevocationTask>>,
@@ -391,6 +407,7 @@ impl Endpoint {
     fn new(major: u32, block_status: bool) -> Self {
         Self {
             major,
+            server_key: Arc::new(wire::TestKey::new(1)),
             available: AtomicBool::new(false),
             opens: AtomicUsize::new(0),
             tasks: Default::default(),
@@ -514,7 +531,7 @@ impl PairingTransport for Transport {
                             ),
                             revocation_event: [10; 16],
                         },
-                        &wire::TestKey::new(1),
+                        self.endpoint.server_key.as_ref(),
                     )
                     .unwrap();
                 self.replies.push_back(
@@ -564,7 +581,7 @@ impl PairingTransport for Transport {
                         majors: vec![self.endpoint.major],
                         ..HandshakeConfig::default()
                     },
-                    Arc::new(wire::TestKey::new(1)),
+                    self.endpoint.server_key.clone(),
                     &lookup,
                     bytes,
                 )
@@ -596,7 +613,7 @@ impl PairingTransport for Transport {
 }
 
 struct Harness {
-    executor: tokio::runtime::Runtime,
+    executor: Arc<tokio::runtime::Runtime>,
     storage: Arc<MemoryJournal>,
     old: Pairing,
     credentials: Arc<Credentials>,
@@ -614,7 +631,7 @@ impl Harness {
         Self {
             credentials: Arc::new(Credentials::new(&old, block_cleanup)),
             old,
-            executor,
+            executor: Arc::new(executor),
             storage: Arc::new(MemoryJournal::default()),
             endpoint: Arc::new(Endpoint::new(major, !block_cleanup)),
             ordinary: Arc::new(wire::peer::PeerPlan::new(vec![major])),
@@ -963,4 +980,385 @@ fn desktop_recovered_journal_scheduler_quit_drains_in_progress_exact_cleanup(
     h.executor.block_on(scheduler.shutdown()).unwrap();
     assert_eq!(h.ordinary.opens.load(Ordering::SeqCst), 0);
     assert_eq!(h.ordinary_credentials.0.load(Ordering::SeqCst), 0);
+}
+
+impl Harness {
+    fn install_native_ipc(
+        &self,
+        paths: Arc<crate::platform::app_paths::AppPaths>,
+        native: spaceterm_client_native::NativeClientProvider,
+        journal: Arc<JournalController>,
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<DesktopClientRuntime>,
+        Rc<dyn desktop_client_startup::DesktopClientStartup>,
+    ) {
+        *self.credentials.journal.lock().unwrap() = Arc::downgrade(&journal);
+        *self.endpoint.journal.lock().unwrap() = Arc::downgrade(&journal);
+        let startup = desktop_client_startup::pending_ipc_startup(
+            paths,
+            journal,
+            native,
+            self.credentials.clone(),
+            self.ordinary_credentials.clone(),
+            self.executor.clone(),
+        );
+        let recovery = cx.update(|cx| startup.recover(cx));
+        let result = Rc::new(RefCell::new(None));
+        let completed = result.clone();
+        let observer = cx.foreground_executor().spawn(async move {
+            *completed.borrow_mut() = Some(recovery.await);
+        });
+        self.drive_until(cx, "native desktop recovery did not complete", || {
+            result.borrow().is_some()
+        });
+        let recovered = result.borrow_mut().take().unwrap().unwrap();
+        cx.foreground_executor().block_test(observer);
+        let runtime = cx.update(|cx| recovered.install(cx)).unwrap();
+        (runtime, startup)
+    }
+}
+
+/// Reuse the authenticated restricted protocol peer over a real private IPC
+/// listener. The production NativePairingConnector is not replaced.
+fn serve_pending_ipc(
+    executor: &tokio::runtime::Runtime,
+    listener: spaceterm_host::ipc::IpcListener,
+    endpoint: Arc<Endpoint>,
+    task: PendingRevocationTask,
+) -> (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    use spaceterm_host::transport::MessageTransport;
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let service = executor.spawn(async move {
+        let mut stopped = std::pin::pin!(stopped);
+        let mut workers = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                _ = &mut stopped => break,
+                Some(result) = workers.join_next(), if !workers.is_empty() => result.unwrap(),
+                accepted = listener.accept() => {
+                    let pending = accepted.unwrap();
+                    assert!(pending.peer_facts().local_uid.is_some());
+                    endpoint.opens.fetch_add(1, Ordering::SeqCst);
+                    endpoint.tasks.lock().unwrap().push(task.clone());
+                    let endpoint = endpoint.clone();
+                    let task = task.clone();
+                    workers.spawn(async move {
+                        let mut peer = Transport {
+                            endpoint,
+                            task,
+                            handshake: None,
+                            connection: None,
+                            replies: VecDeque::new(),
+                            wait_status: false,
+                        };
+                        for _ in 0..2 {
+                            let bytes = pending.recv().await.unwrap().unwrap();
+                            peer.send(&bytes).await.unwrap();
+                            let reply = peer.receive().await.unwrap();
+                            pending.send(&reply).await.unwrap();
+                        }
+                        assert!(peer.connection.is_some());
+                        let stream = pending.finish_authentication().unwrap();
+                        while let Ok(Some(bytes)) = stream.recv().await {
+                            peer.send(&bytes).await.unwrap();
+                            if !peer.replies.is_empty() {
+                                let reply = peer.receive().await.unwrap();
+                                stream.send(&reply).await.unwrap();
+                            }
+                        }
+                        stream.close().await.unwrap();
+                    });
+                }
+            }
+        }
+        while let Some(result) = workers.join_next().await {
+            result.unwrap();
+        }
+        listener.close().unwrap();
+    });
+    (stop, service)
+}
+
+fn production_pending_only_ipc_restart(major: u32, cx: &mut TestAppContext) {
+    use crate::platform::{
+        app_directories::{AppDirectories, AppDirectoryEnvironment},
+        app_paths::AppPaths,
+        unix_secure_filesystem::UnixSecureFilesystem,
+    };
+    use spaceterm_client_native::{NativeClientProvider, route::LocalRouteAuthority};
+    use spaceterm_host::{
+        account_service::test_support::AccountServiceFixture,
+        ipc::IpcListener,
+        server_keys::ServerKeyStore,
+        startup::{BuildIdentity, DesiredServerState},
+        transport::{AdmissionLimits, MessageLimit},
+    };
+    cx.executor().allow_parking();
+    #[cfg(target_os = "macos")]
+    let parent = "/private/tmp";
+    #[cfg(not(target_os = "macos"))]
+    let parent = "/var/tmp";
+    let directory = tempfile::tempdir_in(parent).unwrap();
+    let root = directory.path();
+    let fixture = AccountServiceFixture::new(root, BuildIdentity::Development).unwrap();
+    let registration = fixture.initialize(DesiredServerState::Running).unwrap();
+    let identity = ServerKeyStore::open(&registration)
+        .unwrap()
+        .load_identity(registration.server_pin())
+        .unwrap();
+    let route = LocalRouteAuthority::new(registration.endpoint().unwrap()).unwrap();
+    let environment = AppDirectoryEnvironment {
+        home: Some(root.as_os_str().to_owned()),
+        xdg_state_home: Some(root.join("state").into_os_string()),
+        ..Default::default()
+    };
+    let paths = Arc::new(
+        AppPaths::from_directories(
+            AppDirectories::resolve_xdg("pending-ipc-composition-test", &environment, None)
+                .unwrap(),
+            104,
+            Arc::new(UnixSecureFilesystem),
+        )
+        .unwrap(),
+    );
+    let old = Pairing::at_native_route(
+        1,
+        registration.server_pin(),
+        DeviceId::new([91; 16]),
+        route.description().clone(),
+        identity.as_ref(),
+    );
+    let mut endpoint = Endpoint::new(major, true);
+    endpoint.server_key = identity.clone();
+    let h = Harness {
+        executor: Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap(),
+        ),
+        credentials: Arc::new(Credentials::new(&old, false)),
+        old,
+        storage: Arc::new(MemoryJournal::default()),
+        endpoint: Arc::new(endpoint),
+        ordinary: Arc::new(wire::peer::PeerPlan::new(vec![major])),
+        ordinary_credentials: Arc::default(),
+    };
+    let journal = h.reopen();
+    h.executor.block_on(h.old.seed(&journal));
+    let (runtime, startup) = h.install_native_ipc(
+        paths.clone(),
+        NativeClientProvider::from_supervisor(fixture.reopen()),
+        journal.clone(),
+        cx,
+    );
+    assert_eq!(h.snapshot(cx).servers.len(), 1);
+    h.send(
+        ServerRequest::UnpairThisDevice(h.snapshot(cx).servers[0].key.clone()),
+        cx,
+    );
+    h.drive_until(
+        cx,
+        "native offline self-unpair did not retain restricted work",
+        || {
+            let snapshot = journal.snapshot().unwrap();
+            snapshot.bindings().is_empty()
+                && snapshot.revocations().len() == 1
+                && snapshot.revocations()[0].attempts > 0
+        },
+    );
+    let original = journal.snapshot().unwrap().revocations()[0].clone();
+    assert_eq!(original.target.target().unwrap(), *h.old.binding.target());
+    assert!(
+        runtime
+            .read_with(cx, |runtime, _| runtime.servers())
+            .is_empty()
+    );
+    h.send(
+        ServerRequest::DismissUnpairNotice(h.snapshot(cx).pending_unpairs[0].id.clone()),
+        cx,
+    );
+    h.drive_until(cx, "native pending notice was not dismissed", || {
+        journal.snapshot().unwrap().revocations()[0].notice_dismissed
+    });
+    h.quit(&runtime, cx);
+    drop((startup, runtime, journal));
+
+    let mut restarted = cx.new_app();
+    let journal = h.reopen();
+    assert!(journal.snapshot().unwrap().bindings().is_empty());
+    let ordinary_reads = h.ordinary_credentials.0.load(Ordering::SeqCst);
+    let attempts = journal.snapshot().unwrap().revocations()[0].attempts;
+    let (runtime, startup) = h.install_native_ipc(
+        paths,
+        NativeClientProvider::from_supervisor(fixture.reopen()),
+        journal.clone(),
+        &mut restarted,
+    );
+    assert!(h.snapshot(&mut restarted).servers.is_empty());
+    assert!(h.snapshot(&mut restarted).pending_unpairs.is_empty());
+    h.drive_until(
+        &mut restarted,
+        "pending-only native restart lost its scheduler",
+        || journal.snapshot().unwrap().revocations()[0].attempts > attempts,
+    );
+    assert!(!journal.ordinary_use_allowed(&h.old.binding).unwrap());
+    let ordinary_routes = crate::platform::server_client_route::refreshing_connector(
+        Some(NativeClientProvider::from_supervisor(fixture.reopen())),
+        journal.clone(),
+        crate::platform::server_client_route::connector(
+            vec![LocalRouteAuthority::new(registration.endpoint().unwrap()).unwrap()],
+            None,
+        )
+        .unwrap(),
+    );
+    assert!(matches!(
+        h.executor.block_on(ordinary_routes.open(h.old.binding.target(), ConnectionPurpose::Ordinary)),
+        Err(failure) if failure.class() == ClientFailureClass::StaleAuthority
+    ));
+    assert_eq!(
+        h.ordinary_credentials.0.load(Ordering::SeqCst),
+        ordinary_reads
+    );
+
+    // A deliberate later pairing is durable before availability returns. It must
+    // not redirect the old route, credential, pin or operation, or be cleaned up.
+    let newer = Pairing::at_native_route(
+        2,
+        registration.server_pin(),
+        h.old.binding.target().device(),
+        route.description().clone(),
+        identity.as_ref(),
+    );
+    h.executor.block_on(newer.seed(&journal));
+    let device = PreparedCredential {
+        scope: CredentialScope::new(CredentialScopeParts {
+            namespace: h.old.credential.scope.parts().namespace.clone(),
+            purpose: CredentialPurpose::DeviceIdentity,
+            reference: CredentialReference::new([33; 16]),
+        })
+        .unwrap(),
+        public_key: wire::TestKey::new(100).public_key(),
+    };
+    h.credentials
+        .items
+        .lock()
+        .unwrap()
+        .extend([newer.credential.clone(), device.clone()]);
+    let attachment = WorkspaceAttachment::new(
+        WorkspaceId::new(newer.binding.target().server(), 1).unwrap(),
+        newer.binding.target().pairing(),
+        newer.binding.target().client(),
+        AttachmentIncarnation::new(1).unwrap(),
+    )
+    .unwrap();
+    h.executor
+        .block_on(
+            journal.record_attachment(newer.binding.target().local_pairing().unwrap(), attachment),
+        )
+        .unwrap();
+    let (stop, service) = {
+        let _entered = h.executor.enter();
+        let listener = IpcListener::bind(
+            registration.endpoint().unwrap(),
+            MessageLimit::new(spaceterm_protocol::limits::MAX_FRAME_BYTES).unwrap(),
+            AdmissionLimits::new(8, Duration::from_secs(5)).unwrap(),
+        )
+        .unwrap();
+        serve_pending_ipc(
+            &h.executor,
+            listener,
+            h.endpoint.clone(),
+            original.task.clone(),
+        )
+    };
+    h.drive_until(
+        &mut restarted,
+        "production native route never authenticated retained IPC revocation",
+        || h.endpoint.statuses.load(Ordering::SeqCst) == 1,
+    );
+    assert!(matches!(
+        journal
+            .snapshot()
+            .unwrap()
+            .pairing_snapshot()
+            .unwrap()
+            .task(h.old.operation())
+            .unwrap()
+            .phase,
+        RevocationPhase::ReceiptRecorded {
+            acknowledged: false,
+            ..
+        }
+    ));
+    assert!(h.credentials.deletions.lock().unwrap().is_empty());
+    h.endpoint.status_gate.add_permits(1);
+    h.drive_until(
+        &mut restarted,
+        "native restricted receipt and acknowledgement did not finish exact cleanup",
+        || journal.snapshot().unwrap().revocations().is_empty(),
+    );
+    assert_eq!(h.endpoint.acknowledgements.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        *h.credentials.deletions.lock().unwrap(),
+        vec![h.old.credential.clone()]
+    );
+    assert_eq!(
+        *h.credentials.items.lock().unwrap(),
+        vec![newer.credential.clone(), device]
+    );
+    let saved = journal.snapshot().unwrap();
+    assert!(saved.bindings().contains(&newer.saved));
+    assert!(!saved.suppresses(&attachment));
+    assert!(journal.ordinary_use_allowed(&newer.binding).unwrap());
+    assert!(
+        runtime
+            .read_with(&mut restarted, |runtime, _| runtime.servers())
+            .is_empty()
+    );
+    assert_eq!(
+        h.ordinary_credentials.0.load(Ordering::SeqCst),
+        ordinary_reads
+    );
+    assert!(
+        h.endpoint
+            .tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|task| task == &original.task)
+    );
+    let found = fixture.reopen().discover().unwrap().unwrap();
+    assert_eq!(found.server_pin(), registration.server_pin());
+    assert_eq!(found.key(), registration.key());
+    assert_eq!(found.generation(), registration.generation());
+    assert_eq!(found.desired_state(), DesiredServerState::Running);
+    h.quit(&runtime, &mut restarted);
+    drop((startup, runtime));
+    stop.send(()).unwrap();
+    h.executor.block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), service)
+            .await
+            .unwrap()
+            .unwrap();
+    });
+    restarted.quit();
+}
+
+#[gpui::test]
+fn desktop_production_pending_only_ipc_restart_completes_exact_revocation_major1(
+    cx: &mut TestAppContext,
+) {
+    production_pending_only_ipc_restart(1, cx);
+}
+
+#[gpui::test]
+fn desktop_production_pending_only_ipc_restart_completes_exact_revocation_major2(
+    cx: &mut TestAppContext,
+) {
+    production_pending_only_ipc_restart(2, cx);
 }

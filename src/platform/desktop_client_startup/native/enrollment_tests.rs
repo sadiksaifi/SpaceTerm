@@ -52,10 +52,13 @@ async fn desktop_production_factory_installs_foreground_enrollment_with_empty_re
             fixture: None,
             paths: paths.clone(),
             ssh: crate::platform::server_client_route::SshStartup {
-                executable: "/usr/bin/ssh".into(), home: root.0.clone(), environment: vec![],
+                executable: "/usr/bin/ssh".into(),
+                home: root.0.clone(),
+                environment: vec![],
             },
             askpass: crate::platform::server_client_route::askpass::DesktopTunnelAskPass::new(
-                paths.clone(), Arc::new(crate::platform::unix_askpass_transport::AskPassWindowFactory::new(None)),
+                paths.clone(),
+                Arc::new(crate::platform::unix_askpass_transport::AskPassWindowFactory::new(None)),
             ),
             // Journal storage and native account discovery are external boundaries.
             // The real Factory, route connector, pairing runtime and installer remain.
@@ -92,4 +95,96 @@ async fn desktop_production_factory_installs_foreground_enrollment_with_empty_re
         Err(EnrollmentFailure::Pairing(PairingFailure::InvalidRequest))
     ));
     assert!(journal.snapshot().unwrap().bindings().is_empty());
+}
+
+/// Keep the production Factory, local discovery and native route composition. Only
+/// the journal, account service and native credential boundaries are substituted.
+pub(crate) fn pending_ipc_startup(
+    paths: Arc<AppPaths>,
+    journal: Arc<JournalController>,
+    native: NativeClientProvider,
+    credentials: Arc<dyn NativeDeviceCredentials>,
+    ordinary_credentials: Arc<dyn CredentialSource>,
+    executor: Arc<tokio::runtime::Runtime>,
+) -> Rc<dyn DesktopClientStartup> {
+    struct CredentialFactory {
+        factory: Factory,
+        credentials: Arc<dyn NativeDeviceCredentials>,
+        ordinary: Arc<dyn CredentialSource>,
+    }
+    impl NativeOwnerFactory for CredentialFactory {
+        fn foreground_setup(
+            &self,
+        ) -> ClientFuture<
+            '_,
+            Option<Arc<dyn crate::platform::local_server_client::foreground::ForegroundSetup>>,
+        > {
+            self.factory.foreground_setup()
+        }
+        fn recover(&self) -> ClientFuture<'_, NativeDesktopOwners> {
+            Box::pin(async {
+                let credentials = self.credentials.clone();
+                let mut owners = self
+                    .factory
+                    .recover_with_enrollment(move |journal, routes, invalidator, local, executor| {
+                        let connector = Arc::new(
+                            spaceterm_client_native::restricted_routes::NativePairingConnector::with_shared_routes(
+                                journal.clone(), routes.clone(),
+                            ),
+                        );
+                        let mut services = crate::ui::settings_window::server_enrollment::native::production(
+                            journal.clone(), routes, invalidator.clone(), local, executor,
+                        );
+                        services.pairing = Arc::new(
+                            spaceterm_client_native::pairing_runtime::NativePairingRuntime::with_adapters(
+                                journal,
+                                credentials,
+                                connector.clone(),
+                                connector,
+                                invalidator,
+                                spaceterm_protocol::authentication::HandshakeConfig::default(),
+                            ),
+                        );
+                        services
+                    })
+                    .await?;
+                owners.services.credentials = self.ordinary.clone();
+                Ok(owners)
+            })
+        }
+    }
+    let enrollment = Arc::default();
+    Rc::new(NativeDesktopStartup {
+        owners: Arc::new(tokio::sync::Mutex::new(None)),
+        factory: Some(Arc::new(CredentialFactory {
+            factory: Factory {
+                #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+                fixture: None,
+                paths: paths.clone(),
+                ssh: crate::platform::server_client_route::SshStartup {
+                    executable: "/usr/bin/ssh".into(),
+                    home: paths.managed_ssh_config().parent().unwrap().to_owned(),
+                    environment: vec![],
+                },
+                askpass: crate::platform::server_client_route::askpass::DesktopTunnelAskPass::new(
+                    paths.clone(),
+                    Arc::new(
+                        crate::platform::unix_askpass_transport::AskPassWindowFactory::new(None),
+                    ),
+                ),
+                context: tokio::sync::Mutex::new(Some(Arc::new(Context {
+                    journal,
+                    native: Some(native),
+                    native_failure: None,
+                }))),
+                enrollment: Arc::clone(&enrollment),
+            },
+            credentials,
+            ordinary: ordinary_credentials,
+        })),
+        store: SharedViewStore(Arc::new(std::sync::Mutex::new(NativeViewStore::new(paths)))),
+        consumed: Arc::default(),
+        executor,
+        enrollment,
+    })
 }
