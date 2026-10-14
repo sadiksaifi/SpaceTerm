@@ -1496,6 +1496,22 @@ async fn near_ceiling_journal_reserves_nonempty_scope_and_original_outcome_befor
                 generation: spaceterm_core::authority::SessionGeneration::new(1),
             })
             .collect();
+        // Bind the target's exact scope and completion budget before admission
+        // pressure. It must survive later allocations without a replacement ID.
+        let request = supervisor.allocate_request().unwrap();
+        let assessment = supervisor
+            .assess(
+                request,
+                if activate {
+                    ServiceAction::Activate(installation(2).installation)
+                } else {
+                    ServiceAction::Stop
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(assessment.affected_sessions(), 64);
+        let action = assessment.confirm().unwrap();
         // Retain exact nonempty scopes until another assessment no longer fits.
         for _ in 0..32 {
             let next = match supervisor.allocate_request() {
@@ -1532,43 +1548,22 @@ async fn near_ceiling_journal_reserves_nonempty_scope_and_original_outcome_befor
                 .len()
                 > 240 * 1024
         );
-        // Unsubmitted IDs may be retired under pressure. Capture this original
-        // confirmation after pressure, then test its reserved completion budget.
-        let request = supervisor.allocate_request().unwrap();
-        let action = supervisor
-            .assess(
-                request,
-                if activate {
-                    ServiceAction::Activate(installation(2).installation)
-                } else {
-                    ServiceAction::Stop
-                },
-            )
-            .await
-            .unwrap()
-            .confirm()
-            .unwrap();
         let result = if activate {
             supervisor.activate(action).await
         } else {
             supervisor.stop(action).await
-        };
+        }
+        .unwrap();
+        assert_eq!(result.request, request);
         assert_eq!(
-            result.unwrap().state,
+            result.state,
             ServiceRequestState::Completed(if activate {
                 ServiceOutcome::Activated(installation(2))
             } else {
                 ServiceOutcome::Stopped
             })
         );
-        assert_eq!(
-            fixture.supervisor().resolve(request).await.unwrap().state,
-            ServiceRequestState::Completed(if activate {
-                ServiceOutcome::Activated(installation(2))
-            } else {
-                ServiceOutcome::Stopped
-            })
-        );
+        assert_eq!(fixture.supervisor().resolve(request).await.unwrap(), result);
     }
 }
 
