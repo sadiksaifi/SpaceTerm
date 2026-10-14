@@ -8,7 +8,8 @@ pub(super) use server::{
 mod text;
 mod view;
 
-use super::drag_and_drop::{DragPreview, DragSession, ReorderableStrip, painted_item_size};
+use super::drag_and_drop::{DragPreview, DragSession, ReorderableStrip};
+use super::sidebar_motion::{SidebarFrame, SidebarMotion};
 use super::workspace_chrome::{
     WorkspaceChromeIdentity, WorkspaceChromeLayout, WorkspaceChromeStatus,
 };
@@ -284,6 +285,10 @@ pub(super) struct WorkspaceSidebar {
     resize_origin: Option<SidebarLayout>,
     suppress_pointer_until_release: bool,
     workspace_reorder: ReorderableStrip<WorkspaceId>,
+    /// How the sidebar moves as it shows and hides.
+    motion: SidebarMotion,
+    /// How the current frame presents the sidebar.
+    frame: SidebarFrame,
 }
 
 impl WorkspaceSidebar {
@@ -350,7 +355,18 @@ impl WorkspaceSidebar {
             resize_origin: None,
             suppress_pointer_until_release: false,
             workspace_reorder: ReorderableStrip::new(gpui::Axis::Vertical),
+            motion: SidebarMotion::new(visible),
+            frame: SidebarFrame {
+                reveal: if visible { 1.0 } else { 0.0 },
+                moving: false,
+            },
         }
+    }
+
+    /// Presents the sidebar in the current frame, which the Workspace chrome around it follows.
+    pub(super) fn present(&mut self, cx: &App) -> SidebarFrame {
+        self.frame = self.motion.present(self.layout.visible, cx);
+        self.frame
     }
 
     pub(super) fn dismiss_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -368,6 +384,12 @@ impl WorkspaceSidebar {
         if source == ResizeInputSource::Pointer {
             self.suppress_pointer_until_release = false;
         }
+    }
+
+    /// Ends a resize when a toggle takes the sidebar's width from it. The handle's remaining events
+    /// for that interaction change nothing.
+    fn end_resize(&mut self) {
+        self.resize_origin = None;
     }
 
     fn finish_resize(
@@ -716,20 +738,40 @@ impl WorkspaceSidebar {
     fn begin_workspace_drag(
         &mut self,
         workspace_id: WorkspaceId,
+        cursor_offset: gpui::Point<Pixels>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> DragPreview {
-        let size = self
-            .row_position(workspace_id)
-            .and_then(|position| painted_item_size(&self.scroll_handle, position));
+        let size = self.row_position(workspace_id).and_then(|position| {
+            self.workspace_reorder
+                .item_size(&self.scroll_handle, workspace_id, position)
+        });
         let session = DragSession::begin(cx, |sidebar: &mut Self, _, cx| {
-            sidebar.workspace_reorder.cancel();
+            let ids = sidebar.row_ids();
+            sidebar
+                .workspace_reorder
+                .cancel(&sidebar.scroll_handle, &ids, cx);
             cx.notify();
         });
-        self.workspace_reorder.begin(workspace_id, session);
+        let ids = self.row_ids();
+        // The lifted copy shows the Workspace row alone, without its group's Worktree rows.
+        let length = self
+            .row_spans
+            .get(&SidebarRowKey::Workspace(workspace_id))
+            .map(|(top, bottom)| *bottom - *top);
+        self.workspace_reorder.begin(
+            workspace_id,
+            length,
+            session,
+            &self.scroll_handle,
+            &ids,
+            window,
+            cx,
+        );
         self.drag_workspace_to(workspace_id, window.mouse_position(), cx);
         cx.notify();
         let sidebar = cx.entity().downgrade();
+        let placement = sidebar.clone();
         DragPreview::new(window, cx, move |window, cx| {
             sidebar
                 .upgrade()
@@ -743,6 +785,11 @@ impl WorkspaceSidebar {
                     )
                 })
                 .unwrap_or_else(|| div().into_any_element())
+        })
+        .placed(cursor_offset, move |cx| {
+            placement
+                .upgrade()
+                .and_then(|owner| owner.read(cx).workspace_reorder.lifted_origin())
         })
     }
 
@@ -790,12 +837,10 @@ impl WorkspaceSidebar {
         if self.workspace_reorder.dragged() != Some(workspace_id) {
             return;
         }
-        let Some(current) = self.row_position(workspace_id) else {
-            return;
-        };
+        let ids = self.row_ids();
         if self
             .workspace_reorder
-            .track(&self.scroll_handle, current, self.rows.len(), pointer)
+            .track(&self.scroll_handle, &ids, pointer, cx)
         {
             cx.notify();
         }
@@ -808,13 +853,14 @@ impl WorkspaceSidebar {
             return;
         };
         self.drag_workspace_to(workspace_id, pointer, cx);
-        let current = self.row_position(workspace_id);
-        let landing = current.and_then(|current| {
-            self.workspace_reorder
-                .finish(current, self.rows.len(), cx)
-                .map(|(workspace_id, position)| (workspace_id, current, position))
-        });
-        self.workspace_reorder.cancel();
+        let ids = self.row_ids();
+        let landing = self
+            .workspace_reorder
+            .finish(&self.scroll_handle, &ids, cx)
+            .and_then(|(workspace_id, position)| {
+                self.row_position(workspace_id)
+                    .map(|current| (workspace_id, current, position))
+            });
         if let Some((workspace_id, current, position)) = landing {
             self.move_row(workspace_id, current, position, cx);
         }
@@ -837,6 +883,10 @@ impl WorkspaceSidebar {
         cx.notify();
     }
 
+    fn row_ids(&self) -> Vec<WorkspaceId> {
+        self.rows.iter().map(|row| row.workspace_id).collect()
+    }
+
     fn row_position(&self, workspace_id: WorkspaceId) -> Option<usize> {
         self.rows
             .iter()
@@ -846,7 +896,22 @@ impl WorkspaceSidebar {
 
 impl Render for WorkspaceSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.workspace_reorder.end_released(cx);
+        let ids = self.row_ids();
+        self.workspace_reorder
+            .refresh(&self.scroll_handle, &ids, window, cx);
+        if let Some(active) = self.rows.iter().find(|row| row.active) {
+            self.workspace_reorder.reveal_while_entering(
+                active.workspace_id,
+                &self.scroll_handle,
+                &ids,
+            );
+        }
+        let selected = match self.selected_key() {
+            Some(SidebarRowKey::Workspace(workspace_id)) => Some(workspace_id),
+            _ => None,
+        };
+        self.workspace_reorder
+            .follow_selection(selected, window, cx);
         self.sync_scrollbar(cx);
         let hovers = self.row_hovers(window, cx);
         self.render_body(hovers, cx.entity().downgrade(), window, cx)
@@ -932,7 +997,7 @@ impl WorkspaceSidebar {
                 source,
                 requested_value,
                 ..
-            } => {
+            } if source != ResizeInputSource::Pointer || self.is_resizing() => {
                 let reveal_width = self
                     .collapsed_top_chrome_width(window, cx)
                     .max(px(WORKSPACE_SIDEBAR_MINIMUM_WIDTH));
@@ -944,6 +1009,7 @@ impl WorkspaceSidebar {
                     self.resize(self.layout.width.max(px(requested_value)), window, cx);
                 }
             }
+            ResizeHandleEvent::ResizeRequested { .. } => {}
             ResizeHandleEvent::ResetRequested { source } => {
                 self.resize(px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH), window, cx);
                 if source == ResizeInputSource::Pointer {
@@ -1249,6 +1315,8 @@ impl WorkspaceSidebar {
             dismiss_active_menu(window, cx);
         }
         self.cancel_rename(cx);
+        self.motion.expect_change();
+        self.end_resize();
         self.set_layout(!self.layout.visible, self.layout.width, window, cx);
         if !self.layout.visible && restore {
             cx.emit(SidebarEvent::FocusPane);
@@ -1268,6 +1336,10 @@ impl WorkspaceSidebar {
             self.cancel_rename(cx);
             cx.emit(SidebarEvent::FocusPane);
         } else {
+            if !self.layout.visible {
+                self.motion.expect_change();
+                self.end_resize();
+            }
             self.set_layout(true, self.layout.width, window, cx);
             if let Some(index) = self.rows.iter().position(|row| row.active) {
                 self.reveal_row(index, cx);

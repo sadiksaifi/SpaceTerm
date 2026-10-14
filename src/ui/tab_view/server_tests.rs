@@ -2262,3 +2262,159 @@ fn desktop_server_zoom_prefix_receipt_and_frame_can_precede_completion(cx: &mut 
     );
     assert!(harness.events().is_empty());
 }
+
+/// Draws the frame `millis` after the last one, while Panes move.
+fn draw_frame_after(millis: u64, cx: &mut VisualTestContext) {
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(millis));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn desktop_server_remote_split_opens_the_new_pane_as_its_source_makes_room(
+    cx: &mut TestAppContext,
+) {
+    use crate::ui::drag_and_drop::{AnimatePresence, finish_slides};
+
+    let mut replica = one_pane(A);
+    let (harness, cx) = server_view(&replica, ReplicaStatus::Ready, cx);
+    let whole = cx.debug_bounds("pane-surface-1").unwrap();
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+    replica
+        .org
+        .split(1, 2, 1, CoreAxis::Horizontal, SplitEdge::After)
+        .publish();
+    replica.reconcile_ready(&[]);
+    assert_eq!(harness.apply(&replica, ReplicaStatus::Ready, 1, cx), Ok(()));
+    draw_frame_after(60, cx);
+    let source = cx.debug_bounds("pane-surface-1").unwrap();
+    let opening = cx.debug_bounds("pane-surface-2").unwrap();
+    finish_slides(cx);
+    let source_place = cx.debug_bounds("pane-surface-1").unwrap();
+    let new_place = cx.debug_bounds("pane-surface-2").unwrap();
+
+    assert!(
+        source.right() < whole.right() && source.right() > source_place.right(),
+        "the source Pane must be making room: {source:?}"
+    );
+    assert!(
+        opening.left() > new_place.left() && opening.right() > source.right(),
+        "the new Pane must be opening from its far edge: {opening:?}"
+    );
+    assert_eq!(harness.focused(cx), pane(A, 1));
+    assert!(harness.runtime.begun().is_empty());
+}
+
+#[gpui::test]
+fn desktop_server_remote_close_closes_the_place_as_the_pane_beside_it_takes_it(
+    cx: &mut TestAppContext,
+) {
+    use crate::ui::drag_and_drop::{AnimatePresence, finish_slides};
+
+    let mut replica = two_panes(A);
+    let (harness, cx) = server_view(&replica, ReplicaStatus::Ready, cx);
+    let first = cx.debug_bounds("pane-surface-1").unwrap();
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+    replica.org.delete_pane(2).publish();
+    replica.reconcile_ready(&[]);
+    assert_eq!(harness.apply(&replica, ReplicaStatus::Ready, 1, cx), Ok(()));
+    draw_frame_after(60, cx);
+    let growing = cx.debug_bounds("pane-surface-1").unwrap();
+    let closing = cx.debug_bounds("closing-pane");
+    finish_slides(cx);
+    let whole = cx.debug_bounds("pane-surface-1").unwrap();
+
+    assert!(
+        growing.right() > first.right() && growing.right() < whole.right(),
+        "the remaining Pane must be taking the closed place: {growing:?}"
+    );
+    assert!(closing.is_some(), "the closed Pane's place must be closing");
+    assert_eq!(
+        (cx.debug_bounds("closing-pane"), harness.presented(cx)),
+        (None, vec![pane(A, 1)])
+    );
+}
+
+#[gpui::test]
+fn desktop_server_published_zoom_carries_on_the_zoom_it_reflects(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::{AnimatePresence, finish_slides};
+
+    let mut replica = two_panes(A);
+    let (harness, cx) = server_view(&replica, ReplicaStatus::Ready, cx);
+    let first = cx.debug_bounds("pane-surface-1").unwrap();
+    let second = cx.debug_bounds("pane-surface-2").unwrap();
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+    cx.update(|window, cx| {
+        harness
+            .view
+            .update(cx, |view, cx| view.toggle_zoom(window, cx))
+    });
+    draw_frame_after(60, cx);
+    let raised = harness
+        .view
+        .read_with(cx, |view, _| view.pane_frames.raised);
+    replica
+        .personal
+        .arrange(ws(A, 1), tab(A, 1), ArrangementEdit::ToggleZoom)
+        .unwrap();
+    assert_eq!(harness.apply(&replica, ReplicaStatus::Ready, 1, cx), Ok(()));
+    draw_frame_after(60, cx);
+    let carried = harness
+        .view
+        .read_with(cx, |view, _| view.pane_frames.raised);
+    let growing = cx.debug_bounds("pane-surface-1").unwrap();
+    let beneath = cx.debug_bounds("pane-surface-2");
+    finish_slides(cx);
+
+    let (Some((raised_pane, before)), Some((carried_pane, after))) = (raised, carried) else {
+        panic!("the zoomed Pane must stay raised through the publication: {carried:?}");
+    };
+    let zoomed = super::PaneKey::Server(pane(A, 1));
+    assert_eq!((raised_pane, carried_pane), (zoomed, zoomed));
+    assert!(
+        after > before,
+        "the zoom must carry on rather than start again: {before} then {after}"
+    );
+    assert!(growing.right() > first.right());
+    assert_eq!(
+        beneath,
+        Some(second),
+        "the other Pane must stay in place beneath the zooming Pane"
+    );
+    assert_eq!(cx.debug_bounds("pane-surface-2"), None);
+    assert_eq!(harness.runtime.begun().len(), 1);
+}
+
+#[gpui::test]
+fn desktop_server_publication_to_a_hidden_tab_lays_out_its_panes_at_once(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::{AnimatePresence, finish_slides};
+
+    let mut replica = one_pane(A);
+    let (harness, cx) = server_view(&replica, ReplicaStatus::Ready, cx);
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+    harness.view.update(cx, |view, cx| view.deactivate(cx));
+    replica
+        .org
+        .split(1, 2, 1, CoreAxis::Horizontal, SplitEdge::After)
+        .publish();
+    replica.reconcile_ready(&[]);
+    assert_eq!(harness.apply(&replica, ReplicaStatus::Ready, 1, cx), Ok(()));
+    harness
+        .view
+        .update(cx, |view, cx| view.activate_without_focus(cx));
+    draw_frame_after(60, cx);
+    let moving = harness
+        .view
+        .read_with(cx, |view, _| view.pane_frames.moving);
+    let shown = cx.debug_bounds("pane-surface-2");
+    finish_slides(cx);
+
+    assert!(
+        !moving,
+        "a Tab shown after a publication presents its Panes at rest"
+    );
+    assert_eq!(shown, cx.debug_bounds("pane-surface-2"));
+    assert!(shown.is_some());
+}

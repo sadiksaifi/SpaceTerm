@@ -8,6 +8,7 @@ use spaceterm_ui::{ButtonSize, ButtonTheme, ComboBoxTheme, CustomIconName, Icon,
 use super::appearance::{ChromeAppearance, chrome};
 use super::chrome_icons::IconRole;
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
+use super::sidebar_motion::SidebarFrame;
 use super::workspace_sidebar::SidebarLayout;
 use super::workspace_status::{WorkspaceStatusPaint, resolve as resolve_workspace_status};
 use crate::appearance::Color;
@@ -45,7 +46,9 @@ fn trailing_reserve(appearance: &ChromeAppearance, cx: &App) -> Pixels {
 #[derive(Clone, Copy)]
 pub(super) struct WorkspaceChromeLayout {
     pub(super) width: Pixels,
-    sidebar_visible: bool,
+    /// How much of the collapsed Workspace identity shows, from 0 beside a shown sidebar to 1
+    /// once it is hidden.
+    identity_presence: f32,
     fullscreen: bool,
     client_controls_width: Pixels,
 }
@@ -63,7 +66,7 @@ impl WorkspaceChromeLayout {
             } else {
                 Self::collapsed_width(identity, window, cx)
             },
-            sidebar_visible: sidebar.visible,
+            identity_presence: if sidebar.visible { 0.0 } else { 1.0 },
             fullscreen: window.is_fullscreen(),
             client_controls_width: spaceterm_ui::ClientWindowControls::width(
                 spaceterm_ui::WindowControlSide::Left,
@@ -73,11 +76,61 @@ impl WorkspaceChromeLayout {
         }
     }
 
-    pub(super) fn collapsed_width(
+    /// The layout one frame presents while the sidebar `frame` moves: as wide as the part of the
+    /// sidebar that shows, with as much of the collapsed Workspace identity as the sidebar hides.
+    pub(super) fn presented(
+        sidebar: SidebarLayout,
+        frame: SidebarFrame,
         identity: &WorkspaceChromeIdentity,
         window: &Window,
         cx: &App,
-    ) -> Pixels {
+    ) -> Self {
+        let collapsed = Self::collapsed_width(identity, window, cx);
+        Self {
+            width: frame.between(collapsed, sidebar.width),
+            identity_presence: 1.0 - frame.reveal,
+            ..Self::resolve(sidebar, identity, window, cx)
+        }
+    }
+
+    /// How much of the collapsed Workspace identity shows, from 0 beside a shown sidebar, where
+    /// the chrome presents only the Workspace glyph, to 1 once the sidebar is hidden.
+    pub(super) fn identity_presence(self) -> f32 {
+        self.identity_presence
+    }
+
+    /// How a partly present collapsed identity draws, or `None` when it is fully present.
+    pub(super) fn identity_motion(
+        self,
+        identity: &WorkspaceChromeIdentity,
+        window: &Window,
+        cx: &App,
+    ) -> Option<IdentityMotion> {
+        if self.identity_presence >= 1.0 {
+            return None;
+        }
+        let appearance = chrome(cx);
+        let theme = cx.global::<ComboBoxTheme>();
+        let (identity_width, status_width, _) = Self::identity_widths(identity, window, cx);
+        // Without the name, the glyph sits where the icon-only switcher centers it.
+        let border = theme.custom_trigger_width(px(0.0), window) / 2.0;
+        let glyph = appearance.icons.metrics(IconRole::Chrome).glyph_size;
+        let bare_padding = ((theme.icon_trigger_size() - glyph) / 2.0 - border).max(px(0.0));
+        let padding = appearance.spacing(SWITCHER_HORIZONTAL_PADDING);
+        Some(IdentityMotion {
+            presence: self.identity_presence,
+            padding: bare_padding + (padding - bare_padding) * self.identity_presence,
+            identity_width,
+            extent: appearance.spacing(SWITCHER_IDENTITY_GAP) + identity_width + status_width,
+        })
+    }
+
+    /// The collapsed identity's name width, its status mark's width, and the rest of its content.
+    fn identity_widths(
+        identity: &WorkspaceChromeIdentity,
+        window: &Window,
+        cx: &App,
+    ) -> (Pixels, Pixels, Pixels) {
         let appearance = chrome(cx);
         let name_width =
             appearance
@@ -143,6 +196,17 @@ impl WorkspaceChromeLayout {
         let identity_width =
             spaceterm_ui::reserve_measured_width(name_width, [pin_width, worktree_width], window)
                 .min(content_maximum.max(px(0.0)));
+        (identity_width, status_width, content_fixed)
+    }
+
+    pub(super) fn collapsed_width(
+        identity: &WorkspaceChromeIdentity,
+        window: &Window,
+        cx: &App,
+    ) -> Pixels {
+        let appearance = chrome(cx);
+        let chrome_theme = cx.global::<ComboBoxTheme>();
+        let (identity_width, _, content_fixed) = Self::identity_widths(identity, window, cx);
         let content_width =
             spaceterm_ui::reserve_measured_width(px(0.0), [identity_width, content_fixed], window);
         let edge_reserve = trailing_reserve(appearance, cx);
@@ -192,7 +256,9 @@ impl WorkspaceChromeLayout {
         // The visible control owns clicks where it meets the sidebar resize target.
         let switcher = div()
             .min_w_0()
-            .when(!self.sidebar_visible, |container| container.w_full())
+            .when(self.identity_presence >= 1.0, |container| {
+                container.w_full()
+            })
             .occlude()
             .child(switcher);
         div()
@@ -230,6 +296,20 @@ impl WorkspaceChromeLayout {
             )
             .into_any_element()
     }
+}
+
+/// How a collapsed Workspace identity draws while the sidebar moves: its name and status ease in
+/// beside the glyph, which glides between its place beside the sidebar and its place in the chip.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct IdentityMotion {
+    /// How much of the identity shows, from 0 to 1.
+    presence: f32,
+    /// The chip's padding on each side of its content.
+    padding: Pixels,
+    /// The width of the name, and of any pin and Worktree beside it.
+    identity_width: Pixels,
+    /// The width the name and status mark take beside the glyph, with the gap before them.
+    extent: Pixels,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -387,11 +467,13 @@ pub(super) struct WorkspaceChromeIdentity {
 
 impl WorkspaceChromeIdentity {
     /// Renders the collapsed identity: the Workspace glyph, its name, and a trailing status mark.
+    /// While the sidebar moves, `motion` eases the name and status mark in beside the glyph.
     pub(super) fn render(
         self,
         switcher_color: Rgba,
         appearance: &ChromeAppearance,
         status_hosts: WorkspaceChromeStatusHosts,
+        motion: Option<IdentityMotion>,
     ) -> AnyElement {
         let status_group = "workspace-chrome-status";
         let status_mark = self
@@ -451,15 +533,14 @@ impl WorkspaceChromeIdentity {
                         ),
                 )
             });
-        div()
+        let gap = appearance.spacing(SWITCHER_IDENTITY_GAP);
+        let identity = div()
             .relative()
             .flex()
             .items_center()
             .w_full()
             .h_full()
             .min_w_0()
-            .px(appearance.spacing(SWITCHER_HORIZONTAL_PADDING))
-            .gap(appearance.spacing(SWITCHER_IDENTITY_GAP))
             .group(status_group)
             .child(
                 div()
@@ -470,10 +551,39 @@ impl WorkspaceChromeIdentity {
                         appearance.icons.metrics(IconRole::Chrome).glyph_size,
                         switcher_color,
                     )),
-            )
-            .child(chip)
-            .children(status_mark)
-            .into_any_element()
+            );
+        match motion {
+            None => identity
+                .px(appearance.spacing(SWITCHER_HORIZONTAL_PADDING))
+                .gap(gap)
+                .child(chip)
+                .children(status_mark)
+                .into_any_element(),
+            // The name keeps its width and truncation, and shows through a window that widens as
+            // the identity appears.
+            Some(motion) => identity
+                .px(motion.padding)
+                .child(
+                    div()
+                        .flex_none()
+                        .w(motion.extent * motion.presence)
+                        .h_full()
+                        .overflow_hidden()
+                        .opacity(motion.presence)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .w(motion.extent)
+                                .h_full()
+                                .pl(gap)
+                                .gap(gap)
+                                .child(chip.flex_none().w(motion.identity_width))
+                                .children(status_mark),
+                        ),
+                )
+                .into_any_element(),
+        }
     }
 
     pub(super) fn accessibility_name(&self) -> String {

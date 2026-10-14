@@ -648,6 +648,7 @@ impl TextInput {
             cx.on_focus(&focus_handle, window, Self::on_focus),
             cx.on_blur(&focus_handle, window, Self::on_blur),
             cx.observe_window_activation(window, Self::on_window_activation),
+            cx.observe_global_in::<crate::TextInputFocus>(window, Self::on_native_focus_change),
         ];
         let initial_value = Zeroizing::new(initial_value.into());
         let normalized = Zeroizing::new(normalize_single_line(&initial_value));
@@ -1127,14 +1128,21 @@ impl TextInput {
             window.focus_next(cx);
             return;
         }
+        let already_focused = self.focused;
         self.focused = true;
         self.window_active = window.is_window_active();
         self.caret_visible = true;
-        cx.emit(TextInputEvent::FocusGained);
+        if !already_focused {
+            cx.emit(TextInputEvent::FocusGained);
+        }
         self.restart_caret(cx);
     }
-    fn on_blur(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.focused {
+    fn on_blur(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focused
+            || (!window.is_window_active()
+                && self.focus_handle.is_focused(window)
+                && crate::text_input_focus::retains_text_input(window, cx))
+        {
             return;
         }
         self.commit_composition(cx);
@@ -1146,8 +1154,17 @@ impl TextInput {
         cx.emit(TextInputEvent::FocusLost);
         cx.notify();
     }
+    fn on_native_focus_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !crate::text_input_focus::retains_text_input(window, cx) {
+            self.on_blur(window, cx);
+        }
+    }
     fn on_window_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.window_active = window.is_window_active();
+        // GPUI suppresses focus events while native UI holds the window's key status.
+        if self.window_active && self.focused && !self.focus_handle.is_focused(window) {
+            self.on_blur(window, cx);
+        }
         if self.window_active {
             self.caret_visible = true;
             self.restart_caret(cx);

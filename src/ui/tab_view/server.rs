@@ -707,6 +707,42 @@ const fn server_axis(axis: SplitAxis) -> ServerSplitAxis {
     }
 }
 
+/// One node of a Pane Layout's placement.
+#[derive(Debug, PartialEq)]
+enum PlacementNode {
+    Pane(PaneKey),
+    Split(SplitAxis, f32),
+}
+
+/// What places the Panes of `layout` at any size: its Panes and Split axes and ratios in layout
+/// order, and its Zoomed Pane. A Split's identity places nothing, so a provider allocating one
+/// for a Split this client predicted moves no Pane.
+fn pane_placement(
+    layout: super::LayoutRef<'_>,
+    zoomed: Option<PaneKey>,
+) -> (Vec<PlacementNode>, Option<PaneKey>) {
+    fn collect(tree: super::LayoutRef<'_>, nodes: &mut Vec<PlacementNode>) {
+        match tree.node() {
+            super::LayoutNode::Leaf(pane) => nodes.push(PlacementNode::Pane(pane)),
+            super::LayoutNode::Split {
+                axis,
+                ratio,
+                first,
+                second,
+                ..
+            } => {
+                nodes.push(PlacementNode::Split(axis, ratio));
+                collect(first, nodes);
+                collect(second, nodes);
+            }
+        }
+    }
+
+    let mut nodes = Vec::new();
+    collect(layout, &mut nodes);
+    (nodes, zoomed)
+}
+
 #[cfg_attr(
     not(test),
     allow(
@@ -819,6 +855,7 @@ impl TabView {
                 _runtime: subscription,
             })),
             pane_bounds: std::collections::BTreeMap::new(),
+            pane_surfaces: std::collections::BTreeMap::new(),
             pane_layout_size: None,
             pending_split: None,
             split_bounds: std::collections::BTreeMap::new(),
@@ -827,6 +864,9 @@ impl TabView {
             pane_attention,
             resizing_split_id: None,
             pane_drag: None,
+            pane_motion: super::PaneMotion::default(),
+            pane_frames: super::PaneFrames::default(),
+            stage_stretch: gpui::px(0.0),
             active: true,
             focus_branch_blocker: None,
             native_service_hierarchy_generation: 0,
@@ -867,6 +907,7 @@ impl TabView {
         arrangement: &PaneArrangement,
         cx: &mut Context<Self>,
     ) -> Result<(), DesktopClientError> {
+        let placement_before = pane_placement(self.panes.layout(), self.panes.zoomed());
         let Panes::Server(panes) = &mut self.panes else {
             return Err(DesktopClientError::WrongServer);
         };
@@ -908,6 +949,7 @@ impl TabView {
         for (pane, terminal) in released {
             let key = PaneKey::Server(pane);
             self.pane_bounds.remove(&key);
+            self.pane_surfaces.remove(&key);
             self.pane_titles.remove(&key);
             self.pane_captions.remove(&key);
             self.pane_attention.remove(&key);
@@ -938,6 +980,14 @@ impl TabView {
             self.advance_native_service_hierarchy_generation(cx);
             self.pane_layout_revision += 1;
             self.split_bounds.clear();
+        }
+        // Panes a publication moves ease as a local split or close moves them. A publication that
+        // reflects a personal edit already presented here places them as they are, so that edit's
+        // own motion carries on. A hidden Tab lays out its Panes at once when it is shown.
+        if self.active
+            && pane_placement(self.panes.layout(), self.panes.zoomed()) != placement_before
+        {
+            self.pane_motion.expect_change();
         }
         self.schedule_materialize(cx);
         self.complete_creation(cx);

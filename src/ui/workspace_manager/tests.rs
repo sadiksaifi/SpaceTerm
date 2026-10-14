@@ -2,6 +2,7 @@ use crate::directory_selection::GpuiDirectorySelection;
 use crate::domain::RemoteConnectionPhase;
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
 use crate::terminal::GpuiTerminalKeyInputAdapterFactory;
+use crate::ui::drag_and_drop::finish_slides;
 use crate::ui::workspace_frame::WorkspaceFrame;
 use crate::ui::workspace_sidebar::SIDEBAR_ROW_SELECTION_INSET_Y;
 use crate::ui::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
@@ -6239,6 +6240,423 @@ fn workspace_popup_name_should_fit_at_fractional_scales(cx: &mut TestAppContext)
     );
 }
 
+/// Draws the frame 30ms into a sidebar motion and reports the sidebar, the stage, the Pane, and
+/// whether the collapsed Workspace identity shows.
+fn sidebar_motion_frame(
+    cx: &mut VisualTestContext,
+) -> (
+    Option<gpui::Bounds<Pixels>>,
+    gpui::Bounds<Pixels>,
+    gpui::Bounds<Pixels>,
+    bool,
+) {
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(30));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    sidebar_presentation(cx)
+}
+
+fn sidebar_presentation(
+    cx: &mut VisualTestContext,
+) -> (
+    Option<gpui::Bounds<Pixels>>,
+    gpui::Bounds<Pixels>,
+    gpui::Bounds<Pixels>,
+    bool,
+) {
+    (
+        cx.debug_bounds("workspace-sidebar"),
+        // A moving stage is laid out where it rests and drawn where the sidebar leaves it.
+        cx.debug_bounds("tab-manager-moving-stage")
+            .or_else(|| cx.debug_bounds("tab-manager-content"))
+            .unwrap(),
+        cx.debug_bounds("pane-surface-1").unwrap(),
+        cx.debug_bounds("workspace-chip-label").is_some(),
+    )
+}
+
+#[gpui::test]
+fn toggling_the_sidebar_should_slide_it_while_the_terminal_resizes_once(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, records, cx) = workspace_manager(cx);
+    let resizes = || {
+        records
+            .commands()
+            .iter()
+            .filter(|call| matches!(call.command, RecordedCommand::Resize(_)))
+            .count()
+    };
+    let (Some(sidebar), stage, pane, false) = sidebar_presentation(cx) else {
+        panic!("the sidebar must start shown");
+    };
+    let before = resizes();
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    let hiding = sidebar_motion_frame(cx);
+    let hiding_resizes = resizes();
+    finish_slides(cx);
+    let hidden = sidebar_presentation(cx);
+    let hidden_resizes = resizes();
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    let showing = sidebar_motion_frame(cx);
+    finish_slides(cx);
+    let shown = sidebar_presentation(cx);
+
+    // The collapsed Workspace name eases in as the sidebar slides out, and out as it slides in.
+    let (Some(hiding_sidebar), hiding_stage, hiding_pane, true) = hiding else {
+        panic!("the sidebar must still show beside the easing Workspace name: {hiding:?}");
+    };
+    assert!(
+        hiding_sidebar.left() < sidebar.left() && hiding_sidebar.right() > px(0.0),
+        "the sidebar must be sliding out: {hiding_sidebar:?} from {sidebar:?}"
+    );
+    assert!(
+        hiding_stage.left() < stage.left() && hiding_stage.left() > hidden.1.left(),
+        "the stage must follow the sidebar: {hiding_stage:?} between {stage:?} and {:?}",
+        hidden.1
+    );
+    assert_eq!(
+        (hiding_pane.right(), hiding_resizes),
+        (hidden.2.right(), hidden_resizes),
+        "the Pane must keep its trailing edge while the Terminal takes its final size when the \
+         motion starts"
+    );
+    assert_eq!((hidden.0, hidden.3), (None, true));
+    assert_eq!(hidden_resizes, before + 1, "the Terminal must resize once");
+
+    let (Some(showing_sidebar), showing_stage, showing_pane, true) = showing else {
+        panic!("the sidebar must slide in beside the easing Workspace name: {showing:?}");
+    };
+    assert!(
+        showing_sidebar.left() < sidebar.left() && showing_stage.left() < stage.left(),
+        "the sidebar and stage must be sliding in: {showing:?}"
+    );
+    assert_eq!(
+        showing_pane.right(),
+        pane.right(),
+        "the Pane must keep its trailing edge while the sidebar slides in"
+    );
+    assert_eq!(shown, (Some(sidebar), stage, pane, false));
+    assert_eq!(resizes(), before + 2);
+}
+
+#[gpui::test]
+fn every_frame_of_a_sidebar_toggle_should_keep_the_terminal_size(cx: &mut TestAppContext) {
+    toggle_the_sidebar_frame_by_frame(None, None, false, cx);
+}
+
+#[gpui::test]
+fn every_frame_of_a_sidebar_toggle_should_keep_the_terminal_size_beside_a_fractional_width(
+    cx: &mut TestAppContext,
+) {
+    toggle_the_sidebar_frame_by_frame(None, Some(px(251.3)), false, cx);
+}
+
+#[gpui::test]
+fn every_frame_of_a_sidebar_toggle_should_keep_the_terminal_size_at_a_fractional_scale(
+    cx: &mut TestAppContext,
+) {
+    toggle_the_sidebar_frame_by_frame(Some(1.25), Some(px(251.3)), false, cx);
+}
+
+#[gpui::test]
+fn every_frame_of_a_sidebar_toggle_should_keep_split_terminal_sizes_at_a_fractional_scale(
+    cx: &mut TestAppContext,
+) {
+    toggle_the_sidebar_frame_by_frame(Some(1.75), Some(px(251.3)), true, cx);
+}
+
+/// Toggles the sidebar twice, drawing every frame, and asserts each Terminal resizes once per
+/// toggle.
+fn toggle_the_sidebar_frame_by_frame(
+    scale: Option<f32>,
+    sidebar_width: Option<Pixels>,
+    split: bool,
+    cx: &mut TestAppContext,
+) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, records, cx) = workspace_manager(cx);
+    if let Some(scale) = scale {
+        cx.simulate_scale_factor_change(scale);
+    }
+    // A width where the stage's fractional edges round across a Terminal cell boundary.
+    cx.simulate_resize(gpui::size(px(804.0), px(600.0)));
+    if let Some(width) = sidebar_width {
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.set_layout(true, width, window, cx)
+                })
+            })
+        });
+    }
+    if split {
+        cx.simulate_keystrokes("cmd-d");
+    }
+    cx.run_until_parked();
+    let resizes = || {
+        records
+            .commands()
+            .into_iter()
+            .filter_map(|call| match call.command {
+                RecordedCommand::Resize(geometry) => Some(geometry),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = resizes().len();
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    for _ in 0..2 {
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx))
+        });
+        cx.run_until_parked();
+        for _ in 0..60 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(8));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+        }
+    }
+
+    let after = resizes();
+    let terminals = if split { 2 } else { 1 };
+    assert_eq!(
+        after.len(),
+        before + 2 * terminals,
+        "each Terminal must resize once per toggle at scale {scale:?} beside a {sidebar_width:?} \
+         sidebar: {:?}",
+        &after[before..]
+    );
+}
+
+#[gpui::test]
+fn a_closing_sidebar_should_not_take_input(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    sidebar_motion_frame(cx);
+    let row = cx
+        .debug_bounds("workspace-row-1-active")
+        .expect("the closing sidebar still draws its rows");
+    let position = point(row.right() - px(12.0), row.center().y);
+    assert!(
+        position.x > px(0.0),
+        "the row must still be on screen: {row:?}"
+    );
+
+    cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+    let menu = cx.debug_bounds("workspace-menu-row-rename");
+    finish_slides(cx);
+
+    let focus = cx.update(|window, cx| {
+        let manager = manager.read(cx);
+        (
+            manager.sidebar.read(cx).is_focused(window),
+            manager
+                .workspaces
+                .active_workspace()
+                .payload()
+                .read(cx)
+                .focused_terminal_is_focused(window, cx),
+        )
+    });
+    assert_eq!(
+        (menu, focus),
+        (None, (false, true)),
+        "a press on a closing sidebar must reach neither its rows nor its menu"
+    );
+}
+
+#[gpui::test]
+fn a_toggle_during_a_resize_drag_should_end_the_drag(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+    let start = cx
+        .debug_bounds("workspace-sidebar-resize-handle-hitbox")
+        .expect("the shown sidebar has a resize handle")
+        .center();
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    sidebar_motion_frame(cx);
+
+    cx.simulate_mouse_move(
+        point(start.x + px(30.0), start.y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    finish_slides(cx);
+    let during = manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible);
+    cx.simulate_mouse_up(
+        point(start.x + px(30.0), start.y),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    let after = manager.read_with(cx, |manager, cx| {
+        let sidebar = manager.sidebar.read(cx);
+        (sidebar.layout().visible, sidebar.is_resizing())
+    });
+
+    assert_eq!(
+        (during, after),
+        (false, (false, false)),
+        "moving the held pointer must not undo the toggle"
+    );
+}
+
+#[gpui::test]
+fn split_panes_should_stretch_across_the_stage_while_the_sidebar_slides(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-d");
+    cx.run_until_parked();
+    let resizes = || {
+        records
+            .commands()
+            .iter()
+            .filter(|call| matches!(call.command, RecordedCommand::Resize(_)))
+            .count()
+    };
+    let panes = |cx: &mut VisualTestContext| {
+        ["pane-surface-1", "pane-surface-2"].map(|selector| cx.debug_bounds(selector).unwrap())
+    };
+    let shown = panes(cx);
+    let before = resizes();
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    let (_, hiding_stage, _, _) = sidebar_motion_frame(cx);
+    let hiding = panes(cx);
+    finish_slides(cx);
+    let hidden = panes(cx);
+
+    assert!(
+        hiding[0].left() < shown[0].left() && hiding[0].left() > hidden[0].left(),
+        "the leading Pane must move with the stage {hiding_stage:?}: {hiding:?}"
+    );
+    assert!(
+        hiding[0].size.width > shown[0].size.width && hiding[0].size.width < hidden[0].size.width,
+        "the leading Pane must widen toward its final width: {hiding:?} from {shown:?} to \
+         {hidden:?}"
+    );
+    assert_eq!(
+        hiding[1].right(),
+        hidden[1].right(),
+        "the trailing Pane must keep its trailing edge"
+    );
+    assert_eq!(resizes(), before + 2, "each Terminal must resize once");
+}
+
+#[gpui::test]
+fn an_unzoom_while_the_sidebar_slides_should_not_clip_the_stretched_panes(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    cx.simulate_keystrokes("cmd-d cmd-shift-enter");
+    cx.run_until_parked();
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    let frame = |cx: &mut VisualTestContext| {
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(30));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    };
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    frame(cx);
+    cx.simulate_keystrokes("cmd-shift-enter");
+    frame(cx);
+
+    for selector in ["pane-surface-1", "pane-surface-2"] {
+        let surface = cx.debug_bounds(selector).unwrap();
+        cx.update(|window, _| {
+            let surface = surface.scale(window.scale_factor());
+            // The surface's fill and rim are quads at its bounds, each clipped to the part it
+            // draws. Together they reach both sides unless something else clips them.
+            let shown = window
+                .painted_quads()
+                .into_iter()
+                .filter(|quad| quad.bounds == surface)
+                .map(|quad| quad.bounds.intersect(&quad.content_mask.bounds))
+                .filter(|shown| shown.size.width.0 > 0.0 && shown.size.height.0 > 0.0)
+                .map(|shown| (shown.left(), shown.right()))
+                .reduce(|(left, right), (l, r)| (left.min(l), right.max(r)))
+                .expect("the Pane surface should be painted");
+            assert_eq!(
+                shown,
+                (surface.left(), surface.right()),
+                "{selector} must not be clipped to its place while the stage stretches"
+            );
+        });
+    }
+}
+
+#[gpui::test]
+fn the_workspace_glyph_should_glide_while_the_sidebar_slides(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    let glyph = |cx: &mut VisualTestContext| {
+        cx.debug_bounds("workspace-switcher-icon")
+            .expect("the Workspace glyph shows in every frame")
+            .left()
+    };
+    let expanded = glyph(cx);
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+
+    for hidden in [true, false] {
+        let from = glyph(cx);
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx))
+        });
+        cx.run_until_parked();
+        let mut frames = vec![from];
+        let mut labelled = Vec::new();
+        for _ in 0..60 {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(8));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+            frames.push(glyph(cx));
+            labelled.push(cx.debug_bounds("workspace-chip-label").is_some());
+        }
+        let to = *frames.last().unwrap();
+        let travel = (to - from).abs();
+        let largest_step = frames
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(px(0.0), Pixels::max);
+        assert!(
+            travel > px(0.0) && largest_step < travel / 4.0,
+            "the glyph must glide from {from:?} to {to:?}, not jump: {frames:?}"
+        );
+        assert_eq!(
+            (labelled[0], *labelled.last().unwrap()),
+            (true, hidden),
+            "the Workspace name must ease in or out as the sidebar moves: {labelled:?}"
+        );
+    }
+    assert_eq!(glyph(cx), expanded);
+}
+
 /// The Workspace identity keeps its glyph in both sidebar states.
 #[gpui::test]
 fn workspace_identity_should_keep_its_icon_when_the_sidebar_is_hidden(cx: &mut TestAppContext) {
@@ -7809,7 +8227,7 @@ fn a_workspace_row_drag_released_on_its_first_move_should_land(cx: &mut TestAppC
 }
 
 #[gpui::test]
-fn a_workspace_row_released_below_the_list_should_stay_in_place(cx: &mut TestAppContext) {
+fn a_workspace_row_released_just_below_the_list_should_land_at_its_end(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-n");
     cx.simulate_keystrokes("cmd-n");
@@ -7831,20 +8249,14 @@ fn a_workspace_row_released_below_the_list_should_stay_in_place(cx: &mut TestApp
     cx.run_until_parked();
     cx.simulate_mouse_move(below, MouseButton::Left, Modifiers::none());
     cx.run_until_parked();
-    let marked = cx.debug_bounds("workspace-insertion-marker-3").is_some();
     cx.simulate_mouse_up(below, MouseButton::Left, Modifiers::none());
     cx.run_until_parked();
 
-    assert_eq!(
-        (marked, workspace_order(&manager, cx)),
-        (false, vec![1, 2, 3])
-    );
+    assert_eq!(workspace_order(&manager, cx), vec![2, 3, 1]);
 }
 
 #[gpui::test]
-fn dragging_a_workspace_row_should_mark_its_slot_and_land_there_on_release(
-    cx: &mut TestAppContext,
-) {
+fn dragging_a_workspace_row_should_open_a_gap_and_settle_there_on_release(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-n");
     cx.simulate_keystrokes("cmd-n");
@@ -7852,6 +8264,9 @@ fn dragging_a_workspace_row_should_mark_its_slot_and_land_there_on_release(
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
     let second = cx.debug_bounds("workspace-row-2-inactive").unwrap();
     let third = cx.debug_bounds("workspace-row-3-active").unwrap();
+    let origin = |selector: &'static str, cx: &mut VisualTestContext| {
+        cx.debug_bounds(selector).map(|row| row.origin)
+    };
 
     cx.simulate_mouse_move(first.center(), None, Modifiers::none());
     cx.simulate_mouse_down(first.center(), MouseButton::Left, Modifiers::none());
@@ -7866,28 +8281,42 @@ fn dragging_a_workspace_row_should_mark_its_slot_and_land_there_on_release(
         MouseButton::Left,
         Modifiers::none(),
     );
-    cx.run_until_parked();
-    let between = cx.debug_bounds("workspace-insertion-marker-2");
-    let release = third.center() + point(px(0.0), px(4.0));
+    finish_slides(cx);
+    let between = origin("workspace-row-2-inactive", cx);
+    // Beside the rows, where the lifted copy stays in line with them.
+    let beside = point(px(0.0), px(4.0));
+    let release = third.center() + point(px(30.0), px(4.0));
     cx.simulate_mouse_move(release, MouseButton::Left, Modifiers::none());
-    cx.run_until_parked();
+    finish_slides(cx);
+    let landing = gpui::Bounds::new(third.origin, first.size);
+    let dashed = cx
+        .debug_bounds("workspace-row-selection-1-landing")
+        .is_some();
     let during = (
         workspace_order(&manager, cx),
         cx.debug_bounds("workspace-row-1-inactive"),
-        cx.debug_bounds("workspace-row-preview-1-inactive")
-            .map(|preview| preview.size),
-        cx.debug_bounds("workspace-insertion-marker-3").is_some(),
+        origin("workspace-row-3-active", cx),
+        cx.debug_bounds("workspace-row-preview-1-inactive"),
     );
     cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
     cx.run_until_parked();
 
+    assert_eq!(between, Some(first.origin));
     assert_eq!(
         during,
-        (vec![1, 2, 3], Some(first), Some(first.size), true),
-        "a dragged row must keep its place, lift an exact copy, and mark where it lands"
+        (
+            vec![1, 2, 3],
+            Some(landing),
+            Some(second.origin),
+            Some(gpui::Bounds::new(third.origin + beside, first.size)),
+        ),
+        "a dragged row must show its faded face where it lands, open a gap there, and hold its \
+         lifted copy in line with the rows"
     );
-    // The marker between two rows stands on the edge they share.
-    assert_eq!(between.map(|marker| marker.center().y), Some(third.top()));
+    assert!(
+        dashed,
+        "a dragged row's faded face must edge its chip with a dashed line"
+    );
     assert_eq!(
         (
             workspace_order(&manager, cx),
@@ -7896,11 +8325,20 @@ fn dragging_a_workspace_row_should_mark_its_slot_and_land_there_on_release(
         (vec![2, 3, 1], WorkspaceId::new(3))
     );
     assert!(cx.debug_bounds("drag-preview").is_none());
-    assert!(cx.debug_bounds("workspace-insertion-marker-3").is_none());
-    let moved = cx
-        .debug_bounds("workspace-row-1-inactive")
-        .expect("the moved Workspace must render in its new place");
-    assert_eq!(moved.origin, third.origin);
+    // The moved row starts where its copy was released and settles into its new place.
+    assert_eq!(
+        origin("workspace-row-1-inactive", cx),
+        Some(third.origin + beside)
+    );
+    finish_slides(cx);
+    assert_eq!(
+        [
+            origin("workspace-row-2-inactive", cx),
+            origin("workspace-row-3-active", cx),
+            origin("workspace-row-1-inactive", cx),
+        ],
+        [Some(first.origin), Some(second.origin), Some(third.origin)]
+    );
 
     // Position shortcuts follow the presented order.
     cx.simulate_keystrokes("ctrl-1");
@@ -7912,7 +8350,295 @@ fn dragging_a_workspace_row_should_mark_its_slot_and_land_there_on_release(
 }
 
 #[gpui::test]
-fn escape_should_cancel_a_workspace_row_drag_without_moving_it(cx: &mut TestAppContext) {
+fn a_closed_workspace_row_should_leave_a_gap_that_closes(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
+    let second = cx.debug_bounds("workspace-row-2-active").unwrap();
+
+    right_click("workspace-row-1-inactive", cx);
+    click("workspace-menu-row-close", cx);
+    click("modal-action-close-confirmation-confirm", cx);
+    let closing = cx
+        .debug_bounds("workspace-row-2-active")
+        .map(|row| row.origin);
+    crate::ui::drag_and_drop::finish_slides(cx);
+    let closed = cx
+        .debug_bounds("workspace-row-2-active")
+        .map(|row| row.origin);
+
+    assert_eq!(
+        (closing, closed),
+        (Some(second.origin), Some(first.origin)),
+        "the row after a closed one must start in its own place and close the gap"
+    );
+}
+
+#[gpui::test]
+fn selecting_another_workspace_should_move_the_selection_from_the_old_row(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-n");
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
+    let second = cx.debug_bounds("workspace-row-2-active").unwrap();
+    let selection = cx.debug_bounds("workspace-row-selection-2").unwrap().origin;
+    let chip = |cx: &mut VisualTestContext| {
+        cx.debug_bounds("workspace-row-selection-1")
+            .expect("the selected row's chip was not rendered")
+            .origin
+    };
+
+    click("workspace-row-1-inactive", cx);
+    let leaving = chip(cx);
+    finish_slides(cx);
+    let landed = chip(cx);
+
+    assert_eq!(
+        (leaving, landed),
+        (selection, selection + (first.origin - second.origin)),
+        "the selection must leave from the old row and land on the new one"
+    );
+}
+
+#[gpui::test]
+fn switching_to_a_workspace_with_fewer_tabs_should_start_its_tab_strip_from_the_old_one(
+    cx: &mut TestAppContext,
+) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-t cmd-t cmd-n");
+    finish_slides(cx);
+    click("workspace-row-1-inactive", cx);
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let first = cx.debug_bounds("tab-item-1-inactive").unwrap().origin;
+    let third = cx.debug_bounds("tab-item-3-active").unwrap().origin;
+    let selection = cx.debug_bounds("tab-item-3-chip").unwrap().origin;
+    let create = cx.debug_bounds("create-tab-button").unwrap().origin;
+    let strip = |cx: &mut VisualTestContext| {
+        (
+            cx.debug_bounds("tab-item-1-chip")
+                .expect("the arriving Tab's chip was not rendered")
+                .origin,
+            cx.debug_bounds("create-tab-button").unwrap().origin,
+        )
+    };
+
+    click("workspace-row-2-inactive", cx);
+    let (leaving, closing) = strip(cx);
+    finish_slides(cx);
+    let (landed, closed) = strip(cx);
+
+    assert_eq!(
+        (leaving, closing, landed),
+        (selection, create, selection + (first - third)),
+        "the selection must leave from the old active Tab, and the strip's end from the old end"
+    );
+    assert!(
+        closed.x < create.x,
+        "the strip must close the place of the Tabs it lacks, got {closed:?} from {create:?}"
+    );
+}
+
+#[gpui::test]
+fn switching_to_a_workspace_with_an_overflowing_tab_strip_should_keep_its_tabs_in_place(
+    cx: &mut TestAppContext,
+) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    for _ in 0..13 {
+        cx.simulate_keystrokes("cmd-t");
+    }
+    cx.simulate_keystrokes("cmd-n");
+    finish_slides(cx);
+    click("workspace-row-1-inactive", cx);
+    finish_slides(cx);
+    let strip = cx.debug_bounds("tab-items").unwrap();
+    let rest = ["tab-item-13-inactive", "tab-item-14-active"]
+        .map(|selector| cx.debug_bounds(selector).map(|tab| tab.origin));
+    click("workspace-row-2-inactive", cx);
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let selection = cx.debug_bounds("tab-item-1-chip").unwrap().origin;
+    let tabs = |cx: &mut VisualTestContext| {
+        ["tab-item-13-inactive", "tab-item-14-active"]
+            .map(|selector| cx.debug_bounds(selector).map(|tab| tab.origin))
+    };
+
+    click("workspace-row-1-inactive", cx);
+    let arriving = tabs(cx);
+    let leaving = cx.debug_bounds("tab-item-14-chip").unwrap().origin;
+    finish_slides(cx);
+
+    assert!(
+        rest[1].is_some_and(|last| strip.right() < last.x + strip.size.width),
+        "the strip must overflow for this test, got {rest:?} in {strip:?}"
+    );
+    assert_eq!(
+        (arriving, leaving, tabs(cx)),
+        (rest, selection, rest),
+        "an overflowing strip's Tabs must keep their places while the selection leaves from the \
+         old one"
+    );
+}
+
+#[gpui::test]
+fn a_new_workspace_should_start_its_tab_strip_from_a_scrolled_old_one(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    for _ in 0..13 {
+        cx.simulate_keystrokes("cmd-t");
+    }
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let selection = cx.debug_bounds("tab-item-14-chip").unwrap().origin;
+    let create = cx.debug_bounds("create-tab-button").unwrap().origin;
+
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    let leaving = (
+        cx.debug_bounds("tab-item-1-chip")
+            .expect("the new Workspace's Tab chip was not rendered")
+            .origin,
+        cx.debug_bounds("create-tab-button").unwrap().origin,
+    );
+
+    assert_eq!(
+        leaving,
+        (selection, create),
+        "the selection and the strip's end must leave from where a scrolled strip drew them"
+    );
+}
+
+#[gpui::test]
+fn switching_workspaces_while_a_dropped_tab_settles_should_move_the_selection_from_where_it_is_drawn(
+    cx: &mut TestAppContext,
+) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-t cmd-t");
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let first = cx.debug_bounds("tab-item-1-inactive").unwrap();
+    let third = cx.debug_bounds("tab-item-3-active").unwrap();
+    cx.simulate_mouse_move(third.center(), None, Modifiers::none());
+    cx.simulate_mouse_down(third.center(), MouseButton::Left, Modifiers::none());
+    for position in [
+        third.center() - point(px(8.0), px(0.0)),
+        first.center() + point(px(30.0), px(0.0)),
+    ] {
+        cx.simulate_mouse_move(position, MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+    }
+    finish_slides(cx);
+    let release = first.center() + point(px(30.0), px(0.0));
+    cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let drawn = cx.debug_bounds("tab-item-3-chip").unwrap().origin;
+
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    let leaving = cx
+        .debug_bounds("tab-item-1-chip")
+        .expect("the new Workspace's Tab chip was not rendered")
+        .origin;
+
+    assert_eq!(
+        leaving, drawn,
+        "the selection must leave from where the settling Tab drew it"
+    );
+}
+
+#[gpui::test]
+fn a_new_workspace_should_start_its_tab_strip_from_the_old_one(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-t cmd-t");
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let first = cx.debug_bounds("tab-item-1-inactive").unwrap().origin;
+    let third = cx.debug_bounds("tab-item-3-active").unwrap().origin;
+    let selection = cx.debug_bounds("tab-item-3-chip").unwrap().origin;
+    let chip = |cx: &mut VisualTestContext| {
+        cx.debug_bounds("tab-item-1-chip")
+            .expect("the new Workspace's Tab chip was not rendered")
+            .origin
+    };
+
+    cx.simulate_keystrokes("cmd-n");
+    cx.run_until_parked();
+    let leaving = chip(cx);
+    finish_slides(cx);
+    let landed = chip(cx);
+
+    assert_eq!(
+        (leaving, landed),
+        (selection, selection + (first - third)),
+        "the selection must leave from the old Workspace's active Tab"
+    );
+}
+
+#[gpui::test]
+fn switching_to_a_workspace_with_more_tabs_should_grow_the_tabs_the_old_strip_lacked(
+    cx: &mut TestAppContext,
+) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-t cmd-t cmd-n");
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let selection = cx.debug_bounds("tab-item-1-chip").unwrap().origin;
+    let create = cx.debug_bounds("create-tab-button").unwrap().origin;
+    let end = |cx: &mut VisualTestContext| cx.debug_bounds("create-tab-button").unwrap().origin;
+
+    click("workspace-row-1-inactive", cx);
+    let leaving = cx.debug_bounds("tab-item-3-chip").unwrap().origin;
+    let growing = end(cx);
+    finish_slides(cx);
+    let grown = end(cx);
+
+    assert_eq!(
+        (leaving, growing),
+        (selection, create),
+        "the selection must leave from the old active Tab, and the strip's end from the old end"
+    );
+    assert!(
+        create.x < grown.x,
+        "the Tabs the old strip lacked must grow in, got {grown:?} from {create:?}"
+    );
+}
+
+#[gpui::test]
+fn switching_back_and_forth_quickly_should_start_each_tab_strip_from_the_old_end(
+    cx: &mut TestAppContext,
+) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    cx.simulate_keystrokes("cmd-t cmd-t cmd-n");
+    finish_slides(cx);
+    cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
+    let end = |cx: &mut VisualTestContext| cx.debug_bounds("create-tab-button").unwrap().origin.x;
+    let later = |cx: &mut VisualTestContext| {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(60));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    };
+
+    click("workspace-row-1-inactive", cx);
+    later(cx);
+    click("workspace-row-2-inactive", cx);
+    later(cx);
+    let left = end(cx);
+    click("workspace-row-1-inactive", cx);
+    let arrived = end(cx);
+
+    assert!(
+        (arrived - left).abs() <= px(1.0),
+        "the Tab strip must start from the old strip's end at {left:?}, got {arrived:?}"
+    );
+}
+
+#[gpui::test]
+fn escape_should_cancel_a_workspace_row_drag_and_return_every_row_to_its_place(
+    cx: &mut TestAppContext,
+) {
     let (manager, _records, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-n");
     cx.simulate_keystrokes("cmd-n");
@@ -7927,24 +8653,29 @@ fn escape_should_cancel_a_workspace_row_drag_without_moving_it(cx: &mut TestAppC
         cx.simulate_mouse_move(position, MouseButton::Left, Modifiers::none());
         cx.run_until_parked();
     }
-    let marked = cx.debug_bounds("workspace-insertion-marker-3").is_some();
+    finish_slides(cx);
+    let opened = cx.debug_bounds("workspace-row-3-active").unwrap().origin != third.origin;
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-    let cancelled = (
-        cx.debug_bounds("drag-preview").is_some(),
-        cx.debug_bounds("workspace-insertion-marker-3").is_some(),
-    );
+    let cancelled = cx.debug_bounds("drag-preview").is_some();
     cx.simulate_mouse_up(release, MouseButton::Left, Modifiers::none());
-    cx.run_until_parked();
+    finish_slides(cx);
 
     assert_eq!(
-        (marked, cancelled, workspace_order(&manager, cx)),
-        (true, (false, false), vec![1, 2, 3])
+        (
+            opened,
+            cancelled,
+            workspace_order(&manager, cx),
+            ["workspace-row-1-inactive", "workspace-row-3-active"]
+                .map(|selector| cx.debug_bounds(selector).map(|row| row.origin)),
+        ),
+        (
+            true,
+            false,
+            vec![1, 2, 3],
+            [Some(first.origin), Some(third.origin)]
+        )
     );
-    let unmoved = cx
-        .debug_bounds("workspace-row-1-inactive")
-        .expect("the cancelled Workspace must render in its original place");
-    assert_eq!(unmoved.origin, first.origin);
 }
 
 #[gpui::test]
@@ -7994,13 +8725,13 @@ fn escape_should_cancel_only_the_drag_in_progress(cx: &mut TestAppContext) {
     cx.simulate_mouse_move(first.center(), None, Modifiers::none());
     cx.simulate_mouse_down(first.center(), MouseButton::Left, Modifiers::none());
     cx.simulate_mouse_move(past_second, MouseButton::Left, Modifiers::none());
-    cx.run_until_parked();
-    let marked = cx.debug_bounds("tab-insertion-marker-2").is_some();
+    finish_slides(cx);
+    let opened = cx.debug_bounds("tab-item-2-active").unwrap().origin != second.origin;
     cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
+    finish_slides(cx);
     let cancelled = (
         visible_tabs.read_with(cx, |tabs, _| tabs.dragged_tab()),
-        cx.debug_bounds("tab-insertion-marker-2").is_some(),
+        cx.debug_bounds("tab-item-2-active").unwrap().origin != second.origin,
     );
     cx.simulate_mouse_up(past_second, MouseButton::Left, Modifiers::none());
     cx.run_until_parked();
@@ -8008,7 +8739,7 @@ fn escape_should_cancel_only_the_drag_in_progress(cx: &mut TestAppContext) {
     // The hidden Tab bar never saw its release, so its drag landed nowhere.
     assert_eq!(
         (
-            marked,
+            opened,
             cancelled,
             visible_tabs.read_with(cx, |tabs, _| tabs.tab_ids()),
             hidden_tabs.read_with(cx, |tabs, _| tabs.tab_ids()),
@@ -8068,6 +8799,48 @@ fn workspace_scrollbar_thumb_should_drag_the_list(cx: &mut TestAppContext) {
     assert!(
         state < before,
         "the Workspace list did not finish a scrollbar drag: {state:?}"
+    );
+}
+
+#[gpui::test]
+fn closing_an_inactive_workspace_should_keep_the_sidebar_where_it_was_scrolled(
+    cx: &mut TestAppContext,
+) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    for _ in 0..24 {
+        cx.simulate_keystrokes("cmd-n");
+    }
+    finish_slides(cx);
+    manager.update(cx, |manager, cx| {
+        manager
+            .sidebar
+            .read(cx)
+            .scroll_handle()
+            .set_offset(point(px(0.0), px(0.0)));
+    });
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+
+    right_click("workspace-row-2-inactive", cx);
+    click("workspace-menu-row-close", cx);
+    if cx
+        .debug_bounds("modal-action-close-confirmation-confirm")
+        .is_some()
+    {
+        click("modal-action-close-confirmation-confirm", cx);
+    }
+    finish_slides(cx);
+
+    let state = manager.read_with(cx, |manager, cx| {
+        (
+            manager.workspaces.len(),
+            manager.sidebar.read(cx).scroll_handle().offset().y,
+        )
+    });
+    assert_eq!(
+        state,
+        (24, px(0.0)),
+        "closing an inactive Workspace must not scroll the sidebar back to the active one"
     );
 }
 
@@ -10218,6 +10991,40 @@ fn hiding_sidebar_with_new_workspace_menu_open_should_restore_terminal_input(
 }
 
 #[gpui::test]
+fn native_text_ui_should_keep_workspace_rename_until_the_emoji_is_committed(
+    cx: &mut TestAppContext,
+) {
+    let (manager, _, cx) = workspace_manager(cx);
+    cx.update(|window, cx| {
+        window.activate_window();
+        spaceterm_ui::TextInputFocus::set(Some(window.window_handle()), cx);
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-shift-e shift-f10 down enter");
+    cx.run_until_parked();
+    assert!(manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).is_renaming()));
+
+    cx.deactivate_window();
+    cx.run_until_parked();
+    assert!(manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).is_renaming()));
+    cx.simulate_input("🙂");
+    cx.run_until_parked();
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .workspaces
+            .active_workspace()
+            .name()
+            .to_owned()),
+        "🙂"
+    );
+    assert!(!manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).is_renaming()));
+}
+
+#[gpui::test]
 fn sidebar_keyboard_rename_cancel_should_preserve_name_and_restore_sidebar_focus(
     cx: &mut TestAppContext,
 ) {
@@ -12076,6 +12883,39 @@ fn sidebar_splitter_range(cx: &mut VisualTestContext) -> (f64, f64, f64) {
 }
 
 #[gpui::test]
+fn an_opening_sidebar_should_publish_its_resting_width(cx: &mut TestAppContext) {
+    use crate::ui::drag_and_drop::AnimatePresence;
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    let width = |cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| {
+            f64::from(f32::from(manager.sidebar.read(cx).layout().width))
+        })
+    };
+    cx.simulate_keystrokes("cmd-b");
+    cx.run_until_parked();
+    cx.update(|_, cx| cx.set_global(AnimatePresence));
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.toggle_sidebar(window, cx)));
+    sidebar_motion_frame(cx);
+    let rest = width(cx);
+
+    let published = sidebar_splitter_range(cx).0;
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(cx);
+    spaceterm_ui::a11y_testing::perform(
+        cx,
+        tree.node("Resize Workspace sidebar"),
+        gpui::accesskit::Action::Increment,
+    );
+    cx.run_until_parked();
+
+    assert_eq!(
+        published, rest,
+        "the splitter must publish the sidebar's model width"
+    );
+    assert!(width(cx) > rest, "Increment must widen the sidebar");
+}
+
+#[gpui::test]
 fn sidebar_resize_handle_publishes_the_range_its_model_resizes_within(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     let maximum = f64::from(f32::from(sidebar_maximum_width(cx)));
@@ -13274,6 +14114,58 @@ fn a_menu_should_keep_the_keyboards_row_in_a_focused_sidebar(cx: &mut TestAppCon
         "Shift-F10 opens the selected row's menu"
     );
     assert_eq!(after_keyboard_menu, landed);
+}
+
+#[gpui::test]
+fn an_expanded_workspace_group_released_below_the_list_should_land_at_its_end(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        crate::ui::worktree_store::testing::install(cx);
+    });
+    let (manager, _records, cx) = workspace_manager(cx);
+    let roots: Vec<PathBuf> = (0..5)
+        .map(|index| std::env::temp_dir().join(format!("spaceterm-dragged-group-{index}")))
+        .collect();
+    let linked: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
+    present_worktrees(cx, &linked);
+    cx.simulate_keystrokes("cmd-n");
+    cx.simulate_keystrokes("cmd-n");
+    redraw(cx);
+    click("workspace-disclosure-2-expanded", cx);
+    click("workspace-disclosure-3-expanded", cx);
+    cx.simulate_resize(gpui::size(px(1000.0), px(600.0)));
+    redraw(cx);
+    let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
+    let group = cx.debug_bounds("workspace-group-1").unwrap();
+    let last = cx.debug_bounds("workspace-row-3-active").unwrap();
+    let list = cx.debug_bounds("workspace-list").unwrap();
+    let footer = cx.debug_bounds("workspace-sidebar-footer").unwrap();
+    assert!(
+        group.size.height > list.size.height / 2.0 && last.bottom() <= list.bottom(),
+        "the expanded group fills more than half of the list {list:?}, which shows every row"
+    );
+    let below = point(first.center().x, footer.center().y);
+
+    cx.simulate_mouse_move(first.center(), None, Modifiers::none());
+    cx.simulate_mouse_down(first.center(), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(
+        first.center() + point(px(0.0), px(8.0)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    cx.simulate_mouse_move(below, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let copy = cx.debug_bounds("drag-preview");
+    cx.simulate_mouse_up(below, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+
+    assert_eq!(
+        workspace_order(&manager, cx),
+        vec![2, 3, 1],
+        "the lifted Workspace row, held at the list's end at {copy:?}, must land there"
+    );
 }
 
 pub(in crate::ui) use super::server::tests::stopped_pane_settings;

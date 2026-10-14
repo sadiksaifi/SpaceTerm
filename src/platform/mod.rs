@@ -17,6 +17,8 @@ mod macos_keyboard_layout;
 #[cfg(target_os = "macos")]
 mod macos_quick_look_window;
 #[cfg(target_os = "macos")]
+mod macos_text_input_focus;
+#[cfg(target_os = "macos")]
 pub(crate) mod macos_updates;
 pub(crate) mod microphone_access;
 pub(crate) mod permission_access;

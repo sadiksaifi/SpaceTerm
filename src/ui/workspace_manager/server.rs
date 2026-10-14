@@ -250,7 +250,8 @@ impl WorkspaceManager {
         {
             return;
         }
-        let previous = server.active_manager().map(Entity::entity_id);
+        let previous_manager = server.active_manager().cloned();
+        let previous = previous_manager.as_ref().map(Entity::entity_id);
         let removed = server
             .collection
             .apply(&frame.organization, &frame.personal);
@@ -350,7 +351,11 @@ impl WorkspaceManager {
         server
             .presentation_errors
             .retain(|workspace, _| server.collection.record(*workspace).is_some());
-        let next = server.active_manager().map(Entity::entity_id);
+        let next_manager = server.active_manager().cloned();
+        let next = next_manager.as_ref().map(Entity::entity_id);
+        if let (Some(previous), Some(next)) = (&previous_manager, &next_manager) {
+            Self::hand_over_tab_strip(previous, next, cx);
+        }
         self.sync_server_git(window, cx);
         self.refresh_server_sidebar(cx);
         self.sync_terminal_focus_blocker(window, cx);
@@ -1724,6 +1729,10 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let sidebar_frame = self.sidebar.update(cx, |sidebar, cx| sidebar.present(cx));
+        if sidebar_frame.moving {
+            window.request_animation_frame();
+        }
         let Some(server) = &self.server else {
             return div().into_any_element();
         };
@@ -1816,7 +1825,6 @@ impl WorkspaceManager {
                 )
                 .into_any_element()
         };
-        let sidebar_visible = self.sidebar.read(cx).layout().visible;
         let close_owner = owner.clone();
         let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
             let _ = close_owner.update(cx, |manager, cx| {
@@ -1849,13 +1857,16 @@ impl WorkspaceManager {
                     status: None,
                 },
             );
-        let chrome = WorkspaceChromeLayout::resolve(sidebar, &identity, window, cx);
+        let resting_chrome = WorkspaceChromeLayout::resolve(sidebar, &identity, window, cx);
+        let chrome =
+            WorkspaceChromeLayout::presented(sidebar, sidebar_frame, &identity, window, cx);
         let frame = super::super::workspace_frame::WorkspaceFrame::for_appearance(&appearance, cx);
         if let Some(tabs) = server.active_manager() {
             let controls = gpui::AnyView::from(self.update_control.clone());
             let close = close.clone();
             tabs.update(cx, |tabs, cx| {
                 tabs.set_sidebar_layout(sidebar.visible, sidebar.width, chrome.width, cx);
+                tabs.present_sidebar(sidebar_frame.reveal, cx);
                 tabs.set_trailing_accessory(Some(controls), cx);
                 tabs.set_window_close_handler(close);
             });
@@ -1931,10 +1942,14 @@ impl WorkspaceManager {
             .child(div().relative().size_full().child(content))
             .children(server.repair.iter().map(|repair| repair.read(cx).picker()))
             .children(self.pin_picker.iter().cloned())
-            .when(sidebar_visible, |root| root.child(self.sidebar.clone()))
+            .when(sidebar_frame.reveal > 0.0, |root| {
+                root.child(self.sidebar.clone())
+            })
             .child(self.sidebar.read(cx).render_resize_handle(
                 self.sidebar.downgrade(),
+                resting_chrome.width,
                 chrome.width,
+                !sidebar_frame.moving,
                 frame.top_chrome_height(appearance.top_height()),
             ))
             .child(

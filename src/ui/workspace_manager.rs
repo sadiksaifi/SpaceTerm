@@ -1118,6 +1118,7 @@ impl WorkspaceManager {
         self.synchronize_tab_manager_layout(workspace_id, window, cx);
         previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
         next_manager.update(cx, |manager, cx| manager.activate(window, cx));
+        Self::hand_over_tab_strip(&previous_manager, &next_manager, cx);
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.cancel_rename(cx);
         });
@@ -1824,6 +1825,17 @@ impl WorkspaceManager {
             manager.set_parent_focus_blocker(blocker, cx);
             manager.activate(window, cx);
         });
+        Self::hand_over_tab_strip(&previous_manager, &next_manager, cx);
+    }
+
+    /// Starts `next`'s Tab strip from the shape of `previous`'s, whose place it takes.
+    fn hand_over_tab_strip(previous: &Entity<TabManager>, next: &Entity<TabManager>, cx: &mut App) {
+        if previous == next {
+            return;
+        }
+        if let Some(shape) = previous.read(cx).tab_strip_shape(cx) {
+            next.update(cx, |manager, cx| manager.arrive_from(shape, cx));
+        }
     }
 
     fn debug_assert_remote_runtime_invariants(&self) {
@@ -2492,6 +2504,7 @@ impl WorkspaceManager {
         } else {
             next_manager.update(cx, |manager, cx| manager.activate(window, cx));
         }
+        Self::hand_over_tab_strip(&previous_manager, &next_manager, cx);
         self.sync_terminal_focus_blocker(window, cx);
         self.scroll_active_workspace_into_view(cx);
 
@@ -2821,7 +2834,10 @@ impl WorkspaceManager {
             sidebar.cancel_rename_for(workspace_id, cx)
         });
         self.sync_terminal_focus_blocker(window, cx);
-        self.scroll_active_workspace_into_view(cx);
+        // Closing another Workspace leaves the sidebar where it was scrolled.
+        if was_active {
+            self.scroll_active_workspace_into_view(cx);
+        }
 
         cx.notify();
     }
@@ -2875,7 +2891,9 @@ impl WorkspaceManager {
                     sidebar.cancel_rename_for(workspace_id, cx)
                 });
                 self.sync_terminal_focus_blocker(window, cx);
-                self.scroll_active_workspace_into_view(cx);
+                if was_active {
+                    self.scroll_active_workspace_into_view(cx);
+                }
 
                 cx.notify();
             }
@@ -3411,7 +3429,9 @@ impl WorkspaceManager {
                 .host_colors(spaceterm_ui::ControlHost::Floating)
                 .text_placeholder,
         );
-        let sidebar_visible = self.sidebar.read(cx).layout().visible;
+        // The collapsed identity eases in beside the glyph as the sidebar hides, and out as it
+        // shows.
+        let presence = layout.identity_presence();
         let (toggle_icon, toggle_label) =
             sidebar_toggle_presentation(self.sidebar.read(cx).layout().visible);
         let drag_manager = manager.clone();
@@ -3424,7 +3444,11 @@ impl WorkspaceManager {
         let remote_unavailable_reason = self.remote_workspace_unavailable_reason.clone();
         let creation_shortcuts =
             WorkspaceCreation::ALL.map(|creation| creation.shortcut(presentation));
-        let collapsed_identity = (!sidebar_visible).then(|| self.workspace_chrome_identity(cx));
+        let collapsed_identity = (presence > 0.0).then(|| {
+            let (identity, tooltip) = self.workspace_chrome_identity(cx);
+            let motion = layout.identity_motion(&identity, window, cx);
+            (identity, tooltip, motion)
+        });
         let switcher_surface =
             super::tab_manager::active_tab_surface(appearance, window.is_window_active());
         let title_bar_host =
@@ -3440,7 +3464,7 @@ impl WorkspaceManager {
         );
         let switcher_accessibility_name = collapsed_identity.as_ref().map_or_else(
             || "Switch Workspace".to_owned(),
-            |(identity, _)| identity.accessibility_name(),
+            |(identity, _, _)| identity.accessibility_name(),
         );
         let chooser = ComboBox::with_commands(
             "workspace-switcher",
@@ -3478,27 +3502,25 @@ impl WorkspaceManager {
             },
         )
         .handle(self.workspace_switcher.clone())
-        .when(sidebar_visible, |chooser| chooser.ghost_trigger())
-        .when(!sidebar_visible, |chooser| {
+        .when(presence == 0.0, |chooser| chooser.ghost_trigger())
+        .when(presence > 0.0, |chooser| {
+            // The chip's surface fades with the identity it holds.
+            let fade = |color: Option<Color>| {
+                let color = gpui_color(color.unwrap_or(Color::rgba(0)));
+                gpui::Rgba {
+                    a: color.a * presence,
+                    ..color
+                }
+            };
             let normal = spaceterm_ui::ButtonPaint::new(
-                gpui_color(switcher_surface.fill.unwrap_or(Color::rgba(0))),
+                fade(switcher_surface.fill),
                 switcher_foreground,
-                gpui_color(switcher_surface.rim.unwrap_or(Color::rgba(0))),
+                fade(switcher_surface.rim),
             );
             let hovered = spaceterm_ui::ButtonPaint::new(
-                gpui_color(
-                    switcher_surface
-                        .hover_fill
-                        .or(switcher_surface.fill)
-                        .unwrap_or(Color::rgba(0)),
-                ),
+                fade(switcher_surface.hover_fill.or(switcher_surface.fill)),
                 switcher_foreground,
-                gpui_color(
-                    switcher_surface
-                        .hover_rim
-                        .or(switcher_surface.rim)
-                        .unwrap_or(Color::rgba(0)),
-                ),
+                fade(switcher_surface.hover_rim.or(switcher_surface.rim)),
             );
             chooser.trigger_surface(spaceterm_ui::ButtonVariantStyle::new(
                 normal, hovered, hovered, normal,
@@ -3539,19 +3561,24 @@ impl WorkspaceManager {
                 .debug_selector("workspace-switcher-tooltip")
                 .shortcut(presentation.shortcut(&SwitchWorkspace).unwrap_or_default()),
         )
-        .when_some(collapsed_identity, |chooser, (identity, tooltip)| {
-            chooser
-                .custom_trigger(identity.render(
-                    switcher_foreground,
-                    appearance,
-                    switcher_status_hosts,
-                ))
-                .custom_trigger_height(frame.top_chip_height(appearance.top_height()))
-                .full_width(true)
-                .tooltip(
-                    tooltip.shortcut(presentation.shortcut(&SwitchWorkspace).unwrap_or_default()),
-                )
-        })
+        .when_some(
+            collapsed_identity,
+            |chooser, (identity, tooltip, motion)| {
+                chooser
+                    .custom_trigger(identity.render(
+                        switcher_foreground,
+                        appearance,
+                        switcher_status_hosts,
+                        motion,
+                    ))
+                    .custom_trigger_height(frame.top_chip_height(appearance.top_height()))
+                    .full_width(motion.is_none())
+                    .tooltip(
+                        tooltip
+                            .shortcut(presentation.shortcut(&SwitchWorkspace).unwrap_or_default()),
+                    )
+            },
+        )
         .on_lifecycle(move |_, cx| {
             let manager = combo_lifecycle_manager.clone();
             cx.defer(move |cx| {
@@ -3774,12 +3801,14 @@ impl WorkspaceManager {
         let active_tab_manager = self.workspaces.active_workspace().payload().clone();
         let workspace = self.workspaces.active_workspace();
         let sidebar_layout = self.sidebar.read(cx).layout();
-        let chrome = WorkspaceChromeLayout::resolve(
-            sidebar_layout,
-            &self.chrome_identity(workspace.id(), cx),
-            window,
-            cx,
-        );
+        let sidebar_frame = self.sidebar.update(cx, |sidebar, cx| sidebar.present(cx));
+        if sidebar_frame.moving {
+            window.request_animation_frame();
+        }
+        let identity = self.chrome_identity(workspace.id(), cx);
+        let resting_chrome = WorkspaceChromeLayout::resolve(sidebar_layout, &identity, window, cx);
+        let chrome =
+            WorkspaceChromeLayout::presented(sidebar_layout, sidebar_frame, &identity, window, cx);
         let update_control = gpui::AnyView::from(self.update_control.clone());
         let close_owner = cx.weak_entity();
         let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
@@ -3792,6 +3821,7 @@ impl WorkspaceManager {
                 chrome.width,
                 cx,
             );
+            manager.present_sidebar(sidebar_frame.reveal, cx);
             manager.set_trailing_accessory(Some(update_control), cx);
             manager.set_window_close_handler(close);
         });
@@ -3835,13 +3865,15 @@ impl WorkspaceManager {
                     .min_h_0()
                     .child(active_tab_manager),
             )
-            .when(self.sidebar.read(cx).layout().visible, |root| {
+            .when(sidebar_frame.reveal > 0.0, |root| {
                 root.child(self.sidebar.clone())
             })
             .child(
                 self.sidebar.read(cx).render_resize_handle(
                     self.sidebar.downgrade(),
+                    resting_chrome.width,
                     chrome.width,
+                    !sidebar_frame.moving,
                     super::workspace_frame::WorkspaceFrame::for_appearance(
                         super::appearance::chrome(cx),
                         cx,

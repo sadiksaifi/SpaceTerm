@@ -3,7 +3,7 @@ use crate::ui::appearance::gpui_color;
 use crate::ui::chrome_geometry::RadiusRole;
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
-use crate::ui::drag_and_drop::{MarkerSide, drag_release_observer, insertion_marker};
+use crate::ui::drag_and_drop::{LIFTED_OPACITY, drag_release_observer, lift_shadow};
 use crate::ui::selection_chip::{ChipPaint, ChipShape, SelectionChip};
 use gpui::accesskit;
 use spaceterm_ui::{ContextMenuTarget, HoverFade};
@@ -245,46 +245,6 @@ pub(super) enum RowRole {
 }
 
 impl WorkspaceSidebar {
-    /// The accent lines on a row that mark the slot a dragged row would land in.
-    fn row_insertion_markers(
-        &self,
-        workspace_id: WorkspaceId,
-        role: RowRole,
-        appearance: &crate::ui::appearance::ChromeAppearance,
-        cx: &App,
-    ) -> Vec<AnyElement> {
-        let len = self.rows.len();
-        let (Some(slot), Some(index), RowRole::InList) = (
-            self.workspace_reorder.insertion(len),
-            self.row_position(workspace_id),
-            role,
-        ) else {
-            return Vec::new();
-        };
-        let frame = crate::ui::workspace_frame::WorkspaceFrame::for_appearance(appearance, cx);
-        let inset = (
-            frame.sidebar_chip_leading_inset(),
-            frame.sidebar_chip_trailing_inset(),
-        );
-        let side = if slot == index {
-            MarkerSide::Leading
-        } else if slot == len && index + 1 == len {
-            MarkerSide::Trailing
-        } else {
-            return Vec::new();
-        };
-        vec![insertion_marker(
-            gpui::Axis::Vertical,
-            side,
-            slot == 0 || slot == len,
-            inset,
-            format!("workspace-insertion-marker-{slot}"),
-            appearance,
-        )]
-    }
-}
-
-impl WorkspaceSidebar {
     /// One Workspace row, or the lifted copy that follows the pointer during a drag. The copy
     /// claims no pointer input because it lies over every drop target.
     #[expect(
@@ -333,6 +293,8 @@ impl WorkspaceSidebar {
         let (chip, row_colors) = row_paint(selected, emphasized, hover, appearance, cx);
         let chip = if lifted {
             chip
+        } else if self.workspace_reorder.motion(workspace_id, cx).lifted {
+            chip.landing(row_colors.row_foreground)
         } else {
             self.outline_menu_target(chip, SidebarRowKey::Workspace(workspace_id), appearance)
         };
@@ -475,7 +437,13 @@ impl WorkspaceSidebar {
         let (row_padding_leading, row_padding_trailing) = row_padding(appearance, cx);
         let drag_sidebar = sidebar.clone();
         let owner = sidebar.entity_id();
-        let markers = self.row_insertion_markers(workspace_id, role, appearance, cx);
+        // The lifted copy shows its whole lift; the row in the list shows what remains of its
+        // lift as it settles.
+        let lift = if lifted {
+            1.0
+        } else {
+            self.workspace_reorder.motion(workspace_id, cx).lift
+        };
         let element_name = if lifted {
             "workspace-row-preview"
         } else {
@@ -537,10 +505,19 @@ impl WorkspaceSidebar {
             .when_some(row_background, |row, background| {
                 row.bg(gpui_color(background))
             })
-            .child(chip.render(
-                format!("{element_name}-selection-{}", workspace_id.get()),
-                hover,
-            ))
+            .when(lifted, |row| row.opacity(LIFTED_OPACITY))
+            .child({
+                let selector = format!("{element_name}-selection-{}", workspace_id.get());
+                if lift > 0.0 {
+                    chip.render_lifted(selector, hover.max(lift), lift_shadow(appearance, lift))
+                } else if lifted {
+                    chip.render(selector, hover)
+                } else {
+                    let motion = self.workspace_reorder.motion(workspace_id, cx);
+                    chip.displaced(motion.selection_offset)
+                        .render(selector, hover)
+                }
+            })
             .when(!lifted, |row| {
                 row.on_click(move |_, _, cx| {
                     let _ = click_sidebar.update(cx, |sidebar, cx| {
@@ -559,10 +536,15 @@ impl WorkspaceSidebar {
                         workspace_id,
                         owner,
                     },
-                    move |_, _, window, cx| {
+                    move |_, cursor_offset, window, cx| {
                         let preview = drag_sidebar
                             .update(cx, |sidebar, cx| {
-                                sidebar.begin_workspace_drag(workspace_id, window, cx)
+                                sidebar.begin_workspace_drag(
+                                    workspace_id,
+                                    cursor_offset,
+                                    window,
+                                    cx,
+                                )
                             })
                             .unwrap_or_else(|_| DragPreview::empty());
                         cx.new(|_| preview)
@@ -629,7 +611,6 @@ impl WorkspaceSidebar {
             )
             // Rows rest on the continuous base surface without separators. The hover and selection
             // chips alone give each Workspace its shape; collection focus never adds a row ring.
-            .children(markers)
             .when_some(tracker, |row, tracker| row.child(tracker.tracker()));
         if lifted {
             return row_content.into_any_element();
@@ -900,21 +881,40 @@ impl WorkspaceSidebar {
                     .chain(worktree_keys)
                     .collect();
             let measure_sidebar = sidebar.clone();
+            let grow_sidebar = sidebar.clone();
+            let motion = self.workspace_reorder.motion(workspace_id, cx);
+            // The slot keeps the group's laid-out place, so a drag measures every group at rest
+            // while the group itself slides. It also grows a new group in and closes the gap a
+            // removed one leaves.
+            let slot = motion.frame_slot(
+                gpui::Axis::Vertical,
+                div().w_full().flex_shrink_0(),
+                move |size, cx| {
+                    let _ = grow_sidebar.update(cx, |sidebar, _| {
+                        sidebar.workspace_reorder.measure(workspace_id, size);
+                    });
+                },
+            );
             rows = rows.child(
-                div()
-                    .on_children_prepainted(move |bounds, _, cx| {
-                        let _ = measure_sidebar.update(cx, |sidebar, _| {
-                            sidebar.record_row_spans(workspace_id, &keys, &bounds);
-                        });
-                    })
-                    .id(("workspace-group", workspace_id.get()))
-                    .debug_selector(move || format!("workspace-group-{}", workspace_id.get()))
-                    .w_full()
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_col()
-                    .child(parent)
-                    .children(children),
+                slot.child(
+                    div()
+                        .on_children_prepainted(move |bounds, _, cx| {
+                            let _ = measure_sidebar.update(cx, |sidebar, _| {
+                                sidebar.record_row_spans(workspace_id, &keys, &bounds);
+                            });
+                        })
+                        .id(("workspace-group", workspace_id.get()))
+                        .debug_selector(move || format!("workspace-group-{}", workspace_id.get()))
+                        .relative()
+                        .left(motion.offset.x)
+                        .top(motion.offset.y)
+                        .opacity(motion.opacity())
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .child(parent)
+                        .children(children),
+                ),
             );
         }
 
@@ -992,7 +992,8 @@ impl WorkspaceSidebar {
                     .top_chrome_height(appearance.top_height()),
             )
             .bottom_0()
-            .left_0()
+            // The sidebar slides in from the window's leading edge as it shows.
+            .left(self.frame.between(-self.layout.width, px(0.0)))
             .w(self.layout.width)
             .min_h_0()
             .flex()
@@ -1054,6 +1055,10 @@ impl WorkspaceSidebar {
                     .child(new_workspace_menu),
             )
             .child(scrollbar)
+            // A sidebar that is hiding still draws as it slides out, but takes no input.
+            .when(!self.layout.visible, |sidebar| {
+                sidebar.child(div().absolute().top_0().left_0().size_full().occlude())
+            })
             .into_any_element();
         spaceterm_ui::ControlHost::Panel
             .mount(sidebar)
@@ -1063,12 +1068,16 @@ impl WorkspaceSidebar {
     pub(in crate::ui) fn render_resize_handle(
         &self,
         sidebar: WeakEntity<Self>,
+        resting_width: Pixels,
         handle_width: Pixels,
+        pointer_input: bool,
         top_chrome_height: Pixels,
     ) -> AnyElement {
         let pointer_guard = Self::pointer_guard(sidebar.clone());
         let selector = "workspace-sidebar-resize-handle";
-        let current_width = f32::from(handle_width);
+        // The handle resizes from the width the sidebar rests at, while it sits where a moving
+        // sidebar is drawn.
+        let current_width = f32::from(resting_width);
         let handle = ResizeHandle::new(
             selector,
             "Resize Workspace sidebar",
@@ -1080,6 +1089,8 @@ impl WorkspaceSidebar {
         // The sidebar and the content stage share one continuous base surface, so the edge keeps
         // its resize target and cursor while only keyboard focus reveals an indicator.
         .paint_divider(false)
+        // A moving sidebar's edge takes no pointer input until it settles.
+        .pointer_input(pointer_input)
         .target(ResizeHandleTarget::SpaciousLeading(top_chrome_height))
         .debug_selector(selector)
         .on_event_with_accepted_value(move |event, window, cx| {

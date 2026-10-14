@@ -3,7 +3,7 @@
 
 use crate::ui::appearance::gpui_color;
 use gpui::prelude::*;
-use gpui::{AnyElement, Pixels, div, px};
+use gpui::{AnyElement, Bounds, PathBuilder, Pixels, canvas, div, point, px, size};
 
 use crate::appearance::{Appearance, Color};
 use crate::ui::chrome_geometry::HAIRLINE;
@@ -130,10 +130,19 @@ pub(crate) struct SelectionChip {
     shape: ChipShape,
     paint: ChipPaint,
     outline: Option<Color>,
+    landing: Option<Color>,
+    offset: gpui::Point<Pixels>,
 }
 
 /// The width of the outline that marks the item a context menu acts on.
 const MENU_TARGET_OUTLINE: f32 = 2.0;
+/// How much of its color's opacity the dashed edge of a landing place keeps, so it marks the
+/// place without competing with the item's faded face.
+const LANDING_EDGE_OPACITY: u8 = 77;
+/// The length of each dash in the edge of a landing place.
+const LANDING_DASH: f32 = 2.0;
+/// The space between the dashes in the edge of a landing place.
+const LANDING_GAP: f32 = 3.0;
 
 impl SelectionChip {
     pub(crate) fn new(shape: ChipShape, paint: ChipPaint) -> Self {
@@ -141,7 +150,21 @@ impl SelectionChip {
             shape,
             paint,
             outline: None,
+            landing: None,
+            offset: gpui::Point::default(),
         }
+    }
+
+    /// Draws the chip `offset` from its place in the item, as a selection moving to the item.
+    pub(crate) const fn displaced(mut self, offset: gpui::Point<Pixels>) -> Self {
+        self.offset = offset;
+        self
+    }
+
+    /// Edges the chip with a dashed line in `color`, marking the place a dragged item would land.
+    pub(crate) const fn landing(mut self, color: Color) -> Self {
+        self.landing = Some(color);
+        self
     }
 
     /// Outlines the chip in `color`, as a source list marks the item its context menu acts on
@@ -151,19 +174,35 @@ impl SelectionChip {
         self
     }
 
-    fn body(shape: ChipShape) -> gpui::Div {
+    fn body(shape: ChipShape, offset: gpui::Point<Pixels>) -> gpui::Div {
         div()
             .absolute()
-            .top(shape.inset_y)
-            .bottom(shape.inset_y)
-            .left(shape.inset_leading)
-            .right(shape.inset_trailing)
+            .top(shape.inset_y + offset.y)
+            .bottom(shape.inset_y - offset.y)
+            .left(shape.inset_leading + offset.x)
+            .right(shape.inset_trailing - offset.x)
             .rounded(shape.radius)
     }
 
     /// The chip itself, painted under the item's own content. `hover` is how far the owning item
     /// has eased toward its hovered look.
     pub(crate) fn render(self, selector: String, hover: f32) -> AnyElement {
+        self.paint(selector, hover).into_any_element()
+    }
+
+    /// The chip of an item lifted off its surface, casting `shadow`.
+    pub(crate) fn render_lifted(
+        self,
+        selector: String,
+        hover: f32,
+        shadow: Vec<gpui::BoxShadow>,
+    ) -> AnyElement {
+        self.paint(selector, hover)
+            .shadow(shadow)
+            .into_any_element()
+    }
+
+    fn paint(self, selector: String, hover: f32) -> gpui::Div {
         let paint = self.paint;
         let fill = hovered_paint(paint.fill, paint.hover_fill.or(paint.fill), hover);
         // A rim describes the edge of a fill, and a transparent hover rim leaves the resting rim
@@ -171,8 +210,15 @@ impl SelectionChip {
         let rest_rim = paint.fill.and(paint.rim).filter(|rim| rim.a != 0);
         let hover_rim = paint.hover_rim.filter(|rim| rim.a != 0).or(rest_rim);
         let rim = hovered_paint(rest_rim, hover_rim, hover);
-        Self::body(self.shape)
-            .debug_selector(move || selector.clone())
+        let landing = self.landing.is_some();
+        Self::body(self.shape, self.offset)
+            .debug_selector(move || {
+                if landing {
+                    format!("{selector}-landing")
+                } else {
+                    selector.clone()
+                }
+            })
             .when_some(fill, |chip, fill| chip.bg(gpui_color(fill)))
             .when_some(self.outline.or(rim), |chip, edge| {
                 let width = if self.outline.is_some() {
@@ -182,8 +228,52 @@ impl SelectionChip {
                 };
                 chip.border(px(width)).border_color(gpui_color(edge))
             })
-            .into_any_element()
+            .when_some(self.landing, |chip, edge| {
+                chip.child(dashed_edge(
+                    edge.multiply_opacity(LANDING_EDGE_OPACITY),
+                    self.shape.radius,
+                ))
+            })
     }
+}
+
+/// A hairline of dashes in `color` around the rounded rectangle that fills its parent, with
+/// corners of `radius`. GPUI's dashed border fixes its gaps at half a dash, so the edge strokes its
+/// own path.
+fn dashed_edge(color: Color, radius: Pixels) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            // The stroke centers on the path, so the path runs half a hairline inside the bounds.
+            let inset = px(HAIRLINE / 2.0);
+            let edge = Bounds::new(
+                bounds.origin + point(inset, inset),
+                bounds.size - size(inset * 2.0, inset * 2.0),
+            );
+            let radius = (radius - inset)
+                .max(px(0.0))
+                .min(edge.size.width / 2.0)
+                .min(edge.size.height / 2.0);
+            let corner = point(radius, radius);
+            let (left, top, right, bottom) = (edge.left(), edge.top(), edge.right(), edge.bottom());
+            let mut path =
+                PathBuilder::stroke(px(HAIRLINE)).dash_array(&[px(LANDING_DASH), px(LANDING_GAP)]);
+            path.move_to(point(left + radius, top));
+            path.line_to(point(right - radius, top));
+            path.arc_to(corner, px(0.0), false, true, point(right, top + radius));
+            path.line_to(point(right, bottom - radius));
+            path.arc_to(corner, px(0.0), false, true, point(right - radius, bottom));
+            path.line_to(point(left + radius, bottom));
+            path.arc_to(corner, px(0.0), false, true, point(left, bottom - radius));
+            path.line_to(point(left, top + radius));
+            path.arc_to(corner, px(0.0), false, true, point(left + radius, top));
+            path.close();
+            if let Ok(path) = path.build() {
+                window.paint_path(path, gpui_color(color));
+            }
+        },
+    )
+    .size_full()
 }
 
 /// A paint `hover` of the way from its resting to its hovered color.

@@ -216,8 +216,15 @@ fn grid_dimension(available: f32, cell: f32, minimum: u16) -> u16 {
     calculated.max(minimum)
 }
 
+/// The cell length that spreads `cells` across `available`. A grid with room for another nominal
+/// cell was laid out for a smaller viewport and keeps nominal cells until it is resized.
 fn fitted_cell_dimension(available: f32, nominal: f32, cells: u16) -> f32 {
-    if !available.is_finite() || !nominal.is_finite() || nominal <= 0.0 || cells == 0 {
+    if !available.is_finite()
+        || !nominal.is_finite()
+        || nominal <= 0.0
+        || cells == 0
+        || grid_dimension(available, nominal, 0) > cells
+    {
         return nominal;
     }
     (available / f32::from(cells)).max(nominal)
@@ -262,6 +269,28 @@ mod tests {
                 BackingSize::new(12, 26),
                 BackingSize::new(152, 78),
             )
+        );
+    }
+
+    #[test]
+    fn a_grid_with_room_for_another_cell_should_keep_its_nominal_cells() {
+        let nominal = LogicalCellSize::new(7.5, 17.25);
+
+        assert_eq!(
+            (
+                TerminalGeometry::fitted_cell_size(
+                    LogicalSize::new(202.0, 104.0),
+                    nominal,
+                    CellGridSize::new(13, 3),
+                ),
+                TerminalGeometry::fitted_cell_size(
+                    LogicalSize::new(101.0, 104.0),
+                    nominal,
+                    CellGridSize::new(13, 3),
+                ),
+            ),
+            (nominal, LogicalCellSize::new(101.0 / 13.0, 17.25)),
+            "a grid laid out for a smaller viewport must not stretch until it is resized"
         );
     }
 

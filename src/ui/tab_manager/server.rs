@@ -1108,7 +1108,9 @@ impl TabManager {
                 self.tab_selector_pressed = None;
             }
             if self.tab_reorder.dragged() == Some(key) {
-                self.tab_reorder.cancel();
+                let ids = self.visible_tab_ids();
+                self.tab_reorder
+                    .cancel(&self.tab_bar_scroll_handle, &ids, cx);
             }
         }
         if !removed.is_empty() {
