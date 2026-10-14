@@ -288,15 +288,51 @@ impl ProductionFixture {
         }
     }
     pub(super) async fn client(&self, initialize: bool) -> (Composition, Arc<AtomicU64>) {
+        self.client_with_state(
+            self.paths.clone(),
+            self.credentials.clone(),
+            initialize,
+            false,
+        )
+        .await
+    }
+    async fn independent_client(&self) -> (Composition, Arc<AtomicU64>) {
+        let directories = AppDirectories::resolve_xdg(
+            "production-acceptance-second-client",
+            &AppDirectoryEnvironment {
+                home: Some(self.root.0.clone().into_os_string()),
+                xdg_state_home: Some(self.root.0.join("client-state").into_os_string()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        let paths = Arc::new(
+            AppPaths::from_directories(directories, 104, Arc::new(UnixSecureFilesystem)).unwrap(),
+        );
+        // The first explicit owner enrollment already admits separate native
+        // Clients over its authenticated ordinary connection. Restore one unused
+        // additional Client's own acknowledged journal, not another owner device
+        // or the primary desktop's identity. Both Clients use this device's keys.
+        self.client_with_state(paths, self.credentials.clone(), true, true)
+            .await
+    }
+    async fn client_with_state(
+        &self,
+        paths: Arc<AppPaths>,
+        credentials: test_composition::MemoryCredentials,
+        initialize: bool,
+        restore_additional_client: bool,
+    ) -> (Composition, Arc<AtomicU64>) {
         let mut fixture = test_composition::Fixture::from_arguments([
             "--test-account-root".into(),
             self.root.0.clone().into_os_string(),
         ])
         .unwrap()
         .unwrap();
-        fixture.credentials = self.credentials.clone();
+        fixture.credentials = credentials.clone();
         let mut factory = Factory {
-            paths: self.paths.clone(),
+            paths: paths.clone(),
             enrollment: Arc::default(),
             ssh: crate::platform::server_client_route::SshStartup {
                 executable: "/usr/bin/ssh".into(),
@@ -304,7 +340,7 @@ impl ProductionFixture {
                 environment: vec![],
             },
             askpass: crate::platform::server_client_route::askpass::DesktopTunnelAskPass::new(
-                self.paths.clone(),
+                paths.clone(),
                 Arc::new(crate::platform::unix_askpass_transport::AskPassWindowFactory::new(None)),
             ),
             legacy: std::sync::Mutex::new(None),
@@ -313,7 +349,54 @@ impl ProductionFixture {
         };
         assert!(factory.foreground_setup().await.unwrap().is_none());
         let context = factory.context().await.unwrap();
-        if initialize {
+        if restore_additional_client {
+            use spaceterm_client::journal::JournalLimits;
+            use spaceterm_client_native::journal::NativeClientJournal;
+            use spaceterm_core::operation_ledger::canonical::CanonicalCodec;
+
+            let native = context.native.as_ref().unwrap();
+            let directory = native
+                .management()
+                .supervisor()
+                .client_connections_directory()
+                .join("cli");
+            let codec = Arc::new(CanonicalCodec);
+            let verifier = Arc::new(crate::platform::desktop_client_startup::native::Verifier);
+            let limits = JournalLimits::default();
+            let storage = NativeClientJournal::open_existing(
+                directory,
+                codec.clone(),
+                verifier.clone(),
+                limits,
+            )
+            .await
+            .unwrap();
+            let journal = Arc::new(
+                JournalController::recover(Arc::new(storage), codec, verifier, limits)
+                    .await
+                    .unwrap(),
+            );
+            let saved = journal.snapshot().unwrap();
+            let [additional] = saved.bindings() else {
+                panic!("explicit native provisioning must retain one additional Client");
+            };
+            assert!(matches!(
+                &additional.proof().parts().claims,
+                spaceterm_core::pairing::PairingReceiptBody::ClientBinding { .. }
+            ));
+            assert!(
+                journal
+                    .ordinary_use_allowed(&additional.binding().unwrap())
+                    .unwrap()
+            );
+            *factory.context.lock().await = Some(Arc::new(
+                crate::platform::desktop_client_startup::native::Context {
+                    journal,
+                    native: context.native.clone(),
+                    native_failure: context.native_failure,
+                },
+            ));
+        } else if initialize {
             factory.fixture.as_ref().unwrap().enroll(
                 context.native.as_ref().unwrap(), context.journal.clone(),
             ).await.unwrap_or_else(|error| {
@@ -329,7 +412,7 @@ impl ProductionFixture {
                 store: spaceterm_client::pairing::journal::JournalPairingStore::new(
                     owners.journal.clone(),
                 ),
-                credentials: self.credentials.clone(),
+                credentials,
             },
         );
         let opens = Arc::new(AtomicU64::new(0));
@@ -337,12 +420,10 @@ impl ProductionFixture {
             inner: owners.services.routes,
             opens: opens.clone(),
         });
-        let composition = crate::platform::desktop_client_startup::recover(
-            owners,
-            NativeViewStore::new(self.paths.clone()),
-        )
-        .await
-        .unwrap();
+        let composition =
+            crate::platform::desktop_client_startup::recover(owners, NativeViewStore::new(paths))
+                .await
+                .unwrap();
         assert_eq!(
             opens.load(Ordering::SeqCst),
             0,
@@ -516,6 +597,22 @@ pub(super) async fn start(pane: &PaneChannel, pty: &RecordingPty) {
             .runtime
             .filter(|runtime| matches!(runtime.phase, SessionPhase::Running { .. }))
     })
+    .await;
+    live_input_authority(pane).await;
+}
+async fn live_input_authority(pane: &PaneChannel) {
+    // Running publication precedes fresh content reconciliation. Neither it nor
+    // a completed startup operation opens the Pane's effect-admission gate.
+    wait_for(
+        "native Pane did not acquire reconciled input authority",
+        || {
+            let frame = pane.current_frame()?;
+            if !frame.permits_native_content_use() {
+                return None;
+            }
+            pane.permit(EffectKind::Key).ok()
+        },
+    )
     .await;
 }
 async fn completed(ticket: OperationTicket) {
@@ -1026,6 +1123,7 @@ async fn desktop_native_unsafe_paste_preserves_runtime_and_native_request_correl
                 .unwrap(),
             ExplicitUseOutcome::ControlReady(_)
         ));
+        live_input_authority(&reattached).await;
         let native = reattached.permit(EffectKind::NativeCompletion).unwrap();
         assert_eq!(
             reattached
@@ -1052,14 +1150,20 @@ async fn desktop_native_equal_paste_request_ids_remain_session_local_both_majors
     use spaceterm_core::native_requests::*;
     for major in [1, 2] {
         let fixture = ProductionFixture::new(major).await;
-        let (mut client, _) = fixture.client(true).await;
-        let (_first_lease, first) = attach(&mut client).await;
+        let (mut first_client, _) = fixture.client(true).await;
+        let (_first_lease, first) = attach(&mut first_client).await;
         start(&first, &fixture.pty).await;
-        client = test_composition::initialize_workspace(client)
-            .await
-            .unwrap();
-        let (_second_lease, second) = attach_workspace(&mut client, 1).await;
+        // One connection has one focused Pane. Keep both approvals live under
+        // independent paired clients instead of claiming two input foci at once.
+        let (mut second_client, _) = fixture.independent_client().await;
+        let (_, first_info, _) = ready(&first_client).await;
+        let (_, second_info, _) = ready(&second_client).await;
+        assert_eq!(first_info.server, second_info.server);
+        assert_eq!(first_info.pairing, second_info.pairing);
+        assert_ne!(first_info.client, second_info.client);
+        let (_second_lease, second) = attach_workspace(&mut second_client, 1).await;
         start(&second, &fixture.pty).await;
+        live_input_authority(&first).await;
         let mut first_events = first.events().unwrap();
         let mut second_events = second.events().unwrap();
         let first_permit = first.permit(EffectKind::Paste).unwrap();
@@ -1164,7 +1268,8 @@ async fn desktop_native_equal_paste_request_ids_remain_session_local_both_majors
         assert!(fixture.pty.session_input(0).is_empty());
         assert!(fixture.pty.session_input(1) == b"second\rpaste");
         assert_eq!(fixture.pty.launches().len(), 2);
-        quit(client).await;
+        quit(first_client).await;
+        quit(second_client).await;
         fixture.close().await;
     }
 }

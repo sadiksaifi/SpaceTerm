@@ -314,6 +314,22 @@ fn enhanced_copy_and_native_paste_metadata_require_independent_negotiated_capabi
             let completed = Payload::$major($p::Message {
                 kind: Some($p::message::Kind::NativeCompletion(wire)),
             });
+            let fragment_snapshot = snapshot(2, ProgressMetadata::Normal(37));
+            let fragment_bytes = metadata::snapshot_bytes(&fragment_snapshot).unwrap();
+            let fragment = Payload::$major($p::Message {
+                kind: Some($p::message::Kind::MetadataFragment(Box::new(
+                    metadata::$p::encode_fragment(
+                        command.fence,
+                        3,
+                        4,
+                        &fragment_snapshot,
+                        0,
+                        &fragment_bytes,
+                        fragment_bytes.len() as u32,
+                    )
+                    .unwrap(),
+                ))),
+            });
             for mask in 0u8..8 {
                 let copy_allowed = mask & 1 != 0;
                 let paste_allowed = mask & 2 != 0;
@@ -357,6 +373,14 @@ fn enhanced_copy_and_native_paste_metadata_require_independent_negotiated_capabi
                 } else {
                     assert_eq!(server.encode(&native), Err(ProtocolError::Negotiation));
                     assert_eq!(client.encode(&completed), Err(ProtocolError::Negotiation));
+                }
+                if fragments_allowed {
+                    assert_eq!(
+                        client.decode(&server.encode(&fragment).unwrap()).unwrap(),
+                        fragment
+                    );
+                } else {
+                    assert_eq!(server.encode(&fragment), Err(ProtocolError::Negotiation));
                 }
             }
         }};

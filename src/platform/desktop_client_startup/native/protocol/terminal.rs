@@ -1246,3 +1246,106 @@ impl Drop for ReadSource {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spaceterm_client::testing::{FakePaneConnection, FakeServer};
+    use spaceterm_core::native_requests::{
+        NativeCompletion, NativeCompletionKind, NativeRequest, NativeRequestId, NativeRequestKind,
+        NativeText, PasteApprovalId, PasteDecision,
+    };
+
+    #[tokio::test]
+    async fn equal_native_ids_keep_session_local_paste_metadata_after_late_cleanup() {
+        let server = FakeServer::new(1, vec![2]).unwrap();
+        let peer = FakePaneConnection::new(server.clone(), 1, 2).await.unwrap();
+        let journal = peer.journal().clone();
+        let protocol = NativeProtocol::new(journal.clone(), OperationTracker::new(journal));
+        let client = server.binding(1).unwrap().target().client();
+        let approval = PasteApprovalId::new(1).unwrap();
+        let request = |pane, generation, context, runtime_request| {
+            let pane = PaneId::new(server.server(), pane).unwrap();
+            let fence = EffectFence::new(
+                SessionKey {
+                    pane,
+                    epoch: ServerEpoch::new(1),
+                    generation: SessionGeneration::new(generation),
+                },
+                ControlGrant::new(pane, client, ControlGeneration::new(1)).unwrap(),
+                ConnectionBinding::new(client, ConnectionGeneration::new(1)),
+                ContextGeneration::new(context),
+                None,
+            )
+            .unwrap();
+            NativeRequest::new(
+                fence,
+                NativeRequestId::new(1).unwrap(),
+                MonotonicTick::new(0),
+                MonotonicTick::new(0),
+                Some(MonotonicTick::new(30_000)),
+                NativeRequestKind::UnsafePaste {
+                    approval,
+                    text: NativeText::new("unsafe\npaste".into()).unwrap(),
+                },
+            )
+            .unwrap()
+            .with_runtime_request(runtime_request)
+            .unwrap()
+        };
+        // Only correlation metadata is exercised here. Successive focus contexts
+        // do not claim two live Pane foci or admit terminal input. The production
+        // acceptance case separately proves independent focus and PTY delivery.
+        let first = request(1, 1, 1, 41);
+        let second = request(2, 1, 2, 42);
+        let replacement = request(1, 2, 3, 43);
+        let timing = NativeTiming {
+            not_before: Duration::ZERO,
+            expires_after: Some(Duration::from_secs(30)),
+        };
+        protocol.remember_paste(&first, timing).unwrap();
+        protocol.remember_paste(&second, timing).unwrap();
+        let confirm = |request: &NativeRequest| {
+            NativeCompletion::new(
+                request,
+                NativeCompletionKind::Paste {
+                    approval,
+                    decision: PasteDecision::Confirm,
+                },
+            )
+            .unwrap()
+        };
+        for request in [&first, &second] {
+            assert_eq!(
+                protocol
+                    .paste_completion(request.fence(), approval, PasteDecision::Confirm)
+                    .unwrap(),
+                confirm(request),
+            );
+        }
+        protocol
+            .forget_native(first.fence().session(), first.id().get())
+            .unwrap();
+        assert_eq!(
+            protocol
+                .paste_completion(first.fence(), approval, PasteDecision::Confirm)
+                .unwrap_err()
+                .class(),
+            ClientFailureClass::StaleAuthority,
+        );
+        protocol.remember_paste(&replacement, timing).unwrap();
+        // A late cleanup for the retired Session must spare both its replacement
+        // and the other Pane's equal native request ID in this same protocol map.
+        protocol
+            .forget_native(first.fence().session(), first.id().get())
+            .unwrap();
+        for request in [&second, &replacement] {
+            assert_eq!(
+                protocol
+                    .paste_completion(request.fence(), approval, PasteDecision::Confirm)
+                    .unwrap(),
+                confirm(request),
+            );
+        }
+    }
+}
