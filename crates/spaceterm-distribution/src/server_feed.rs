@@ -318,6 +318,8 @@ pub struct AccountServerFeedV2 {
     pub build_identity: BuildChannel,
     pub platform: ServerPlatform,
     pub version: crate::BuildVersion,
+    #[serde(with = "crate::encoding::commit")]
+    pub build_commit: [u8; 20],
     pub published_at: u64,
     pub protocol_majors: Vec<u16>,
     pub storage: StorageCompatibility,
