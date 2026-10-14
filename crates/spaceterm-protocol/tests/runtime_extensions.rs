@@ -314,17 +314,32 @@ fn enhanced_copy_and_native_paste_metadata_require_independent_negotiated_capabi
             let completed = Payload::$major($p::Message {
                 kind: Some($p::message::Kind::NativeCompletion(wire)),
             });
-            for (copy_allowed, paste_allowed) in
-                [(false, false), (true, false), (false, true), (true, true)]
-            {
-                let mut capabilities = vec![CAPABILITY_CANONICAL_DOMAIN];
-                if copy_allowed {
-                    capabilities.push(CAPABILITY_ENHANCED_COPY);
+            for mask in 0u8..8 {
+                let copy_allowed = mask & 1 != 0;
+                let paste_allowed = mask & 2 != 0;
+                let fragments_allowed = mask & 4 != 0;
+                let mut capabilities =
+                    vec![CAPABILITY_CANONICAL_DOMAIN, CAPABILITY_RUNTIME_METADATA];
+                if fragments_allowed {
+                    capabilities.push(CAPABILITY_RUNTIME_METADATA_FRAGMENTS);
                 }
                 if paste_allowed {
                     capabilities.push(CAPABILITY_NATIVE_PASTE_CORRELATION);
                 }
-                let (mut client, mut server) = connected($number, capabilities);
+                if copy_allowed {
+                    capabilities.push(CAPABILITY_ENHANCED_COPY);
+                }
+                let (mut client, mut server) = connected($number, capabilities.clone());
+                assert_eq!(client.capabilities(), capabilities);
+                assert_eq!(server.capabilities(), capabilities);
+                for (feature, expected) in [
+                    (CAPABILITY_ENHANCED_COPY, copy_allowed),
+                    (CAPABILITY_NATIVE_PASTE_CORRELATION, paste_allowed),
+                    (CAPABILITY_RUNTIME_METADATA_FRAGMENTS, fragments_allowed),
+                ] {
+                    assert_eq!(client.capabilities().contains(&feature), expected);
+                    assert_eq!(server.capabilities().contains(&feature), expected);
+                }
                 if copy_allowed {
                     assert_eq!(server.decode(&client.encode(&copy).unwrap()).unwrap(), copy);
                 } else {
@@ -348,4 +363,31 @@ fn enhanced_copy_and_native_paste_metadata_require_independent_negotiated_capabi
     }
     check!(v1, Major1, 1);
     check!(v2, Major2, 2);
+}
+
+#[test]
+fn native_metadata_fragments_copy_and_paste_capability_identities_are_distinct() {
+    use spaceterm_protocol::negotiation::*;
+    assert_eq!(CAPABILITY_RUNTIME_METADATA_FRAGMENTS, 520_010);
+    assert_eq!(CAPABILITY_NATIVE_PASTE_CORRELATION, 520_011);
+    assert_eq!(CAPABILITY_ENHANCED_COPY, 520_012);
+    let identities = [
+        CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
+        CAPABILITY_SERVER_GIT,
+        CAPABILITY_SERVER_DIRECTORIES,
+        CAPABILITY_CANONICAL_DOMAIN,
+        CAPABILITY_ORGANIZATION_COMPARISONS,
+        CAPABILITY_TERMINAL_STREAMS,
+        CAPABILITY_NATIVE_NOTIFICATIONS,
+        CAPABILITY_ACCOUNT_RUNTIME,
+        CAPABILITY_APPLICATION_MOUSE,
+        CAPABILITY_RUNTIME_METADATA,
+        CAPABILITY_RUNTIME_METADATA_FRAGMENTS,
+        CAPABILITY_NATIVE_PASTE_CORRELATION,
+        CAPABILITY_ENHANCED_COPY,
+    ];
+    assert!(
+        identities.windows(2).all(|pair| pair[0] < pair[1]),
+        "negotiated features must never alias an existing wire identity"
+    );
 }

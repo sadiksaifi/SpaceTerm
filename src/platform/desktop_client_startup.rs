@@ -32,8 +32,8 @@ pub(crate) const NATIVE_PROTOCOL_CAPABILITIES: [u32; 9] = [
     spaceterm_protocol::negotiation::CAPABILITY_NATIVE_NOTIFICATIONS,
     spaceterm_protocol::negotiation::CAPABILITY_APPLICATION_MOUSE,
     spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA,
-    spaceterm_protocol::negotiation::CAPABILITY_ENHANCED_COPY,
     spaceterm_protocol::negotiation::CAPABILITY_NATIVE_PASTE_CORRELATION,
+    spaceterm_protocol::negotiation::CAPABILITY_ENHANCED_COPY,
 ];
 
 use crate::ui::{

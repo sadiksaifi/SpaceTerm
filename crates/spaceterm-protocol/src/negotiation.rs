@@ -68,10 +68,13 @@ pub const CAPABILITY_APPLICATION_MOUSE: u32 = 520_008;
 /// Sequence-qualified runtime metadata independent of semantic content.
 pub const CAPABILITY_RUNTIME_METADATA: u32 = 520_009;
 
-/// Enhanced-only Copy, never an ordinary legacy key fallback.
-pub const CAPABILITY_ENHANCED_COPY: u32 = 520_010;
+/// Bounded fragmented metadata snapshots for small negotiated frames.
+pub const CAPABILITY_RUNTIME_METADATA_FRAGMENTS: u32 = 520_010;
+
 /// Exact originating runtime request and independent native completion correlation.
 pub const CAPABILITY_NATIVE_PASTE_CORRELATION: u32 = 520_011;
+/// Enhanced-only Copy, never an ordinary legacy key fallback.
+pub const CAPABILITY_ENHANCED_COPY: u32 = 520_012;
 
 /// Additive envelope registration: tag, authenticated capability, permitted directions.
 pub const EXTENSION_ENVELOPES: &[(u32, u32, bool, bool)] = &[
