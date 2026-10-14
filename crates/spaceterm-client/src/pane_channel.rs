@@ -162,10 +162,15 @@ struct ChannelInner {
     effect_slots: Arc<Semaphore>,
     _slot: tokio::sync::OwnedSemaphorePermit,
 }
+#[derive(Clone, Copy)]
+struct AuthorizedIntent {
+    intent: StartupIntent,
+    attempt: u64,
+}
 struct ChannelState {
     facts: PaneChannelState,
     content_confirmed: bool,
-    intent: Option<StartupIntent>,
+    intent: Option<AuthorizedIntent>,
     intent_pending: Option<Arc<()>>,
     events: Option<events::Subscription>,
     native_high_water: u64,
@@ -452,10 +457,11 @@ impl PaneChannels {
         }
         for channel in self.channels(server)? {
             let mut state = channel.state.lock().map_err(|_| stale())?;
-            state.intent = None;
-            // A pending request is correlation, not effect authority. Its reply
-            // still validates the installed session, connection, context and grant.
+            // Pending and authorized intents are comparison state, not effect
+            // authority. Publication disables admission until their fences are
+            // revalidated against the installed graph and connection attempt.
             if reason != ConnectionInvalidation::Publication {
+                state.intent = None;
                 state.intent_pending = None;
             }
             state.native.clear();
@@ -1108,7 +1114,10 @@ impl PaneChannel {
         }
         let outcome = match reply {
             PaneUseReply::AwaitingMeasurement(intent) => {
-                state.intent = Some(intent);
+                state.intent = Some(AuthorizedIntent {
+                    intent,
+                    attempt: request.info.attempt,
+                });
                 ExplicitUseOutcome::AwaitingMeasurement(Box::new(IntentToken {
                     intent,
                     channel: Arc::downgrade(&self.inner),
@@ -1134,7 +1143,13 @@ impl PaneChannel {
             if !Weak::ptr_eq(&token.channel, &Arc::downgrade(&self.inner))
                 || token.incarnation != self.lease.incarnation
                 || !self.lease.active.load(Ordering::Acquire)
-                || state.intent != Some(token.intent)
+                || !state.intent.is_some_and(|saved| {
+                    saved.intent == token.intent
+                        && state
+                            .facts
+                            .connection
+                            .is_some_and(|info| info.attempt == saved.attempt)
+                })
                 || !token.intent.fence().is_current(&current_fence(
                     &state.facts,
                     self.inner.pane,
@@ -1166,7 +1181,10 @@ impl PaneChannel {
             return;
         }
         let removed = self.inner.state.lock().is_ok_and(|mut state| {
-            if state.intent == Some(token.intent) {
+            if state
+                .intent
+                .is_some_and(|saved| saved.intent == token.intent)
+            {
                 state.intent = None;
                 true
             } else {
@@ -1359,7 +1377,6 @@ impl ChannelInner {
                 .connection
                 .is_none_or(|old| !same_attempt(old, info));
         if changed {
-            state.intent = None;
             state.native.clear();
             state.effects.clear();
             let session = runtime.map(|runtime| SessionKey {
@@ -1417,6 +1434,13 @@ impl ChannelInner {
         } else {
             PaneReadiness::Live
         };
+        if state.intent.is_some_and(|saved| {
+            saved.attempt != info.attempt
+                || !current_fence(&state.facts, self.pane, false)
+                    .is_ok_and(|current| saved.intent.fence().is_current(&current))
+        }) {
+            state.intent = None;
+        }
         self.update_projection(&state)?;
         if changed {
             events::publish(&mut state, PaneEvent::Invalidated, true);

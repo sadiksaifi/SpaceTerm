@@ -1163,3 +1163,294 @@ async fn organization_publication_preserves_the_original_pending_startup_request
         SessionPhase::Running { .. }
     ));
 }
+
+#[tokio::test]
+async fn authorized_startup_survives_unrelated_live_delta_and_launches_exactly_once() {
+    use spaceterm_client::{limits::ClientLimits, replica::*};
+    use spaceterm_core::{
+        operation_ledger_contracts::CanonicalOperationRequest,
+        operations::{Command, OperationLookup, Outcome, WorkspaceCreationSource},
+        organization::{NameDraft, NameText, OrganizationDelta, OrganizationWrite},
+        organization_retained::RetainedOrganizationWrite,
+    };
+    use std::sync::Arc;
+    let fixture = Fixture::new(false).await;
+    fixture
+        .peer
+        .submit(
+            Command::CreateWorkspace {
+                server: fixture.server.server(),
+                source: WorkspaceCreationSource::ServerHome {
+                    server: fixture.server.server(),
+                },
+                name: NameDraft::Automatic,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let token = fixture
+        .pane
+        .explicit_use(ExplicitUseSource::StartSession)
+        .await
+        .unwrap()
+        .startup()
+        .unwrap();
+    let before = fixture.server.snapshot().unwrap();
+    let other = &before.state().workspaces[1];
+    let original = *fixture.pane.state().borrow();
+    let mut replica = Replica::new(
+        fixture.server.server(),
+        Arc::new(OrganizationResidency::new(ClientLimits::default()).unwrap()),
+    );
+    let resync = replica.begin_resync(before.epoch()).unwrap();
+    replica.install_snapshot(resync, before.clone()).unwrap();
+    fixture
+        .channels
+        .invalidate(fixture.server.server(), ConnectionInvalidation::Publication)
+        .unwrap();
+    assert_eq!(
+        fixture.pane.state().borrow().readiness,
+        PaneReadiness::Offline
+    );
+    assert!(fixture.pane.state().borrow().connection.is_none());
+    let operations = fixture.server.received_operations().unwrap().len();
+    assert_eq!(
+        fixture
+            .pane
+            .complete_intent(&token, grid())
+            .await
+            .unwrap_err()
+            .class(),
+        ClientFailureClass::StaleAuthority
+    );
+    assert_eq!(
+        fixture.server.received_operations().unwrap().len(),
+        operations
+    );
+    fixture.server.add_client(2).unwrap();
+    let mutation = fixture.server.next_operation(2).unwrap();
+    assert!(matches!(
+        fixture
+            .server
+            .command(
+                mutation,
+                Command::RenameWorkspace {
+                    workspace: other.id,
+                    expected_version: other.name.version,
+                    draft: NameDraft::Custom(NameText::new("renamed".into()).unwrap()),
+                }
+            )
+            .unwrap(),
+        OperationLookup::Completed {
+            result: Outcome::Applied,
+            ..
+        }
+    ));
+    let after = fixture.server.snapshot().unwrap();
+    let renamed = after
+        .state()
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == other.id)
+        .unwrap()
+        .clone();
+    let basis = after
+        .state()
+        .retained
+        .as_ref()
+        .unwrap()
+        .workspace_names()
+        .iter()
+        .find(|basis| basis.workspace() == other.id)
+        .unwrap()
+        .clone();
+    let delta = OrganizationDelta::new(
+        fixture.server.server(),
+        after.epoch(),
+        before.state().revision,
+        after.state().revision,
+        vec![
+            OrganizationWrite::PutWorkspace(renamed),
+            OrganizationWrite::Retained(RetainedOrganizationWrite::PutWorkspaceNameBasis(basis)),
+        ],
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(
+        replica.apply_delta(&delta).unwrap(),
+        ReplicaUpdate::Installed
+    );
+    let published = replica.subscribe().borrow().retained().unwrap().clone();
+    let mut info = original.connection.unwrap();
+    info.organization_revision = published.cursor.revision;
+    fixture.channels.publish(info, published).unwrap();
+    let installed = *fixture.pane.state().borrow();
+    assert_eq!(installed.context, original.context);
+    assert_eq!(installed.runtime, original.runtime);
+    let completion = fixture
+        .pane
+        .complete_intent(&token, grid())
+        .await
+        .expect("an unrelated live delta must preserve the exact authorized intent");
+    let saved = fixture.peer.journal().snapshot().unwrap();
+    let record = saved.operation(completion.id()).unwrap();
+    let request =
+        CanonicalOperationRequest::decode(&record.request, fixture.peer.journal().codec()).unwrap();
+    assert!(
+        matches!(request.command(), Command::CompleteMeasuredStartup(measurement) if measurement.intent == token.intent().id() && measurement.fence == token.intent().fence() && measurement.grid == grid().into())
+    );
+    assert!(
+        matches!(*completion.status().borrow(), spaceterm_client::operations::OperationStatus::Completed { outcome: Outcome::SessionStarted(session), .. } if session.generation == token.intent().fence().session().generation.checked_successor().unwrap())
+    );
+    assert!(fixture.pane.complete_intent(&token, grid()).await.is_err());
+    let submissions = fixture.server.received_operations().unwrap();
+    assert_eq!(
+        submissions
+            .iter()
+            .filter(|binding| binding.id == completion.id())
+            .count(),
+        1
+    );
+    let starts = saved
+        .operations()
+        .iter()
+        .filter(|record| {
+            CanonicalOperationRequest::decode(&record.request, fixture.peer.journal().codec())
+                .is_ok_and(|request| {
+                    matches!(request.command(), Command::CompleteMeasuredStartup(_))
+                })
+        })
+        .count();
+    assert_eq!(starts, 1);
+    assert!(matches!(
+        fixture.server.snapshot().unwrap().runtime()[0].phase,
+        SessionPhase::Running { .. }
+    ));
+}
+
+#[tokio::test]
+async fn authorized_startup_does_not_survive_changed_publication_fences() {
+    use spaceterm_core::{
+        authority::SessionKey, organization::StartupReservation, reducer::OrganizationEvent,
+    };
+    for change in [
+        "context",
+        "grant",
+        "session",
+        "connection",
+        "attempt",
+        "reconciliation",
+        "connection_lost",
+        "detach",
+    ] {
+        let fixture = Fixture::new(false).await;
+        let token = fixture
+            .pane
+            .explicit_use(ExplicitUseSource::StartSession)
+            .await
+            .unwrap()
+            .startup()
+            .unwrap();
+        fixture
+            .channels
+            .invalidate(fixture.server.server(), ConnectionInvalidation::Publication)
+            .unwrap();
+        match change {
+            "context" => {
+                fixture
+                    .pane
+                    .update_context(PaneContextFacts {
+                        focused_pane: true,
+                        terminal_input_focus: false,
+                        presentable: true,
+                    })
+                    .unwrap();
+                fixture.peer.publish().unwrap();
+            }
+            "grant" => fixture.takeover().await,
+            "session" => {
+                let runtime = fixture.server.snapshot().unwrap().runtime()[0];
+                fixture
+                    .server
+                    .event(OrganizationEvent::StartupReserved(
+                        StartupReservation::new(
+                            runtime.pane,
+                            runtime.session_generation,
+                            runtime.control_generation,
+                            runtime.control,
+                            SessionKey {
+                                generation: runtime.session_generation.checked_successor().unwrap(),
+                                ..token.intent().fence().session()
+                            },
+                        )
+                        .unwrap(),
+                    ))
+                    .unwrap();
+                fixture.peer.publish().unwrap();
+            }
+            "connection" => fixture.peer.reconnect(2, 2).unwrap(),
+            "attempt" => fixture.peer.reconnect(1, 2).unwrap(),
+            "reconciliation" => {
+                fixture
+                    .channels
+                    .invalidate(
+                        fixture.server.server(),
+                        ConnectionInvalidation::Reconciliation,
+                    )
+                    .unwrap();
+                fixture.peer.publish().unwrap();
+            }
+            "connection_lost" => {
+                fixture
+                    .channels
+                    .invalidate(
+                        fixture.server.server(),
+                        ConnectionInvalidation::ConnectionLost,
+                    )
+                    .unwrap();
+                fixture.peer.publish().unwrap();
+            }
+            "detach" => {
+                fixture.lease.invalidate().unwrap();
+                fixture.peer.publish().unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let before = fixture.server.snapshot().unwrap().runtime()[0];
+        let operations = fixture.server.received_operations().unwrap().len();
+        assert_eq!(
+            fixture
+                .pane
+                .complete_intent(&token, grid())
+                .await
+                .unwrap_err()
+                .class(),
+            ClientFailureClass::StaleAuthority,
+            "changed {change} must reject the original token"
+        );
+        assert_eq!(
+            fixture.server.received_operations().unwrap().len(),
+            operations
+        );
+        assert_eq!(fixture.server.snapshot().unwrap().runtime()[0], before);
+    }
+}
+
+#[tokio::test]
+async fn publication_masks_existing_runtime_permits_until_authority_reinstalls() {
+    let fixture = Fixture::new(true).await;
+    let permit = fixture.pane.permit(EffectKind::ImeCommit).unwrap();
+    let input = RuntimeEffect::InputMethodCommit(
+        spaceterm_terminal::runtime_contracts::BoundedInputMethodText::new("input".into()).unwrap(),
+    );
+    fixture.pane.try_effect(&permit, input.clone()).unwrap();
+    fixture
+        .channels
+        .invalidate(fixture.server.server(), ConnectionInvalidation::Publication)
+        .unwrap();
+    assert!(!permit.is_current());
+    assert!(fixture.pane.permit(EffectKind::ImeCommit).is_err());
+    assert!(fixture.pane.try_effect(&permit, input).is_err());
+    assert!(fixture.peer.flush_effects().unwrap().is_empty());
+}
