@@ -3,12 +3,14 @@
 use super::identity::{decode_fence, encode_fence, required};
 use crate::ProtocolError;
 use spaceterm_core::{
-    content::Rgb,
+    content::{CellRef, Rgb},
+    content_queries::QueryStamp,
     geometry::{CellPixels, MeasuredGrid, SUPPORTED_GRID_LIMITS},
 };
 use spaceterm_terminal::{
     InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey,
     appearance::{Appearance, AppearanceGeneration},
+    pointer_input::{PointerButton, PointerPhase},
     runtime_contracts::*,
 };
 
@@ -71,13 +73,57 @@ macro_rules! profile {
         pub mod $p {
             use super::*;
             use crate::wire::$p as wire;
+            fn encode_cell(cell: CellRef) -> wire::CellRef {
+                wire::CellRef {
+                    session: Some(super::super::identity::encode_session(cell.session)),
+                    screen_generation: cell.row.screen_generation,
+                    row_id: cell.row.node_serial,
+                    row_revision: cell.row_revision,
+                    column: u32::from(cell.column),
+                    physical_row: Some(super::super::content::$p::encode_row_id(cell.row)),
+                }
+            }
+            fn decode_cell(
+                value: &wire::CellRef,
+                stamp: QueryStamp,
+            ) -> Result<CellRef, ProtocolError> {
+                let cell = CellRef {
+                    session: super::super::identity::decode_session(required(&value.session)?)?,
+                    row: super::super::content::$p::decode_row_id(required(&value.physical_row)?)?,
+                    row_revision: value.row_revision,
+                    column: u16::try_from(value.column).map_err(|_| ProtocolError::Malformed)?,
+                };
+                if cell.session != stamp.base().session
+                    || !stamp.base().contains(cell.row)
+                    || value.screen_generation != cell.row.screen_generation
+                    || value.row_id != cell.row.node_serial
+                {
+                    return Err(ProtocolError::Malformed);
+                }
+                Ok(cell)
+            }
             pub fn decode_command(
                 value: &wire::RuntimeCommand,
             ) -> Result<FencedRuntimeCommand, ProtocolError> {
                 if value.request == 0 {
                     return Err(ProtocolError::Malformed);
                 }
-                let fence = decode_fence(required(&value.fence)?, None)?;
+                let stamp = match required(&value.action)? {
+                    wire::runtime_command::Action::ApplicationPointer(mouse) => Some(
+                        super::super::content::$p::decode_stamp(required(&mouse.stamp)?)?,
+                    ),
+                    wire::runtime_command::Action::ApplicationWheel(mouse) => Some(
+                        super::super::content::$p::decode_stamp(required(&mouse.stamp)?)?,
+                    ),
+                    _ => None,
+                };
+                let fence = decode_fence(
+                    required(&value.fence)?,
+                    stamp.map(|stamp| stamp.base().revision),
+                )?;
+                if stamp.is_some_and(|stamp| stamp.fence() != fence) {
+                    return Err(ProtocolError::Malformed);
+                }
                 let command = match required(&value.action)? {
                     wire::runtime_command::Action::Key(value) => {
                         if value.logical_key.len() > 1024
@@ -199,6 +245,39 @@ macro_rules! profile {
                     wire::runtime_command::Action::ClearScreenAndScrollback(_) => {
                         RuntimeCommand::ClearScreenAndScrollback
                     }
+                    wire::runtime_command::Action::ApplicationPointer(mouse) => {
+                        let stamp =
+                            super::super::content::$p::decode_stamp(required(&mouse.stamp)?)?;
+                        RuntimeCommand::Pointer(ApplicationPointerInput {
+                            stamp,
+                            cell: decode_cell(required(&mouse.cell)?, stamp)?,
+                            phase: match mouse.phase {
+                                1 => PointerPhase::Press,
+                                2 => PointerPhase::Motion,
+                                3 => PointerPhase::Release,
+                                _ => return Err(ProtocolError::Malformed),
+                            },
+                            button: match mouse.button {
+                                0 => None,
+                                1 => Some(PointerButton::Left),
+                                2 => Some(PointerButton::Middle),
+                                3 => Some(PointerButton::Right),
+                                _ => return Err(ProtocolError::Malformed),
+                            },
+                            modifiers: modifiers(mouse.modifiers)?,
+                        })
+                    }
+                    wire::runtime_command::Action::ApplicationWheel(mouse) => {
+                        let stamp =
+                            super::super::content::$p::decode_stamp(required(&mouse.stamp)?)?;
+                        RuntimeCommand::Wheel(ApplicationWheelInput {
+                            stamp,
+                            cell: decode_cell(required(&mouse.cell)?, stamp)?,
+                            horizontal_steps: mouse.horizontal_steps,
+                            vertical_steps: mouse.vertical_steps,
+                            modifiers: modifiers(mouse.modifiers)?,
+                        })
+                    }
                     wire::runtime_command::Action::Pointer(_) => {
                         return Err(ProtocolError::UnexpectedMessage)
                     }
@@ -209,10 +288,51 @@ macro_rules! profile {
                 request: u64,
                 value: &FencedRuntimeCommand,
             ) -> Result<wire::RuntimeCommand, ProtocolError> {
-                if request == 0 || value.fence.content().is_some() {
+                if request == 0
+                    || (value.fence.content().is_some()
+                        && !matches!(
+                            value.command,
+                            RuntimeCommand::Pointer(_) | RuntimeCommand::Wheel(_)
+                        ))
+                {
                     return Err(ProtocolError::Malformed);
                 }
                 let action = match &value.command {
+                    RuntimeCommand::Pointer(mouse) => {
+                        if mouse.stamp.fence() != value.fence {
+                            return Err(ProtocolError::Malformed);
+                        }
+                        wire::runtime_command::Action::ApplicationPointer(
+                            wire::ApplicationPointer {
+                                stamp: Some(super::super::content::$p::encode_stamp(mouse.stamp)),
+                                cell: Some(encode_cell(mouse.cell)),
+                                phase: match mouse.phase {
+                                    PointerPhase::Press => 1,
+                                    PointerPhase::Motion => 2,
+                                    PointerPhase::Release => 3,
+                                },
+                                button: match mouse.button {
+                                    None => 0,
+                                    Some(PointerButton::Left) => 1,
+                                    Some(PointerButton::Middle) => 2,
+                                    Some(PointerButton::Right) => 3,
+                                },
+                                modifiers: modifier_bits(mouse.modifiers),
+                            },
+                        )
+                    }
+                    RuntimeCommand::Wheel(mouse) => {
+                        if mouse.stamp.fence() != value.fence {
+                            return Err(ProtocolError::Malformed);
+                        }
+                        wire::runtime_command::Action::ApplicationWheel(wire::ApplicationWheel {
+                            stamp: Some(super::super::content::$p::encode_stamp(mouse.stamp)),
+                            cell: Some(encode_cell(mouse.cell)),
+                            horizontal_steps: mouse.horizontal_steps,
+                            vertical_steps: mouse.vertical_steps,
+                            modifiers: modifier_bits(mouse.modifiers),
+                        })
+                    }
                     RuntimeCommand::Key(value) => wire::runtime_command::Action::Key(wire::Key {
                         code: (*value).physical_key.into(),
                         modifiers: modifier_bits(value.modifiers),

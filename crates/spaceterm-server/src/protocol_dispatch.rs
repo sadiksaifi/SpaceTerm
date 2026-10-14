@@ -249,7 +249,8 @@ impl OrdinaryDispatchPort for ActorOrdinaryDispatch {
                                     &value,
                                 )
                                 .map_err(protocol_failure)?;
-                            let request = terminal::bounded_page_request(request)?;
+                            let request =
+                                terminal::bounded_page_request(request, Default::default())?;
                             let access = handle
                                 .runtime_access(principal, request.stamp().fence().session())
                                 .await?;
@@ -548,7 +549,9 @@ impl ProtocolDispatcher {
                         }
                         PeerConnection::Ordinary(session) => {
                             self.authenticator.check_current(session.principal)?;
-                            let payload = session.codec.decode(&bytes).map_err(protocol_failure)?;
+                            let mut payload =
+                                session.codec.decode(&bytes).map_err(protocol_failure)?;
+                            terminal.bound_page_query(&mut payload)?;
                             if let Some(query) = organization_action(&payload)? {
                                 if organization_query.is_some_and(|old| {
                                     (old.request == query.request

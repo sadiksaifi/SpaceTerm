@@ -50,6 +50,8 @@ pub(super) fn desktop_capabilities() -> Vec<u32> {
         CAPABILITY_ORGANIZATION_COMPARISONS,
         CAPABILITY_TERMINAL_STREAMS,
         CAPABILITY_NATIVE_NOTIFICATIONS,
+        CAPABILITY_APPLICATION_MOUSE,
+        CAPABILITY_RUNTIME_METADATA,
     ]
 }
 
@@ -415,6 +417,28 @@ impl ConnectionDelegate for NativeProtocol {
         channel: &'a mut dyn ProtocolChannel,
     ) -> ClientFuture<'a, ()> {
         Box::pin(async move {
+            let metadata = match &message {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::MetadataPublication(value)),
+                }) => Some(
+                    spaceterm_protocol::convert::metadata::v1::decode_publication(value)
+                        .map_err(ClientFailure::from)?,
+                ),
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::MetadataPublication(value)),
+                }) => Some(
+                    spaceterm_protocol::convert::metadata::v2::decode_publication(value)
+                        .map_err(ClientFailure::from)?,
+                ),
+                _ => None,
+            };
+            if let Some((fence, snapshot)) = metadata {
+                if fence.connection() != info.binding || fence.session().epoch != info.epoch {
+                    return Err(invalid());
+                }
+                self.channels()?.receive_metadata(fence, snapshot)?;
+                return Ok(());
+            }
             if self.receive_terminal(info, &message).await? {
                 return Ok(());
             }
@@ -447,7 +471,7 @@ impl ConnectionDelegate for NativeProtocol {
                         let mut effects = self.effects.lock().map_err(|_| invalid())?;
                         if effects
                             .get(&(info.server, request))
-                            .is_some_and(|effect| effect.permit.fence() != fence)
+                            .is_some_and(|effect| !fence.is_current(&effect.permit.fence()))
                         {
                             // Native request numbers can repeat in a replacement
                             // Session. An old receipt cannot retire its new permit.
@@ -670,6 +694,16 @@ impl PaneConnectionPort for NativeProtocol {
         }
         let server = command.fence.session().pane.server();
         let (_, info) = self.connected(server)?;
+        if matches!(
+            &command.command,
+            spaceterm_client::pane_channel::RuntimeEffect::Pointer(_)
+                | spaceterm_client::pane_channel::RuntimeEffect::Wheel(_)
+        ) && !info
+            .capabilities
+            .supports(spaceterm_protocol::negotiation::CAPABILITY_APPLICATION_MOUSE)
+        {
+            return Err(fail(ClientFailureClass::MissingCapability));
+        }
         let mut effects = self.effects.lock().map_err(|_| invalid())?;
         effects.retain(|_, queued| queued.permit.is_current());
         let native = match &command.command {

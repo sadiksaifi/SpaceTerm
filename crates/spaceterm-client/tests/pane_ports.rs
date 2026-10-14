@@ -702,3 +702,27 @@ async fn metadata_updates_coalesce_without_spending_native_lifecycle_capacity() 
         matches!(events.next().await.unwrap(), Some(PaneEvent::Metadata { snapshot, .. }) if *snapshot == latest)
     );
 }
+
+#[tokio::test]
+async fn routed_metadata_requires_existing_live_channel_and_current_fence() {
+    let fixture = Fixture::new(true).await;
+    let captured = pane_fence(&fixture.pane);
+    let first = metadata(&fixture.pane, 1);
+    assert!(
+        fixture
+            .channels
+            .receive_metadata(captured, first.clone())
+            .unwrap()
+    );
+    assert_eq!(fixture.pane.metadata_snapshot().as_deref(), Some(&first));
+    assert!(!fixture.channels.receive_metadata(captured, first).unwrap());
+    let delayed = metadata(&fixture.pane, 2);
+    fixture.takeover().await;
+    assert!(
+        !fixture
+            .channels
+            .receive_metadata(captured, delayed)
+            .unwrap()
+    );
+    assert!(fixture.pane.metadata_snapshot().is_none());
+}

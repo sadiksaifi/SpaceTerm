@@ -449,6 +449,21 @@ fn ordinary_field_capabilities(
     {
         return Err(ProtocolError::Negotiation);
     }
+    macro_rules! application_mouse {
+        ($message:expr, $p:ident) => {{
+            use crate::wire::$p;
+            matches!(&$message.kind, Some($p::message::Kind::RuntimeCommand(command))
+                if matches!(&command.action, Some($p::runtime_command::Action::ApplicationPointer(_)
+                    | $p::runtime_command::Action::ApplicationWheel(_))))
+        }};
+    }
+    let mouse = match payload {
+        Payload::Major1(message) => application_mouse!(message, v1),
+        Payload::Major2(message) => application_mouse!(message, v2),
+    };
+    if mouse && !capabilities.contains(&crate::negotiation::CAPABILITY_APPLICATION_MOUSE) {
+        return Err(ProtocolError::Negotiation);
+    }
     macro_rules! canonical {
         ($message:expr, $p:ident) => {{
             use crate::wire::$p;
