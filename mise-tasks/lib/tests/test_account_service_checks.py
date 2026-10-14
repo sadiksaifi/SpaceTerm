@@ -310,6 +310,22 @@ class AccountCheckTests(unittest.TestCase):
                 f"package=spaceterm-host target=server_installation classification={expected}",
             )
 
+    def test_startup_gate_preserves_the_callers_build_job_limit(self):
+        output = (
+            b"running 1 test\n"
+            b"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; "
+            b"finished in 0.01s\n"
+        )
+        with (
+            patch.dict(os.environ, {"CARGO_BUILD_JOBS": "2"}),
+            patch.object(checks.package_server, "build_executable") as compile_fixture,
+            patch.object(checks.native, "run_tool", return_value=output) as run,
+        ):
+            self.assertEqual(checks.test_gate("startup"), 2)
+        self.assertEqual(compile_fixture.call_args.kwargs["env"]["CARGO_BUILD_JOBS"], "2")
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs["environment"]["CARGO_BUILD_JOBS"], "2")
+
     def test_startup_gate_requires_real_account_and_binary_composition_tests(self):
         output = (
             b"running 1 test\n"
@@ -332,7 +348,10 @@ class AccountCheckTests(unittest.TestCase):
             ("--locked", "-p", "spaceterm-server", "--features", "test-support"),
         )
         self.assertEqual(compile_fixture.call_args.kwargs["binary"], "spaceterm-server")
-        self.assertEqual(compile_fixture.call_args.kwargs["env"]["CARGO_BUILD_JOBS"], "4")
+        self.assertEqual(
+            compile_fixture.call_args.kwargs["env"]["CARGO_BUILD_JOBS"],
+            os.environ.get("CARGO_BUILD_JOBS", "4"),
+        )
         self.assertEqual(
             [call.args[0] for call in run.call_args_list],
             [
