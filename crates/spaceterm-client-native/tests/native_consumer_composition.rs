@@ -386,8 +386,24 @@ async fn exercise(
             kind,
             journal.clone(),
             Arc::new(Credentials(device.clone())),
-            NativeRouteConnector::new(vec![route.clone()], None).unwrap(),
+            NativeRouteConnector::new(
+                vec![LocalRouteAuthority::new(registration.endpoint().unwrap()).unwrap()],
+                None,
+            )
+            .unwrap(),
         );
+        if offline == Some(DesiredServerState::Running) {
+            // An unreachable account server may also lose its registration. Local
+            // pairing removal still uses only the retained journal's authority.
+            let registration_path = account
+                .reopen()
+                .client_connections_directory()
+                .parent()
+                .unwrap()
+                .join("registration");
+            std::fs::remove_file(registration_path).unwrap();
+            assert!(account.reopen().discover().unwrap().is_none());
+        }
         let assessment = consumer
             .assess_unpair(DeviceId::new([6; 16]), None)
             .await
@@ -729,9 +745,17 @@ async fn exercise(
             assert!(state.operations().len() < 128);
         }
         if recover_pairing {
-            use spaceterm_client_native::cli::bindings::PairingCommandBindings;
             assert_eq!(
-                consumer.assess_unpair(DeviceId::new([6; 16]), None).await,
+                consumer
+                    .assess(spaceterm_client::management_cli::ManagementAction::Unpair {
+                        target: PairingTarget::new(PairingTargetParts {
+                            server,
+                            device: DeviceId::new([6; 16]),
+                            pairing,
+                        })
+                        .unwrap(),
+                    })
+                    .await,
                 Err(spaceterm_client::management_cli::ManagementFailure::OutcomePending)
             );
             let operation = lost_pairing_operation.lock().unwrap().unwrap();

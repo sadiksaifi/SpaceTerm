@@ -1,6 +1,9 @@
 //! Real native lifecycle and CLI dispatch against isolated storage and injected OS effects.
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
+#[path = "../../spaceterm-host/tests/support/signed_installation.rs"]
+mod signed_installation;
+
 use spaceterm_client::management_cli::{
     AssessmentToken, ConfirmationPrompt, ConfirmationReply, ManagementFailure,
 };
@@ -158,6 +161,7 @@ struct Fixture {
     manager: Arc<Manager>,
     processes: Arc<Processes>,
     clock: Arc<Clock>,
+    installation_trust: Option<spaceterm_distribution::UpdateKey>,
 }
 impl Fixture {
     fn new(desired: Option<DesiredServerState>) -> Self {
@@ -189,15 +193,23 @@ impl Fixture {
             }),
             processes: Arc::new(Processes(AtomicU64::new(1))),
             clock: Arc::new(Clock(AtomicU64::new(100))),
+            installation_trust: None,
         }
     }
     fn provider(&self) -> NativeClientProvider {
-        NativeClientProvider::from_supervisor(self.account.with_providers(
+        let supervisor = self.account.with_providers(
             self.manager.clone(),
             self.processes.clone(),
             self.clock.clone(),
             None,
-        ))
+        );
+        let supervisor = match &self.installation_trust {
+            Some(key) => self
+                .account
+                .with_installation_trust(supervisor, key.clone()),
+            None => supervisor,
+        };
+        NativeClientProvider::from_supervisor(supervisor)
     }
 }
 #[derive(Default)]
@@ -793,12 +805,39 @@ async fn interrupted_cli_wait_preserves_and_resolves_the_original_admitted_start
 
 #[tokio::test]
 async fn cli_activates_only_the_assessed_staged_installation_and_preserves_stopped() {
-    let fixture = Fixture::new(Some(DesiredServerState::Stopped));
-    let staged: InstallationStatus = serde_json::from_value(serde_json::json!({
-        "installation":2,"version":"1.2.4","artifact_sha256":vec![4;32]
-    }))
-    .unwrap();
+    use spaceterm_host::server_installation::test_support;
+    let mut fixture = Fixture::new(None);
+    *fixture.manager.state.lock().unwrap() = SupervisorState::Disabled;
+    let (key, original) =
+        signed_installation::fixture("1.2.3", 7, signed_installation::native_machine());
+    let registration = fixture
+        .account
+        .initialize_with_installation(
+            DesiredServerState::Stopped,
+            Some(InstallationStatus {
+                installation: spaceterm_host::startup::InstallationId(std::num::NonZeroU64::MIN),
+                version: original.manifest().version.clone(),
+                artifact_sha256: original.artifact_sha256(),
+            }),
+        )
+        .unwrap();
+    let store = test_support::store(&registration, key.clone()).unwrap();
+    let original_id = store.stage(&original).unwrap();
+    store
+        .activate(original_id, store.snapshot().unwrap().generation, 1)
+        .unwrap();
+    let (_, candidate) =
+        signed_installation::fixture("1.2.4", 7, signed_installation::native_machine());
+    let candidate_id = store.stage(&candidate).unwrap();
+    assert_eq!(candidate_id.0.get(), 2);
+    let staged = InstallationStatus {
+        installation: candidate_id,
+        version: candidate.manifest().version.clone(),
+        artifact_sha256: candidate.artifact_sha256(),
+    };
+    drop(store);
     fixture.account.stage_installation(staged.clone()).unwrap();
+    fixture.installation_trust = Some(key);
     let provider = fixture.provider();
     let deps = dependencies(&provider);
     let mut assessed = Io::default();
