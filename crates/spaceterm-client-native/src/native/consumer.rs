@@ -347,21 +347,19 @@ impl NativeConsumer {
             return Err(ManagementFailure::PairingRequired);
         }
         let saved = &inventory.saved[0];
-        let registration = self
-            .native
-            .supervisor
-            .discover()
-            .map_err(classify_service)?
-            .ok_or(ManagementFailure::NativeUnavailable)?;
-        if saved.pin() != registration.server_pin() {
-            return Err(ManagementFailure::AuthorizationDenied);
-        }
         let scope = assessments::Scope::local(
             saved.client().parts().ordinary,
             saved.device(),
-            registration.server_pin(),
+            saved.pin(),
         )?;
-        Ok((registration.data_directory().join("cli-assessments"), scope))
+        // Account/build authority selects storage even if server registration is
+        // absent or unreadable. The verified journal supplies pairing scope only.
+        let directory = self
+            .native
+            .supervisor
+            .client_connections_directory()
+            .with_file_name("cli-assessments");
+        Ok((directory, scope))
     }
     async fn retained_assessment(
         &self,
