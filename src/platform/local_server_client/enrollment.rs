@@ -143,36 +143,53 @@ async fn enroll_using<N: NativeDeviceCredentials + Clone + 'static>(
                 .map_err(pairing_failure)?
                 .1
         };
-        let pending = inventory.credential_preparations.iter().find(|preparation| {
-            preparation.scope.parts().namespace == namespace
-                && preparation.scope.parts().purpose == CredentialPurpose::PairingAuthentication { server }
-        });
+        let pending = inventory
+            .credential_preparations
+            .iter()
+            .find(|preparation| {
+                preparation.scope.parts().namespace == namespace
+                    && preparation.scope.parts().purpose
+                        == CredentialPurpose::PairingAuthentication { server }
+            });
         let retained_preparation = inventory.prepared.iter().find(|prepared| {
-            prepared.pin == pin && prepared.credential.scope.parts().namespace == namespace
+            prepared.pin == pin
+                && prepared.credential.scope.parts().namespace == namespace
                 && !inventory.is_suppressed(&prepared.local_pairing)
         });
         let (generation, authentication) = if let Some(prepared) = retained_preparation {
-            let credential = credentials.recover_preparation(&prepared.credential.scope).await
-                .map_err(pairing_failure)?.ok_or_else(|| failure(ClientFailureClass::StorageUnavailable))?;
+            let credential = credentials
+                .recover_preparation(&prepared.credential.scope)
+                .await
+                .map_err(pairing_failure)?
+                .ok_or_else(|| failure(ClientFailureClass::StorageUnavailable))?;
             if credential != prepared.credential {
                 return Err(failure(ClientFailureClass::InvalidStorage));
             }
             (prepared.local_pairing.parts().generation, credential)
         } else if let Some(pending) = pending {
             let credential = recover_native_credential(&store, &credentials, pending.generation)
-                .await.map_err(pairing_failure)?
+                .await
+                .map_err(pairing_failure)?
                 .ok_or_else(|| failure(ClientFailureClass::StorageUnavailable))?;
             (pending.generation, credential)
         } else {
-            let scope = DeviceCredentials::new_scope(namespace, CredentialPurpose::PairingAuthentication { server })
-                .map_err(pairing_failure)?;
-            prepare_native_credential(&store, &credentials, scope).await.map_err(pairing_failure)?
+            let scope = DeviceCredentials::new_scope(
+                namespace,
+                CredentialPurpose::PairingAuthentication { server },
+            )
+            .map_err(pairing_failure)?;
+            prepare_native_credential(&store, &credentials, scope)
+                .await
+                .map_err(pairing_failure)?
         };
         let keys = PairingKeys::new(PairingKeysParts {
             device_identity_public_key: device.public_key,
             pairing_authentication_public_key: authentication.public_key,
-        }).map_err(|_| failure(ClientFailureClass::InvalidStorage))?;
-        let original = supervisor.retained_owner_proposal(server, &keys).map_err(classify)?;
+        })
+        .map_err(|_| failure(ClientFailureClass::InvalidStorage))?;
+        let original = supervisor
+            .retained_owner_proposal(server, &keys)
+            .map_err(classify)?;
         let (request, proposal) = if let Some(original) = original {
             original
         } else {
@@ -191,29 +208,46 @@ async fn enroll_using<N: NativeDeviceCredentials + Clone + 'static>(
                 device: DeviceId::new(device_id),
                 keys,
                 claim_nonce: nonce,
-            }).map_err(|_| failure(ClientFailureClass::InvalidStorage))?;
+            })
+            .map_err(|_| failure(ClientFailureClass::InvalidStorage))?;
             let request = supervisor.allocate_request().map_err(classify)?;
-            supervisor.record_owner_proposal(request, proposal.clone()).map_err(classify)?;
+            supervisor
+                .record_owner_proposal(request, proposal.clone())
+                .map_err(classify)?;
             (request, proposal)
         };
         let captured = journal.snapshot()?;
-        let slot = captured.pairing().slot(authentication.scope.reference()).cloned()
+        let slot = captured
+            .pairing()
+            .slot(authentication.scope.reference())
+            .cloned()
             .ok_or_else(|| failure(ClientFailureClass::InvalidStorage))?;
         let reference = match slot.route_reference {
-            Some(reference) if slot.route.as_ref() == Some(&route)
-                || captured.pairing().prepared().iter().any(|prepared| {
-                    prepared.route_reference == reference && prepared.target.target().is_ok_and(|target| {
-                        target.credential() == authentication.scope.reference() && target.route() == &route
-                    })
-                }) => reference,
+            Some(reference)
+                if slot.route.as_ref() == Some(&route)
+                    || captured.pairing().prepared().iter().any(|prepared| {
+                        prepared.route_reference == reference
+                            && prepared.target.target().is_ok_and(|target| {
+                                target.credential() == authentication.scope.reference()
+                                    && target.route() == &route
+                            })
+                    }) =>
+            {
+                reference
+            }
             Some(_) => return Err(failure(ClientFailureClass::StaleAuthority)),
             None => {
                 let mut reference = [0; 16];
-                getrandom::fill(&mut reference).map_err(|_| failure(ClientFailureClass::Unavailable))?;
+                getrandom::fill(&mut reference)
+                    .map_err(|_| failure(ClientFailureClass::Unavailable))?;
                 let reference = RevocationRouteReference::new(reference);
-                journal.transact(vec![ClientJournalChange::BindCredentialRoute {
-                    reference: authentication.scope.reference(), route_reference: reference, route: route.clone(),
-                }]).await?;
+                journal
+                    .transact(vec![ClientJournalChange::BindCredentialRoute {
+                        reference: authentication.scope.reference(),
+                        route_reference: reference,
+                        route: route.clone(),
+                    }])
+                    .await?;
                 reference
             }
         };
@@ -248,7 +282,9 @@ async fn enroll_using<N: NativeDeviceCredentials + Clone + 'static>(
         let digest = supervisor
             .owner_enrollment_digest(request, server, claim)
             .map_err(classify)?;
-        supervisor.validate_owner_enrollment(&request, digest, server, claim).map_err(classify)?;
+        supervisor
+            .validate_owner_enrollment(&request, digest, server, claim)
+            .map_err(classify)?;
         let initial = serde_json::to_vec(&serde_json::json!({
             "request": request,
             "proposal": proposal,
@@ -317,9 +353,13 @@ async fn enroll_using<N: NativeDeviceCredentials + Clone + 'static>(
         };
         prepared.validate().map_err(pairing_failure)?;
         if retained_preparation.is_none() {
-            journal.transact(vec![ClientJournalChange::BindCredentialRoute {
-                reference: prepared.credential.scope.reference(), route_reference: reference, route,
-            }]).await?;
+            journal
+                .transact(vec![ClientJournalChange::BindCredentialRoute {
+                    reference: prepared.credential.scope.reference(),
+                    route_reference: reference,
+                    route,
+                }])
+                .await?;
         }
         let connector = OwnerConnector {
             pin,

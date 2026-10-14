@@ -914,11 +914,18 @@ async fn metadata_acceptance(
     use spaceterm_core::observations::{MonotonicTick, RuntimeObservationSequence};
     use spaceterm_protocol::convert::metadata;
     use spaceterm_terminal::{metadata::*, runtime_contracts::*};
-    let permit = pane.permit(spaceterm_client::pane_channel::EffectKind::Read).unwrap();
+    let permit = pane
+        .permit(spaceterm_client::pane_channel::EffectKind::Read)
+        .unwrap();
     let original = permit.fence();
     let fence = EffectFence::new(
-        original.session(), original.grant(), original.connection(), original.context(), None,
-    ).unwrap();
+        original.session(),
+        original.grant(),
+        original.connection(),
+        original.context(),
+        None,
+    )
+    .unwrap();
     let initial = RuntimeMetadataSnapshot::new(RuntimeMetadataParts {
         session: fence.session(),
         sequence: RuntimeObservationSequence::new(1000).unwrap(),
@@ -927,12 +934,16 @@ async fn metadata_acceptance(
             value: "\u{10400}".repeat(256).into(),
             provenance: TitleProvenance::TerminalControl,
         },
-        origin: RuntimeMetadataOrigin::Local { user: None, host: None },
+        origin: RuntimeMetadataOrigin::Local {
+            user: None,
+            host: None,
+        },
         progress: ProgressMetadata::Normal(37),
         freshness: MetadataFreshness::Live,
         prompt_zone: PromptZone::CommandOutput,
         hidden_input: false,
-    }).unwrap();
+    })
+    .unwrap();
     let content = pane.current_frame().unwrap().frame().unwrap().base();
     let bytes = metadata::snapshot_bytes(&initial).unwrap();
     for (index, chunk) in bytes.chunks(127).enumerate() {
@@ -940,36 +951,66 @@ async fn metadata_acceptance(
             ($p:ident, $variant:ident) => {
                 Payload::$variant($p::Message {
                     kind: Some($p::message::Kind::MetadataFragment(Box::new(
-                        metadata::$p::encode_fragment(fence, 900, 1, &initial, (index * 127) as u32, chunk, bytes.len() as u32).unwrap(),
+                        metadata::$p::encode_fragment(
+                            fence,
+                            900,
+                            1,
+                            &initial,
+                            (index * 127) as u32,
+                            chunk,
+                            bytes.len() as u32,
+                        )
+                        .unwrap(),
                     ))),
                 })
             };
         }
-        let payload = if info.major == 1 { fragment!(v1, Major1) } else { fragment!(v2, Major2) };
-        plan.control(fixture::peer::PeerControl::publication(payload)).await;
+        let payload = if info.major == 1 {
+            fragment!(v1, Major1)
+        } else {
+            fragment!(v2, Major2)
+        };
+        plan.control(fixture::peer::PeerControl::publication(payload))
+            .await;
     }
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         while pane.metadata_snapshot().as_deref() != Some(&initial) {
             tokio::task::yield_now().await;
         }
-    }).await.expect("native registry must publish the fully reconstructed title");
+    })
+    .await
+    .expect("native registry must publish the fully reconstructed title");
     let mut parts = initial.parts().clone();
     parts.sequence = RuntimeObservationSequence::new(1001).unwrap();
     parts.observed_at = MonotonicTick::new(30001);
     parts.progress = ProgressMetadata::None;
     let expired = RuntimeMetadataSnapshot::new(parts).unwrap();
     let payload = if info.major == 1 {
-        Payload::Major1(v1::Message { kind: Some(v1::message::Kind::MetadataPublication(Box::new(metadata::v1::encode_publication(fence, 900, 1, &expired).unwrap()))) })
+        Payload::Major1(v1::Message {
+            kind: Some(v1::message::Kind::MetadataPublication(Box::new(
+                metadata::v1::encode_publication(fence, 900, 1, &expired).unwrap(),
+            ))),
+        })
     } else {
-        Payload::Major2(v2::Message { kind: Some(v2::message::Kind::MetadataPublication(Box::new(metadata::v2::encode_publication(fence, 900, 1, &expired).unwrap()))) })
+        Payload::Major2(v2::Message {
+            kind: Some(v2::message::Kind::MetadataPublication(Box::new(
+                metadata::v2::encode_publication(fence, 900, 1, &expired).unwrap(),
+            ))),
+        })
     };
-    plan.control(fixture::peer::PeerControl::publication(payload)).await;
+    plan.control(fixture::peer::PeerControl::publication(payload))
+        .await;
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         while pane.metadata_snapshot().as_deref() != Some(&expired) {
             tokio::task::yield_now().await;
         }
-    }).await.expect("progress expiry must reach desktop metadata without terminal text");
-    assert_eq!(pane.current_frame().unwrap().frame().unwrap().base(), content);
+    })
+    .await
+    .expect("progress expiry must reach desktop metadata without terminal text");
+    assert_eq!(
+        pane.current_frame().unwrap().frame().unwrap().base(),
+        content
+    );
 }
 
 #[gpui::test]

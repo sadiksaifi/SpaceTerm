@@ -255,7 +255,16 @@ impl EnrollmentProvider for NativeEnrollmentProvider {
         let services = self.services.clone();
         self.task(cx, async move {
             attempt.validate()?;
-            let claim = services.direct.prepare_claim(address, descriptor, compared_fingerprint, attempt.clone(), &services.pairing).await?;
+            let claim = services
+                .direct
+                .prepare_claim(
+                    address,
+                    descriptor,
+                    compared_fingerprint,
+                    attempt.clone(),
+                    &services.pairing,
+                )
+                .await?;
             attempt.validate()?;
             Ok(claim)
         })

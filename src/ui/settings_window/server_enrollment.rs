@@ -632,7 +632,9 @@ impl ServerEnrollment {
         if self.busy || self.done || self.method != Method::Direct || self.candidate.is_some() {
             return;
         }
-        let Some(provider) = self.provider.clone() else { return };
+        let Some(provider) = self.provider.clone() else {
+            return;
+        };
         let address = self.address.read(cx).value().trim().to_owned();
         let comparison = self.comparison.read(cx).value().trim().to_owned();
         if address.is_empty() || comparison.is_empty() {
@@ -648,11 +650,14 @@ impl ServerEnrollment {
         };
         self.generation = generation;
         let attempt = EnrollmentAttempt::new(generation);
-        let descriptor = Zeroizing::new(self.invitation.update(cx, |input, cx| input.take_value(cx)));
+        let descriptor =
+            Zeroizing::new(self.invitation.update(cx, |input, cx| input.take_value(cx)));
         let task = provider.prepare_claim(address, descriptor, comparison, attempt.clone(), cx);
         self.attempt = Some(attempt.clone());
         self.busy = true;
-        self.status = "Preparing this desktop's public device claim. No enrollment has been requested.".into();
+        self.status =
+            "Preparing this desktop's public device claim. No enrollment has been requested."
+                .into();
         self.operation = Some(cx.spawn(async move |sheet, cx| {
             let result = task.await;
             let _ = sheet.update(cx, |sheet, cx| {
@@ -1049,21 +1054,29 @@ impl Render for ServerEnrollment {
                     &appearance,
                 ))
             })
-            .when(method == Method::Direct && self.candidate.is_none(), |view| {
-                view.child(field(
-                    self.comparison.clone(),
-                    "Server fingerprint received through another trusted channel",
-                    &appearance,
-                ))
-                .child(Button::new("settings-server-enrollment-copy-claim", "Copy Public Device Claim")
-                    .variant(ButtonVariant::Outline)
-                    .tab_stop(true)
-                    .disabled(!ready)
-                    .debug_selector("settings-server-enrollment-copy-claim")
-                    .on_activate(move |_, _, cx| {
-                        let _ = claim.update(cx, |sheet, cx| sheet.copy_claim(cx));
-                    }))
-            })
+            .when(
+                method == Method::Direct && self.candidate.is_none(),
+                |view| {
+                    view.child(field(
+                        self.comparison.clone(),
+                        "Server fingerprint received through another trusted channel",
+                        &appearance,
+                    ))
+                    .child(
+                        Button::new(
+                            "settings-server-enrollment-copy-claim",
+                            "Copy Public Device Claim",
+                        )
+                        .variant(ButtonVariant::Outline)
+                        .tab_stop(true)
+                        .disabled(!ready)
+                        .debug_selector("settings-server-enrollment-copy-claim")
+                        .on_activate(move |_, _, cx| {
+                            let _ = claim.update(cx, |sheet, cx| sheet.copy_claim(cx));
+                        }),
+                    )
+                },
+            )
             .child(
                 Button::new(
                     "settings-server-enrollment-check",

@@ -32,13 +32,25 @@ pub(crate) fn offer(
     // never a launch-time replacement identity or another authorization request.
     if expected.is_some_and(|pin| {
         snapshot.bindings().iter().any(|saved| {
-            saved.binding().is_ok_and(|binding| binding.target().pin() == pin)
-        }) || snapshot.tombstones().iter().any(|suppressed| suppressed.parts().server.bytes() == pin.identity)
+            saved
+                .binding()
+                .is_ok_and(|binding| binding.target().pin() == pin)
+        }) || snapshot
+            .tombstones()
+            .iter()
+            .any(|suppressed| suppressed.parts().server.bytes() == pin.identity)
     }) {
         return Ok(None);
     }
-    let installs = native.management().supervisor().retained_initial_install_requests().map_err(classify)?;
-    let pending: Vec<_> = installs.iter().filter(|progress| progress.phase != ServicePhase::Completed).collect();
+    let installs = native
+        .management()
+        .supervisor()
+        .retained_initial_install_requests()
+        .map_err(classify)?;
+    let pending: Vec<_> = installs
+        .iter()
+        .filter(|progress| progress.phase != ServicePhase::Completed)
+        .collect();
     if pending.len() > 1 {
         return Err(ClientFailure::new(ClientFailureClass::RecoveryRequired));
     }
@@ -47,7 +59,11 @@ pub(crate) fn offer(
         native,
         journal,
         expected,
-        legacy: if expected.is_none() && install.is_none() { legacy } else { None },
+        legacy: if expected.is_none() && install.is_none() {
+            legacy
+        } else {
+            None
+        },
         install: tokio::sync::Mutex::new(install),
         execution: tokio::sync::Mutex::new(()),
     })))
@@ -62,7 +78,10 @@ struct NativeSetup {
     execution: tokio::sync::Mutex<()>,
 }
 impl NativeSetup {
-    fn seed(&self, assessment: spaceterm_host::account_service::ServiceInstallAssessment) -> spaceterm_host::account_service::ServiceInstallAssessment {
+    fn seed(
+        &self,
+        assessment: spaceterm_host::account_service::ServiceInstallAssessment,
+    ) -> spaceterm_host::account_service::ServiceInstallAssessment {
         if self.expected.is_none() {
             assessment.with_local_desktop_seed(self.legacy.clone())
         } else {
@@ -95,13 +114,21 @@ impl ForegroundSetup for NativeSetup {
             let mut retained = self.install.lock().await;
             if registration.is_none() || retained.is_some() {
                 let progress = if let Some(request) = *retained {
-                    let progress = supervisor.resolve_install(request).await.map_err(classify)?;
+                    let progress = supervisor
+                        .resolve_install(request)
+                        .await
+                        .map_err(classify)?;
                     if progress.phase != ServicePhase::Completed {
                         // A crash before archive staging may need the original bytes.
                         // The host rejects a newer feed rather than replacing this request.
-                        let artifact = management.download_installation(None).await
+                        let artifact = management
+                            .download_installation(None)
+                            .await
                             .map_err(|_| ClientFailure::new(ClientFailureClass::Unavailable))?;
-                        supervisor.resume_install_artifact(request, artifact).await.map_err(classify)?
+                        supervisor
+                            .resume_install_artifact(request, artifact)
+                            .await
+                            .map_err(classify)?
                     } else {
                         progress
                     }
@@ -110,7 +137,8 @@ impl ForegroundSetup for NativeSetup {
                         .download_installation(None)
                         .await
                         .map_err(|_| ClientFailure::new(ClientFailureClass::Unavailable))?;
-                    let assessment = self.seed(supervisor.assess_install(artifact).map_err(classify)?);
+                    let assessment =
+                        self.seed(supervisor.assess_install(artifact).map_err(classify)?);
                     let request = supervisor.allocate_request().map_err(classify)?;
                     *retained = Some(request);
                     // Only this method is reachable after the foreground affirmative action.
