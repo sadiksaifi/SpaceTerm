@@ -17,27 +17,47 @@ impl SigningKey for Key {
 /// Only the uncontrolled native credential service is replaced. The production
 /// credential reservation, authorization and journal transitions remain real.
 pub struct MemoryCredentials {
-    device: Arc<Key>,
-    authentication: Arc<Key>,
-    items: Mutex<Vec<PreparedCredential>>,
+    items: Mutex<Vec<(PreparedCredential, Arc<Key>)>>,
+    lost: Mutex<Vec<CredentialScope>>,
 }
 impl MemoryCredentials {
     pub fn new() -> Self {
         Self {
-            device: Arc::new(Key(Ed25519KeyPair::from_seed_unchecked(&[41; 32]).unwrap())),
-            authentication: Arc::new(Key(Ed25519KeyPair::from_seed_unchecked(&[42; 32]).unwrap())),
             items: Mutex::new(Vec::new()),
+            lost: Mutex::new(Vec::new()),
         }
     }
     pub fn created(&self) -> usize {
         self.items.lock().unwrap().len()
     }
-    fn key(&self, scope: &CredentialScope) -> &Arc<Key> {
-        if scope.parts().purpose == CredentialPurpose::DeviceIdentity {
-            &self.device
-        } else {
-            &self.authentication
-        }
+    pub fn lose_device_key(&self) {
+        let items = self.items.lock().unwrap();
+        let scope = items
+            .iter()
+            .rev()
+            .find(|(item, _)| item.scope.parts().purpose == CredentialPurpose::DeviceIdentity)
+            .unwrap()
+            .0
+            .scope
+            .clone();
+        self.lost.lock().unwrap().push(scope);
+    }
+    pub fn lose_authentication_key(&self) {
+        let items = self.items.lock().unwrap();
+        let scope = items
+            .iter()
+            .rev()
+            .find(|(item, _)| {
+                matches!(
+                    item.scope.parts().purpose,
+                    CredentialPurpose::PairingAuthentication { .. }
+                )
+            })
+            .unwrap()
+            .0
+            .scope
+            .clone();
+        self.lost.lock().unwrap().push(scope);
     }
 }
 impl NativeDeviceCredentials for MemoryCredentials {
@@ -47,13 +67,17 @@ impl NativeDeviceCredentials for MemoryCredentials {
     ) -> PairingFuture<'_, Result<PreparedCredential, PairingFailure>> {
         Box::pin(async move {
             let scope = reservation.scope().clone();
+            let mut items = self.items.lock().unwrap();
+            assert!(!items.iter().any(|(item, _)| item.scope == scope));
+            let seed = u8::try_from(items.len() + 41).unwrap();
+            let key = Arc::new(Key(
+                Ed25519KeyPair::from_seed_unchecked(&[seed; 32]).unwrap()
+            ));
             let credential = PreparedCredential {
-                public_key: self.key(&scope).public_key(),
+                public_key: key.public_key(),
                 scope,
             };
-            let mut items = self.items.lock().unwrap();
-            assert!(!items.iter().any(|item| item.scope == credential.scope));
-            items.push(credential.clone());
+            items.push((credential.clone(), key));
             Ok(credential)
         })
     }
@@ -62,13 +86,16 @@ impl NativeDeviceCredentials for MemoryCredentials {
         scope: &'a CredentialScope,
     ) -> PairingFuture<'a, Result<Option<PreparedCredential>, PairingFailure>> {
         Box::pin(async move {
+            if self.lost.lock().unwrap().contains(scope) {
+                return Ok(None);
+            }
             Ok(self
                 .items
                 .lock()
                 .unwrap()
                 .iter()
-                .find(|item| &item.scope == scope)
-                .cloned())
+                .find(|(item, _)| &item.scope == scope)
+                .map(|(item, _)| item.clone()))
         })
     }
     fn signing_key<'a>(
@@ -78,9 +105,14 @@ impl NativeDeviceCredentials for MemoryCredentials {
     ) -> PairingFuture<'a, Result<Arc<dyn SigningKey>, PairingFailure>> {
         Box::pin(async move {
             authorization.validate(&credential.scope)?;
-            assert!(self.items.lock().unwrap().contains(credential));
-            let key = self.key(&credential.scope);
-            assert_eq!(key.public_key(), credential.public_key);
+            if self.lost.lock().unwrap().contains(&credential.scope) {
+                return Err(PairingFailure::CredentialUnavailable);
+            }
+            let items = self.items.lock().unwrap();
+            let (_, key) = items
+                .iter()
+                .find(|(item, _)| item == credential)
+                .ok_or(PairingFailure::CredentialUnavailable)?;
             Ok(key.clone() as Arc<dyn SigningKey>)
         })
     }

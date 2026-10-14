@@ -54,6 +54,10 @@ impl ReceiptVerifier for Verifier {
 struct Credentials(
     Arc<Mutex<Vec<(PreparedCredential, u8)>>>,
     Arc<std::sync::atomic::AtomicUsize>,
+    Arc<Mutex<Vec<CredentialScope>>>,
+    Arc<Mutex<Vec<CredentialScope>>>,
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<tokio::sync::Notify>,
 );
 struct Key(Ed25519KeyPair);
 impl Key {
@@ -75,13 +79,30 @@ impl NativeDeviceCredentials for Credentials {
         reservation: CredentialCreationReservation,
     ) -> PairingFuture<'_, Result<PreparedCredential, PairingFailure>> {
         Box::pin(async move {
-            let mut items = self.0.lock().unwrap();
-            let seed = u8::try_from(items.len() + 30).unwrap();
-            let prepared = PreparedCredential {
-                scope: reservation.scope().clone(),
-                public_key: Key::new(seed).public_key(),
+            let mode = self.4.swap(0, std::sync::atomic::Ordering::SeqCst);
+            if mode == 1 {
+                return Err(PairingFailure::CredentialUnavailable);
+            }
+            let prepared = {
+                let mut items = self.0.lock().unwrap();
+                assert!(
+                    !items
+                        .iter()
+                        .any(|(item, _)| item.scope == *reservation.scope()),
+                    "native credential insertion must be exclusive"
+                );
+                let seed = u8::try_from(items.len() + 30).unwrap();
+                let prepared = PreparedCredential {
+                    scope: reservation.scope().clone(),
+                    public_key: Key::new(seed).public_key(),
+                };
+                items.push((prepared.clone(), seed));
+                prepared
             };
-            items.push((prepared.clone(), seed));
+            if mode == 2 {
+                self.5.notify_one();
+                std::future::pending::<()>().await;
+            }
             Ok(prepared)
         })
     }
@@ -90,6 +111,9 @@ impl NativeDeviceCredentials for Credentials {
         scope: &'a CredentialScope,
     ) -> PairingFuture<'a, Result<Option<PreparedCredential>, PairingFailure>> {
         Box::pin(async move {
+            if self.2.lock().unwrap().contains(scope) {
+                return Ok(None);
+            }
             let remaining = self.1.load(std::sync::atomic::Ordering::SeqCst);
             if remaining > 0 && self.1.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
                 return Err(PairingFailure::CredentialUnavailable);
@@ -110,6 +134,9 @@ impl NativeDeviceCredentials for Credentials {
     ) -> PairingFuture<'a, Result<Arc<dyn SigningKey>, PairingFailure>> {
         Box::pin(async move {
             authorization.validate(&credential.scope)?;
+            if self.2.lock().unwrap().contains(&credential.scope) {
+                return Err(PairingFailure::CredentialUnavailable);
+            }
             let items = self.0.lock().unwrap();
             let (_, seed) = items
                 .iter()
@@ -120,9 +147,22 @@ impl NativeDeviceCredentials for Credentials {
     }
     fn delete_pairing_key<'a>(
         &'a self,
-        _: &'a PreparedCredential,
+        credential: &'a PreparedCredential,
     ) -> PairingFuture<'a, Result<CredentialDeletion, PairingFailure>> {
-        Box::pin(async { panic!("foreground enrollment must not delete another credential") })
+        Box::pin(async move {
+            assert!(
+                self.3.lock().unwrap().contains(&credential.scope),
+                "foreground enrollment must not delete another credential"
+            );
+            let mut items = self.0.lock().unwrap();
+            let before = items.len();
+            items.retain(|(item, _)| item != credential);
+            Ok(if before == items.len() {
+                CredentialDeletion::AlreadyMissing
+            } else {
+                CredentialDeletion::Deleted
+            })
+        })
     }
 }
 
@@ -218,7 +258,494 @@ async fn enroll_cli_with_credentials(
         .map_err(classify)
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_account_recovery_after_last_device_key_loss_in_both_majors() {
+    account_recovery(false, false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_account_recovery_after_last_device_revocation_in_both_majors() {
+    account_recovery(true, false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_account_recovery_resumes_original_attempt_after_receiving_failure_in_both_majors()
+{
+    account_recovery(false, true, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_account_recovery_rolls_over_after_recovered_device_key_loss_in_both_majors() {
+    account_recovery(false, false, true).await;
+}
+
+async fn account_recovery(revoke: bool, interrupt: bool, lose_recovered_device: bool) {
+    use spaceterm_client::management_cli::ProtocolManagement;
+    use spaceterm_client_native::{
+        cli::{
+            arguments::{CliCommand, parse},
+            bindings::PairingCommandBindings,
+        },
+        native::consumer::{NativeConsumer, NativeConsumerKind},
+    };
+    for major in [1, 2] {
+        let root = Root::new();
+        let fixture = AccountServiceFixture::new(&root.0, BuildIdentity::Development).unwrap();
+        let registration = fixture
+            .initialize_with_installation(
+                DesiredServerState::Running,
+                Some(InstallationStatus {
+                    installation: InstallationId(std::num::NonZeroU64::new(9).unwrap()),
+                    version: spaceterm_distribution::BuildVersion::parse("9.0.0").unwrap(),
+                    artifact_sha256: [8; 32],
+                }),
+            )
+            .unwrap();
+        let pin = registration.server_pin();
+        let identity = StoreIdentity {
+            server: ServerId::new(pin.identity),
+            account: registration.key(),
+            server_public_key: pin.public_key,
+        };
+        let home = spaceterm_core::organization::ServerDirectory::new(
+            identity.server,
+            root.0.as_os_str().as_encoded_bytes().to_vec(),
+        )
+        .unwrap();
+        let database = Database::open_for_application(
+            registration.organization_directory(),
+            migrations(),
+            schema::APPLICATION_ID,
+        )
+        .unwrap();
+        assert!(matches!(
+            SqliteOrganizationStore::initialize_new(
+                database,
+                NewStoreSeed {
+                    identity,
+                    origin: NewServerOrigin::LocalHeadless
+                },
+                StoreLimits::production(),
+                production_services(identity, home).unwrap(),
+            ),
+            InitializationDisposition::Durable { .. }
+        ));
+        let supervisor = supervisor(&root.0, Arc::new(StartupAbsence)).unwrap();
+        let server = RecoveredAccountServer::recover(
+            supervisor.clone(),
+            AccountStartup::admit(&supervisor).unwrap(),
+            AccountLaunchFacts {
+                uid: registration.key().account_uid,
+                home: root.0.clone(),
+                planner: ShellLaunchPlanner::for_test(root.0.join("shell"), root.0.clone()),
+                machine: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+        let handle = server.handle();
+        let before = handle.snapshot();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let running = tokio::spawn(server.run_until(async {
+            let _ = stopped.await;
+        }));
+        let native = NativeClientProvider::from_supervisor((*supervisor).clone());
+        let credentials = Credentials::default();
+        let consumer = || {
+            NativeConsumer::new(native.management(), NativeConsumerKind::Cli)
+                .with_credentials(Arc::new(credentials.clone()))
+                .with_owner_handshake(spaceterm_protocol::authentication::HandshakeConfig {
+                    majors: vec![major],
+                    ..Default::default()
+                })
+        };
+        let fingerprint = || {
+            let invocation = parse(
+                [
+                    "pair",
+                    "enroll",
+                    "--server-fingerprint",
+                    &spaceterm_client_native::cli::output::hex(&pin.public_key),
+                ]
+                .into_iter()
+                .map(std::ffi::OsString::from),
+            )
+            .unwrap();
+            let CliCommand::PairEnroll { fingerprint, .. } = invocation.command else {
+                panic!("enrollment command required")
+            };
+            fingerprint
+        };
+        let initial = consumer();
+        initial
+            .enroll(
+                fingerprint(),
+                false,
+                spaceterm_host::native_management::SudoMode::NonInteractive,
+                &mut PairIo,
+            )
+            .await
+            .unwrap();
+        initial.shutdown().await.unwrap();
+        let old = consumer();
+        let runtime = old.pairing_runtime().await.unwrap();
+        let inventory = runtime.inventory().await.unwrap();
+        let [saved] = inventory.saved.as_slice() else {
+            panic!("one CLI binding required")
+        };
+        let old_key = saved.key().clone();
+        let old_device = saved.device();
+        let old_keys = saved.receipt().parts().claims.clone();
+        let old_authentication = saved.credential().clone();
+        let shared_device = credentials.0.lock().unwrap()[0].0.clone();
+        // The unrelated credential must survive both old cleanup and recovery.
+        let sentinel = PreparedCredential {
+            scope: DeviceCredentials::new_scope(
+                shared_device.scope.parts().namespace.clone(),
+                spaceterm_client::pairing::credentials::CredentialPurpose::DeviceIdentity,
+            )
+            .unwrap(),
+            public_key: Key::new(99).public_key(),
+        };
+        credentials.0.lock().unwrap().push((sentinel.clone(), 99));
+        if revoke {
+            credentials
+                .3
+                .lock()
+                .unwrap()
+                .push(old_authentication.scope.clone());
+            let assessment = runtime
+                .assess_unpair(&old_key, saved.client().parts().client.id)
+                .await
+                .unwrap();
+            let removal = runtime.self_unpair(assessment).await.unwrap();
+            runtime
+                .retry_revocation_once(removal.operation)
+                .await
+                .unwrap();
+        } else {
+            credentials
+                .2
+                .lock()
+                .unwrap()
+                .push(old_authentication.scope.clone());
+        }
+        drop(runtime);
+        old.shutdown().await.unwrap();
+        let remaining = credentials.0.lock().unwrap().len();
+        let ordinary = consumer();
+        assert!(
+            ProtocolManagement::status(&ordinary).await.is_err(),
+            "ordinary reconnect must not reenroll lost or revoked authority"
+        );
+        ordinary.shutdown().await.unwrap();
+        assert_eq!(credentials.0.lock().unwrap().len(), remaining);
+        let denied = consumer();
+        let wrong = parse(
+            ["pair", "enroll", "--server-fingerprint", &"ff".repeat(32)]
+                .into_iter()
+                .map(std::ffi::OsString::from),
+        )
+        .unwrap();
+        let CliCommand::PairEnroll {
+            fingerprint: wrong_pin,
+            ..
+        } = wrong.command
+        else {
+            panic!("enrollment required")
+        };
+        assert!(matches!(
+            denied
+                .enroll(
+                    wrong_pin,
+                    true,
+                    spaceterm_host::native_management::SudoMode::NonInteractive,
+                    &mut PairIo
+                )
+                .await,
+            Err(spaceterm_client::management_cli::ManagementFailure::AuthorizationDenied)
+        ));
+        denied.shutdown().await.unwrap();
+        assert_eq!(credentials.0.lock().unwrap().len(), remaining);
+        let recovery = consumer();
+        if interrupt {
+            credentials.1.store(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        let result = recovery
+            .enroll(
+                fingerprint(),
+                true,
+                spaceterm_host::native_management::SudoMode::NonInteractive,
+                &mut PairIo,
+            )
+            .await;
+        recovery.shutdown().await.unwrap();
+        if interrupt {
+            assert!(
+                result.is_err(),
+                "receiving credential boundary must interrupt recovery"
+            );
+        } else if let Err(failure) = result {
+            let mut stages = Vec::new();
+            for name in ["enrollment", "cli", "companion", "management"] {
+                let codec = Arc::new(CanonicalCodec);
+                let verifier = Arc::new(Verifier);
+                let storage = spaceterm_client_native::journal::NativeClientJournal::open_existing(
+                    native
+                        .management()
+                        .supervisor()
+                        .client_connections_directory()
+                        .join(name),
+                    codec.clone(),
+                    verifier.clone(),
+                    JournalLimits::default(),
+                )
+                .await
+                .unwrap();
+                let journal = JournalController::recover(
+                    Arc::new(storage),
+                    codec,
+                    verifier,
+                    JournalLimits::default(),
+                )
+                .await
+                .unwrap();
+                let inventory = journal.snapshot().unwrap().pairing_snapshot().unwrap();
+                stages.push((
+                    name,
+                    inventory.saved.len(),
+                    inventory.prepared.len(),
+                    inventory.enrollment_acknowledgements.len(),
+                    inventory.revocations.len(),
+                    inventory
+                        .saved
+                        .iter()
+                        .any(|saved| saved.key().parts().pairing != old_key.parts().pairing),
+                ));
+            }
+            panic!(
+                "explicit recovery classification {failure:?}; stages (name,saved,prepared,acks,revocations,fresh) {stages:?}"
+            );
+        }
+        let new_count = credentials.0.lock().unwrap().len();
+        assert_eq!(
+            new_count,
+            remaining + 2,
+            "recovery must create exactly two fresh keys"
+        );
+        if interrupt {
+            let blocked = consumer();
+            assert!(matches!(
+                ProtocolManagement::status(&blocked).await,
+                Err(spaceterm_client::management_cli::ManagementFailure::OutcomePending)
+            ));
+            blocked.shutdown().await.unwrap();
+        }
+        let retry = consumer();
+        retry
+            .enroll(
+                fingerprint(),
+                true,
+                spaceterm_host::native_management::SudoMode::NonInteractive,
+                &mut PairIo,
+            )
+            .await
+            .unwrap();
+        retry.shutdown().await.unwrap();
+        assert_eq!(
+            credentials.0.lock().unwrap().len(),
+            new_count,
+            "recovery retry must retain the original new attempt"
+        );
+        if lose_recovered_device {
+            let admission = supervisor.admit_client_provisioning().unwrap();
+            let attempt: serde_json::Value =
+                serde_json::from_slice(&admission.owner_attempt("enrollment").unwrap().unwrap())
+                    .unwrap();
+            let recovered_device: PreparedCredential =
+                serde_json::from_value(attempt["device"].clone()).unwrap();
+            drop(admission);
+            credentials.2.lock().unwrap().push(recovered_device.scope);
+            let second = consumer();
+            second
+                .enroll(
+                    fingerprint(),
+                    true,
+                    spaceterm_host::native_management::SudoMode::NonInteractive,
+                    &mut PairIo,
+                )
+                .await
+                .unwrap();
+            second.shutdown().await.unwrap();
+            assert_eq!(
+                credentials.0.lock().unwrap().len(),
+                new_count + 2,
+                "loss of the recovered device key must create a fresh identity and pairing"
+            );
+            let replay = consumer();
+            replay
+                .enroll(
+                    fingerprint(),
+                    true,
+                    spaceterm_host::native_management::SudoMode::NonInteractive,
+                    &mut PairIo,
+                )
+                .await
+                .unwrap();
+            replay.shutdown().await.unwrap();
+            assert_eq!(credentials.0.lock().unwrap().len(), new_count + 2);
+        }
+        for kind in [NativeConsumerKind::Cli, NativeConsumerKind::StatusCompanion] {
+            let receiver = NativeConsumer::new(native.management(), kind)
+                .with_credentials(Arc::new(credentials.clone()));
+            if kind == NativeConsumerKind::Cli {
+                let runtime = receiver.pairing_runtime().await.unwrap();
+                let inventory = runtime.inventory().await.unwrap();
+                let [saved] = inventory.saved.as_slice() else {
+                    panic!("one fresh receiving binding required")
+                };
+                assert_ne!(saved.key().parts().pairing, old_key.parts().pairing);
+                assert_ne!(saved.device(), old_device);
+                assert!(saved.credential() != &old_authentication);
+                assert!(saved.credential().public_key != old_authentication.public_key);
+                let spaceterm_core::pairing::PairingReceiptBody::ClientBinding {
+                    keys: old_pairing_keys,
+                    ..
+                } = &old_keys
+                else {
+                    panic!("old CLI binding receipt required")
+                };
+                let spaceterm_core::pairing::PairingReceiptBody::ClientBinding {
+                    keys: new_pairing_keys,
+                    ..
+                } = &saved.receipt().parts().claims
+                else {
+                    panic!("new CLI binding receipt required")
+                };
+                assert!(
+                    new_pairing_keys.parts().device_identity_public_key
+                        != old_pairing_keys.parts().device_identity_public_key
+                );
+                assert!(inventory.is_suppressed(&old_key));
+                assert!(
+                    runtime
+                        .restore(&old_key, saved.client().parts().client.id)
+                        .await
+                        .is_err()
+                );
+                drop(runtime);
+            }
+            assert!(ProtocolManagement::status(&receiver).await.is_ok());
+            receiver.shutdown().await.unwrap();
+        }
+        for name in ["enrollment", "cli", "companion", "management"] {
+            let codec = Arc::new(CanonicalCodec);
+            let verifier = Arc::new(Verifier);
+            let storage = spaceterm_client_native::journal::NativeClientJournal::open_existing(
+                native
+                    .management()
+                    .supervisor()
+                    .client_connections_directory()
+                    .join(name),
+                codec.clone(),
+                verifier.clone(),
+                JournalLimits::default(),
+            )
+            .await
+            .unwrap();
+            let journal = JournalController::recover(
+                Arc::new(storage),
+                codec,
+                verifier,
+                JournalLimits::default(),
+            )
+            .await
+            .unwrap();
+            let snapshot = journal.snapshot().unwrap();
+            let inventory = snapshot.pairing_snapshot().unwrap();
+            assert!(inventory.is_suppressed(&old_key));
+            let [saved] = inventory.saved.as_slice() else {
+                panic!("one recovered binding required")
+            };
+            assert_ne!(saved.key().parts().pairing, old_key.parts().pairing);
+            assert!(
+                journal
+                    .ordinary_use_allowed(&snapshot.bindings()[0].binding().unwrap())
+                    .unwrap()
+            );
+        }
+        assert!(
+            credentials
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(item, _)| item == &sentinel)
+        );
+        assert!(
+            credentials
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(item, _)| item == &shared_device)
+        );
+        let after = handle.snapshot();
+        assert_eq!(
+            after.state(),
+            before.state(),
+            "account recovery must retain the organization"
+        );
+        assert_eq!(
+            fixture.reopen().discover().unwrap().unwrap().server_pin(),
+            pin
+        );
+        stop.send(()).unwrap();
+        assert!(running.await.unwrap().unwrap().cleanup_confirmed);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_account_recovery_refuses_before_suppressing_unfinished_receiver_origin() {
+    foreground_owner_pairing_with_preparation(true, 5, 4).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_account_recovery_preserves_unissued_desktop_key_preparation() {
+    foreground_owner_pairing_with_preparation(false, 0, 5).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_owner_preparation_retries_original_scope_after_insertion_failure() {
+    foreground_owner_pairing_with_preparation(true, 0, 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_owner_preparation_recovers_exact_device_key_after_cancellation() {
+    foreground_owner_pairing_with_preparation(true, 0, 2).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_enrollment_recovers_original_owner_metadata_publication_before_recovery_guard() {
+    for mode in [6, 7] {
+        foreground_owner_pairing_with_preparation(true, 0, mode).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_account_recovery_blocks_native_management_and_desktop_provisioning() {
+    foreground_owner_pairing_with_preparation(true, 0, 3).await;
+}
+
 async fn foreground_owner_pairing(cli: bool, interrupt_recovery: usize) {
+    foreground_owner_pairing_with_preparation(cli, interrupt_recovery, 0).await;
+}
+
+async fn foreground_owner_pairing_with_preparation(
+    cli: bool,
+    interrupt_recovery: usize,
+    preparation_mode: usize,
+) {
     let root = Root::new();
     let fixture = AccountServiceFixture::new(&root.0, BuildIdentity::Development).unwrap();
     let registration = fixture
@@ -286,11 +813,298 @@ async fn foreground_owner_pairing(cli: bool, interrupt_recovery: usize) {
     credentials
         .1
         .store(interrupt_recovery, std::sync::atomic::Ordering::SeqCst);
+    credentials.4.store(
+        if preparation_mode == 5 {
+            2
+        } else if preparation_mode <= 2 {
+            preparation_mode
+        } else {
+            0
+        },
+        std::sync::atomic::Ordering::SeqCst,
+    );
+    if preparation_mode == 2 || preparation_mode == 5 {
+        let pending_native = NativeClientProvider::from_supervisor((*supervisor).clone());
+        let pending_credentials = credentials.clone();
+        let pending_journal = journal.clone();
+        let preparing = tokio::spawn(async move {
+            if cli {
+                enroll_cli_with_credentials(&pending_native, pending_credentials, pin).await
+            } else {
+                enroll_with_credentials(&pending_native, pending_journal, pending_credentials).await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(15), credentials.5.notified())
+            .await
+            .unwrap();
+        preparing.abort();
+        assert!(preparing.await.unwrap_err().is_cancelled());
+        assert_eq!(credentials.0.lock().unwrap().len(), 1);
+        if preparation_mode == 5 {
+            use spaceterm_client_native::cli::{
+                arguments::{CliCommand, parse},
+                bindings::PairingCommandBindings,
+            };
+            let before = supervisor
+                .admit_client_provisioning()
+                .unwrap()
+                .owner_attempt("desktop-preparation")
+                .unwrap()
+                .unwrap();
+            let invocation = parse(
+                [
+                    "pair",
+                    "enroll",
+                    "--server-fingerprint",
+                    &spaceterm_client_native::cli::output::hex(&pin.public_key),
+                ]
+                .into_iter()
+                .map(std::ffi::OsString::from),
+            )
+            .unwrap();
+            let CliCommand::PairEnroll { fingerprint, .. } = invocation.command else {
+                panic!("enroll required")
+            };
+            let recovery = spaceterm_client_native::native::consumer::NativeConsumer::new(
+                native.management(),
+                spaceterm_client_native::native::consumer::NativeConsumerKind::Cli,
+            )
+            .with_credentials(Arc::new(credentials.clone()));
+            assert!(matches!(
+                recovery
+                    .enroll(
+                        fingerprint,
+                        true,
+                        spaceterm_host::native_management::SudoMode::NonInteractive,
+                        &mut PairIo
+                    )
+                    .await,
+                Err(spaceterm_client::management_cli::ManagementFailure::OutcomePending)
+            ));
+            recovery.shutdown().await.unwrap();
+            let admission = supervisor.admit_client_provisioning().unwrap();
+            assert!(admission.owner_attempt("recovery").unwrap().is_none());
+            assert!(admission.owner_attempt("desktop").unwrap().is_none());
+            assert!(
+                admission
+                    .owner_attempt("desktop-preparation")
+                    .unwrap()
+                    .as_ref()
+                    == Some(&before)
+            );
+            assert_eq!(credentials.0.lock().unwrap().len(), 1);
+            assert!(
+                journal
+                    .snapshot()
+                    .unwrap()
+                    .pairing_snapshot()
+                    .unwrap()
+                    .suppressed
+                    .is_empty()
+            );
+        }
+    }
     let mut result = if cli {
         enroll_cli_with_credentials(&native, credentials.clone(), pin).await
     } else {
         enroll_with_credentials(&native, journal.clone(), credentials.clone()).await
     };
+    if preparation_mode == 1 {
+        assert!(
+            result.is_err(),
+            "native insertion must fail before receiving enrollment authority"
+        );
+        assert!(credentials.0.lock().unwrap().is_empty());
+        let original = supervisor
+            .admit_client_provisioning()
+            .unwrap()
+            .owner_attempt("enrollment-preparation")
+            .unwrap()
+            .unwrap();
+        for _ in 0..3 {
+            assert!(
+                enroll_cli_with_credentials(&native, credentials.clone(), pin)
+                    .await
+                    .is_err(),
+                "absence cannot prove the original insertion will not finish"
+            );
+            let admission = supervisor.admit_client_provisioning().unwrap();
+            assert!(
+                admission
+                    .owner_attempt("enrollment-preparation")
+                    .unwrap()
+                    .as_ref()
+                    == Some(&original)
+            );
+            assert!(admission.owner_attempt("enrollment").unwrap().is_none());
+            assert!(credentials.0.lock().unwrap().is_empty());
+        }
+        use spaceterm_client_native::cli::{
+            arguments::{CliCommand, parse},
+            bindings::PairingCommandBindings,
+        };
+        let invocation = parse(
+            [
+                "pair",
+                "enroll",
+                "--server-fingerprint",
+                &spaceterm_client_native::cli::output::hex(&pin.public_key),
+            ]
+            .into_iter()
+            .map(std::ffi::OsString::from),
+        )
+        .unwrap();
+        let CliCommand::PairEnroll { fingerprint, .. } = invocation.command else {
+            panic!("enroll required")
+        };
+        let recovery = spaceterm_client_native::native::consumer::NativeConsumer::new(
+            native.management(),
+            spaceterm_client_native::native::consumer::NativeConsumerKind::Cli,
+        )
+        .with_credentials(Arc::new(credentials.clone()));
+        assert!(matches!(
+            recovery
+                .enroll(
+                    fingerprint,
+                    true,
+                    spaceterm_host::native_management::SudoMode::NonInteractive,
+                    &mut PairIo
+                )
+                .await,
+            Err(spaceterm_client::management_cli::ManagementFailure::OutcomePending)
+        ));
+        recovery.shutdown().await.unwrap();
+        assert!(
+            supervisor
+                .admit_client_provisioning()
+                .unwrap()
+                .owner_attempt("recovery")
+                .unwrap()
+                .is_none()
+        );
+        assert!(credentials.0.lock().unwrap().is_empty());
+        assert!(handle.snapshot().state() == before.state());
+        stop.send(()).unwrap();
+        assert!(running.await.unwrap().unwrap().cleanup_confirmed);
+        return;
+    }
+    if preparation_mode == 6 || preparation_mode == 7 {
+        use spaceterm_host::account_service::{ServiceFailure, test_support};
+        assert!(
+            result.is_ok(),
+            "initial enrollment must finish before publication interruption"
+        );
+        let count = credentials.0.lock().unwrap().len();
+        let admission = supervisor.admit_client_provisioning().unwrap();
+        let original = admission.owner_attempt("enrollment").unwrap().unwrap();
+        if preparation_mode == 7 {
+            test_support::fail_next_publication_durability();
+        } else {
+            test_support::fail_next_publication_before_effect();
+        }
+        assert_eq!(
+            admission.retain_owner_attempt("enrollment", Some(&original), &original),
+            Err(ServiceFailure::Indeterminate)
+        );
+        drop(admission);
+        assert_eq!(
+            supervisor.retained_account_recovery(),
+            Err(ServiceFailure::Indeterminate)
+        );
+        result = enroll_cli_with_credentials(&native, credentials.clone(), pin).await;
+        assert!(
+            result.is_ok(),
+            "deliberate enrollment must recover the exact original publication"
+        );
+        assert_eq!(credentials.0.lock().unwrap().len(), count);
+        assert_eq!(
+            supervisor
+                .admit_client_provisioning()
+                .unwrap()
+                .owner_attempt("enrollment")
+                .unwrap(),
+            Some(original)
+        );
+    }
+    if preparation_mode == 3 {
+        use spaceterm_client_native::native::runtime::{
+            NativeRuntimeIdentity, RuntimeClientIdentity,
+        };
+        let codec = Arc::new(CanonicalCodec);
+        let verifier = Arc::new(Verifier);
+        let storage = spaceterm_client_native::journal::NativeClientJournal::open_existing(
+            native
+                .management()
+                .supervisor()
+                .client_connections_directory()
+                .join("management"),
+            codec.clone(),
+            verifier.clone(),
+            JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        let management_journal = Arc::new(
+            JournalController::recover(
+                Arc::new(storage),
+                codec,
+                verifier,
+                JournalLimits::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        let identity =
+            NativeRuntimeIdentity::from_journal(management_journal, Arc::new(credentials.clone()))
+                .with_supervisor((*supervisor).clone());
+        assert!(
+            identity.access(&registration).await.is_ok(),
+            "original management binding must be usable"
+        );
+        // Stage a marker-only interruption while every old journal is still
+        // usable. The checkpoint uses only this fixture's owned public facts.
+        let admission = supervisor.admit_client_provisioning().unwrap();
+        let preparation: serde_json::Value = serde_json::from_slice(
+            &admission
+                .owner_attempt("enrollment-preparation")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let marker = serde_json::json!({
+            "schema": 1, "server": preparation["server"], "server_public_key": preparation["server_public_key"],
+            "previous_attempt": admission.owner_attempt("enrollment").unwrap(),
+            "bindings": [], "preparation": preparation, "complete": false,
+        });
+        let checkpoint = serde_json::to_vec(&marker).unwrap();
+        admission
+            .retain_owner_attempt("recovery", None, &checkpoint)
+            .unwrap();
+        drop(admission);
+        assert!(matches!(
+            identity.access(&registration).await,
+            Err(spaceterm_host::account_service::ServiceFailure::AuthorizationUnavailable)
+        ));
+        let foreground = spaceterm_client_native::native::consumer::NativeConsumer::new(
+            native.management(),
+            spaceterm_client_native::native::consumer::NativeConsumerKind::Cli,
+        )
+        .with_credentials(Arc::new(credentials.clone()));
+        assert!(matches!(
+            foreground.enroll_journal(journal.clone()).await,
+            Err(spaceterm_client::management_cli::ManagementFailure::OutcomePending)
+        ));
+        assert!(matches!(
+            foreground.provision_journal(journal.clone()).await,
+            Err(spaceterm_client::management_cli::ManagementFailure::OutcomePending)
+        ));
+        assert_eq!(credentials.0.lock().unwrap().len(), 2);
+        drop(identity);
+        assert!(handle.snapshot().state() == before.state());
+        stop.send(()).unwrap();
+        assert!(running.await.unwrap().unwrap().cleanup_confirmed);
+        return;
+    }
     let desktop_journal = journal.clone();
     let mut journal = if cli && interrupt_recovery > 0 {
         let codec = Arc::new(CanonicalCodec);
@@ -371,6 +1185,61 @@ async fn foreground_owner_pairing(cli: bool, interrupt_recovery: usize) {
                 ))
                 .count(),
         );
+        if preparation_mode == 4 {
+            use spaceterm_client_native::cli::{
+                arguments::{CliCommand, parse},
+                bindings::PairingCommandBindings,
+            };
+            let before = journal.snapshot().unwrap();
+            assert_eq!(before.bindings().len(), 1);
+            let native_consumer = spaceterm_client_native::native::consumer::NativeConsumer::new(
+                native.management(),
+                spaceterm_client_native::native::consumer::NativeConsumerKind::Cli,
+            )
+            .with_credentials(Arc::new(credentials.clone()));
+            let invocation = parse(
+                [
+                    "pair",
+                    "enroll",
+                    "--server-fingerprint",
+                    &spaceterm_client_native::cli::output::hex(&pin.public_key),
+                ]
+                .into_iter()
+                .map(std::ffi::OsString::from),
+            )
+            .unwrap();
+            let CliCommand::PairEnroll { fingerprint, .. } = invocation.command else {
+                panic!("enroll required")
+            };
+            assert!(matches!(
+                native_consumer
+                    .enroll(
+                        fingerprint,
+                        true,
+                        spaceterm_host::native_management::SudoMode::NonInteractive,
+                        &mut PairIo
+                    )
+                    .await,
+                Err(spaceterm_client::management_cli::ManagementFailure::OutcomePending)
+            ));
+            native_consumer.shutdown().await.unwrap();
+            let admission = supervisor.admit_client_provisioning().unwrap();
+            assert!(
+                admission.owner_attempt("recovery").unwrap().is_none(),
+                "unfinished receiver work must be refused before the recovery marker"
+            );
+            assert!(admission.provisioning_attempt("cli").unwrap().is_some());
+            drop(admission);
+            let after = journal.snapshot().unwrap();
+            assert_eq!(after.bindings().len(), 1);
+            assert!(after.pairing_snapshot().unwrap().suppressed.is_empty());
+            assert!(
+                journal
+                    .ordinary_use_allowed(&after.bindings()[0].binding().unwrap())
+                    .unwrap()
+            );
+            assert_eq!(credentials.0.lock().unwrap().len(), 2);
+        }
         if cli {
             // A process restart releases the original journal before retrying
             // through the shipped lazy consumer constructor.
@@ -491,6 +1360,48 @@ async fn foreground_owner_pairing(cli: bool, interrupt_recovery: usize) {
         );
     }
     assert_eq!(credentials.0.lock().unwrap().len(), 2);
+    if preparation_mode > 0 {
+        let inventory = if cli {
+            let codec = Arc::new(CanonicalCodec);
+            let verifier = Arc::new(Verifier);
+            let storage = spaceterm_client_native::journal::NativeClientJournal::open_existing(
+                native
+                    .management()
+                    .supervisor()
+                    .client_connections_directory()
+                    .join("enrollment"),
+                codec.clone(),
+                verifier.clone(),
+                JournalLimits::default(),
+            )
+            .await
+            .unwrap();
+            let journal = JournalController::recover(
+                Arc::new(storage),
+                codec,
+                verifier,
+                JournalLimits::default(),
+            )
+            .await
+            .unwrap();
+            journal.snapshot().unwrap().pairing_snapshot().unwrap()
+        } else {
+            desktop_journal
+                .snapshot()
+                .unwrap()
+                .pairing_snapshot()
+                .unwrap()
+        };
+        assert_eq!(
+            inventory.credential_preparations.len(),
+            1,
+            "only the original shared device preparation may remain"
+        );
+        assert!(
+            inventory.credential_preparations[0].credential.as_ref()
+                == Some(&credentials.0.lock().unwrap()[0].0)
+        );
+    }
     assert_eq!(handle.snapshot().state(), before.state());
     assert_eq!(
         fixture

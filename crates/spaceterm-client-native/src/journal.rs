@@ -931,6 +931,12 @@ mod tests {
         for legacy_pairing in [false, true] {
             let mut database = Database::open(&directory.0, &[Migration { sql: SCHEMA }]).unwrap();
             let mut document = serde_json::to_value(&state).unwrap();
+            // Feature-branch schema-1 journals predating receiver provenance
+            // retain their existing recovery and physical-history migration.
+            document
+                .as_object_mut()
+                .unwrap()
+                .remove("receiver_bindings");
             if legacy_pairing {
                 document.as_object_mut().unwrap().remove("pairing");
             }
@@ -1680,5 +1686,285 @@ mod tests {
                 .route_reference,
             Some(prepared.route_reference)
         );
+    }
+
+    fn receiver_reservation() -> (
+        Vec<spaceterm_client::journal::ClientJournalChange>,
+        spaceterm_client::journal::JournalOperation,
+        spaceterm_client::journal::JournalReceiverBinding,
+    ) {
+        use spaceterm_client::journal::*;
+        use spaceterm_core::authority::{FieldVersion, OrganizationRevision};
+        let saved = saved();
+        let binding = saved.binding().unwrap();
+        let stream = saved.streams().parts().ordinary;
+        let target = PairingTarget::new(PairingTargetParts {
+            server: stream.server(),
+            pairing: stream.pairing(),
+            device: binding.target().device(),
+        })
+        .unwrap();
+        let assessment = CanonicalOperationRequest::new(
+            OperationId::new(stream, OperationSequence::new(1).unwrap()),
+            Command::Pairing(PairingCommand::AssessUnpair {
+                target: target.clone(),
+            }),
+            &Codec,
+        )
+        .unwrap();
+        let result = Outcome::Pairing(Box::new(PairingOutcome::UnpairAssessed(
+            UnpairAssessment::new(UnpairAssessmentParts {
+                reference: AssessmentRef {
+                    operation: assessment.binding().id,
+                    digest: assessment.binding().digest,
+                },
+                target: target.clone(),
+                authorization_version: FieldVersion::new(1),
+                clients: vec![saved.streams().parts().client],
+            })
+            .unwrap(),
+        )));
+        let initial = vec![
+            ClientJournalChange::SaveBinding(Box::new(saved)),
+            ClientJournalChange::Prepare(JournalOperation {
+                binding: assessment.binding(),
+                request: assessment.encode(&Codec).unwrap(),
+                workspace: None,
+                reserves_grant: false,
+                cleanup: false,
+                state: RetainedOperationState::Pending,
+            }),
+            ClientJournalChange::Complete {
+                binding: assessment.binding(),
+                outcome: CompactOutcome::new(&result, &Codec).unwrap(),
+                publication_revision: OrganizationRevision::new(1),
+            },
+        ];
+        let operation = OperationId::new(stream, OperationSequence::new(2).unwrap());
+        let (claim_digest, _) = spaceterm_protocol::pairing_adapter::client_binding_claim(
+            &target,
+            FieldVersion::new(1),
+            operation,
+        )
+        .unwrap();
+        let request = CanonicalOperationRequest::new(
+            operation,
+            Command::Pairing(PairingCommand::BindAdditionalClient {
+                target: target.clone(),
+                expected_authorization_version: FieldVersion::new(1),
+                claim_digest,
+            }),
+            &Codec,
+        )
+        .unwrap();
+        let receiver = JournalReceiverBinding {
+            receiver: ProvisioningReceiver::Companion,
+            operation: request.binding(),
+            server_public_key: binding.target().pin().public_key,
+            target,
+            assessment: assessment.binding().id,
+            version: FieldVersion::new(1),
+        };
+        let record = JournalOperation {
+            binding: request.binding(),
+            request: request.encode(&Codec).unwrap(),
+            workspace: None,
+            reserves_grant: false,
+            cleanup: false,
+            state: RetainedOperationState::Pending,
+        };
+        (initial, record, receiver)
+    }
+
+    #[tokio::test]
+    async fn native_receiver_binding_provenance_survives_assessment_pruning_and_is_pruned_with_its_request()
+     {
+        use spaceterm_client::journal::*;
+        use spaceterm_core::authority::OrganizationRevision;
+        let directory = Directory::new();
+        let native = NativeClientJournal::create(
+            directory.0.clone(),
+            Arc::new(Codec),
+            Arc::new(Verifier),
+            JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        let (initial, operation, receiver) = receiver_reservation();
+        let journal = JournalController::recover(
+            Arc::new(native),
+            Arc::new(Codec),
+            Arc::new(Verifier),
+            JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        journal.transact(initial).await.unwrap();
+        journal
+            .transact(vec![ClientJournalChange::PrepareReceiverBinding {
+                operation: operation.clone(),
+                receiver: Box::new(receiver.clone()),
+            }])
+            .await
+            .unwrap();
+        journal
+            .transact(vec![
+                ClientJournalChange::ConsumeResult(receiver.assessment),
+                ClientJournalChange::ConfirmAcknowledgement {
+                    stream: receiver.assessment.stream(),
+                    through: 1,
+                },
+            ])
+            .await
+            .unwrap();
+        assert!(
+            journal
+                .snapshot()
+                .unwrap()
+                .operation(receiver.assessment)
+                .is_none()
+        );
+        drop(journal);
+        let native = NativeClientJournal::open_existing(
+            directory.0.clone(),
+            Arc::new(Codec),
+            Arc::new(Verifier),
+            JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        let state = native.recover().await.unwrap();
+        assert_eq!(state.receiver_bindings(), std::slice::from_ref(&receiver));
+        assert_eq!(
+            state.operation(receiver.operation.id).unwrap().binding,
+            operation.binding
+        );
+        let journal = JournalController::recover(
+            Arc::new(native),
+            Arc::new(Codec),
+            Arc::new(Verifier),
+            JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        journal
+            .transact(vec![
+                ClientJournalChange::Complete {
+                    binding: operation.binding,
+                    outcome: CompactOutcome::new(
+                        &Outcome::Pairing(Box::new(PairingOutcome::Failed(
+                            PairingFailure::StaleAssessment,
+                        ))),
+                        &Codec,
+                    )
+                    .unwrap(),
+                    publication_revision: OrganizationRevision::new(2),
+                },
+                ClientJournalChange::ConsumeResult(receiver.operation.id),
+            ])
+            .await
+            .unwrap();
+        journal
+            .transact(vec![ClientJournalChange::ConfirmAcknowledgement {
+                stream: receiver.operation.id.stream(),
+                through: 2,
+            }])
+            .await
+            .unwrap();
+        drop(journal);
+        let native = NativeClientJournal::open_existing(
+            directory.0.clone(),
+            Arc::new(Codec),
+            Arc::new(Verifier),
+            JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        let state = native.recover().await.unwrap();
+        assert!(state.operations().is_empty());
+        assert!(state.receiver_bindings().is_empty());
+    }
+
+    #[test]
+    fn receiver_provenance_cannot_claim_a_preexisting_identical_user_request_or_another_origin() {
+        use spaceterm_client::journal::*;
+        use spaceterm_core::authority::FieldVersion;
+        let (initial, operation, receiver) = receiver_reservation();
+        let state = RecoveredClientState::empty()
+            .apply(
+                &ClientJournalTransaction {
+                    expected_revision: ClientJournalRevision::new(0),
+                    changes: initial,
+                },
+                &Codec,
+                &Verifier,
+                JournalLimits::default(),
+            )
+            .unwrap();
+        let apply = |state: &RecoveredClientState,
+                     operation: JournalOperation,
+                     receiver: JournalReceiverBinding| {
+            state.apply(
+                &ClientJournalTransaction {
+                    expected_revision: state.revision(),
+                    changes: vec![ClientJournalChange::PrepareReceiverBinding {
+                        operation,
+                        receiver: Box::new(receiver),
+                    }],
+                },
+                &Codec,
+                &Verifier,
+                JournalLimits::default(),
+            )
+        };
+        for mutation in 0..5 {
+            let mut changed = receiver.clone();
+            match mutation {
+                0 => changed.operation.digest = RequestDigest::from_bytes([99; 32]),
+                1 => changed.server_public_key = [99; 32],
+                2 => {
+                    changed.target = PairingTarget::new(PairingTargetParts {
+                        device: spaceterm_core::identity::DeviceId::new([99; 16]),
+                        ..changed.target.parts().clone()
+                    })
+                    .unwrap()
+                }
+                3 => changed.assessment = changed.operation.id,
+                4 => changed.version = FieldVersion::new(2),
+                _ => unreachable!(),
+            }
+            assert!(apply(&state, operation.clone(), changed).is_err());
+        }
+        let user = state
+            .apply(
+                &ClientJournalTransaction {
+                    expected_revision: state.revision(),
+                    changes: vec![ClientJournalChange::Prepare(operation.clone())],
+                },
+                &Codec,
+                &Verifier,
+                JournalLimits::default(),
+            )
+            .unwrap();
+        assert!(user.receiver_bindings().is_empty());
+        assert!(apply(&user, operation.clone(), receiver.clone()).is_err());
+        // Even a fresh Prepare cannot attach ownership to a different old ID.
+        let request = CanonicalOperationRequest::new(
+            OperationId::new(
+                operation.binding.id.stream(),
+                OperationSequence::new(3).unwrap(),
+            ),
+            Command::Pairing(PairingCommand::AssessUnpair {
+                target: receiver.target.clone(),
+            }),
+            &Codec,
+        )
+        .unwrap();
+        let fresh = JournalOperation {
+            binding: request.binding(),
+            request: request.encode(&Codec).unwrap(),
+            ..operation
+        };
+        assert!(apply(&user, fresh, receiver).is_err());
     }
 }

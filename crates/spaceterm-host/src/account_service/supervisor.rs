@@ -258,11 +258,29 @@ impl ServiceSupervisor {
     pub fn client_connections_directory(&self) -> PathBuf {
         self.anchor.join("client-connections")
     }
+    /// Read-only recovery intent for ordinary native admission. Missing storage
+    /// is not created and no credential or organization store is consulted.
+    pub fn retained_account_recovery(&self) -> Result<Option<Vec<u8>>, ServiceFailure> {
+        self.available()?;
+        let Some(directory) = Directory::open(&self.client_connections_directory())? else {
+            return Ok(None);
+        };
+        Ok(directory
+            .read("owner-account-recovery", 64 * 1024)?
+            .map(|snapshot| snapshot.bytes.to_vec()))
+    }
     /// Deliberate enrollment owns the private client storage lease. This never
     /// reads or opens the server's organization database.
     pub fn admit_client_provisioning(&self) -> Result<ClientProvisioning, ServiceFailure> {
         let path = self.client_connections_directory();
-        let directory = Directory::create(&path)?;
+        let directory = match Directory::create(&path) {
+            Ok(directory) => directory,
+            Err(crate::private_filesystem::Failure::Indeterminate) => {
+                ClientProvisioning::recover_metadata_publication(&path)?;
+                Directory::create(&path)?
+            }
+            Err(error) => return Err(error.into()),
+        };
         let lease = directory.lease("provisioning-lock")?;
         Ok(ClientProvisioning {
             path,
@@ -2284,6 +2302,42 @@ pub struct ClientProvisioning {
     lease: crate::private_filesystem::Lease,
 }
 impl ClientProvisioning {
+    fn recover_metadata_publication(path: &std::path::Path) -> Result<(), ServiceFailure> {
+        use crate::private_filesystem::Failure;
+        // Only deliberate provisioning may replay these fixed metadata names.
+        // The shared filesystem owner checks the original phase, name, proposed
+        // content digest and expected inode before republishing those exact bytes.
+        // It serializes recovery on the original mutation descriptor. Lifecycle
+        // work still requires the ordinary provisioning lease after recovery.
+        let names = [
+            Self::owner_attempt_name("enrollment")?,
+            Self::owner_attempt_name("desktop")?,
+            Self::owner_attempt_name("recovery")?,
+            Self::owner_attempt_name("enrollment-preparation")?,
+            Self::owner_attempt_name("desktop-preparation")?,
+            Self::owner_attempt_name("public-claims")?,
+            Self::provisioning_attempt_name("cli")?,
+            Self::provisioning_attempt_name("companion")?,
+            Self::provisioning_attempt_name("management")?,
+        ];
+        for name in names {
+            match Directory::reconcile_publication(path, name, 64 * 1024, |bytes| {
+                // Domain decoding remains with each metadata owner and runs
+                // before issuing work. Recovery cannot choose replacement bytes.
+                if bytes.is_empty()
+                    || serde_json::from_slice::<serde::de::IgnoredAny>(bytes).is_err()
+                {
+                    return Err(Failure::Unsafe);
+                }
+                Ok(())
+            }) {
+                Ok(()) => return Ok(()),
+                Err(Failure::Indeterminate) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(ServiceFailure::Indeterminate)
+    }
     /// Reads bounded public owner-attempt metadata under deliberate account/build
     /// provisioning authority. No credential bytes belong in this record.
     pub fn owner_attempt(&self, consumer: &str) -> Result<Option<Vec<u8>>, ServiceFailure> {
@@ -2319,6 +2373,49 @@ impl ClientProvisioning {
         match consumer {
             "enrollment" => Ok("owner-enrollment-attempt"),
             "desktop" => Ok("desktop-owner-enrollment-attempt"),
+            "recovery" => Ok("owner-account-recovery"),
+            "enrollment-preparation" => Ok("owner-enrollment-preparation"),
+            "desktop-preparation" => Ok("desktop-owner-enrollment-preparation"),
+            "public-claims" => Ok("owner-public-claim-bindings"),
+            _ => Err(ServiceFailure::InvalidRecord),
+        }
+    }
+    /// Reads the original operation and phase for one dedicated Client receiver.
+    /// This bounded public metadata never contains credentials or caller paths.
+    pub fn provisioning_attempt(&self, consumer: &str) -> Result<Option<Vec<u8>>, ServiceFailure> {
+        let name = Self::provisioning_attempt_name(consumer)?;
+        self.lease.verify()?;
+        Ok(self
+            .directory
+            .read(name, 64 * 1024)?
+            .map(|snapshot| snapshot.bytes.to_vec()))
+    }
+    /// Retains receiver ownership before dispatch and compares every phase change
+    /// with the preceding record under the deliberate provisioning lease.
+    pub fn retain_provisioning_attempt(
+        &self,
+        consumer: &str,
+        expected: Option<&[u8]>,
+        bytes: &[u8],
+    ) -> Result<(), ServiceFailure> {
+        let name = Self::provisioning_attempt_name(consumer)?;
+        if bytes.is_empty() || bytes.len() > 64 * 1024 {
+            return Err(ServiceFailure::LimitExceeded);
+        }
+        self.lease.verify()?;
+        let snapshot = self.directory.read(name, 64 * 1024)?;
+        if snapshot.as_ref().map(|value| value.bytes.as_slice()) != expected {
+            return Err(ServiceFailure::RequestConflict);
+        }
+        self.directory
+            .publish(name, bytes, snapshot.as_ref())
+            .map_err(Into::into)
+    }
+    fn provisioning_attempt_name(consumer: &str) -> Result<&'static str, ServiceFailure> {
+        match consumer {
+            "cli" => Ok("cli-provisioning-attempt"),
+            "companion" => Ok("companion-provisioning-attempt"),
+            "management" => Ok("management-provisioning-attempt"),
             _ => Err(ServiceFailure::InvalidRecord),
         }
     }

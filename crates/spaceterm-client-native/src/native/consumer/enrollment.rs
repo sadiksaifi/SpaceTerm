@@ -34,6 +34,9 @@ use spaceterm_protocol::pairing_adapter::{
 use std::time::Duration;
 use zeroize::Zeroizing;
 
+mod preparation;
+pub(super) mod recovery;
+
 const OWNER_LIMIT: usize = 64 * 1024;
 #[derive(Serialize)]
 struct OwnerRequest {
@@ -90,11 +93,9 @@ impl NativeConsumer {
         if !registration.is_installed() {
             return Err(ManagementFailure::NativeUnavailable);
         }
-        if recover_account {
-            // Recovery must roll over retained attempts and suppress old bindings
-            // together. Normal enrollment cannot safely substitute for that flow.
-            return Err(ManagementFailure::AuthorizationUnavailable);
-        }
+        // Deliberate admission recovers the exact original metadata publication
+        // before checking recovery intent under its lease. Ordinary startup keeps
+        // its read-only guard and cannot repair a shared-directory fence.
         // An active dedicated CLI can issue additional Clients with its own
         // authority. It never borrows a desktop Client or enrolls another device.
         let admission = self
@@ -102,6 +103,10 @@ impl NativeConsumer {
             .supervisor
             .admit_client_provisioning()
             .map_err(classify_service)?;
+        if recover_account {
+            return self.recover_account(&registration, &admission).await;
+        }
+        self.require_account_recovery_complete()?;
         if registration.desired_state() == DesiredServerState::Running
             && admission
                 .owner_attempt("enrollment")
@@ -195,6 +200,7 @@ impl NativeConsumer {
             .supervisor
             .admit_client_provisioning()
             .map_err(classify_service)?;
+        self.require_account_recovery_complete()?;
         let route = LocalRouteAuthority::new(registration.endpoint().map_err(classify_service)?)
             .map_err(classify_client)?;
         let description = route.description().clone();
@@ -301,6 +307,7 @@ impl NativeConsumer {
             .supervisor
             .admit_client_provisioning()
             .map_err(classify_service)?;
+        self.require_account_recovery_complete()?;
         let route = LocalRouteAuthority::new(registration.endpoint().map_err(classify_service)?)
             .map_err(classify_client)?;
         let owner = PairingOwner {
@@ -360,17 +367,145 @@ impl NativeConsumer {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProvisioningAttempt {
+    server_public_key: [u8; 32],
+    target: spaceterm_core::pairing::PairingTarget,
+    origin: spaceterm_core::identity::OperationStreamId,
+    phase: ProvisioningPhase,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+enum ProvisioningPhase {
+    Assessment {
+        operation: OperationId,
+    },
+    Binding {
+        assessment: OperationId,
+        operation: OperationId,
+        version: spaceterm_core::authority::FieldVersion,
+    },
+    Saved {
+        operation: OperationId,
+    },
+    Failure {
+        operation: OperationId,
+        failure: PairingFailure,
+    },
+    RetryReady {
+        operation: OperationId,
+    },
+    Complete {
+        operation: OperationId,
+    },
+}
+impl ProvisioningPhase {
+    fn operation(self) -> OperationId {
+        match self {
+            Self::Assessment { operation }
+            | Self::Binding { operation, .. }
+            | Self::Saved { operation }
+            | Self::Failure { operation, .. }
+            | Self::RetryReady { operation }
+            | Self::Complete { operation } => operation,
+        }
+    }
+    fn incomplete(self) -> bool {
+        !matches!(self, Self::RetryReady { .. } | Self::Complete { .. })
+    }
+}
+
+struct RetainedProvisioning {
+    attempt: ProvisioningAttempt,
+    bytes: Vec<u8>,
+}
+impl RetainedProvisioning {
+    fn read(admission: &ClientProvisioning, name: &str) -> Result<Option<Self>, ManagementFailure> {
+        let Some(bytes) = admission
+            .provisioning_attempt(name)
+            .map_err(classify_service)?
+        else {
+            return Ok(None);
+        };
+        let attempt: ProvisioningAttempt =
+            serde_json::from_slice(&bytes).map_err(|_| ManagementFailure::UnsafeNativeState)?;
+        if attempt.origin.server() != attempt.target.parts().server
+            || attempt.origin.pairing() != attempt.target.parts().pairing
+            || attempt.phase.operation().stream() != attempt.origin
+            || matches!(attempt.phase, ProvisioningPhase::Binding { assessment, operation, .. }
+                if assessment.stream() != attempt.origin || assessment.sequence() >= operation.sequence())
+        {
+            return Err(ManagementFailure::UnsafeNativeState);
+        }
+        Ok(Some(Self { attempt, bytes }))
+    }
+
+    fn publish(
+        admission: &ClientProvisioning,
+        name: &str,
+        expected: Option<&[u8]>,
+        attempt: ProvisioningAttempt,
+    ) -> Result<Self, ManagementFailure> {
+        let bytes =
+            serde_json::to_vec(&attempt).map_err(|_| ManagementFailure::UnsafeNativeState)?;
+        admission
+            .retain_provisioning_attempt(name, expected, &bytes)
+            .map_err(classify_service)?;
+        Ok(Self { attempt, bytes })
+    }
+
+    fn advance(
+        &mut self,
+        admission: &ClientProvisioning,
+        name: &str,
+        phase: ProvisioningPhase,
+    ) -> Result<(), ManagementFailure> {
+        let mut attempt = self.attempt.clone();
+        attempt.phase = phase;
+        *self = Self::publish(admission, name, Some(&self.bytes), attempt)?;
+        Ok(())
+    }
+
+    fn matches_origin(
+        &self,
+        original: &spaceterm_client::pairing::journal::SavedPairing,
+        target: &spaceterm_core::pairing::PairingTarget,
+    ) -> bool {
+        self.attempt.server_public_key == original.pin().public_key
+            && &self.attempt.target == target
+            && self.attempt.origin == original.client().parts().ordinary
+    }
+}
+
 async fn provisioned_clients(
     admission: &ClientProvisioning,
     owner: &PairingOwner,
     original: &spaceterm_client::pairing::journal::SavedPairing,
     cli_origin: bool,
 ) -> Result<Option<spaceterm_core::identity::ClientId>, ManagementFailure> {
-    let original_keys = match &original.receipt().parts().claims {
-        PairingReceiptBody::Enrollment { keys, .. }
-        | PairingReceiptBody::ClientBinding { keys, .. } => keys,
+    let (original_target, original_keys) = match &original.receipt().parts().claims {
+        PairingReceiptBody::Enrollment { target, keys, .. }
+        | PairingReceiptBody::ClientBinding { target, keys, .. } => (target, keys),
         _ => return Err(ManagementFailure::AuthorizationDenied),
     };
+    // Check all receivers before opening any originating connection or issuing
+    // work. A usable CLI does not own interrupted desktop provisioning.
+    let mut incomplete = false;
+    for name in ["cli", "companion", "management"] {
+        if let Some(retained) = RetainedProvisioning::read(admission, name)?
+            && retained.attempt.phase.incomplete()
+        {
+            if !retained.matches_origin(original, original_target) {
+                return Err(ManagementFailure::OutcomePending);
+            }
+            incomplete = true;
+        }
+    }
+    if incomplete {
+        return Ok(None);
+    }
     let mut cli = None;
     let mut clients = std::collections::BTreeSet::new();
     for name in ["cli", "companion", "management"] {
@@ -391,8 +526,7 @@ async fn provisioned_clients(
         };
         let binding = saved.binding().map_err(classify_client)?;
         if binding.target().pin() != original.pin()
-            || target.parts().pairing != original.key().parts().pairing
-            || target.parts().device != original.device()
+            || target != original_target
             || keys != original_keys
             || !clients.insert(binding.target().client())
         {
@@ -438,8 +572,13 @@ async fn provision(
         .ok_or(ManagementFailure::AuthorizationDenied)?;
     let mut cli = None;
     for name in ["cli", "companion", "management"] {
-        let recovered_version =
-            recover_provisioning_assessments(owner, operations, original, target).await?;
+        let mut retained = RetainedProvisioning::read(admission, name)?;
+        if let Some(attempt) = &retained
+            && attempt.attempt.phase.incomplete()
+            && !attempt.matches_origin(original, target)
+        {
+            return Err(ManagementFailure::OutcomePending);
+        }
         let journal = if name == "cli" && cli_origin {
             owner.pairing.journal().clone()
         } else {
@@ -459,57 +598,151 @@ async fn provision(
             .map_err(classify_pairing)?;
         let saved = if let [saved] = inventory.saved.as_slice() {
             if saved.pin() != original.pin()
-                || saved.key().parts().pairing != original.key().parts().pairing
+                || !matches!(&saved.receipt().parts().claims,
+                    PairingReceiptBody::ClientBinding { target: candidate, keys: candidate_keys, .. }
+                        if candidate == target && candidate_keys == keys)
             {
                 return Err(ManagementFailure::AuthorizationDenied);
             }
             saved.clone()
         } else if inventory.saved.is_empty() {
-            if !inventory.revocations.is_empty() {
+            if inventory.revocations.iter().any(|work| {
+                work.task.parts().local_pairing.parts().pairing == original.key().parts().pairing
+                    && work.task.parts().local_pairing.parts().server
+                        == original.key().parts().server
+            }) {
                 return Err(ManagementFailure::Revoked);
             }
-            // Only one receiver is provisioned at a time. Earlier saved
-            // receivers consume their originating results before this search.
-            // A retained result is the recovery authority before local save.
+            if retained
+                .as_ref()
+                .is_none_or(|value| !value.attempt.phase.incomplete())
+            {
+                // An older binding without receiver metadata cannot be assigned
+                // to a receiver by scanning whichever stream is now available.
+                refuse_unowned_binding(owner.pairing.journal(), original, target)?;
+                let operation = reserve_provisioning_operation(
+                    owner.pairing.journal(),
+                    &original_binding,
+                    target,
+                    None,
+                    operations,
+                )
+                .await?;
+                retained = Some(RetainedProvisioning::publish(
+                    admission,
+                    name,
+                    retained.as_ref().map(|value| value.bytes.as_slice()),
+                    ProvisioningAttempt {
+                        server_public_key: original.pin().public_key,
+                        target: target.clone(),
+                        origin: original.client().parts().ordinary,
+                        phase: ProvisioningPhase::Assessment { operation },
+                    },
+                )?);
+            }
+            let attempt = retained
+                .as_mut()
+                .ok_or(ManagementFailure::UnsafeNativeState)?;
+            if let ProvisioningPhase::Failure { .. } = attempt.attempt.phase {
+                return Err(settle_provisioning_failure(
+                    admission,
+                    name,
+                    attempt,
+                    owner.pairing.journal(),
+                    operations,
+                )
+                .await?);
+            }
+            if let ProvisioningPhase::Assessment { operation } = attempt.attempt.phase {
+                let outcome =
+                    recover_provisioning_assessments(owner, operations, operation, target).await?;
+                if let Outcome::Pairing(value) = &outcome
+                    && let PairingOutcome::Failed(failure) = value.as_ref()
+                {
+                    attempt.advance(
+                        admission,
+                        name,
+                        ProvisioningPhase::Failure {
+                            operation,
+                            failure: *failure,
+                        },
+                    )?;
+                    return Err(settle_provisioning_failure(
+                        admission,
+                        name,
+                        attempt,
+                        owner.pairing.journal(),
+                        operations,
+                    )
+                    .await?);
+                }
+                let version = assessment_version(outcome, target)?;
+                let receiver = provisioning_receiver(name)?;
+                let binding = match recover_receiver_binding(
+                    owner.pairing.journal(),
+                    original,
+                    target,
+                    receiver,
+                    operation,
+                    version,
+                )? {
+                    Some(binding) => binding,
+                    None => {
+                        refuse_unowned_binding(owner.pairing.journal(), original, target)?;
+                        reserve_provisioning_operation(
+                            owner.pairing.journal(),
+                            &original_binding,
+                            target,
+                            Some((receiver, operation, version)),
+                            operations,
+                        )
+                        .await?
+                    }
+                };
+                // Retain the successful assessment and durably reserved binding
+                // before consumption can permit pruning the assessment result.
+                attempt.advance(
+                    admission,
+                    name,
+                    ProvisioningPhase::Binding {
+                        assessment: operation,
+                        operation: binding,
+                        version,
+                    },
+                )?;
+            }
+            let ProvisioningPhase::Binding {
+                assessment,
+                operation,
+                version,
+            } = attempt.attempt.phase
+            else {
+                return Err(ManagementFailure::OutcomePending);
+            };
+            consume_result(owner.pairing.journal(), assessment).await?;
+            let proof = owner
+                .pairing
+                .prepare_additional_client(
+                    original.key(),
+                    original.client().parts().client.id,
+                    version,
+                    operation,
+                )
+                .await
+                .map_err(classify_pairing)?;
             let state = owner
                 .pairing
                 .journal()
                 .snapshot()
                 .map_err(classify_client)?;
-            let mut retained = Vec::new();
-            for record in state.operations() {
-                if record.binding.id.stream() != original.client().parts().ordinary
-                    || matches!(
-                        record.state,
-                        spaceterm_client::journal::RetainedOperationState::Completed {
-                            consumed: true,
-                            ..
-                        } | spaceterm_client::journal::RetainedOperationState::Retired
-                    )
-                {
-                    continue;
-                }
-                let request =
-                    spaceterm_core::operation_ledger_contracts::CanonicalOperationRequest::decode(
-                        &record.request,
-                        &CanonicalCodec,
-                    )
-                    .map_err(|_| ManagementFailure::UnsafeNativeState)?;
-                if let Command::Pairing(PairingCommand::BindAdditionalClient {
-                    target: candidate,
-                    expected_authorization_version,
-                    ..
-                }) = request.command()
-                {
-                    if candidate != target {
+            let outcome = match state.operation(operation) {
+                Some(record) => {
+                    let request = spaceterm_core::operation_ledger_contracts::CanonicalOperationRequest::decode(&record.request, &CanonicalCodec)
+                        .map_err(|_| ManagementFailure::UnsafeNativeState)?;
+                    if request.command() != &Command::Pairing(proof.command().clone()) {
                         return Err(ManagementFailure::AuthorizationDenied);
                     }
-                    retained.push((record.clone(), *expected_authorization_version));
-                }
-            }
-            let receipt = match retained.as_slice() {
-                [(record, version)] => {
-                    let outcome = match &record.state {
+                    match &record.state {
                         spaceterm_client::journal::RetainedOperationState::Completed {
                             outcome,
                             ..
@@ -517,16 +750,6 @@ async fn provision(
                             .outcome(&CanonicalCodec)
                             .map_err(|_| ManagementFailure::UnsafeNativeState)?,
                         spaceterm_client::journal::RetainedOperationState::Pending => {
-                            let proof = owner
-                                .pairing
-                                .prepare_additional_client(
-                                    original.key(),
-                                    original.client().parts().client.id,
-                                    *version,
-                                    record.binding.id,
-                                )
-                                .await
-                                .map_err(classify_pairing)?;
                             let ticket = operations
                                 .resolve_additional_client(proof)
                                 .await
@@ -534,51 +757,31 @@ async fn provision(
                             operations.wait(&ticket).await.map_err(classify_client)?
                         }
                         _ => return Err(ManagementFailure::UnsafeNativeState),
-                    };
-                    additional_receipt(outcome)?
+                    }
                 }
-                [] => {
-                    let version = match recovered_version {
-                        Some(version) => version,
-                        None => {
-                            let assessment_ticket = operations
-                                .submit_command(Command::Pairing(PairingCommand::AssessUnpair {
-                                    target: target.clone(),
-                                }))
-                                .await
-                                .map_err(classify_client)?;
-                            let version = assessment_version(
-                                operations
-                                    .wait(&assessment_ticket)
-                                    .await
-                                    .map_err(classify_client)?,
-                                target,
-                            )?;
-                            consume_result(owner.pairing.journal(), assessment_ticket.id()).await?;
-                            version
-                        }
-                    };
-
-                    let proof = owner
-                        .pairing
-                        .prepare_additional_client(
-                            original.key(),
-                            original.client().parts().client.id,
-                            version,
-                            operations.next_operation().map_err(classify_client)?,
-                        )
-                        .await
-                        .map_err(classify_pairing)?;
-
-                    let ticket = operations
-                        .submit_additional_client(proof)
-                        .await
-                        .map_err(classify_client)?;
-                    additional_receipt(operations.wait(&ticket).await.map_err(classify_client)?)?
-                }
-                _ => return Err(ManagementFailure::UnsafeNativeState),
+                None => return Err(ManagementFailure::OutcomePending),
             };
-
+            if let Outcome::Pairing(value) = &outcome
+                && let PairingOutcome::Failed(failure) = value.as_ref()
+            {
+                attempt.advance(
+                    admission,
+                    name,
+                    ProvisioningPhase::Failure {
+                        operation,
+                        failure: *failure,
+                    },
+                )?;
+                return Err(settle_provisioning_failure(
+                    admission,
+                    name,
+                    attempt,
+                    owner.pairing.journal(),
+                    operations,
+                )
+                .await?);
+            }
+            let receipt = additional_receipt(outcome)?;
             let PairingReceiptBody::ClientBinding {
                 client, operation, ..
             } = &receipt.parts().claims
@@ -609,7 +812,6 @@ async fn provision(
                 )
                 .await
                 .map_err(classify_pairing)?;
-
             let prepared = PreparedEnrollment {
                 local_pairing: LocalPairingKey::new(LocalPairingKeyParts {
                     server: target.parts().server,
@@ -644,6 +846,15 @@ async fn provision(
         else {
             return Err(ManagementFailure::AuthorizationDenied);
         };
+        if let Some(attempt) = &retained
+            && attempt.attempt.phase.incomplete()
+            && (!matches!(
+                attempt.attempt.phase,
+                ProvisioningPhase::Binding { .. } | ProvisioningPhase::Saved { .. }
+            ) || attempt.attempt.phase.operation() != operation.id)
+        {
+            return Err(ManagementFailure::UnsafeNativeState);
+        }
         let saved_binding = saved_binding(&receiving.pairing, &saved)?;
         if receiving
             .pairing
@@ -654,6 +865,17 @@ async fn provision(
             // Already usable Clients need no access to another origin's stream.
             if operation.id.stream() == original.client().parts().ordinary {
                 consume_result(owner.pairing.journal(), operation.id).await?;
+                if let Some(attempt) = &mut retained
+                    && attempt.attempt.phase.incomplete()
+                {
+                    attempt.advance(
+                        admission,
+                        name,
+                        ProvisioningPhase::Complete {
+                            operation: operation.id,
+                        },
+                    )?;
+                }
             }
             if name == "cli" {
                 cli = Some(saved.client().parts().client.id);
@@ -663,8 +885,31 @@ async fn provision(
         if operation.id.stream() != original.client().parts().ordinary {
             return Err(ManagementFailure::OutcomePending);
         }
-        // A receipt retained before an interrupted acknowledgement keeps the
-        // original stream. Replay settlement, never the binding operation.
+        // The saved receipt remains recovery authority for an older journal that
+        // predates receiver metadata. Retain its exact origin before settlement.
+        if let Some(attempt) = &mut retained {
+            attempt.advance(
+                admission,
+                name,
+                ProvisioningPhase::Saved {
+                    operation: operation.id,
+                },
+            )?;
+        } else {
+            retained = Some(RetainedProvisioning::publish(
+                admission,
+                name,
+                None,
+                ProvisioningAttempt {
+                    server_public_key: original.pin().public_key,
+                    target: target.clone(),
+                    origin: original.client().parts().ordinary,
+                    phase: ProvisioningPhase::Saved {
+                        operation: operation.id,
+                    },
+                },
+            )?);
+        }
         consume_result(owner.pairing.journal(), operation.id).await?;
         operations
             .tracker
@@ -672,7 +917,6 @@ async fn provision(
             .await
             .map_err(classify_client)?;
         wait_acknowledgement(owner.pairing.journal(), &saved).await?;
-
         receiving
             .pairing
             .confirm_additional_client_acknowledgement(
@@ -687,6 +931,16 @@ async fn provision(
             .restore(saved.key(), saved.client().parts().client.id)
             .await
             .map_err(classify_pairing)?;
+        retained
+            .as_mut()
+            .ok_or(ManagementFailure::UnsafeNativeState)?
+            .advance(
+                admission,
+                name,
+                ProvisioningPhase::Complete {
+                    operation: operation.id,
+                },
+            )?;
         if name == "cli" {
             cli = Some(saved.client().parts().client.id);
         }
@@ -694,18 +948,178 @@ async fn provision(
     cli.ok_or(ManagementFailure::PairingRequired)
 }
 
-async fn recover_provisioning_assessments(
-    owner: &PairingOwner,
+async fn reserve_provisioning_operation(
+    journal: &Arc<JournalController>,
+    binding: &PairedServerBinding,
+    target: &spaceterm_core::pairing::PairingTarget,
+    receiver_binding: Option<(
+        spaceterm_client::journal::ProvisioningReceiver,
+        OperationId,
+        spaceterm_core::authority::FieldVersion,
+    )>,
     operations: &super::super::tracked::ManagementOperations,
+) -> Result<OperationId, ManagementFailure> {
+    let state = journal.snapshot().map_err(classify_client)?;
+    let stream = state
+        .bindings()
+        .iter()
+        .find(|saved| saved.binding().as_ref() == Ok(binding))
+        .ok_or(ManagementFailure::AuthorizationDenied)?
+        .streams()
+        .parts()
+        .ordinary;
+    let predecessors = state
+        .operations()
+        .iter()
+        .filter(|record| {
+            record.binding.id.stream() == stream
+                && matches!(
+                    record.state,
+                    spaceterm_client::journal::RetainedOperationState::Pending
+                )
+        })
+        .map(|record| record.binding.id)
+        .collect::<Vec<_>>();
+    // Portable reconciliation settles earlier retained intents without UI
+    // consumption. This includes a prepare committed before receiver metadata.
+    operations
+        .tracker
+        .reconcile(binding, operations)
+        .await
+        .map_err(classify_client)?;
+    for predecessor in predecessors {
+        let ticket = operations
+            .tracker
+            .ticket(predecessor)
+            .map_err(classify_client)?;
+        operations.wait(&ticket).await.map_err(classify_client)?;
+    }
+    let controller = journal.clone();
+    let binding = binding.clone();
+    let target = target.clone();
+    // The journal serial owner commits the actual ID before receiver metadata
+    // can claim it. A crash before this commit cannot claim a later user command.
+    journal
+        .update(move |state| {
+            let invalid = || ClientFailure::new(ClientFailureClass::InvalidStorage);
+            if !controller.ordinary_use_allowed(&binding)? || !state.ordinary_use_allowed(&binding)
+            {
+                return Err(ClientFailure::new(ClientFailureClass::AuthorizationDenied));
+            }
+            let stream = state
+                .bindings()
+                .iter()
+                .find(|saved| saved.binding().as_ref() == Ok(&binding))
+                .ok_or_else(invalid)?
+                .streams()
+                .parts()
+                .ordinary;
+            let header = state.stream(stream).ok_or_else(invalid)?;
+            if header.retired {
+                return Err(ClientFailure::new(ClientFailureClass::StaleAuthority));
+            }
+            let operation = OperationId::new(
+                stream,
+                OperationSequence::new(header.high_water.checked_add(1).ok_or_else(invalid)?)
+                    .map_err(|_| invalid())?,
+            );
+            let command = match receiver_binding {
+                None => PairingCommand::AssessUnpair {
+                    target: target.clone(),
+                },
+                Some((_, _, version)) => {
+                    let (claim_digest, _) =
+                        spaceterm_protocol::pairing_adapter::client_binding_claim(
+                            &target, version, operation,
+                        )
+                        .map_err(|_| invalid())?;
+                    PairingCommand::BindAdditionalClient {
+                        target: target.clone(),
+                        expected_authorization_version: version,
+                        claim_digest,
+                    }
+                }
+            };
+            let request =
+                spaceterm_core::operation_ledger_contracts::CanonicalOperationRequest::new(
+                    operation,
+                    Command::Pairing(command),
+                    &CanonicalCodec,
+                )
+                .map_err(|_| invalid())?;
+            let record = spaceterm_client::journal::JournalOperation {
+                binding: request.binding(),
+                request: request.encode(&CanonicalCodec).map_err(|_| invalid())?,
+                workspace: None,
+                reserves_grant: false,
+                cleanup: false,
+                state: spaceterm_client::journal::RetainedOperationState::Pending,
+            };
+            let change = match receiver_binding {
+                None => spaceterm_client::journal::ClientJournalChange::Prepare(record),
+                Some((receiver, assessment, version)) => {
+                    spaceterm_client::journal::ClientJournalChange::PrepareReceiverBinding {
+                        receiver: Box::new(spaceterm_client::journal::JournalReceiverBinding {
+                            receiver,
+                            operation: record.binding,
+                            server_public_key: binding.target().pin().public_key,
+                            target,
+                            assessment,
+                            version,
+                        }),
+                        operation: record,
+                    }
+                }
+            };
+            Ok((vec![change], operation))
+        })
+        .await
+        .map(|(_, operation)| operation)
+        .map_err(classify_client)
+}
+
+fn provisioning_receiver(
+    name: &str,
+) -> Result<spaceterm_client::journal::ProvisioningReceiver, ManagementFailure> {
+    use spaceterm_client::journal::ProvisioningReceiver;
+    match name {
+        "cli" => Ok(ProvisioningReceiver::Cli),
+        "companion" => Ok(ProvisioningReceiver::Companion),
+        "management" => Ok(ProvisioningReceiver::Management),
+        _ => Err(ManagementFailure::UnsafeNativeState),
+    }
+}
+
+fn recover_receiver_binding(
+    journal: &JournalController,
     original: &spaceterm_client::pairing::journal::SavedPairing,
     target: &spaceterm_core::pairing::PairingTarget,
-) -> Result<Option<spaceterm_core::authority::FieldVersion>, ManagementFailure> {
-    let state = owner
-        .pairing
-        .journal()
-        .snapshot()
-        .map_err(classify_client)?;
-    let mut version = None;
+    receiver: spaceterm_client::journal::ProvisioningReceiver,
+    assessment: OperationId,
+    version: spaceterm_core::authority::FieldVersion,
+) -> Result<Option<OperationId>, ManagementFailure> {
+    let state = journal.snapshot().map_err(classify_client)?;
+    let mut owned = state.receiver_bindings().iter().filter(|record| {
+        record.receiver == receiver
+            && record.server_public_key == original.pin().public_key
+            && &record.target == target
+            && record.operation.id.stream() == original.client().parts().ordinary
+            && record.assessment == assessment
+            && record.version == version
+    });
+    let operation = owned.next().map(|record| record.operation.id);
+    if owned.next().is_some() {
+        return Err(ManagementFailure::UnsafeNativeState);
+    }
+    Ok(operation)
+}
+
+fn refuse_unowned_binding(
+    journal: &JournalController,
+    original: &spaceterm_client::pairing::journal::SavedPairing,
+    target: &spaceterm_core::pairing::PairingTarget,
+) -> Result<(), ManagementFailure> {
+    let state = journal.snapshot().map_err(classify_client)?;
     for record in state.operations() {
         if record.binding.id.stream() != original.client().parts().ordinary
             || matches!(
@@ -722,27 +1136,76 @@ async fn recover_provisioning_assessments(
                 &CanonicalCodec,
             )
             .map_err(|_| ManagementFailure::UnsafeNativeState)?;
-        if !matches!(request.command(), Command::Pairing(PairingCommand::AssessUnpair { target: candidate }) if candidate == target)
+        if matches!(request.command(), Command::Pairing(PairingCommand::BindAdditionalClient { target: candidate, .. }) if candidate == target)
         {
-            continue;
+            return Err(ManagementFailure::OutcomePending);
         }
-        let outcome = match &record.state {
-            spaceterm_client::journal::RetainedOperationState::Completed { outcome, .. } => outcome
-                .outcome(&CanonicalCodec)
-                .map_err(|_| ManagementFailure::UnsafeNativeState)?,
-            spaceterm_client::journal::RetainedOperationState::Pending => {
-                let ticket = operations
-                    .resolve_original(record.binding.id)
-                    .await
-                    .map_err(classify_client)?;
-                operations.wait(&ticket).await.map_err(classify_client)?
-            }
-            _ => return Err(ManagementFailure::UnsafeNativeState),
-        };
-        version = Some(assessment_version(outcome, target)?);
-        consume_result(owner.pairing.journal(), record.binding.id).await?;
     }
-    Ok(version)
+    Ok(())
+}
+
+async fn recover_provisioning_assessments(
+    owner: &PairingOwner,
+    operations: &super::super::tracked::ManagementOperations,
+    operation: OperationId,
+    target: &spaceterm_core::pairing::PairingTarget,
+) -> Result<Outcome, ManagementFailure> {
+    let state = owner
+        .pairing
+        .journal()
+        .snapshot()
+        .map_err(classify_client)?;
+    match state.operation(operation) {
+        Some(record) => {
+            let request =
+                spaceterm_core::operation_ledger_contracts::CanonicalOperationRequest::decode(
+                    &record.request,
+                    &CanonicalCodec,
+                )
+                .map_err(|_| ManagementFailure::UnsafeNativeState)?;
+            if !matches!(request.command(), Command::Pairing(PairingCommand::AssessUnpair { target: candidate }) if candidate == target)
+            {
+                return Err(ManagementFailure::AuthorizationDenied);
+            }
+            match &record.state {
+                spaceterm_client::journal::RetainedOperationState::Completed {
+                    outcome, ..
+                } => outcome
+                    .outcome(&CanonicalCodec)
+                    .map_err(|_| ManagementFailure::UnsafeNativeState),
+                spaceterm_client::journal::RetainedOperationState::Pending => {
+                    let ticket = operations
+                        .resolve_original(operation)
+                        .await
+                        .map_err(classify_client)?;
+                    operations.wait(&ticket).await.map_err(classify_client)
+                }
+                _ => Err(ManagementFailure::UnsafeNativeState),
+            }
+        }
+        None => Err(ManagementFailure::OutcomePending),
+    }
+}
+
+async fn settle_provisioning_failure(
+    admission: &ClientProvisioning,
+    name: &str,
+    retained: &mut RetainedProvisioning,
+    journal: &JournalController,
+    operations: &super::super::tracked::ManagementOperations,
+) -> Result<ManagementFailure, ManagementFailure> {
+    let ProvisioningPhase::Failure { operation, failure } = retained.attempt.phase else {
+        return Err(ManagementFailure::UnsafeNativeState);
+    };
+    consume_result(journal, operation).await?;
+    operations
+        .tracker
+        .acknowledge(operation.stream(), operations)
+        .await
+        .map_err(classify_client)?;
+    wait_operation_acknowledgement(journal, operation).await?;
+    retained.advance(admission, name, ProvisioningPhase::RetryReady { operation })?;
+    Ok(classify_pairing(failure))
 }
 
 fn assessment_version(
@@ -832,13 +1295,20 @@ async fn wait_acknowledgement(
     else {
         return Err(ManagementFailure::AuthorizationDenied);
     };
+    wait_operation_acknowledgement(journal, operation.id).await
+}
+
+async fn wait_operation_acknowledgement(
+    journal: &JournalController,
+    operation: OperationId,
+) -> Result<(), ManagementFailure> {
     let mut changes = journal.revisions();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let state = journal.snapshot().map_err(classify_client)?;
             if state
-                .stream(operation.id.stream())
-                .is_some_and(|header| header.confirmed_prefix >= operation.id.sequence().get())
+                .stream(operation.stream())
+                .is_some_and(|header| header.confirmed_prefix >= operation.sequence().get())
             {
                 return Ok(());
             }
@@ -930,71 +1400,14 @@ impl NativeConsumer {
             }
             plan
         } else {
-            let inventory = pairing.inventory().await.map_err(classify_pairing)?;
-            // Older incomplete work lacks the nonce/native request binding required
-            // for safe replay. It cannot mint replacement authorization.
-            if inventory
-                .prepared
-                .iter()
-                .any(|prepared| prepared.pin == registration.server_pin())
-                || inventory.credential_preparations.iter().any(|preparation| {
-                    preparation.scope.parts().purpose
-                        == CredentialPurpose::PairingAuthentication { server }
-                })
-            {
-                return Err(ManagementFailure::OutcomePending);
-            }
-            let namespace = CredentialNamespace::new(format!(
-                "spaceterm-native-{}",
-                match registration.key().build_identity {
-                    BuildIdentity::Release => "release",
-                    BuildIdentity::Preflight => "preflight",
-                    BuildIdentity::Development => "development",
-                }
-            ))
-            .map_err(classify_pairing)?;
-            let (_, device) = pairing
-                .prepare_credential(
-                    DeviceCredentials::new_scope(
-                        namespace.clone(),
-                        CredentialPurpose::DeviceIdentity,
-                    )
-                    .map_err(classify_pairing)?,
-                )
-                .await
-                .map_err(classify_pairing)?;
-            let (generation, authentication) = pairing
-                .prepare_credential(
-                    DeviceCredentials::new_scope(
-                        namespace,
-                        CredentialPurpose::PairingAuthentication { server },
-                    )
-                    .map_err(classify_pairing)?,
-                )
-                .await
-                .map_err(classify_pairing)?;
-            let plan = OwnerAttempt {
-                server_public_key: registration.server_pin().public_key,
-                proposal: EnrollmentProposal::new(EnrollmentProposalParts {
-                    server,
-                    device: DeviceId::new(random()?),
-                    keys: PairingKeys::new(PairingKeysParts {
-                        device_identity_public_key: device.public_key,
-                        pairing_authentication_public_key: authentication.public_key,
-                    })
-                    .map_err(|_| ManagementFailure::UnsafeNativeState)?,
-                    claim_nonce: random()?,
-                })
-                .map_err(|_| ManagementFailure::UnsafeNativeState)?,
-                request: native
-                    .supervisor
-                    .allocate_request()
-                    .map_err(classify_service)?,
-                generation,
-                device,
-                authentication,
-                reference: RevocationRouteReference::new(random()?),
-            };
+            let plan = preparation::retained_preparation(
+                native,
+                registration,
+                pairing,
+                admission,
+                consumer,
+            )
+            .await?;
             let bytes =
                 serde_json::to_vec(&plan).map_err(|_| ManagementFailure::UnsafeNativeState)?;
             admission

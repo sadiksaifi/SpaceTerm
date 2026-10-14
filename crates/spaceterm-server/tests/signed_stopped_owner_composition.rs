@@ -277,7 +277,7 @@ async fn public_cli_enrolls_through_signed_installed_stopped_owner_in_both_major
         let credentials = Arc::new(MemoryCredentials::new());
         let mut original_result = None;
         let mut original_receipt = None;
-        for attempt in 0..2 {
+        for attempt in 0..6 {
             let supervisor = Arc::try_unwrap(stopped_owner::supervisor(root.path()).unwrap())
                 .ok()
                 .unwrap();
@@ -304,61 +304,38 @@ async fn public_cli_enrolls_through_signed_installed_stopped_owner_in_both_major
                     })
                     .with_owner_channels(channels.clone()),
             );
-            // A recovery request must never masquerade as ordinary enrollment
-            // or return an old Client while retained-attempt rollover is absent.
-            let before_recovery = credentials.created();
+            let previous_client = original_result
+                .as_ref()
+                .map(|result: &serde_json::Value| result["result"]["client"].as_u64().unwrap());
+            if attempt == 2 {
+                credentials.lose_authentication_key();
+                original_result = None;
+                original_receipt = None;
+            }
+            if attempt == 4 {
+                credentials.lose_device_key();
+                original_result = None;
+                original_receipt = None;
+            }
             let fingerprint = hex(&pin.public_key);
-            let recovery = parse(
-                [
-                    "pair",
-                    "enroll",
-                    "--recover-account",
-                    "--server-fingerprint",
-                    &fingerprint,
-                ]
-                .into_iter()
-                .map(std::ffi::OsString::from),
-            )
-            .unwrap();
-            let spaceterm_client_native::cli::arguments::CliCommand::PairEnroll {
-                fingerprint: recovery_fingerprint,
-                ..
-            } = recovery.command
-            else {
-                panic!("recovery enrollment required")
-            };
-            assert!(matches!(
-                spaceterm_client_native::cli::bindings::PairingCommandBindings::enroll(
-                    consumer.as_ref(),
-                    recovery_fingerprint,
-                    true,
-                    spaceterm_host::native_management::SudoMode::NonInteractive,
-                    &mut Io::default(),
-                )
-                .await,
-                Err(spaceterm_client::management_cli::ManagementFailure::AuthorizationUnavailable)
-            ));
-            assert_eq!(credentials.created(), before_recovery);
-            assert_eq!(channels.opened.load(Ordering::SeqCst), 0);
             let dependencies = CliDependencies::new(
                 Ok(provider.key()),
                 consumer.clone(),
                 provider.management(),
                 consumer.clone(),
             );
-            let invocation = parse(
-                [
-                    "--json",
-                    "--non-interactive",
-                    "pair",
-                    "enroll",
-                    "--server-fingerprint",
-                    &fingerprint,
-                ]
-                .into_iter()
-                .map(std::ffi::OsString::from),
-            )
-            .unwrap();
+            let mut arguments = vec![
+                "--json",
+                "--non-interactive",
+                "pair",
+                "enroll",
+                "--server-fingerprint",
+                &fingerprint,
+            ];
+            if attempt >= 2 {
+                arguments.push("--recover-account");
+            }
+            let invocation = parse(arguments.into_iter().map(std::ffi::OsString::from)).unwrap();
             let mut io = Io::default();
             let Dispatch::Exit(exit) = tokio::time::timeout(
                 Duration::from_secs(60),
@@ -374,6 +351,9 @@ async fn public_cli_enrolls_through_signed_installed_stopped_owner_in_both_major
             assert_eq!(result["result"]["server"], hex(&pin.identity));
             let client = result["result"]["client"].as_u64().unwrap();
             assert!(client > 0);
+            if attempt == 2 || attempt == 4 {
+                assert_ne!(Some(client), previous_client);
+            }
             if let Some(original) = &original_result {
                 assert_eq!(&result, original);
             } else {
@@ -381,11 +361,11 @@ async fn public_cli_enrolls_through_signed_installed_stopped_owner_in_both_major
             }
             assert_eq!(
                 channels.opened.load(Ordering::SeqCst),
-                usize::from(attempt == 0)
+                usize::from(attempt == 0 || attempt == 2 || attempt == 4)
             );
             assert_eq!(
                 channels.closed.load(Ordering::SeqCst),
-                usize::from(attempt == 0)
+                usize::from(attempt == 0 || attempt == 2 || attempt == 4)
             );
             drop(dependencies);
             Arc::try_unwrap(consumer)
@@ -409,7 +389,7 @@ async fn public_cli_enrolls_through_signed_installed_stopped_owner_in_both_major
             } else {
                 original_receipt = Some(receipt);
             }
-            assert_eq!(credentials.created(), 2);
+            assert_eq!(credentials.created(), 2 * (attempt / 2 + 1));
             let current = fixture.reopen().discover().unwrap().unwrap();
             assert_eq!(current.desired_state(), DesiredServerState::Stopped);
             assert_eq!(current.server_pin(), pin);

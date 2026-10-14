@@ -333,6 +333,19 @@ impl NativePairingRuntime {
     ) -> Result<(LocalPairingGeneration, PreparedCredential), PairingFailure> {
         prepare_native_credential(&self.store(), &self.credentials, scope).await
     }
+    /// Explicit recovery resumes only its previously retained preparation scope.
+    /// Ordinary restoration never enters this credential-creation path.
+    pub(crate) async fn resume_credential(
+        &self,
+        scope: CredentialScope,
+    ) -> Result<(LocalPairingGeneration, PreparedCredential), PairingFailure> {
+        spaceterm_client::pairing::journal::resume_native_credential(
+            &self.store(),
+            &self.credentials,
+            scope,
+        )
+        .await
+    }
     /// Deliberate additional-Client composition can retain an already-owned
     /// native scope in its own journal. This reserves cleanup capacity but never
     /// inserts or replaces a native key. Missing and locked storage fail closed.

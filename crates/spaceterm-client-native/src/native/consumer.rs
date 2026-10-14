@@ -3,6 +3,12 @@
 
 mod assessments;
 mod enrollment;
+
+pub(super) fn require_account_recovery(
+    supervisor: &spaceterm_host::account_service::ServiceSupervisor,
+) -> Result<(), spaceterm_client::management_cli::ManagementFailure> {
+    enrollment::recovery::require_complete(supervisor)
+}
 mod listing;
 
 use super::{NativeServiceManagement, classify_service};
@@ -229,6 +235,7 @@ impl NativeConsumer {
             .await
     }
     async fn opened(&self) -> Result<&OpenedConsumer, ManagementFailure> {
+        self.require_account_recovery_complete()?;
         let registration = self
             .native
             .supervisor

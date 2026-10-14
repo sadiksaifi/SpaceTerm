@@ -54,6 +54,7 @@ struct Manager {
     state: Mutex<SupervisorState>,
     effects: Mutex<Vec<&'static str>>,
     block_start: AtomicBool,
+    fail_start: AtomicBool,
     start_entered: tokio::sync::Notify,
     start_release: tokio::sync::Notify,
 }
@@ -76,6 +77,9 @@ impl ServiceManager for Manager {
     fn start<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
         Box::pin(async {
             self.effects.lock().unwrap().push("start");
+            if self.fail_start.swap(false, Ordering::SeqCst) {
+                return Err(ServiceFailure::SupervisorUnavailable);
+            }
             *self.state.lock().unwrap() = SupervisorState::Running;
             if self.block_start.load(Ordering::SeqCst) {
                 self.start_entered.notify_one();
@@ -194,6 +198,7 @@ impl Fixture {
                 state: Mutex::new(state),
                 effects: Mutex::new(vec![]),
                 block_start: AtomicBool::new(false),
+                fail_start: AtomicBool::new(false),
                 start_entered: tokio::sync::Notify::new(),
                 start_release: tokio::sync::Notify::new(),
             }),
@@ -202,6 +207,105 @@ impl Fixture {
             installation_trust: None,
         }
     }
+    fn signed_stopped() -> Self {
+        use spaceterm_host::server_installation::test_support;
+
+        let mut fixture = Self::new(None);
+        *fixture.manager.state.lock().unwrap() = SupervisorState::Disabled;
+        let (key, artifact) =
+            signed_installation::fixture("1.2.3", 7, signed_installation::native_machine());
+        let registration = fixture
+            .account
+            .initialize_with_installation(
+                DesiredServerState::Stopped,
+                Some(InstallationStatus {
+                    installation: spaceterm_host::startup::InstallationId(
+                        std::num::NonZeroU64::MIN,
+                    ),
+                    version: artifact.manifest().version.clone(),
+                    artifact_sha256: artifact.artifact_sha256(),
+                }),
+            )
+            .unwrap();
+        let store = test_support::store(&registration, key.clone()).unwrap();
+        let installation = store.stage(&artifact).unwrap();
+        store
+            .activate(installation, store.snapshot().unwrap().generation, 1)
+            .unwrap();
+        assert!(
+            spaceterm_host::account_service::runtime_inventory::RetainedRuntimeProcesses::is_clean(
+                &registration
+            )
+            .unwrap()
+        );
+        fixture.installation_trust = Some(key);
+        fixture
+    }
+
+    fn clean_runtime_provider(&self) -> NativeClientProvider {
+        let supervisor = self.account.with_providers(
+            self.manager.clone(),
+            Arc::new(
+                spaceterm_client_native::native::runtime::RuntimeServiceProcesses::new(Arc::new(
+                    NoRuntimeIdentity,
+                )),
+            ),
+            self.clock.clone(),
+            None,
+        );
+        NativeClientProvider::from_supervisor(
+            self.account
+                .with_installation_trust(supervisor, self.installation_trust.clone().unwrap()),
+        )
+    }
+
+    fn retain_incomplete_recovery(&self, provider: &NativeClientProvider) -> Vec<u8> {
+        use spaceterm_client::pairing::credentials::{CredentialNamespace, CredentialPurpose};
+        use spaceterm_client_native::credentials::adapter::DeviceCredentials;
+        use spaceterm_core::{identity::DeviceId, pairing::RevocationRouteReference};
+
+        let management = provider.management();
+        let supervisor = management.supervisor();
+        let registration = supervisor.discover().unwrap().unwrap();
+        let pin = registration.server_pin();
+        let server = ServerId::new(pin.identity);
+        let namespace = CredentialNamespace::new("spaceterm-native-development".into()).unwrap();
+        let device_scope =
+            DeviceCredentials::new_scope(namespace.clone(), CredentialPurpose::DeviceIdentity)
+                .unwrap();
+        let authentication_scope = DeviceCredentials::new_scope(
+            namespace,
+            CredentialPurpose::PairingAuthentication { server },
+        )
+        .unwrap();
+        let admission = supervisor.admit_client_provisioning().unwrap();
+        // This is the recovery DTO with real public scopes, retained through the
+        // same admission and publication interface as deliberate account recovery.
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "schema": 1,
+            "server": server,
+            "server_public_key": pin.public_key,
+            "previous_attempt": null,
+            "bindings": [],
+            "preparation": {
+                "server": server,
+                "server_public_key": pin.public_key,
+                "device_scope": device_scope,
+                "authentication_scope": authentication_scope,
+                "device": DeviceId::new([41; 16]),
+                "claim_nonce": vec![42; 32],
+                "request": supervisor.allocate_request().unwrap(),
+                "reference": RevocationRouteReference::new([43; 16]),
+            },
+            "complete": false,
+        }))
+        .unwrap();
+        admission
+            .retain_owner_attempt("recovery", None, &bytes)
+            .unwrap();
+        bytes
+    }
+
     fn provider(&self) -> NativeClientProvider {
         let supervisor = self.account.with_providers(
             self.manager.clone(),
@@ -281,6 +385,347 @@ impl spaceterm_client_native::native::artifacts::ArtifactTransport for DeniedArt
         self.0.fetch_add(1, Ordering::SeqCst);
         Err(ManagementFailure::AuthorizationDenied)
     }
+}
+
+struct NoRuntimeIdentity;
+impl spaceterm_client_native::native::runtime::RuntimeClientIdentity for NoRuntimeIdentity {
+    fn access<'a>(
+        &'a self,
+        _: &'a RegisteredServer,
+    ) -> ServiceFuture<'a, spaceterm_client_native::native::runtime::RuntimeClientAccess> {
+        Box::pin(async { panic!("signed clean Stopped custody needs no Client identity") })
+    }
+}
+
+#[tokio::test]
+async fn incomplete_account_recovery_blocks_clean_stopped_start_before_native_effects() {
+    let fixture = Fixture::signed_stopped();
+    let provider = fixture.clean_runtime_provider();
+    let management = provider.management();
+    let request = management.supervisor().allocate_request().unwrap();
+    let marker = fixture.retain_incomplete_recovery(&provider);
+    let registration = std::fs::read(fixture.account.anchor().join("registration")).unwrap();
+    let requests = std::fs::read(fixture.account.anchor().join("requests")).unwrap();
+
+    assert_eq!(
+        management.start(request).await,
+        Err(ServiceFailure::Pending)
+    );
+    assert_eq!(
+        management.status().await.unwrap().desired,
+        Some(DesiredServerState::Stopped)
+    );
+    assert_eq!(
+        provider.inspect(provider.key()).await.unwrap().desired,
+        Some(DesiredServerState::Stopped)
+    );
+    assert_eq!(
+        std::fs::read(fixture.account.anchor().join("registration")).unwrap(),
+        registration
+    );
+    assert_eq!(
+        std::fs::read(fixture.account.anchor().join("requests")).unwrap(),
+        requests
+    );
+    assert_eq!(
+        management.supervisor().retained_account_recovery().unwrap(),
+        Some(marker)
+    );
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn incomplete_account_recovery_blocks_original_clean_stopped_uninstall() {
+    let fixture = Fixture::signed_stopped();
+    let provider = fixture.clean_runtime_provider();
+    let management = provider.management();
+    let assessment = management.assess(ServiceAction::Uninstall).await.unwrap();
+    let prompt = NativeActionPrompt::from_assessment(&assessment).unwrap();
+    let confirmed = assessment.confirm().unwrap();
+    let marker = fixture.retain_incomplete_recovery(&provider);
+    let registration = std::fs::read(fixture.account.anchor().join("registration")).unwrap();
+    let requests = std::fs::read(fixture.account.anchor().join("requests")).unwrap();
+
+    assert_eq!(
+        management.uninstall(confirmed).await,
+        Err(ServiceFailure::Pending)
+    );
+    assert!(matches!(
+        management
+            .restore_assessment(ServiceAction::Uninstall, prompt.token.clone())
+            .await,
+        Err(ManagementFailure::OutcomePending)
+    ));
+    assert!(matches!(
+        run(
+            &provider,
+            NativeCliCommand::Uninstall,
+            ConfirmationMode::Token(prompt.token),
+            &mut Io::default(),
+        )
+        .await,
+        Err(ManagementFailure::OutcomePending)
+    ));
+    assert_eq!(
+        management
+            .supervisor()
+            .request_progress(prompt.request)
+            .unwrap()
+            .phase,
+        spaceterm_host::account_service::ServicePhase::Reserved
+    );
+    assert_eq!(
+        std::fs::read(fixture.account.anchor().join("registration")).unwrap(),
+        registration
+    );
+    assert_eq!(
+        std::fs::read(fixture.account.anchor().join("requests")).unwrap(),
+        requests
+    );
+    assert_eq!(
+        management.supervisor().retained_account_recovery().unwrap(),
+        Some(marker)
+    );
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn incomplete_account_recovery_fences_every_cli_admission_without_allocating_requests() {
+    let fixture = Fixture::signed_stopped();
+    let artifacts = Arc::new(DeniedArtifacts(AtomicU64::new(0)));
+    let provider = fixture
+        .provider()
+        .with_artifact_transport(artifacts.clone());
+    fixture.retain_incomplete_recovery(&provider);
+    let requests = std::fs::read(fixture.account.anchor().join("requests")).unwrap();
+    let registration = std::fs::read(fixture.account.anchor().join("registration")).unwrap();
+    for command in [
+        NativeCliCommand::Start,
+        NativeCliCommand::Stop,
+        NativeCliCommand::Restart,
+        NativeCliCommand::Uninstall,
+        NativeCliCommand::UpdateActivate {
+            installation: spaceterm_host::startup::InstallationId(std::num::NonZeroU64::MIN),
+        },
+        NativeCliCommand::Install {
+            version: None,
+            source: None,
+        },
+        NativeCliCommand::UpdateStage {
+            version: None,
+            source: None,
+        },
+    ] {
+        let mut io = Io {
+            confirm: true,
+            ..Io::default()
+        };
+        assert!(matches!(
+            run(&provider, command, ConfirmationMode::Interactive, &mut io).await,
+            Err(ManagementFailure::OutcomePending)
+        ));
+        assert!(io.stderr.is_empty());
+        assert!(io.stdout.is_empty());
+        assert_eq!(io.prompts, 0);
+    }
+    assert!(matches!(
+        provider.management().assess(ServiceAction::Uninstall).await,
+        Err(ServiceFailure::Pending)
+    ));
+    assert_eq!(artifacts.0.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        std::fs::read(fixture.account.anchor().join("requests")).unwrap(),
+        requests
+    );
+    assert_eq!(
+        std::fs::read(fixture.account.anchor().join("registration")).unwrap(),
+        registration
+    );
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn incomplete_account_recovery_blocks_resuming_an_original_native_effect() {
+    let fixture = Fixture::signed_stopped();
+    let provider = fixture.clean_runtime_provider();
+    let management = provider.management();
+    let request = management.supervisor().allocate_request().unwrap();
+    fixture.manager.fail_start.store(true, Ordering::SeqCst);
+    assert_eq!(
+        management.start(request).await,
+        Err(ServiceFailure::SupervisorUnavailable)
+    );
+    let original = management.supervisor().request_progress(request).unwrap();
+    assert_ne!(
+        original.phase,
+        spaceterm_host::account_service::ServicePhase::Completed
+    );
+    fixture.retain_incomplete_recovery(&provider);
+    let effects = fixture.manager.effects.lock().unwrap().clone();
+    let registration = std::fs::read(fixture.account.anchor().join("registration")).unwrap();
+    let requests = std::fs::read(fixture.account.anchor().join("requests")).unwrap();
+
+    assert_eq!(
+        management.resolve(request).await,
+        Err(ServiceFailure::Pending)
+    );
+    assert!(matches!(
+        run(
+            &provider,
+            NativeCliCommand::Resolve { request },
+            ConfirmationMode::Interactive,
+            &mut Io::default(),
+        )
+        .await,
+        Err(ManagementFailure::OutcomePending)
+    ));
+    assert_eq!(
+        management.supervisor().request_progress(request).unwrap(),
+        original
+    );
+    assert_eq!(fixture.manager.effects.lock().unwrap().as_slice(), effects);
+    assert_eq!(
+        std::fs::read(fixture.account.anchor().join("registration")).unwrap(),
+        registration
+    );
+    assert_eq!(
+        std::fs::read(fixture.account.anchor().join("requests")).unwrap(),
+        requests
+    );
+}
+
+#[tokio::test]
+async fn incomplete_account_recovery_preserves_completed_native_results_and_cli_receipts() {
+    for retained in [false, true] {
+        let fixture = Fixture::signed_stopped();
+        let provider = fixture.clean_runtime_provider();
+        let management = provider.management();
+        let request = management.supervisor().allocate_request().unwrap();
+        let original = management.start(request).await.unwrap();
+        if retained {
+            assert_eq!(management.retain_cli_completion(request).unwrap(), original);
+            management.acknowledge_request(request).unwrap();
+        }
+        fixture.retain_incomplete_recovery(&provider);
+        let effects = fixture.manager.effects.lock().unwrap().clone();
+        let registration = std::fs::read(fixture.account.anchor().join("registration")).unwrap();
+        assert_eq!(management.resolve(request).await.unwrap(), original);
+        let CliOutput::ServiceProgress(replayed) = run(
+            &fixture.clean_runtime_provider(),
+            NativeCliCommand::Resolve { request },
+            ConfirmationMode::Interactive,
+            &mut Io::default(),
+        )
+        .await
+        .unwrap() else {
+            panic!("missing completed native result")
+        };
+        assert_eq!(replayed, original);
+        assert_eq!(fixture.manager.effects.lock().unwrap().as_slice(), effects);
+        assert_eq!(
+            std::fs::read(fixture.account.anchor().join("registration")).unwrap(),
+            registration
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_admission_shares_the_recovery_lease_before_marker_publication() {
+    let fixture = Fixture::signed_stopped();
+    let provider = fixture.clean_runtime_provider();
+    let management = provider.management();
+    let request = management.supervisor().allocate_request().unwrap();
+    let admission = management.supervisor().admit_client_provisioning().unwrap();
+    assert_eq!(
+        management.supervisor().retained_account_recovery().unwrap(),
+        None
+    );
+    let requests = std::fs::read(fixture.account.anchor().join("requests")).unwrap();
+    assert_eq!(
+        management.start(request).await,
+        Err(ServiceFailure::Pending)
+    );
+    assert!(matches!(
+        management.assess(ServiceAction::Uninstall).await,
+        Err(ServiceFailure::Pending)
+    ));
+    assert!(matches!(
+        run(
+            &provider,
+            NativeCliCommand::Start,
+            ConfirmationMode::Interactive,
+            &mut Io::default()
+        )
+        .await,
+        Err(ManagementFailure::OutcomePending)
+    ));
+    management.status().await.unwrap();
+    assert_eq!(
+        std::fs::read(fixture.account.anchor().join("requests")).unwrap(),
+        requests
+    );
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+    drop(admission);
+    assert_eq!(
+        management.start(request).await.unwrap().state,
+        ServiceRequestState::Completed(ServiceOutcome::Started)
+    );
+}
+
+#[tokio::test]
+async fn native_recovery_guard_preserves_unsafe_storage_classification() {
+    let fixture = Fixture::signed_stopped();
+    let provider = fixture.clean_runtime_provider();
+    let management = provider.management();
+    let request = management.supervisor().allocate_request().unwrap();
+    let admission = management.supervisor().admit_client_provisioning().unwrap();
+    admission
+        .retain_owner_attempt("recovery", None, b"invalid recovery record")
+        .unwrap();
+    drop(admission);
+    assert_eq!(
+        management.start(request).await,
+        Err(ServiceFailure::UnsafeStorage)
+    );
+    assert!(matches!(
+        run(
+            &provider,
+            NativeCliCommand::Start,
+            ConfirmationMode::Interactive,
+            &mut Io::default()
+        )
+        .await,
+        Err(ManagementFailure::UnsafeNativeState)
+    ));
+    assert_eq!(
+        management.status().await.unwrap().desired,
+        Some(DesiredServerState::Stopped)
+    );
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn restoring_an_original_native_assessment_does_not_provision_client_storage() {
+    let fixture = Fixture::new(Some(DesiredServerState::Stopped));
+    let provider = fixture.provider();
+    let management = provider.management();
+    let supervisor = management.supervisor();
+    let request = supervisor.allocate_request().unwrap();
+    let assessment = supervisor
+        .assess(request, ServiceAction::Uninstall)
+        .await
+        .unwrap();
+    let prompt = NativeActionPrompt::from_assessment(&assessment).unwrap();
+    assert!(!supervisor.client_connections_directory().exists());
+    let restored = management
+        .restore_assessment(ServiceAction::Uninstall, prompt.token)
+        .await
+        .unwrap();
+    assert_eq!(restored.request(), request);
+    assert_eq!(restored.token(), assessment.token());
+    management.status().await.unwrap();
+    assert!(!supervisor.client_connections_directory().exists());
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -756,8 +1201,16 @@ async fn interrupted_cli_wait_preserves_and_resolves_the_original_admitted_start
         ),
     )
     .await;
-    fixture.manager.start_release.notify_one();
     assert!(matches!(result, Ok(Dispatch::Exit(exit)) if exit.code() == 75));
+    // Cancellation releases the CLI wait, not the native effect's recovery fence.
+    assert!(matches!(
+        provider
+            .management()
+            .supervisor()
+            .admit_client_provisioning(),
+        Err(ServiceFailure::Pending)
+    ));
+    fixture.manager.start_release.notify_one();
     let mut records =
         serde_json::Deserializer::from_slice(&io.stderr).into_iter::<serde_json::Value>();
     let reservation = records.next().unwrap().unwrap();

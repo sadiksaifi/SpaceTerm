@@ -1272,7 +1272,7 @@ impl spaceterm_client::pending::LocalUseInvalidator for ProvisionInvalidator {
 async fn deliberate_provisioning_creates_three_server_issued_clients_before_native_restoration_in_both_majors()
  {
     for major in [1, 2] {
-        provision_from_receipt(major, false, false).await;
+        provision_from_receipt(major, ProvisionInterruption::default()).await;
     }
 }
 
@@ -1280,22 +1280,382 @@ async fn deliberate_provisioning_creates_three_server_issued_clients_before_nati
 async fn provisioning_recovers_lost_assessment_reply_without_replacing_its_operation_in_both_majors()
  {
     for major in [1, 2] {
-        provision_from_receipt(major, true, false).await;
+        provision_from_receipt(
+            major,
+            ProvisionInterruption {
+                lose_assessment: true,
+                ..Default::default()
+            },
+        )
+        .await;
     }
 }
 
 #[tokio::test]
 async fn provisioning_recovers_saved_client_receipt_after_lost_acknowledgement_in_both_majors() {
     for major in [1, 2] {
-        provision_from_receipt(major, false, true).await;
+        provision_from_receipt(
+            major,
+            ProvisionInterruption {
+                lose_acknowledgement: true,
+                ..Default::default()
+            },
+        )
+        .await;
     }
 }
 
-async fn provision_from_receipt(
-    major: u32,
-    lose_first_assessment: bool,
-    lose_first_acknowledgement: bool,
-) {
+struct PendingAssessmentPeer;
+impl spaceterm_client::operations::OperationPeer for PendingAssessmentPeer {
+    fn validate_submission(
+        &self,
+        _: &PairedServerBinding,
+        command: &Command,
+        workspace: Option<WorkspaceId>,
+    ) -> Result<(), ClientFailure> {
+        assert!(matches!(
+            command,
+            Command::Pairing(PairingCommand::AssessUnpair { .. })
+        ));
+        assert!(workspace.is_none());
+        Ok(())
+    }
+    fn submit<'a>(
+        &'a self,
+        _: &'a spaceterm_core::operation_ledger_contracts::CanonicalOperationRequest,
+    ) -> spaceterm_client::ports::ClientFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+    fn lookup(
+        &self,
+        _: OperationBinding,
+    ) -> spaceterm_client::ports::ClientFuture<'_, OperationLookup> {
+        Box::pin(async { panic!("the user owns assessment recovery") })
+    }
+    fn acknowledge(
+        &self,
+        _: OperationStreamId,
+        _: u64,
+    ) -> spaceterm_client::ports::ClientFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+struct ProvisionLookup {
+    record: PairingRecord,
+    issued: Vec<ClientId>,
+    authenticated: std::sync::Mutex<ClientId>,
+}
+impl PairingLookup for ProvisionLookup {
+    fn lookup(
+        &self,
+        server: [u8; 16],
+        pairing: [u8; 16],
+        client: [u8; 16],
+    ) -> Result<PairingRecord, ProtocolError> {
+        assert_eq!(server, self.record.principal.server);
+        assert_eq!(pairing, self.record.principal.pairing);
+        let id = self
+            .issued
+            .iter()
+            .find(|id| local(id.local()) == client)
+            .copied()
+            .unwrap();
+        *self.authenticated.lock().unwrap() = id;
+        Ok(PairingRecord {
+            principal: Principal {
+                client,
+                ..self.record.principal
+            },
+            ..self.record
+        })
+    }
+}
+
+struct PauseAfterPrepare {
+    storage: NativeClientJournal,
+    armed: std::sync::atomic::AtomicBool,
+    binding_only: bool,
+    refuse_binding_prepare: bool,
+    metadata_fault: Option<ReceiverMetadataFault>,
+    directory: std::path::PathBuf,
+    committed: tokio::sync::watch::Sender<Option<OperationId>>,
+    release: tokio::sync::Notify,
+}
+impl spaceterm_client::journal::ClientJournal for PauseAfterPrepare {
+    fn authority_fence(&self) -> &spaceterm_client::pairing::credentials::PairingAuthorityFence {
+        spaceterm_client::journal::ClientJournal::authority_fence(&self.storage)
+    }
+    fn admission_latch(&self) -> Arc<spaceterm_client::journal::JournalAdmission> {
+        spaceterm_client::journal::ClientJournal::admission_latch(&self.storage)
+    }
+    fn scheduler_claim(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        spaceterm_client::journal::ClientJournal::scheduler_claim(&self.storage)
+    }
+    fn recover(
+        &self,
+    ) -> spaceterm_client::ports::ClientFuture<'_, spaceterm_client::journal::RecoveredClientState>
+    {
+        spaceterm_client::journal::ClientJournal::recover(&self.storage)
+    }
+    fn commit<'a>(
+        &'a self,
+        transaction: &'a spaceterm_client::journal::ClientJournalTransaction,
+    ) -> spaceterm_client::ports::ClientFuture<
+        'a,
+        spaceterm_client::journal::JournalCommitDisposition,
+    > {
+        Box::pin(async move {
+            use std::os::unix::fs::PermissionsExt;
+            let operation = transaction.changes.iter().find_map(|change| match change {
+                ClientJournalChange::Prepare(record)
+                | ClientJournalChange::PrepareReceiverBinding { operation: record, .. }
+                    if self.binding_only == matches!(
+                        spaceterm_core::operation_ledger_contracts::CanonicalOperationRequest::decode(
+                            &record.request, &CanonicalCodec,
+                        ).unwrap().command(),
+                        Command::Pairing(PairingCommand::BindAdditionalClient { .. })
+                    ) => Some(record.binding.id),
+                _ => None,
+            });
+            let interrupt =
+                operation.is_some() && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst);
+            if interrupt && self.refuse_binding_prepare {
+                std::fs::set_permissions(&self.directory, std::fs::Permissions::from_mode(0o500))
+                    .unwrap();
+            }
+            let result =
+                spaceterm_client::journal::ClientJournal::commit(&self.storage, transaction).await;
+            if interrupt && self.refuse_binding_prepare {
+                std::fs::set_permissions(&self.directory, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+            }
+            let result = result?;
+            if interrupt
+                && matches!(
+                    result,
+                    spaceterm_client::journal::JournalCommitDisposition::Durable(_)
+                )
+                && let Some(fault) = self.metadata_fault
+            {
+                self.committed.send_replace(operation);
+                match fault {
+                    ReceiverMetadataFault::BeforeEffect => spaceterm_host::account_service::test_support::fail_next_publication_before_effect(),
+                    ReceiverMetadataFault::Unsynced => spaceterm_host::account_service::test_support::fail_next_publication_durability(),
+                }
+                return Ok(result);
+            }
+            if interrupt
+                && !self.refuse_binding_prepare
+                && matches!(
+                    result,
+                    spaceterm_client::journal::JournalCommitDisposition::Durable(_)
+                )
+            {
+                self.committed.send_replace(operation);
+                self.release.notified().await;
+            }
+            Ok(result)
+        })
+    }
+}
+
+async fn provisioning_controller(
+    directory: &std::path::Path,
+    create: bool,
+    interruption: ProvisionInterruption,
+) -> (Arc<JournalController>, Option<Arc<PauseAfterPrepare>>) {
+    if !interruption.orphan_assessment
+        && !interruption.orphan_binding
+        && !interruption.refuse_binding_prepare
+        && interruption.metadata_fault.is_none()
+    {
+        return (controller(directory, create).await, None);
+    }
+    let codec = Arc::new(CanonicalCodec);
+    let verifier = Arc::new(Verifier);
+    let storage = NativeClientJournal::create(
+        directory.to_owned(),
+        codec.clone(),
+        verifier.clone(),
+        JournalLimits::default(),
+    )
+    .await
+    .unwrap();
+    let (committed, _) = tokio::sync::watch::channel(None);
+    let storage = Arc::new(PauseAfterPrepare {
+        storage,
+        armed: std::sync::atomic::AtomicBool::new(false),
+        binding_only: interruption.orphan_binding
+            || interruption.refuse_binding_prepare
+            || interruption.metadata_fault.is_some(),
+        refuse_binding_prepare: interruption.refuse_binding_prepare,
+        metadata_fault: interruption.metadata_fault,
+        directory: directory.to_owned(),
+        committed,
+        release: tokio::sync::Notify::new(),
+    });
+    let journal = Arc::new(
+        JournalController::recover(storage.clone(), codec, verifier, JournalLimits::default())
+            .await
+            .unwrap(),
+    );
+    (journal, Some(storage))
+}
+
+#[derive(Clone, Copy)]
+enum ReceiverMetadataFault {
+    BeforeEffect,
+    Unsynced,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ProvisionInterruption {
+    lose_assessment: bool,
+    lose_acknowledgement: bool,
+    companion_save: bool,
+    stale_binding: bool,
+    user_assessment: bool,
+    orphan_assessment: bool,
+    orphan_binding: bool,
+    refuse_binding_prepare: bool,
+    metadata_fault: Option<ReceiverMetadataFault>,
+    identical_user_binding: bool,
+}
+
+#[tokio::test]
+async fn cli_enroll_cannot_replace_desktop_companion_receipt_before_exact_desktop_repair() {
+    for major in [1, 2] {
+        provision_from_receipt(
+            major,
+            ProvisionInterruption {
+                companion_save: true,
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn terminal_stale_provisioning_failure_is_settled_before_fresh_deliberate_retry() {
+    for major in [1, 2] {
+        provision_from_receipt(
+            major,
+            ProvisionInterruption {
+                stale_binding: true,
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn provisioning_recovery_preserves_unrelated_pending_user_assessment_on_same_stream() {
+    for major in [1, 2] {
+        provision_from_receipt(
+            major,
+            ProvisionInterruption {
+                lose_assessment: true,
+                user_assessment: true,
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn failed_binding_prepare_does_not_claim_user_assessment_that_takes_the_reserved_slot() {
+    for major in [1, 2] {
+        provision_from_receipt(
+            major,
+            ProvisionInterruption {
+                refuse_binding_prepare: true,
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn failed_receiver_binding_prepare_cannot_adopt_an_identical_unrelated_user_binding() {
+    for major in [1, 2] {
+        provision_from_receipt(
+            major,
+            ProvisionInterruption {
+                refuse_binding_prepare: true,
+                identical_user_binding: true,
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn interrupted_receiver_metadata_publication_recovers_exact_original_on_deliberate_retry() {
+    for major in [1, 2] {
+        provision_from_receipt(
+            major,
+            ProvisionInterruption {
+                metadata_fault: Some(ReceiverMetadataFault::BeforeEffect),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn unsynced_receiver_metadata_publication_recovers_exact_original_on_deliberate_retry() {
+    for major in [1, 2] {
+        provision_from_receipt(
+            major,
+            ProvisionInterruption {
+                metadata_fault: Some(ReceiverMetadataFault::Unsynced),
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn cancelled_binding_reservation_recovers_exact_original_before_submitting_on_a_contiguous_stream()
+ {
+    for major in [1, 2] {
+        provision_from_receipt(
+            major,
+            ProvisionInterruption {
+                orphan_binding: true,
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn cancelled_assessment_reservation_reconciles_original_before_provisioning_on_a_contiguous_stream()
+ {
+    for major in [1, 2] {
+        provision_from_receipt(
+            major,
+            ProvisionInterruption {
+                orphan_assessment: true,
+                ..Default::default()
+            },
+        )
+        .await;
+    }
+}
+
+async fn provision_from_receipt(major: u32, interruption: ProvisionInterruption) {
+    let lose_first_assessment = interruption.lose_assessment;
+    let lose_first_acknowledgement = interruption.lose_acknowledgement;
     use spaceterm_client::pairing::journal::PreparedEnrollment;
     use spaceterm_client_native::{
         pairing_runtime::NativePairingRuntime, restricted_routes::NativePairingConnector,
@@ -1328,22 +1688,27 @@ async fn provision_from_receipt(
         .admit_client_provisioning()
         .unwrap();
     let (origin_directory, create) = admission.journal_directory("enrollment").unwrap();
-    let journal = controller(&origin_directory, create).await;
+    let (mut journal, mut pause) =
+        provisioning_controller(&origin_directory, create, interruption).await;
     drop(admission);
     let route = LocalRouteAuthority::new(registration.endpoint().unwrap()).unwrap();
     let description = route.description().clone();
-    let connector = Arc::new(NativePairingConnector::new(
-        journal.clone(),
-        NativeRouteConnector::new(vec![route], None).unwrap(),
-    ));
-    let origin = Arc::new(NativePairingRuntime::with_adapters(
-        journal.clone(),
-        credentials.clone(),
-        connector.clone(),
-        connector,
-        Arc::new(ProvisionInvalidator),
-        HandshakeConfig::default(),
-    ));
+    let make_origin = |journal: Arc<JournalController>| {
+        let route = LocalRouteAuthority::new(registration.endpoint().unwrap()).unwrap();
+        let connector = Arc::new(NativePairingConnector::new(
+            journal.clone(),
+            NativeRouteConnector::new(vec![route], None).unwrap(),
+        ));
+        Arc::new(NativePairingRuntime::with_adapters(
+            journal,
+            credentials.clone(),
+            connector.clone(),
+            connector,
+            Arc::new(ProvisionInvalidator),
+            HandshakeConfig::default(),
+        ))
+    };
+    let mut origin = make_origin(journal.clone());
     let namespace = CredentialNamespace::new("dev.spaceterm.provision-test".into()).unwrap();
     let scope = |purpose, reference| {
         CredentialScope::new(CredentialScopeParts {
@@ -1446,10 +1811,21 @@ async fn provision_from_receipt(
         .unwrap();
     journal
         .transact(vec![ClientJournalChange::SaveBinding(Box::new(
-            SavedBinding::verified(binding, streams, proof, &Verifier).unwrap(),
+            SavedBinding::verified(binding.clone(), streams, proof, &Verifier).unwrap(),
         ))])
         .await
         .unwrap();
+    let user_binding = Arc::new(std::sync::Mutex::new(None::<OperationBinding>));
+    let served_user_binding = user_binding.clone();
+    let companion_directory = account
+        .reopen()
+        .client_connections_directory()
+        .join("companion");
+    let interrupted_directory = companion_directory.clone();
+    let binding_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let served_binding_ids = binding_ids.clone();
+    let issued_clients = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let served_clients = issued_clients.clone();
     let listener = IpcListener::bind(
         registration.endpoint().unwrap(),
         MessageLimit::envelope(),
@@ -1458,13 +1834,16 @@ async fn provision_from_receipt(
     .unwrap();
     let serving_credentials = credentials.clone();
     let serving_keys = keys.clone();
+    let serving_target = target.clone();
     let (finished, mut finish) = tokio::sync::oneshot::channel();
     let served = tokio::spawn(async move {
+        let target = serving_target;
         let mut next_client = 2;
         let mut version = 1;
         let mut observed = vec![];
         let mut assessments = vec![];
         let mut retained_assessment = None;
+        let mut admitted = std::collections::BTreeMap::<OperationStreamId, u64>::new();
         let mut connection = 0;
         loop {
             let pending = tokio::select! {
@@ -1472,16 +1851,22 @@ async fn provision_from_receipt(
                 _ = &mut finish => break,
             };
             connection += 1;
-            let lookup = Lookup(PairingRecord {
-                principal: Principal {
-                    server: server.bytes(),
-                    device: target.parts().device.bytes(),
-                    pairing: local(pairing.local()),
-                    client: local(original_client.local()),
+            let lookup = ProvisionLookup {
+                record: PairingRecord {
+                    principal: Principal {
+                        server: server.bytes(),
+                        device: target.parts().device.bytes(),
+                        pairing: local(pairing.local()),
+                        client: local(original_client.local()),
+                    },
+                    device_public_key: serving_credentials.authentication.public_key(),
+                    active: true,
                 },
-                device_public_key: serving_credentials.authentication.public_key(),
-                active: true,
-            });
+                issued: std::iter::once(original_client)
+                    .chain(observed.iter().copied())
+                    .collect(),
+                authenticated: std::sync::Mutex::new(original_client),
+            };
             let hello = pending.recv().await.unwrap().unwrap();
             let (handshake, reply) = ServerHandshake::accept(
                 server.bytes(),
@@ -1509,6 +1894,7 @@ async fn provision_from_receipt(
             };
             pending.send(&ready).await.unwrap();
             let transport = pending.finish_authentication().unwrap();
+            let authenticated_client = *lookup.authenticated.lock().unwrap();
             while let Some(bytes) = transport.recv().await.unwrap() {
                 let payload = codec.decode(&bytes).unwrap();
                 macro_rules! respond { ($m:expr, $p:ident, $v:ident) => { match $m.kind {
@@ -1517,6 +1903,9 @@ async fn provision_from_receipt(
                     Some($p::message::Kind::Operation(value)) => {
                         let Some($p::operation::Action::IdentifiedPairing(request)) = value.action else { panic!("identified pairing required") };
                         let id = spaceterm_protocol::pairing_adapter::operation_from_wire(request.operation.as_ref().unwrap()).unwrap();
+                        let high_water = admitted.entry(id.stream()).or_default();
+                        assert_eq!(id.sequence().get(), *high_water + 1, "the server admits a contiguous stream and never repeats a durable operation");
+                        *high_water = id.sequence().get();
                         let mut outcome = $p::PairingOutcome { operation: Some(Box::new(spaceterm_protocol::pairing_adapter::operation_to_wire(id))), ..Default::default() };
                         match request.action.unwrap() {
                             $p::pairing_request::Action::AssessUnpair(value) => {
@@ -1535,23 +1924,53 @@ async fn provision_from_receipt(
                                 let client = ClientId::new(server, next_client).unwrap();
                                 let streams = PairingClientStreams::new(PairingClientStreamsParts { client: ClientRecord { id: client, pairing }, ordinary: OperationStreamId::new(OperationStreamKey::new(server, next_client * 2).unwrap(), pairing, client).unwrap(), self_revocation: OperationStreamId::new(OperationStreamKey::new(server, next_client * 2 + 1).unwrap(), pairing, client).unwrap() }).unwrap();
                                 let receipt = ReceiptCodec::new(pin).sign(PairingReceiptBody::ClientBinding { target, keys: serving_keys.clone(), client: streams, operation: binding, revision: StoreRevision::new(next_client) }, signer.as_ref()).unwrap();
-                                observed.push(client); next_client += 1; version += 1;
-                                outcome.disposition = 3;
-                                outcome.client_binding_receipt = Some(Box::new(spaceterm_protocol::pairing_adapter::receipt_to_wire(&receipt)));
+                                served_binding_ids.lock().unwrap().push(id);
+                                if interruption.stale_binding && served_binding_ids.lock().unwrap().len() == 1 {
+                                    outcome.disposition = 7;
+                                    outcome.classified_failure = spaceterm_protocol::wire::pairing::PairingFailure::PairingStaleAssessment as i32;
+                                    version += 1;
+                                } else {
+                                    observed.push(client); next_client += 1; version += 1;
+                                    served_clients.lock().unwrap().push(client);
+                                    outcome.disposition = 3;
+                                    outcome.client_binding_receipt = Some(Box::new(spaceterm_protocol::pairing_adapter::receipt_to_wire(&receipt)));
+                                    if interruption.companion_save && observed.len() == 2 {
+                                        use std::os::unix::fs::PermissionsExt;
+                                        std::fs::set_permissions(&interrupted_directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+                                    }
+                                }
                             },
                             _ => panic!("unexpected pairing request"),
                         }
                         Payload::$v($p::Message { kind: Some($p::message::Kind::Outcome($p::Outcome { operation: Some(spaceterm_protocol::convert::identity::encode_operation(id)), publication_revision: 2, result: Some($p::outcome::Result::PairingResult(Box::new(outcome))) })) })
                     },
                     Some($p::message::Kind::OperationLookupRequest(value)) => {
-                        let Some(Payload::$v($p::Message { kind: Some($p::message::Kind::Outcome(outcome)) })) = &retained_assessment else { panic!("original assessment outcome required"); };
-                        assert_eq!(value.operation, outcome.operation);
-                        let Some($p::outcome::Result::PairingResult(result)) = &outcome.result else { panic!("pairing result required"); };
-                        assert_eq!(value.request_digest, result.unpair_assessment.as_ref().unwrap().assessment_digest);
-                        Payload::$v($p::Message { kind: Some($p::message::Kind::OperationLookupResult($p::OperationLookupResult { operation: value.operation, request_digest: value.request_digest, disposition: Some($p::operation_lookup_result::Disposition::Completed(Box::new(outcome.clone()))) })) })
+                        let outcome = if let Some(binding) = (*served_user_binding.lock().unwrap()).filter(|binding| value.operation == Some(spaceterm_protocol::convert::identity::encode_operation(binding.id))) {
+                            assert_eq!(value.request_digest, binding.digest.bytes());
+                            admitted.entry(binding.id.stream()).and_modify(|high_water| *high_water = (*high_water).max(binding.id.sequence().get())).or_insert(binding.id.sequence().get());
+                            Some($p::Outcome { operation: value.operation.clone(), publication_revision: 2, result: Some($p::outcome::Result::PairingResult(Box::new($p::PairingOutcome { operation: Some(Box::new(spaceterm_protocol::pairing_adapter::operation_to_wire(binding.id))), disposition: 4, unpair_assessment: Some(Box::new(spaceterm_protocol::wire::pairing::UnpairAssessment { assessment_operation: Some(spaceterm_protocol::pairing_adapter::operation_to_wire(binding.id)), assessment_digest: binding.digest.bytes().to_vec(), target: Some(spaceterm_protocol::pairing_adapter::target_to_wire(&target)), authorization_version: version, clients: vec![spaceterm_protocol::convert::identity::encode_client(original_client)] })), ..Default::default() }))) })
+                        } else if let Some(Payload::$v($p::Message { kind: Some($p::message::Kind::Outcome(outcome)) })) = &retained_assessment {
+                            if value.operation == outcome.operation {
+                                let Some($p::outcome::Result::PairingResult(result)) = &outcome.result else { panic!("pairing result required"); };
+                                assert_eq!(value.request_digest, result.unpair_assessment.as_ref().unwrap().assessment_digest);
+                                Some(outcome.clone())
+                            } else { None }
+                        } else { None };
+                        let disposition = outcome.map(|outcome| $p::operation_lookup_result::Disposition::Completed(Box::new(outcome)))
+                            .unwrap_or_else(|| {
+                                let id = spaceterm_protocol::convert::identity::decode_operation(value.operation.as_ref().unwrap()).unwrap();
+                                let expected = admitted.get(&id.stream()).copied().unwrap_or(0) + 1;
+                                if id.sequence().get() > expected {
+                                    $p::operation_lookup_result::Disposition::SequenceGap(expected)
+                                } else {
+                                    assert_eq!(id.sequence().get(), expected, "completed operations require their retained original outcome");
+                                    $p::operation_lookup_result::Disposition::NeverAdmitted(true)
+                                }
+                            });
+                        Payload::$v($p::Message { kind: Some($p::message::Kind::OperationLookupResult($p::OperationLookupResult { operation: value.operation, request_digest: value.request_digest, disposition: Some(disposition) })) })
                     },
                     Some($p::message::Kind::Acknowledgement(value)) => {
-                        let (stream, through) = spaceterm_protocol::convert::operations::$p::decode_acknowledgement(&value, pairing, original_client).unwrap();
+                        let (stream, through) = spaceterm_protocol::convert::operations::$p::decode_acknowledgement(&value, pairing, authenticated_client).unwrap();
                         // Delay server confirmation so provisioning must wait for
                         // the originating journal's durable confirmed prefix.
                         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -1596,25 +2015,408 @@ async fn provision_from_receipt(
                 if lose_first_acknowledgement && connection == 1 && binding_acknowledgement {
                     continue;
                 }
-                transport
+                if transport
                     .send(&codec.encode(&response).unwrap())
                     .await
-                    .unwrap();
+                    .is_err()
+                {
+                    assert!(
+                        matches!(
+                            response,
+                            Payload::Major1(v1::Message {
+                                kind: Some(v1::message::Kind::AcknowledgementConfirmation(_))
+                            }) | Payload::Major2(v2::Message {
+                                kind: Some(v2::message::Kind::AcknowledgementConfirmation(_))
+                            })
+                        ),
+                        "only final acknowledgement confirmation may race an interrupted receiver's disconnect"
+                    );
+                    break;
+                }
             }
         }
         listener.close().unwrap();
         (observed, assessments)
     });
-    let consumer = Arc::try_unwrap(provider.cli_consumer())
-        .ok()
-        .unwrap()
-        .with_credentials(credentials.clone());
+    let consumer = Arc::new(
+        Arc::try_unwrap(provider.cli_consumer())
+            .ok()
+            .unwrap()
+            .with_credentials(credentials.clone()),
+    );
+    let orphan = if interruption.metadata_fault.is_some() {
+        let fault = pause.take().unwrap();
+        fault.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(consumer.provision_consumers(origin.clone()).await.is_err());
+        assert!(binding_ids.lock().unwrap().is_empty());
+        let operation = fault.committed.borrow().unwrap();
+        let receiver = journal.snapshot().unwrap().receiver_bindings()[0].clone();
+        assert_eq!(receiver.operation.id, operation);
+        drop(origin);
+        drop(journal);
+        drop(fault);
+        journal = controller(&origin_directory, false).await;
+        assert_eq!(journal.snapshot().unwrap().receiver_bindings(), &[receiver]);
+        origin = make_origin(journal.clone());
+        // Explicit account recovery must replay the original filesystem phase
+        // before checking receiver ownership, then refuse suppression of its origin.
+        use spaceterm_client_native::cli::bindings::PairingCommandBindings;
+        let invocation = spaceterm_client_native::cli::arguments::parse(
+            [
+                "pair",
+                "enroll",
+                "--recover-account",
+                "--server-fingerprint",
+                &spaceterm_client_native::cli::output::hex(&pin.public_key),
+            ]
+            .into_iter()
+            .map(std::ffi::OsString::from),
+        )
+        .unwrap();
+        let spaceterm_client_native::cli::arguments::CliCommand::PairEnroll { fingerprint, .. } =
+            invocation.command
+        else {
+            panic!("pair enroll required");
+        };
+        assert!(matches!(
+            consumer
+                .enroll(
+                    fingerprint,
+                    true,
+                    spaceterm_host::native_management::SudoMode::NonInteractive,
+                    &mut RepeatPairIo
+                )
+                .await,
+            Err(spaceterm_client::management_cli::ManagementFailure::OutcomePending)
+        ));
+        assert!(binding_ids.lock().unwrap().is_empty());
+        assert!(
+            journal.ordinary_use_allowed(&binding).unwrap(),
+            "account recovery cannot suppress an unfinished receiver's exact origin"
+        );
+        let admission = account.reopen().admit_client_provisioning()
+                .expect("deliberate retry must recover the original fixed receiver metadata publication before ordinary directory admission");
+        let bytes = admission.provisioning_attempt("cli").unwrap().unwrap();
+        let marker: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            marker["phase"]["Binding"]["operation"],
+            serde_json::to_value(operation).unwrap()
+        );
+        Some(operation)
+    } else if interruption.refuse_binding_prepare {
+        let fault = pause.take().unwrap();
+        fault.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(consumer.provision_consumers(origin.clone()).await.is_err());
+        assert!(binding_ids.lock().unwrap().is_empty());
+        drop(origin);
+        drop(journal);
+        drop(fault);
+        journal = controller(&origin_directory, false).await;
+        assert!(
+            journal
+                .snapshot()
+                .unwrap()
+                .operations()
+                .iter()
+                .all(|record| !matches!(
+                    spaceterm_core::operation_ledger_contracts::CanonicalOperationRequest::decode(
+                        &record.request,
+                        &CanonicalCodec,
+                    )
+                    .unwrap()
+                    .command(),
+                    Command::Pairing(PairingCommand::BindAdditionalClient { .. })
+                ))
+        );
+        origin = make_origin(journal.clone());
+        None
+    } else if let Some(pause) = &pause {
+        let mut committed = pause.committed.subscribe();
+        let mut revisions = journal.revisions();
+        pause.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let interrupted = {
+            let consumer = consumer.clone();
+            let origin = origin.clone();
+            tokio::spawn(async move { consumer.provision_consumers(origin).await })
+        };
+        tokio::time::timeout(Duration::from_secs(5), committed.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let operation = committed.borrow_and_update().unwrap();
+        interrupted.abort();
+        assert!(interrupted.await.unwrap_err().is_cancelled());
+        pause.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while journal.snapshot().unwrap().operation(operation).is_none() {
+                revisions.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let admission = provider
+            .management()
+            .supervisor()
+            .admit_client_provisioning()
+            .unwrap();
+        assert_eq!(
+            admission.provisioning_attempt("cli").unwrap().is_some(),
+            interruption.orphan_binding,
+        );
+        drop(admission);
+        let receiving = controller(
+            &account.reopen().client_connections_directory().join("cli"),
+            false,
+        )
+        .await;
+        assert!(receiving.snapshot().unwrap().bindings().is_empty());
+        drop(receiving);
+        assert!(binding_ids.lock().unwrap().is_empty());
+        Some(operation)
+    } else {
+        None
+    };
+    if interruption.identical_user_binding {
+        let operation = OperationId::new(
+            journal.snapshot().unwrap().bindings()[0]
+                .streams()
+                .parts()
+                .ordinary,
+            OperationSequence::new(2).unwrap(),
+        );
+        let (claim_digest, _) = spaceterm_protocol::pairing_adapter::client_binding_claim(
+            &target,
+            FieldVersion::new(1),
+            operation,
+        )
+        .unwrap();
+        let request = spaceterm_core::operation_ledger_contracts::CanonicalOperationRequest::new(
+            operation,
+            Command::Pairing(PairingCommand::BindAdditionalClient {
+                target: target.clone(),
+                expected_authorization_version: FieldVersion::new(1),
+                claim_digest,
+            }),
+            &CanonicalCodec,
+        )
+        .unwrap();
+        journal
+            .transact(vec![ClientJournalChange::Prepare(
+                spaceterm_client::journal::JournalOperation {
+                    binding: request.binding(),
+                    request: request.encode(&CanonicalCodec).unwrap(),
+                    workspace: None,
+                    reserves_grant: false,
+                    cleanup: false,
+                    state: spaceterm_client::journal::RetainedOperationState::Pending,
+                },
+            )])
+            .await
+            .unwrap();
+        assert!(journal.snapshot().unwrap().receiver_bindings().is_empty());
+        assert!(matches!(
+            consumer.provision_consumers(origin.clone()).await,
+            Err(spaceterm_client::management_cli::ManagementFailure::OutcomePending)
+        ));
+        assert!(
+            binding_ids.lock().unwrap().is_empty(),
+            "identical command bytes are not receiver ownership"
+        );
+        assert!(matches!(
+            journal
+                .snapshot()
+                .unwrap()
+                .operation(operation)
+                .unwrap()
+                .state,
+            spaceterm_client::journal::RetainedOperationState::Pending
+        ));
+        let _ = finished.send(());
+        served.await.unwrap();
+        return;
+    }
+    if interruption.user_assessment {
+        use std::os::unix::fs::PermissionsExt;
+        // Refuse the originating journal write before allocation. After restart,
+        // the user's command must be free to take the still-unallocated ID.
+        std::fs::set_permissions(&origin_directory, std::fs::Permissions::from_mode(0o500))
+            .unwrap();
+        let failed_preparation = consumer.provision_consumers(origin.clone()).await;
+        std::fs::set_permissions(&origin_directory, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        assert!(failed_preparation.is_err());
+        assert!(binding_ids.lock().unwrap().is_empty());
+        drop(origin);
+        drop(journal);
+        journal = controller(&origin_directory, false).await;
+        origin = make_origin(journal.clone());
+    }
+    let user_tracker = spaceterm_client::operations::OperationTracker::new(journal.clone());
+    let user_ticket = if interruption.user_assessment || interruption.refuse_binding_prepare {
+        let ticket = user_tracker
+            .submit(
+                &binding,
+                Command::Pairing(PairingCommand::AssessUnpair {
+                    target: target.clone(),
+                }),
+                None,
+                &PendingAssessmentPeer,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            ticket.id().sequence().get(),
+            if interruption.refuse_binding_prepare {
+                2
+            } else {
+                1
+            },
+            "failed preparation must not have allocated an operation"
+        );
+        *user_binding.lock().unwrap() = Some(ticket.binding());
+        Some(ticket)
+    } else {
+        None
+    };
     if lose_first_assessment {
         assert!(matches!(
             consumer.provision_consumers(origin.clone()).await,
             Err(spaceterm_client::management_cli::ManagementFailure::Offline)
         ));
-        assert_eq!(journal.snapshot().unwrap().operations().len(), 1);
+        if let Some(ticket) = &user_ticket {
+            assert!(
+                journal
+                    .snapshot()
+                    .unwrap()
+                    .operation(ticket.id())
+                    .is_some_and(|record| matches!(
+                        record.state,
+                        spaceterm_client::journal::RetainedOperationState::Completed {
+                            consumed: false,
+                            ..
+                        }
+                    )),
+                "journal reconciliation must preserve the user's original assessment result for independent recovery"
+            );
+        }
+        assert_eq!(
+            journal.snapshot().unwrap().operations().len(),
+            if interruption.user_assessment { 2 } else { 1 }
+        );
+    }
+    if let Some(ticket) = user_ticket
+        .as_ref()
+        .filter(|_| !interruption.refuse_binding_prepare)
+    {
+        let assessment = UnpairAssessment::new(UnpairAssessmentParts {
+            reference: AssessmentRef {
+                operation: ticket.id(),
+                digest: ticket.binding().digest,
+            },
+            target: target.clone(),
+            authorization_version: FieldVersion::new(1),
+            clients: vec![ClientRecord {
+                id: original_client,
+                pairing,
+            }],
+        })
+        .unwrap();
+        user_tracker
+            .resolve_bound(
+                ticket.binding(),
+                OperationLookup::Completed {
+                    result: Outcome::Pairing(Box::new(PairingOutcome::UnpairAssessed(
+                        assessment.clone(),
+                    ))),
+                    publication_revision: OrganizationRevision::new(2),
+                },
+                &PendingAssessmentPeer,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(ticket.status().borrow().clone(), spaceterm_client::operations::OperationStatus::Completed { outcome: Outcome::Pairing(value), .. } if *value == PairingOutcome::UnpairAssessed(assessment))
+        );
+    }
+    if interruption.companion_save {
+        use spaceterm_client_native::cli::bindings::PairingCommandBindings;
+        use std::os::unix::fs::PermissionsExt;
+        let first = consumer.provision_consumers(origin.clone()).await;
+        std::fs::set_permissions(&companion_directory, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        assert!(
+            first.is_err(),
+            "companion receipt persistence must be interrupted"
+        );
+        assert_eq!(binding_ids.lock().unwrap().len(), 2);
+        let interrupted = journal.snapshot().unwrap();
+        let companion_operation = binding_ids.lock().unwrap()[1];
+        assert!(matches!(
+            interrupted.operation(companion_operation).unwrap().state,
+            spaceterm_client::journal::RetainedOperationState::Completed {
+                consumed: false,
+                ..
+            }
+        ));
+        let clients_before = issued_clients.lock().unwrap().clone();
+        let invocation = spaceterm_client_native::cli::arguments::parse(
+            [
+                "pair",
+                "enroll",
+                "--server-fingerprint",
+                &spaceterm_client_native::cli::output::hex(&pin.public_key),
+            ]
+            .into_iter()
+            .map(std::ffi::OsString::from),
+        )
+        .unwrap();
+        let spaceterm_client_native::cli::arguments::CliCommand::PairEnroll { fingerprint, .. } =
+            invocation.command
+        else {
+            panic!("pair enroll required");
+        };
+        assert!(
+            matches!(
+                consumer
+                    .enroll(
+                        fingerprint,
+                        false,
+                        spaceterm_host::native_management::SudoMode::NonInteractive,
+                        &mut RepeatPairIo
+                    )
+                    .await,
+                Err(spaceterm_client::management_cli::ManagementFailure::OutcomePending)
+            ),
+            "a different origin must not replace the desktop companion operation"
+        );
+        assert_eq!(*issued_clients.lock().unwrap(), clients_before);
+        assert_eq!(binding_ids.lock().unwrap().len(), 2);
+        let receiving = controller(&companion_directory, false).await;
+        assert!(receiving.snapshot().unwrap().bindings().is_empty());
+    }
+    if interruption.stale_binding {
+        assert!(matches!(
+            consumer.provision_consumers(origin.clone()).await,
+            Err(spaceterm_client::management_cli::ManagementFailure::StaleAssessment)
+        ));
+        let rejected = binding_ids.lock().unwrap()[0];
+        let state = journal.snapshot().unwrap();
+        assert!(
+            matches!(
+                state.operation(rejected).map(|record| &record.state),
+                None | Some(
+                    spaceterm_client::journal::RetainedOperationState::Completed {
+                        consumed: true,
+                        ..
+                    }
+                )
+            ),
+            "the terminal server rejection must be consumed before surfacing it"
+        );
+        assert!(
+            state.stream(rejected.stream()).unwrap().confirmed_prefix >= rejected.sequence().get(),
+            "the original rejection must be acknowledged before a fresh deliberate retry"
+        );
     }
     if lose_first_acknowledgement {
         assert!(matches!(
@@ -1637,13 +2439,70 @@ async fn provision_from_receipt(
         );
     }
     let cli = consumer.provision_consumers(origin.clone()).await.unwrap();
+    if interruption.orphan_binding || interruption.metadata_fault.is_some() {
+        assert_eq!(binding_ids.lock().unwrap()[0], orphan.unwrap());
+    } else if let Some(operation) = orphan {
+        assert!(
+            matches!(
+                journal
+                    .snapshot()
+                    .unwrap()
+                    .operation(operation)
+                    .unwrap()
+                    .state,
+                spaceterm_client::journal::RetainedOperationState::Completed {
+                    consumed: false,
+                    ..
+                }
+            ),
+            "unassigned predecessor recovery must retain its original result without claiming it for provisioning"
+        );
+    }
+    if let Some(ticket) = &user_ticket {
+        assert!(matches!(
+            journal
+                .snapshot()
+                .unwrap()
+                .operation(ticket.id())
+                .unwrap()
+                .state,
+            spaceterm_client::journal::RetainedOperationState::Completed {
+                consumed: false,
+                ..
+            }
+        ));
+    }
     let _ = finished.send(());
     let (observed, assessments) = served.await.unwrap();
     assert_eq!(
         assessments.len(),
-        3,
-        "receipt recovery must not replace the original assessment"
+        if interruption.stale_binding || interruption.orphan_assessment {
+            4
+        } else {
+            3
+        },
+        "assigned assessment recovery keeps its ID; unassigned predecessors and rejected bindings require a fresh provisioning assessment"
     );
+    assert_eq!(
+        assessments
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        assessments.len()
+    );
+    {
+        let ids = binding_ids.lock().unwrap();
+        assert_eq!(ids.len(), if interruption.stale_binding { 4 } else { 3 });
+        assert_eq!(
+            ids.iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            ids.len(),
+            "a terminal rejection must never replay its binding operation"
+        );
+    }
     assert_eq!(observed.len(), 3);
     assert_eq!(cli, observed[0]);
     let mut identities = std::collections::BTreeSet::from([original_client]);
@@ -1658,6 +2517,15 @@ async fn provision_from_receipt(
         assert!(!saved.additional_client_acknowledgement_pending());
         let binding = saved.binding().unwrap();
         assert_eq!(binding.target().client(), observed[index]);
+        let PairingReceiptBody::ClientBinding { operation, .. } = &saved.proof().parts().claims
+        else {
+            panic!("server-issued Client receipt required");
+        };
+        assert_eq!(
+            operation.id,
+            binding_ids.lock().unwrap()[index + usize::from(interruption.stale_binding)],
+            "repair must retain the receiver's original server-issued operation"
+        );
         assert!(identities.insert(binding.target().client()));
         assert!(receiving.ordinary_use_allowed(&binding).unwrap());
         if name == "management" {

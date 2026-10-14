@@ -33,9 +33,8 @@ impl Directory {
         let parent = if cfg!(target_os = "linux") {
             PathBuf::from("/var/tmp")
         } else {
-            std::env::var_os("CARGO_TARGET_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+            // Native runtime fixtures must also fit Darwin's Unix socket limit.
+            PathBuf::from("/private/tmp")
         };
         std::fs::create_dir_all(&parent).unwrap();
         let path = parent.canonicalize().unwrap().join(format!(

@@ -83,38 +83,6 @@ impl ManagementOperations {
             .submit(&self.binding, command, None, self)
             .await
     }
-    pub fn next_operation(&self) -> Result<OperationId, ClientFailure> {
-        let state = self.tracker.journal().snapshot()?;
-        let saved = state
-            .bindings()
-            .iter()
-            .find(|saved| saved.binding().as_ref() == Ok(&self.binding))
-            .ok_or_else(invalid)?;
-        let stream = saved.streams().parts().ordinary;
-        let sequence = state
-            .stream(stream)
-            .ok_or_else(invalid)?
-            .high_water
-            .checked_add(1)
-            .ok_or_else(invalid)?;
-        Ok(OperationId::new(
-            stream,
-            OperationSequence::new(sequence).map_err(|_| invalid())?,
-        ))
-    }
-    pub async fn submit_additional_client(
-        &self,
-        proof: spaceterm_client::pairing::enrollment::AdditionalClientProof,
-    ) -> Result<OperationTicket, ClientFailure> {
-        let command = Command::Pairing(proof.command().clone());
-        let peer = AdditionalClientPeer {
-            operations: self,
-            proof,
-        };
-        self.tracker
-            .submit(&self.binding, command, None, &peer)
-            .await
-    }
     pub async fn resolve_additional_client(
         &self,
         proof: spaceterm_client::pairing::enrollment::AdditionalClientProof,

@@ -66,12 +66,14 @@ pub trait RuntimeClientIdentity: Send + Sync {
 pub struct NativeRuntimeIdentity {
     journal: Option<Arc<JournalController>>,
     credentials: Arc<dyn NativeDeviceCredentials>,
+    supervisor: Option<spaceterm_host::account_service::ServiceSupervisor>,
 }
 impl Default for NativeRuntimeIdentity {
     fn default() -> Self {
         Self {
             journal: None,
             credentials: Arc::new(DeviceCredentials::native()),
+            supervisor: None,
         }
     }
 }
@@ -85,7 +87,17 @@ impl NativeRuntimeIdentity {
         Self {
             journal: Some(journal),
             credentials,
+            supervisor: None,
         }
+    }
+    /// Retains the same account/build owner for recovery admission. This reads
+    /// intent only; it cannot enroll, authorize or change service state.
+    pub fn with_supervisor(
+        mut self,
+        supervisor: spaceterm_host::account_service::ServiceSupervisor,
+    ) -> Self {
+        self.supervisor = Some(supervisor);
+        self
     }
     /// The enrollment owner can provision this explicit native Client directory.
     /// Ordinary lifecycle observation only opens it if it already exists.
@@ -136,6 +148,22 @@ impl RuntimeClientIdentity for NativeRuntimeIdentity {
         registration: &'a RegisteredServer,
     ) -> ServiceFuture<'a, RuntimeClientAccess> {
         Box::pin(async move {
+            let supervisor = match &self.supervisor {
+                Some(supervisor) => Some(supervisor.clone()),
+                None if self.journal.is_none() => Some(
+                    spaceterm_host::account_service::ServiceSupervisor::current(None)?,
+                ),
+                // Explicit journals may belong to a caller paired with a foreign
+                // account. Its credential custody is not the guest's native UID.
+                None => None,
+            };
+            if let Some(supervisor) = supervisor {
+                if supervisor.key() != registration.key() {
+                    return Err(ServiceFailure::IdentityMismatch);
+                }
+                super::consumer::require_account_recovery(&supervisor)
+                    .map_err(|_| ServiceFailure::AuthorizationUnavailable)?;
+            }
             let journal = self.journal(registration).await?;
             let bindings = journal.recover_bindings().await.map_err(client_failure)?;
             let binding = bindings
@@ -168,6 +196,43 @@ impl RuntimeClientIdentity for NativeRuntimeIdentity {
         })
     }
 }
+/// The native lifecycle owner fences its own account recovery without changing
+/// the injected caller's canonical journal or native credential custody.
+pub(super) struct RecoveryGuardedIdentity {
+    supervisor: spaceterm_host::account_service::ServiceSupervisor,
+    identity: Arc<dyn RuntimeClientIdentity>,
+}
+impl RecoveryGuardedIdentity {
+    pub(super) fn new(
+        supervisor: spaceterm_host::account_service::ServiceSupervisor,
+        identity: Arc<dyn RuntimeClientIdentity>,
+    ) -> Self {
+        Self {
+            supervisor,
+            identity,
+        }
+    }
+}
+impl RuntimeClientIdentity for RecoveryGuardedIdentity {
+    fn access<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+    ) -> ServiceFuture<'a, RuntimeClientAccess> {
+        Box::pin(async move {
+            if self.supervisor.key() == registration.key()
+                && self
+                    .supervisor
+                    .discover()?
+                    .is_some_and(|local| local.server_pin() == registration.server_pin())
+            {
+                super::consumer::require_account_recovery(&self.supervisor)
+                    .map_err(|_| ServiceFailure::AuthorizationUnavailable)?;
+            }
+            self.identity.access(registration).await
+        })
+    }
+}
+
 struct PinnedReceipts;
 impl ReceiptVerifier for PinnedReceipts {
     fn verify(
