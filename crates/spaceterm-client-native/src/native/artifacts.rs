@@ -208,6 +208,16 @@ impl ServerArtifacts {
         version: Option<&StableVersion>,
     ) -> Result<VerifiedAccountServerFeed, ManagementFailure> {
         let platform = platform()?;
+        self.check_target_with_key(key, build, platform, version)
+    }
+
+    fn check_target_with_key(
+        &self,
+        key: &UpdateKey,
+        build: BuildIdentity,
+        platform: ServerPlatform,
+        version: Option<&StableVersion>,
+    ) -> Result<VerifiedAccountServerFeed, ManagementFailure> {
         let channel = channel(build);
         let url = feed_url(platform, channel, version);
         let feed = self.download(&url, MAX_FEED_BYTES)?;
@@ -229,7 +239,19 @@ impl ServerArtifacts {
         build: BuildIdentity,
         version: Option<&StableVersion>,
     ) -> Result<VerifiedAccountServerArtifact, ManagementFailure> {
-        let feed = self.check(build, version)?;
+        self.download_for_target(build, platform()?, version)
+    }
+
+    /// Selects a remote platform established by the retained read-only SSH probe.
+    /// The byte source cannot replace embedded Ed25519 signing authority.
+    pub fn download_for_target(
+        &self,
+        build: BuildIdentity,
+        platform: ServerPlatform,
+        version: Option<&StableVersion>,
+    ) -> Result<VerifiedAccountServerArtifact, ManagementFailure> {
+        let key = UpdateKey::release().ok_or(ManagementFailure::UnsafeNativeState)?;
+        let feed = self.check_target_with_key(&key, build, platform, version)?;
         let document = feed.document();
         let url = format!(
             "{RELEASES}/download/v{}/{}",

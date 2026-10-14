@@ -1104,3 +1104,5 @@ async fn desktop_explicit_repair_publishes_new_incarnation_after_old_binding_sup
         &[prepared.local_pairing]
     );
 }
+
+mod bootstrap_tests;

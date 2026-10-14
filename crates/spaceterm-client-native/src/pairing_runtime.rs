@@ -159,6 +159,29 @@ impl NativePairingRuntime {
         runtime
     }
 
+    /// Shares the application's ordinary SSH owner and retains its exact enrollment capture.
+    pub fn with_shared_routes(
+        journal: Arc<JournalController>,
+        routes: Arc<NativeRouteConnector>,
+        invalidator: Arc<dyn LocalUseInvalidator>,
+        config: HandshakeConfig,
+    ) -> Self {
+        let connector = Arc::new(NativePairingConnector::with_shared_routes(
+            journal.clone(),
+            routes,
+        ));
+        let mut runtime = Self::with_adapters(
+            journal,
+            Arc::new(DeviceCredentials::native()),
+            connector.clone(),
+            connector.clone(),
+            invalidator,
+            config,
+        );
+        runtime.native_connector = Some(connector);
+        runtime
+    }
+
     /// Injection is confined to native credential and transport boundaries.
     /// The portable journal, receipts, enrollment driver and scheduler stay real.
     pub fn with_adapters(
@@ -193,6 +216,10 @@ impl NativePairingRuntime {
             invalidator,
             majors: config.majors,
         }
+    }
+
+    pub(crate) fn shared_credentials(&self) -> SharedCredentials {
+        self.credentials.clone()
     }
 
     pub fn journal(&self) -> &Arc<JournalController> {
@@ -397,6 +424,31 @@ impl NativePairingRuntime {
         prepared: &PreparedEnrollment,
         route: RouteDescription,
     ) -> Result<(), PairingFailure> {
+        self.prepare_route_inner(prepared, route, None).await
+    }
+
+    /// Retains the locally owned configuration of an already authenticated SSH
+    /// session. The caller supplies its immutable capture, never remote data.
+    /// Binding and capture commit together without rereading a mutable alias.
+    pub async fn prepare_route_with_capture(
+        &self,
+        prepared: &PreparedEnrollment,
+        route: RouteDescription,
+        capture: spaceterm_client::journal::JournalSshCapture,
+    ) -> Result<(), PairingFailure> {
+        if !matches!(route.parts(), spaceterm_client::api::RouteParts::Ssh { .. }) {
+            return Err(PairingFailure::RouteChanged);
+        }
+        self.prepare_route_inner(prepared, route, Some(capture))
+            .await
+    }
+
+    async fn prepare_route_inner(
+        &self,
+        prepared: &PreparedEnrollment,
+        route: RouteDescription,
+        capture: Option<spaceterm_client::journal::JournalSshCapture>,
+    ) -> Result<(), PairingFailure> {
         prepared.validate()?;
         let state = self.journal.snapshot().map_err(classify)?;
         let slot = state
@@ -436,34 +488,106 @@ impl NativePairingRuntime {
                             && binding.target().route() == &route
                     })
                 });
-            if exact_route {
-                // Capturing can fail after the route commit. While still preparing,
-                // retry that exact capture rather than mistaking the route for it.
-                if slot.ssh_capture.is_none()
-                    && slot.route.is_some()
-                    && let Some(connector) = &self.native_connector
-                {
-                    connector
-                        .capture_route(prepared.credential.scope.reference())
-                        .await?;
+            if !exact_route {
+                return Err(PairingFailure::RouteChanged);
+            }
+            if let Some(capture) = capture {
+                match &slot.ssh_capture {
+                    Some(original) if original == &capture => return Ok(()),
+                    Some(_) => return Err(PairingFailure::RouteChanged),
+                    None if slot.route.is_none() => return Err(PairingFailure::RouteChanged),
+                    None => {}
                 }
+                self.commit_captured_route(
+                    prepared,
+                    route,
+                    capture.clone(),
+                    vec![ClientJournalChange::CaptureRestrictedSsh {
+                        reference: prepared.credential.scope.reference(),
+                        capture,
+                    }],
+                )
+                .await?;
                 return Ok(());
             }
+            // Capturing can fail after the ordinary route commit. Retry only
+            // during preparation, before that route becomes a saved target.
+            if slot.ssh_capture.is_none()
+                && slot.route.is_some()
+                && let Some(connector) = &self.native_connector
+            {
+                connector
+                    .capture_route(prepared.credential.scope.reference())
+                    .await?;
+            }
+            return Ok(());
+        }
+        if slot.route_reference.is_some() {
             return Err(PairingFailure::RouteChanged);
         }
-        self.journal
-            .transact(vec![ClientJournalChange::BindCredentialRoute {
+        let mut changes = vec![ClientJournalChange::BindCredentialRoute {
+            reference: prepared.credential.scope.reference(),
+            route_reference: prepared.route,
+            route: route.clone(),
+        }];
+        if let Some(capture) = capture {
+            changes.push(ClientJournalChange::CaptureRestrictedSsh {
                 reference: prepared.credential.scope.reference(),
-                route_reference: prepared.route,
-                route,
-            }])
-            .await
-            .map_err(classify)?;
-        if let Some(connector) = &self.native_connector {
-            connector
-                .capture_route(prepared.credential.scope.reference())
+                capture: capture.clone(),
+            });
+            self.commit_captured_route(prepared, route, capture, changes)
                 .await?;
+        } else {
+            self.journal.transact(changes).await.map_err(classify)?;
+            if let Some(connector) = &self.native_connector {
+                connector
+                    .capture_route(prepared.credential.scope.reference())
+                    .await?;
+            }
         }
+        Ok(())
+    }
+
+    async fn commit_captured_route(
+        &self,
+        prepared: &PreparedEnrollment,
+        route: RouteDescription,
+        capture: spaceterm_client::journal::JournalSshCapture,
+        changes: Vec<ClientJournalChange>,
+    ) -> Result<(), PairingFailure> {
+        let reference = prepared.credential.scope.reference();
+        let route_reference = prepared.route;
+        let conflict = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let detected = conflict.clone();
+        self.journal
+            .update(move |state| {
+                let changed = || {
+                    detected.store(true, std::sync::atomic::Ordering::Release);
+                    ClientFailure::new(ClientFailureClass::StaleAuthority)
+                };
+                let projection = state.pairing();
+                let slot = projection.slot(reference).ok_or_else(changed)?;
+                // The snapshot above can precede another route admission. Check
+                // immutable comparison metadata again inside the serial owner.
+                if !projection.credential_preparations().contains(&reference)
+                    || slot
+                        .route_reference
+                        .is_some_and(|old| old != route_reference)
+                    || slot.route.as_ref().is_some_and(|old| old != &route)
+                    || slot.ssh_capture.as_ref().is_some_and(|old| old != &capture)
+                {
+                    return Err(changed());
+                }
+                Ok((changes, ()))
+            })
+            .await
+            .map_err(|failure| {
+                if conflict.load(std::sync::atomic::Ordering::Acquire) {
+                    PairingFailure::RouteChanged
+                } else {
+                    classify(failure)
+                }
+            })?;
         Ok(())
     }
 
@@ -795,7 +919,7 @@ impl NativePairingRuntime {
 }
 
 #[derive(Clone)]
-struct SharedCredentials(Arc<dyn NativeDeviceCredentials>);
+pub(crate) struct SharedCredentials(Arc<dyn NativeDeviceCredentials>);
 impl NativeDeviceCredentials for SharedCredentials {
     fn create(
         &self,
