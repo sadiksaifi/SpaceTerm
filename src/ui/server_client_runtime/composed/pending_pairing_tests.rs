@@ -808,7 +808,7 @@ fn restart_without_connections_completes_revocation(major: u32, cx: &mut TestApp
     assert!(registry.servers().is_empty());
     assert!(
         runtime
-            .read_with(&mut restarted, |runtime, _| runtime.servers())
+            .read_with(&restarted, |runtime, _| runtime.servers())
             .is_empty()
     );
     assert!(h.snapshot(&mut restarted).servers.is_empty());
@@ -1476,7 +1476,7 @@ fn production_pending_only_ipc_restart(
         NativeIpcRestart::PendingOnly | NativeIpcRestart::MissingRuntimeDirectory => {
             assert!(
                 runtime
-                    .read_with(&mut restarted, |runtime, _| runtime.servers())
+                    .read_with(&restarted, |runtime, _| runtime.servers())
                     .is_empty()
             );
             assert_eq!(
@@ -1485,7 +1485,7 @@ fn production_pending_only_ipc_restart(
             );
         }
         NativeIpcRestart::NewerWssPairing => {
-            let servers = runtime.read_with(&mut restarted, |runtime, _| runtime.servers());
+            let servers = runtime.read_with(&restarted, |runtime, _| runtime.servers());
             assert_eq!(servers.len(), 1);
             assert_eq!(servers[0].server, newer.binding.target().server());
             assert!(
