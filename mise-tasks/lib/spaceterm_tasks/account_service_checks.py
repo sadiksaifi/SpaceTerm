@@ -29,9 +29,10 @@ GATES = {
     "vertical": {
         "spaceterm-server": (
             "authenticated_local_vertical",
-            "two_client_control",
-            "terminal_resources_wss",
+            "authenticated_route_equivalence",
+            "production_listeners",
         ),
+        "spaceterm-terminal": ("geometry_admission",),
     },
     # Real keys, SQLite, IPC and shell startup. Only service-manager and
     # authorization boundaries use fixtures; no installed service is touched.
@@ -105,12 +106,33 @@ def test_gate(name):
         for target in targets:
             if name == "account" and target == "pty_inheritance" and sys.platform != "darwin":
                 continue
-            command = ["cargo", "test", "--quiet", "--locked", "-p", package, "--test", target]
+            command = ["cargo", "test", "--quiet", "--locked", "-p", package]
+            if package == "spaceterm-client-native" and target == "bootstrap":
+                # The native provider suite lives in the library, not tests/bootstrap.rs.
+                command.extend(("--lib", "bootstrap::"))
+            else:
+                command.extend(("--test", target))
             if name in {"account", "update", "startup"}:
                 command.extend(("--features", "test-support"))
-            output = native.run_tool(
-                command, cwd=ROOT, environment=environment, timeout=300, maximum=1024 * 1024
-            )
+            elif package == "spaceterm-terminal":
+                command.extend(("--features", "runtime"))
+            try:
+                output = native.run_tool(
+                    command, cwd=ROOT, environment=environment, timeout=300, maximum=1024 * 1024
+                )
+            except TaskError as error:
+                classification = str(error)
+                if classification not in {
+                    "tool-failed",
+                    "tool-timeout",
+                    "tool-output-limit",
+                    "tool-cleanup-unresolved",
+                    "child-ownership-unavailable",
+                }:
+                    classification = "tool-failed"
+                raise TaskError(
+                    f"package={package} target={target} classification={classification}"
+                ) from None
             count = require_nonempty(output)
             total += count
             target_count += 1
