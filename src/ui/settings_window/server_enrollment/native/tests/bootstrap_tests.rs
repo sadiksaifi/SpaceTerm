@@ -247,6 +247,8 @@ struct Remote {
     lost_ack_channels: AtomicUsize,
     fail_owner_binding: AtomicBool,
     owner_authorizations: Arc<AtomicUsize>,
+    owner_helpers: Arc<AtomicUsize>,
+    failed_owner_exit: Mutex<Option<Arc<OwnerExit>>>,
     prompt_allowed: AtomicBool,
     start_during_prompt: AtomicBool,
     prompt_count: AtomicUsize,
@@ -539,13 +541,29 @@ impl BootstrapRemoteConnection for Remote {
                 uid,
             };
             let supervisor = self.supervisor.clone();
+            self.owner_helpers.fetch_add(1, Ordering::SeqCst);
+            let helper = OwnerHelper(self.owner_helpers.clone());
+            let exit = if ack_failure == Some(1) {
+                self.failed_owner_exit.lock().unwrap().take()
+            } else {
+                None
+            };
             let task = tokio::spawn(async move {
+                let _helper = helper;
                 let result =
                     spaceterm_server::deployment::owner::execute(supervisor, &server).await;
                 if lost_reply {
                     assert!(result.is_err());
                 } else if ack_failure.is_none() {
-                    result.unwrap();
+                    assert!(
+                        result.is_ok(),
+                        "owner exchange failed: {result:?}; sent frames: {}",
+                        server.frame_count.load(Ordering::SeqCst),
+                    );
+                }
+                if let Some(exit) = exit {
+                    exit.entered.notify_one();
+                    exit.release.notified().await;
                 }
             });
             Ok(Arc::new(Channel {
@@ -635,6 +653,17 @@ impl BootstrapRemoteConnection for Remote {
             self.manager.linger_enabled.store(true, Ordering::SeqCst);
             Ok(())
         })
+    }
+}
+#[derive(Default)]
+struct OwnerExit {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+struct OwnerHelper(Arc<AtomicUsize>);
+impl Drop for OwnerHelper {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 struct Channel {
@@ -822,6 +851,8 @@ impl Harness {
             lost_ack_channels: AtomicUsize::new(0),
             fail_owner_binding: AtomicBool::new(false),
             owner_authorizations: Arc::new(AtomicUsize::new(0)),
+            owner_helpers: Arc::new(AtomicUsize::new(0)),
+            failed_owner_exit: Mutex::new(None),
             prompt_allowed: AtomicBool::new(false),
             start_during_prompt: AtomicBool::new(false),
             prompt_count: AtomicUsize::new(0),
@@ -1330,6 +1361,51 @@ async fn desktop_ssh_bootstrap_rejects_another_foreground_scope_with_the_same_co
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_failed_ack_waits_for_owned_helper_retirement() {
+    let h = Harness::new().await;
+    h.install_existing().await;
+    let candidate = h.candidate(1).await;
+    h.remote.lost_ack_channels.store(2, Ordering::SeqCst);
+    let exit = Arc::new(OwnerExit::default());
+    *h.remote.failed_owner_exit.lock().unwrap() = Some(exit.clone());
+    let bootstrap = h
+        .provider
+        .bootstrap(candidate.confirm().unwrap(), candidate);
+    tokio::pin!(bootstrap);
+    let failure = tokio::time::timeout(std::time::Duration::from_secs(300), async {
+        tokio::select! {
+            _ = exit.entered.notified() => (),
+            _ = &mut bootstrap => panic!("bootstrap returned before owner helper retirement"),
+        }
+        let pending = std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(std::future::Future::poll(bootstrap.as_mut(), cx).is_pending())
+        })
+        .await;
+        assert!(
+            pending,
+            "failed bootstrap must await its exact owner helper"
+        );
+        assert_eq!(h.remote.owner_helpers.load(Ordering::SeqCst), 1);
+        exit.release.notify_one();
+        bootstrap.await
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        failure,
+        Err(EnrollmentFailure::Bootstrap(
+            BootstrapFailureClass::Pairing(PairingFailure::Offline)
+        ))
+    ));
+    assert_eq!(h.remote.owner_helpers.load(Ordering::SeqCst), 0);
+    let retained = h.pairing.inventory().await.unwrap();
+    assert_eq!(retained.saved.len(), 1);
+    assert_eq!(retained.enrollment_acknowledgements.len(), 1);
+    assert_eq!(h.remote.owner_authorizations.load(Ordering::SeqCst), 1);
+    assert!(h.remote.manager.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desktop_ssh_bootstrap_lost_ack_recovers_saved_original_after_provider_recreation() {
     let h = Harness::new().await;
     h.install_existing().await;
@@ -1343,6 +1419,7 @@ async fn desktop_ssh_bootstrap_lost_ack_recovers_saved_original_after_provider_r
             BootstrapFailureClass::Pairing(PairingFailure::Offline)
         ))
     ));
+    assert_eq!(h.remote.owner_helpers.load(Ordering::SeqCst), 0);
     let original = h.pairing.inventory().await.unwrap();
     assert!(original.prepared.is_empty());
     assert_eq!(original.enrollment_acknowledgements.len(), 1);
@@ -1376,6 +1453,7 @@ async fn desktop_ssh_bootstrap_lost_ack_recovers_saved_original_after_provider_r
         .retain_request(pending)
         .unwrap();
     let completion = provider.resolve(candidate, pending).await.unwrap();
+    assert_eq!(h.remote.owner_helpers.load(Ordering::SeqCst), 0);
     assert_eq!(completion.prepared, work.prepared);
     assert_eq!(completion.saved, original.saved[0]);
     let recovered = h.pairing.inventory().await.unwrap();
@@ -1796,7 +1874,9 @@ async fn desktop_ssh_bootstrap_initial_starting_completes_original_request_witho
         h.remote.manager.running.store(true, Ordering::SeqCst);
         h.remote.manager.starting.store(false, Ordering::SeqCst);
     };
-    let (completion, ()) = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+    // This watchdog covers durable installation and enrollment as well as
+    // startup. The native worker's separate 15-second observation stays unchanged.
+    let (completion, ()) = tokio::time::timeout(std::time::Duration::from_secs(300), async {
         tokio::join!(
             h.provider
                 .bootstrap(candidate.confirm().unwrap(), candidate),

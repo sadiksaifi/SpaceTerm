@@ -348,29 +348,33 @@ impl ProductionSshBootstrap {
             transport.clone(),
             NativeBootstrapAccount::new(Arc::new(transport))?,
         ));
-        let enrollment = self.enrollment_for(&host, facts).await?;
+        let (enrollment, owner) = self.enrollment_for(&host, facts).await?;
         let coordinator = BootstrapCoordinator::new(
             setup,
             SharedEnrollment(enrollment.clone()),
             Prompt(host.connection.clone()),
         );
-        let outcome = coordinator.bootstrap(intent, artifact).await?;
-        let (prepared, saved) = enrollment
-            .completed()
-            .map_err(|e| fail(e, BootstrapPhase::Enrolled))?
-            .ok_or_else(|| fail(PairingFailure::RecoveryRequired, BootstrapPhase::Enrolled))?;
-        self.release(&host)?;
-        Ok(ProductionBootstrapCompletion {
-            prepared,
-            saved,
-            outcome,
-        })
+        let result = async {
+            let outcome = coordinator.bootstrap(intent, artifact).await?;
+            let (prepared, saved) = enrollment
+                .completed()
+                .map_err(|e| fail(e, BootstrapPhase::Enrolled))?
+                .ok_or_else(|| fail(PairingFailure::RecoveryRequired, BootstrapPhase::Enrolled))?;
+            self.release(&host)?;
+            Ok(ProductionBootstrapCompletion {
+                prepared,
+                saved,
+                outcome,
+            })
+        }
+        .await;
+        finish_owner_operation(&owner.channel, result).await
     }
     async fn enrollment_for(
         &self,
         host: &Arc<RetainedHost>,
         facts: BootstrapHostFacts,
-    ) -> Result<Arc<Enrollment>, BootstrapFailure> {
+    ) -> Result<(Arc<Enrollment>, Arc<OwnerState>), BootstrapFailure> {
         let mut reference = [0; 16];
         ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut reference).map_err(
             |_| {
@@ -428,14 +432,14 @@ impl ProductionSshBootstrap {
                 self.pairing.journal().clone(),
                 self.credentials.clone(),
                 OwnerConnector(shared.clone()),
-                OwnerExchange(shared),
+                OwnerExchange(shared.clone()),
                 namespace,
                 host.connection.route(),
                 reference,
             )
             .map_err(|e| fail(e, BootstrapPhase::Planned))?,
         );
-        Ok(enrollment)
+        Ok((enrollment, shared))
     }
     /// Reads pending original owner metadata without reenrolling or issuing new native authority.
     pub async fn inspect_with_pending(
@@ -581,48 +585,52 @@ impl ProductionSshBootstrap {
         }
         let intent = ForegroundBootstrap::confirm_observed(facts, generation)?;
         let attempt = intent.cancellation();
-        let enrollment = self.enrollment_for(&host, facts).await?;
-        let proposal = enrollment.prepare_owner(&server, &attempt).await?;
-        match host
-            .connection
-            .account(
-                AccountRequest::RetainedOwner {
-                    keys: proposal.parts().keys.clone(),
+        let (enrollment, owner) = self.enrollment_for(&host, facts).await?;
+        let result = async {
+            let proposal = enrollment.prepare_owner(&server, &attempt).await?;
+            match host
+                .connection
+                .account(
+                    AccountRequest::RetainedOwner {
+                        keys: proposal.parts().keys.clone(),
+                    },
+                    None,
+                )
+                .await?
+            {
+                AccountReply::RetainedOwner(Some((original, claim)))
+                    if original.as_bytes() == &request && claim == proposal => {}
+                AccountReply::Failure(error) => {
+                    return Err(service_failure(error, BootstrapPhase::Applied));
+                }
+                _ => {
+                    return Err(fail(
+                        PairingFailure::IdentityMismatch,
+                        BootstrapPhase::Applied,
+                    ));
+                }
+            }
+            enrollment
+                .enroll_owner(&server, request, &proposal, &attempt)
+                .await?;
+            enrollment.connect(&server, &attempt).await?;
+            let (prepared, saved) = enrollment
+                .completed()
+                .map_err(|e| fail(e, BootstrapPhase::Enrolled))?
+                .ok_or_else(|| fail(PairingFailure::RecoveryRequired, BootstrapPhase::Enrolled))?;
+            self.release(&host)?;
+            Ok(ProductionBootstrapCompletion {
+                prepared,
+                saved,
+                outcome: BootstrapOutcome {
+                    server,
+                    reused: true,
+                    phase: BootstrapPhase::Connected,
                 },
-                None,
-            )
-            .await?
-        {
-            AccountReply::RetainedOwner(Some((original, claim)))
-                if original.as_bytes() == &request && claim == proposal => {}
-            AccountReply::Failure(error) => {
-                return Err(service_failure(error, BootstrapPhase::Applied));
-            }
-            _ => {
-                return Err(fail(
-                    PairingFailure::IdentityMismatch,
-                    BootstrapPhase::Applied,
-                ));
-            }
+            })
         }
-        enrollment
-            .enroll_owner(&server, request, &proposal, &attempt)
-            .await?;
-        enrollment.connect(&server, &attempt).await?;
-        let (prepared, saved) = enrollment
-            .completed()
-            .map_err(|e| fail(e, BootstrapPhase::Enrolled))?
-            .ok_or_else(|| fail(PairingFailure::RecoveryRequired, BootstrapPhase::Enrolled))?;
-        self.release(&host)?;
-        Ok(ProductionBootstrapCompletion {
-            prepared,
-            saved,
-            outcome: BootstrapOutcome {
-                server,
-                reused: true,
-                phase: BootstrapPhase::Connected,
-            },
-        })
+        .await;
+        finish_owner_operation(&owner.channel, result).await
     }
     /// A separately foreground-authorized Start. Bootstrap and reconnect never invoke it.
     pub async fn start(
@@ -1202,11 +1210,34 @@ impl BootstrapLingerTransport for StartLingerTransport {
     }
 }
 
+type OwnerChannel = Mutex<Option<(Arc<dyn MessageTransport>, bool)>>;
+
+async fn finish_owner_operation<T>(
+    channel: &OwnerChannel,
+    result: Result<T, BootstrapFailure>,
+) -> Result<T, BootstrapFailure> {
+    if result.is_err() {
+        // A failed ACK lookup can leave its preceding ACK in flight. Await
+        // restricted-channel teardown before reporting failure to the caller,
+        // without changing the original failure or its durable journal work.
+        let retained = channel
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some((retained, _)) = retained {
+            // This future owns the channel during close. Dropping observation
+            // still releases native Drop-owned child retirement and reaping.
+            let _ = retained.close().await;
+        }
+    }
+    result
+}
+
 struct OwnerState {
     connection: Arc<dyn BootstrapRemoteConnection>,
     pairing: Arc<NativePairingRuntime>,
     reference: RevocationRouteReference,
-    channel: Mutex<Option<(Arc<dyn MessageTransport>, bool)>>,
+    channel: OwnerChannel,
     session: Mutex<Option<OwnerSession>>,
     pin: Mutex<Option<spaceterm_protocol::authentication::ServerPin>>,
     route: Mutex<Option<RouteDescription>>,
@@ -1438,6 +1469,13 @@ impl BootstrapOwnerExchange for OwnerExchange {
                 .await
                 .map_err(pairing_failure)?;
             let channel = self.0.connection.owner_channel().await?;
+            // Retain teardown ownership before any fallible owner exchange,
+            // including failures before a public reply has been received.
+            *self
+                .0
+                .channel
+                .lock()
+                .map_err(|_| PairingFailure::RecoveryRequired)? = Some((channel.clone(), false));
             let initial = serde_json::to_vec(&serde_json::json!({"request":request, "proposal":proposal, "device_proof":device_proof.to_vec(), "authentication_proof":authentication_proof.to_vec()})).map_err(|_| PairingFailure::InvalidRequest)?;
             self.0.connection.revalidate().map_err(pairing_failure)?;
             channel
@@ -1495,11 +1533,6 @@ impl BootstrapOwnerExchange for OwnerExchange {
                 .pin
                 .lock()
                 .map_err(|_| PairingFailure::RecoveryRequired)? = Some(server.pin);
-            *self
-                .0
-                .channel
-                .lock()
-                .map_err(|_| PairingFailure::RecoveryRequired)? = Some((channel, false));
             *self
                 .0
                 .route
@@ -1624,4 +1657,127 @@ impl BootstrapEnrollment for SharedEnrollment {
 }
 fn fail(class: PairingFailure, phase: BootstrapPhase) -> BootstrapFailure {
     BootstrapFailure::new(class, phase)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spaceterm_host::transport::{PeerFacts, TransportFuture, TransportRoute};
+    use std::sync::{Weak, atomic::AtomicUsize};
+    use tokio::sync::Semaphore;
+
+    struct ClosingTransport {
+        entered: Arc<Semaphore>,
+        release: Arc<Semaphore>,
+        closes: Arc<AtomicUsize>,
+        result: Result<(), TransportError>,
+    }
+    impl MessageTransport for ClosingTransport {
+        fn peer_facts(&self) -> PeerFacts {
+            PeerFacts {
+                route: TransportRoute::PrivateIpc,
+                local_uid: Some(501),
+                local_pid: None,
+                pinned_server_key: None,
+            }
+        }
+        fn send<'a>(&'a self, _: &'a [u8]) -> TransportFuture<'a, ()> {
+            Box::pin(async { panic!("cleanup must not send protocol frames") })
+        }
+        fn recv(&self) -> TransportFuture<'_, Option<Vec<u8>>> {
+            Box::pin(async { panic!("cleanup must not receive protocol frames") })
+        }
+        fn close(&self) -> TransportFuture<'_, ()> {
+            Box::pin(async move {
+                self.closes.fetch_add(1, Ordering::AcqRel);
+                self.entered.add_permits(1);
+                self.release.acquire().await.unwrap().forget();
+                self.result
+            })
+        }
+    }
+    struct CloseFixture {
+        retained: OwnerChannel,
+        entered: Arc<Semaphore>,
+        release: Arc<Semaphore>,
+        closes: Arc<AtomicUsize>,
+        channel: Weak<ClosingTransport>,
+    }
+    impl CloseFixture {
+        fn new(result: Result<(), TransportError>) -> Self {
+            let entered = Arc::new(Semaphore::new(0));
+            let release = Arc::new(Semaphore::new(0));
+            let closes = Arc::new(AtomicUsize::new(0));
+            let channel = Arc::new(ClosingTransport {
+                entered: entered.clone(),
+                release: release.clone(),
+                closes: closes.clone(),
+                result,
+            });
+            let weak = Arc::downgrade(&channel);
+            Self {
+                retained: Mutex::new(Some((channel, true))),
+                entered,
+                release,
+                closes,
+                channel: weak,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_failure_waits_for_close_and_preserves_original_error() {
+        let fixture = CloseFixture::new(Err(TransportError::Unavailable));
+        let original = fail(PairingFailure::Offline, BootstrapPhase::Connected);
+        let mut operation = Box::pin(finish_owner_operation(
+            &fixture.retained,
+            Err::<(), _>(original),
+        ));
+        tokio::select! {
+            biased;
+            result = &mut operation => panic!("failure returned before close completed: {result:?}"),
+            permit = fixture.entered.acquire() => permit.unwrap().forget(),
+        }
+        assert!(fixture.retained.lock().unwrap().is_none());
+        assert!(fixture.channel.upgrade().is_some());
+        fixture.release.add_permits(1);
+        assert_eq!(operation.await, Err(original));
+        assert_eq!(fixture.closes.load(Ordering::Acquire), 1);
+        assert!(fixture.channel.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn dropping_failure_cleanup_releases_its_native_channel_owner() {
+        let fixture = CloseFixture::new(Ok(()));
+        let original = fail(PairingFailure::Cancelled, BootstrapPhase::ExplicitIntent);
+        let mut operation = Box::pin(finish_owner_operation(
+            &fixture.retained,
+            Err::<(), _>(original),
+        ));
+        tokio::select! {
+            biased;
+            result = &mut operation => panic!("failure returned before close completed: {result:?}"),
+            permit = fixture.entered.acquire() => permit.unwrap().forget(),
+        }
+        drop(operation);
+        assert!(fixture.retained.lock().unwrap().is_none());
+        assert!(fixture.channel.upgrade().is_none());
+        assert_eq!(fixture.closes.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn successful_owner_operation_does_not_close_or_replace_its_channel() {
+        let fixture = CloseFixture::new(Ok(()));
+        fixture.release.add_permits(1);
+        assert_eq!(
+            finish_owner_operation(&fixture.retained, Ok(7)).await,
+            Ok(7)
+        );
+        let retained = fixture.retained.lock().unwrap();
+        let (channel, used) = retained.as_ref().unwrap();
+        let original: Arc<dyn MessageTransport> = fixture.channel.upgrade().unwrap();
+        assert!(Arc::ptr_eq(channel, &original));
+        assert!(*used);
+        assert_eq!(fixture.closes.load(Ordering::Acquire), 0);
+    }
 }
