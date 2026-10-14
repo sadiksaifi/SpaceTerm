@@ -1881,6 +1881,106 @@ async fn native_process_composition_requires_actor_custody_and_validates_actor_a
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn local_stage_rechecks_paired_capture_under_lease_before_retaining_artifact() {
+    use spaceterm_host::account_service::NativeLifecycleHandoff;
+    use std::task::Poll;
+
+    let fixture = Fixture::for_install();
+    let (key, original_artifact) =
+        signed_installation::fixture("1.0.0", 7, signed_installation::native_machine());
+    let approved = InstallationStatus {
+        installation: installation(1).installation,
+        version: original_artifact.manifest().version.clone(),
+        artifact_sha256: original_artifact.artifact_sha256(),
+    };
+    let registration = fixture
+        .account
+        .initialize_with_installation(DesiredServerState::Running, Some(approved))
+        .unwrap();
+    let store =
+        spaceterm_host::server_installation::test_support::store(&registration, key.clone())
+            .unwrap();
+    let original_id = store.stage(&original_artifact).unwrap();
+    store
+        .activate(original_id, store.snapshot().unwrap().generation, 1)
+        .unwrap();
+    let installation_before = store.snapshot().unwrap();
+    drop(store);
+
+    let supervisor = fixture.supervisor();
+    let request = supervisor.allocate_request().unwrap();
+    let (_, candidate) =
+        signed_installation::fixture("2.0.0", 7, signed_installation::native_machine());
+    let cache = fixture.account.anchor().join("stage-artifacts");
+    assert!(!cache.try_exists().unwrap());
+    let mut stage =
+        supervisor.stage_installation(request, fixture.account.confirm_install(candidate));
+
+    // One poll passes the public local-origin guard and enqueues its owned worker.
+    // The current-thread executor cannot run that worker before this task yields.
+    std::future::poll_fn(|cx| {
+        assert!(stage.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Stop)
+        .unwrap();
+    assert_eq!(capture.request, request);
+    assert_eq!(capture.action, ServiceAction::Stop);
+    let original_handoff = NativeLifecycleHandoff::Awaiting {
+        expires_at: ServiceTime {
+            boot: [3; 32],
+            millis: 30_100,
+        },
+    };
+    assert_eq!(
+        supervisor
+            .poll_runtime_lifecycle_handoff(supervisor.key(), registration.server_pin(), capture)
+            .unwrap(),
+        original_handoff
+    );
+    let captured_journal = std::fs::read(fixture.account.anchor().join("requests")).unwrap();
+    fixture.clock.0.store(200, Ordering::SeqCst);
+
+    assert_eq!(stage.await, Err(ServiceFailure::PairingRequired));
+    assert!(!cache.try_exists().unwrap());
+    assert_eq!(
+        supervisor.restore_runtime_request(request).unwrap(),
+        capture
+    );
+    assert_eq!(
+        supervisor
+            .poll_runtime_lifecycle_handoff(supervisor.key(), registration.server_pin(), capture)
+            .unwrap(),
+        original_handoff
+    );
+    assert_eq!(
+        std::fs::read(fixture.account.anchor().join("requests")).unwrap(),
+        captured_journal
+    );
+    let after = supervisor.discover().unwrap().unwrap();
+    assert_eq!(after.generation(), registration.generation());
+    assert_eq!(after.server_pin(), registration.server_pin());
+    assert_eq!(after.desired_state(), DesiredServerState::Running);
+    assert_eq!(
+        after.approved_installation(),
+        registration.approved_installation()
+    );
+    assert_eq!(after.staged_installation(), None);
+    let store = spaceterm_host::server_installation::test_support::store(&after, key).unwrap();
+    assert_eq!(store.snapshot().unwrap(), installation_before);
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+    assert_eq!(
+        *fixture.manager.state.lock().unwrap(),
+        SupervisorState::Running
+    );
+    assert_eq!(fixture.processes.assessments.load(Ordering::SeqCst), 1);
+    assert!(!fixture.processes.reserved.load(Ordering::SeqCst));
+    assert!(fixture.processes.calls.lock().unwrap().is_empty());
+}
+
 #[tokio::test(start_paused = true)]
 async fn install_reports_completed_when_launch_agent_runs_after_start_acknowledgement_failure() {
     let fixture = Fixture::for_install();

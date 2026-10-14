@@ -47,10 +47,14 @@ async fn desktop_saved_ssh_route_uses_captured_native_configuration() {
     use std::{os::unix::fs::PermissionsExt, sync::Arc};
     #[cfg(target_os = "macos")]
     let parent = "/private/tmp";
-    #[cfg(not(target_os = "macos"))]
-    let parent = "/var/tmp";
+    #[cfg(target_os = "linux")]
+    let parent = spaceterm_host::account_service::TrustedAccountFacts::current()
+        .unwrap()
+        .home()
+        .to_owned();
     let directory = tempfile::Builder::new()
         .prefix("stsr-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir_in(parent)
         .unwrap();
     let root = directory.path().canonicalize().unwrap();

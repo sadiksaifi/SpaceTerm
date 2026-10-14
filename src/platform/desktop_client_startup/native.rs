@@ -224,7 +224,25 @@ impl NativeOwnerFactory for Factory {
         })
     }
     fn recover(&self) -> ClientFuture<'_, NativeDesktopOwners> {
-        Box::pin(async {
+        self.recover_with_enrollment(
+            crate::ui::settings_window::server_enrollment::native::production,
+        )
+    }
+}
+impl Factory {
+    fn recover_with_enrollment<'a>(
+        &'a self,
+        enrollment: impl FnOnce(
+            Arc<JournalController>,
+            Arc<spaceterm_client_native::route::NativeRouteConnector>,
+            Arc<dyn spaceterm_client::pending::LocalUseInvalidator>,
+            Option<NativeClientProvider>,
+            tokio::runtime::Handle,
+        ) -> crate::ui::settings_window::server_enrollment::native::NativeEnrollmentServices
+        + Send
+        + 'a,
+    ) -> ClientFuture<'a, NativeDesktopOwners> {
+        Box::pin(async move {
             let context = self.context().await?;
             let journal = context.journal.clone();
             let native = context.native.clone();
@@ -239,17 +257,40 @@ impl NativeOwnerFactory for Factory {
                     )
                     .await?;
             }
-            let local = if let Some(provider) = native.clone() {
+            let (local, local_routes) = if let Some(provider) = native.clone() {
                 let discovery_journal = journal.clone();
                 tokio::task::spawn_blocking(move || {
-                    crate::platform::local_server_client::discover(&provider, &discovery_journal)
+                    // Restricted IPC authority comes only from trusted account/build
+                    // registration, independently of ordinary-binding admission. A
+                    // later WSS binding or self-unpair must not retire this authority.
+                    // The native endpoint checks still admit the exact private route;
+                    // a retained route string grants no local filesystem authority.
+                    let local_routes = provider
+                        .management()
+                        .supervisor()
+                        .discover()
+                        .ok()
+                        .flatten()
+                        .and_then(|registration| {
+                            spaceterm_client_native::route::LocalRouteAuthority::new(
+                                registration.endpoint().ok()?,
+                            )
+                            .ok()
+                        })
+                        .into_iter()
+                        .collect();
+                    let local = crate::platform::local_server_client::discover(
+                        &provider,
+                        &discovery_journal,
+                    )
+                    .ok()
+                    .flatten();
+                    (local, local_routes)
                 })
                 .await
                 .map_err(|_| fail(ClientFailureClass::Unavailable))?
-                .ok()
-                .flatten()
             } else {
-                None
+                (None, Vec::new())
             };
             let local_server = local
                 .as_ref()
@@ -290,42 +331,37 @@ impl NativeOwnerFactory for Factory {
             })
             .await
             .map_err(|_| fail(ClientFailureClass::Unavailable))?;
-            // Restricted pairing shares the same native transport configuration.
-            // Ordinary IPC still refreshes trusted registration on every attempt.
-            let local_routes = local
-                .and_then(|local| {
-                    local.route.or_else(|| {
-                        local.binding.as_ref()?;
-                        spaceterm_client_native::route::LocalRouteAuthority::new(
-                            local.registration.endpoint().ok()?,
-                        )
-                        .ok()
-                    })
-                })
-                .into_iter()
-                .collect();
-            let (remote, pairing_routes): (Arc<dyn spaceterm_client::ports::RouteConnector>, _) =
-                match configuration {
-                    Ok((configuration, owner)) => {
-                        let shared = crate::platform::server_client_route::connector(
-                            local_routes,
-                            Some(configuration),
-                        )?;
-                        let foreground = crate::platform::server_client_route::foreground_connector(
-                            shared.clone(),
-                            journal.clone(),
-                        );
-                        (
-                            crate::platform::server_client_route::retain_runtime(foreground, owner),
-                            shared,
-                        )
-                    }
-                    Err(_) => {
-                        let shared =
-                            crate::platform::server_client_route::connector(local_routes, None)?;
-                        (shared.clone(), shared)
-                    }
-                };
+            // Ordinary IPC still refreshes registration and requires an
+            // unsuppressed binding on every attempt through RefreshingRoutes.
+            let (configuration, owner) = match configuration {
+                Ok((configuration, owner)) => (Some(configuration), Some(owner)),
+                Err(_) => (None, None),
+            };
+            // A missing runtime directory at recovery must not freeze restricted
+            // retries offline. Renewal reads only this trusted account/build
+            // provider and still requires the original task's pin and exact route.
+            let pairing_routes = match native.clone() {
+                Some(provider) => Arc::new(
+                    spaceterm_client_native::route::NativeRouteConnector::new(
+                        local_routes,
+                        configuration,
+                    )?
+                    .with_restricted_local_discovery(provider),
+                ),
+                None => {
+                    crate::platform::server_client_route::connector(local_routes, configuration)?
+                }
+            };
+            let remote: Arc<dyn spaceterm_client::ports::RouteConnector> = match owner {
+                Some(owner) => {
+                    let foreground = crate::platform::server_client_route::foreground_connector(
+                        pairing_routes.clone(),
+                        journal.clone(),
+                    );
+                    crate::platform::server_client_route::retain_runtime(foreground, owner)
+                }
+                None => pairing_routes.clone(),
+            };
             let routes = crate::platform::server_client_route::refreshing_connector_with_failure(
                 native.clone(),
                 context.native_failure,
@@ -342,7 +378,7 @@ impl NativeOwnerFactory for Factory {
                 ProjectionBudgets::supported()?,
             )?);
             protocol.set_channels(channels.clone())?;
-            let enrollment = crate::ui::settings_window::server_enrollment::native::production(
+            let enrollment = enrollment(
                 journal.clone(),
                 pairing_routes,
                 protocol.clone(),
@@ -463,3 +499,5 @@ fn pairing_failure(failure: PairingFailure) -> ClientFailure {
 
 #[cfg(test)]
 mod enrollment_tests;
+#[cfg(test)]
+pub(crate) use enrollment_tests::pending_ipc_startup;

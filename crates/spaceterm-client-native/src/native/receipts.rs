@@ -169,6 +169,7 @@ mod tests {
         },
         startup::BuildIdentity,
     };
+    use std::os::unix::fs::PermissionsExt;
     fn private_root() -> tempfile::TempDir {
         let parent = if cfg!(target_os = "linux") {
             spaceterm_host::account_service::TrustedAccountFacts::current()
@@ -178,7 +179,10 @@ mod tests {
         } else {
             std::path::PathBuf::from("/private/tmp")
         };
-        tempfile::tempdir_in(parent).unwrap()
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in(parent)
+            .unwrap()
     }
     fn receipt(number: u64) -> Receipt {
         let mut bytes = [1; 16];

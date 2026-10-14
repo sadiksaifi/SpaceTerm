@@ -38,6 +38,319 @@ impl Drop for Fixture {
     }
 }
 
+#[test]
+fn initial_creation_intent_never_adopts_an_existing_unbound_empty_inode() {
+    use super::{InitialCreation, directory::Directory as StorageDirectory};
+    let fixture = Fixture::new();
+    let records = crate::private_filesystem::Directory::create(&fixture.path).unwrap();
+    let creation = InitialCreation::new(records, [7; 32]);
+    let directory = StorageDirectory::open(&fixture.path).unwrap();
+    creation.prepare(&directory, 123).unwrap();
+    drop(directory);
+    let database_path = fixture.path.join(super::DATABASE_FILE_NAME);
+    fs::write(&database_path, []).unwrap();
+    fs::set_permissions(&database_path, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(
+        Database::open_initial_for_application(&fixture.path, MIGRATIONS, 123, &creation).is_err()
+    );
+    assert_eq!(fs::read(database_path).unwrap(), Vec::<u8>::new());
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn initial_creation_pending_identity_and_seal_keep_ordinary_directory_opens_closed() {
+    for sealing in [false, true] {
+        let fixture = Fixture::new();
+        let records = crate::private_filesystem::Directory::create(&fixture.path).unwrap();
+        let creation = super::InitialCreation::new(records, [7; 32]);
+        if !sealing {
+            super::testing::after_initialization_boundary(5, || {
+                crate::private_filesystem::test_support::fail_next_publication_durability();
+            });
+        }
+        let database =
+            Database::open_initial_for_application(&fixture.path, MIGRATIONS, 123, &creation);
+        if sealing {
+            drop(database.unwrap());
+            crate::private_filesystem::test_support::fail_next_publication_durability();
+            assert_eq!(creation.complete(), Err(StorageFailure::RecoveryRequired));
+        } else {
+            assert!(database.is_err());
+        }
+        assert!(matches!(
+            crate::private_filesystem::Directory::open(&fixture.path),
+            Err(crate::private_filesystem::Failure::Indeterminate)
+        ));
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn initial_creation_namespace(
+    path: &std::path::Path,
+) -> std::collections::BTreeMap<std::ffi::OsString, (u64, u64, u32, Vec<u8>)> {
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    fs::read_dir(path)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            let metadata = fs::symlink_metadata(entry.path()).unwrap();
+            let bytes = if metadata.is_symlink() {
+                fs::read_link(entry.path())
+                    .unwrap()
+                    .as_os_str()
+                    .as_bytes()
+                    .to_vec()
+            } else if metadata.is_file() {
+                fs::read(entry.path()).unwrap()
+            } else {
+                Vec::new()
+            };
+            (
+                entry.file_name(),
+                (metadata.dev(), metadata.ino(), metadata.mode(), bytes),
+            )
+        })
+        .collect()
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn initial_creation_repeated_process_interruptions_recover_only_the_bound_object() {
+    use super::{InitialCreation, directory::Directory as StorageDirectory};
+    use std::os::unix::fs::MetadataExt as _;
+
+    const ROOT: &str = "SPACETERM_STORAGE_STAGING_FIXTURE";
+    const BOUNDARY: &str = "SPACETERM_STORAGE_STAGING_BOUNDARY";
+    const FILTER: &str = "storage::tests::initial_creation_repeated_process_interruptions_recover_only_the_bound_object";
+    if let Some(path) = std::env::var_os(ROOT) {
+        let path = std::path::Path::new(&path);
+        let records = crate::private_filesystem::Directory::open(path)
+            .unwrap()
+            .unwrap();
+        let creation = InitialCreation::new(records, [7; 32]);
+        let boundary = std::env::var(BOUNDARY).unwrap().parse().unwrap();
+        super::testing::after_initialization_boundary(boundary, || std::process::exit(91));
+        let _ = Database::open_initial_for_application(path, MIGRATIONS, 123, &creation);
+        panic!("the selected staging interruption must fire");
+    }
+
+    let fixture = Fixture::new();
+    let records = crate::private_filesystem::Directory::create(&fixture.path).unwrap();
+    let creation = InitialCreation::new(records, [7; 32]);
+    let directory = StorageDirectory::open(&fixture.path).unwrap();
+    creation.prepare(&directory, 123).unwrap();
+    drop(directory);
+    drop(creation);
+    let record_path = fixture.path.join("organization-creation");
+    let intent = fs::read(&record_path).unwrap();
+    let intent_inode = fs::metadata(&record_path).unwrap().ino();
+    let intent_record: serde_json::Value = serde_json::from_slice(&intent).unwrap();
+    let mut unbound = std::collections::BTreeMap::new();
+    for (attempt, boundary) in [7, 7, 7, 8].into_iter().enumerate() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(FILTER)
+            .env(ROOT, &fixture.path)
+            .env(BOUNDARY, boundary.to_string())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(91));
+        assert!(!fixture.path.join(super::DATABASE_FILE_NAME).exists());
+        let namespace = initial_creation_namespace(&fixture.path);
+        for (name, facts) in &unbound {
+            assert_eq!(namespace.get(name), Some(facts));
+        }
+        let staged: std::collections::BTreeMap<_, _> = namespace
+            .into_iter()
+            .filter(|(name, _)| {
+                name.as_encoded_bytes()
+                    .starts_with(b".organization-create-")
+            })
+            .collect();
+        assert_eq!(staged.len(), attempt + 1);
+        if boundary == 7 {
+            assert_eq!(fs::read(&record_path).unwrap(), intent);
+            assert_eq!(fs::metadata(&record_path).unwrap().ino(), intent_inode);
+            unbound = staged;
+        }
+    }
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+    for field in ["schema", "binding", "application", "directory", "complete"] {
+        assert_eq!(record[field], intent_record[field]);
+    }
+    let identity = &record["database"];
+    let staged = fixture.path.join(format!(
+        ".organization-create-{:016x}-{:016x}",
+        identity["device"].as_u64().unwrap(),
+        identity["inode"].as_u64().unwrap(),
+    ));
+    let bound_inode = fs::metadata(&staged).unwrap().ino();
+    assert_eq!(Some(bound_inode), identity["inode"].as_u64());
+    assert!(unbound.values().all(|facts| facts.1 != bound_inode));
+
+    let records = crate::private_filesystem::Directory::open(&fixture.path)
+        .unwrap()
+        .unwrap();
+    let foreign = InitialCreation::new(records.clone(), [8; 32]);
+    assert!(
+        Database::open_initial_for_application(&fixture.path, MIGRATIONS, 123, &foreign).is_err()
+    );
+    let creation = InitialCreation::new(records, [7; 32]);
+    assert!(
+        Database::open_initial_for_application(&fixture.path, MIGRATIONS, 124, &creation).is_err()
+    );
+    let database =
+        Database::open_initial_for_application(&fixture.path, MIGRATIONS, 123, &creation).unwrap();
+    assert_eq!(count(&database), 0);
+    assert_eq!(
+        fs::metadata(fixture.path.join(super::DATABASE_FILE_NAME))
+            .unwrap()
+            .ino(),
+        bound_inode,
+    );
+    assert!(!staged.exists());
+    creation.complete().unwrap();
+    drop(database);
+    assert!(Database::open_existing_for_application(&fixture.path, MIGRATIONS, 123).is_ok());
+    let namespace = initial_creation_namespace(&fixture.path);
+    for (name, facts) in unbound {
+        assert_eq!(namespace.get(&name), Some(&facts));
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn initial_creation_last_staging_slot_recovers_its_exact_durable_binding() {
+    use super::InitialCreation;
+    use std::os::unix::fs::MetadataExt as _;
+
+    // The persistent policy admits at most 64 staging entries, including unbound
+    // entries. A bound final slot remains recoverable without another allocation.
+    let fixture = Fixture::new();
+    crate::private_filesystem::Directory::create(&fixture.path).unwrap();
+    for _ in 0..63 {
+        let records = crate::private_filesystem::Directory::open(&fixture.path)
+            .unwrap()
+            .unwrap();
+        let creation = InitialCreation::new(records, [7; 32]);
+        super::testing::interrupt_initialization_at(7);
+        assert!(matches!(
+            Database::open_initial_for_application(&fixture.path, MIGRATIONS, 123, &creation),
+            Err(StorageFailure::Io),
+        ));
+    }
+    let unbound = initial_creation_namespace(&fixture.path);
+    let records = crate::private_filesystem::Directory::open(&fixture.path)
+        .unwrap()
+        .unwrap();
+    let creation = InitialCreation::new(records, [7; 32]);
+    super::testing::interrupt_initialization_at(8);
+    assert!(matches!(
+        Database::open_initial_for_application(&fixture.path, MIGRATIONS, 123, &creation),
+        Err(StorageFailure::Io),
+    ));
+    drop(creation);
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture.path.join("organization-creation")).unwrap())
+            .unwrap();
+    let bound_inode = record["database"]["inode"].as_u64().unwrap();
+    let records = crate::private_filesystem::Directory::open(&fixture.path)
+        .unwrap()
+        .unwrap();
+    let creation = InitialCreation::new(records, [7; 32]);
+    let database =
+        Database::open_initial_for_application(&fixture.path, MIGRATIONS, 123, &creation).unwrap();
+    assert_eq!(
+        fs::metadata(fixture.path.join(super::DATABASE_FILE_NAME))
+            .unwrap()
+            .ino(),
+        bound_inode,
+    );
+    assert_eq!(count(&database), 0);
+    drop(database);
+    let namespace = initial_creation_namespace(&fixture.path);
+    for (name, facts) in unbound {
+        if name
+            .as_encoded_bytes()
+            .starts_with(b".organization-create-")
+        {
+            assert_eq!(namespace.get(&name), Some(&facts));
+        }
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn initial_creation_staging_budget_refuses_without_touching_foreign_or_unbound_entries() {
+    use super::{InitialCreation, directory::Directory as StorageDirectory};
+
+    let fixture = Fixture::new();
+    let records = crate::private_filesystem::Directory::create(&fixture.path).unwrap();
+    let creation = InitialCreation::new(records, [7; 32]);
+    let directory = StorageDirectory::open(&fixture.path).unwrap();
+    creation.prepare(&directory, 123).unwrap();
+    drop(directory);
+    fs::write(fixture.path.join("foreign"), b"foreign bytes").unwrap();
+    fs::create_dir(fixture.path.join(".organization-create-foreign-directory")).unwrap();
+    std::os::unix::fs::symlink(
+        "foreign",
+        fixture
+            .path
+            .join(".organization-create-foreign-symlink.tmp"),
+    )
+    .unwrap();
+    for index in 0..62 {
+        fs::write(
+            fixture
+                .path
+                .join(format!(".organization-create-unbound-{index}.tmp")),
+            b"unbound bytes",
+        )
+        .unwrap();
+    }
+    let before = initial_creation_namespace(&fixture.path);
+    for _ in 0..2 {
+        assert!(matches!(
+            Database::open_initial_for_application(&fixture.path, MIGRATIONS, 123, &creation),
+            Err(StorageFailure::Unavailable),
+        ));
+        assert_eq!(initial_creation_namespace(&fixture.path), before);
+    }
+    assert!(!fixture.path.join(super::DATABASE_FILE_NAME).exists());
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn initial_creation_directory_entry_budget_refuses_without_touching_foreign_entries() {
+    use super::{InitialCreation, directory::Directory as StorageDirectory};
+
+    let fixture = Fixture::new();
+    let records = crate::private_filesystem::Directory::create(&fixture.path).unwrap();
+    let creation = InitialCreation::new(records, [7; 32]);
+    let directory = StorageDirectory::open(&fixture.path).unwrap();
+    creation.prepare(&directory, 123).unwrap();
+    drop(directory);
+    // Fill the complete namespace, including private authority records, to 256
+    // entries. Unknown names consume scan budget but grant no cleanup authority.
+    for index in fs::read_dir(&fixture.path).unwrap().count()..256 {
+        fs::write(
+            fixture.path.join(format!("foreign-{index}")),
+            b"foreign bytes",
+        )
+        .unwrap();
+    }
+    let before = initial_creation_namespace(&fixture.path);
+    assert!(matches!(
+        Database::open_initial_for_application(&fixture.path, MIGRATIONS, 123, &creation),
+        Err(StorageFailure::Unavailable),
+    ));
+    assert_eq!(initial_creation_namespace(&fixture.path), before);
+    assert!(!fixture.path.join(super::DATABASE_FILE_NAME).exists());
+}
+
 fn insert(database: &mut Database) -> CommitDisposition {
     database.transaction(|transaction| {
         transaction

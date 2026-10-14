@@ -548,6 +548,242 @@ impl Directory {
         Ok((entry, before.is_none() && create))
     }
 
+    fn initial_name(identity: Identity) -> Result<CString, StorageFailure> {
+        CString::new(format!(
+            ".organization-create-{:016x}-{:016x}",
+            identity.device, identity.inode
+        ))
+        .map_err(|_| StorageFailure::InvalidState)
+    }
+
+    fn rename_initial(&self, from: &CStr, to: &CStr) -> Result<(), StorageFailure> {
+        self.verify()?;
+        let directory = &self
+            .ancestors
+            .last()
+            .ok_or(StorageFailure::UnsafeStorage)?
+            .file;
+        crate::private_filesystem::rename_noreplace_at(directory, from, to).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                StorageFailure::UnsafeStorage
+            } else {
+                StorageFailure::Unavailable
+            }
+        })
+    }
+
+    fn sync_initial_file(file: &File) -> Result<(), StorageFailure> {
+        file.sync_all().map_err(|_| io_failure())?;
+        #[cfg(target_os = "macos")]
+        // SAFETY: storage retains this exclusive-created regular-file descriptor.
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) } != 0 {
+            return Err(io_failure());
+        }
+        Ok(())
+    }
+
+    /// Reserve capacity by observation only. Every staging-prefixed name counts,
+    /// including foreign files, directories, symlinks and pre-rename temporaries.
+    /// No unbound object supplies authority to open, adopt or remove it.
+    fn admit_initial_allocation(&self) -> Result<(), StorageFailure> {
+        const MAX_STAGING_ENTRIES: usize = 64;
+        const MAX_DIRECTORY_ENTRIES: usize = 256;
+
+        // A new cursor below the retained descriptor neither reopens a database
+        // inode nor shares the directory offset with another enumeration.
+        // SAFETY: the retained parent and literal component identify this directory.
+        let fd = unsafe {
+            libc::openat(
+                self.fd(),
+                c".".as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd < 0 {
+            return Err(io_failure());
+        }
+        // SAFETY: fdopendir takes ownership of this new descriptor only on success.
+        let stream = unsafe { libc::fdopendir(fd) };
+        if stream.is_null() {
+            // Capture errno before closing the descriptor still owned here.
+            let failure = io_failure();
+            // SAFETY: fdopendir failed and fd has no other owner.
+            unsafe { libc::close(fd) };
+            return Err(failure);
+        }
+        struct DirectoryStream(*mut libc::DIR);
+        impl Drop for DirectoryStream {
+            fn drop(&mut self) {
+                // SAFETY: this stream uniquely owns its enumeration descriptor.
+                unsafe { libc::closedir(self.0) };
+            }
+        }
+        let stream = DirectoryStream(stream);
+        // SAFETY: libc supplies this thread's errno slot. No operation changes
+        // threads while the cursor and pointer are in use.
+        #[cfg(target_os = "macos")]
+        let errno = unsafe { libc::__error() };
+        #[cfg(target_os = "linux")]
+        // SAFETY: libc supplies the errno slot for this native thread.
+        let errno = unsafe { libc::__errno_location() };
+        let mut entries = 0;
+        let mut staging = 0;
+        loop {
+            // SAFETY: the cursor and errno slot belong to the current thread.
+            unsafe { *errno = 0 };
+            // SAFETY: the live cursor is exclusively owned by this thread.
+            let entry = unsafe { libc::readdir(stream.0) };
+            if entry.is_null() {
+                // SAFETY: readdir distinguishes end-of-stream by leaving errno zero.
+                return if unsafe { *errno } == 0 {
+                    self.verify()
+                } else {
+                    Err(io_failure())
+                };
+            }
+            // SAFETY: readdir's terminated name remains valid until the next call.
+            let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+            if name == c"." || name == c".." {
+                continue;
+            }
+            entries += 1;
+            if name.to_bytes().starts_with(b".organization-create-") {
+                staging += 1;
+            }
+            // Refuse before allocation at either persistent cap. The namespace
+            // lock serializes in-process allocation; original request lifecycle
+            // authority supplies cross-process serialization. Bound recovery does
+            // not allocate and remains admitted even when the cap is reached.
+            if staging >= MAX_STAGING_ENTRIES || entries >= MAX_DIRECTORY_ENTRIES {
+                return Err(StorageFailure::Unavailable);
+            }
+        }
+    }
+
+    /// Stage a fresh empty inode without making it visible to any SQLite opener.
+    /// The stable staging name is derived from the actual inode, not from intent.
+    /// Unbound staging files from process death are inert and never adopted.
+    /// At 64 staging-prefixed entries or 256 total entries, allocation returns
+    /// `Unavailable` without creating or removing anything. These persistent caps
+    /// bound retained crash debris; they do not promise unlimited crash recovery.
+    pub(super) fn create_initial_database(&self) -> Result<Identity, StorageFailure> {
+        self.verify()?;
+        let mut expected = mutex(&self.expected);
+        if self.check_locked(Kind::Database, &mut expected)?.is_some() {
+            return Err(StorageFailure::UnsafeStorage);
+        }
+        self.admit_initial_allocation()?;
+        let mut nonce = [0; 16];
+        getrandom::fill(&mut nonce).map_err(|_| StorageFailure::Unavailable)?;
+        let temporary = CString::new(format!(
+            ".organization-create-{:032x}.tmp",
+            u128::from_be_bytes(nonce)
+        ))
+        .map_err(|_| StorageFailure::InvalidState)?;
+        // SAFETY: the fixed private parent is retained; O_EXCL never adopts an entry.
+        let fd = unsafe {
+            libc::openat(
+                self.fd(),
+                temporary.as_ptr(),
+                libc::O_RDWR
+                    | libc::O_CREAT
+                    | libc::O_EXCL
+                    | libc::O_CLOEXEC
+                    | libc::O_NOFOLLOW
+                    | libc::O_NONBLOCK,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(io_failure());
+        }
+        // SAFETY: the exclusive-created descriptor has exactly one owner.
+        let file = unsafe { File::from_raw_fd(fd) };
+        let stat = stat_fd(fd)?;
+        private_file(&stat)?;
+        private_acl(fd)?;
+        let identity = Identity::of(&stat);
+        if stat.st_size != 0
+            || stat_at(self.fd(), &temporary)?
+                .is_none_or(|linked| Identity::of(&linked) != identity)
+        {
+            return Err(StorageFailure::UnsafeStorage);
+        }
+        Self::sync_initial_file(&file)?;
+        let staged = Self::initial_name(identity)?;
+        self.rename_initial(&temporary, &staged)?;
+        self.sync()?;
+        if stat_at(self.fd(), &staged)?.is_none_or(|linked| Identity::of(&linked) != identity) {
+            return Err(StorageFailure::UnsafeStorage);
+        }
+        Ok(identity)
+    }
+
+    /// Observe only the named object. Never open another descriptor for a live DB.
+    pub(super) fn verify_initial_database(
+        &self,
+        identity: Identity,
+        allow_staged: bool,
+    ) -> Result<(), StorageFailure> {
+        match self.check(Kind::Database)? {
+            Some(database) if database == identity => Ok(()),
+            Some(_) => Err(StorageFailure::UnsafeStorage),
+            None if allow_staged => {
+                let staged = Self::initial_name(identity)?;
+                let stat = stat_at(self.fd(), &staged)?.ok_or(StorageFailure::RecoveryRequired)?;
+                private_file(&stat)?;
+                if Identity::of(&stat) != identity || stat.st_size != 0 {
+                    return Err(StorageFailure::UnsafeStorage);
+                }
+                Ok(())
+            }
+            None => Err(StorageFailure::RecoveryRequired),
+        }
+    }
+
+    /// The caller has durably bound this exact staged inode. Publish without
+    /// replacement, then hand all descriptor and lock ownership to the VFS.
+    pub(super) fn publish_initial_database(
+        &self,
+        identity: Identity,
+    ) -> Result<(), StorageFailure> {
+        self.verify_initial_database(identity, true)?;
+        let mut expected = mutex(&self.expected);
+        if self.check_locked(Kind::Database, &mut expected)? == Some(identity) {
+            return self.sync();
+        }
+        let staged = Self::initial_name(identity)?;
+        // SAFETY: the inode is still unpublished; no SQLite handle can own its locks.
+        let fd = unsafe {
+            libc::openat(
+                self.fd(),
+                staged.as_ptr(),
+                libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+            )
+        };
+        if fd < 0 {
+            return Err(io_failure());
+        }
+        // SAFETY: this descriptor is uniquely owned and closes before VFS enrollment.
+        let file = unsafe { File::from_raw_fd(fd) };
+        let stat = stat_fd(fd)?;
+        private_file(&stat)?;
+        private_acl(fd)?;
+        let linked = stat_at(self.fd(), &staged)?.ok_or(StorageFailure::UnsafeStorage)?;
+        private_file(&linked)?;
+        if Identity::of(&stat) != identity || Identity::of(&linked) != identity || stat.st_size != 0
+        {
+            return Err(StorageFailure::UnsafeStorage);
+        }
+        self.rename_initial(&staged, Kind::Database.name())?;
+        expected[Kind::Database as usize] = Some(identity);
+        if self.check_locked(Kind::Database, &mut expected)? != Some(identity) {
+            return Err(StorageFailure::UnsafeStorage);
+        }
+        self.sync()?;
+        Self::sync_initial_file(&file)
+    }
+
     pub(super) fn delete(&self, kind: Kind) -> Result<(), StorageFailure> {
         if kind != Kind::Journal {
             return Err(StorageFailure::UnsafeStorage);
