@@ -79,9 +79,10 @@ impl NativeDeviceCredentials for Keys {
 }
 #[derive(Default)]
 struct LostReply(Mutex<Vec<Vec<u8>>>);
-impl OwnerChannelProvider for Arc<LostReply> {
+struct LostReplyChannel(Arc<LostReply>);
+impl OwnerChannelProvider for LostReplyChannel {
     fn open<'a>(&'a self, _: &'a RegisteredServer) -> ClientFuture<'a, Arc<dyn MessageTransport>> {
-        Box::pin(async { Ok(self.clone() as Arc<dyn MessageTransport>) })
+        Box::pin(async { Ok(self.0.clone() as Arc<dyn MessageTransport>) })
     }
 }
 impl MessageTransport for LostReply {
@@ -124,7 +125,7 @@ fn desktop_owner_enrollment_retries_original_native_request_after_reply_loss() {
         &native,
         journal.clone(),
         keys.clone(),
-        Arc::new(channel.clone()),
+        Arc::new(LostReplyChannel(channel.clone())),
     ));
     assert_eq!(first.unwrap_err().class(), ClientFailureClass::Unavailable);
     let route_before = journal
@@ -146,7 +147,7 @@ fn desktop_owner_enrollment_retries_original_native_request_after_reply_loss() {
         &native,
         journal.clone(),
         keys.clone(),
-        Arc::new(channel.clone()),
+        Arc::new(LostReplyChannel(channel.clone())),
     ));
     assert_eq!(second.unwrap_err().class(), ClientFailureClass::Unavailable);
     let attempts = channel.0.lock().unwrap();
