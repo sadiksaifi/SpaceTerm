@@ -1457,7 +1457,7 @@ impl TabView {
                 let Panes::Server(panes) = &self.panes else {
                     return;
                 };
-                // A refused measurement leaves its startup intent waiting for the next one.
+                // The composed provider owns this exact measurement while a view save finishes.
                 let _ = panes
                     .runtime
                     .update(cx, |runtime, cx| runtime.request(request, cx));

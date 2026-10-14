@@ -58,6 +58,16 @@ pub(super) struct TerminalTransport {
     pub(super) effects_changed: Arc<Notify>,
 }
 impl TerminalTransport {
+    pub(super) fn invalidate_publication(&self, server: ServerId) {
+        if let Ok(mut state) = self.state.lock() {
+            // Organization publication replaces content authority, not the
+            // connection's acknowledged native context or an in-flight update.
+            state
+                .subscriptions
+                .retain(|pane, _| pane.server() != server);
+            state.reads.retain(|(owner, _), _| *owner != server);
+        }
+    }
     pub(super) fn invalidate(&self, server: ServerId) {
         if let Ok(mut state) = self.state.lock() {
             state.synchronizers.remove(&server);
@@ -91,7 +101,9 @@ impl NativeProtocol {
                         // Stale demand is disposable. A connection failure is published
                         // by the registry, which revokes its subscriptions and reads.
                         if error.class() != ClientFailureClass::StaleAuthority {
-                            owner.terminal.invalidate(info.server);
+                            // Local presentation or capacity failures do not
+                            // revoke an acknowledged connection context.
+                            owner.terminal.invalidate_publication(info.server);
                         } else if owner.handle(info.server).is_ok_and(|handle| {
                             !matches!(*handle.state().borrow(), ConnectionState::Connected { .. })
                         }) {
@@ -193,7 +205,7 @@ impl NativeProtocol {
             generation,
             focused: focused.map(PaneChannel::pane),
             input: facts.terminal_input_focus,
-            native: facts.presentable,
+            native: facts.presentable && facts.terminal_input_focus,
         };
         if let Some(previous) = previous
             && previous != context

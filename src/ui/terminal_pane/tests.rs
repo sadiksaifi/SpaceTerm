@@ -10439,6 +10439,8 @@ fn desktop_server_measurement_keeps_the_exact_ticket_and_reports_equal_geometry(
         let token = pane.server_session.as_ref().unwrap().token();
         pane.request_measurement(token, UseTicket::FIRST, LayoutRevision::INITIAL, cx)
             .unwrap();
+        pane.request_measurement(token, UseTicket::FIRST, LayoutRevision::INITIAL, cx)
+            .unwrap();
         pane.request_measurement(
             token,
             UseTicket::new(2).unwrap(),
@@ -12749,4 +12751,85 @@ fn desktop_server_native_paste_acknowledgement_and_approval_round_trip(cx: &mut 
         .unwrap();
     cx.run_until_parked();
     assert_eq!(resolved.try_recv().unwrap(), Ok(PasteResolution::Written));
+}
+
+#[gpui::test]
+fn desktop_server_repeated_passive_presentation_does_not_schedule_another_render(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_client::view::{
+        ClientViewState, PresentationFacts, PresentationState, ReplicaFacts, ReplicaObservation,
+        ReplicaReadiness, ServerViewStatus, StartupIntents,
+    };
+    let (fixture, pane, cx) = server_pane(cx, false);
+    let snapshot = fixture.server.snapshot().unwrap();
+    let observation = *fixture.channel.state().borrow();
+    let info = observation.connection.unwrap();
+    let token = PaneViewToken {
+        context_generation: observation.context,
+        ..fixture.token
+    };
+    let replica = ReplicaObservation::new(
+        &snapshot,
+        &[],
+        ReplicaFacts {
+            pairing: info.pairing,
+            client: info.client,
+            connection: Some(info.binding),
+            readiness: ReplicaReadiness::Ready,
+            status: ServerViewStatus::Connected,
+        },
+    )
+    .unwrap();
+    let mut view = ClientViewState::new();
+    view.attach(fixture.lease.workspace(), &replica).unwrap();
+    let facts = PresentationFacts::observe(
+        &view,
+        &replica,
+        fixture.lease.workspace(),
+        fixture.channel.pane(),
+        &StartupIntents::new(),
+        None,
+    )
+    .unwrap();
+    let decision = PresentationState::new().reduce(&facts).unwrap();
+    assert_eq!(
+        decision.presentation,
+        spaceterm_client::view::PanePresentation::NotStarted
+    );
+    pane.update(cx, |pane, cx| {
+        pane.set_portable_presentation(
+            token,
+            observation,
+            decision,
+            super::super::pane_presentation::DisplayName::unnamed(),
+            super::super::pane_presentation::OfflineCause::Unreachable,
+            cx,
+        )
+        .unwrap();
+    });
+    cx.run_until_parked();
+    let notifications = Rc::new(Cell::new(0));
+    let observed = notifications.clone();
+    cx.update(|_, cx| {
+        cx.observe(&pane, move |_, _| observed.set(observed.get() + 1))
+            .detach();
+    });
+    pane.update(cx, |pane, cx| {
+        pane.set_portable_presentation(
+            token,
+            observation,
+            decision,
+            super::super::pane_presentation::DisplayName::unnamed(),
+            super::super::pane_presentation::OfflineCause::Unreachable,
+            cx,
+        )
+        .unwrap();
+    });
+    cx.run_until_parked();
+    assert_eq!(notifications.get(), 0);
+    assert_eq!(
+        fixture.server.snapshot().unwrap().runtime()[0].phase,
+        spaceterm_core::organization::SessionPhase::NotStarted
+    );
 }

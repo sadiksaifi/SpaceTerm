@@ -158,15 +158,45 @@ impl NativeProtocol {
             .map(|previous| previous + 1)
             .map_err(|_| fail(ClientFailureClass::CounterExhausted))
     }
-    async fn completed(&self, ticket: OperationTicket) -> Result<Outcome, ClientFailure> {
+    async fn completed(
+        &self,
+        ticket: OperationTicket,
+        captured: ConnectedInfo,
+    ) -> Result<Outcome, ClientFailure> {
         let mut state = ticket.status();
+        let mut connection = self.handle(captured.server)?.state();
         let await_outcome = async {
             loop {
-                let current = state.borrow().clone();
-                match current {
-                    OperationStatus::Completed { outcome, .. } => return Ok(outcome),
-                    OperationStatus::Retired => return Err(stale()),
-                    _ => state.changed().await.map_err(|_| stale())?,
+                let current = state.borrow_and_update().clone();
+                let connected = connection.borrow_and_update().clone();
+                match connected {
+                    ConnectionState::Connected { info }
+                        if info.binding == captured.binding
+                            && info.epoch == captured.epoch
+                            && info.attempt == captured.attempt =>
+                    {
+                        // Receipt and organization delivery are separate. The
+                        // pending use must validate against the installed grant.
+                        if let OperationStatus::Completed {
+                            outcome,
+                            publication_revision,
+                        } = current
+                            && info.organization_revision >= publication_revision
+                        {
+                            return Ok(outcome);
+                        }
+                    }
+                    ConnectionState::Connecting {
+                        phase: spaceterm_client::api::ConnectingPhase::Reconciling,
+                    } => {}
+                    _ => return Err(stale()),
+                }
+                if matches!(*state.borrow(), OperationStatus::Retired) {
+                    return Err(stale());
+                }
+                tokio::select! {
+                    changed = state.changed() => changed.map_err(|_| stale())?,
+                    changed = connection.changed() => changed.map_err(|_| stale())?,
                 }
             }
         };
@@ -337,6 +367,13 @@ impl ConnectionDelegate for NativeProtocol {
         let server = binding.target().server();
         if let Ok(channels) = self.channels() {
             let _ = channels.invalidate(server, reason);
+            // Resynchronization can retain the authenticated connection. Its
+            // next context must exceed even an acknowledgement discarded by resync.
+            if reason == ConnectionInvalidation::Reconciliation
+                && let Ok(context) = channels.next_connection_context()
+            {
+                let _ = channels.align_connection_context(server, context);
+            }
         }
         if let Ok(mut effects) = self.effects.lock() {
             effects.retain(|(owner, _), _| *owner != server);
@@ -347,10 +384,16 @@ impl ConnectionDelegate for NativeProtocol {
         if let Ok(mut infos) = self.infos.lock() {
             infos.remove(&server);
         }
-        if let Ok(mut metadata) = self.metadata.lock() {
+        if reason != ConnectionInvalidation::Publication
+            && let Ok(mut metadata) = self.metadata.lock()
+        {
             metadata.remove(&server);
         }
-        self.terminal.invalidate(server);
+        if reason == ConnectionInvalidation::Publication {
+            self.terminal.invalidate_publication(server);
+        } else {
+            self.terminal.invalidate(server);
+        }
     }
     fn reconcile<'a>(
         &'a self,
@@ -657,7 +700,7 @@ impl PaneConnectionPort for NativeProtocol {
                             }),
                         )
                         .await?;
-                    match self.completed(ticket).await? {
+                    match self.completed(ticket, request.info).await? {
                         Outcome::ControlGranted(grant) => grant.grant(),
                         Outcome::ControlAcquired(grant) => grant,
                         _ => return Err(stale()),
@@ -690,7 +733,7 @@ impl PaneConnectionPort for NativeProtocol {
                 .tracker
                 .begin_startup(&binding, fence, request.source, request.workspace, self)
                 .await?;
-            match self.completed(ticket).await? {
+            match self.completed(ticket, request.info).await? {
                 Outcome::StartupAwaitingMeasurement { intent: received }
                     if received == intent.id() =>
                 {

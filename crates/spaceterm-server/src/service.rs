@@ -90,6 +90,11 @@ impl OperationReply {
     }
 }
 pub(crate) enum ActorRequest {
+    OrganizationChanges {
+        principal: VerifiedPrincipal,
+        base: OrganizationRevision,
+        reply: Reply<crate::publication::PublicationPlan>,
+    },
     OrganizationSnapshot {
         principal: VerifiedPrincipal,
         major: u32,
@@ -960,6 +965,16 @@ impl Actor {
             return;
         }
         match request {
+            ActorRequest::OrganizationChanges {
+                principal,
+                base,
+                reply,
+            } => {
+                let result = self
+                    .check_principal(principal, false)
+                    .map(|_| self.publication.plan_since(Some(base)));
+                let _ = reply.send(result);
+            }
             ActorRequest::OrganizationSnapshot {
                 principal,
                 major,
