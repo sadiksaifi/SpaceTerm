@@ -270,6 +270,40 @@ async fn dropping_channels_and_subscribers_sends_no_shutdown_or_release() {
 }
 
 #[tokio::test]
+async fn same_authority_publication_preserves_explicit_startup_response_and_measurement() {
+    let fixture = Fixture::new(false).await;
+    let response = fixture.peer.delay_next_intent_response().unwrap();
+    let pane = fixture.pane.clone();
+    let request =
+        tokio::spawn(async move { pane.explicit_use(ExplicitUseSource::StartSession).await });
+    wait_for_operations(&fixture, 2).await;
+    fixture
+        .channels
+        .invalidate(fixture.server.server(), ConnectionInvalidation::Publication)
+        .unwrap();
+    assert!(fixture.pane.state().borrow().connection.is_none());
+    fixture.peer.publish().unwrap();
+    response.add_permits(1);
+    let token = request
+        .await
+        .unwrap()
+        .expect("a publication with the same authority must retain the deliberate request")
+        .startup()
+        .unwrap();
+    fixture
+        .channels
+        .invalidate(fixture.server.server(), ConnectionInvalidation::Publication)
+        .unwrap();
+    assert!(fixture.pane.complete_intent(&token, grid()).await.is_err());
+    fixture.peer.publish().unwrap();
+    fixture.pane.complete_intent(&token, grid()).await.unwrap();
+    assert!(matches!(
+        fixture.server.snapshot().unwrap().runtime()[0].phase,
+        SessionPhase::Running { .. }
+    ));
+}
+
+#[tokio::test]
 async fn delayed_old_intent_response_cannot_cancel_a_new_context_request() {
     let fixture = Fixture::new(false).await;
     let old_gate = fixture.peer.delay_next_intent_response().unwrap();

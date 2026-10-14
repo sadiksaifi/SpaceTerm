@@ -149,8 +149,25 @@ pub struct PaneChannelState {
     pub facts: PaneContextFacts,
     pub content: Option<ContentBase>,
 }
+#[derive(Clone, Copy)]
+struct PaneAuthority {
+    server: ServerId,
+    pairing: spaceterm_core::identity::PairingId,
+    client: spaceterm_core::identity::ClientId,
+    incarnation: Option<spaceterm_core::pairing::LocalPairingGeneration>,
+}
+impl From<ConnectedInfo> for PaneAuthority {
+    fn from(info: ConnectedInfo) -> Self {
+        Self {
+            server: info.server,
+            pairing: info.pairing,
+            client: info.client,
+            incarnation: None,
+        }
+    }
+}
 struct ChannelInner {
-    authority: ConnectedInfo,
+    authority: PaneAuthority,
     pane: PaneId,
     tab: TabId,
     lease: Weak<LeaseInner>,
@@ -189,6 +206,10 @@ struct ServerState {
     transfers: Arc<Semaphore>,
     requests: Arc<AtomicU64>,
 }
+struct RetainedServer {
+    authority: PaneAuthority,
+    snapshot: Arc<ReplicaSnapshot>,
+}
 struct Shared {
     admission: Mutex<Option<crate::journal::PaneJournalAdmission>>,
     peer: Arc<dyn PaneConnectionPort>,
@@ -199,13 +220,30 @@ struct Shared {
     // channels without retaining comparison entries for deleted Panes.
     context_high_water: AtomicU64,
     servers: Mutex<BTreeMap<ServerId, ServerState>>,
+    retained: Mutex<BTreeMap<ServerId, RetainedServer>>,
     leases: Mutex<BTreeMap<(WorkspaceId, AttachmentIncarnation), Weak<LeaseInner>>>,
 }
 impl Shared {
     fn admitted(&self, info: ConnectedInfo) -> bool {
-        self.admission
-            .lock()
-            .is_ok_and(|gate| gate.as_ref().is_none_or(|gate| gate.allows(info)))
+        self.admitted_identity(info.into())
+    }
+    fn admitted_identity(&self, authority: PaneAuthority) -> bool {
+        self.admission.lock().is_ok_and(|gate| {
+            gate.as_ref().is_none_or(|gate| {
+                gate.allows_identity(
+                    authority.server,
+                    authority.pairing,
+                    authority.client,
+                    authority.incarnation,
+                )
+            })
+        })
+    }
+    fn admitted_binding(&self, binding: &crate::api::PairedServerBinding) -> bool {
+        self.admission.lock().is_ok_and(|gate| {
+            gate.as_ref()
+                .is_none_or(|gate| gate.allows_binding(binding))
+        })
     }
     fn next_context(&self) -> Result<ContextGeneration, ClientFailure> {
         self.context_high_water
@@ -238,6 +276,7 @@ impl PaneChannels {
                 slots: Arc::new(Semaphore::new(4096)),
                 context_high_water: AtomicU64::new(1),
                 servers: Mutex::new(BTreeMap::new()),
+                retained: Mutex::new(BTreeMap::new()),
                 leases: Mutex::new(BTreeMap::new()),
             }),
         })
@@ -280,6 +319,42 @@ impl PaneChannels {
         });
         leases.insert((workspace, incarnation), Arc::downgrade(&lease));
         Ok(WorkspaceLease(lease))
+    }
+    /// Materialize readonly membership from an exact saved pairing before a cold reconnect.
+    /// This retains the replica's residency charge and creates no connection, grant or intent.
+    pub fn retain(
+        &self,
+        binding: &crate::api::PairedServerBinding,
+        snapshot: Arc<ReplicaSnapshot>,
+    ) -> Result<(), ClientFailure> {
+        let target = binding.target();
+        let authority = PaneAuthority {
+            server: target.server(),
+            pairing: target.pairing(),
+            client: target.client(),
+            incarnation: Some(target.incarnation()),
+        };
+        if snapshot.cursor.server != authority.server || !self.shared.admitted_binding(binding) {
+            return Err(stale());
+        }
+        let servers = self.shared.servers.lock().map_err(|_| stale())?;
+        if servers.contains_key(&authority.server) {
+            return Ok(());
+        }
+        let mut retained = self.shared.retained.lock().map_err(|_| stale())?;
+        if retained.len() >= crate::limits::ClientLimits::default().saved_servers
+            && !retained.contains_key(&authority.server)
+        {
+            return Err(resource_limit());
+        }
+        retained.insert(
+            authority.server,
+            RetainedServer {
+                authority,
+                snapshot,
+            },
+        );
+        Ok(())
     }
     /// Called only with the authenticated, reconciled replica. The allocation is
     /// retained by Arc, keeping the replica owner's residency charge intact.
@@ -336,6 +411,11 @@ impl PaneChannels {
                 },
             );
         }
+        self.shared
+            .retained
+            .lock()
+            .map_err(|_| stale())?
+            .remove(&info.server);
         for channel in self.channels(info.server)? {
             channel.apply(info, &snapshot)?;
         }
@@ -437,6 +517,11 @@ impl PaneChannels {
                 ConnectionInvalidation::Shutdown | ConnectionInvalidation::BindingRemoved
             ) {
                 servers.remove(&server);
+                self.shared
+                    .retained
+                    .lock()
+                    .map_err(|_| stale())?
+                    .remove(&server);
             } else if let Some(retained) = servers.get_mut(&server) {
                 // Retained membership serves personal navigation only. It grants no
                 // connection, content permit, startup intent or runtime effect.
@@ -445,8 +530,13 @@ impl PaneChannels {
         }
         for channel in self.channels(server)? {
             let mut state = channel.state.lock().map_err(|_| stale())?;
-            state.intent = None;
-            state.intent_pending = None;
+            // Publication temporarily withholds effects while its complete authority
+            // is checked. It must not cancel the deliberate startup that produced it.
+            // Every other invalidation ends that request immediately.
+            if reason != ConnectionInvalidation::Publication {
+                state.intent = None;
+                state.intent_pending = None;
+            }
             state.native.clear();
             state.effects.clear();
             state.facts.connection = None;
@@ -589,11 +679,24 @@ impl WorkspaceLease {
                 lease: Arc::clone(&self.0),
             });
         }
-        let (info, snapshot, active) = {
+        let (authority, info, snapshot, active) = {
             let servers = self.0.shared.servers.lock().map_err(|_| stale())?;
-            let server = servers.get(&self.0.workspace.server()).ok_or_else(stale)?;
-            (server.info, Arc::clone(&server.snapshot), server.active)
+            if let Some(server) = servers.get(&self.0.workspace.server()) {
+                (
+                    server.info.into(),
+                    Some(server.info),
+                    Arc::clone(&server.snapshot),
+                    server.active,
+                )
+            } else {
+                let retained = self.0.shared.retained.lock().map_err(|_| stale())?;
+                let server = retained.get(&self.0.workspace.server()).ok_or_else(stale)?;
+                (server.authority, None, Arc::clone(&server.snapshot), false)
+            }
         };
+        if !self.0.shared.admitted_identity(authority) {
+            return Err(stale());
+        }
         let record = snapshot
             .organization
             .state()
@@ -632,9 +735,9 @@ impl WorkspaceLease {
         };
         let projection = TerminalProjection::new(self.0.shared.budgets.clone())?;
         let shared = Arc::clone(&self.0.shared);
-        projection.bind_admission(Arc::new(move || shared.admitted(info)));
+        projection.bind_admission(Arc::new(move || shared.admitted_identity(authority)));
         let channel = Arc::new(ChannelInner {
-            authority: info,
+            authority,
             pane,
             tab,
             lease: Arc::downgrade(&self.0),
@@ -663,7 +766,7 @@ impl WorkspaceLease {
                 .map_err(|_| resource_limit())?,
         });
         channels.insert(pane, Arc::downgrade(&channel));
-        if active {
+        if let Some(info) = info.filter(|_| active) {
             channel.apply(info, &snapshot)?;
         }
         drop(channels);
@@ -1289,7 +1392,7 @@ impl Drop for PendingIntent {
 }
 impl ChannelInner {
     fn admitted(&self) -> bool {
-        self.shared.admitted(self.authority)
+        self.shared.admitted_identity(self.authority)
     }
     fn apply(&self, info: ConnectedInfo, snapshot: &ReplicaSnapshot) -> Result<(), ClientFailure> {
         if !self.admitted()
@@ -1322,13 +1425,13 @@ impl ChannelInner {
             .find(|runtime| runtime.pane == self.pane)
             .copied()
             .filter(|_| present);
-        let changed = state.facts.runtime != runtime
+        let same_runtime = state.facts.runtime == runtime;
+        let changed = !same_runtime
             || state
                 .facts
                 .connection
                 .is_none_or(|old| !same_attempt(old, info));
         if changed {
-            state.intent = None;
             state.native.clear();
             state.effects.clear();
             let session = runtime.map(|runtime| SessionKey {
@@ -1368,6 +1471,13 @@ impl ChannelInner {
         }
         state.facts.runtime = runtime;
         state.facts.connection = Some(info);
+        if state.intent.is_some_and(|intent| {
+            !same_runtime
+                || !bound_fence(&state.facts, self.pane, false)
+                    .is_ok_and(|fence| intent.fence().is_current(&fence))
+        }) {
+            state.intent = None;
+        }
         state.facts.readiness = if self
             .lease
             .upgrade()

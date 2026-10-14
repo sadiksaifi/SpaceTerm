@@ -269,6 +269,11 @@ impl<S: ViewStore + 'static> ComposedDesktopClientProvider<S> {
             {
                 continue;
             }
+            if let Some(snapshot) = handle.replica().borrow().retained().cloned() {
+                channels
+                    .retain(&binding, snapshot)
+                    .map_err(DesktopClientError::from)?;
+            }
             order.push(name.server);
             if sources
                 .insert(

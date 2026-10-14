@@ -825,6 +825,12 @@ async fn terminal_acceptance(
 
 #[gpui::test]
 async fn desktop_native_terminal_stream_publishes_owned_active_grid(cx: &mut TestAppContext) {
-    authenticated_case(1, cx, true).await;
     authenticated_case(2, cx, true).await;
+}
+
+#[gpui::test]
+async fn desktop_native_terminal_stream_publishes_owned_active_grid_previous_major(
+    cx: &mut TestAppContext,
+) {
+    authenticated_case(1, cx, true).await;
 }

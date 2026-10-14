@@ -2123,6 +2123,15 @@ async fn enrollment_ssh_uses_foreground_askpass_without_granting_restricted_retr
                 zeroize::Zeroizing::new(vec![b'a'; 64]),
             )
         }
+        fn handoff_authorized(
+            &self,
+            authority: spaceterm_host::ssh_tunnel::AskPassAuthorityCheck,
+        ) -> Result<AskPassHandoff, TransportError> {
+            if !authority() {
+                return Err(TransportError::PeerAccountRejected);
+            }
+            self.handoff()
+        }
     }
     let directory = Directory::new();
     let journal = controller(Arc::new(directory.create().await)).await;
@@ -2163,7 +2172,7 @@ if captured:
     expected_batch = 'no' if foreground else 'yes'
     assert configuration.startswith('Host *\n BatchMode ' + expected_batch + '\n')
 with open({observed:?}, 'a') as output:
-    output.write('ordinary\n' if not captured else ('foreground\n' if foreground else 'restricted\n'))
+    output.write(('foreground-ordinary\n' if foreground else 'ordinary\n') if not captured else ('foreground\n' if foreground else 'restricted\n'))
 forward = sys.argv[sys.argv.index('-L') + 1]
 listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 listener.bind(forward.split(':', 1)[0])
@@ -2227,7 +2236,11 @@ while True:
     .unwrap();
     assert_eq!(prompt.0.load(Ordering::SeqCst), 0);
     ordinary.sender.close().await.unwrap();
-    let connector = Arc::new(NativePairingConnector::new(journal.clone(), routes));
+    let routes = Arc::new(routes);
+    let connector = Arc::new(NativePairingConnector::with_shared_routes(
+        journal.clone(),
+        routes.clone(),
+    ));
     journal
         .transact(fixture.seed_changes()[..3].to_vec())
         .await
@@ -2268,13 +2281,66 @@ while True:
         ))])
         .await
         .unwrap();
-    let composition = runtime(journal);
+    use spaceterm_client::{
+        pairing::journal::{JournalPairingStore, LocalPairingStore},
+        ports::ForegroundCancellation,
+    };
     let key = fixture.binding.target().local_pairing().unwrap();
+    let authority = JournalPairingStore::new(journal.clone())
+        .ordinary_authority(&key)
+        .await
+        .unwrap();
+    // Ordinary leases stay noninteractive. The person must deliberately Retry.
+    assert!(matches!(
+        routes.open_foreground_ordinary(fixture.binding.target(), &authority.lease(), ForegroundCancellation::new()).await,
+        Err(error) if error.class() == spaceterm_client::failure::ClientFailureClass::AuthorizationDenied
+    ));
+    let reconnect_lease = authority.foreground_lease();
+    let target = fixture.binding.target();
+    let different_incarnation = ConnectionTarget::new(
+        target.pin(),
+        target.device(),
+        target.pairing(),
+        target.client(),
+        target.route().clone(),
+        target.credential(),
+        LocalPairingGeneration::new(target.incarnation().get() + 1).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        routes.open_foreground_ordinary(&different_incarnation, &reconnect_lease, ForegroundCancellation::new()).await,
+        Err(error) if error.class() == spaceterm_client::failure::ClientFailureClass::AuthorizationDenied
+    ));
+    assert_eq!(prompt.0.load(Ordering::SeqCst), 1);
+    let reconnect = routes
+        .open_foreground_ordinary(
+            fixture.binding.target(),
+            &reconnect_lease,
+            ForegroundCancellation::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(prompt.0.load(Ordering::SeqCst), 2);
+    reconnect.sender.close().await.unwrap();
+    let background = spaceterm_client::ports::RouteConnector::open(
+        routes.as_ref(),
+        fixture.binding.target(),
+        spaceterm_client::ports::ConnectionPurpose::Ordinary,
+    )
+    .await
+    .unwrap();
+    assert_eq!(prompt.0.load(Ordering::SeqCst), 2);
+    background.sender.close().await.unwrap();
+    let composition = runtime(journal);
     let assessment = composition
         .assess_unpair(&key, fixture.binding.target().client())
         .await
         .unwrap();
     let removed = composition.self_unpair(assessment).await.unwrap();
+    assert!(matches!(
+        routes.open_foreground_ordinary(fixture.binding.target(), &reconnect_lease, ForegroundCancellation::new()).await,
+        Err(error) if error.class() == spaceterm_client::failure::ClientFailureClass::AuthorizationDenied
+    ));
     let task = composition
         .inventory()
         .await
@@ -2286,7 +2352,7 @@ while True:
     let retry = RestrictedConnector::open(connector.as_ref(), &task)
         .await
         .unwrap();
-    assert_eq!(prompt.0.load(Ordering::SeqCst), 1);
+    assert_eq!(prompt.0.load(Ordering::SeqCst), 2);
     drop(retry);
     attempt.cancel();
     assert!(matches!(
@@ -2295,10 +2361,10 @@ while True:
             .await,
         Err(PairingFailure::AuthorizationDenied)
     ));
-    assert_eq!(prompt.0.load(Ordering::SeqCst), 1);
+    assert_eq!(prompt.0.load(Ordering::SeqCst), 2);
     assert_eq!(
         std::fs::read_to_string(observed).unwrap(),
-        "ordinary\nforeground\nrestricted\nrestricted\n"
+        "ordinary\nforeground\nrestricted\nforeground-ordinary\nordinary\nrestricted\n"
     );
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {

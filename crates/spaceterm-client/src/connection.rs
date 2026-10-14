@@ -18,8 +18,8 @@ use crate::{
         RETRY_MAXIMUM, RETRY_MINIMUM,
     },
     ports::{
-        ConnectedRoute, ConnectionInvalidation, ConnectionPurpose, DiscoveryState, MessageSender,
-        OrganizationPublication,
+        ConnectedRoute, ConnectionInvalidation, ConnectionPurpose, DiscoveryState,
+        ForegroundCancellation, MessageSender, OrganizationPublication,
     },
     protocol_adapter::{
         ProtocolSession, confirmed_stopped, is_organization, is_resync, organization_query,
@@ -58,6 +58,7 @@ pub(crate) struct WorkerChannels {
 }
 
 struct AttemptResources {
+    foreground: Option<ForegroundCancellation>,
     queries: Arc<queries::QueryHub>,
     egress: Arc<EgressBudget>,
     writer_done: Option<watch::Receiver<bool>>,
@@ -66,8 +67,13 @@ struct AttemptResources {
     slot: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 impl AttemptResources {
-    fn new(egress: Arc<EgressBudget>, queries: Arc<queries::QueryHub>) -> Self {
+    fn new(
+        egress: Arc<EgressBudget>,
+        queries: Arc<queries::QueryHub>,
+        foreground_retry: bool,
+    ) -> Self {
         Self {
+            foreground: foreground_retry.then(ForegroundCancellation::new),
             queries,
             egress,
             writer_done: None,
@@ -77,8 +83,11 @@ impl AttemptResources {
         }
     }
     async fn close(&mut self) -> Result<(), ClientFailure> {
-        // A native open owns cancellation cleanup too. Explicit shutdown drains
-        // its bounded open before joining the returned route's close operation.
+        if let Some(foreground) = self.foreground.take() {
+            foreground.cancel();
+        }
+        // Revoke prompt authority before waiting for the native open. Keep its
+        // owned task so shutdown and replacement Retry still join exact cleanup.
         if let Some(opening) = self.opening.take()
             && let Ok(Ok(route)) = opening.await
         {
@@ -123,6 +132,7 @@ pub(crate) async fn run(
     let mut retry_at: Option<Instant> = None;
     let mut attempt = 0u64;
     let mut failures = 0u32;
+    let mut foreground_retry = false;
     loop {
         if *shutdown.borrow() {
             break;
@@ -131,7 +141,10 @@ pub(crate) async fn run(
             biased;
             _ = shutdown.changed() => break,
             request = requests.recv() => match request {
-                Some(request) => { let _ = request.completion.send(Ok(())); }
+                Some(request) => {
+                    foreground_retry = request.retry;
+                    let _ = request.completion.send(Ok(()));
+                }
                 None => break,
             },
             request = outgoing.recv() => {
@@ -154,7 +167,11 @@ pub(crate) async fn run(
             .invalidate(&binding, ConnectionInvalidation::Reconciliation);
         replica.invalidate(ResyncReason::ConnectionLost);
         reject_outgoing(&mut outgoing);
-        let mut resources = AttemptResources::new(Arc::clone(&egress), Arc::clone(&queries));
+        let mut resources = AttemptResources::new(
+            Arc::clone(&egress),
+            Arc::clone(&queries),
+            std::mem::take(&mut foreground_retry),
+        );
         let end = {
             let pending = run_attempt(
                 &shared,
@@ -174,7 +191,10 @@ pub(crate) async fn run(
                         Some(request) => {
                             let connected = matches!(*state.borrow(), ConnectionState::Connected { .. });
                             let _ = request.completion.send(Ok(()));
-                            if request.retry || !connected { break AttemptEnd::Restart; }
+                            if request.retry || !connected {
+                                foreground_retry = request.retry;
+                                break AttemptEnd::Restart;
+                            }
                         }
                         None => break AttemptEnd::Shutdown,
                     },
@@ -182,8 +202,8 @@ pub(crate) async fn run(
                 }
             }
         };
-        // Dropping the exact attempt cancels dial/read/send/journal callbacks and
-        // aborts its route before any newer attempt is published.
+        // Dropping the exact attempt cancels read/send/journal callbacks. Close
+        // revokes its prompts and drains its owned dial before publishing a replacement.
         let reason = match &end {
             AttemptEnd::Finished(Ok(())) => ConnectionInvalidation::Stopped,
             AttemptEnd::Shutdown => ConnectionInvalidation::Shutdown,
@@ -306,10 +326,15 @@ async fn run_attempt(
     );
     let routes = Arc::clone(&services.routes);
     let owned_target = target.clone();
+    let foreground = resources.foreground.clone();
     resources.opening = Some(tokio::spawn(async move {
-        routes
-            .open(&owned_target, ConnectionPurpose::Ordinary)
-            .await
+        if let Some(cancellation) = foreground {
+            routes.open_foreground(&owned_target, cancellation).await
+        } else {
+            routes
+                .open(&owned_target, ConnectionPurpose::Ordinary)
+                .await
+        }
     }));
     // The deadline bounds admission, not native cleanup. Timing out the owned
     // open future would drop its cancel-and-join completion while SSH still reaps.

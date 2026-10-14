@@ -2,7 +2,7 @@
 #[path = "projection/support.rs"]
 mod support;
 use spaceterm_client::{pane_channel::*, projection::*};
-use spaceterm_core::{content_queries::*, observations::*};
+use spaceterm_core::{authority::ContentRevision, content::*, content_queries::*, observations::*};
 use spaceterm_terminal::{metadata::*, runtime_contracts::*};
 use support::*;
 
@@ -725,4 +725,98 @@ async fn routed_metadata_requires_existing_live_channel_and_current_fence() {
             .unwrap()
     );
     assert!(fixture.pane.metadata_snapshot().is_none());
+}
+
+#[tokio::test]
+async fn cold_retained_channels_are_readonly_until_authenticated_publication_and_content() {
+    use spaceterm_client::{ports::ConnectionInvalidation, view::AttachmentIncarnation};
+    use std::sync::Arc;
+    let fixture = Fixture::new(true).await;
+    let channels = PaneChannels::new(
+        fixture.peer.clone(),
+        ProjectionBudgets::supported().unwrap(),
+    )
+    .unwrap();
+    fixture
+        .peer
+        .journal()
+        .bind_pane_channels(channels.clone())
+        .unwrap();
+    let binding = fixture.server.binding(1).unwrap();
+    let snapshot = fixture.server.replica().unwrap();
+    let target = binding.target();
+    let different_incarnation = spaceterm_client::api::PairedServerBinding::new(
+        spaceterm_client::api::ConnectionTarget::new(
+            target.pin(),
+            target.device(),
+            target.pairing(),
+            target.client(),
+            target.route().clone(),
+            target.credential(),
+            spaceterm_core::pairing::LocalPairingGeneration::new(target.incarnation().get() + 1)
+                .unwrap(),
+        )
+        .unwrap(),
+    );
+    assert!(matches!(
+        channels.retain(&different_incarnation, Arc::clone(&snapshot)),
+        Err(error) if error.class() == spaceterm_client::failure::ClientFailureClass::StaleAuthority
+    ));
+    channels.retain(&binding, Arc::clone(&snapshot)).unwrap();
+    let lease = channels
+        .attach(fixture.workspace, AttachmentIncarnation::new(2).unwrap())
+        .unwrap();
+    let pane = lease.pane(fixture.pane.pane()).unwrap();
+    assert_eq!(pane.state().borrow().readiness, PaneReadiness::Offline);
+    assert!(pane.state().borrow().connection.is_none());
+    assert!(pane.current_frame().is_none());
+    pane.update_context(PaneContextFacts {
+        focused_pane: true,
+        terminal_input_focus: true,
+        presentable: true,
+    })
+    .unwrap();
+    for kind in [
+        EffectKind::Key,
+        EffectKind::Read,
+        EffectKind::NativeRead,
+        EffectKind::Resize,
+    ] {
+        assert!(pane.permit(kind).is_err());
+    }
+    assert!(
+        pane.explicit_use(ExplicitUseSource::StartSession)
+            .await
+            .is_err()
+    );
+    assert!(pane.take_over().await.is_err());
+    let info = fixture.server.connected_info(1, 1, 1, 2).unwrap();
+    channels.publish(info, snapshot).unwrap();
+    assert_eq!(pane.state().borrow().connection, Some(info));
+    assert_eq!(pane.state().borrow().readiness, PaneReadiness::Reconciling);
+    assert!(pane.permit(EffectKind::Key).is_err());
+    let fence = pane_fence(&pane);
+    pane.publish_content_base(
+        fence,
+        ContentBase {
+            session: fence.session(),
+            revision: ContentRevision::new(1),
+            screen: Screen::Primary,
+            screen_generation: 1,
+            topology_revision: 1,
+        },
+    )
+    .unwrap();
+    assert!(pane.permit(EffectKind::Key).is_ok());
+    channels
+        .invalidate(
+            fixture.server.server(),
+            ConnectionInvalidation::BindingRemoved,
+        )
+        .unwrap();
+    assert!(pane.permit(EffectKind::Key).is_err());
+    let replacement = channels
+        .attach(fixture.workspace, AttachmentIncarnation::new(3).unwrap())
+        .unwrap();
+    assert!(replacement.pane(fixture.pane.pane()).is_err());
 }
