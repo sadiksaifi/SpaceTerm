@@ -1074,16 +1074,13 @@ impl Render for ServerEnrollment {
                         }),
                 )
             })
-            .when(self.candidate.is_some() && !stopped, |view| {
+            // After submission the check button above is the single Check Original control.
+            .when(self.candidate.is_some() && !stopped && !submitted, |view| {
                 view.child(
                     Button::new(
                         "settings-server-enrollment-confirm",
-                        if method == Method::Ssh && self.ssh_submitted {
-                            "Check Original Setup"
-                        } else if method == Method::Ssh {
+                        if method == Method::Ssh {
                             "Set Up over SSH"
-                        } else if direct_submitted {
-                            "Check Original Enrollment"
                         } else {
                             "Confirm Fingerprint and Pair"
                         },

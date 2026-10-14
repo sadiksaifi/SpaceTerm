@@ -1411,3 +1411,196 @@ fn desktop_workspace_starting_directory_reports_a_server_field_conflict(cx: &mut
         "a conflict never repeats the write"
     );
 }
+
+fn close_message(
+    manager: &Entity<WorkspaceManager>,
+    target: AssessmentTarget,
+    counts: (u32, u32, u32, u32),
+    cx: &mut VisualTestContext,
+) -> String {
+    let command = Command::AssessKillWorkspace {
+        workspace: ws(A, 1),
+    };
+    let assessment = CloseAssessment::new(
+        AssessmentRef {
+            operation: operation(server(A), 9),
+            digest: RequestDigest::for_command(&command).unwrap(),
+        },
+        spaceterm_core::authority::ServerEpoch::new(1),
+        AssessmentSummary::new(target, counts.0, counts.1, counts.2, counts.3, true).unwrap(),
+    )
+    .unwrap();
+    cx.update(|_, cx| {
+        let manager = manager.read(cx);
+        close_copy(assessment, manager.server.as_ref().unwrap(), cx).1
+    })
+}
+
+#[gpui::test]
+fn desktop_server_close_confirmations_use_singular_and_plural_counts(cx: &mut TestAppContext) {
+    let (manager, runtime, cx) = harness(cx);
+    servers(&runtime, &[A]);
+    publish(&replica(A), 1, &runtime, cx);
+    let kill = AssessmentTarget::KillWorkspace(ws(A, 1));
+    let close_tab = AssessmentTarget::Close(ServerCloseTarget::Tab(tab(A, 1)));
+    assert_eq!(
+        close_message(&manager, kill, (1, 1, 1, 1), cx),
+        "work and its 1 Tab are deleted from Local for every client. 1 Terminal Session ends for every client. Any command running in it stops. This can't be undone. Repository files and Git Worktree directories stay on disk."
+    );
+    assert!(
+        close_message(&manager, kill, (1, 2, 3, 2), cx)
+            .starts_with("work and its 2 Tabs are deleted from Local for every client. 2 Terminal Sessions end for every client. Any command running in them stops.")
+    );
+    assert_eq!(
+        close_message(&manager, close_tab, (1, 1, 1, 0), cx),
+        "Its 1 Pane closes for every client."
+    );
+    assert_eq!(
+        close_message(&manager, close_tab, (1, 1, 3, 0), cx),
+        "Its 3 Panes close for every client."
+    );
+}
+
+#[gpui::test]
+fn desktop_directory_retry_shows_its_result_on_the_pane(cx: &mut TestAppContext) {
+    use crate::ui::directory_picker::pane_repair::PaneRepairStatus;
+    use crate::ui::server_desktop_contracts::{
+        AttachmentGeneration, PaneAction, PaneViewToken, SelectionSource,
+    };
+    use spaceterm_core::{
+        authority::ContextGeneration,
+        organization::{ControlRecord, OrganizationSnapshot, SessionPhase},
+    };
+    let (manager, runtime, cx) = harness(cx);
+    servers(&runtime, &[7]);
+    let replica = replica(7);
+    let pane = replica.org.snapshot().state().panes[0].id;
+    runtime.provider.set_pane_token(PaneViewToken {
+        pane,
+        attachment_generation: AttachmentGeneration::FIRST,
+        context_generation: ContextGeneration::new(1),
+    });
+    runtime.provider.set_directory_connection(
+        server(7),
+        crate::ui::directory_picker::server_tests::Peer::new(),
+    );
+    publish(&replica, 1, &runtime, cx);
+    let published = runtime.provider.frame(server(7)).unwrap();
+    let mut facts = published.organization.runtime().to_vec();
+    facts[0].control = ControlRecord::Held {
+        client: ready(7).client,
+        generation: facts[0].control_generation,
+    };
+    facts[0].phase = SessionPhase::DirectoryUnavailable;
+    runtime.provider.set_frame(Arc::new(DesktopServerFrame {
+        server: published.server,
+        connection: published.connection.clone(),
+        replica_status: published.replica_status,
+        organization: Arc::new(
+            OrganizationSnapshot::new(
+                published.organization.epoch(),
+                published.organization.state().clone(),
+                facts,
+            )
+            .unwrap(),
+        ),
+        personal: published.personal.clone(),
+        view_revision: published.view_revision,
+    }));
+    runtime.notifier.frame_changed(server(7));
+    cx.run_until_parked();
+    let status = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| {
+            let manager = manager.read(cx);
+            let server = manager.server.as_ref().unwrap();
+            server
+                .collection
+                .payloads()
+                .find_map(|tabs| tabs.read(cx).server_terminal(pane, cx))
+                .expect("the repaired Pane is presented")
+                .read(cx)
+                .server_repair_status()
+        })
+    };
+    assert_eq!(status(cx), None);
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.server_tab_event(
+                ServerTabManagerEvent::PaneAction {
+                    pane,
+                    action: PaneAction::Retry(SelectionSource::Pointer),
+                },
+                window,
+                cx,
+            )
+        })
+    });
+    assert_eq!(status(cx), Some(PaneRepairStatus::Pending));
+    cx.run_until_parked();
+    assert!(
+        matches!(
+            status(cx),
+            Some(PaneRepairStatus::StillUnavailable | PaneRepairStatus::Completed)
+        ),
+        "Retry reports its result on the Pane: {:?}",
+        status(cx)
+    );
+}
+
+#[gpui::test]
+fn desktop_server_sidebar_keyboard_navigation_reveals_rows_in_a_tall_section(
+    cx: &mut TestAppContext,
+) {
+    let (manager, runtime, cx) = harness(cx);
+    servers(&runtime, &[A]);
+    let mut org = Org::new(A);
+    for local in 1..=60 {
+        org.add_workspace(local, local, local);
+    }
+    let mut replica = Replica::attached(org, 1);
+    for local in 2..=60 {
+        replica
+            .personal
+            .attach(
+                ws(A, local),
+                &ReplicaObservation::new(&replica.org.snapshot(), &[], ready(A)).unwrap(),
+            )
+            .unwrap();
+    }
+    publish(&replica, 1, &runtime, cx);
+    cx.update(|window, cx| {
+        window.activate_window();
+        manager.update(cx, |manager, cx| manager.toggle_sidebar_focus(window, cx));
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("home");
+    cx.run_until_parked();
+    let offset = |cx: &mut VisualTestContext| {
+        manager.read_with(cx, |manager, cx| {
+            manager.sidebar.read(cx).scroll_handle().offset().y
+        })
+    };
+    assert_eq!(offset(cx), gpui::px(0.0));
+    cx.simulate_keystrokes("end");
+    cx.run_until_parked();
+    let row = cx
+        .debug_bounds(
+            format!(
+                "workspace-{:032x}-60-row",
+                u128::from_be_bytes(server(A).bytes())
+            )
+            .leak(),
+        )
+        .expect("the last Workspace row is painted");
+    let list = cx
+        .debug_bounds("workspace-list")
+        .expect("the Workspace list is painted");
+    assert!(
+        offset(cx) < gpui::px(0.0),
+        "the list scrolled toward the cursor"
+    );
+    assert!(
+        row.top() >= list.top() && row.bottom() <= list.bottom(),
+        "the cursor row {row:?} is inside the list {list:?}"
+    );
+}

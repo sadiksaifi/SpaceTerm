@@ -1214,3 +1214,40 @@ fn desktop_server_only_the_focused_pane_announces_going_offline() {
         assert_eq!(node.label(), Some("Connection status"));
     }
 }
+
+#[test]
+fn directory_unavailable_screen_shows_and_announces_the_repair_status() {
+    let screen = |status| {
+        PanePresentation::DirectoryUnavailable
+            .screen()
+            .unwrap()
+            .repair(status)
+    };
+    let retry = |screen: &Screen| {
+        screen
+            .actions
+            .iter()
+            .find(|action| action.action == PanePresentationAction::Retry)
+            .unwrap()
+            .available
+    };
+    let resting = screen(None);
+    assert!(retry(&resting));
+    assert_eq!(resting.announcement, None);
+
+    let pending = screen(Some(PaneRepairStatus::Pending));
+    assert_eq!(pending.detail.as_ref(), "Checking directory…");
+    assert!(!retry(&pending), "Retry waits for the running check");
+    assert_eq!(
+        pending.announcement.as_ref().map(AsRef::as_ref),
+        Some("Directory unavailable. Checking directory…")
+    );
+
+    let failed = screen(Some(PaneRepairStatus::StillUnavailable));
+    assert!(failed.detail.starts_with("Still unavailable. "));
+    assert!(retry(&failed));
+    assert_eq!(
+        failed.announcement.as_ref().map(AsRef::as_ref),
+        Some("Directory unavailable. Still unavailable.")
+    );
+}

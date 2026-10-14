@@ -253,7 +253,7 @@ fn device_pages_use_the_exact_cursor_and_revision_and_replace_instead_of_accumul
     named(&tree, "Group", "Tablet");
     named(&tree, "Group", "Phone");
     assert!(!fixture.rendered("settings-paired-devices-next"));
-    assert_eq!(tree.focused().unwrap()["aria"]["label"], "Refresh devices");
+    assert_eq!(tree.focused().unwrap()["aria"]["label"], "Refresh Devices");
     fixture.click("settings-paired-devices-refresh");
     assert_eq!(
         fixture.requests.take(),

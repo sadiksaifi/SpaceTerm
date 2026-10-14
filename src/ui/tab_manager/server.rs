@@ -1213,6 +1213,18 @@ impl TabManager {
         }
     }
 
+    /// The Terminal Pane presenting `pane` in any of this Workspace's Tabs.
+    pub(crate) fn server_terminal(
+        &self,
+        pane: crate::ui::server_desktop_contracts::PaneId,
+        cx: &gpui::App,
+    ) -> Option<Entity<crate::ui::TerminalPane>> {
+        self.tabs
+            .all_views()
+            .into_iter()
+            .find_map(|view| view.read(cx).server_terminal(pane))
+    }
+
     pub(crate) fn server_tab(&self, tab: TabId) -> Option<Entity<TabView>> {
         self.tabs.view(TabKey::Server(tab)).cloned()
     }
