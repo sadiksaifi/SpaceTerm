@@ -91,13 +91,3 @@ path = "src/bin/spaceterm-server-manager.rs"
 [[bin]]
 name = "spaceterm-server-spawner"
 path = "src/bin/spaceterm-server-spawner.rs"
-
-[[bin]]
-name = "spaceterm-native-evidence-admin"
-path = "src/bin/spaceterm-native-evidence-admin.rs"
-required-features = ["native-tests"]
-
-[[bin]]
-name = "spaceterm-native-evidence-client"
-path = "src/bin/spaceterm-native-evidence-client.rs"
-required-features = ["native-tests"]

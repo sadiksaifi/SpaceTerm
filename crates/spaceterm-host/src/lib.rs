@@ -1,18 +1,8 @@
-//! Headless native boundaries for SpaceTerm Server startup.
+//! Native host adapters for the headless SpaceTerm Server.
 //!
-//! Protected directory authority retains every ancestor handle on macOS and Linux.
-//! [`root_protection::NativeRootProtection`] supplies macOS fixed-root filesystem
-//! and ACL inspection. Linux requires a private, independently issued protection
-//! lease covering selected-mount mapping and every inode's account-write-authorizing
-//! aliases. Native query adapters and lease validation exist, but no production
-//! issuer does. Uncontextualized Linux protection and fixed registration reads fail
-//! closed. Optional newer mount queries do not raise the Linux 5.15/glibc 2.35/systemd
-//! 249 baseline; old layouts without genuine provenance remain unavailable.
-//! Filesystem protection is separate from signed-code authentication and execution
-//! approval. No privileged or credential admission is supplied by these checks.
-//! Startup admission validates an injected native registration and retains only its
-//! exact approved installation. These boundaries neither load credentials nor start
-//! processes.
+//! Account-service supervision, account-private credentials, PTYs, storage and
+//! transports are composed by `spaceterm-server`. Portable behavior and policy
+//! belong to `spaceterm-core`.
 
 #![deny(missing_docs)]
 
@@ -23,7 +13,6 @@ pub mod git;
 pub mod native_registration;
 pub mod protected_directory;
 pub mod root_protection;
-pub mod session_capabilities;
 pub mod startup;
 pub mod storage;
 
@@ -53,10 +42,8 @@ pub mod server_machine_facts;
 
 pub mod bootstrap;
 
-// Native phase 2 producers compile against the same headless host surface.
 pub mod linux_custody;
 pub mod linux_launcher;
-pub mod native_evidence;
 pub mod native_management;
 pub mod native_receipts;
 pub mod native_receiver;

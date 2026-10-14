@@ -14,9 +14,6 @@ pub use crate::installation::{
     ApprovedInstallationRetention, MigrationProgress, QuiescenceProgress, RetainedRegistration,
     ServerDataCompatibilityPort, ServerLifecyclePort, ServerMigrationPort,
 };
-pub use crate::native_evidence::{
-    NativeEvidenceEmitter, NativeEvidenceRecord, UnavailableNativeEvidenceEmitter,
-};
 pub use crate::native_management::facade::{
     GuiNativeManagement, NativeAction, NativeAssessment, NativeManagement, NativeOperation,
     NativeProgress, NativeStatus, UnavailableNativeManagement,
