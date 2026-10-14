@@ -54,6 +54,11 @@ pub enum CliCommand {
         request: PublicRequestId,
         fingerprint: PublicFingerprint,
     },
+    /// The existing public claim JSON enters stdin and the opaque protocol
+    /// authorization leaves stdout. Both streams must be private pipes.
+    PairAuthorizeClaim {
+        fingerprint: PublicFingerprint,
+    },
     PairList,
     Unpair {
         device: DeviceId,
@@ -225,13 +230,32 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInvocat
                 recover_account: options.present("--recover-account"),
             }
         }
-        ["pair", "authorize", request, rest @ ..] => {
-            let options = Options::new(rest, &[("--device-fingerprint", Flag::Value)])?;
-            CliCommand::PairAuthorize {
-                request: PublicRequestId(parse_hex(request)?),
-                fingerprint: PublicFingerprint(parse_hex(
-                    options.required("--device-fingerprint")?,
-                )?),
+        ["pair", "authorize", rest @ ..] => {
+            if rest.first().is_some_and(|arg| !arg.starts_with("--")) {
+                let options = Options::new(&rest[1..], &[("--device-fingerprint", Flag::Value)])?;
+                CliCommand::PairAuthorize {
+                    request: PublicRequestId(parse_hex(rest[0])?),
+                    fingerprint: PublicFingerprint(parse_hex(
+                        options.required("--device-fingerprint")?,
+                    )?),
+                }
+            } else {
+                let options = Options::new(
+                    rest,
+                    &[
+                        ("--claim-stdin", Flag::Switch),
+                        ("--authorization-stdout", Flag::Switch),
+                        ("--device-fingerprint", Flag::Value),
+                    ],
+                )?;
+                if !options.present("--claim-stdin") || !options.present("--authorization-stdout") {
+                    return Err(CliFailure::Usage);
+                }
+                CliCommand::PairAuthorizeClaim {
+                    fingerprint: PublicFingerprint(parse_hex(
+                        options.required("--device-fingerprint")?,
+                    )?),
+                }
             }
         }
         ["pair", "list"] => CliCommand::PairList,

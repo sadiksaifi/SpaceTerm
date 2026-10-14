@@ -30,6 +30,7 @@ pub(super) fn validate(
         (state.bindings.len(), limits.saved_servers),
         (state.streams.len(), MAX_HEADERS),
         (state.generations.len(), MAX_HEADERS),
+        (state.receiver_bindings.len(), MAX_HEADERS),
         (state.tombstones.len(), MAX_HEADERS),
         (state.suppressed_workspaces.len(), MAX_HEADERS),
         (state.detaches.len(), MAX_HEADERS),
@@ -176,6 +177,25 @@ pub(super) fn validate(
             return Err(resource_limit());
         }
     }
+    let mut receivers = BTreeSet::new();
+    let mut unfinished_receivers = BTreeSet::new();
+    for receiver in &state.receiver_bindings {
+        validate_receiver_binding(state, receiver, codec)?;
+        if !receivers.insert(receiver.operation.id) {
+            return Err(invalid());
+        }
+        let record = state.operation(receiver.operation.id).ok_or_else(invalid)?;
+        if !matches!(
+            record.state,
+            RetainedOperationState::Completed { consumed: true, .. }
+                | RetainedOperationState::Retired
+        ) && !unfinished_receivers.insert((receiver.receiver, receiver.operation.id.stream()))
+        {
+            return Err(invalid());
+        }
+        // Fixed public fields fit this reservation even at full-width values.
+        resident = charge(resident, 4096)?;
+    }
     let mut operations = BTreeSet::new();
     let mut grant_keys = BTreeSet::new();
     let mut cleanup_workspaces: BTreeSet<_> = state
@@ -313,14 +333,20 @@ pub(super) fn validate(
             ..
         } = &entry.state
         {
-            // An empty server remains at revision zero during pairing assessments
-            // and additional-Client binding. Grant records still require a nonzero
-            // publication revision in the grant validation above.
             if outcome.encoded_len() > outcome_charge {
                 return Err(invalid());
             }
             let decoded = outcome.outcome(codec).map_err(|_| invalid())?;
-            if publication_revision.get() == 0 && decoded.grant_provenance().is_some() {
+            // Pairing changes the authorization store, not the organization.
+            // Its outcomes may precede the first organization publication.
+            // Organization mutations and control grants still require a revision.
+            if publication_revision.get() == 0
+                && (decoded.grant_provenance().is_some()
+                    || !matches!(
+                        (request.command(), &decoded),
+                        (Command::Pairing(_), Outcome::Pairing(_))
+                    ))
+            {
                 return Err(invalid());
             }
             decoded
@@ -648,6 +674,53 @@ fn apply_change(
                 return Err(invalid());
             }
             saved.additional_client_acknowledgement_pending = false;
+        }
+        ClientJournalChange::PrepareReceiverBinding {
+            operation,
+            receiver,
+        } => {
+            let saved = state
+                .bindings
+                .iter()
+                .find(|saved| saved.streams.parts().ordinary == receiver.operation.id.stream())
+                .ok_or_else(invalid)?;
+            let binding = saved.binding()?;
+            let assessment = state.operation(receiver.assessment).ok_or_else(invalid)?;
+            if !matches!(
+                assessment.state,
+                RetainedOperationState::Completed {
+                    consumed: false,
+                    ..
+                }
+            ) {
+                return Err(invalid());
+            }
+            validate_receiver_assessment(assessment, receiver, codec)?;
+            if operation.binding != receiver.operation
+                || binding.target().pin().public_key != receiver.server_public_key
+                || binding.target().device() != receiver.target.parts().device
+                || state.receiver_bindings.iter().any(|old| {
+                    old.receiver == receiver.receiver
+                        && old.operation.id.stream() == receiver.operation.id.stream()
+                        && state.operation(old.operation.id).is_some_and(|record| {
+                            !matches!(
+                                record.state,
+                                RetainedOperationState::Completed { consumed: true, .. }
+                                    | RetainedOperationState::Retired
+                            )
+                        })
+                })
+            {
+                return Err(invalid());
+            }
+            apply_change(
+                state,
+                &ClientJournalChange::Prepare(operation.clone()),
+                codec,
+                verifier,
+            )?;
+            validate_receiver_binding(state, receiver, codec)?;
+            state.receiver_bindings.push(receiver.as_ref().clone());
         }
         ClientJournalChange::Prepare(record) => {
             if !matches!(record.state, RetainedOperationState::Pending) {
@@ -1312,6 +1385,101 @@ fn compact(state: &mut RecoveredClientState) {
         });
         !acknowledged || !consumed || cleanup_dependency
     });
+    state.receiver_bindings.retain(|receiver| {
+        state
+            .operations
+            .iter()
+            .any(|entry| entry.binding == receiver.operation)
+    });
+}
+
+fn validate_receiver_binding(
+    state: &RecoveredClientState,
+    receiver: &JournalReceiverBinding,
+    codec: &dyn LedgerCodec,
+) -> Result<(), ClientFailure> {
+    let record = state.operation(receiver.operation.id).ok_or_else(invalid)?;
+    let stream = receiver.operation.id.stream();
+    receiver.target.validate().map_err(|_| invalid())?;
+    if record.binding != receiver.operation
+        || receiver.assessment.stream() != stream
+        || receiver.assessment.sequence() >= receiver.operation.id.sequence()
+        || receiver.target.parts().server != stream.server()
+        || receiver.target.parts().pairing != stream.pairing()
+        || record.workspace.is_some()
+        || record.cleanup
+        || record.reserves_grant
+    {
+        return Err(invalid());
+    }
+    if let Some(assessment) = state.operation(receiver.assessment) {
+        validate_receiver_assessment(assessment, receiver, codec)?;
+    } else if state
+        .stream(stream)
+        .is_none_or(|header| receiver.assessment.sequence().get() > header.confirmed_prefix)
+    {
+        // Pruned assessments are permissible only after durable consumption and
+        // the server's confirmation. The exact binding keeps its own provenance.
+        return Err(invalid());
+    }
+    if let Some(saved) = state
+        .bindings
+        .iter()
+        .find(|saved| saved.streams.parts().ordinary == stream)
+    {
+        let binding = saved.binding()?;
+        if binding.target().pin().public_key != receiver.server_public_key
+            || binding.target().device() != receiver.target.parts().device
+        {
+            return Err(invalid());
+        }
+    }
+    let request =
+        CanonicalOperationRequest::decode(&record.request, codec).map_err(|_| invalid())?;
+    let (claim_digest, _) = spaceterm_protocol::pairing_adapter::client_binding_claim(
+        &receiver.target,
+        receiver.version,
+        receiver.operation.id,
+    )
+    .map_err(|_| invalid())?;
+    if request.command()
+        != &Command::Pairing(PairingCommand::BindAdditionalClient {
+            target: receiver.target.clone(),
+            expected_authorization_version: receiver.version,
+            claim_digest,
+        })
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+fn validate_receiver_assessment(
+    assessment: &JournalOperation,
+    receiver: &JournalReceiverBinding,
+    codec: &dyn LedgerCodec,
+) -> Result<(), ClientFailure> {
+    let request =
+        CanonicalOperationRequest::decode(&assessment.request, codec).map_err(|_| invalid())?;
+    let RetainedOperationState::Completed { outcome, .. } = &assessment.state else {
+        return Err(invalid());
+    };
+    let Outcome::Pairing(result) = outcome.outcome(codec).map_err(|_| invalid())? else {
+        return Err(invalid());
+    };
+    if request.command()
+        != &Command::Pairing(PairingCommand::AssessUnpair {
+            target: receiver.target.clone(),
+        })
+        || !matches!(result.as_ref(), spaceterm_core::pairing::PairingOutcome::UnpairAssessed(value)
+            if value.parts().reference.operation == receiver.assessment
+                && value.parts().reference.digest == assessment.binding.digest
+                && value.parts().target == receiver.target
+                && value.parts().authorization_version == receiver.version)
+    {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_revocation(

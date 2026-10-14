@@ -33,9 +33,8 @@ impl Directory {
         let parent = if cfg!(target_os = "linux") {
             PathBuf::from("/var/tmp")
         } else {
-            std::env::var_os("CARGO_TARGET_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+            // Native runtime fixtures must also fit Darwin's Unix socket limit.
+            PathBuf::from("/private/tmp")
         };
         std::fs::create_dir_all(&parent).unwrap();
         let path = parent.canonicalize().unwrap().join(format!(
@@ -2534,4 +2533,60 @@ async fn cli_reopens_suppressed_pairing_for_restricted_retry_without_native_regi
             .unwrap()
             .is_suppressed(&key)
     );
+}
+
+#[tokio::test]
+async fn cli_retains_restricted_inventory_when_registered_runtime_is_missing_or_unsafe() {
+    use spaceterm_client_native::{NativeClientProvider, cli::bindings::PairingCommandBindings};
+    use spaceterm_host::{
+        account_service::test_support::AccountServiceFixture,
+        startup::{BuildIdentity, DesiredServerState},
+    };
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    for missing in [true, false] {
+        let account_root = Directory::new();
+        let account =
+            AccountServiceFixture::new(&account_root.0, BuildIdentity::Development).unwrap();
+        let registration = account.initialize(DesiredServerState::Stopped).unwrap();
+        let path = account.reopen().client_connections_directory().join("cli");
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&path)
+            .unwrap();
+        let directory = Directory(path);
+        let native = Arc::new(directory.create().await);
+        let fixture = Fixture::new(1);
+        fixture.seed(native.as_ref()).await;
+        let key = fixture.binding.target().local_pairing().unwrap();
+        let composition = runtime(controller(native).await);
+        let assessment = composition
+            .assess_unpair(&key, fixture.binding.target().client())
+            .await
+            .unwrap();
+        let removal = composition.self_unpair(assessment).await.unwrap();
+        drop(composition);
+        let endpoint = registration.endpoint().unwrap();
+        let runtime = endpoint.path().parent().unwrap();
+        if missing {
+            std::fs::remove_dir_all(runtime).unwrap();
+        } else {
+            std::fs::set_permissions(runtime, std::fs::Permissions::from_mode(0o777)).unwrap();
+        }
+        assert!(account.reopen().discover().is_ok());
+        assert!(registration.endpoint().is_err());
+        let consumer = NativeClientProvider::from_supervisor(account.reopen()).cli_consumer();
+        let inventory = consumer
+            .pairing_runtime()
+            .await
+            .unwrap()
+            .inventory()
+            .await
+            .unwrap();
+        assert!(inventory.is_suppressed(&key));
+        assert!(inventory.task(removal.operation).is_some());
+        let reports = consumer.retry_pending().await.unwrap();
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].local_connection_removed);
+    }
 }

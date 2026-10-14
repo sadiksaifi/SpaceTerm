@@ -83,37 +83,20 @@ impl ManagementOperations {
             .submit(&self.binding, command, None, self)
             .await
     }
-    pub fn next_operation(&self) -> Result<OperationId, ClientFailure> {
-        let state = self.tracker.journal().snapshot()?;
-        let saved = state
-            .bindings()
-            .iter()
-            .find(|saved| saved.binding().as_ref() == Ok(&self.binding))
-            .ok_or_else(invalid)?;
-        let stream = saved.streams().parts().ordinary;
-        let sequence = state
-            .stream(stream)
-            .ok_or_else(invalid)?
-            .high_water
-            .checked_add(1)
-            .ok_or_else(invalid)?;
-        Ok(OperationId::new(
-            stream,
-            OperationSequence::new(sequence).map_err(|_| invalid())?,
-        ))
-    }
-    pub async fn submit_additional_client(
+    pub async fn resolve_additional_client(
         &self,
         proof: spaceterm_client::pairing::enrollment::AdditionalClientProof,
     ) -> Result<OperationTicket, ClientFailure> {
-        let command = Command::Pairing(proof.command().clone());
+        let ticket = self.tracker.ticket(proof.operation())?;
+        let result = self.lookup(ticket.binding()).await?;
         let peer = AdditionalClientPeer {
             operations: self,
             proof,
         };
         self.tracker
-            .submit(&self.binding, command, None, &peer)
-            .await
+            .resolve_bound(ticket.binding(), result, &peer)
+            .await?;
+        Ok(ticket)
     }
     pub async fn wait(&self, ticket: &OperationTicket) -> Result<Outcome, ClientFailure> {
         let mut status = ticket.status();
@@ -520,6 +503,43 @@ impl OperationPeer for OutcomePeer<'_> {
 fn invalid() -> ClientFailure {
     ClientFailure::new(ClientFailureClass::InvalidPeer)
 }
+fn pairing_failure(value: i32) -> Result<spaceterm_core::pairing::PairingFailure, ClientFailure> {
+    use spaceterm_core::pairing::PairingFailure as Domain;
+    use spaceterm_protocol::wire::pairing::PairingFailure as Wire;
+    Ok(match Wire::try_from(value).map_err(|_| invalid())? {
+        Wire::Unspecified => return Err(invalid()),
+        Wire::PairingInvalidRequest => Domain::InvalidRequest,
+        Wire::PairingLimitExceeded => Domain::LimitExceeded,
+        Wire::PairingIdentityMismatch => Domain::IdentityMismatch,
+        Wire::PairingFingerprintMismatch => Domain::FingerprintMismatch,
+        Wire::PairingAuthorizationRequired => Domain::AuthorizationRequired,
+        Wire::PairingAuthorizationDenied => Domain::AuthorizationDenied,
+        Wire::PairingAuthorizationUnavailable => Domain::AuthorizationUnavailable,
+        Wire::PairingPairingRevoked => Domain::PairingRevoked,
+        Wire::PairingClientNotBound => Domain::ClientNotBound,
+        Wire::PairingStaleAssessment => Domain::StaleAssessment,
+        Wire::PairingAuthorizationExpired => Domain::AuthorizationExpired,
+        Wire::PairingAuthorizationConsumed => Domain::AuthorizationConsumed,
+        Wire::PairingRequestIdentityReused => Domain::RequestIdentityReused,
+        Wire::PairingOffline => Domain::Offline,
+        Wire::PairingRouteChanged => Domain::RouteChanged,
+        Wire::PairingTimedOut => Domain::TimedOut,
+        Wire::PairingCancelled => Domain::Cancelled,
+        Wire::PairingIncompatible => Domain::Incompatible,
+        Wire::PairingUnsupportedTarget => Domain::UnsupportedTarget,
+        Wire::PairingServiceManagerUnavailable => Domain::ServiceManagerUnavailable,
+        Wire::PairingExplicitStartRequired => Domain::ExplicitStartRequired,
+        Wire::PairingCredentialUnavailable => Domain::CredentialUnavailable,
+        Wire::PairingCredentialIntegrity => Domain::CredentialIntegrity,
+        Wire::PairingStorageUnavailable => Domain::StorageUnavailable,
+        Wire::PairingUnsafeStorage => Domain::UnsafeStorage,
+        Wire::PairingUnknownSchema => Domain::UnknownSchema,
+        Wire::PairingInvalidDurableState => Domain::InvalidDurableState,
+        Wire::PairingRecoveryRequired => Domain::RecoveryRequired,
+        Wire::PairingReceiptInvalid => Domain::ReceiptInvalid,
+        Wire::PairingRevocationUnconfirmed => Domain::RevocationUnconfirmed,
+    })
+}
 fn offline() -> ClientFailure {
     ClientFailure::new(ClientFailureClass::Unavailable)
 }
@@ -662,6 +682,20 @@ macro_rules! pairing_profile {
                 let revision = spaceterm_core::authority::OrganizationRevision::new(
                     value.publication_revision,
                 );
+                if result.disposition == 7 {
+                    if result.client_binding_receipt.is_some()
+                        || result.unpair_assessment.is_some()
+                        || !result.devices.is_empty()
+                        || result.receipt.is_some()
+                        || result.failure.is_some()
+                    {
+                        return Err(invalid());
+                    }
+                    return Ok((revision, Outcome::Pairing(Box::new(
+                        PairingOutcome::Failed(super::pairing_failure(result.classified_failure)?)
+                    ))));
+                }
+                if result.classified_failure != 0 { return Err(invalid()); }
                 if result.disposition == 3 {
                     if result.unpair_assessment.is_some() { return Err(invalid()); }
                     let receipt = pairing::ReceiptCodec::new(pin).from_wire(result.client_binding_receipt.as_deref().ok_or_else(invalid)?).map_err(|_| invalid())?;

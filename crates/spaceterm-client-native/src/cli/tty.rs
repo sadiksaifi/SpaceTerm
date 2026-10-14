@@ -23,6 +23,86 @@ impl CliIo for TerminalIo {
             .write_all(bytes)
             .map_err(|_| CliFailure::IoUnavailable)
     }
+    fn read_authorization_claim(&mut self) -> Result<zeroize::Zeroizing<Vec<u8>>, CliFailure> {
+        #[cfg(unix)]
+        {
+            use super::pairing_pipe::{PipeDirection, duplicate_private_pipe, read_public_claim};
+            use std::os::fd::AsFd;
+            let input = std::io::stdin().lock();
+            let output = std::io::stdout().lock();
+            let mut input = duplicate_private_pipe(input.as_fd(), PipeDirection::Read)?;
+            // Reject an unsafe output before reading or authorizing any claim.
+            let _output = duplicate_private_pipe(output.as_fd(), PipeDirection::Write)?;
+            read_public_claim(&mut input)
+        }
+        #[cfg(not(unix))]
+        Err(CliFailure::UnsupportedHost)
+    }
+    fn write_authorization_delivery(&mut self, bytes: &[u8]) -> Result<(), CliFailure> {
+        #[cfg(unix)]
+        {
+            use super::pairing_pipe::write_private_authorization_immediate;
+            use std::os::fd::AsFd;
+            write_private_authorization_immediate(std::io::stdout().as_fd(), bytes)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = bytes;
+            Err(CliFailure::UnsupportedHost)
+        }
+    }
+    fn write_authorization_delivery_async<'a>(
+        &'a mut self,
+        bytes: &'a [u8],
+        signal: &'a super::runner::CliSignalContext,
+    ) -> spaceterm_client::management_cli::ManagementFuture<'a, ()> {
+        Box::pin(async move {
+            #[cfg(unix)]
+            {
+                use std::os::fd::AsFd;
+                super::pairing_pipe::write_private_authorization_delivery(
+                    std::io::stdout().as_fd(),
+                    bytes,
+                    signal,
+                )
+                .await
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (bytes, signal);
+                Err(CliFailure::UnsupportedHost)
+            }
+        })
+    }
+    fn write_authorization_diagnostic(&mut self, bytes: &[u8]) -> Result<(), CliFailure> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsFd;
+            super::pairing_pipe::write_authorization_diagnostic(std::io::stderr().as_fd(), bytes)
+        }
+        #[cfg(not(unix))]
+        self.write_stderr(bytes)
+    }
+    fn write_authorization_diagnostic_scoped(
+        &mut self,
+        bytes: &[u8],
+        signal: &super::runner::CliSignalContext,
+    ) -> Result<(), CliFailure> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsFd;
+            super::pairing_pipe::write_authorization_diagnostic_scoped(
+                std::io::stderr().as_fd(),
+                bytes,
+                signal,
+            )
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = signal;
+            self.write_authorization_diagnostic(bytes)
+        }
+    }
     fn confirm_server_fingerprint(
         &mut self,
         fingerprint: super::arguments::PublicFingerprint,

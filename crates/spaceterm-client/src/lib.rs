@@ -18,6 +18,8 @@ pub mod limits;
 
 pub mod operations;
 
+pub mod organization_protocol;
+
 pub mod pane_channel;
 
 pub mod pending;

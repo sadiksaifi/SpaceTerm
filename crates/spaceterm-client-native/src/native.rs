@@ -3,6 +3,7 @@
 
 pub mod artifacts;
 pub mod consumer;
+pub mod owner_channel;
 mod receipts;
 pub mod runtime;
 mod tracked;
@@ -56,8 +57,11 @@ impl NativeClientProvider {
     ) -> Result<Self, ManagementFailure> {
         ServiceSupervisor::current(authorization)
             .and_then(|supervisor| {
-                supervisor
-                    .with_runtime_processes(Arc::new(runtime::RuntimeServiceProcesses::default()))
+                let identity =
+                    runtime::NativeRuntimeIdentity::default().with_supervisor(supervisor.clone());
+                supervisor.with_runtime_processes(Arc::new(runtime::RuntimeServiceProcesses::new(
+                    Arc::new(identity),
+                )))
             })
             .map(|supervisor| {
                 let mut provider = Self::from_supervisor(supervisor);
@@ -87,6 +91,10 @@ impl NativeClientProvider {
         mut self,
         identity: Arc<dyn runtime::RuntimeClientIdentity>,
     ) -> Result<Self, ManagementFailure> {
+        let identity = Arc::new(runtime::RecoveryGuardedIdentity::new(
+            self.management.supervisor.clone(),
+            identity,
+        ));
         let supervisor = self
             .management
             .supervisor
@@ -334,13 +342,64 @@ impl NativeServiceManagement {
         })
     }
 
+    fn require_lifecycle_recovery_complete(&self) -> Result<(), ServiceFailure> {
+        consumer::require_account_recovery(&self.supervisor).map_err(|failure| match failure {
+            ManagementFailure::OutcomePending => ServiceFailure::Pending,
+            ManagementFailure::StorageLocked => ServiceFailure::StorageLocked,
+            ManagementFailure::StorageUnavailable => ServiceFailure::StorageUnavailable,
+            ManagementFailure::UnsafeNativeState => ServiceFailure::UnsafeStorage,
+            ManagementFailure::Incompatible => ServiceFailure::IncompatibleStorage,
+            ManagementFailure::Indeterminate => ServiceFailure::Indeterminate,
+            ManagementFailure::AuthorizationDenied => ServiceFailure::AuthorizationDenied,
+            ManagementFailure::UnsupportedHost => ServiceFailure::UnsupportedHost,
+            ManagementFailure::NativeUnavailable => ServiceFailure::Missing,
+            ManagementFailure::LimitExceeded => ServiceFailure::LimitExceeded,
+            _ => ServiceFailure::InvalidRecord,
+        })
+    }
+
+    fn admit_lifecycle(
+        &self,
+    ) -> Result<spaceterm_host::account_service::ClientProvisioning, ServiceFailure> {
+        self.require_lifecycle_recovery_complete()?;
+        let admission = self.supervisor.admit_client_provisioning()?;
+        // Recovery publishes its marker and performs its effects under this same
+        // lease. The first read alone cannot exclude publication during an await.
+        self.require_lifecycle_recovery_complete()?;
+        Ok(admission)
+    }
+
+    async fn supervise_lifecycle(
+        admission: spaceterm_host::account_service::ClientProvisioning,
+        effect: impl std::future::Future<Output = Result<ServiceProgress, ServiceFailure>>
+        + Send
+        + 'static,
+    ) -> Result<ServiceProgress, ServiceFailure> {
+        // The host detaches admitted effects from a cancelled caller. Retain the
+        // recovery lease with that effect, not merely with the caller's wait.
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
+        let worker = handle.spawn(async move {
+            let result = effect.await;
+            drop(admission);
+            result
+        });
+        worker.await.map_err(|_| ServiceFailure::Indeterminate)?
+    }
+
     pub fn start(&self, request: NativeRequestId) -> ServiceFuture<'_, ServiceProgress> {
-        self.supervisor.start(request)
+        Box::pin(async move {
+            let admission = self.admit_lifecycle()?;
+            let supervisor = self.supervisor.clone();
+            Self::supervise_lifecycle(admission, async move { supervisor.start(request).await })
+                .await
+        })
     }
 
     /// Allocates once and captures the original runtime scope and expiry.
     pub fn assess(&self, action: ServiceAction) -> ServiceFuture<'_, ServiceAssessment> {
         Box::pin(async move {
+            let _admission = self.admit_lifecycle()?;
             let request = self.supervisor.allocate_request()?;
             self.supervisor.assess(request, action).await
         })
@@ -353,6 +412,10 @@ impl NativeServiceManagement {
         token: AssessmentToken,
     ) -> ManagementFuture<'_, ServiceAssessment> {
         Box::pin(async move {
+            // Restoration is read-only. Confirmation acquires admission again
+            // before effects, so a missing Client directory stays missing here.
+            self.require_lifecycle_recovery_complete()
+                .map_err(classify_service)?;
             let (request, comparison) = decode_token(&token)?;
             let assessment = self
                 .supervisor
@@ -362,20 +425,36 @@ impl NativeServiceManagement {
             if assessment.action() != action {
                 return Err(ManagementFailure::StaleAssessment);
             }
+            self.require_lifecycle_recovery_complete()
+                .map_err(classify_service)?;
             Ok(assessment)
         })
     }
 
     pub fn stop(&self, action: ConfirmedServiceAction) -> ServiceFuture<'_, ServiceProgress> {
-        self.supervisor.stop(action)
+        Box::pin(async move {
+            let admission = self.admit_lifecycle()?;
+            let supervisor = self.supervisor.clone();
+            Self::supervise_lifecycle(admission, async move { supervisor.stop(action).await }).await
+        })
     }
 
     pub fn restart(&self, action: ConfirmedServiceAction) -> ServiceFuture<'_, ServiceProgress> {
-        self.supervisor.restart(action)
+        Box::pin(async move {
+            let admission = self.admit_lifecycle()?;
+            let supervisor = self.supervisor.clone();
+            Self::supervise_lifecycle(admission, async move { supervisor.restart(action).await })
+                .await
+        })
     }
 
     pub fn uninstall(&self, action: ConfirmedServiceAction) -> ServiceFuture<'_, ServiceProgress> {
-        self.supervisor.uninstall(action)
+        Box::pin(async move {
+            let admission = self.admit_lifecycle()?;
+            let supervisor = self.supervisor.clone();
+            Self::supervise_lifecycle(admission, async move { supervisor.uninstall(action).await })
+                .await
+        })
     }
 
     pub fn resolve(&self, request: NativeRequestId) -> ServiceFuture<'_, ServiceProgress> {
@@ -387,7 +466,17 @@ impl NativeServiceManagement {
                     .map_err(|_| ServiceFailure::StorageUnavailable)?;
                 return Ok(progress);
             }
-            self.supervisor.resolve(request).await
+            // A completed host record is an observation, not permission to
+            // reconcile storage or resume an interrupted native effect.
+            if let Ok(progress) = self.supervisor.request_progress(request)
+                && progress.phase == spaceterm_host::account_service::ServicePhase::Completed
+            {
+                return Ok(progress);
+            }
+            let admission = self.admit_lifecycle()?;
+            let supervisor = self.supervisor.clone();
+            Self::supervise_lifecycle(admission, async move { supervisor.resolve(request).await })
+                .await
         })
     }
     fn settle_native_receipt(&self, progress: &ServiceProgress) -> Result<(), ManagementFailure> {
@@ -569,45 +658,6 @@ impl NativeCommandBindings for NativeServiceManagement {
                     .map_err(classify_service)
                     .and_then(|progress| self.cli_service_result(progress));
             }
-            if let NativeCliCommand::Install { version, source } = command {
-                // The command itself is deliberate installation consent. Signed
-                // download and native admission precede request allocation and all
-                // identity/service effects. Only the host may authorize lingering.
-                let artifact = self.download_installation_from(version, source).await?;
-                let assessment = self
-                    .supervisor
-                    .assess_install(artifact)
-                    .map_err(classify_service)?;
-                let request = self
-                    .supervisor
-                    .allocate_request()
-                    .map_err(classify_service)?;
-                crate::cli::output::emit_native_request(request, io)?;
-                return self
-                    .supervisor
-                    .install(request, assessment.confirm())
-                    .await
-                    .map_err(classify_service)
-                    .and_then(|progress| self.cli_service_result(progress));
-            }
-            if let NativeCliCommand::UpdateStage { version, source } = command {
-                let artifact = self.download_installation_from(version, source).await?;
-                let assessment = self
-                    .supervisor
-                    .assess_install(artifact)
-                    .map_err(classify_service)?;
-                let request = self
-                    .supervisor
-                    .allocate_request()
-                    .map_err(classify_service)?;
-                crate::cli::output::emit_native_request(request, io)?;
-                let progress = self
-                    .supervisor
-                    .stage_installation(request, assessment.confirm())
-                    .await
-                    .map_err(classify_service)?;
-                return self.cli_service_result(progress);
-            }
             if command == NativeCliCommand::UpdateCheck {
                 return Ok(CliOutput::Update {
                     available_version: self
@@ -616,17 +666,67 @@ impl NativeCommandBindings for NativeServiceManagement {
                         .map(|version| version.as_str().to_owned()),
                 });
             }
+            self.require_lifecycle_recovery_complete()
+                .map_err(classify_service)?;
+            if let NativeCliCommand::Install { version, source } = command {
+                // The command itself is deliberate installation consent. Signed
+                // download and native admission precede request allocation and all
+                // identity/service effects. Only the host may authorize lingering.
+                let artifact = self.download_installation_from(version, source).await?;
+                let admission = self.admit_lifecycle().map_err(classify_service)?;
+                let assessment = self
+                    .supervisor
+                    .assess_install(artifact)
+                    .map_err(classify_service)?;
+                let request = self
+                    .supervisor
+                    .allocate_request()
+                    .map_err(classify_service)?;
+                crate::cli::output::emit_native_request(request, io)?;
+                let supervisor = self.supervisor.clone();
+                return Self::supervise_lifecycle(admission, async move {
+                    supervisor.install(request, assessment.confirm()).await
+                })
+                .await
+                .map_err(classify_service)
+                .and_then(|progress| self.cli_service_result(progress));
+            }
+            if let NativeCliCommand::UpdateStage { version, source } = command {
+                let artifact = self.download_installation_from(version, source).await?;
+                let admission = self.admit_lifecycle().map_err(classify_service)?;
+                let assessment = self
+                    .supervisor
+                    .assess_install(artifact)
+                    .map_err(classify_service)?;
+                let request = self
+                    .supervisor
+                    .allocate_request()
+                    .map_err(classify_service)?;
+                crate::cli::output::emit_native_request(request, io)?;
+                let supervisor = self.supervisor.clone();
+                let progress = Self::supervise_lifecycle(admission, async move {
+                    supervisor
+                        .stage_installation(request, assessment.confirm())
+                        .await
+                })
+                .await
+                .map_err(classify_service)?;
+                return self.cli_service_result(progress);
+            }
+            let admission = self.admit_lifecycle().map_err(classify_service)?;
             if command == NativeCliCommand::Start {
                 let request = self
                     .supervisor
                     .allocate_request()
                     .map_err(classify_service)?;
                 crate::cli::output::emit_native_request(request, io)?;
-                return self
-                    .start(request)
-                    .await
-                    .map_err(classify_service)
-                    .and_then(|progress| self.cli_service_result(progress));
+                let supervisor = self.supervisor.clone();
+                return Self::supervise_lifecycle(admission, async move {
+                    supervisor.start(request).await
+                })
+                .await
+                .map_err(classify_service)
+                .and_then(|progress| self.cli_service_result(progress));
             }
             let action = match command {
                 NativeCliCommand::Stop => ServiceAction::Stop,
@@ -663,12 +763,16 @@ impl NativeCommandBindings for NativeServiceManagement {
                 ConfirmationMode::Token(_) => {}
             }
             let confirmed = assessment.confirm().map_err(classify_service)?;
-            let progress = match action {
-                ServiceAction::Stop => self.stop(confirmed).await,
-                ServiceAction::Restart => self.restart(confirmed).await,
-                ServiceAction::Uninstall => self.uninstall(confirmed).await,
-                ServiceAction::Activate(_) => self.supervisor.activate(confirmed).await,
-            }
+            let supervisor = self.supervisor.clone();
+            let progress = Self::supervise_lifecycle(admission, async move {
+                match action {
+                    ServiceAction::Stop => supervisor.stop(confirmed).await,
+                    ServiceAction::Restart => supervisor.restart(confirmed).await,
+                    ServiceAction::Uninstall => supervisor.uninstall(confirmed).await,
+                    ServiceAction::Activate(_) => supervisor.activate(confirmed).await,
+                }
+            })
+            .await
             .map_err(classify_service)?;
             self.cli_service_result(progress)
         })

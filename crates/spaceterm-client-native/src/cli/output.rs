@@ -351,6 +351,56 @@ pub fn emit_native_request(
     }))?)
 }
 
+/// Raw authorization mode retains the original admitted request on failure.
+/// This separate path leaves every normal schema-1 CLI envelope unchanged.
+pub fn emit_authorization_failure(
+    failure: &super::bindings::PairingAuthorizationFailure,
+    json_output: bool,
+    io: &mut dyn CliIo,
+) -> Result<(), CliFailure> {
+    io.write_authorization_diagnostic(&authorization_failure_bytes(failure, json_output)?)
+}
+
+/// Uses the same envelope while sharing flag ownership with the raw writer.
+pub fn emit_authorization_failure_scoped(
+    failure: &super::bindings::PairingAuthorizationFailure,
+    json_output: bool,
+    io: &mut dyn CliIo,
+    signal: &super::runner::CliSignalContext,
+) -> Result<(), CliFailure> {
+    io.write_authorization_diagnostic_scoped(
+        &authorization_failure_bytes(failure, json_output)?,
+        signal,
+    )
+}
+
+fn authorization_failure_bytes(
+    failure: &super::bindings::PairingAuthorizationFailure,
+    json_output: bool,
+) -> Result<Vec<u8>, CliFailure> {
+    let request_value = failure.request.as_deref().map(|&request| match request {
+        ManagementRequestReference::Operation(binding) => {
+            json!({"operation": operation_text(binding.id)})
+        }
+        ManagementRequestReference::OperationReference(id) => {
+            json!({"operation": operation_text(id)})
+        }
+        ManagementRequestReference::Native(bytes) => json!({"native_request": hex(&bytes)}),
+    });
+    let bytes = if json_output {
+        let mut envelope = json!({"schema": 1, "error": failure.failure});
+        if let Some(request) = request_value {
+            envelope["request"] = request;
+        }
+        encoded(&envelope)?
+    } else if let Some(&request) = failure.request.as_deref() {
+        format!("{} (request {})\n", failure.failure, request_text(request)).into_bytes()
+    } else {
+        format!("{}\n", failure.failure).into_bytes()
+    };
+    Ok(bytes)
+}
+
 pub fn emit_failure(
     failure: CliFailure,
     json_output: bool,
@@ -363,7 +413,7 @@ pub fn emit_failure(
     }
 }
 
-pub const USAGE: &str = "Usage: spaceterm-cli [--json] [--non-interactive] <command>\n\nstatus [--operation <server:pairing:client:stream:sequence|native:request>]\ninstall [--version <stable-version>] [--feed <local-json> --archive <local-tar-gz>]\nstart\nrestart [--assess | --confirm <assessment>]\nuninstall [--assess | --confirm <assessment>]\nstop [--assess | --confirm <assessment>]\npair enroll [--server-fingerprint <64 lowercase hex digits>] [--recover-account]\npair authorize <32 lowercase hex request digits> --device-fingerprint <64 lowercase hex digits>\npair list\nunpair --device <32 lowercase hex digits> [--assess | --confirm <assessment>]\nunpair --retry-pending\nremote-access enable --bind <ip:port>... [--assess | --confirm <assessment>]\nremote-access disable [--assess | --confirm <assessment>]\nend-all-sessions [--assess | --confirm <assessment>]\nupdate check\nupdate stage [--version <stable-version>] [--feed <local-json> --archive <local-tar-gz>]\nupdate activate --installation <installation-id> [--assess | --confirm <assessment>]\n--help\n--version\nserve (requires the daemon's native-startup composition)\n\nRun as the owning account, not root. Noninteractive destructive actions require an exact, unexpired assessment. No discovery action installs, pairs, starts or updates a server. Local artifact actions read <local-json>.sig and requires the same release-key signatures as GitHub downloads.\n";
+pub const USAGE: &str = "Usage: spaceterm-cli [--json] [--non-interactive] <command>\n\nstatus [--operation <server:pairing:client:stream:sequence|native:request>]\ninstall [--version <stable-version>] [--feed <local-json> --archive <local-tar-gz>]\nstart\nrestart [--assess | --confirm <assessment>]\nuninstall [--assess | --confirm <assessment>]\nstop [--assess | --confirm <assessment>]\npair enroll [--server-fingerprint <64 lowercase hex digits>] [--recover-account]\npair authorize <32 lowercase hex request digits> --device-fingerprint <64 lowercase hex digits>\npair authorize --claim-stdin --authorization-stdout --device-fingerprint <64 lowercase hex digits>\npair list\nunpair --device <32 lowercase hex digits> [--assess | --confirm <assessment>]\nunpair --retry-pending\nremote-access enable --bind <ip:port>... [--assess | --confirm <assessment>]\nremote-access disable [--assess | --confirm <assessment>]\nend-all-sessions [--assess | --confirm <assessment>]\nupdate check\nupdate stage [--version <stable-version>] [--feed <local-json> --archive <local-tar-gz>]\nupdate activate --installation <installation-id> [--assess | --confirm <assessment>]\n--help\n--version\nserve (requires the daemon's native-startup composition)\n\nRun as the owning account, not root. Noninteractive destructive actions require an exact, unexpired assessment. No discovery action installs, pairs, starts or updates a server. Local artifact actions read <local-json>.sig and requires the same release-key signatures as GitHub downloads.\n\nHeadless direct-pairing authorization: spaceterm-cli --non-interactive pair authorize --claim-stdin --authorization-stdout --device-fingerprint <64 lowercase hex digits>\nThe explicit pipe mode reads the exact JSON serialization of spaceterm_client_native::pairing_runtime::PublicDeviceClaim through a private anonymous stdin pipe until EOF (8192 bytes maximum). It writes only the existing opaque binary authorization delivery through a private anonymous stdout pipe (8192 bytes maximum), with no newline or JSON envelope, even with --json. Files, named FIFOs, sockets and terminals are rejected. Diagnostics use stderr; --json keeps typed failure envelopes and includes the original request after admission. The receiving client consumes the delivery with EnrollmentAuthorization::from_delivery and verifies it against its retained claim before enrollment in its own journal.\n";
 
 pub fn emit_text(
     kind: &str,
