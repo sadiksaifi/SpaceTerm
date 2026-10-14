@@ -1431,3 +1431,7 @@ async fn graphics_read_acceptance(
     .await
     .expect("dropping a graphics read must cancel its exact transfer");
 }
+
+#[cfg(all(feature = "desktop-test-support", debug_assertions))]
+#[path = "production_acceptance.rs"]
+mod production_acceptance;

@@ -173,6 +173,9 @@ macro_rules! profile {
                         input.validate().map_err(|_| ProtocolError::Malformed)?;
                         RuntimeCommand::Key(input)
                     }
+                    wire::runtime_command::Action::EnhancedCopy(value) => {
+                        RuntimeCommand::Copy(modifiers(*value)?)
+                    }
                     wire::runtime_command::Action::InputMethodText(value) => {
                         RuntimeCommand::InputMethodCommit(
                             BoundedInputMethodText::new(value.clone())
@@ -298,6 +301,10 @@ macro_rules! profile {
                     return Err(ProtocolError::Malformed);
                 }
                 let action = match &value.command {
+                    RuntimeCommand::RequestCorrelatedPaste(..) => {
+                        // Only the owning server assigns a runtime request correlation.
+                        return Err(ProtocolError::Malformed);
+                    }
                     RuntimeCommand::Pointer(mouse) => {
                         if mouse.stamp.fence() != value.fence {
                             return Err(ProtocolError::Malformed);
@@ -347,6 +354,9 @@ macro_rules! profile {
                         unshifted_codepoint: value.unshifted_codepoint.map_or(0, u32::from),
                         option_as_alt: value.option_as_alt == OptionAsAltPolicy::Both,
                     }),
+                    RuntimeCommand::Copy(value) => {
+                        wire::runtime_command::Action::EnhancedCopy(modifier_bits(*value))
+                    }
                     RuntimeCommand::InputMethodCommit(value) => {
                         wire::runtime_command::Action::InputMethodText(value.as_str().into())
                     }

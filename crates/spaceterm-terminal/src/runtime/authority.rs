@@ -54,7 +54,9 @@ impl Authority {
             Some(RuntimeCommand::InputMethodCommit(_)) => parts.focused_pane,
             Some(
                 RuntimeCommand::Key(_)
+                | RuntimeCommand::Copy(_)
                 | RuntimeCommand::RequestPaste(_)
+                | RuntimeCommand::RequestCorrelatedPaste(..)
                 | RuntimeCommand::ResolvePaste(..)
                 | RuntimeCommand::Pointer(_)
                 | RuntimeCommand::Wheel(_),

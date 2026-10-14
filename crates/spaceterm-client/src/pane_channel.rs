@@ -1546,13 +1546,15 @@ fn allows(kind: EffectKind, facts: PaneContextFacts) -> bool {
 }
 fn effect_kind(effect: &RuntimeEffect) -> EffectKind {
     match effect {
-        RuntimeEffect::Key(_) => EffectKind::Key,
+        RuntimeEffect::Key(_) | RuntimeEffect::Copy(_) => EffectKind::Key,
         RuntimeEffect::InputMethodCommit(_) => EffectKind::ImeCommit,
         RuntimeEffect::Pointer(_) | RuntimeEffect::Wheel(_) => EffectKind::Pointer,
         RuntimeEffect::Resize(_) | RuntimeEffect::CellPixelMetrics(_) => EffectKind::Resize,
         RuntimeEffect::FocusReport(_) => EffectKind::FocusReport,
         RuntimeEffect::Appearance(_) => EffectKind::Appearance,
-        RuntimeEffect::RequestPaste(_) | RuntimeEffect::ResolvePaste(_, _) => EffectKind::Paste,
+        RuntimeEffect::RequestPaste(_)
+        | RuntimeEffect::RequestCorrelatedPaste(..)
+        | RuntimeEffect::ResolvePaste(_, _) => EffectKind::Paste,
         RuntimeEffect::CompleteNativeRequest(_) => EffectKind::NativeCompletion,
         RuntimeEffect::ClearScreenAndScrollback => EffectKind::Key,
     }

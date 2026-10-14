@@ -484,6 +484,38 @@ fn ordinary_field_capabilities(
     if mouse && !capabilities.contains(&crate::negotiation::CAPABILITY_APPLICATION_MOUSE) {
         return Err(ProtocolError::Negotiation);
     }
+    macro_rules! native_input_fields {
+        ($message:expr, $p:ident) => {{
+            use crate::wire::$p;
+            match &$message.kind {
+                Some($p::message::Kind::RuntimeCommand(command)) => (
+                    matches!(
+                        command.action,
+                        Some($p::runtime_command::Action::EnhancedCopy(_))
+                    ),
+                    false,
+                ),
+                Some($p::message::Kind::NativeRequest(request)) => {
+                    (false, request.originating_runtime_request != 0)
+                }
+                Some($p::message::Kind::NativeCompletion(completion)) => (
+                    false,
+                    completion.originating_runtime_request != 0 || completion.effect_request != 0,
+                ),
+                _ => (false, false),
+            }
+        }};
+    }
+    let (copy, paste) = match payload {
+        Payload::Major1(message) => native_input_fields!(message, v1),
+        Payload::Major2(message) => native_input_fields!(message, v2),
+    };
+    if (copy && !capabilities.contains(&crate::negotiation::CAPABILITY_ENHANCED_COPY))
+        || (paste
+            && !capabilities.contains(&crate::negotiation::CAPABILITY_NATIVE_PASTE_CORRELATION))
+    {
+        return Err(ProtocolError::Negotiation);
+    }
     macro_rules! canonical {
         ($message:expr, $p:ident) => {{
             use crate::wire::$p;

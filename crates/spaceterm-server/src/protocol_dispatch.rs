@@ -403,7 +403,12 @@ impl ProtocolDispatcher {
             PeerConnection::Ordinary(session) => session.codec.limits(),
             _ => Default::default(),
         };
-        let mut terminal = terminal::TerminalConnection::new(self.clock.clone(), limits);
+        let mut terminal = terminal::TerminalConnection::new(
+            self.clock.clone(),
+            limits,
+            matches!(&peer.connection, PeerConnection::Ordinary(session)
+                if session.codec.capabilities().contains(&spaceterm_protocol::negotiation::CAPABILITY_NATIVE_PASTE_CORRELATION)),
+        );
         let mut status = self.status.clone();
         let mut organization = handle.subscribe_snapshot();
         let mut organization_query: Option<organization::OrganizationQuery> = None;
@@ -1206,10 +1211,10 @@ fn runtime_failure(
     use spaceterm_core::runtime_authority::EffectDisposition;
     let class = match result {
         Ok(EffectDisposition::Applied) => return Ok(None),
-        Ok(EffectDisposition::StaleAuthority | EffectDisposition::Cancelled) => {
-            common::FailureClass::Stale
+        Ok(EffectDisposition::StaleAuthority) => common::FailureClass::Stale,
+        Ok(EffectDisposition::Cancelled | EffectDisposition::Retired) => {
+            common::FailureClass::Retired
         }
-        Ok(EffectDisposition::Retired) => common::FailureClass::Retired,
         Err(error) => match error.class {
             ServerFailureClass::StaleAuthority => common::FailureClass::Stale,
             ServerFailureClass::Capacity => common::FailureClass::Limit,

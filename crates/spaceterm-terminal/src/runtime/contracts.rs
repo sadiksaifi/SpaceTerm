@@ -51,6 +51,8 @@ pub struct RuntimeAppearance {
 #[derive(Clone, PartialEq)]
 pub enum RuntimeCommand {
     Key(KeyInput),
+    /// Encode a complete Copy chord only through enhanced keyboard reporting.
+    Copy(InputModifiers),
     InputMethodCommit(BoundedInputMethodText),
     Pointer(ApplicationPointerInput),
     Wheel(ApplicationWheelInput),
@@ -60,6 +62,8 @@ pub enum RuntimeCommand {
     CellPixelMetrics(CellPixels),
     ClearScreenAndScrollback,
     RequestPaste(BoundedPaste),
+    /// Assigned by the authenticated server adapter, never inferred from a native ID.
+    RequestCorrelatedPaste(u64, BoundedPaste),
     ResolvePaste(PasteApprovalId, PasteDecision),
     CompleteNativeRequest(NativeCompletion),
 }
@@ -69,6 +73,7 @@ impl std::fmt::Debug for RuntimeCommand {
         // server command boundary must never inherit that diagnostic payload.
         f.write_str(match self {
             Self::Key(_) => "RuntimeCommand::Key",
+            Self::Copy(_) => "RuntimeCommand::Copy",
             Self::InputMethodCommit(_) => "RuntimeCommand::InputMethodCommit",
             Self::Pointer(_) => "RuntimeCommand::Pointer",
             Self::Wheel(_) => "RuntimeCommand::Wheel",
@@ -78,6 +83,7 @@ impl std::fmt::Debug for RuntimeCommand {
             Self::CellPixelMetrics(_) => "RuntimeCommand::CellPixelMetrics",
             Self::ClearScreenAndScrollback => "RuntimeCommand::ClearScreenAndScrollback",
             Self::RequestPaste(_) => "RuntimeCommand::RequestPaste",
+            Self::RequestCorrelatedPaste(..) => "RuntimeCommand::RequestCorrelatedPaste",
             Self::ResolvePaste(..) => "RuntimeCommand::ResolvePaste",
             Self::CompleteNativeRequest(_) => "RuntimeCommand::CompleteNativeRequest",
         })

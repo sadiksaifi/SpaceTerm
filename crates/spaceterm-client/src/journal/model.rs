@@ -313,10 +313,16 @@ pub(super) fn validate(
             ..
         } = &entry.state
         {
-            if publication_revision.get() == 0 || outcome.encoded_len() > outcome_charge {
+            // An empty server remains at revision zero during pairing assessments
+            // and additional-Client binding. Grant records still require a nonzero
+            // publication revision in the grant validation above.
+            if outcome.encoded_len() > outcome_charge {
                 return Err(invalid());
             }
             let decoded = outcome.outcome(codec).map_err(|_| invalid())?;
+            if publication_revision.get() == 0 && decoded.grant_provenance().is_some() {
+                return Err(invalid());
+            }
             decoded
                 .validate_scope(entry.binding.id.stream())
                 .map_err(|_| invalid())?;

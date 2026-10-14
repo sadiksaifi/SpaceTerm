@@ -726,3 +726,209 @@ async fn routed_metadata_requires_existing_live_channel_and_current_fence() {
     );
     assert!(fixture.pane.metadata_snapshot().is_none());
 }
+
+#[tokio::test]
+async fn correlated_paste_accepts_native_reordering_but_never_a_different_origin_or_duplicate() {
+    use spaceterm_core::native_requests::*;
+    use std::time::Duration;
+    let fixture = Fixture::new(true).await;
+    let mut events = fixture.pane.events().unwrap();
+    let permit = fixture.pane.permit(EffectKind::Paste).unwrap();
+    let origin = fixture
+        .pane
+        .try_effect(
+            &permit,
+            RuntimeEffect::RequestPaste(NativeText::new("one\ntwo".into()).unwrap()),
+        )
+        .unwrap()
+        .correlation()
+        .unwrap();
+    let notification = NativeRequest::new(
+        origin.fence(),
+        NativeRequestId::new(80).unwrap(),
+        MonotonicTick::new(0),
+        MonotonicTick::new(0),
+        Some(MonotonicTick::new(1000)),
+        NativeRequestKind::Notification(NotificationNotice::Bell),
+    )
+    .unwrap();
+    fixture
+        .pane
+        .receive_native(
+            notification,
+            NativeTiming {
+                not_before: Duration::ZERO,
+                expires_after: Some(Duration::from_secs(1)),
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        events.next().await.unwrap(),
+        Some(PaneEvent::Native { .. })
+    ));
+    let approval = PasteApprovalId::new(77).unwrap();
+    let request = NativeRequest::new(
+        origin.fence(),
+        NativeRequestId::new(70).unwrap(),
+        MonotonicTick::new(0),
+        MonotonicTick::new(0),
+        Some(MonotonicTick::new(30000)),
+        NativeRequestKind::UnsafePaste {
+            approval,
+            text: NativeText::new("one\ntwo".into()).unwrap(),
+        },
+    )
+    .unwrap()
+    .with_runtime_request(origin.request())
+    .unwrap();
+    let timing = NativeTiming {
+        not_before: Duration::ZERO,
+        expires_after: Some(Duration::from_secs(30)),
+    };
+    let wrong = request
+        .clone()
+        .with_runtime_request(origin.request() + 1)
+        .unwrap();
+    assert!(
+        fixture
+            .pane
+            .receive_paste_approval(origin, wrong, timing)
+            .is_err()
+    );
+    fixture
+        .pane
+        .receive_paste_approval(origin, request.clone(), timing)
+        .unwrap();
+    let Some(PaneEvent::PasteApproval {
+        correlation,
+        request: lease,
+        ..
+    }) = events.next().await.unwrap()
+    else {
+        panic!("paste approval");
+    };
+    assert_eq!(correlation, origin);
+    assert_eq!(lease.id(), request.id());
+    assert_eq!(lease.runtime_request().unwrap().get(), origin.request());
+    assert!(
+        fixture
+            .pane
+            .receive_paste_approval(origin, request.clone(), timing)
+            .is_err()
+    );
+    assert!(
+        fixture
+            .pane
+            .receive_runtime_outcome(origin, Ok(()))
+            .is_err()
+    );
+    let forged = request
+        .clone()
+        .with_runtime_request(origin.request() + 1)
+        .unwrap();
+    let forged = NativeCompletion::new(
+        &forged,
+        NativeCompletionKind::Paste {
+            approval,
+            decision: PasteDecision::Confirm,
+        },
+    )
+    .unwrap();
+    let native = fixture.pane.permit(EffectKind::NativeCompletion).unwrap();
+    assert!(fixture.pane.complete_native(&native, forged).is_err());
+    assert!(lease.is_current());
+    let completion = NativeCompletion::new(
+        &request,
+        NativeCompletionKind::Paste {
+            approval,
+            decision: PasteDecision::Confirm,
+        },
+    )
+    .unwrap();
+    let resolved = fixture
+        .pane
+        .complete_native(&native, completion.clone())
+        .unwrap()
+        .correlation()
+        .unwrap();
+    assert_ne!(resolved.request(), request.id().get());
+    assert_ne!(resolved.request(), origin.request());
+    assert_eq!(resolved.fence(), origin.fence());
+    assert!(fixture.pane.complete_native(&native, completion).is_err());
+    fixture
+        .pane
+        .receive_runtime_outcome(resolved, Ok(()))
+        .unwrap();
+    assert!(
+        matches!(events.next().await.unwrap(), Some(PaneEvent::PasteResolved { correlation, approval: id, result: Ok(()), .. }) if correlation == resolved && id == approval)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn correlated_paste_native_delivery_never_extends_the_originating_runtime_deadline() {
+    use spaceterm_core::native_requests::*;
+    use std::time::Duration;
+    let fixture = Fixture::new(true).await;
+    let mut events = fixture.pane.events().unwrap();
+    let permit = fixture.pane.permit(EffectKind::Paste).unwrap();
+    let origin = fixture
+        .pane
+        .try_effect(
+            &permit,
+            RuntimeEffect::RequestPaste(NativeText::new("one\ntwo".into()).unwrap()),
+        )
+        .unwrap()
+        .correlation()
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(20)).await;
+    let approval = PasteApprovalId::new(77).unwrap();
+    let request = NativeRequest::new(
+        origin.fence(),
+        NativeRequestId::new(70).unwrap(),
+        MonotonicTick::new(0),
+        MonotonicTick::new(0),
+        Some(MonotonicTick::new(30000)),
+        NativeRequestKind::UnsafePaste {
+            approval,
+            text: NativeText::new("one\ntwo".into()).unwrap(),
+        },
+    )
+    .unwrap()
+    .with_runtime_request(origin.request())
+    .unwrap();
+    fixture
+        .pane
+        .receive_paste_approval(
+            origin,
+            request.clone(),
+            NativeTiming {
+                not_before: Duration::ZERO,
+                expires_after: Some(Duration::from_secs(30)),
+            },
+        )
+        .unwrap();
+    let Some(PaneEvent::PasteApproval { request: lease, .. }) = events.next().await.unwrap() else {
+        panic!("paste approval");
+    };
+    assert!(lease.is_current());
+    tokio::time::advance(Duration::from_secs(10)).await;
+    assert!(!lease.is_current());
+    let native = fixture.pane.permit(EffectKind::NativeCompletion).unwrap();
+    let completion = NativeCompletion::new(
+        &request,
+        NativeCompletionKind::Paste {
+            approval,
+            decision: PasteDecision::Confirm,
+        },
+    )
+    .unwrap();
+    assert!(fixture.pane.complete_native(&native, completion).is_err());
+    assert!(
+        fixture
+            .peer
+            .flush_effects()
+            .unwrap()
+            .iter()
+            .all(|effect| !matches!(effect.command, RuntimeEffect::CompleteNativeRequest(_)))
+    );
+}

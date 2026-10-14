@@ -28,6 +28,7 @@ fn maximum_native_text_encoding_uses_at_most_two_scratch_copies() {
                         )),
                         not_before_delay_ms: 0,
                         remaining_ms: Some(1000),
+                        originating_runtime_request: 0,
                     })),
                 })
             };

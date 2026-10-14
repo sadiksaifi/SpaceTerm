@@ -1812,3 +1812,627 @@ fn public_runtime_streams_real_session_qualified_graphics() {
         .unwrap();
     owner.join().unwrap();
 }
+
+#[cfg(feature = "runtime")]
+#[test]
+fn real_vt_enhanced_copy_never_writes_legacy_control_c_or_hidden_input() {
+    use spaceterm_terminal::{
+        InputModifiers, runtime::budget::RuntimeLimits, runtime_contracts::*,
+    };
+    use support::*;
+    for (modifiers, expected) in [
+        (
+            InputModifiers {
+                control: true,
+                shift: true,
+                ..Default::default()
+            },
+            b"\x1b[99;6u\x1b[99;6:3u".as_slice(),
+        ),
+        (
+            InputModifiers {
+                platform: true,
+                ..Default::default()
+            },
+            b"\x1b[99;9u\x1b[99;9:3u".as_slice(),
+        ),
+    ] {
+        let factory = factory(RuntimeLimits::default());
+        let pty = Pty::default();
+        let request = request(1, support::grid(3, 16));
+        let authority = request.authority();
+        let mut owner = real_runtime(&factory, request, &pty);
+        let handle = owner.handle();
+        let copy = || {
+            handle
+                .try_submit(fence(authority), RuntimeCommand::Copy(modifiers))
+                .unwrap()
+                .receive_blocking()
+                .unwrap()
+        };
+        assert_eq!(copy(), EffectDisposition::Applied);
+        assert!(pty.inspect(|state| state.written.is_empty()));
+        runtime_output(&pty, b"\x1b[>11u");
+        let before = pty.inspect(|state| state.written.len());
+        assert_eq!(copy(), EffectDisposition::Applied);
+        assert_eq!(
+            pty.inspect(|state| state.written[before..].to_vec()),
+            expected
+        );
+        pty.update(|state| state.hidden = true);
+        let before = pty.inspect(|state| state.written.len());
+        assert_eq!(copy(), EffectDisposition::Applied);
+        assert_eq!(pty.inspect(|state| state.written.len()), before);
+        pty.update(|state| state.hidden = false);
+        runtime_output(&pty, b"\x1b[<u");
+        let before = pty.inspect(|state| state.written.len());
+        assert_eq!(copy(), EffectDisposition::Applied);
+        assert_eq!(pty.inspect(|state| state.written.len()), before);
+        owner.retire(spaceterm_core::organization::RetirementReason::Stop);
+        owner.join().unwrap();
+    }
+}
+
+#[cfg(feature = "runtime")]
+#[test]
+fn real_vt_correlated_unsafe_paste_waits_for_the_matching_native_completion() {
+    use spaceterm_core::{
+        native_requests::*,
+        organization::{FailureClass, RetirementReason},
+    };
+    use spaceterm_terminal::{runtime::budget::RuntimeLimits, runtime_contracts::*};
+    use support::*;
+    let factory = factory(RuntimeLimits::default());
+    let pty = Pty::default();
+    let start = request(1, support::grid(3, 16));
+    let authority = start.authority();
+    let mut owner = real_runtime(&factory, start, &pty);
+    let mut native = owner.take_native_requests().unwrap();
+    let handle = owner.handle();
+    let pending = handle
+        .try_submit(
+            fence(authority),
+            RuntimeCommand::RequestCorrelatedPaste(
+                127,
+                NativeText::new("one\r\ntwo\x03".into()).unwrap(),
+            ),
+        )
+        .unwrap();
+    let approval = native.next_blocking().unwrap().unwrap();
+    assert_eq!(approval.runtime_request().unwrap().get(), 127);
+    assert_ne!(approval.id().get(), 127);
+    assert!(
+        pending.try_receive().unwrap().is_none(),
+        "approval is not a PTY write receipt"
+    );
+    assert!(pty.inspect(|state| state.written.is_empty()));
+    let second = handle
+        .try_submit(
+            fence(authority),
+            RuntimeCommand::RequestCorrelatedPaste(
+                128,
+                NativeText::new("second\npaste".into()).unwrap(),
+            ),
+        )
+        .unwrap()
+        .receive_blocking()
+        .unwrap_err();
+    assert_eq!(second.class, FailureClass::ResourceLimit);
+    let NativeRequestKind::UnsafePaste { approval: id, .. } = approval.kind() else {
+        panic!("paste approval");
+    };
+    let forged = approval.clone().with_runtime_request(128).unwrap();
+    let forged = NativeCompletion::new(
+        &forged,
+        NativeCompletionKind::Paste {
+            approval: *id,
+            decision: PasteDecision::Confirm,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        handle
+            .try_submit(
+                fence(authority),
+                RuntimeCommand::CompleteNativeRequest(forged)
+            )
+            .unwrap()
+            .receive_blocking()
+            .unwrap(),
+        EffectDisposition::StaleAuthority
+    );
+    assert!(pending.try_receive().unwrap().is_none());
+    let completion = NativeCompletion::new(
+        &approval,
+        NativeCompletionKind::Paste {
+            approval: *id,
+            decision: PasteDecision::Confirm,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        handle
+            .try_submit(
+                fence(authority),
+                RuntimeCommand::CompleteNativeRequest(completion.clone())
+            )
+            .unwrap()
+            .receive_blocking()
+            .unwrap(),
+        EffectDisposition::Applied
+    );
+    assert_eq!(
+        pending.receive_blocking().unwrap(),
+        EffectDisposition::Applied
+    );
+    assert!(pty.inspect(|state| state.written == b"one\rtwo"));
+    // A late completion must not resolve the next paste with the same authority fence.
+    let next = handle
+        .try_submit(
+            fence(authority),
+            RuntimeCommand::RequestCorrelatedPaste(
+                129,
+                NativeText::new("next\npaste".into()).unwrap(),
+            ),
+        )
+        .unwrap();
+    let request = native.next_blocking().unwrap().unwrap();
+    assert_eq!(
+        handle
+            .try_submit(
+                fence(authority),
+                RuntimeCommand::CompleteNativeRequest(completion)
+            )
+            .unwrap()
+            .receive_blocking()
+            .unwrap(),
+        EffectDisposition::StaleAuthority
+    );
+    assert!(next.try_receive().unwrap().is_none());
+    let denied = NativeCompletion::new(&request, NativeCompletionKind::Denied).unwrap();
+    assert_eq!(
+        handle
+            .try_submit(
+                fence(authority),
+                RuntimeCommand::CompleteNativeRequest(denied)
+            )
+            .unwrap()
+            .receive_blocking()
+            .unwrap(),
+        EffectDisposition::Cancelled
+    );
+    assert_eq!(
+        next.receive_blocking().unwrap(),
+        EffectDisposition::Cancelled
+    );
+    assert!(pty.inspect(|state| state.written == b"one\rtwo"));
+    owner.retire(RetirementReason::Stop);
+    owner.join().unwrap();
+}
+
+#[cfg(feature = "runtime")]
+#[test]
+fn real_vt_correlated_unsafe_paste_expires_or_revokes_without_replay() {
+    use spaceterm_core::{native_requests::*, organization::RetirementReason};
+    use spaceterm_terminal::{
+        runtime::{budget::RuntimeLimits, owner::RuntimeFactory},
+        runtime_contracts::*,
+    };
+    use std::sync::{Arc, atomic::Ordering};
+    use support::*;
+    for expired in [false, true] {
+        let clock = Arc::new(Clock::default());
+        let factory = RuntimeFactory::new(RuntimeLimits::default(), clock.clone()).unwrap();
+        let pty = Pty::default();
+        let start = request(1, support::grid(3, 16));
+        let authority = start.authority();
+        let mut owner = real_runtime(&factory, start, &pty);
+        let mut native = owner.take_native_requests().unwrap();
+        let handle = owner.handle();
+        let pending = handle
+            .try_submit(
+                fence(authority),
+                RuntimeCommand::RequestCorrelatedPaste(
+                    127,
+                    NativeText::new("one\ntwo".into()).unwrap(),
+                ),
+            )
+            .unwrap();
+        let request = native.next_blocking().unwrap().unwrap();
+        let NativeRequestKind::UnsafePaste { approval, .. } = request.kind() else {
+            panic!("paste approval");
+        };
+        let completion = NativeCompletion::new(
+            &request,
+            NativeCompletionKind::Paste {
+                approval: *approval,
+                decision: PasteDecision::Confirm,
+            },
+        )
+        .unwrap();
+        if expired {
+            clock.0.store(30_000, Ordering::Release);
+        } else {
+            owner
+                .transition_authority(takeover(authority))
+                .unwrap()
+                .receive_blocking()
+                .unwrap();
+        }
+        let submitted = handle.try_submit(
+            request.fence(),
+            RuntimeCommand::CompleteNativeRequest(completion),
+        );
+        if expired {
+            assert_eq!(
+                submitted.unwrap().receive_blocking().unwrap(),
+                EffectDisposition::StaleAuthority
+            );
+        } else {
+            assert_eq!(
+                submitted.err().unwrap().class,
+                spaceterm_core::organization::FailureClass::StaleAuthority
+            );
+        }
+        assert_eq!(
+            pending.receive_blocking().unwrap(),
+            EffectDisposition::Cancelled
+        );
+        assert!(pty.inspect(|state| state.written.is_empty()));
+        owner.retire(RetirementReason::Stop);
+        owner.join().unwrap();
+    }
+}
+
+#[cfg(feature = "runtime")]
+#[test]
+fn real_vt_correlated_paste_keeps_its_deadline_after_confirmation_and_would_block() {
+    use spaceterm_core::{native_requests::*, organization::RetirementReason};
+    use spaceterm_terminal::{
+        runtime::{budget::RuntimeLimits, owner::RuntimeFactory},
+        runtime_contracts::*,
+    };
+    use std::sync::{Arc, atomic::Ordering};
+    use support::*;
+    let clock = Arc::new(Clock::default());
+    let factory = RuntimeFactory::new(RuntimeLimits::default(), clock.clone()).unwrap();
+    let pty = Pty::default();
+    let start = request(1, support::grid(3, 16));
+    let authority = start.authority();
+    let mut owner = real_runtime(&factory, start, &pty);
+    let mut native = owner.take_native_requests().unwrap();
+    let handle = owner.handle();
+    let origin = handle
+        .try_submit(
+            fence(authority),
+            RuntimeCommand::RequestCorrelatedPaste(
+                127,
+                NativeText::new("one\ntwo".into()).unwrap(),
+            ),
+        )
+        .unwrap();
+    let request = native.next_blocking().unwrap().unwrap();
+    let NativeRequestKind::UnsafePaste { approval, .. } = request.kind() else {
+        panic!("paste approval");
+    };
+    clock.0.store(29_000, Ordering::Release);
+    pty.update(|state| state.blocked = true);
+    let completion = NativeCompletion::new(
+        &request,
+        NativeCompletionKind::Paste {
+            approval: *approval,
+            decision: PasteDecision::Confirm,
+        },
+    )
+    .unwrap();
+    let final_reply = handle
+        .try_submit(
+            request.fence(),
+            RuntimeCommand::CompleteNativeRequest(completion),
+        )
+        .unwrap();
+    pty.until(|state| !state.attempted_write.is_empty());
+    assert!(
+        origin.try_receive().unwrap().is_none(),
+        "a blocked write must not complete the originating paste"
+    );
+    clock.0.store(30_000, Ordering::Release);
+    assert_eq!(
+        final_reply.receive_blocking().unwrap(),
+        EffectDisposition::StaleAuthority
+    );
+    assert_eq!(
+        origin.receive_blocking().unwrap(),
+        EffectDisposition::StaleAuthority
+    );
+    pty.update(|state| state.blocked = false);
+    handle
+        .try_submit(fence(authority), ime("after"))
+        .unwrap()
+        .receive_blocking()
+        .unwrap();
+    assert!(
+        pty.inspect(|state| state.written == b"after"),
+        "expired paste must not replay after the writer resumes"
+    );
+    owner.retire(RetirementReason::Stop);
+    owner.join().unwrap();
+}
+
+#[cfg(feature = "runtime")]
+#[test]
+fn real_vt_correlated_native_paste_cancellation_is_not_stale() {
+    use spaceterm_core::{native_requests::*, organization::RetirementReason};
+    use spaceterm_terminal::{runtime::budget::RuntimeLimits, runtime_contracts::*};
+    use support::*;
+    let factory = factory(RuntimeLimits::default());
+    let pty = Pty::default();
+    let start = request(1, support::grid(3, 16));
+    let authority = start.authority();
+    let mut owner = real_runtime(&factory, start, &pty);
+    let mut native = owner.take_native_requests().unwrap();
+    let handle = owner.handle();
+    let origin = handle
+        .try_submit(
+            fence(authority),
+            RuntimeCommand::RequestCorrelatedPaste(
+                127,
+                NativeText::new("one\ntwo".into()).unwrap(),
+            ),
+        )
+        .unwrap();
+    let request = native.next_blocking().unwrap().unwrap();
+    let NativeRequestKind::UnsafePaste { approval, .. } = request.kind() else {
+        panic!("paste approval");
+    };
+    let completion = NativeCompletion::new(
+        &request,
+        NativeCompletionKind::Paste {
+            approval: *approval,
+            decision: PasteDecision::Cancel,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        handle
+            .try_submit(
+                request.fence(),
+                RuntimeCommand::CompleteNativeRequest(completion.clone())
+            )
+            .unwrap()
+            .receive_blocking()
+            .unwrap(),
+        EffectDisposition::Cancelled
+    );
+    assert_eq!(
+        origin.receive_blocking().unwrap(),
+        EffectDisposition::Cancelled
+    );
+    assert_eq!(
+        handle
+            .try_submit(
+                request.fence(),
+                RuntimeCommand::CompleteNativeRequest(completion)
+            )
+            .unwrap()
+            .receive_blocking()
+            .unwrap(),
+        EffectDisposition::StaleAuthority
+    );
+    assert!(pty.inspect(|state| state.written.is_empty()));
+    owner.retire(RetirementReason::Stop);
+    owner.join().unwrap();
+}
+
+#[cfg(feature = "runtime")]
+#[test]
+fn real_vt_enhanced_copy_rechecks_hidden_input_after_would_block() {
+    use spaceterm_core::organization::RetirementReason;
+    use spaceterm_terminal::{
+        InputModifiers, runtime::budget::RuntimeLimits, runtime_contracts::*,
+    };
+    use support::*;
+    let factory = factory(RuntimeLimits::default());
+    let pty = Pty::default();
+    let start = request(1, support::grid(3, 16));
+    let authority = start.authority();
+    let mut owner = real_runtime(&factory, start, &pty);
+    let handle = owner.handle();
+    runtime_output(&pty, b"\x1b[>11u");
+    pty.update(|state| {
+        state.blocked = true;
+        state.written.clear();
+        state.attempted_write.clear();
+    });
+    let copy = handle
+        .try_submit(
+            fence(authority),
+            RuntimeCommand::Copy(InputModifiers {
+                control: true,
+                shift: true,
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+    pty.until(|state| !state.attempted_write.is_empty());
+    assert!(copy.try_receive().unwrap().is_none());
+    pty.update(|state| state.hidden = true);
+    assert_eq!(
+        copy.receive_blocking().unwrap(),
+        EffectDisposition::StaleAuthority
+    );
+    pty.update(|state| {
+        state.hidden = false;
+        state.blocked = false;
+    });
+    handle
+        .try_submit(fence(authority), ime("after"))
+        .unwrap()
+        .receive_blocking()
+        .unwrap();
+    assert!(
+        pty.inspect(|state| state.written == b"after"),
+        "suppressed blocked Copy must not replay when native input becomes visible again"
+    );
+    owner.retire(RetirementReason::Stop);
+    owner.join().unwrap();
+}
+
+#[cfg(feature = "runtime")]
+#[test]
+fn real_vt_correlated_paste_origin_cancellation_completes_live_confirmation_without_input() {
+    use spaceterm_core::{native_requests::*, organization::RetirementReason};
+    use spaceterm_terminal::{runtime::budget::RuntimeLimits, runtime_contracts::*};
+    use support::*;
+    let factory = factory(RuntimeLimits::default());
+    let pty = Pty::default();
+    let start = request(1, support::grid(3, 16));
+    let authority = start.authority();
+    let mut owner = real_runtime(&factory, start, &pty);
+    let mut native = owner.take_native_requests().unwrap();
+    let handle = owner.handle();
+    let origin = handle
+        .try_submit(
+            fence(authority),
+            RuntimeCommand::RequestCorrelatedPaste(
+                127,
+                NativeText::new("one\ntwo".into()).unwrap(),
+            ),
+        )
+        .unwrap();
+    let request = native.next_blocking().unwrap().unwrap();
+    let NativeRequestKind::UnsafePaste { approval, .. } = request.kind() else {
+        panic!("unsafe paste approval");
+    };
+    drop(origin);
+    let completion = NativeCompletion::new(
+        &request,
+        NativeCompletionKind::Paste {
+            approval: *approval,
+            decision: PasteDecision::Confirm,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        handle
+            .try_submit(
+                request.fence(),
+                RuntimeCommand::CompleteNativeRequest(completion)
+            )
+            .unwrap()
+            .receive_blocking()
+            .unwrap(),
+        EffectDisposition::Cancelled
+    );
+    assert!(pty.inspect(|state| state.written.is_empty()));
+    owner.retire(RetirementReason::Stop);
+    owner.join().unwrap();
+}
+
+#[cfg(feature = "runtime")]
+#[test]
+fn real_vt_correlated_paste_denial_requires_the_origin_and_never_cancels_a_later_paste() {
+    use spaceterm_core::{native_requests::*, organization::RetirementReason};
+    use spaceterm_terminal::{runtime::budget::RuntimeLimits, runtime_contracts::*};
+    use support::*;
+    let factory = factory(RuntimeLimits::default());
+    let pty = Pty::default();
+    let start = request(1, support::grid(3, 16));
+    let authority = start.authority();
+    let mut owner = real_runtime(&factory, start, &pty);
+    let mut native = owner.take_native_requests().unwrap();
+    let handle = owner.handle();
+    let origin = handle
+        .try_submit(
+            fence(authority),
+            RuntimeCommand::RequestCorrelatedPaste(
+                127,
+                NativeText::new("first\npaste".into()).unwrap(),
+            ),
+        )
+        .unwrap();
+    let first = native.next_blocking().unwrap().unwrap();
+    let wrong_origin = first.clone().with_runtime_request(128).unwrap();
+    let wrong = NativeCompletion::new(&wrong_origin, NativeCompletionKind::Denied).unwrap();
+    assert_eq!(
+        handle
+            .try_submit(first.fence(), RuntimeCommand::CompleteNativeRequest(wrong))
+            .unwrap()
+            .receive_blocking()
+            .unwrap(),
+        EffectDisposition::StaleAuthority
+    );
+    assert!(
+        origin.try_receive().unwrap().is_none(),
+        "a denial of another originating request must not consume this approval"
+    );
+    let denied = NativeCompletion::new(&first, NativeCompletionKind::Denied).unwrap();
+    assert_eq!(
+        handle
+            .try_submit(
+                first.fence(),
+                RuntimeCommand::CompleteNativeRequest(denied.clone())
+            )
+            .unwrap()
+            .receive_blocking()
+            .unwrap(),
+        EffectDisposition::Cancelled
+    );
+    assert_eq!(
+        origin.receive_blocking().unwrap(),
+        EffectDisposition::Cancelled
+    );
+    assert!(pty.inspect(|state| state.written.is_empty()));
+    let origin = handle
+        .try_submit(
+            fence(authority),
+            RuntimeCommand::RequestCorrelatedPaste(
+                129,
+                NativeText::new("second\npaste".into()).unwrap(),
+            ),
+        )
+        .unwrap();
+    let second = native.next_blocking().unwrap().unwrap();
+    assert_ne!(second.id(), first.id());
+    assert_eq!(
+        handle
+            .try_submit(first.fence(), RuntimeCommand::CompleteNativeRequest(denied))
+            .unwrap()
+            .receive_blocking()
+            .unwrap(),
+        EffectDisposition::StaleAuthority
+    );
+    assert!(
+        origin.try_receive().unwrap().is_none(),
+        "a duplicated denial must not cancel the next paste under the same fence"
+    );
+    let NativeRequestKind::UnsafePaste { approval, .. } = second.kind() else {
+        panic!("second unsafe paste approval");
+    };
+    let confirm = NativeCompletion::new(
+        &second,
+        NativeCompletionKind::Paste {
+            approval: *approval,
+            decision: PasteDecision::Confirm,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        handle
+            .try_submit(
+                second.fence(),
+                RuntimeCommand::CompleteNativeRequest(confirm)
+            )
+            .unwrap()
+            .receive_blocking()
+            .unwrap(),
+        EffectDisposition::Applied
+    );
+    assert_eq!(
+        origin.receive_blocking().unwrap(),
+        EffectDisposition::Applied
+    );
+    assert!(pty.inspect(|state| state.written == b"second\rpaste"));
+    owner.retire(RetirementReason::Stop);
+    owner.join().unwrap();
+}

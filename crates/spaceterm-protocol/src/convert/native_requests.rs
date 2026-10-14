@@ -119,6 +119,9 @@ macro_rules! profile {
                     action: Some(action),
                     not_before_delay_ms: delay,
                     remaining_ms: remaining,
+                    originating_runtime_request: request
+                        .runtime_request()
+                        .map_or(0, |request| request.get()),
                 })
             }
             pub fn decode_request(
@@ -183,7 +186,7 @@ macro_rules! profile {
                     .remaining_ms
                     .map(|remaining| add_tick(received_at, remaining))
                     .transpose()?;
-                NativeRequest::new(
+                let request = NativeRequest::new(
                     fence,
                     NativeRequestId::new(value.request).map_err(|_| ProtocolError::Malformed)?,
                     received_at,
@@ -191,7 +194,14 @@ macro_rules! profile {
                     deadline,
                     kind,
                 )
-                .map_err(|_| ProtocolError::Malformed)
+                .map_err(|_| ProtocolError::Malformed)?;
+                if value.originating_runtime_request == 0 {
+                    Ok(request)
+                } else {
+                    request
+                        .with_runtime_request(value.originating_runtime_request)
+                        .map_err(|_| ProtocolError::Malformed)
+                }
             }
             pub fn encode_completion(
                 completion: &NativeCompletion,
@@ -200,6 +210,9 @@ macro_rules! profile {
                 let mut value = wire::NativeCompletion {
                     fence: Some(encode_fence(completion.fence())),
                     request: completion.id().get(),
+                    originating_runtime_request: completion
+                        .runtime_request()
+                        .map_or(0, |request| request.get()),
                     ..Default::default()
                 };
                 value.disposition = match completion.kind() {
@@ -233,6 +246,8 @@ macro_rules! profile {
                 request: &NativeRequest,
             ) -> Result<NativeCompletion, ProtocolError> {
                 if value.request != request.id().get()
+                    || value.originating_runtime_request
+                        != request.runtime_request().map_or(0, |request| request.get())
                     || decode_fence(required(&value.fence)?, None)? != request.fence()
                     || value.failure.is_some()
                     || value.allowed
