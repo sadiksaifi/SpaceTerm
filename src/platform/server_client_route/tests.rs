@@ -47,11 +47,16 @@ async fn desktop_saved_ssh_route_uses_captured_native_configuration() {
     use std::{os::unix::fs::PermissionsExt, sync::Arc};
     let mut suffix = [0; 4];
     getrandom::fill(&mut suffix).unwrap();
-    let root = std::path::PathBuf::from(format!(
-        "/private/tmp/stsr-{:x}",
-        u32::from_be_bytes(suffix)
-    ));
+    #[cfg(target_os = "macos")]
+    let parent = std::path::PathBuf::from("/private/tmp");
+    #[cfg(target_os = "linux")]
+    let parent = spaceterm_host::account_service::TrustedAccountFacts::current()
+        .unwrap()
+        .home()
+        .to_owned();
+    let root = parent.join(format!("stsr-{:x}", u32::from_be_bytes(suffix)));
     std::fs::create_dir(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let executable = root.join("ssh");
     let arguments = root.join("arguments");
     std::fs::write(
