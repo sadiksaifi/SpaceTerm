@@ -1005,7 +1005,8 @@ fn lost_ssh_reply_and_reopened_sheet_resolve_only_the_retained_native_request(
     click("settings-server-enrollment-ssh", cx);
     write_field("Server address or SSH host", "build-box", cx);
     click("settings-server-enrollment-check", cx);
-    click("settings-server-enrollment-confirm", cx);
+    // The reopened sheet found the retained setup, so Check Original Setup is its one control.
+    click("settings-server-enrollment-check", cx);
     assert_eq!(provider.bootstraps.get(), 1);
     assert_eq!(provider.resolutions.get(), 2);
     assert!(provider.publications.borrow().is_empty());
