@@ -49,7 +49,7 @@ async fn production_account_advertises_installed_git_and_directory_providers_in_
 
 async fn receive_native(
     transport: &dyn MessageTransport,
-    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    codec: &mut PublicationCodec,
 ) -> spaceterm_core::native_requests::NativeRequest {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -105,7 +105,7 @@ async fn receive_native(
 
 async fn complete_native(
     transport: &dyn MessageTransport,
-    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    codec: &mut PublicationCodec,
     request: &spaceterm_core::native_requests::NativeRequest,
     kind: spaceterm_core::native_requests::NativeCompletionKind,
 ) {
@@ -114,7 +114,7 @@ async fn complete_native(
 
 async fn complete_native_expected(
     transport: &dyn MessageTransport,
-    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    codec: &mut PublicationCodec,
     request: &spaceterm_core::native_requests::NativeRequest,
     kind: spaceterm_core::native_requests::NativeCompletionKind,
     expected_failure: Option<i32>,
@@ -284,7 +284,7 @@ async fn production_account_delivers_unsafe_paste_clipboard_and_notifications_in
 
 async fn protocol_shell_line(
     transport: &dyn MessageTransport,
-    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    codec: &mut PublicationCodec,
     effect_fence: EffectFence,
     request: u64,
     text: &str,
@@ -502,7 +502,7 @@ async fn production_account_clipboard_read_expiry_through_production_factory_in_
 
 async fn directory_query(
     transport: &dyn MessageTransport,
-    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    codec: &mut PublicationCodec,
     context: spaceterm_core::server_directories::DirectoryContext,
     action: spaceterm_core::server_directories::DirectoryQueryAction,
 ) -> spaceterm_core::server_directories::DirectoryQueryResult {
