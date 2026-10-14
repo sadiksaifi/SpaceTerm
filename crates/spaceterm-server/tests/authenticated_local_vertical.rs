@@ -1,4 +1,4 @@
-#[path = "support/allocation_probe.rs"]
+#[path = "../../spaceterm-protocol/tests/support/allocation_probe.rs"]
 mod allocation_probe;
 #[path = "support/publication.rs"]
 mod publication;

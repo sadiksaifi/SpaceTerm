@@ -1,10 +1,14 @@
+#[path = "support/native_client_fixture.rs"]
+mod native_client_fixture;
+use native_client_fixture::{Directory, Fixture, Key, Verifier};
+
 use spaceterm_client::{
     failure::{ClientFailure, ClientFailureClass},
-    journal::{ClientJournal, JournalLimits, PairingClientJournal, ReceiptVerifier},
+    journal::{ClientJournal, JournalLimits, PairingClientJournal},
 };
 use spaceterm_client_native::journal::NativeClientJournal;
 use spaceterm_core::{operation_ledger::canonical::CanonicalCodec, pairing::SignedPairingReceipt};
-use spaceterm_protocol::{authentication::ServerPin, pairing_adapter::ReceiptCodec};
+use spaceterm_protocol::pairing_adapter::ReceiptCodec;
 use std::{
     path::PathBuf,
     sync::{
@@ -13,20 +17,8 @@ use std::{
     },
 };
 
-struct Verifier;
-impl ReceiptVerifier for Verifier {
-    fn verify(&self, pin: ServerPin, receipt: &SignedPairingReceipt) -> Result<(), ClientFailure> {
-        ReceiptCodec::new(pin)
-            .verify(receipt)
-            .map(|_| ())
-            .map_err(|_| ClientFailure::new(ClientFailureClass::InvalidPeer))
-    }
-}
-struct Directory(PathBuf);
 impl Directory {
     fn new() -> Self {
-        use std::os::unix::fs::DirBuilderExt;
-        static NEXT: AtomicU64 = AtomicU64::new(0);
         // Linux /tmp can be tmpfs, which native storage rejects. Use persistent
         // temporary storage outside the build tree to isolate journal syncs from
         // compiler I/O. Native filesystem and durability checks remain unchanged.
@@ -37,32 +29,7 @@ impl Directory {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
         };
-        std::fs::create_dir_all(&parent).unwrap();
-        let path = parent.canonicalize().unwrap().join(format!(
-            "spaceterm-client-compose-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&path)
-            .unwrap();
-        Self(path)
-    }
-    async fn create(&self) -> NativeClientJournal {
-        NativeClientJournal::create(
-            self.0.clone(),
-            Arc::new(CanonicalCodec),
-            Arc::new(Verifier),
-            JournalLimits::default(),
-        )
-        .await
-        .unwrap()
-    }
-}
-impl Drop for Directory {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).unwrap();
+        Self::in_parent(parent)
     }
 }
 
@@ -124,12 +91,11 @@ async fn pairing_facade_uses_one_native_journal_and_one_scheduler() {
     runtime.shutdown().await.unwrap();
 }
 
-use ring::signature::{Ed25519KeyPair, KeyPair};
 use spaceterm_client::{
     api::{ConnectionTarget, PairedServerBinding, RouteDescription, RouteParts},
     journal::{
-        ClientJournalChange, ClientJournalTransaction, JournalController, JournalCredentialSlot,
-        JournalRevocation, PairingCommitDisposition, SavedBinding,
+        ClientJournalChange, ClientJournalTransaction, JournalController, JournalRevocation,
+        PairingCommitDisposition, SavedBinding,
     },
     pairing::{
         credentials::*,
@@ -150,154 +116,7 @@ use spaceterm_core::{
 };
 use spaceterm_protocol::{ProtocolError, authentication::SigningKey};
 
-struct Key(Ed25519KeyPair);
-impl Key {
-    fn new(seed: u8) -> Self {
-        Self(Ed25519KeyPair::from_seed_unchecked(&[seed; 32]).unwrap())
-    }
-}
-impl SigningKey for Key {
-    fn public_key(&self) -> [u8; 32] {
-        self.0.public_key().as_ref().try_into().unwrap()
-    }
-    fn sign(&self, bytes: &[u8]) -> Result<[u8; 64], ProtocolError> {
-        Ok(self.0.sign(bytes).as_ref().try_into().unwrap())
-    }
-}
-struct Fixture {
-    server: Key,
-    binding: PairedServerBinding,
-    credential: PreparedCredential,
-    saved: SavedBinding,
-    route: RevocationRouteReference,
-}
 impl Fixture {
-    fn new(lifetime: u64) -> Self {
-        Self::on_server(lifetime, ServerId::new([1; 16]))
-    }
-    fn on_server(lifetime: u64, id: ServerId) -> Self {
-        let server = Key::new(1);
-        let pairing = PairingId::new(id, lifetime).unwrap();
-        let client = ClientId::new(id, lifetime).unwrap();
-        let stream = |local| {
-            OperationStreamId::new(OperationStreamKey::new(id, local).unwrap(), pairing, client)
-                .unwrap()
-        };
-        let credential = PreparedCredential {
-            scope: CredentialScope::new(CredentialScopeParts {
-                namespace: CredentialNamespace::new("dev.spaceterm.test".into()).unwrap(),
-                purpose: CredentialPurpose::PairingAuthentication { server: id },
-                reference: CredentialReference::new(u128::from(lifetime).to_be_bytes()),
-            })
-            .unwrap(),
-            public_key: Key::new(2).public_key(),
-        };
-        let target = ConnectionTarget::new(
-            ServerPin {
-                identity: id.bytes(),
-                public_key: server.public_key(),
-            },
-            DeviceId::new([3; 16]),
-            pairing,
-            client,
-            RouteDescription::new(RouteParts::Ipc {
-                directory: "/local/client-route".into(),
-                name: "server".into(),
-            })
-            .unwrap(),
-            credential.scope.reference(),
-            LocalPairingGeneration::new(lifetime).unwrap(),
-        )
-        .unwrap();
-        let binding = PairedServerBinding::new(target);
-        let streams = PairingClientStreams::new(PairingClientStreamsParts {
-            client: ClientRecord {
-                id: client,
-                pairing,
-            },
-            ordinary: stream(lifetime * 3),
-            self_revocation: stream(lifetime * 3 + 1),
-        })
-        .unwrap();
-        let proof = ReceiptCodec::new(binding.target().pin())
-            .sign(
-                PairingReceiptBody::ClientBinding {
-                    target: PairingTarget::new(PairingTargetParts {
-                        server: id,
-                        device: binding.target().device(),
-                        pairing,
-                    })
-                    .unwrap(),
-                    keys: PairingKeys::new(PairingKeysParts {
-                        device_identity_public_key: Key::new(3).public_key(),
-                        pairing_authentication_public_key: credential.public_key,
-                    })
-                    .unwrap(),
-                    client: streams,
-                    operation: OperationBinding {
-                        id: OperationId::new(
-                            stream(lifetime * 3 + 2),
-                            OperationSequence::new(1).unwrap(),
-                        ),
-                        digest: RequestDigest::from_bytes([1; 32]),
-                    },
-                    revision: StoreRevision::new(1),
-                },
-                &server,
-            )
-            .unwrap();
-        let saved = SavedBinding::verified(
-            binding.clone(),
-            match &proof.parts().claims {
-                PairingReceiptBody::ClientBinding { client, .. } => client.clone(),
-                _ => unreachable!(),
-            },
-            proof,
-            &Verifier,
-        )
-        .unwrap();
-        Self {
-            server,
-            binding,
-            credential,
-            saved,
-            route: RevocationRouteReference::new([9; 16]),
-        }
-    }
-    fn seed_changes(&self) -> Vec<ClientJournalChange> {
-        vec![
-            ClientJournalChange::ReserveCredential(JournalCredentialSlot {
-                namespace: self.credential.scope.parts().namespace.as_str().to_owned(),
-                server: Some(self.binding.target().server()),
-                reference: self.credential.scope.reference(),
-                public_key: None,
-                route_reference: None,
-                route: None,
-                ssh_capture: None,
-                generation: self.binding.target().incarnation(),
-            }),
-            ClientJournalChange::RecordCredentialPublicKey {
-                reference: self.credential.scope.reference(),
-                public_key: self.credential.public_key,
-            },
-            ClientJournalChange::BindCredentialRoute {
-                reference: self.credential.scope.reference(),
-                route_reference: self.route,
-                route: self.binding.target().route().clone(),
-            },
-            ClientJournalChange::SaveBinding(Box::new(self.saved.clone())),
-        ]
-    }
-    async fn seed(&self, journal: &dyn ClientJournal) {
-        let tx = ClientJournalTransaction {
-            expected_revision: journal.recover().await.unwrap().revision(),
-            changes: self.seed_changes(),
-        };
-        assert!(matches!(
-            journal.commit(&tx).await.unwrap(),
-            spaceterm_client::journal::JournalCommitDisposition::Durable(_)
-        ));
-    }
     async fn remove(&self, store: JournalPairingStore<JournalController>) -> OperationId {
         let authority = store
             .ordinary_authority(&self.binding.target().local_pairing().unwrap())
