@@ -303,13 +303,13 @@ fn run_reset(
             .stdout(Stdio::null())
             .stderr(Stdio::null()),
     )
-        .map_err(|_| std::io::Error::from(std::io::ErrorKind::Other))
-        .and_then(|mut child| {
-            // A reset holds the probing lock during a setup, so a stuck one must not hold it
-            // for the rest of the session.
-            wait_bounded(&mut child, RESET_TIMEOUT)
-                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::TimedOut))
-        });
+    .map_err(|_| std::io::Error::from(std::io::ErrorKind::Other))
+    .and_then(|mut child| {
+        // A reset holds the probing lock during a setup, so a stuck one must not hold it
+        // for the rest of the session.
+        wait_bounded(&mut child, RESET_TIMEOUT)
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::TimedOut))
+    });
     reset_result(status)
 }
 

@@ -10146,7 +10146,10 @@ fn desktop_server_text_change_queues_accessibility_value_without_focus_change(
 ) {
     let (fixture, pane, cx) = server_pane(cx, true);
     let focus = pane.read_with(cx, |pane, _| pane.product_focus);
-    assert_eq!(pane.read_with(cx, |pane, _| pane.accessibility.text().to_owned()), "priva");
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.accessibility.text().to_owned()),
+        "priva"
+    );
     pane.update(cx, |pane, _| {
         pane.pending_accessibility_notifications.take();
     });
@@ -10156,7 +10159,10 @@ fn desktop_server_text_change_queues_accessibility_value_without_focus_change(
         pane.sync_server_screen(cx);
         assert_eq!(pane.product_focus, focus);
         assert_eq!(pane.accessibility.text(), "new!!");
-        assert!(pane.pending_accessibility_notifications.contains(AccessibilityNotification::Value));
+        assert!(
+            pane.pending_accessibility_notifications
+                .contains(AccessibilityNotification::Value)
+        );
     });
 }
 
@@ -10166,7 +10172,8 @@ fn desktop_server_selection_change_queues_accessibility_selection_without_focus_
 ) {
     let (fixture, pane, cx) = server_pane(cx, true);
     let focus = pane.read_with(cx, |pane, _| pane.product_focus);
-    let previous_range = pane.read_with(cx, |pane, _| pane.accessibility.selected_or_cursor_range());
+    let previous_range =
+        pane.read_with(cx, |pane, _| pane.accessibility.selected_or_cursor_range());
     pane.update(cx, |pane, _| {
         pane.pending_accessibility_notifications.take();
     });
@@ -10175,9 +10182,15 @@ fn desktop_server_selection_change_queues_accessibility_selection_without_focus_
         pane.sync_server_screen(cx);
         assert_eq!(pane.product_focus, focus);
         assert_eq!(pane.accessibility.text(), "priva");
-        assert_ne!(pane.accessibility.selected_or_cursor_range(), previous_range);
+        assert_ne!(
+            pane.accessibility.selected_or_cursor_range(),
+            previous_range
+        );
         assert_eq!(pane.accessibility.selected_or_cursor_range(), 0..5);
-        assert!(pane.pending_accessibility_notifications.contains(AccessibilityNotification::Selection));
+        assert!(
+            pane.pending_accessibility_notifications
+                .contains(AccessibilityNotification::Selection)
+        );
     });
 }
 
@@ -10274,7 +10287,12 @@ fn desktop_server_takeover_removes_paint_ax_copy_services_and_ime(cx: &mut TestA
         assert!(pane.server_screen_frame.is_none());
         assert!(pane.server_last_valid_frame.is_none());
         assert!(pane.accessibility.text().is_empty());
-        assert!(pane.server_session_handle().unwrap().accessibility_model().is_none());
+        assert!(
+            pane.server_session_handle()
+                .unwrap()
+                .accessibility_model()
+                .is_none()
+        );
         assert!(pane.ime.marked_text().is_none());
         assert!(pane.ordered_selection_copy(cx).is_none());
         assert!(!pane.native_context_actions().copy);
@@ -12650,7 +12668,6 @@ fn desktop_server_accessibility_selection_prepares_complete_copy_for_services(
     );
 }
 
-
 #[gpui::test]
 fn desktop_server_native_paste_acknowledgement_and_approval_round_trip(cx: &mut TestAppContext) {
     use spaceterm_client::pane_channel::{NativeTiming, RuntimeEffect};
@@ -12658,33 +12675,78 @@ fn desktop_server_native_paste_acknowledgement_and_approval_round_trip(cx: &mut 
     let (fixture, content, pane, cx) = server_pane_with_content(cx);
     let session = pane.read_with(cx, |pane, _| pane.server_session_handle().unwrap());
     let written = session.request_paste("safe".to_owned().into());
-    assert!(written.try_recv().is_err(), "queue admission is not write completion");
+    assert!(
+        written.try_recv().is_err(),
+        "queue admission is not write completion"
+    );
     let (correlation, _) = content.effects.lock().unwrap().last().cloned().unwrap();
-    fixture.channel.receive_runtime_outcome(correlation, Ok(())).unwrap();
+    fixture
+        .channel
+        .receive_runtime_outcome(correlation, Ok(()))
+        .unwrap();
     cx.run_until_parked();
-    assert_eq!(written.try_recv().unwrap(), Ok(PasteRequestOutcome::Written));
+    assert_eq!(
+        written.try_recv().unwrap(),
+        Ok(PasteRequestOutcome::Written)
+    );
 
     let approval = PasteApprovalId::new(77).unwrap();
     let request_id = NativeRequestId::new(91).unwrap();
     let pending = session.request_paste("unsafe\npaste".to_owned().into());
     let (correlation, _) = content.effects.lock().unwrap().last().cloned().unwrap();
-    fixture.channel.receive_paste_approval(correlation, NativeRequest::new(
-        correlation.fence(), request_id, MonotonicTick::new(0), MonotonicTick::new(0),
-        Some(MonotonicTick::new(30_000)),
-        NativeRequestKind::UnsafePaste { approval, text: NativeText::new("unsafe\npaste".into()).unwrap() },
-    ).unwrap(), NativeTiming { not_before: Duration::ZERO, expires_after: Some(Duration::from_secs(30)) }).unwrap();
+    fixture
+        .channel
+        .receive_paste_approval(
+            correlation,
+            NativeRequest::new(
+                correlation.fence(),
+                request_id,
+                MonotonicTick::new(0),
+                MonotonicTick::new(0),
+                Some(MonotonicTick::new(30_000)),
+                NativeRequestKind::UnsafePaste {
+                    approval,
+                    text: NativeText::new("unsafe\npaste".into()).unwrap(),
+                },
+            )
+            .unwrap(),
+            NativeTiming {
+                not_before: Duration::ZERO,
+                expires_after: Some(Duration::from_secs(30)),
+            },
+        )
+        .unwrap();
     cx.run_until_parked();
-    let Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)) = pending.try_recv().unwrap() else { panic!("unsafe paste needs approval"); };
+    let Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)) = pending.try_recv().unwrap()
+    else {
+        panic!("unsafe paste needs approval");
+    };
     assert_eq!(confirmation.byte_len, 12);
     assert_eq!(confirmation.line_count, 2);
     assert!(confirmation.risk.multiline);
-    assert_eq!(session.request_paste("second".to_owned().into()).try_recv().unwrap(),
-        Ok(PasteRequestOutcome::Rejected(crate::terminal::paste::PasteRejection::ConfirmationPending)));
+    assert_eq!(
+        session
+            .request_paste("second".to_owned().into())
+            .try_recv()
+            .unwrap(),
+        Ok(PasteRequestOutcome::Rejected(
+            crate::terminal::paste::PasteRejection::ConfirmationPending
+        ))
+    );
     let resolved = session.resolve_paste(confirmation.id, crate::terminal::PasteDecision::Confirm);
     assert!(resolved.try_recv().is_err());
     let (correlation, command) = content.effects.lock().unwrap().last().cloned().unwrap();
-    assert_eq!(command, RuntimeEffect::ResolvePaste(approval, spaceterm_core::native_requests::PasteDecision::Confirm));
-    fixture.channel.receive_runtime_outcome(correlation, Ok(())).unwrap();
+    assert_eq!(
+        command,
+        RuntimeEffect::ResolvePaste(
+            approval,
+            spaceterm_core::native_requests::PasteDecision::Confirm
+        )
+    );
+    fixture
+        .channel
+        .receive_runtime_outcome(correlation, Ok(()))
+        .unwrap();
     cx.run_until_parked();
     assert_eq!(resolved.try_recv().unwrap(), Ok(PasteResolution::Written));
 }
