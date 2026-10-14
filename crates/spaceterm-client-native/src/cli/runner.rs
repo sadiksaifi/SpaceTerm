@@ -309,11 +309,11 @@ async fn run(
                 )
                 .await?
         }
-        CliCommand::UpdateStage { version } => {
+        CliCommand::UpdateStage { version, source } => {
             deps.native
                 .run(
                     key,
-                    NativeCliCommand::UpdateStage { version },
+                    NativeCliCommand::UpdateStage { version, source },
                     ConfirmationMode::Interactive,
                     mode,
                     io,

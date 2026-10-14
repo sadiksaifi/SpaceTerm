@@ -70,6 +70,7 @@ pub enum NativeCliCommand {
     UpdateCheck,
     UpdateStage {
         version: Option<StableVersion>,
+        source: Option<crate::native::artifacts::LocalArtifactSource>,
     },
     UpdateActivate {
         installation: InstallationId,

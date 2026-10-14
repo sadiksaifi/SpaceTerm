@@ -146,6 +146,9 @@ impl<B: ManagementBackend> TrackedProtocolManagement<B> {
             AssessmentEvidence::EndAllSessions(v) => {
                 check_operation(v.reference().operation, context.stream)?
             }
+            AssessmentEvidence::LocalSelfUnpair { .. } => {
+                return Err(ManagementFailure::AuthorizationDenied);
+            }
             AssessmentEvidence::Unpair(v) => {
                 check_operation(v.parts().reference.operation, context.stream)?
             }

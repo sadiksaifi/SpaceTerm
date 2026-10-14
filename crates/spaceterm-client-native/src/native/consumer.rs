@@ -85,6 +85,7 @@ pub struct NativeConsumer {
     native: Arc<NativeServiceManagement>,
     kind: NativeConsumerKind,
     assessments: Mutex<BTreeMap<String, ManagementAssessment>>,
+    local_unpairs: Mutex<BTreeMap<String, crate::pairing_runtime::UnpairAssessment>>,
     origin: Instant,
     mutation: tokio::sync::Mutex<()>,
     owner: OnceCell<PairingOwner>,
@@ -109,6 +110,7 @@ impl NativeConsumer {
             native,
             kind,
             assessments: Mutex::default(),
+            local_unpairs: Mutex::default(),
             origin: Instant::now(),
             mutation: tokio::sync::Mutex::new(()),
             owner: OnceCell::new(),
@@ -129,6 +131,7 @@ impl NativeConsumer {
             native,
             kind,
             assessments: Mutex::default(),
+            local_unpairs: Mutex::default(),
             origin: Instant::now(),
             mutation: tokio::sync::Mutex::new(()),
             owner: OnceCell::new_with(Some(pairing_owner(journal, credentials, routes))),
@@ -219,6 +222,10 @@ impl NativeConsumer {
                 {
                     return Err(ManagementFailure::UnsafeNativeState);
                 }
+                if self.kind == NativeConsumerKind::Cli {
+                    self.recover_protocol_receipts(owner.pairing.journal())
+                        .await?;
+                }
                 open_consumer(self.kind, owner).await
             })
             .await?;
@@ -241,6 +248,67 @@ impl NativeConsumer {
             return Err(ManagementFailure::UnsafeNativeState);
         }
         Ok(opened)
+    }
+    async fn settle_protocol_receipt(
+        &self,
+        receipt: &super::receipts::Receipt,
+        journal: &JournalController,
+    ) -> Result<(), ManagementFailure> {
+        let super::receipts::Receipt::Protocol { binding, outcome } = receipt else {
+            return Ok(());
+        };
+        let state = journal.snapshot().map_err(classify_client)?;
+        let Some(header) = state.stream(binding.id.stream()) else {
+            return Ok(());
+        };
+        if let Some(record) = state.operation(binding.id) {
+            if record.binding != *binding
+                || !matches!(&record.state,
+                spaceterm_client::journal::RetainedOperationState::Completed { outcome: original, .. } if original == outcome)
+            {
+                return Err(ManagementFailure::UnsafeNativeState);
+            }
+            journal
+                .transact(vec![
+                    spaceterm_client::journal::ClientJournalChange::ConsumeResult(binding.id),
+                ])
+                .await
+                .map_err(classify_client)?;
+        } else if header.confirmed_prefix < binding.id.sequence().get() {
+            return Err(ManagementFailure::UnsafeNativeState);
+        }
+        super::receipts::settle(&self.native.supervisor, receipt)
+    }
+    async fn recover_protocol_receipts(
+        &self,
+        journal: &JournalController,
+    ) -> Result<(), ManagementFailure> {
+        for receipt in super::receipts::unsettled(&self.native.supervisor)? {
+            self.settle_protocol_receipt(&receipt, journal).await?;
+        }
+        Ok(())
+    }
+    async fn wait_retained(
+        &self,
+        operations: &super::tracked::ManagementOperations,
+        ticket: &spaceterm_client::operations::OperationTicket,
+    ) -> Result<Result<spaceterm_core::operations::Outcome, ClientFailure>, ManagementFailure> {
+        let result = operations.wait(ticket).await;
+        if let Ok(outcome) = &result {
+            let compact = spaceterm_core::operation_ledger_contracts::CompactOutcome::new(
+                outcome,
+                operations.tracker.journal().codec(),
+            )
+            .map_err(|_| ManagementFailure::UnsafeNativeState)?;
+            let receipt = super::receipts::Receipt::Protocol {
+                binding: ticket.binding(),
+                outcome: compact,
+            };
+            super::receipts::retain(&self.native.supervisor, &receipt)?;
+            self.settle_protocol_receipt(&receipt, operations.tracker.journal())
+                .await?;
+        }
+        Ok(result)
     }
     fn mutable(&self) -> Result<(), ManagementFailure> {
         if self.kind == NativeConsumerKind::Cli {
@@ -348,9 +416,9 @@ impl ProtocolManagement for NativeConsumer {
                         })
                         .await
                         .map_err(classify_client)?;
-                    match operations
-                        .wait(&ticket)
-                        .await
+                    match self
+                        .wait_retained(operations, &ticket)
+                        .await?
                         .map_err(|_| ManagementFailure::OutcomePending)?
                     {
                         spaceterm_core::operations::Outcome::Assessment(value) => {
@@ -377,9 +445,9 @@ impl ProtocolManagement for NativeConsumer {
                         ))
                         .await
                         .map_err(classify_client)?;
-                    match operations
-                        .wait(&ticket)
-                        .await
+                    match self
+                        .wait_retained(operations, &ticket)
+                        .await?
                         .map_err(|_| ManagementFailure::OutcomePending)?
                     {
                         spaceterm_core::operations::Outcome::Pairing(value) => match *value {
@@ -482,7 +550,10 @@ impl ProtocolManagement for NativeConsumer {
                 .submit_command(assessment.command())
                 .await
                 .map_err(classify_client)?;
-            Ok(progress(&ticket, operations.wait(&ticket).await))
+            Ok(progress(
+                &ticket,
+                self.wait_retained(operations, &ticket).await?,
+            ))
         })
     }
     fn resolve(
@@ -491,6 +562,42 @@ impl ProtocolManagement for NativeConsumer {
     ) -> ManagementFuture<'_, spaceterm_core::management::ManagementProgress> {
         Box::pin(async move {
             self.mutable()?;
+            let owner = self.owner().await?;
+            self.recover_protocol_receipts(owner.pairing.journal())
+                .await?;
+            if let Some(receipt @ super::receipts::Receipt::Protocol { .. }) =
+                super::receipts::load(
+                    &self.native.supervisor,
+                    &super::receipts::protocol_key(operation)?,
+                )?
+            {
+                let super::receipts::Receipt::Protocol { binding, outcome } = &receipt else {
+                    unreachable!()
+                };
+                let state = owner
+                    .pairing
+                    .journal()
+                    .snapshot()
+                    .map_err(classify_client)?;
+                let saved = state
+                    .bindings()
+                    .iter()
+                    .find(|saved| saved.streams().parts().ordinary == operation.stream())
+                    .ok_or(ManagementFailure::AuthorizationDenied)?;
+                let paired = saved.binding().map_err(classify_client)?;
+                if !owner
+                    .pairing
+                    .journal()
+                    .ordinary_use_allowed(&paired)
+                    .map_err(classify_client)?
+                {
+                    return Err(ManagementFailure::AuthorizationDenied);
+                }
+                let outcome = outcome
+                    .outcome(owner.pairing.journal().codec())
+                    .map_err(|_| ManagementFailure::UnsafeNativeState)?;
+                return Ok(progress_binding(*binding, Ok(outcome)));
+            }
             let opened = self.opened().await?;
             let operations = opened
                 .operations
@@ -500,7 +607,10 @@ impl ProtocolManagement for NativeConsumer {
                 .resolve_original(operation)
                 .await
                 .map_err(|_| ManagementFailure::OutcomePending)?;
-            Ok(progress(&ticket, operations.wait(&ticket).await))
+            Ok(progress(
+                &ticket,
+                self.wait_retained(operations, &ticket).await?,
+            ))
         })
     }
 }
@@ -617,6 +727,14 @@ async fn open_consumer(
     })
     .await
     .map_err(|_| ManagementFailure::Offline)??;
+    if let Some(operations) = &operations {
+        let stream = ordinary.binding().streams().parts().ordinary;
+        operations
+            .tracker
+            .acknowledge(stream, operations.as_ref())
+            .await
+            .map_err(classify_client)?;
+    }
     Ok(OpenedConsumer {
         pairing: pairing.clone(),
         server,
@@ -768,6 +886,7 @@ fn classify_pairing(failure: PairingFailure) -> ManagementFailure {
         PairingFailure::ClientNotBound => ManagementFailure::PairingRequired,
         PairingFailure::CredentialUnavailable => ManagementFailure::CredentialUnavailable,
         PairingFailure::StorageUnavailable => ManagementFailure::StorageUnavailable,
+        PairingFailure::StaleAssessment => ManagementFailure::StaleAssessment,
         _ => ManagementFailure::UnsafeNativeState,
     }
 }
@@ -791,6 +910,12 @@ fn progress(
     ticket: &spaceterm_client::operations::OperationTicket,
     outcome: Result<spaceterm_core::operations::Outcome, ClientFailure>,
 ) -> spaceterm_core::management::ManagementProgress {
+    progress_binding(ticket.binding(), outcome)
+}
+fn progress_binding(
+    binding: spaceterm_core::operations::OperationBinding,
+    outcome: Result<spaceterm_core::operations::Outcome, ClientFailure>,
+) -> spaceterm_core::management::ManagementProgress {
     use spaceterm_core::{
         management::{ManagementProgress, ManagementProgressState, ManagementRequestReference},
         operations::Outcome,
@@ -801,7 +926,7 @@ fn progress(
         Err(_) => ManagementProgressState::Pending,
     };
     ManagementProgress {
-        request: ManagementRequestReference::Operation(ticket.binding()),
+        request: ManagementRequestReference::Operation(binding),
         state,
         completed_units: u32::from(state == ManagementProgressState::Completed),
         total_units: 1,
@@ -849,24 +974,80 @@ impl crate::cli::bindings::PairingCommandBindings for NativeConsumer {
     ) -> ManagementFuture<'_, ManagementAssessment> {
         Box::pin(async move {
             self.mutable()?;
-            let opened = self.opened().await?;
-            let context = opened.backend()?.context()?;
-            if context.device() != device {
+            let runtime = self.pairing_runtime().await?;
+            let inventory = runtime.inventory().await.map_err(classify_pairing)?;
+            if inventory.saved.len() != 1 {
+                return Err(if inventory.saved.is_empty() {
+                    ManagementFailure::PairingRequired
+                } else {
+                    ManagementFailure::UnsafeNativeState
+                });
+            }
+            let saved = &inventory.saved[0];
+            if saved.device() != device {
                 return Err(ManagementFailure::NativeUnavailable);
             }
+            if !matches!(
+                saved.receipt().parts().claims,
+                PairingReceiptBody::ClientBinding { .. }
+            ) {
+                return Err(ManagementFailure::AuthorizationDenied);
+            }
+            let local = runtime
+                .assess_unpair(saved.key(), saved.client().parts().client.id)
+                .await
+                .map_err(classify_pairing)?;
             let target = spaceterm_core::pairing::PairingTarget::new(
                 spaceterm_core::pairing::PairingTargetParts {
-                    server: context.server(),
+                    server: saved.key().parts().server,
                     device,
-                    pairing: context.stream().pairing(),
+                    pairing: saved.key().parts().pairing,
                 },
             )
             .map_err(|_| ManagementFailure::UnsafeNativeState)?;
             let action = ManagementAction::Unpair { target };
-            match token {
-                Some(token) => self.restore_assessment(action, token).await,
-                None => self.assess(action).await,
+            if let Some(token) = token {
+                let assessment = self.retained_assessment(&token)?;
+                if assessment.action() != &action
+                    || !matches!(assessment.evidence(), spaceterm_client::management_cli::AssessmentEvidence::LocalSelfUnpair { pairing, client }
+                        if pairing == local.pairing() && *client == local.client())
+                {
+                    return Err(ManagementFailure::StaleAssessment);
+                }
+                return Ok(assessment);
             }
+            let issued = self.now();
+            let expires = spaceterm_core::observations::MonotonicTick::new(
+                issued
+                    .get()
+                    .checked_add(30_000)
+                    .ok_or(ManagementFailure::LimitExceeded)?,
+            );
+            let mut nonce = [0; 32];
+            ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut nonce)
+                .map_err(|_| ManagementFailure::NativeUnavailable)?;
+            let token = AssessmentToken::new(crate::cli::output::hex(&nonce))?;
+            let evidence = spaceterm_client::management_cli::AssessmentEvidence::LocalSelfUnpair {
+                pairing: local.pairing().clone(),
+                client: local.client(),
+            };
+            let assessment = ManagementAssessment::new(token, action, evidence, issued, expires)?;
+            let mut assessments = self
+                .assessments
+                .lock()
+                .map_err(|_| ManagementFailure::UnsafeNativeState)?;
+            assessments.retain(|_, value| value.validate_at(issued).is_ok());
+            let mut locals = self
+                .local_unpairs
+                .lock()
+                .map_err(|_| ManagementFailure::UnsafeNativeState)?;
+            locals.retain(|token, _| assessments.contains_key(token));
+            if assessments.len() >= 32 {
+                return Err(ManagementFailure::LimitExceeded);
+            }
+            locals.insert(assessment.token().as_str().to_owned(), local);
+            assessments.insert(assessment.token().as_str().to_owned(), assessment.clone());
+            Ok(assessment)
         })
     }
     fn unpair(
@@ -887,26 +1068,28 @@ impl crate::cli::bindings::PairingCommandBindings for NativeConsumer {
             let ManagementAction::Unpair { target } = assessment.action() else {
                 return Err(ManagementFailure::StaleAssessment);
             };
-            let opened = self.opened().await?;
-            let context = opened.backend()?.context()?;
-            if target.parts().server != context.server()
-                || target.parts().device != context.device()
-                || target.parts().pairing != context.stream().pairing()
+            let runtime = self.pairing_runtime().await?;
+            let local = self
+                .local_unpairs
+                .lock()
+                .map_err(|_| ManagementFailure::UnsafeNativeState)?
+                .remove(assessment.token().as_str())
+                .ok_or(ManagementFailure::StaleAssessment)?;
+            let spaceterm_client::management_cli::AssessmentEvidence::LocalSelfUnpair {
+                pairing,
+                client,
+            } = assessment.evidence()
+            else {
+                return Err(ManagementFailure::StaleAssessment);
+            };
+            if pairing != local.pairing()
+                || *client != local.client()
+                || target.parts().server != pairing.parts().server
+                || target.parts().pairing != pairing.parts().pairing
             {
                 return Err(ManagementFailure::AuthorizationDenied);
             }
-            let runtime = opened.pairing.clone();
-            let inventory = runtime.inventory().await.map_err(classify_pairing)?;
-            let saved = inventory
-                .saved
-                .iter()
-                .find(|saved| saved.client().parts().client.id == context.stream().client())
-                .ok_or(ManagementFailure::PairingRequired)?;
-            let key = saved.key().clone();
-            let local = runtime
-                .assess_unpair(&key, context.stream().client())
-                .await
-                .map_err(classify_pairing)?;
+            let key = local.pairing().clone();
             self.assessments
                 .lock()
                 .map_err(|_| ManagementFailure::UnsafeNativeState)?

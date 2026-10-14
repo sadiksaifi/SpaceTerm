@@ -640,6 +640,136 @@ mod account_installation {
     }
 
     #[tokio::test]
+    async fn signed_update_staging_preserves_running_and_stopped_intent_and_original_request() {
+        use spaceterm_host::account_service::{
+            InstallationStatus, ServiceOutcome, ServiceRequestState,
+        };
+        for desired in [DesiredServerState::Running, DesiredServerState::Stopped] {
+            let root = installation_root();
+            let account =
+                AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+            let (key, original_artifact) = fixture("1.2.3", 7, native_machine());
+            let approved = InstallationStatus {
+                installation: spaceterm_host::startup::InstallationId(
+                    std::num::NonZeroU64::new(1).unwrap(),
+                ),
+                version: original_artifact.manifest().version.clone(),
+                artifact_sha256: original_artifact.artifact_sha256(),
+            };
+            let registration = account
+                .initialize_with_installation(desired, Some(approved))
+                .unwrap();
+            let store = test_support::store(&registration, key.clone()).unwrap();
+            let original_id = store.stage(&original_artifact).unwrap();
+            store
+                .activate(original_id, store.snapshot().unwrap().generation, 1)
+                .unwrap();
+            drop(store);
+            let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+            let supervisor = installer(&account, key.clone(), manager.clone());
+            let before = supervisor.discover().unwrap().unwrap();
+            let effects = manager.effects.lock().unwrap().clone();
+            let (_, candidate) = fixture("1.2.4", 7, native_machine());
+            let request = supervisor.allocate_request().unwrap();
+            let result = supervisor
+                .stage_installation(request, account.confirm_install(candidate))
+                .await
+                .unwrap();
+            let ServiceRequestState::Completed(ServiceOutcome::Staged(staged)) = &result.state
+            else {
+                panic!("candidate must be staged")
+            };
+            assert_eq!(staged.version.as_str(), "1.2.4");
+            let after = supervisor.discover().unwrap().unwrap();
+            assert_eq!(after.desired_state(), desired);
+            assert_eq!(after.server_pin(), before.server_pin());
+            assert_eq!(
+                after.approved_installation(),
+                before.approved_installation()
+            );
+            assert_eq!(after.staged_installation(), Some(staged));
+            assert_eq!(*manager.effects.lock().unwrap(), effects);
+            let reopened = installer(&account, key.clone(), manager.clone());
+            assert_eq!(reopened.resolve(request).await.unwrap(), result);
+            let (_, candidate) = fixture("1.2.4", 7, native_machine());
+            assert_eq!(
+                reopened
+                    .stage_installation(request, account.confirm_install(candidate))
+                    .await
+                    .unwrap(),
+                result
+            );
+            assert_eq!(*manager.effects.lock().unwrap(), effects);
+            let (_, conflicting) = fixture("1.2.5", 7, native_machine());
+            let conflicting_request = reopened.allocate_request().unwrap();
+            assert_eq!(
+                reopened
+                    .stage_installation(conflicting_request, account.confirm_install(conflicting))
+                    .await,
+                Err(spaceterm_host::account_service::ServiceFailure::RequestConflict)
+            );
+            assert_eq!(
+                reopened.request_progress(conflicting_request),
+                Err(spaceterm_host::account_service::ServiceFailure::Pending)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn signed_stage_response_loss_resolves_same_candidate_without_activation() {
+        use spaceterm_host::account_service::{
+            InstallationStatus, ServiceFailure, ServiceOutcome, ServicePhase, ServiceRequestState,
+        };
+        for phase in [ServicePhase::Publishing, ServicePhase::Completed] {
+            let root = installation_root();
+            let account =
+                AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+            let (key, original_artifact) = fixture("1.2.3", 7, native_machine());
+            let approved = InstallationStatus {
+                installation: spaceterm_host::startup::InstallationId(
+                    std::num::NonZeroU64::new(1).unwrap(),
+                ),
+                version: original_artifact.manifest().version.clone(),
+                artifact_sha256: original_artifact.artifact_sha256(),
+            };
+            let registration = account
+                .initialize_with_installation(DesiredServerState::Stopped, Some(approved.clone()))
+                .unwrap();
+            let store = test_support::store(&registration, key.clone()).unwrap();
+            let id = store.stage(&original_artifact).unwrap();
+            store
+                .activate(id, store.snapshot().unwrap().generation, 1)
+                .unwrap();
+            drop(store);
+            let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+            let supervisor = installer(&account, key.clone(), manager.clone());
+            let (_, candidate) = fixture("1.2.4", 7, native_machine());
+            let digest = candidate.artifact_sha256();
+            let request = supervisor.allocate_request().unwrap();
+            spaceterm_host::account_service::test_support::interrupt_after_phase(phase);
+            assert_eq!(
+                supervisor
+                    .stage_installation(request, account.confirm_install(candidate))
+                    .await,
+                Err(ServiceFailure::SupervisorUnavailable)
+            );
+            let reopened = installer(&account, key.clone(), manager.clone());
+            let result = reopened.resolve(request).await.unwrap();
+            let ServiceRequestState::Completed(ServiceOutcome::Staged(staged)) = &result.state
+            else {
+                panic!("original staging must resolve")
+            };
+            assert_eq!(result.request, request);
+            assert_eq!(staged.artifact_sha256, digest);
+            let registration = reopened.discover().unwrap().unwrap();
+            assert_eq!(registration.approved_installation(), Some(&approved));
+            assert_eq!(registration.desired_state(), DesiredServerState::Stopped);
+            assert_eq!(registration.staged_installation(), Some(staged));
+            assert!(manager.effects.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn first_install_initializes_the_real_organization_store_before_starting() {
         let root = private_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
