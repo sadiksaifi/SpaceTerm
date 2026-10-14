@@ -385,14 +385,32 @@ async fn exercise(
             provider.management(),
             kind,
             journal.clone(),
-            Arc::new(Credentials(device)),
-            NativeRouteConnector::new(vec![route], None).unwrap(),
+            Arc::new(Credentials(device.clone())),
+            NativeRouteConnector::new(vec![route.clone()], None).unwrap(),
         );
         let assessment = consumer
             .assess_unpair(DeviceId::new([6; 16]), None)
             .await
             .unwrap();
         let token = assessment.token().clone();
+        consumer.shutdown().await.unwrap();
+        drop(journal);
+        let journal = controller(&directory, false).await;
+        let consumer = NativeConsumer::with_recovered_journal(
+            provider.management(),
+            kind,
+            journal.clone(),
+            Arc::new(Credentials(device)),
+            NativeRouteConnector::new(vec![route], None).unwrap(),
+        );
+        assert_eq!(
+            consumer
+                .assess_unpair(DeviceId::new([6; 16]), Some(token.clone()))
+                .await
+                .unwrap(),
+            assessment,
+            "offline local confirmation retains its original scope across restart",
+        );
         let confirmed = spaceterm_client::management_cli::confirm_exact(
             assessment,
             spaceterm_client::management_cli::ConfirmationReply::new(token),
@@ -432,7 +450,11 @@ async fn exercise(
     let served = tokio::spawn(async move {
         let mut queries = 0;
         let mut writes = 0;
-        for _ in 0..if operation_count > 128 || restart || processes { 2 } else { 1 } {
+        for _ in 0..if operation_count > 128 || restart || processes {
+            2
+        } else {
+            1
+        } {
             let pending = listener.accept().await.unwrap();
             let hello = pending.recv().await.unwrap().unwrap();
             let (handshake, reply) = ServerHandshake::accept(
@@ -838,14 +860,34 @@ async fn exercise(
 async fn production_cli_reopens_saved_additional_client_and_executes_authenticated_management_in_both_majors()
  {
     for major in [1, 2] {
-        exercise(NativeConsumerKind::Cli, major, false, None, 1, false, false, false).await;
+        exercise(
+            NativeConsumerKind::Cli,
+            major,
+            false,
+            None,
+            1,
+            false,
+            false,
+            false,
+        )
+        .await;
     }
 }
 #[tokio::test]
 async fn production_companion_reopens_saved_additional_client_and_subscribes_over_authenticated_ipc()
  {
     for major in [1, 2] {
-        exercise(NativeConsumerKind::StatusCompanion, major, false, None, 1, false, false, false).await;
+        exercise(
+            NativeConsumerKind::StatusCompanion,
+            major,
+            false,
+            None,
+            1,
+            false,
+            false,
+            false,
+        )
+        .await;
     }
 }
 
@@ -853,14 +895,34 @@ async fn production_companion_reopens_saved_additional_client_and_subscribes_ove
 async fn production_cli_self_unpair_closes_ordinary_worker_before_restricted_retry_in_both_majors()
 {
     for major in [1, 2] {
-        exercise(NativeConsumerKind::Cli, major, true, None, 1, false, false, false).await;
+        exercise(
+            NativeConsumerKind::Cli,
+            major,
+            true,
+            None,
+            1,
+            false,
+            false,
+            false,
+        )
+        .await;
     }
 }
 
 #[tokio::test]
 async fn cli_assessment_survives_consumer_and_journal_restart_without_refreshing_scope() {
     for major in [1, 2] {
-        exercise(NativeConsumerKind::Cli, major, false, None, 1, true, false, false).await;
+        exercise(
+            NativeConsumerKind::Cli,
+            major,
+            false,
+            None,
+            1,
+            true,
+            false,
+            false,
+        )
+        .await;
     }
 }
 
@@ -965,7 +1027,17 @@ async fn cli_assess_and_confirm_work_in_separate_processes() {
             .unwrap();
     } else {
         for major in [1, 2] {
-            exercise(NativeConsumerKind::Cli, major, false, None, 1, false, true, false).await;
+            exercise(
+                NativeConsumerKind::Cli,
+                major,
+                false,
+                None,
+                1,
+                false,
+                true,
+                false,
+            )
+            .await;
         }
     }
 }
@@ -974,19 +1046,49 @@ async fn cli_assess_and_confirm_work_in_separate_processes() {
 async fn lost_assess_unpair_reply_recovers_original_operation_over_authenticated_ipc_in_both_majors()
  {
     for major in [1, 2] {
-        exercise(NativeConsumerKind::Cli, major, false, None, 1, false, false, true).await;
+        exercise(
+            NativeConsumerKind::Cli,
+            major,
+            false,
+            None,
+            1,
+            false,
+            false,
+            true,
+        )
+        .await;
     }
 }
 
 #[tokio::test]
 async fn offline_cli_self_unpair_removes_stopped_and_unreachable_pairings() {
     for desired in [DesiredServerState::Stopped, DesiredServerState::Running] {
-        exercise(NativeConsumerKind::Cli, 2, true, Some(desired), 1, false, false, false).await;
+        exercise(
+            NativeConsumerKind::Cli,
+            2,
+            true,
+            Some(desired),
+            1,
+            false,
+            false,
+            false,
+        )
+        .await;
     }
 }
 #[tokio::test]
 async fn cli_protocol_results_release_capacity_after_more_than_128_operations() {
-    exercise(NativeConsumerKind::Cli, 2, false, None, 130, false, false, false).await;
+    exercise(
+        NativeConsumerKind::Cli,
+        2,
+        false,
+        None,
+        130,
+        false,
+        false,
+        false,
+    )
+    .await;
 }
 struct ProvisionCredentials {
     device: Arc<Key>,

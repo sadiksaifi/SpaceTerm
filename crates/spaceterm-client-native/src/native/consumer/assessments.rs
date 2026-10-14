@@ -40,13 +40,22 @@ pub(super) struct Scope {
     epoch: ServerEpoch,
 }
 impl Scope {
-    pub(super) fn local(stream: OperationStreamId, device: DeviceId, pin: ServerPin) -> Result<Self, ManagementFailure> {
+    pub(super) fn local(
+        stream: OperationStreamId,
+        device: DeviceId,
+        pin: ServerPin,
+    ) -> Result<Self, ManagementFailure> {
         if pin.identity != stream.server().bytes() {
             return Err(ManagementFailure::AuthorizationDenied);
         }
         Ok(Self {
-            boot: spaceterm_host::account_service::ServiceTime::current().map_err(super::classify_service)?.boot,
-            server: pin.identity, public_key: pin.public_key, stream, device,
+            boot: spaceterm_host::account_service::ServiceTime::current()
+                .map_err(super::classify_service)?
+                .boot,
+            server: pin.identity,
+            public_key: pin.public_key,
+            stream,
+            device,
             // Local removal depends on retained pairing authority, not a live server epoch.
             epoch: ServerEpoch::new(0),
         })
@@ -91,7 +100,10 @@ enum Action {
 enum Evidence {
     EndAllSessions(CloseAssessment),
     Unpair(UnpairAssessment),
-    LocalSelfUnpair { pairing: LocalPairingKey, client: ClientId },
+    LocalSelfUnpair {
+        pairing: LocalPairingKey,
+        client: ClientId,
+    },
     RemoteAccess(FieldVersion),
 }
 impl Record {
@@ -110,7 +122,10 @@ impl Record {
         let evidence = match assessment.evidence() {
             AssessmentEvidence::EndAllSessions(value) => Evidence::EndAllSessions(*value),
             AssessmentEvidence::Unpair(value) => Evidence::Unpair(value.clone()),
-            AssessmentEvidence::LocalSelfUnpair { pairing, client } => Evidence::LocalSelfUnpair { pairing: pairing.clone(), client: *client },
+            AssessmentEvidence::LocalSelfUnpair { pairing, client } => Evidence::LocalSelfUnpair {
+                pairing: pairing.clone(),
+                client: *client,
+            },
             AssessmentEvidence::RemoteAccess { current_version } => {
                 Evidence::RemoteAccess(*current_version)
             }
@@ -142,7 +157,9 @@ impl Record {
         let evidence = match self.evidence {
             Evidence::EndAllSessions(value) => AssessmentEvidence::EndAllSessions(value),
             Evidence::Unpair(value) => AssessmentEvidence::Unpair(value),
-            Evidence::LocalSelfUnpair { pairing, client } => AssessmentEvidence::LocalSelfUnpair { pairing, client },
+            Evidence::LocalSelfUnpair { pairing, client } => {
+                AssessmentEvidence::LocalSelfUnpair { pairing, client }
+            }
             Evidence::RemoteAccess(current_version) => {
                 AssessmentEvidence::RemoteAccess { current_version }
             }

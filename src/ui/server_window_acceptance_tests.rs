@@ -180,6 +180,8 @@ impl Desktop {
                 protocol.set_channels(channels.clone()).unwrap();
                 let composition = desktop_client_startup::recover(
                     NativeDesktopOwners {
+                        #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+                        fixture: false,
                         services: spaceterm_client::ports::ClientServices {
                             routes: Arc::new(NativeRouteConnector::new(routes, None).unwrap()),
                             credentials: Arc::new(TestSigning),

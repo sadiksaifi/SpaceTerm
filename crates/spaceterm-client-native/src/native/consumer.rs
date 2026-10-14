@@ -338,20 +338,28 @@ impl NativeConsumer {
         let directory = registration.data_directory().join("cli-assessments");
         Ok((directory, scope))
     }
-    async fn local_assessment_owner(&self) -> Result<(PathBuf, assessments::Scope), ManagementFailure> {
+    async fn local_assessment_owner(
+        &self,
+    ) -> Result<(PathBuf, assessments::Scope), ManagementFailure> {
         let runtime = self.pairing_runtime().await?;
         let inventory = runtime.inventory().await.map_err(classify_pairing)?;
         if inventory.saved.len() != 1 {
             return Err(ManagementFailure::PairingRequired);
         }
         let saved = &inventory.saved[0];
-        let registration = self.native.supervisor.discover().map_err(classify_service)?
+        let registration = self
+            .native
+            .supervisor
+            .discover()
+            .map_err(classify_service)?
             .ok_or(ManagementFailure::NativeUnavailable)?;
         if saved.pin() != registration.server_pin() {
             return Err(ManagementFailure::AuthorizationDenied);
         }
         let scope = assessments::Scope::local(
-            saved.client().parts().ordinary, saved.device(), registration.server_pin(),
+            saved.client().parts().ordinary,
+            saved.device(),
+            registration.server_pin(),
         )?;
         Ok((registration.data_directory().join("cli-assessments"), scope))
     }
@@ -362,7 +370,7 @@ impl NativeConsumer {
         let (directory, scope) = self.local_assessment_owner().await?;
         match assessments::restore(directory, scope, token.clone(), self.now()?).await {
             Ok(assessment) => return Ok(assessment),
-            Err(ManagementFailure::StaleAssessment) => {},
+            Err(ManagementFailure::StaleAssessment) => {}
             Err(error) => return Err(error),
         }
         let (directory, scope) = self.assessment_owner().await?;
@@ -374,8 +382,10 @@ impl NativeConsumer {
         &self,
         assessment: &ManagementAssessment,
     ) -> Result<(), ManagementFailure> {
-        let (directory, scope) = if matches!(assessment.evidence(),
-            spaceterm_client::management_cli::AssessmentEvidence::LocalSelfUnpair { .. }) {
+        let (directory, scope) = if matches!(
+            assessment.evidence(),
+            spaceterm_client::management_cli::AssessmentEvidence::LocalSelfUnpair { .. }
+        ) {
             self.local_assessment_owner().await?
         } else {
             self.assessment_owner().await?
@@ -1126,11 +1136,19 @@ impl crate::cli::bindings::PairingCommandBindings for NativeConsumer {
                 return Err(ManagementFailure::StaleAssessment);
             };
             let inventory = runtime.inventory().await.map_err(classify_pairing)?;
-            let saved = inventory.saved.iter().find(|saved| saved.key() == pairing
-                && saved.client().parts().client.id == *client
-                && saved.device() == target.parts().device)
+            let saved = inventory
+                .saved
+                .iter()
+                .find(|saved| {
+                    saved.key() == pairing
+                        && saved.client().parts().client.id == *client
+                        && saved.device() == target.parts().device
+                })
                 .ok_or(ManagementFailure::StaleAssessment)?;
-            let local = runtime.assess_unpair(saved.key(), *client).await.map_err(classify_pairing)?;
+            let local = runtime
+                .assess_unpair(saved.key(), *client)
+                .await
+                .map_err(classify_pairing)?;
             if pairing != local.pairing()
                 || *client != local.client()
                 || target.parts().server != pairing.parts().server

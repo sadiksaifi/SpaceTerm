@@ -373,7 +373,8 @@ impl ConnectionDelegate for ManagementOperations {
                             )
                             .map_err(|_| invalid())?;
                             let binding = self.record(operation)?;
-                            let result = pairing::$p::lookup(&value, binding, self.binding.target().pin())?;
+                            let result =
+                                pairing::$p::lookup(&value, binding, self.binding.target().pin())?;
                             let reply = self
                                 .lookups
                                 .lock()

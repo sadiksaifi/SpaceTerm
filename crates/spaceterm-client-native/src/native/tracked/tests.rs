@@ -10,7 +10,10 @@ use spaceterm_protocol::pairing_adapter;
 #[test]
 fn lost_unpair_assessment_lookup_recovers_original_id_in_both_majors() {
     let server = ServerId::new([1; 16]);
-    let pin = spaceterm_protocol::authentication::ServerPin { identity: server.bytes(), public_key: [8; 32] };
+    let pin = spaceterm_protocol::authentication::ServerPin {
+        identity: server.bytes(),
+        public_key: [8; 32],
+    };
     let pairing_id = PairingId::new(server, 2).unwrap();
     let client = ClientId::new(server, 3).unwrap();
     let stream = OperationStreamId::new(
