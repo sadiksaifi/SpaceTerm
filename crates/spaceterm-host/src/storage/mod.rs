@@ -30,6 +30,10 @@ use rusqlite::{Connection, Params, Row};
 use thiserror::Error;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+mod initial_creation;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) use initial_creation::InitialCreation;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod directory;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod locking;
@@ -141,7 +145,7 @@ impl Database {
         directory: &Path,
         migrations: &[Migration<'_>],
     ) -> Result<Self, StorageFailure> {
-        Self::open_inner(directory, migrations, false, None)
+        Self::open_inner(directory, migrations, false, None, None)
     }
 
     /// Opens, recovers, validates, and migrates the fixed organization database.
@@ -158,7 +162,7 @@ impl Database {
     /// Returns bounded classifications for unsafe authority, unavailable storage,
     /// unsupported schema, invalid data, or I/O. Unsupported hosts fail closed.
     pub fn open(directory: &Path, migrations: &[Migration<'_>]) -> Result<Self, StorageFailure> {
-        Self::open_inner(directory, migrations, true, None)
+        Self::open_inner(directory, migrations, true, None, None)
     }
 
     /// Creates or opens storage only for the specified nonzero application ID.
@@ -169,7 +173,7 @@ impl Database {
         migrations: &[Migration<'_>],
         application_id: u32,
     ) -> Result<Self, StorageFailure> {
-        Self::open_inner(directory, migrations, true, Some(application_id))
+        Self::open_inner(directory, migrations, true, Some(application_id), None)
     }
 
     /// Opens registered application storage without creating a missing database.
@@ -178,12 +182,29 @@ impl Database {
         migrations: &[Migration<'_>],
         application_id: u32,
     ) -> Result<Self, StorageFailure> {
-        Self::open_inner(directory, migrations, false, Some(application_id))
+        Self::open_inner(directory, migrations, false, Some(application_id), None)
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub(crate) fn open_initial_for_application(
+        directory: &Path,
+        migrations: &[Migration<'_>],
+        application_id: u32,
+        creation: &InitialCreation,
+    ) -> Result<Self, StorageFailure> {
+        Self::open_inner(
+            directory,
+            migrations,
+            true,
+            Some(application_id),
+            Some(creation),
+        )
     }
 
     /// Reports creation by this opener's exclusive descriptor-relative create,
-    /// never by an empty file, schema or missing metadata. Evidence remains bound
-    /// to this live authority and does not survive disposal or reopen.
+    /// never by an empty file, schema or missing metadata. Ordinary openers lose
+    /// evidence on disposal. Original first-install recovery retains a request-
+    /// and inode-bound creation record until organization initialization validates.
     pub fn is_new_storage(&self) -> Result<bool, StorageFailure> {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
@@ -271,6 +292,8 @@ impl Database {
         migrations: &[Migration<'_>],
         create: bool,
         owner: Option<u32>,
+        #[cfg(any(target_os = "macos", target_os = "linux"))] initial: Option<&InitialCreation>,
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))] _initial: Option<&()>,
     ) -> Result<Self, StorageFailure> {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
@@ -285,6 +308,11 @@ impl Database {
             }
             let directory = directory::Directory::open(directory)?;
             directory.check_all()?;
+            if let Some(initial) = initial {
+                initial.prepare(&directory, owner.ok_or(StorageFailure::InvalidState)?)?;
+                #[cfg(feature = "test-support")]
+                testing::initialization_boundary(5)?;
+            }
             if !create && directory.check(directory::Kind::Database)?.is_none() {
                 return Err(StorageFailure::Unavailable);
             }
@@ -324,8 +352,20 @@ impl Database {
             check_version(found, supported)?;
             let source_application = application_id(&database.connection)?;
             let created = database.is_new_storage()?;
+            #[cfg(feature = "test-support")]
+            if initial.is_some() {
+                testing::initialization_boundary(6)?;
+            }
+            let recovering = initial
+                .map(|initial| initial.bind(&database.registration.context.directory))
+                .transpose()?
+                .unwrap_or(false);
+            #[cfg(feature = "test-support")]
+            if create && owner.is_some() {
+                testing::initialization_boundary(0)?;
+            }
             if let Some(expected) = owner {
-                if created {
+                if created || (recovering && source_application == 0) {
                     let objects: u64 = database
                         .connection
                         .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
@@ -347,7 +387,13 @@ impl Database {
             if mode != "delete" {
                 return Err(StorageFailure::InvalidState);
             }
-            if found < supported || (owner.is_some() && created) {
+            #[cfg(feature = "test-support")]
+            if create && owner.is_some() {
+                testing::initialization_boundary(1)?;
+            }
+            if found < supported
+                || (owner.is_some() && source_application == 0 && (created || recovering))
+            {
                 let outcome = database.transaction(|transaction| {
                     // Recheck under the writer lock: another opener may have migrated.
                     let found = schema_operation(transaction, version)?;
@@ -355,7 +401,7 @@ impl Database {
                     if let Some(expected) = owner {
                         schema_operation(transaction, |connection| {
                             let current = application_id(connection)?;
-                            if current != if created { 0 } else { expected } {
+                            if current != source_application {
                                 return Err(StorageFailure::InvalidState);
                             }
                             connection
@@ -383,6 +429,17 @@ impl Database {
                         return Err(StorageFailure::RecoveryRequired);
                     }
                 }
+            }
+            #[cfg(feature = "test-support")]
+            if create && owner.is_some() {
+                testing::initialization_boundary(2)?;
+            }
+            if recovering {
+                database
+                    .registration
+                    .context
+                    .created
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
             }
             database.owned_application_id = owner;
             database.admit()?;

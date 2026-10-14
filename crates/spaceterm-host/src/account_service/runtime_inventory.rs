@@ -1,6 +1,10 @@
 //! Signed, account-local runtime custody records. Wire replies never carry native
 //! cleanup proofs. Only a validated registration can read this private record.
 
+mod stopped_owner;
+use stopped_owner::StoppedEpoch;
+pub use stopped_owner::StoppedRuntimeCustody;
+
 use std::sync::Arc;
 
 use ring::signature::{ED25519, UnparsedPublicKey};
@@ -81,6 +85,8 @@ struct State {
     graceful: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     owner: Option<InstanceOwner>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stopped_owner: Option<StoppedEpoch>,
 }
 
 /// Signed native incarnation. The boot prevents PID or process-birth reuse
@@ -151,6 +157,7 @@ impl RuntimeCustody {
             cleanup: None,
             graceful: false,
             owner: Some(owner),
+            stopped_owner: None,
         };
         publish(registration, &state, signer.as_ref())?;
         Ok(Self { state, signer })
@@ -380,11 +387,22 @@ impl RetainedRuntimeProcesses {
         let Some((state, _)) = read(registration)? else {
             return Ok(false);
         };
-        Ok(state.clean && marker_matches(registration, &state)?)
+        Ok(state.clean
+            && !state
+                .stopped_owner
+                .as_ref()
+                .is_some_and(|owner| owner.pending)
+            && marker_matches(registration, &state)?)
     }
     fn absent(registration: &RegisteredServer) -> Result<(State, [u8; 32]), ServiceFailure> {
         let (state, digest) = read(registration)?.ok_or(ServiceFailure::CleanupUnresolved)?;
-        if !state.clean || !marker_matches(registration, &state)? {
+        if !state.clean
+            || state
+                .stopped_owner
+                .as_ref()
+                .is_some_and(|owner| owner.pending)
+            || !marker_matches(registration, &state)?
+        {
             return Err(ServiceFailure::CleanupUnresolved);
         }
         registration
@@ -546,7 +564,13 @@ impl ServiceProcesses for RetainedRuntimeProcesses {
             if !state.clean || state.epoch.unwrap_or(ServerEpoch::new(0)) != epoch {
                 return Err(ServiceFailure::CleanupUnresolved);
             }
-            if epoch.get() == 0 && sessions.is_empty() {
+            if sessions.is_empty()
+                && (epoch.get() == 0
+                    || state
+                        .stopped_owner
+                        .as_ref()
+                        .is_some_and(|owner| !owner.pending))
+            {
                 return Ok(Vec::new());
             }
             // Completed native retirement descriptors no longer appear in the
@@ -584,6 +608,7 @@ pub(super) fn initialize(
         cleanup: None,
         graceful: false,
         owner: None,
+        stopped_owner: None,
     };
     // Only exclusive initial registration calls this. Never repair missing custody
     // metadata on an established store by publishing an empty clean instance.
@@ -662,7 +687,9 @@ fn read(registration: &RegisteredServer) -> Result<Option<(State, [u8; 32])>, Se
         || state.generation == 0
         || state.epoch.is_some_and(|epoch| epoch.get() == 0)
         || (state.epoch.is_none() && (!state.clean || state.cleanup.is_some() || state.graceful))
-        || (state.epoch.is_some() && state.clean != (state.cleanup.is_some() || state.graceful))
+        || (state.epoch.is_some()
+            && state.stopped_owner.is_none()
+            && state.clean != (state.cleanup.is_some() || state.graceful))
         || (state.cleanup.is_some() && state.graceful)
         || state.owner.is_some_and(|owner| {
             owner.boot == [0; 32]
@@ -670,6 +697,10 @@ fn read(registration: &RegisteredServer) -> Result<Option<(State, [u8; 32])>, Se
                 || owner.pid > i32::MAX as u32
                 || owner.birth == 0
         })
+        || state
+            .stopped_owner
+            .as_ref()
+            .is_some_and(|owner| !owner.validate())
     {
         return Err(ServiceFailure::InvalidRecord);
     }
@@ -725,7 +756,7 @@ fn read_marker(registration: &RegisteredServer) -> Result<Option<Starting>, Serv
 fn marker_matches(registration: &RegisteredServer, state: &State) -> Result<bool, ServiceFailure> {
     Ok(match read_marker(registration)? {
         Some(marker) => marker.instance == state.instance,
-        None => state.epoch.is_none(),
+        None => state.epoch.is_none() || state.stopped_owner.is_some(),
     })
 }
 

@@ -36,7 +36,7 @@ pub(super) fn io_failure() -> StorageFailure {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(super) struct Identity {
     device: u64,
     inode: u64,
@@ -320,6 +320,14 @@ impl Directory {
         self.ancestors
             .last()
             .map_or(-1, |ancestor| ancestor.file.as_raw_fd())
+    }
+
+    pub(super) fn identity(&self) -> Result<Identity, StorageFailure> {
+        self.verify()?;
+        self.ancestors
+            .last()
+            .map(|ancestor| ancestor.identity)
+            .ok_or(StorageFailure::UnsafeStorage)
     }
 
     pub(super) fn verify(&self) -> Result<(), StorageFailure> {

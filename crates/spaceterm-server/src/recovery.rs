@@ -364,7 +364,7 @@ async fn checked_commit(
         _ => Err(failure(ServerFailureClass::RecoveryRequired)),
     }
 }
-fn expected_cleanup(
+pub(crate) fn expected_cleanup(
     recovered: &RecoveredState,
 ) -> Result<BTreeMap<SessionKey, spaceterm_core::organization::RetirementReason>, ServerFailure> {
     let mut expected = BTreeMap::new();
