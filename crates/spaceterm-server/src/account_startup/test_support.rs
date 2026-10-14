@@ -229,7 +229,15 @@ pub fn initialize(root: &Path) -> Result<(), StartupFailure> {
         .and_then(|_| shell.sync_all())
         .map_err(|_| StartupFailure::Account(ServiceFailure::StorageUnavailable))?;
     let registration = fixture
-        .initialize(DesiredServerState::Running)
+        .initialize_with_installation(
+            DesiredServerState::Running,
+            Some(spaceterm_host::account_service::InstallationStatus {
+                installation: spaceterm_host::startup::InstallationId(std::num::NonZeroU64::MIN),
+                version: crate::distribution_metadata::version()
+                    .map_err(StartupFailure::Distribution)?,
+                artifact_sha256: [1; 32],
+            }),
+        )
         .map_err(StartupFailure::Account)?;
     let pin = registration.server_pin();
     let identity = StoreIdentity {
@@ -282,6 +290,8 @@ mod fixture_tests {
         let supervisor = supervisor(root.path(), Arc::new(StartupAbsence)).unwrap();
         let registration = supervisor.discover().unwrap().unwrap();
         let pin = registration.server_pin();
+        // Opening SQLite alone is insufficient: the account startup also requires an approved installation.
+        drop(AccountStartup::admit(&supervisor).unwrap());
         let home = spaceterm_core::organization::ServerDirectory::new(
             spaceterm_core::identity::ServerId::new(pin.identity),
             root.path().as_os_str().as_encoded_bytes().to_vec(),
