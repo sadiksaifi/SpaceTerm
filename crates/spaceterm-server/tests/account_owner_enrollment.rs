@@ -552,6 +552,7 @@ async fn interrupted_stopped_owner_epoch_recovers_only_the_original_request() {
     );
 }
 
+#[cfg(feature = "test-support")]
 #[tokio::test]
 async fn explicit_start_recovers_an_interrupted_stopped_owner_epoch_with_native_custody() {
     use spaceterm_host::account_service::{
