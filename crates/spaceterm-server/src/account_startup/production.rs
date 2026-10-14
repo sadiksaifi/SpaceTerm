@@ -14,6 +14,7 @@ use crate::{
     extensions::ExtensionObserverPort,
     failure::failure,
     git::{
+        directories::{DirectoryOrdinaryDispatch, DirectoryService},
         dispatch::GitOrdinaryDispatch,
         host::NativeServerGitHost,
         recovery::GitExternalWork,
@@ -217,7 +218,7 @@ impl RecoveredAccountServer {
             PathBuf::from("/usr/bin/git"),
             launch.home.clone(),
             spaceterm_host::git::MINIMUM_GIT_VERSION,
-            directories,
+            directories.clone(),
         ));
         let core = CorePorts::production_with_git_host(
             identity,
@@ -309,6 +310,11 @@ impl RecoveredAccountServer {
             account.registration.server_pin(),
         )
         .map_err(|_| StartupFailure::Runtime(failure(ServerFailureClass::Authentication)))?;
+        let directory_service = Arc::new(DirectoryService::new(
+            server_id,
+            directories,
+            Arc::new(handle.clone()),
+        ));
         let listeners = production_listener_factories_with_dispatch(
             handle,
             ProductionListenerConfig {
@@ -321,7 +327,10 @@ impl RecoveredAccountServer {
                 ports,
             },
             lookup,
-            Arc::new(GitOrdinaryDispatch::new(git, codec)),
+            Arc::new(DirectoryOrdinaryDispatch::new(
+                directory_service,
+                Arc::new(GitOrdinaryDispatch::new(git, codec)),
+            )),
         )
         .map_err(StartupFailure::Runtime)?;
         Ok(Self {

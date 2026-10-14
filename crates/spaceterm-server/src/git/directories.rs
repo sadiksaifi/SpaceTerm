@@ -184,3 +184,86 @@ impl CommittedDirectoryObserver {
         ConfirmedDirectoryDisposition::Scheduled
     }
 }
+
+/// Adds owning-server directory reads without granting client-local file authority.
+pub struct DirectoryOrdinaryDispatch {
+    service: Arc<DirectoryService>,
+    ordinary: Arc<dyn crate::protocol_dispatch::OrdinaryDispatchPort>,
+}
+impl DirectoryOrdinaryDispatch {
+    pub fn new(
+        service: Arc<DirectoryService>,
+        ordinary: Arc<dyn crate::protocol_dispatch::OrdinaryDispatchPort>,
+    ) -> Self {
+        Self { service, ordinary }
+    }
+}
+impl crate::protocol_dispatch::OrdinaryDispatchPort for DirectoryOrdinaryDispatch {
+    fn capabilities(&self) -> Vec<u32> {
+        let mut capabilities = self.ordinary.capabilities();
+        capabilities.push(spaceterm_protocol::negotiation::CAPABILITY_SERVER_DIRECTORIES);
+        capabilities
+    }
+    fn shutdown(
+        &self,
+    ) -> crate::contracts::ServerFuture<'_, Result<(), crate::contracts::ServerFailure>> {
+        Box::pin(async {
+            let closed = self.service.shutdown().await.map_err(|_| {
+                crate::failure::failure(crate::contracts::ServerFailureClass::CleanupIncomplete)
+            });
+            let inner = self.ordinary.shutdown().await;
+            closed.and(inner)
+        })
+    }
+    fn dispatch(
+        &self,
+        principal: crate::api::VerifiedPrincipal,
+        payload: spaceterm_protocol::codec::Payload,
+        handle: crate::api::ServerHandle,
+    ) -> crate::contracts::ServerFuture<
+        '_,
+        Result<Option<spaceterm_protocol::codec::Payload>, crate::contracts::ServerFailure>,
+    > {
+        Box::pin(async move {
+            use spaceterm_protocol::{
+                codec::Payload,
+                convert::directories,
+                wire::{v1, v2},
+            };
+            let major = match &payload {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::ServerDirectoryQuery(_)),
+                }) => 1,
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::ServerDirectoryQuery(_)),
+                }) => 2,
+                _ => return self.ordinary.dispatch(principal, payload, handle).await,
+            };
+            let context = DirectoryContext::new(DirectoryContextParts {
+                server: principal.server(),
+                epoch: principal.epoch(),
+                pairing: principal.pairing(),
+                client: principal.client(),
+            })
+            .map_err(|_| {
+                crate::failure::failure(crate::contracts::ServerFailureClass::ScopeMismatch)
+            })?;
+            let request = directories::decode_query(&payload, context)
+                .map_err(crate::adapters::transport::protocol_failure)?;
+            let response = directories::DirectoryResponse {
+                request: request.request,
+                generation: request.generation,
+                result: self
+                    .service
+                    .query(
+                        AuthenticatedGitPrincipal::from_verified(principal),
+                        request.query,
+                    )
+                    .await,
+            };
+            directories::encode_response(major, &response, context)
+                .map(Some)
+                .map_err(crate::adapters::transport::protocol_failure)
+        })
+    }
+}

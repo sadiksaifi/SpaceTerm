@@ -29,6 +29,15 @@ pub const MAX_DECODED_DISPATCH_BYTES: usize = 16 * 1024 * 1024;
 /// operations must use actor ledger admission, never an ephemeral request ID.
 /// Publication and terminal resource replies retain their owning egress policy.
 pub trait OrdinaryDispatchPort: Send + Sync {
+    /// Extensions backed by providers installed in this dispatch composition.
+    fn capabilities(&self) -> Vec<u32> {
+        Vec::new()
+    }
+    /// Close read admission and join work retained by this provider.
+    fn shutdown(&self) -> ServerFuture<'_, Result<(), ServerFailure>> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn dispatch(
         &self,
         principal: VerifiedPrincipal,
@@ -162,15 +171,29 @@ impl OrdinaryDispatchPort for ActorOrdinaryDispatch {
                             {
                                 return Err(failure(ServerFailureClass::ScopeMismatch));
                             }
-                            let access = handle
+                            match handle
                                 .reconcile(
                                     principal,
                                     OrganizationRevision::new(value.organization_revision),
                                 )
-                                .await?;
-                            value.connection_generation = access.binding.generation.get();
-                            value.acknowledged = true;
-                            $p::message::Kind::Reconciliation(value)
+                                .await
+                            {
+                                Ok(access) => {
+                                    value.connection_generation = access.binding.generation.get();
+                                    value.acknowledged = true;
+                                    $p::message::Kind::Reconciliation(value)
+                                }
+                                Err(error) if error.class == ServerFailureClass::StaleAuthority => {
+                                    let current = handle.snapshot();
+                                    $p::message::Kind::OrganizationResync($p::OrganizationResync {
+                                        request: value.request,
+                                        request_generation: value.request_generation,
+                                        epoch: current.epoch().get(),
+                                        revision: current.state().revision.get(),
+                                    })
+                                }
+                                Err(error) => return Err(error),
+                            }
                         }
                         $p::message::Kind::ClientContext(mut value) => {
                             if value.request == 0

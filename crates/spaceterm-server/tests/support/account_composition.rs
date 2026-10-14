@@ -307,7 +307,11 @@ async fn operation(
 ) -> Outcome {
     let request = seed.request(sequence, command);
     transport
-        .send(&codec.encode(&request_payload(&request, 2)).unwrap())
+        .send(
+            &codec
+                .encode(&request_payload(&request, codec.major()))
+                .unwrap(),
+        )
         .await
         .unwrap();
     loop {
@@ -315,7 +319,10 @@ async fn operation(
             .decode(&transport.recv().await.unwrap().unwrap())
             .unwrap();
         match &payload {
-            Payload::Major2(v2::Message {
+            Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::Outcome(_)),
+            })
+            | Payload::Major2(v2::Message {
                 kind: Some(v2::message::Kind::Outcome(_)),
             }) => return decode_outcome(payload, request.binding().id),
             Payload::Major2(v2::Message {
@@ -1089,3 +1096,6 @@ async fn real_binary_retains_only_explicit_remote_scope_across_stop_start_and_di
     .await
     .unwrap();
 }
+
+#[path = "listener_fixes.rs"]
+mod listener_fixes;
