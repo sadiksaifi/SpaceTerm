@@ -5,6 +5,8 @@ mod organization_cache;
 pub(super) mod protocol;
 #[cfg(test)]
 pub(super) use organization_cache::OrganizationCache;
+#[cfg(all(feature = "desktop-test-support", debug_assertions))]
+pub(super) mod test_composition;
 
 use super::*;
 use crate::platform::{app_paths::AppPaths, client_view_store::NativeViewStore};
@@ -29,6 +31,8 @@ pub(crate) fn production(
     ssh: crate::platform::server_client_route::SshStartup,
     askpass: Arc<dyn crate::ssh::askpass::AskPassWindowFactory>,
 ) -> Result<Rc<dyn DesktopClientStartup>, crate::desktop_profile::DesktopProfileError> {
+    #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+    let fixture = test_composition::Fixture::from_arguments(std::env::args_os().skip(1))?;
     let executor = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -38,6 +42,8 @@ pub(crate) fn production(
     Ok(Rc::new(NativeDesktopStartup {
         owners: Arc::new(tokio::sync::Mutex::new(None)),
         factory: Some(Arc::new(Factory {
+            #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+            fixture,
             paths: paths.clone(),
             context: tokio::sync::Mutex::new(None),
             enrollment: Arc::clone(&enrollment),
@@ -55,6 +61,8 @@ pub(crate) fn production(
 }
 
 struct Factory {
+    #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+    fixture: Option<test_composition::Fixture>,
     paths: Arc<AppPaths>,
     ssh: crate::platform::server_client_route::SshStartup,
     askpass: Arc<crate::platform::server_client_route::askpass::DesktopTunnelAskPass>,
@@ -109,7 +117,17 @@ impl Factory {
             JournalLimits::default(),
         )
         .await?;
-        let native = tokio::task::spawn_blocking(|| {
+        #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+        let fixture_native = self
+            .fixture
+            .as_ref()
+            .map(|fixture| fixture.native())
+            .transpose()?;
+        let native = tokio::task::spawn_blocking(move || {
+            #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+            if let Some(native) = fixture_native {
+                return Ok(native);
+            }
             #[cfg(target_os = "linux")]
             let authorization = Some(Arc::new(
                 spaceterm_host::account_service::PkexecLingerAuthorization::new(),
@@ -162,6 +180,10 @@ impl NativeOwnerFactory for Factory {
         Option<Arc<dyn crate::platform::local_server_client::foreground::ForegroundSetup>>,
     > {
         Box::pin(async {
+            #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+            if self.fixture.is_some() {
+                return Ok(None);
+            }
             let context = self.context().await?;
             let Some(native) = context.native.clone() else {
                 return Ok(None);
@@ -181,6 +203,17 @@ impl NativeOwnerFactory for Factory {
             let context = self.context().await?;
             let journal = context.journal.clone();
             let native = context.native.clone();
+            #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+            if let Some(fixture) = &self.fixture {
+                fixture
+                    .enroll(
+                        native
+                            .as_ref()
+                            .ok_or_else(|| fail(ClientFailureClass::Unavailable))?,
+                        journal.clone(),
+                    )
+                    .await?;
+            }
             let local = if let Some(provider) = native.clone() {
                 let discovery_journal = journal.clone();
                 tokio::task::spawn_blocking(move || {
@@ -282,13 +315,24 @@ impl NativeOwnerFactory for Factory {
             protocol.set_cache(organization_cache::OrganizationCache::new(
                 self.paths.clone(),
             ))?;
+            let credentials: Arc<dyn CredentialSource> = Arc::new(Credentials {
+                store: JournalPairingStore::new(journal.clone()),
+                credentials: DeviceCredentials::native(),
+            });
+            #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+            let credentials: Arc<dyn CredentialSource> = match &self.fixture {
+                Some(fixture) => Arc::new(Credentials {
+                    store: JournalPairingStore::new(journal.clone()),
+                    credentials: fixture.credentials.clone(),
+                }),
+                None => credentials,
+            };
             Ok(NativeDesktopOwners {
+                #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+                fixture: self.fixture.is_some(),
                 services: ClientServices {
                     routes,
-                    credentials: Arc::new(Credentials {
-                        store: JournalPairingStore::new(journal.clone()),
-                        credentials: DeviceCredentials::native(),
-                    }),
+                    credentials,
                     journal: journal.clone(),
                     organization: Arc::new(protocol::Decoder),
                     delegate: protocol.clone(),
@@ -328,11 +372,11 @@ impl ReceiptVerifier for Verifier {
     }
 }
 
-struct Credentials {
+struct Credentials<N> {
     store: JournalPairingStore<JournalController>,
-    credentials: DeviceCredentials,
+    credentials: N,
 }
-impl CredentialSource for Credentials {
+impl<N: NativeDeviceCredentials + Send + Sync> CredentialSource for Credentials<N> {
     fn signing_access<'a>(
         &'a self,
         target: &'a ConnectionTarget,

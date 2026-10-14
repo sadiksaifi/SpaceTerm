@@ -48,6 +48,8 @@ async fn desktop_production_factory_installs_foreground_enrollment_with_empty_re
     let startup = NativeDesktopStartup {
         owners: Arc::new(tokio::sync::Mutex::new(None)),
         factory: Some(Arc::new(Factory {
+            #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+            fixture: None,
             paths: paths.clone(),
             ssh: crate::platform::server_client_route::SshStartup {
                 executable: "/usr/bin/ssh".into(), home: root.0.clone(), environment: vec![],

@@ -72,7 +72,7 @@ pub(super) async fn enroll(
     enroll_with_credentials(native, journal, DeviceCredentials::native()).await
 }
 
-async fn enroll_with_credentials<N: NativeDeviceCredentials + Clone + 'static>(
+pub(crate) async fn enroll_with_credentials<N: NativeDeviceCredentials + Clone + 'static>(
     native: &NativeClientProvider,
     journal: Arc<JournalController>,
     credentials: N,

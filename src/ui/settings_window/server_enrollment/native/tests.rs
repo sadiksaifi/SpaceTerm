@@ -376,6 +376,8 @@ async fn desktop_add_server_publishes_enrolled_handle_into_runtime(cx: &mut Test
         .channels(ProjectionBudgets::supported().unwrap())
         .unwrap();
     let owners = NativeDesktopOwners {
+        #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+        fixture: false,
         services: ClientServices {
             routes: h.ports.clone(),
             credentials: h.ports.clone(),

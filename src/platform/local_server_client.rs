@@ -2,7 +2,7 @@
 //! Launch never creates a server identity, requests authorization, starts a deliberately
 //! stopped service, activates staged code, or enrolls a replacement client binding.
 
-mod enrollment;
+pub(crate) mod enrollment;
 pub(crate) mod foreground;
 mod setup;
 pub(crate) use setup::offer as setup_offer;
@@ -149,7 +149,7 @@ impl spaceterm_client::ports::TrustedDiscovery for LocalDiscovery {
     }
 }
 
-fn classify(failure: ServiceFailure) -> ClientFailure {
+pub(crate) fn classify(failure: ServiceFailure) -> ClientFailure {
     let class = match failure {
         ServiceFailure::StorageLocked
         | ServiceFailure::StorageUnavailable
