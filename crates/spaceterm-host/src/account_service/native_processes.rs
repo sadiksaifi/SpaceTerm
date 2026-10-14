@@ -206,7 +206,13 @@ impl NativeServiceProcesses {
         if registration.key().account_uid != self.table.uid {
             return Err(ServiceFailure::IdentityMismatch);
         }
-        let executable = self.installations.approved_executable(registration)?;
+        // Only startup may exempt the current approved root. Ordinary absence
+        // rejects every live scoped process and needs no executable authority.
+        let executable = if startup {
+            Some(self.installations.approved_executable(registration)?)
+        } else {
+            None
+        };
         let scope = self.manager.scoped_processes(registration).await?;
         if scope.len() > 65536 {
             return Err(ServiceFailure::LimitExceeded);
@@ -219,7 +225,7 @@ impl NativeServiceProcesses {
                 if !startup
                     || process.pid != std::process::id()
                     || !process.fully_account_owned
-                    || process.executable != executable
+                    || Some(&process.executable) != executable.as_ref()
                 {
                     return Err(ServiceFailure::CleanupUnresolved);
                 }
@@ -284,6 +290,46 @@ impl ServiceProcesses for NativeServiceProcesses {
                 .await
         })
     }
+    fn abort_native_origin<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+        request: NativeManagementRequestRef,
+        assessment: &'a RuntimeAssessment,
+    ) -> ServiceFuture<'a, ()> {
+        Box::pin(async move {
+            self.account(registration)?;
+            assessment.validate(registration)?;
+            if request.server() != assessment.server {
+                return Err(ServiceFailure::IdentityMismatch);
+            }
+            match self
+                .runtime()?
+                .abort_native_origin(registration, request, assessment)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(
+                    ServiceFailure::Pending
+                    | ServiceFailure::CleanupUnresolved
+                    | ServiceFailure::RequestConflict,
+                ) => {}
+                Err(error) => return Err(error),
+            }
+            // A dead actor cannot sign a reply. Native scope and signed lineage
+            // must prove its exact old instance absent before resolving non-admission.
+            self.absent(registration, true).await?;
+            let absence = super::runtime_inventory::NativeInstanceAbsence {
+                key: registration.key(),
+                server: assessment.server,
+                epoch: assessment.epoch.ok_or(ServiceFailure::IdentityMismatch)?,
+                boot: self.clock.now()?.boot,
+                observer: self.observer.clone(),
+            };
+            self.runtime()?
+                .abort_reservation_with_absence(registration, assessment, &absence)
+                .await
+        })
+    }
     fn quiesce<'a>(
         &'a self,
         registration: &'a RegisteredServer,
@@ -308,6 +354,12 @@ impl ServiceProcesses for NativeServiceProcesses {
             // The runtime proves descendant custody; native observations prove
             // the approved root process and retained listener are also absent.
             self.runtime()?.verify_absent(registration).await?;
+            self.absent(registration, false).await?;
+            super::runtime_inventory::RetainedRuntimeProcesses::verify_native_instance_absent(
+                registration,
+                self.clock.now()?.boot,
+                self.observer.as_ref(),
+            )?;
             self.absent(registration, false).await
         })
     }

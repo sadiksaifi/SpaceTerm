@@ -1,5 +1,7 @@
-//! Correlated reads on the existing authenticated worker and bounded writer.
+//! Correlated calls on the existing authenticated worker and bounded writer.
 //! Returned server directories and Git facts confer no client-local authority.
+
+mod account_runtime;
 
 use crate::{
     api::{ConnectedInfo, ConnectionState},
@@ -936,6 +938,9 @@ fn query_correlation(message: &Payload) -> Option<(u64, u64)> {
                 Some($p::message::Kind::StatusQuery(value)) => {
                     Some((value.request, value.request_generation))
                 }
+                Some($p::message::Kind::AccountRuntimeRequest(value)) => {
+                    Some((value.request, value.request_generation))
+                }
                 _ => None,
             }
         };
@@ -959,6 +964,9 @@ fn response_correlation(message: &Payload) -> Option<(u64, u64)> {
                     Some((value.request, value.request_generation))
                 }
                 Some($p::message::Kind::StatusPublication(value)) => {
+                    Some((value.request, value.request_generation))
+                }
+                Some($p::message::Kind::AccountRuntimeReply(value)) => {
                     Some((value.request, value.request_generation))
                 }
                 _ => None,
@@ -987,6 +995,9 @@ fn matching_reply(query: &Payload, reply: &Payload) -> bool {
                 ) | (
                     Some($p::message::Kind::PairingRequest(_)),
                     Some($p::message::Kind::PairingOutcome(_))
+                ) | (
+                    Some($p::message::Kind::AccountRuntimeRequest(_)),
+                    Some($p::message::Kind::AccountRuntimeReply(_))
                 )
             )
         };

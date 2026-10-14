@@ -251,6 +251,153 @@ impl ReceiptVerifier for PinnedReceipts {
     }
 }
 
+/// Exchanges one bounded runtime call on a dedicated, caller-owned route.
+/// The caller establishes native route authority; this exchange authenticates the
+/// exact canonical Client binding and pinned Server in either protocol major.
+/// Replies are comparisons, not transferable native authorization or cleanup.
+pub async fn authenticated_account_runtime_call(
+    access: &RuntimeClientAccess,
+    transport: &dyn MessageTransport,
+    call: &AccountRuntimeCall,
+) -> Result<AccountRuntimeReply, ServiceFailure> {
+    if !access
+        .journal
+        .ordinary_use_allowed(&access.binding)
+        .await
+        .map_err(client_failure)?
+    {
+        return Err(ServiceFailure::AuthorizationDenied);
+    }
+    let target = access.binding.target();
+    tokio::time::timeout(CONNECT_DEADLINE, async {
+        let local_id = |n: u64| {
+            let mut bytes = [0; 16];
+            bytes[8..].copy_from_slice(&n.to_be_bytes());
+            bytes
+        };
+        let principal = Principal {
+            server: target.server().bytes(),
+            device: target.device().bytes(),
+            pairing: local_id(target.pairing().local()),
+            client: local_id(target.client().local()),
+        };
+        let config = HandshakeConfig {
+            capabilities: vec![CAPABILITY_ACCOUNT_RUNTIME],
+            ..HandshakeConfig::default()
+        };
+        let (handshake, hello) = ClientHandshake::begin(
+            target.pin(),
+            principal,
+            Purpose::Ordinary,
+            config,
+            Arc::clone(&access.signer),
+        )
+        .map_err(|_| ServiceFailure::IdentityMismatch)?;
+        transport
+            .send(&hello)
+            .await
+            .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
+        let reply = transport
+            .recv()
+            .await
+            .map_err(|_| ServiceFailure::SupervisorUnavailable)?
+            .ok_or(ServiceFailure::SupervisorUnavailable)?;
+        let (ready, proof) = handshake
+            .receive_server(&reply)
+            .map_err(|_| ServiceFailure::IdentityMismatch)?;
+        transport
+            .send(&proof)
+            .await
+            .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
+        let reply = transport
+            .recv()
+            .await
+            .map_err(|_| ServiceFailure::SupervisorUnavailable)?
+            .ok_or(ServiceFailure::SupervisorUnavailable)?;
+        let Established::Ordinary(mut codec) = ready
+            .receive_ready(&reply)
+            .map_err(|_| ServiceFailure::IdentityMismatch)?
+        else {
+            return Err(ServiceFailure::AuthorizationDenied);
+        };
+        if !codec.capabilities().contains(&CAPABILITY_ACCOUNT_RUNTIME) {
+            return Err(ServiceFailure::UnsupportedSchema);
+        }
+        if !access
+            .journal
+            .ordinary_use_allowed(&access.binding)
+            .await
+            .map_err(client_failure)?
+        {
+            return Err(ServiceFailure::AuthorizationDenied);
+        }
+        let body = serde_json::to_vec(call).map_err(|_| ServiceFailure::InvalidRecord)?;
+        if body.len() > RUNTIME_MESSAGE_LIMIT {
+            return Err(ServiceFailure::LimitExceeded);
+        }
+        let message = common::AccountRuntimeMessage {
+            request: 1,
+            body,
+            request_generation: 0,
+        };
+        let payload = match codec.major() {
+            1 => Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::AccountRuntimeRequest(message)),
+            }),
+            2 => Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::AccountRuntimeRequest(message)),
+            }),
+            _ => return Err(ServiceFailure::UnsupportedSchema),
+        };
+        let bytes = codec
+            .encode(&payload)
+            .map_err(|_| ServiceFailure::InvalidRecord)?;
+        transport
+            .send(&bytes)
+            .await
+            .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
+        let bytes = transport
+            .recv()
+            .await
+            .map_err(|_| ServiceFailure::SupervisorUnavailable)?
+            .ok_or(ServiceFailure::SupervisorUnavailable)?;
+        let response = codec
+            .decode(&bytes)
+            .map_err(|_| ServiceFailure::IdentityMismatch)?;
+        let response = match response {
+            Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::AccountRuntimeReply(value)),
+            }) => value,
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::AccountRuntimeReply(value)),
+            }) => value,
+            _ => return Err(ServiceFailure::InvalidRecord),
+        };
+        if response.request != 1 {
+            return Err(ServiceFailure::IdentityMismatch);
+        }
+        if response.body.len() > RUNTIME_MESSAGE_LIMIT {
+            return Err(ServiceFailure::LimitExceeded);
+        }
+        let reply: AccountRuntimeReply =
+            serde_json::from_slice(&response.body).map_err(|_| ServiceFailure::InvalidRecord)?;
+        if !access
+            .journal
+            .ordinary_use_allowed(&access.binding)
+            .await
+            .map_err(client_failure)?
+        {
+            return Err(ServiceFailure::AuthorizationDenied);
+        }
+        if let AccountRuntimeReply::Failed(failure) = reply {
+            return Err(failure);
+        }
+        Ok(reply)
+    })
+    .await
+    .map_err(|_| ServiceFailure::SupervisorUnavailable)?
+}
+
 /// Real paired cross-process inventory and native signed cleanup reconciliation.
 /// NativeServiceProcesses still independently checks the approved root process
 /// and registered endpoint before claiming Stop or Start absence.
@@ -292,118 +439,7 @@ impl RuntimeServiceProcesses {
         .await
         .map_err(|_| ServiceFailure::SupervisorUnavailable)?
         .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
-        let result = tokio::time::timeout(CONNECT_DEADLINE, async {
-            let local_id = |n: u64| {
-                let mut bytes = [0; 16];
-                bytes[8..].copy_from_slice(&n.to_be_bytes());
-                bytes
-            };
-            let principal = Principal {
-                server: target.server().bytes(),
-                device: target.device().bytes(),
-                pairing: local_id(target.pairing().local()),
-                client: local_id(target.client().local()),
-            };
-            let config = HandshakeConfig {
-                capabilities: vec![CAPABILITY_ACCOUNT_RUNTIME],
-                ..HandshakeConfig::default()
-            };
-            let (handshake, hello) = ClientHandshake::begin(
-                target.pin(),
-                principal,
-                Purpose::Ordinary,
-                config,
-                access.signer,
-            )
-            .map_err(|_| ServiceFailure::IdentityMismatch)?;
-            transport
-                .send(&hello)
-                .await
-                .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
-            let reply = transport
-                .recv()
-                .await
-                .map_err(|_| ServiceFailure::SupervisorUnavailable)?
-                .ok_or(ServiceFailure::SupervisorUnavailable)?;
-            let (ready, proof) = handshake
-                .receive_server(&reply)
-                .map_err(|_| ServiceFailure::IdentityMismatch)?;
-            transport
-                .send(&proof)
-                .await
-                .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
-            let reply = transport
-                .recv()
-                .await
-                .map_err(|_| ServiceFailure::SupervisorUnavailable)?
-                .ok_or(ServiceFailure::SupervisorUnavailable)?;
-            let Established::Ordinary(mut codec) = ready
-                .receive_ready(&reply)
-                .map_err(|_| ServiceFailure::IdentityMismatch)?
-            else {
-                return Err(ServiceFailure::AuthorizationDenied);
-            };
-            if !codec.capabilities().contains(&CAPABILITY_ACCOUNT_RUNTIME) {
-                return Err(ServiceFailure::UnsupportedSchema);
-            }
-            if !access
-                .journal
-                .ordinary_use_allowed(&access.binding)
-                .await
-                .map_err(client_failure)?
-            {
-                return Err(ServiceFailure::AuthorizationDenied);
-            }
-            let body = serde_json::to_vec(&call).map_err(|_| ServiceFailure::InvalidRecord)?;
-            if body.len() > RUNTIME_MESSAGE_LIMIT {
-                return Err(ServiceFailure::LimitExceeded);
-            }
-            let message = common::AccountRuntimeMessage { request: 1, body };
-            let payload = match codec.major() {
-                1 => Payload::Major1(v1::Message {
-                    kind: Some(v1::message::Kind::AccountRuntimeRequest(message)),
-                }),
-                2 => Payload::Major2(v2::Message {
-                    kind: Some(v2::message::Kind::AccountRuntimeRequest(message)),
-                }),
-                _ => return Err(ServiceFailure::UnsupportedSchema),
-            };
-            let bytes = codec
-                .encode(&payload)
-                .map_err(|_| ServiceFailure::InvalidRecord)?;
-            transport
-                .send(&bytes)
-                .await
-                .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
-            let bytes = transport
-                .recv()
-                .await
-                .map_err(|_| ServiceFailure::SupervisorUnavailable)?
-                .ok_or(ServiceFailure::SupervisorUnavailable)?;
-            let response = codec
-                .decode(&bytes)
-                .map_err(|_| ServiceFailure::IdentityMismatch)?;
-            let response = match response {
-                Payload::Major1(v1::Message {
-                    kind: Some(v1::message::Kind::AccountRuntimeReply(value)),
-                }) => value,
-                Payload::Major2(v2::Message {
-                    kind: Some(v2::message::Kind::AccountRuntimeReply(value)),
-                }) => value,
-                _ => return Err(ServiceFailure::InvalidRecord),
-            };
-            if response.request != 1 {
-                return Err(ServiceFailure::IdentityMismatch);
-            }
-            let reply: AccountRuntimeReply = serde_json::from_slice(&response.body)
-                .map_err(|_| ServiceFailure::InvalidRecord)?;
-            if let AccountRuntimeReply::Failed(failure) = reply {
-                return Err(failure);
-            }
-            Ok(reply)
-        })
-        .await
-        .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
+        let result = authenticated_account_runtime_call(&access, &transport, &call).await;
         let _ = transport.close().await;
         result
     }

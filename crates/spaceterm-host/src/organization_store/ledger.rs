@@ -264,15 +264,24 @@ impl OperationProjection for LedgerSql {
                 )
                 .map_err(invalid)?;
                 let purpose = match r.get::<_, i64>(3).map_err(invalid)? {
-                    0 => StreamPurpose::Ordinary,
-                    1 => StreamPurpose::SelfRevocation,
+                    0 => {
+                        super::recovery::require_nulls(r, &[13]).map_err(invalid)?;
+                        StreamPurpose::Ordinary
+                    }
+                    1 => {
+                        super::recovery::require_nulls(r, &[13]).map_err(invalid)?;
+                        StreamPurpose::SelfRevocation
+                    }
                     2 => StreamPurpose::Enrollment {
                         claim_digest: RequestDigest::from_bytes(auxiliary::fixed::<32>(r, 13)?),
                     },
                     _ => return Err(StoreFailure::InvalidDurableState),
                 };
                 let status = match r.get::<_, i64>(4).map_err(invalid)? {
-                    0 => StreamStatus::Active,
+                    0 => {
+                        super::recovery::require_nulls(r, &[5]).map_err(invalid)?;
+                        StreamStatus::Active
+                    }
                     1 => StreamStatus::Retired(decode_reason(r.get(5).map_err(invalid)?)?),
                     _ => return Err(StoreFailure::InvalidDurableState),
                 };
@@ -287,6 +296,9 @@ impl OperationProjection for LedgerSql {
                         .map_err(invalid)
                     })
                     .transpose()?;
+                if dormant_reservation.is_none() {
+                    super::recovery::require_nulls(r, &[9]).map_err(invalid)?;
+                }
                 Ok(StreamRecord {
                     binding: StreamBinding::from_stream(stream),
                     purpose,
@@ -335,9 +347,13 @@ impl OperationProjection for LedgerSql {
                 let admitted_at = StoreRevision::new(counter(r, 6).map_err(invalid)?);
                 match r.get::<_, i64>(3).map_err(invalid)? {
                     0 => {
+                        super::recovery::require_nulls(r, &[9, 12, 13]).map_err(invalid)?;
                         let (kind, external_progress) =
                             match r.get::<_, i64>(10).map_err(invalid)? {
-                                0 => (PendingKind::AtomicMutation, None),
+                                0 => {
+                                    super::recovery::require_nulls(r, &[11]).map_err(invalid)?;
+                                    (PendingKind::AtomicMutation, None)
+                                }
                                 1 => {
                                     let progress =
                                         decode_progress(auxiliary::blob(r, 11)?, binding)?;
@@ -366,19 +382,22 @@ impl OperationProjection for LedgerSql {
                             },
                         )))
                     }
-                    1 => Ok(RecoveredOperationRecord::Completed(
-                        CompletedOperationRecord {
-                            binding,
-                            reservation,
-                            admitted_at,
-                            completed_at: StoreRevision::new(counter(r, 9).map_err(invalid)?),
-                            outcome: CompactOutcome::from_encoded(r.get(12).map_err(invalid)?)
-                                .map_err(invalid)?,
-                            outcome_revision: OrganizationRevision::new(
-                                counter(r, 13).map_err(invalid)?,
-                            ),
-                        },
-                    )),
+                    1 => {
+                        super::recovery::require_nulls(r, &[7, 8, 10, 11]).map_err(invalid)?;
+                        Ok(RecoveredOperationRecord::Completed(
+                            CompletedOperationRecord {
+                                binding,
+                                reservation,
+                                admitted_at,
+                                completed_at: StoreRevision::new(counter(r, 9).map_err(invalid)?),
+                                outcome: CompactOutcome::from_encoded(r.get(12).map_err(invalid)?)
+                                    .map_err(invalid)?,
+                                outcome_revision: OrganizationRevision::new(
+                                    counter(r, 13).map_err(invalid)?,
+                                ),
+                            },
+                        ))
+                    }
                     _ => Err(StoreFailure::InvalidDurableState),
                 }
             },

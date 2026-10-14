@@ -686,7 +686,11 @@ impl ProtocolDispatcher {
                             }
                             if let Some(runtime) = &self.account_runtime
                                 && let Some(reply) = runtime
-                                    .dispatch(&payload, peer.transport.peer_facts().local_uid)
+                                    .dispatch(
+                                        &payload,
+                                        peer.transport.peer_facts().local_uid,
+                                        session,
+                                    )
                                     .await?
                             {
                                 self.send(session, &peer.transport, &reply, &mut egress, None)

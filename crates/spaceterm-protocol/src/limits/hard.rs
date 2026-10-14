@@ -1,5 +1,7 @@
 pub const MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_MANAGEMENT_BYTES: usize = 64 * 1024;
+/// Maximum encoded body of one account runtime request or reply.
+pub const MAX_ACCOUNT_RUNTIME_BYTES: usize = 32 * 1024;
 pub const MAX_SEMANTIC_ROWS: usize = 256;
 pub const MAX_SEMANTIC_CELLS: usize = 16_384;
 pub const MAX_PALETTE_COLORS: usize = 256;

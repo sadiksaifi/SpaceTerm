@@ -129,6 +129,85 @@ pub(super) struct InstallRecord {
     start_basis: Option<RegistrationBasis>,
 }
 impl InstallRecord {
+    pub(super) fn stopped_stage(
+        key: AccountBuildKey,
+        request: NativeRequestId,
+        artifact: &VerifiedServerArtifact,
+        basis: RegistrationBasis,
+    ) -> Result<Self, ServiceFailure> {
+        Self::stage(
+            key,
+            request,
+            artifact.artifact_sha256(),
+            artifact.manifest().version.clone(),
+            basis,
+        )
+    }
+    pub(super) fn stage(
+        key: AccountBuildKey,
+        request: NativeRequestId,
+        artifact_sha256: [u8; 32],
+        version: spaceterm_distribution::BuildVersion,
+        basis: RegistrationBasis,
+    ) -> Result<Self, ServiceFailure> {
+        let digest = stage_digest(
+            install_digest(key, request, artifact_sha256, &version, None, None, false)?,
+            Some(&basis),
+        )?;
+        let record = Self {
+            artifact_sha256,
+            version,
+            digest,
+            phase: ServicePhase::Accepted,
+            state: ServiceRequestState::Pending,
+            reused: false,
+            roots: None,
+            installation: None,
+            desktop_seed: None,
+            new_organization: false,
+            stage_basis: Some(basis),
+            start_basis: None,
+        };
+        record.validate(key, request)?;
+        Ok(record)
+    }
+    /// Constructs only the exact negative receipt for a newly constructed Stage
+    /// record. The caller must hold the admission lease and prove native expiry
+    /// with no retained install record; this method supplies no non-admission proof.
+    pub(super) fn expired_stage_before_admission(
+        mut self,
+        key: AccountBuildKey,
+        request: NativeRequestId,
+    ) -> Result<Self, ServiceFailure> {
+        self.validate(key, request)?;
+        if self.stage_basis.is_none()
+            || self.phase != ServicePhase::Accepted
+            || self.state != ServiceRequestState::Pending
+            || self.installation.is_some()
+            || self.roots.is_some()
+            || self.desktop_seed.is_some()
+            || self.reused
+            || self.new_organization
+        {
+            return Err(ServiceFailure::RequestConflict);
+        }
+        self.phase = ServicePhase::Completed;
+        self.state = ServiceRequestState::NotApplied(ServiceFailure::StaleAssessment);
+        self.validate(key, request)?;
+        Ok(self)
+    }
+    pub(super) fn matches_stopped_stage(
+        &self,
+        basis: &RegistrationBasis,
+        artifact_sha256: [u8; 32],
+    ) -> bool {
+        self.stage_basis.as_ref() == Some(basis)
+            && self.artifact_sha256 == artifact_sha256
+            && !self.reused
+            && self.roots.is_none()
+            && self.desktop_seed.is_none()
+            && !self.new_organization
+    }
     pub(super) fn pending(&self) -> bool {
         self.phase != ServicePhase::Completed
     }
@@ -308,6 +387,23 @@ impl ServiceSupervisor {
             stage_basis: None,
         })
     }
+    fn require_local_install_request(
+        &self,
+        request: NativeRequestId,
+    ) -> Result<(), ServiceFailure> {
+        let (_, _, journal) = self.read_journal()?;
+        let reservation = &journal.reservations[journal.reservation(request)?];
+        if reservation.acknowledged {
+            return Err(ServiceFailure::RequestRetired);
+        }
+        if reservation.runtime_intent.is_some()
+            || reservation.stopped_native.is_some()
+            || reservation.running_stage.is_some()
+        {
+            return Err(ServiceFailure::PairingRequired);
+        }
+        Ok(())
+    }
     /// Installs the original confirmed artifact, or reuses an established service without starting it.
     /// The retained request owns effects even if its observer is dropped.
     pub fn install(
@@ -317,6 +413,7 @@ impl ServiceSupervisor {
     ) -> ServiceFuture<'_, ServiceProgress> {
         let supervisor = self.clone();
         Box::pin(async move {
+            supervisor.require_local_install_request(request)?;
             let handle = tokio::runtime::Handle::try_current()
                 .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
             let execution = supervisor.install_execution.admit()?;
@@ -338,6 +435,7 @@ impl ServiceSupervisor {
     ) -> ServiceFuture<'_, ServiceProgress> {
         let supervisor = self.clone();
         Box::pin(async move {
+            supervisor.require_local_install_request(request)?;
             let registration = supervisor.discover()?.ok_or(ServiceFailure::Missing)?;
             if !registration.is_installed() {
                 return Err(ServiceFailure::Missing);
@@ -371,6 +469,7 @@ impl ServiceSupervisor {
     pub fn resolve_install(&self, request: NativeRequestId) -> ServiceFuture<'_, ServiceProgress> {
         let supervisor = self.clone();
         Box::pin(async move {
+            supervisor.require_local_install_request(request)?;
             let handle = tokio::runtime::Handle::try_current()
                 .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
             let execution = supervisor.install_execution.admit()?;
@@ -430,6 +529,7 @@ impl ServiceSupervisor {
     ) -> ServiceFuture<'_, ServiceProgress> {
         let supervisor = self.clone();
         Box::pin(async move {
+            supervisor.require_local_install_request(request)?;
             let original = supervisor
                 .original_install(request)?
                 .ok_or(ServiceFailure::UnknownRequest)?;
@@ -709,7 +809,35 @@ impl ServiceSupervisor {
         let proposed_seed = confirmation
             .as_ref()
             .and_then(|value| value.desktop_seed.as_ref());
-        self.reconcile_storage(request)?;
+        if let Err(failure) = self.reconcile_storage(request) {
+            if failure != ServiceFailure::Indeterminate {
+                return Err(failure);
+            }
+            // Runtime publication recovery cannot resolve a first-install creation fence.
+            // Only its retained local original may reconcile that fence under the lease.
+            let lease = self.lifecycle_lease()?;
+            self.require_local_install_request(request)?;
+            self.ensure_no_pending(request)?;
+            let original = self
+                .original_install(request)?
+                .ok_or(ServiceFailure::Indeterminate)?;
+            if !original.new_organization || !original.pending() || original.reused {
+                return Err(failure);
+            }
+            if let Some(artifact) = artifact
+                && (original.artifact_sha256 != artifact.artifact_sha256()
+                    || original.version != artifact.manifest().version
+                    || original.desktop_seed.as_ref() != proposed_seed
+                    || original.stage_basis.as_ref() != proposed_stage
+                    || original.roots.as_ref() != proposed_roots)
+            {
+                return Err(ServiceFailure::RequestConflict);
+            }
+            lease.verify()?;
+            self.reconcile_initial_creation(&original)?;
+            lease.verify()?;
+            self.reconcile_storage(request)?;
+        }
         if let Some(original) = self.original_install(request)?
             && original.phase == ServicePhase::Completed
         {
@@ -728,6 +856,9 @@ impl ServiceSupervisor {
             return Ok(original.progress(request));
         }
         let lease = self.lifecycle_lease()?;
+        // A paired capture may win after the public guard but before this worker.
+        // Recheck origin under its lease before any pre-acceptance cache write.
+        self.require_local_install_request(request)?;
         self.ensure_no_pending(request)?;
         let mut record = match self.original_install(request)? {
             Some(record) => {
@@ -752,6 +883,7 @@ impl ServiceSupervisor {
                     if !basis.matches(&registered)
                         || registered.staged_installation().is_some_and(|staged| {
                             staged.artifact_sha256 != artifact.artifact_sha256()
+                                || staged.version != artifact.manifest().version
                         })
                     {
                         // This request has admitted no artifact effect. Leave its
@@ -1032,12 +1164,14 @@ impl ServiceSupervisor {
     ) -> ServiceFuture<'_, ServiceProgress> {
         let supervisor = self.clone();
         Box::pin(async move {
+            supervisor.require_local_install_request(request)?;
             let handle = tokio::runtime::Handle::try_current()
                 .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
             let execution = supervisor.install_execution.admit()?;
             handle
                 .spawn(async move {
                     let _execution = execution;
+                    supervisor.require_local_install_request(request)?;
                     let original = supervisor
                         .original_install(request)?
                         .ok_or(ServiceFailure::UnknownRequest)?;
@@ -1052,6 +1186,7 @@ impl ServiceSupervisor {
                         Err(ServiceFailure::Pending) => return Ok(original.progress(request)),
                         Err(failure) => return Err(failure),
                     };
+                    supervisor.require_local_install_request(request)?;
                     let current = supervisor
                         .original_install(request)?
                         .ok_or(ServiceFailure::UnknownRequest)?;
@@ -1079,11 +1214,12 @@ impl ServiceSupervisor {
         record: &InstallRecord,
         lease: &Lease,
     ) -> Result<ServiceProgress, ServiceFailure> {
+        lease.verify()?;
+        self.require_local_install_request(request)?;
         // Older originals cannot acquire a new registration binding from observation.
         let Some(basis) = &record.start_basis else {
             return Ok(record.progress(request));
         };
-        lease.verify()?;
         if record.phase != ServicePhase::Starting
             || record.state != ServiceRequestState::Pending
             || self.original_install(request)?.as_ref() != Some(record)
@@ -1120,7 +1256,7 @@ impl ServiceSupervisor {
         }
         self.finish_install(request, record.clone(), &registered)
     }
-    fn run_stage_install(
+    pub(super) fn run_stage_install(
         &self,
         request: NativeRequestId,
         mut record: InstallRecord,

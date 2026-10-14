@@ -66,6 +66,59 @@ impl ServiceManager for Manager {
         Ok(())
     }
 }
+const RETAINED_CLOCK_FILE: &str = "native-test-clock";
+const RETAINED_CLOCK_LIMIT: u64 = 256;
+
+struct RetainedClock(std::path::PathBuf);
+impl ServiceClock for RetainedClock {
+    fn now(&self) -> Result<ServiceTime, ServiceFailure> {
+        use std::io::Read;
+        let metadata =
+            std::fs::symlink_metadata(&self.0).map_err(|_| ServiceFailure::StorageUnavailable)?;
+        if !metadata.file_type().is_file() || metadata.len() > RETAINED_CLOCK_LIMIT {
+            return Err(ServiceFailure::InvalidRecord);
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(&self.0)
+            .map_err(|_| ServiceFailure::StorageUnavailable)?
+            .take(RETAINED_CLOCK_LIMIT + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| ServiceFailure::StorageUnavailable)?;
+        if bytes.len() as u64 > RETAINED_CLOCK_LIMIT {
+            return Err(ServiceFailure::LimitExceeded);
+        }
+        let time: ServiceTime =
+            serde_json::from_slice(&bytes).map_err(|_| ServiceFailure::InvalidRecord)?;
+        if time.boot == [0; 32] || time.millis == 0 {
+            return Err(ServiceFailure::SupervisorUnavailable);
+        }
+        Ok(time)
+    }
+}
+
+/// Sets one fixture-owned native clock shared by the helper and real test binary.
+/// Existing fixtures retain their constant clock unless this test-only port is used.
+pub fn set_retained_clock(root: &Path, time: ServiceTime) -> Result<(), StartupFailure> {
+    use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    if time.boot == [0; 32] || time.millis == 0 {
+        return Err(StartupFailure::Account(ServiceFailure::InvalidRecord));
+    }
+    let bytes = serde_json::to_vec(&time)
+        .map_err(|_| StartupFailure::Account(ServiceFailure::InvalidRecord))?;
+    let pending = root.join("native-test-clock-pending");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&pending)
+        .map_err(|_| StartupFailure::Account(ServiceFailure::StorageUnavailable))?;
+    file.write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| StartupFailure::Account(ServiceFailure::StorageUnavailable))?;
+    std::fs::rename(pending, root.join(RETAINED_CLOCK_FILE))
+        .map_err(|_| StartupFailure::Account(ServiceFailure::StorageUnavailable))
+}
+
 struct Clock;
 impl ServiceClock for Clock {
     fn now(&self) -> Result<ServiceTime, ServiceFailure> {
@@ -138,12 +191,23 @@ fn retained_supervisor_with_observations(
     };
     let fixture = AccountServiceFixture::new(root, BuildIdentity::Development)
         .map_err(StartupFailure::Account)?;
+    let retained_clock_path = root.join(RETAINED_CLOCK_FILE);
+    let retained_clock: Option<Arc<dyn ServiceClock>> =
+        match std::fs::symlink_metadata(&retained_clock_path) {
+            Ok(_) => {
+                let clock = RetainedClock(retained_clock_path);
+                clock.now().map_err(StartupFailure::Account)?;
+                Some(Arc::new(clock))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return Err(StartupFailure::Account(ServiceFailure::StorageUnavailable)),
+        };
     let manager: Arc<dyn ServiceManager> = Arc::new(Manager(Mutex::new(SupervisorState::Running)));
     let processes = NativeServiceProcesses::current(Arc::new(FixtureInstallations))
         .map_err(StartupFailure::Account)?
         .with_manager(manager.clone())
         .with_runtime(Arc::new(RetainedRuntimeProcesses));
-    let processes = match clock {
+    let processes = match clock.or_else(|| retained_clock.clone()) {
         Some(clock) => processes.with_clock(clock),
         None => processes,
     };
@@ -154,7 +218,7 @@ fn retained_supervisor_with_observations(
     Ok(Arc::new(fixture.with_providers(
         manager,
         Arc::new(processes),
-        Arc::new(Clock),
+        retained_clock.unwrap_or_else(|| Arc::new(Clock)),
         None,
     )))
 }

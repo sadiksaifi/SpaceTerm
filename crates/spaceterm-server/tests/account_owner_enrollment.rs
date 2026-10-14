@@ -1449,3 +1449,7 @@ fn foreign_account_registration_cannot_validate_retained_owner_authority() {
 #[cfg(feature = "test-support")]
 #[path = "support/native_owner_endpoint.rs"]
 mod native_endpoint;
+
+#[cfg(feature = "test-support")]
+#[path = "support/account_native_maintenance.rs"]
+mod native_maintenance;

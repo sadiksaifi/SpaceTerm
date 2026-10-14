@@ -402,6 +402,7 @@ async fn handshake_with_machine_facts(
             spaceterm_protocol::negotiation::CAPABILITY_TERMINAL_STREAMS,
             spaceterm_protocol::negotiation::CAPABILITY_NATIVE_NOTIFICATIONS,
             spaceterm_protocol::negotiation::CAPABILITY_ACCOUNT_RUNTIME,
+            spaceterm_protocol::negotiation::CAPABILITY_REMOTE_NATIVE_LIFECYCLE,
         ],
         ..Default::default()
     };
@@ -410,6 +411,7 @@ async fn handshake_with_machine_facts(
             .capabilities
             .push(spaceterm_protocol::negotiation::CAPABILITY_SERVER_MACHINE_FACTS);
     }
+    config.capabilities.sort_unstable();
     let (client, hello) = authentication::ClientHandshake::begin(
         pin,
         principal,

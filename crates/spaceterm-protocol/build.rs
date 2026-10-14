@@ -340,6 +340,7 @@ fn repeated_limit(message: &str, field: &str) -> usize {
 fn bytes_limit(message: &str, field: &str) -> usize {
     match (message, field) {
         ("RuntimeMetadataSnapshot", "title" | "user" | "host") => 1024,
+        ("AccountRuntimeMessage", "body") => hard::MAX_ACCOUNT_RUNTIME_BYTES,
         ("SignedReceipt", "canonical_body") => 1984,
         ("RemoteEndpoint", "address") => 16,
         ("DirectoryEntryName", "value") => 255,

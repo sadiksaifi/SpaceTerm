@@ -564,7 +564,10 @@ pub(super) fn recover(
         |row| {
             let id = invalid(PairingId::new(server, counter(row, 0)?))?;
             let state = match invalid(row.get::<_, i64>(5))? {
-                0 => PairingState::Authorized,
+                0 => {
+                    invalid(super::recovery::require_nulls(row, &[6]))?;
+                    PairingState::Authorized
+                }
                 1 => PairingState::Revoked {
                     revision: StoreRevision::new(counter(row, 6)?),
                 },
@@ -621,7 +624,10 @@ pub(super) fn recover(
                 client,
             ))?;
             let state = match invalid(row.get::<_, i64>(15))? {
-                0 => EnrollmentReservationState::Reserved,
+                0 => {
+                    invalid(super::recovery::require_nulls(row, &[16, 17]))?;
+                    EnrollmentReservationState::Reserved
+                }
                 1 => {
                     let original = binding(
                         sql,
@@ -643,7 +649,10 @@ pub(super) fn recover(
                         receipt: Box::new(proof.clone()),
                     }
                 }
-                2 => EnrollmentReservationState::Invalidated,
+                2 => {
+                    invalid(super::recovery::require_nulls(row, &[16, 17]))?;
+                    EnrollmentReservationState::Invalidated
+                }
                 _ => return Err(StoreFailure::InvalidDurableState),
             };
             invalid(EnrollmentReservation::new(EnrollmentReservationParts {

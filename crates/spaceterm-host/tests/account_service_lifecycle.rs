@@ -20,6 +20,7 @@ use spaceterm_host::{
         ServiceSupervisor, ServiceTime, SupervisorState,
         test_support::{self, AccountServiceFixture},
     },
+    native_deployment::contracts::NativeRequestId,
     startup::{BuildIdentity, DesiredServerState},
 };
 use std::sync::{
@@ -77,6 +78,9 @@ impl ServiceManager for Manager {
                 None => Ok(*self.state.lock().unwrap()),
             }
         })
+    }
+    fn scoped_processes<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, Vec<u32>> {
+        Box::pin(async { Ok(Vec::new()) })
     }
     fn linger(&self) -> ServiceFuture<'_, Option<LingerState>> {
         Box::pin(async { Ok(*self.linger.lock().unwrap()) })
@@ -1877,6 +1881,106 @@ async fn native_process_composition_requires_actor_custody_and_validates_actor_a
     );
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn local_stage_rechecks_paired_capture_under_lease_before_retaining_artifact() {
+    use spaceterm_host::account_service::NativeLifecycleHandoff;
+    use std::task::Poll;
+
+    let fixture = Fixture::for_install();
+    let (key, original_artifact) =
+        signed_installation::fixture("1.0.0", 7, signed_installation::native_machine());
+    let approved = InstallationStatus {
+        installation: installation(1).installation,
+        version: original_artifact.manifest().version.clone(),
+        artifact_sha256: original_artifact.artifact_sha256(),
+    };
+    let registration = fixture
+        .account
+        .initialize_with_installation(DesiredServerState::Running, Some(approved))
+        .unwrap();
+    let store =
+        spaceterm_host::server_installation::test_support::store(&registration, key.clone())
+            .unwrap();
+    let original_id = store.stage(&original_artifact).unwrap();
+    store
+        .activate(original_id, store.snapshot().unwrap().generation, 1)
+        .unwrap();
+    let installation_before = store.snapshot().unwrap();
+    drop(store);
+
+    let supervisor = fixture.supervisor();
+    let request = supervisor.allocate_request().unwrap();
+    let (_, candidate) =
+        signed_installation::fixture("2.0.0", 7, signed_installation::native_machine());
+    let cache = fixture.account.anchor().join("stage-artifacts");
+    assert!(!cache.try_exists().unwrap());
+    let mut stage =
+        supervisor.stage_installation(request, fixture.account.confirm_install(candidate));
+
+    // One poll passes the public local-origin guard and enqueues its owned worker.
+    // The current-thread executor cannot run that worker before this task yields.
+    std::future::poll_fn(|cx| {
+        assert!(stage.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Stop)
+        .unwrap();
+    assert_eq!(capture.request, request);
+    assert_eq!(capture.action, ServiceAction::Stop);
+    let original_handoff = NativeLifecycleHandoff::Awaiting {
+        expires_at: ServiceTime {
+            boot: [3; 32],
+            millis: 30_100,
+        },
+    };
+    assert_eq!(
+        supervisor
+            .poll_runtime_lifecycle_handoff(supervisor.key(), registration.server_pin(), capture)
+            .unwrap(),
+        original_handoff
+    );
+    let captured_journal = std::fs::read(fixture.account.anchor().join("requests")).unwrap();
+    fixture.clock.0.store(200, Ordering::SeqCst);
+
+    assert_eq!(stage.await, Err(ServiceFailure::PairingRequired));
+    assert!(!cache.try_exists().unwrap());
+    assert_eq!(
+        supervisor.restore_runtime_request(request).unwrap(),
+        capture
+    );
+    assert_eq!(
+        supervisor
+            .poll_runtime_lifecycle_handoff(supervisor.key(), registration.server_pin(), capture)
+            .unwrap(),
+        original_handoff
+    );
+    assert_eq!(
+        std::fs::read(fixture.account.anchor().join("requests")).unwrap(),
+        captured_journal
+    );
+    let after = supervisor.discover().unwrap().unwrap();
+    assert_eq!(after.generation(), registration.generation());
+    assert_eq!(after.server_pin(), registration.server_pin());
+    assert_eq!(after.desired_state(), DesiredServerState::Running);
+    assert_eq!(
+        after.approved_installation(),
+        registration.approved_installation()
+    );
+    assert_eq!(after.staged_installation(), None);
+    let store = spaceterm_host::server_installation::test_support::store(&after, key).unwrap();
+    assert_eq!(store.snapshot().unwrap(), installation_before);
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+    assert_eq!(
+        *fixture.manager.state.lock().unwrap(),
+        SupervisorState::Running
+    );
+    assert_eq!(fixture.processes.assessments.load(Ordering::SeqCst), 1);
+    assert!(!fixture.processes.reserved.load(Ordering::SeqCst));
+    assert!(fixture.processes.calls.lock().unwrap().is_empty());
+}
+
 #[tokio::test(start_paused = true)]
 async fn install_reports_completed_when_launch_agent_runs_after_start_acknowledgement_failure() {
     let fixture = Fixture::for_install();
@@ -1992,4 +2096,1657 @@ async fn install_resolution_preserves_pending_startup_when_manager_observation_i
         *fixture.manager.effects.lock().unwrap(),
         ["configure", "start"]
     );
+}
+
+fn paired_custody(
+    fixture: &Fixture,
+) -> spaceterm_host::account_service::runtime_inventory::RuntimeCustody {
+    let registration = fixture.supervisor().discover().unwrap().unwrap();
+    // This key belongs only to the isolated fixture. No production credential
+    // store, native authorization or service-manager process is involved.
+    let identity = spaceterm_host::server_keys::ServerKeyStore::open(&registration)
+        .unwrap()
+        .load_identity(registration.server_pin())
+        .unwrap();
+    spaceterm_host::account_service::runtime_inventory::RuntimeCustody::begin(
+        &registration,
+        ServerEpoch::new(1),
+        identity,
+    )
+    .unwrap()
+}
+
+fn paired_authority(
+    fixture: &Fixture,
+    custody: &spaceterm_host::account_service::runtime_inventory::RuntimeCustody,
+    caller: u64,
+    pairing_number: u64,
+    device_number: u8,
+    version: u64,
+) -> spaceterm_host::account_service::RuntimeLifecycleAuthority {
+    use spaceterm_core::{
+        authority::{FieldVersion, StoreRevision},
+        identity::*,
+        pairing::{policy::*, *},
+    };
+    let server = ServerId::new(
+        fixture
+            .supervisor()
+            .discover()
+            .unwrap()
+            .unwrap()
+            .server_pin()
+            .identity,
+    );
+    let pairing = PairingId::new(server, pairing_number).unwrap();
+    let client = ClientId::new(server, caller).unwrap();
+    let stream = |number| {
+        OperationStreamId::new(
+            OperationStreamKey::new(server, number).unwrap(),
+            pairing,
+            client,
+        )
+        .unwrap()
+    };
+    let recovery = PairingRecovery::new(PairingRecoveryParts {
+        authorizations: vec![
+            PairingAuthorization::new(PairingAuthorizationParts {
+                record: PairingRecord {
+                    id: pairing,
+                    device: DeviceId::new([device_number; 16]),
+                    state: PairingState::Authorized,
+                },
+                authorization_version: FieldVersion::new(version),
+                keys: PairingKeys::new(PairingKeysParts {
+                    device_identity_public_key: [4; 32],
+                    pairing_authentication_public_key: [5; 32],
+                })
+                .unwrap(),
+                clients: vec![
+                    PairingClientStreams::new(PairingClientStreamsParts {
+                        client: ClientRecord {
+                            id: client,
+                            pairing,
+                        },
+                        ordinary: stream(1),
+                        self_revocation: stream(2),
+                    })
+                    .unwrap(),
+                ],
+                revocation_receipt: None,
+            })
+            .unwrap(),
+        ],
+        enrollments: vec![],
+    })
+    .unwrap();
+    let state = PairingSnapshot::new(
+        server,
+        ServerEpoch::new(1),
+        StoreRevision::new(1),
+        IdentityHighWater {
+            client: caller,
+            pairing: pairing_number,
+            operation_stream: 2,
+            ..Default::default()
+        },
+        recovery,
+    )
+    .unwrap();
+    let principal = PairingPolicy::default()
+        .authorize_client(&state, pairing, client)
+        .unwrap();
+    custody
+        .native_lifecycle_authority(principal, FieldVersion::new(version))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn paired_capture_storage_recovery_requires_original_key_pin_and_id_without_refreshing_intent()
+ {
+    let fixture = Fixture::new(false, true);
+    let custody = paired_custody(&fixture);
+    let authority = paired_authority(&fixture, &custody, 1, 1, 3, 1);
+    let supervisor = fixture.supervisor();
+    let key = supervisor.key();
+    let pin = supervisor.discover().unwrap().unwrap().server_pin();
+    let request = supervisor.allocate_request().unwrap();
+    test_support::fail_next_mutation_completion_sync();
+    assert_eq!(
+        supervisor.capture_runtime_request(request, ServiceAction::Stop),
+        Err(ServiceFailure::Indeterminate)
+    );
+    assert!(matches!(
+        supervisor.discover(),
+        Err(ServiceFailure::Indeterminate)
+    ));
+    let mut wrong_key = key;
+    wrong_key.account_uid += 1;
+    assert_eq!(
+        supervisor.reconcile_runtime_lifecycle_storage(wrong_key, pin, request),
+        Err(ServiceFailure::IdentityMismatch)
+    );
+    let mut wrong_pin = pin;
+    wrong_pin.public_key[0] ^= 1;
+    assert_eq!(
+        supervisor.reconcile_runtime_lifecycle_storage(key, wrong_pin, request),
+        Err(ServiceFailure::IdentityMismatch)
+    );
+    assert_eq!(
+        supervisor.reconcile_runtime_lifecycle_storage(
+            key,
+            pin,
+            NativeRequestId::new([7; 16]).unwrap()
+        ),
+        Err(ServiceFailure::UnknownRequest)
+    );
+    assert!(matches!(
+        supervisor.discover(),
+        Err(ServiceFailure::Indeterminate)
+    ));
+    fixture.clock.0.store(900, Ordering::SeqCst);
+    supervisor
+        .reconcile_runtime_lifecycle_storage(key, pin, request)
+        .unwrap();
+    let capture = supervisor.restore_runtime_request(request).unwrap();
+    assert_eq!(
+        supervisor
+            .capture_runtime_request(request, ServiceAction::Stop)
+            .unwrap(),
+        capture
+    );
+    assert_eq!(
+        supervisor
+            .resolve_runtime_lifecycle(key, pin, request)
+            .await,
+        Err(ServiceFailure::RequestConflict)
+    );
+    assert_eq!(fixture.processes.assessments.load(Ordering::SeqCst), 1);
+    let reference = supervisor
+        .assess_runtime_lifecycle(capture, &authority, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(reference.expires_at.millis, 30_100);
+    assert!(!fixture.processes.reserved.load(Ordering::SeqCst));
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn paired_assessment_lost_reply_restores_exact_original_scope_and_expiry_after_provider_recreation()
+ {
+    let fixture = Fixture::new(false, true);
+    let custody = paired_custody(&fixture);
+    let authority = paired_authority(&fixture, &custody, 1, 1, 3, 1);
+    let supervisor = fixture.supervisor();
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Stop)
+        .unwrap();
+    let original = supervisor
+        .assess_runtime_lifecycle(capture, &authority, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    fixture.clock.0.store(900, Ordering::SeqCst);
+    let recreated = fixture.supervisor();
+    assert_eq!(recreated.restore_runtime_request(request).unwrap(), capture);
+    let restored = recreated
+        .assess_runtime_lifecycle(capture, &authority, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(restored, original);
+    assert_eq!(fixture.processes.assessments.load(Ordering::SeqCst), 2);
+    assert_eq!(restored.expires_at.millis, 30_100);
+    fixture.clock.0.store(40_000, Ordering::SeqCst);
+    assert_eq!(
+        recreated
+            .restore_runtime_lifecycle_reference(capture)
+            .unwrap(),
+        original
+    );
+    assert_eq!(fixture.processes.assessments.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        recreated
+            .resolve_runtime_lifecycle(
+                recreated.key(),
+                recreated.discover().unwrap().unwrap().server_pin(),
+                request,
+            )
+            .await
+            .unwrap()
+            .phase,
+        ServicePhase::Reserved
+    );
+    assert!(!fixture.processes.reserved.load(Ordering::SeqCst));
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn paired_reference_restore_refuses_unknown_unsigned_and_local_requests() {
+    let fixture = Fixture::new(false, true);
+    let supervisor = fixture.supervisor();
+    let unsigned = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(unsigned, ServiceAction::Stop)
+        .unwrap();
+    assert_eq!(
+        supervisor.restore_runtime_lifecycle_reference(capture),
+        Err(ServiceFailure::RequestConflict)
+    );
+    let mut unknown = capture;
+    unknown.request = NativeRequestId::new([7; 16]).unwrap();
+    assert_eq!(
+        supervisor.restore_runtime_lifecycle_reference(unknown),
+        Err(ServiceFailure::UnknownRequest)
+    );
+    let local = supervisor.allocate_request().unwrap();
+    supervisor.assess(local, ServiceAction::Stop).await.unwrap();
+    let mut non_paired = capture;
+    non_paired.request = local;
+    assert_eq!(
+        supervisor.restore_runtime_lifecycle_reference(non_paired),
+        Err(ServiceFailure::RequestConflict)
+    );
+    assert_eq!(
+        supervisor.request_progress(local).unwrap().phase,
+        ServicePhase::Reserved
+    );
+    assert!(!fixture.processes.reserved.load(Ordering::SeqCst));
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn paired_acceptance_lost_reply_stays_accepted_without_native_effects_until_original_owner_resolution()
+ {
+    let fixture = Fixture::new(false, true);
+    let custody = paired_custody(&fixture);
+    let authority = paired_authority(&fixture, &custody, 1, 1, 3, 1);
+    let supervisor = fixture.supervisor();
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Stop)
+        .unwrap();
+    let reference = supervisor
+        .assess_runtime_lifecycle(capture, &authority, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    test_support::interrupt_after_phase(ServicePhase::Accepted);
+    assert_eq!(
+        supervisor
+            .admit_runtime_lifecycle(reference.clone(), &authority, fixture.processes.as_ref())
+            .await,
+        Err(ServiceFailure::SupervisorUnavailable)
+    );
+    assert!(fixture.processes.reserved.load(Ordering::SeqCst));
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+    assert_eq!(
+        supervisor.discover().unwrap().unwrap().desired_state(),
+        DesiredServerState::Running
+    );
+    let accepted = fixture
+        .supervisor()
+        .admit_runtime_lifecycle(reference, &authority, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(accepted.phase, ServicePhase::Accepted);
+    assert_eq!(accepted.request, request);
+    // Acceptance survives its original assessment expiry. Resolution must not
+    // reassess, change the action or allocate another native request.
+    fixture.clock.0.store(40_000, Ordering::SeqCst);
+    assert_eq!(
+        supervisor
+            .poll_runtime_lifecycle_handoff(
+                supervisor.key(),
+                supervisor.discover().unwrap().unwrap().server_pin(),
+                capture,
+            )
+            .unwrap(),
+        spaceterm_host::account_service::NativeLifecycleHandoff::ResolveOriginal {
+            progress: accepted.clone(),
+        }
+    );
+    assert!(fixture.processes.reserved.load(Ordering::SeqCst));
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+    let completed = fixture.supervisor().resolve(request).await.unwrap();
+    assert_eq!(
+        completed.state,
+        ServiceRequestState::Completed(ServiceOutcome::Stopped)
+    );
+    assert_eq!(completed.request_digest, accepted.request_digest);
+    assert_eq!(
+        fixture.supervisor().resolve(request).await.unwrap(),
+        completed
+    );
+    assert_eq!(fixture.processes.calls.lock().unwrap().len(), 1);
+    assert_eq!(
+        fixture
+            .supervisor()
+            .discover()
+            .unwrap()
+            .unwrap()
+            .desired_state(),
+        DesiredServerState::Stopped
+    );
+}
+
+#[tokio::test]
+async fn owner_cannot_admit_a_paired_origin_reserved_request_or_substitute_start() {
+    let fixture = Fixture::new(false, true);
+    let custody = paired_custody(&fixture);
+    let authority = paired_authority(&fixture, &custody, 1, 1, 3, 1);
+    let supervisor = fixture.supervisor();
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Restart)
+        .unwrap();
+    assert_eq!(
+        supervisor.start(request).await,
+        Err(ServiceFailure::PairingRequired)
+    );
+    let reference = supervisor
+        .assess_runtime_lifecycle(capture, &authority, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(
+        supervisor.resolve(request).await.unwrap().phase,
+        ServicePhase::Reserved
+    );
+    assert!(matches!(
+        supervisor.assess(request, ServiceAction::Restart).await,
+        Err(ServiceFailure::RequestConflict)
+    ));
+    assert!(matches!(
+        supervisor
+            .restore_assessment(request, reference.proof_digest.bytes())
+            .await,
+        Err(ServiceFailure::PairingRequired)
+    ));
+    assert_eq!(
+        supervisor.start(request).await,
+        Err(ServiceFailure::PairingRequired)
+    );
+    assert_eq!(
+        supervisor.capture_runtime_request(request, ServiceAction::Stop),
+        Err(ServiceFailure::RequestConflict)
+    );
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn paired_native_admission_rejects_every_public_scope_comparison_substitution() {
+    use spaceterm_core::operations::RequestDigest;
+    let fixture = Fixture::new(false, true);
+    let custody = paired_custody(&fixture);
+    let authority = paired_authority(&fixture, &custody, 1, 1, 3, 1);
+    let supervisor = fixture.supervisor();
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Stop)
+        .unwrap();
+    let reference = supervisor
+        .assess_runtime_lifecycle(capture, &authority, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    let mut substitutions = Vec::new();
+    let mut changed = reference.clone();
+    changed.original.action = ServiceAction::Restart;
+    substitutions.push(changed);
+    let mut changed = reference.clone();
+    changed.original.capture_digest = RequestDigest::from_bytes([91; 32]);
+    substitutions.push(changed);
+    let mut changed = reference.clone();
+    changed.original.request = supervisor.allocate_request().unwrap();
+    substitutions.push(changed);
+    let mut changed = reference.clone();
+    changed.request_digest = RequestDigest::from_bytes([92; 32]);
+    substitutions.push(changed);
+    let mut changed = reference.clone();
+    changed.proof_digest = RequestDigest::from_bytes([93; 32]);
+    substitutions.push(changed);
+    let mut changed = reference.clone();
+    changed.epoch = ServerEpoch::new(2);
+    substitutions.push(changed);
+    let mut changed = reference.clone();
+    changed.affected_sessions += 1;
+    substitutions.push(changed);
+    let mut changed = reference.clone();
+    changed.expires_at.millis += 1;
+    substitutions.push(changed);
+    let mut changed = reference.clone();
+    changed.expires_at.boot = [99; 32];
+    substitutions.push(changed);
+    for changed in substitutions {
+        assert_eq!(
+            supervisor
+                .admit_runtime_lifecycle(changed, &authority, fixture.processes.as_ref())
+                .await,
+            Err(ServiceFailure::RequestConflict)
+        );
+    }
+    assert!(!fixture.processes.reserved.load(Ordering::SeqCst));
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn paired_assessment_and_admission_reject_different_client_pairing_device_and_authorization_lifetime()
+ {
+    let fixture = Fixture::new(false, true);
+    let custody = paired_custody(&fixture);
+    let authority = paired_authority(&fixture, &custody, 1, 1, 3, 1);
+    let supervisor = fixture.supervisor();
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Stop)
+        .unwrap();
+    let reference = supervisor
+        .assess_runtime_lifecycle(capture, &authority, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    for (client, pairing, device, version) in
+        [(2, 1, 3, 1), (1, 2, 3, 1), (1, 1, 7, 1), (1, 1, 3, 2)]
+    {
+        let other = paired_authority(&fixture, &custody, client, pairing, device, version);
+        assert_eq!(
+            supervisor
+                .assess_runtime_lifecycle(capture, &other, fixture.processes.as_ref())
+                .await,
+            Err(ServiceFailure::PairingRequired)
+        );
+        assert_eq!(
+            supervisor
+                .admit_runtime_lifecycle(reference.clone(), &other, fixture.processes.as_ref())
+                .await,
+            Err(ServiceFailure::PairingRequired)
+        );
+    }
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn paired_request_original_expiry_is_not_extended_by_capture_restore_or_assessment() {
+    let fixture = Fixture::new(false, true);
+    let custody = paired_custody(&fixture);
+    let authority = paired_authority(&fixture, &custody, 1, 1, 3, 1);
+    let supervisor = fixture.supervisor();
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Stop)
+        .unwrap();
+    fixture.clock.0.store(30_000, Ordering::SeqCst);
+    let reference = supervisor
+        .assess_runtime_lifecycle(capture, &authority, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(reference.expires_at.millis, 30_100);
+    fixture.clock.0.store(30_100, Ordering::SeqCst);
+    assert_eq!(
+        fixture
+            .supervisor()
+            .capture_runtime_request(request, ServiceAction::Stop)
+            .unwrap(),
+        capture
+    );
+    assert_eq!(
+        supervisor
+            .assess_runtime_lifecycle(capture, &authority, fixture.processes.as_ref())
+            .await,
+        Err(ServiceFailure::StaleAssessment)
+    );
+    assert_eq!(
+        supervisor
+            .admit_runtime_lifecycle(reference, &authority, fixture.processes.as_ref())
+            .await,
+        Err(ServiceFailure::StaleAssessment)
+    );
+    assert_eq!(
+        supervisor.resolve(request).await.unwrap().phase,
+        ServicePhase::Reserved
+    );
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn paired_admission_rechecks_original_expiry_after_final_registration_and_lease_validation() {
+    struct CrossingClock(AtomicU64);
+    impl ServiceClock for CrossingClock {
+        fn now(&self) -> Result<ServiceTime, ServiceFailure> {
+            let call = self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(ServiceTime {
+                boot: [3; 32],
+                millis: if call < 3 { 30_099 } else { 30_100 },
+            })
+        }
+    }
+    let fixture = Fixture::new(false, true);
+    let custody = paired_custody(&fixture);
+    let authority = paired_authority(&fixture, &custody, 1, 1, 3, 1);
+    let supervisor = fixture.supervisor();
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Stop)
+        .unwrap();
+    let reference = supervisor
+        .assess_runtime_lifecycle(capture, &authority, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    let clock = Arc::new(CrossingClock(AtomicU64::new(0)));
+    let (key, _) = signed_installation::fixture("1.0.0", 7, signed_installation::native_machine());
+    let crossing = fixture.account.with_installation_trust(
+        fixture.account.with_providers(
+            fixture.manager.clone(),
+            fixture.processes.clone(),
+            clock.clone(),
+            None,
+        ),
+        key,
+    );
+    assert_eq!(
+        crossing
+            .admit_runtime_lifecycle(reference, &authority, fixture.processes.as_ref())
+            .await,
+        Err(ServiceFailure::StaleAssessment)
+    );
+    assert_eq!(clock.0.load(Ordering::SeqCst), 4);
+    assert_eq!(
+        supervisor.request_progress(request).unwrap().phase,
+        ServicePhase::Reserved
+    );
+    assert!(!fixture.processes.reserved.load(Ordering::SeqCst));
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn paired_exact_ack_preserves_only_the_original_signed_terminal_receipt_until_pressure_retirement()
+ {
+    let fixture = Fixture::new(false, true);
+    let custody = paired_custody(&fixture);
+    let authority = paired_authority(&fixture, &custody, 1, 1, 3, 1);
+    let supervisor = fixture.supervisor();
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Stop)
+        .unwrap();
+    let pin = supervisor.discover().unwrap().unwrap().server_pin();
+    let owner_token = supervisor
+        .native_lifecycle_owner_token(supervisor.key(), pin, capture)
+        .unwrap();
+    let reference = supervisor
+        .assess_runtime_lifecycle(capture, &authority, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    let reserved = supervisor.request_progress(request).unwrap();
+    assert_eq!(
+        supervisor.acknowledge_runtime_lifecycle_exact(&reserved),
+        Err(ServiceFailure::Pending)
+    );
+    let accepted = supervisor
+        .admit_runtime_lifecycle(reference.clone(), &authority, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(
+        supervisor.acknowledge_runtime_lifecycle_exact(&accepted),
+        Err(ServiceFailure::Pending)
+    );
+    for _ in 0..256 {
+        supervisor.allocate_request().unwrap();
+    }
+    assert_eq!(
+        supervisor
+            .poll_owned_runtime_lifecycle_handoff(&owner_token)
+            .unwrap(),
+        spaceterm_host::account_service::NativeLifecycleHandoff::ResolveOriginal {
+            progress: accepted.clone(),
+        }
+    );
+    assert!(fixture.processes.reserved.load(Ordering::SeqCst));
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+    let completed = supervisor.resolve(request).await.unwrap();
+    let effects = fixture.manager.effects.lock().unwrap().clone();
+    assert_eq!(
+        supervisor.acknowledge_request(request),
+        Err(ServiceFailure::PairingRequired)
+    );
+    for index in 0..3 {
+        let mut substituted = completed.clone();
+        match index {
+            0 => {
+                substituted.request_digest =
+                    spaceterm_core::operations::RequestDigest::from_bytes([9; 32])
+            }
+            1 => substituted.phase = ServicePhase::Accepted,
+            _ => substituted.state = ServiceRequestState::Completed(ServiceOutcome::Restarted),
+        }
+        assert_eq!(
+            supervisor.acknowledge_runtime_lifecycle_exact(&substituted),
+            Err(ServiceFailure::RequestConflict)
+        );
+    }
+    supervisor
+        .acknowledge_runtime_lifecycle_exact(&completed)
+        .unwrap();
+    let recreated = fixture.supervisor();
+    recreated
+        .acknowledge_runtime_lifecycle_exact(&completed)
+        .unwrap();
+    let pin = recreated.discover().unwrap().unwrap().server_pin();
+    assert_eq!(
+        recreated
+            .poll_runtime_lifecycle_handoff(recreated.key(), pin, capture)
+            .unwrap(),
+        spaceterm_host::account_service::NativeLifecycleHandoff::ResolveOriginal {
+            progress: completed.clone(),
+        }
+    );
+    let mut changed_capture = capture;
+    changed_capture.action = ServiceAction::Restart;
+    assert_eq!(
+        recreated.poll_runtime_lifecycle_handoff(recreated.key(), pin, changed_capture),
+        Err(ServiceFailure::RequestConflict)
+    );
+    assert_eq!(
+        recreated.request_progress(request),
+        Err(ServiceFailure::RequestRetired)
+    );
+    assert_eq!(
+        recreated.resolve(request).await,
+        Err(ServiceFailure::RequestRetired)
+    );
+    assert_eq!(
+        recreated.restore_runtime_request(request),
+        Err(ServiceFailure::RequestRetired)
+    );
+    assert_eq!(
+        recreated.restore_runtime_lifecycle_reference(capture),
+        Err(ServiceFailure::RequestRetired)
+    );
+    assert_eq!(
+        recreated
+            .admit_runtime_lifecycle(reference, &authority, fixture.processes.as_ref())
+            .await,
+        Err(ServiceFailure::RequestRetired)
+    );
+    assert!(recreated.retained_service_requests().unwrap().is_empty());
+    let local = recreated.allocate_request().unwrap();
+    let action = recreated
+        .assess(local, ServiceAction::Stop)
+        .await
+        .unwrap()
+        .confirm()
+        .unwrap();
+    let local_completed = recreated.stop(action).await.unwrap();
+    assert_eq!(
+        recreated.acknowledge_runtime_lifecycle_exact(&local_completed),
+        Err(ServiceFailure::PairingRequired)
+    );
+    recreated.acknowledge_request(local).unwrap();
+    let effects_after_local = fixture.manager.effects.lock().unwrap().clone();
+    for _ in 0..256 {
+        recreated.allocate_request().unwrap();
+    }
+    assert_eq!(
+        recreated.acknowledge_runtime_lifecycle_exact(&completed),
+        Err(ServiceFailure::RequestRetired)
+    );
+    assert_eq!(
+        recreated.poll_runtime_lifecycle_handoff(recreated.key(), pin, capture),
+        Err(ServiceFailure::RequestRetired)
+    );
+    assert_eq!(
+        recreated
+            .poll_owned_runtime_lifecycle_handoff(&owner_token)
+            .unwrap(),
+        spaceterm_host::account_service::NativeLifecycleHandoff::RetiredOriginal {
+            original: capture
+        }
+    );
+    assert_eq!(
+        *fixture.manager.effects.lock().unwrap(),
+        effects_after_local
+    );
+    assert!(!effects.is_empty());
+}
+
+#[tokio::test]
+async fn paired_uninstall_ack_retains_exact_signed_result_after_native_registration_is_uninstalled()
+{
+    let fixture = Fixture::new(false, true);
+    let custody = paired_custody(&fixture);
+    let authority = paired_authority(&fixture, &custody, 1, 1, 3, 1);
+    let supervisor = fixture.supervisor();
+    let pin = supervisor.discover().unwrap().unwrap().server_pin();
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Uninstall)
+        .unwrap();
+    let reference = supervisor
+        .assess_runtime_lifecycle(capture, &authority, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    let accepted = supervisor
+        .admit_runtime_lifecycle(reference, &authority, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(accepted.phase, ServicePhase::Accepted);
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+    let completed = supervisor.resolve(request).await.unwrap();
+    assert_eq!(
+        completed.state,
+        ServiceRequestState::Completed(ServiceOutcome::Uninstalled)
+    );
+    let retained = supervisor.discover().unwrap().unwrap();
+    assert!(!retained.is_installed());
+    assert_eq!(retained.desired_state(), DesiredServerState::Stopped);
+    assert_eq!(retained.server_pin(), pin);
+    supervisor
+        .acknowledge_runtime_lifecycle_exact(&completed)
+        .unwrap();
+    fixture
+        .supervisor()
+        .acknowledge_runtime_lifecycle_exact(&completed)
+        .unwrap();
+    assert_eq!(
+        supervisor.resolve(request).await,
+        Err(ServiceFailure::RequestRetired)
+    );
+}
+
+#[tokio::test]
+async fn paired_acceptance_uncertain_durability_keeps_barrier_without_effects_until_original_resolution()
+ {
+    let fixture = Fixture::new(false, true);
+    let custody = paired_custody(&fixture);
+    let authority = paired_authority(&fixture, &custody, 1, 1, 3, 1);
+    let supervisor = fixture.supervisor();
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Stop)
+        .unwrap();
+    let reference = supervisor
+        .assess_runtime_lifecycle(capture, &authority, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    let pin = supervisor.discover().unwrap().unwrap().server_pin();
+    fixture
+        .processes
+        .fail_acceptance
+        .store(true, Ordering::SeqCst);
+    assert_eq!(
+        supervisor
+            .admit_runtime_lifecycle(reference.clone(), &authority, fixture.processes.as_ref())
+            .await,
+        Err(ServiceFailure::Indeterminate)
+    );
+    assert!(matches!(
+        supervisor.discover(),
+        Err(ServiceFailure::Indeterminate)
+    ));
+    assert!(fixture.processes.reserved.load(Ordering::SeqCst));
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+    supervisor
+        .reconcile_runtime_lifecycle_storage(supervisor.key(), pin, request)
+        .unwrap();
+    assert_eq!(
+        supervisor
+            .restore_runtime_lifecycle_reference(capture)
+            .unwrap(),
+        reference
+    );
+    assert_eq!(
+        supervisor.request_progress(request).unwrap().phase,
+        ServicePhase::Accepted
+    );
+    assert!(fixture.processes.reserved.load(Ordering::SeqCst));
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+    let completed = supervisor
+        .resolve_runtime_lifecycle(supervisor.key(), pin, request)
+        .await
+        .unwrap();
+    assert_eq!(
+        completed.state,
+        ServiceRequestState::Completed(ServiceOutcome::Stopped)
+    );
+    assert!(!fixture.processes.reserved.load(Ordering::SeqCst));
+    assert_eq!(fixture.processes.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn paired_assessments_for_simultaneous_callers_preserve_exact_request_and_original_scope() {
+    let fixture = Fixture::new(false, true);
+    let custody = paired_custody(&fixture);
+    let first = paired_authority(&fixture, &custody, 1, 1, 3, 1);
+    let second = paired_authority(&fixture, &custody, 2, 2, 7, 1);
+    let supervisor = fixture.supervisor();
+    let first_request = supervisor.allocate_request().unwrap();
+    let second_request = supervisor.allocate_request().unwrap();
+    let first_capture = supervisor
+        .capture_runtime_request(first_request, ServiceAction::Stop)
+        .unwrap();
+    let second_capture = supervisor
+        .capture_runtime_request(second_request, ServiceAction::Restart)
+        .unwrap();
+    let first_ref = supervisor
+        .assess_runtime_lifecycle(first_capture, &first, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    let second_ref = supervisor
+        .assess_runtime_lifecycle(second_capture, &second, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    assert_ne!(first_ref.request_digest, second_ref.request_digest);
+    assert_ne!(first_ref.proof_digest, second_ref.proof_digest);
+    assert_eq!(
+        supervisor
+            .admit_runtime_lifecycle(first_ref.clone(), &second, fixture.processes.as_ref())
+            .await,
+        Err(ServiceFailure::PairingRequired)
+    );
+    let accepted = supervisor
+        .admit_runtime_lifecycle(second_ref.clone(), &second, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(accepted.request, second_request);
+    assert_eq!(accepted.request_digest, second_ref.request_digest);
+    assert_eq!(
+        supervisor
+            .admit_runtime_lifecycle(first_ref, &first, fixture.processes.as_ref())
+            .await,
+        Err(ServiceFailure::Pending)
+    );
+    assert_eq!(
+        supervisor.request_progress(first_request).unwrap().phase,
+        ServicePhase::Reserved
+    );
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn paired_activation_rejects_staged_artifact_changed_after_original_capture() {
+    let fixture = Fixture::new(false, true);
+    fixture.account.stage_installation(installation(2)).unwrap();
+    let custody = paired_custody(&fixture);
+    let authority = paired_authority(&fixture, &custody, 1, 1, 3, 1);
+    let supervisor = fixture.supervisor();
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(
+            request,
+            ServiceAction::Activate(installation(2).installation),
+        )
+        .unwrap();
+    let reference = supervisor
+        .assess_runtime_lifecycle(capture, &authority, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    let mut changed = installation(2);
+    changed.artifact_sha256 = [91; 32];
+    fixture.account.stage_installation(changed).unwrap();
+    assert_eq!(
+        supervisor
+            .admit_runtime_lifecycle(reference, &authority, fixture.processes.as_ref())
+            .await,
+        Err(ServiceFailure::StaleAssessment)
+    );
+    assert!(!fixture.processes.reserved.load(Ordering::SeqCst));
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn paired_origin_signature_tampering_cannot_be_resolved_or_imported_as_native_authority() {
+    let fixture = Fixture::new(false, true);
+    let custody = paired_custody(&fixture);
+    let authority = paired_authority(&fixture, &custody, 1, 1, 3, 1);
+    let supervisor = fixture.supervisor();
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Stop)
+        .unwrap();
+    supervisor
+        .assess_runtime_lifecycle(capture, &authority, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    let path = fixture.account.anchor().join("requests");
+    let mut journal: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let signature = journal["reservations"][0]["service"]["runtime_origin"]["signature"][0]
+        .as_u64()
+        .unwrap();
+    journal["reservations"][0]["service"]["runtime_origin"]["signature"][0] =
+        serde_json::json!(signature ^ 1);
+    journal.sort_all_objects();
+    std::fs::write(path, serde_json::to_vec(&journal).unwrap()).unwrap();
+    assert_eq!(
+        fixture.supervisor().resolve(request).await,
+        Err(ServiceFailure::InvalidRecord)
+    );
+    assert_eq!(
+        fixture.supervisor().request_progress(request),
+        Err(ServiceFailure::InvalidRecord)
+    );
+    assert!(!fixture.processes.reserved.load(Ordering::SeqCst));
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn original_paired_non_admission_requires_exact_pinned_signed_abort_before_owner_resolution()
+{
+    use spaceterm_host::account_service::runtime_inventory::RetainedRuntimeProcesses;
+    let fixture = Fixture::new(false, true);
+    let custody = paired_custody(&fixture);
+    let authority = paired_authority(&fixture, &custody, 1, 1, 3, 1);
+    let supervisor = fixture.supervisor();
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Stop)
+        .unwrap();
+    let reference = supervisor
+        .assess_runtime_lifecycle(capture, &authority, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    *fixture.processes.advance_on_revalidate.lock().unwrap() = Some(fixture.clock.clone());
+    fixture.processes.reject_abort.store(true, Ordering::SeqCst);
+    assert_eq!(
+        supervisor
+            .admit_runtime_lifecycle(reference, &authority, fixture.processes.as_ref())
+            .await,
+        Err(ServiceFailure::CleanupUnresolved)
+    );
+    let registration = supervisor.discover().unwrap().unwrap();
+    let server = ServerId::new(registration.server_pin().identity);
+    let (original, scope) = supervisor
+        .runtime_origin_abort_request(server, ServerEpoch::new(1))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        supervisor
+            .poll_runtime_lifecycle_handoff(supervisor.key(), registration.server_pin(), capture)
+            .unwrap(),
+        spaceterm_host::account_service::NativeLifecycleHandoff::ResolveOriginal {
+            progress: supervisor.request_progress(request).unwrap(),
+        }
+    );
+    assert!(fixture.processes.reserved.load(Ordering::SeqCst));
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+    let retained = RetainedRuntimeProcesses;
+    assert_eq!(
+        retained
+            .abort_native_origin(&registration, original, &scope)
+            .await,
+        Err(ServiceFailure::Pending)
+    );
+    fixture
+        .processes
+        .reject_abort
+        .store(false, Ordering::SeqCst);
+    fixture
+        .processes
+        .abort_reservation(&registration, &scope)
+        .await
+        .unwrap();
+    custody
+        .reservation_aborted(&registration, original, &scope)
+        .unwrap();
+    let replacement = NativeManagementRequestRef::new(
+        server,
+        original.id_bytes(),
+        spaceterm_core::operations::RequestDigest::from_bytes([97; 32]),
+    )
+    .unwrap();
+    assert_eq!(
+        retained
+            .abort_native_origin(&registration, replacement, &scope)
+            .await,
+        Err(ServiceFailure::RequestConflict)
+    );
+    let mut changed = scope.clone();
+    changed.generation += 1;
+    assert_eq!(
+        retained
+            .abort_native_origin(&registration, original, &changed)
+            .await,
+        Err(ServiceFailure::RequestConflict)
+    );
+    let owner = fixture.account.with_providers(
+        fixture.manager.clone(),
+        Arc::new(retained),
+        fixture.clock.clone(),
+        None,
+    );
+    assert_eq!(
+        owner
+            .resolve_runtime_lifecycle(owner.key(), registration.server_pin(), request)
+            .await
+            .unwrap()
+            .phase,
+        ServicePhase::Reserved
+    );
+    assert!(
+        owner
+            .runtime_origin_abort_request(server, ServerEpoch::new(1))
+            .unwrap()
+            .is_none()
+    );
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+    assert_eq!(
+        owner.discover().unwrap().unwrap().desired_state(),
+        DesiredServerState::Running
+    );
+}
+
+#[tokio::test]
+async fn uncertain_signed_abort_publication_recovers_only_original_non_admission_without_native_effects()
+ {
+    use spaceterm_host::account_service::runtime_inventory::RetainedRuntimeProcesses;
+    let fixture = Fixture::new(false, true);
+    let custody = paired_custody(&fixture);
+    let authority = paired_authority(&fixture, &custody, 1, 1, 3, 1);
+    let supervisor = fixture.supervisor();
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Stop)
+        .unwrap();
+    let reference = supervisor
+        .assess_runtime_lifecycle(capture, &authority, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    *fixture.processes.advance_on_revalidate.lock().unwrap() = Some(fixture.clock.clone());
+    fixture.processes.reject_abort.store(true, Ordering::SeqCst);
+    assert_eq!(
+        supervisor
+            .admit_runtime_lifecycle(reference, &authority, fixture.processes.as_ref())
+            .await,
+        Err(ServiceFailure::CleanupUnresolved)
+    );
+    let registration = supervisor.discover().unwrap().unwrap();
+    let server = ServerId::new(registration.server_pin().identity);
+    let (original, scope) = supervisor
+        .runtime_origin_abort_request(server, ServerEpoch::new(1))
+        .unwrap()
+        .unwrap();
+    fixture
+        .processes
+        .reject_abort
+        .store(false, Ordering::SeqCst);
+    fixture
+        .processes
+        .abort_reservation(&registration, &scope)
+        .await
+        .unwrap();
+    test_support::fail_next_mutation_completion_sync();
+    assert_eq!(
+        custody.reservation_aborted(&registration, original, &scope),
+        Err(ServiceFailure::Indeterminate)
+    );
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+    let owner = fixture.account.with_providers(
+        fixture.manager.clone(),
+        Arc::new(RetainedRuntimeProcesses),
+        fixture.clock.clone(),
+        None,
+    );
+    assert_eq!(
+        owner
+            .resolve_runtime_lifecycle(owner.key(), registration.server_pin(), request)
+            .await
+            .unwrap()
+            .phase,
+        ServicePhase::Reserved
+    );
+    assert_eq!(
+        owner.discover().unwrap().unwrap().desired_state(),
+        DesiredServerState::Running
+    );
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+    assert_eq!(
+        owner.start(request).await,
+        Err(ServiceFailure::PairingRequired)
+    );
+}
+
+#[tokio::test]
+async fn native_full_absence_needs_no_approved_executable_when_no_root_is_exempted() {
+    struct MissingApprovedCode;
+    impl spaceterm_host::account_service::ServiceInstallations for MissingApprovedCode {
+        fn approved_executable(
+            &self,
+            _: &RegisteredServer,
+        ) -> Result<std::path::PathBuf, ServiceFailure> {
+            Err(ServiceFailure::ArtifactRejected)
+        }
+        fn uninstall(&self, _: &RegisteredServer) -> Result<(), ServiceFailure> {
+            Err(ServiceFailure::ArtifactRejected)
+        }
+    }
+    let fixture = Fixture::new(false, true);
+    let registration = fixture.supervisor().discover().unwrap().unwrap();
+    let native = spaceterm_host::account_service::NativeServiceProcesses::current(Arc::new(
+        MissingApprovedCode,
+    ))
+    .unwrap()
+    .with_manager(fixture.manager.clone())
+    .with_runtime(fixture.processes.clone());
+    native.verify_absent(&registration).await.unwrap();
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn signed_clean_custody_cannot_hide_a_live_exact_owner_outside_manager_scope() {
+    use spaceterm_host::account_service::{
+        NativeServiceProcesses, runtime_inventory::RetainedRuntimeProcesses,
+    };
+    let fixture = Fixture::new(false, true);
+    let custody = paired_custody(&fixture);
+    let registration = fixture.supervisor().discover().unwrap().unwrap();
+    custody.completed_instance(&registration).unwrap();
+    assert!(RetainedRuntimeProcesses::is_clean(&registration).unwrap());
+    let native = NativeServiceProcesses::current(Arc::new(AbortInstallation))
+        .unwrap()
+        .with_manager(fixture.manager.clone())
+        .with_runtime(Arc::new(RetainedRuntimeProcesses));
+    assert_eq!(
+        native.verify_absent(&registration).await,
+        Err(ServiceFailure::CleanupUnresolved)
+    );
+    // A trusted native boot change discharges only the old signed process;
+    // fixed manager scope, clean custody and private listener checks still run.
+    struct NewBootClock([u8; 32]);
+    impl ServiceClock for NewBootClock {
+        fn now(&self) -> Result<ServiceTime, ServiceFailure> {
+            Ok(ServiceTime {
+                boot: self.0,
+                millis: 100,
+            })
+        }
+    }
+    let mut boot = ServiceTime::current().unwrap().boot;
+    boot[0] ^= 1;
+    let next_boot = native.with_clock(Arc::new(NewBootClock(boot)));
+    next_boot.verify_absent(&registration).await.unwrap();
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+struct AbortInstallation;
+impl spaceterm_host::account_service::ServiceInstallations for AbortInstallation {
+    fn approved_executable(
+        &self,
+        _: &RegisteredServer,
+    ) -> Result<std::path::PathBuf, ServiceFailure> {
+        std::env::current_exe().map_err(|_| ServiceFailure::StorageUnavailable)
+    }
+    fn uninstall(&self, _: &RegisteredServer) -> Result<(), ServiceFailure> {
+        Err(ServiceFailure::CleanupUnresolved)
+    }
+}
+struct AbortInstanceObserver {
+    live: AtomicBool,
+    observations: Mutex<Vec<(u32, u64)>>,
+}
+impl spaceterm_host::account_service::InstanceProcessObserver for AbortInstanceObserver {
+    fn verify_absent(&self, pid: u32, birth: u64, _: &[[u64; 2]]) -> Result<(), ServiceFailure> {
+        self.observations.lock().unwrap().push((pid, birth));
+        if self.live.load(Ordering::SeqCst) {
+            Err(ServiceFailure::CleanupUnresolved)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[tokio::test]
+async fn crashed_runtime_non_admission_requires_exact_native_instance_absence_before_owner_resolution()
+ {
+    use spaceterm_host::account_service::{
+        NativeServiceProcesses, runtime_inventory::RetainedRuntimeProcesses,
+    };
+    for stale_witness in [false, true] {
+        let fixture = Fixture::new(false, true);
+        let custody = paired_custody(&fixture);
+        let authority = paired_authority(&fixture, &custody, 1, 1, 3, 1);
+        let supervisor = fixture.supervisor();
+        let previous_request = supervisor.allocate_request().unwrap();
+        let request = supervisor.allocate_request().unwrap();
+        let capture = supervisor
+            .capture_runtime_request(request, ServiceAction::Stop)
+            .unwrap();
+        let reference = supervisor
+            .assess_runtime_lifecycle(capture, &authority, fixture.processes.as_ref())
+            .await
+            .unwrap();
+        *fixture.processes.advance_on_revalidate.lock().unwrap() = Some(fixture.clock.clone());
+        fixture.processes.reject_abort.store(true, Ordering::SeqCst);
+        assert_eq!(
+            supervisor
+                .admit_runtime_lifecycle(reference, &authority, fixture.processes.as_ref())
+                .await,
+            Err(ServiceFailure::CleanupUnresolved)
+        );
+        if stale_witness {
+            let registration = supervisor.discover().unwrap().unwrap();
+            let (original, mut previous_scope) = supervisor
+                .runtime_origin_abort_request(
+                    ServerId::new(registration.server_pin().identity),
+                    ServerEpoch::new(1),
+                )
+                .unwrap()
+                .unwrap();
+            previous_scope.token = [101; 32];
+            let previous = NativeManagementRequestRef::new(
+                original.server(),
+                *previous_request.as_bytes(),
+                spaceterm_core::operations::RequestDigest::from_bytes([103; 32]),
+            )
+            .unwrap();
+            // Another request's pinned signed witness grants no authority here. The
+            // native adapter must still prove this exact old instance absent.
+            custody
+                .reservation_aborted(&registration, previous, &previous_scope)
+                .unwrap();
+        }
+        let observer = Arc::new(AbortInstanceObserver {
+            live: AtomicBool::new(true),
+            observations: Mutex::new(Vec::new()),
+        });
+        let processes = NativeServiceProcesses::current(Arc::new(AbortInstallation))
+            .unwrap()
+            .with_manager(fixture.manager.clone())
+            .with_runtime(Arc::new(RetainedRuntimeProcesses))
+            .with_instance_observer(observer.clone());
+        let owner = fixture.account.with_providers(
+            fixture.manager.clone(),
+            Arc::new(processes),
+            fixture.clock.clone(),
+            None,
+        );
+        assert_eq!(
+            owner.resolve(request).await,
+            Err(ServiceFailure::CleanupUnresolved)
+        );
+        let observations = observer.observations.lock().unwrap().clone();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].0, std::process::id());
+        assert_ne!(observations[0].1, 0);
+        observer.live.store(false, Ordering::SeqCst);
+        assert_eq!(
+            owner.resolve(request).await.unwrap().phase,
+            ServicePhase::Reserved
+        );
+        assert!(fixture.manager.effects.lock().unwrap().is_empty());
+        assert_eq!(
+            owner.discover().unwrap().unwrap().desired_state(),
+            DesiredServerState::Running
+        );
+        assert_eq!(observer.observations.lock().unwrap()[1], observations[0]);
+    }
+}
+
+#[tokio::test]
+async fn paired_owner_handoff_preserves_unsigned_capture_and_uses_only_original_native_expiry() {
+    use spaceterm_host::account_service::NativeLifecycleHandoff;
+    let fixture = Fixture::new(false, true);
+    let custody = paired_custody(&fixture);
+    let authority = paired_authority(&fixture, &custody, 1, 1, 3, 1);
+    let supervisor = fixture.supervisor();
+    let pin = supervisor.discover().unwrap().unwrap().server_pin();
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Stop)
+        .unwrap();
+    let poll = || supervisor.poll_runtime_lifecycle_handoff(supervisor.key(), pin, capture);
+    assert_eq!(
+        poll().unwrap(),
+        NativeLifecycleHandoff::Awaiting {
+            expires_at: ServiceTime {
+                boot: [3; 32],
+                millis: 30_100
+            },
+        }
+    );
+    let mut wrong_key = supervisor.key();
+    wrong_key.account_uid += 1;
+    assert_eq!(
+        supervisor.poll_runtime_lifecycle_handoff(wrong_key, pin, capture),
+        Err(ServiceFailure::IdentityMismatch)
+    );
+    let mut wrong_pin = pin;
+    wrong_pin.public_key[0] ^= 1;
+    assert_eq!(
+        supervisor.poll_runtime_lifecycle_handoff(supervisor.key(), wrong_pin, capture),
+        Err(ServiceFailure::IdentityMismatch)
+    );
+    let mut changed = capture;
+    changed.action = ServiceAction::Uninstall;
+    assert_eq!(
+        supervisor.poll_runtime_lifecycle_handoff(supervisor.key(), pin, changed),
+        Err(ServiceFailure::RequestConflict)
+    );
+    fixture.clock.0.store(99, Ordering::SeqCst);
+    assert_eq!(poll(), Err(ServiceFailure::SupervisorUnavailable));
+    fixture.clock.0.store(30_099, Ordering::SeqCst);
+    assert!(matches!(
+        poll().unwrap(),
+        NativeLifecycleHandoff::Awaiting { .. }
+    ));
+    fixture.clock.0.store(30_100, Ordering::SeqCst);
+    assert_eq!(
+        poll().unwrap(),
+        NativeLifecycleHandoff::ExpiredNonAdmission {
+            original: capture,
+            progress: None,
+        }
+    );
+    let recreated = fixture.supervisor();
+    assert_eq!(recreated.restore_runtime_request(request).unwrap(), capture);
+    assert_eq!(
+        recreated
+            .capture_runtime_request(request, ServiceAction::Stop)
+            .unwrap(),
+        capture
+    );
+    assert_eq!(
+        recreated
+            .poll_runtime_lifecycle_handoff(recreated.key(), pin, capture)
+            .unwrap(),
+        NativeLifecycleHandoff::ExpiredNonAdmission {
+            original: capture,
+            progress: None
+        }
+    );
+    assert_eq!(
+        recreated
+            .assess_runtime_lifecycle(capture, &authority, fixture.processes.as_ref())
+            .await,
+        Err(ServiceFailure::StaleAssessment)
+    );
+    assert_eq!(fixture.processes.assessments.load(Ordering::SeqCst), 1);
+    assert!(!fixture.processes.reserved.load(Ordering::SeqCst));
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn paired_owner_handoff_seals_only_exact_signed_unreserved_expiry_without_effects() {
+    use spaceterm_host::account_service::NativeLifecycleHandoff;
+    let fixture = Fixture::new(false, true);
+    let custody = paired_custody(&fixture);
+    let authority = paired_authority(&fixture, &custody, 1, 1, 3, 1);
+    let supervisor = fixture.supervisor();
+    let pin = supervisor.discover().unwrap().unwrap().server_pin();
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Stop)
+        .unwrap();
+    let reference = supervisor
+        .assess_runtime_lifecycle(capture, &authority, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    assert!(matches!(
+        supervisor
+            .poll_runtime_lifecycle_handoff(supervisor.key(), pin, capture)
+            .unwrap(),
+        NativeLifecycleHandoff::Awaiting { .. }
+    ));
+    fixture
+        .clock
+        .0
+        .store(reference.expires_at.millis, Ordering::SeqCst);
+    let NativeLifecycleHandoff::ExpiredNonAdmission {
+        original,
+        progress: Some(progress),
+    } = supervisor
+        .poll_runtime_lifecycle_handoff(supervisor.key(), pin, capture)
+        .unwrap()
+    else {
+        panic!("exact signed expiry must become terminal non-admission")
+    };
+    assert_eq!(original, capture);
+    assert_eq!(progress.request, request);
+    assert_eq!(progress.request_digest, reference.request_digest);
+    assert_eq!(progress.phase, ServicePhase::Completed);
+    assert_eq!(
+        progress.state,
+        ServiceRequestState::NotApplied(ServiceFailure::StaleAssessment)
+    );
+    assert_eq!(
+        supervisor.restore_runtime_request(request).unwrap(),
+        capture
+    );
+    assert_eq!(
+        supervisor
+            .restore_runtime_lifecycle_reference(capture)
+            .unwrap(),
+        reference
+    );
+    assert_eq!(
+        supervisor
+            .admit_runtime_lifecycle(reference.clone(), &authority, fixture.processes.as_ref())
+            .await
+            .unwrap(),
+        progress
+    );
+    assert_eq!(
+        fixture
+            .supervisor()
+            .poll_runtime_lifecycle_handoff(supervisor.key(), pin, capture)
+            .unwrap(),
+        NativeLifecycleHandoff::ResolveOriginal {
+            progress: progress.clone()
+        }
+    );
+    assert_eq!(
+        supervisor
+            .resolve_runtime_lifecycle(supervisor.key(), pin, request)
+            .await
+            .unwrap(),
+        progress
+    );
+    supervisor
+        .acknowledge_runtime_lifecycle_exact(&progress)
+        .unwrap();
+    assert_eq!(
+        supervisor
+            .poll_runtime_lifecycle_handoff(supervisor.key(), pin, capture)
+            .unwrap(),
+        NativeLifecycleHandoff::ResolveOriginal { progress }
+    );
+    assert!(!fixture.processes.reserved.load(Ordering::SeqCst));
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn paired_owner_handoff_uncertain_expiry_publication_requires_original_recovery() {
+    use spaceterm_host::account_service::NativeLifecycleHandoff;
+    let fixture = Fixture::new(false, true);
+    let custody = paired_custody(&fixture);
+    let authority = paired_authority(&fixture, &custody, 1, 1, 3, 1);
+    let supervisor = fixture.supervisor();
+    let pin = supervisor.discover().unwrap().unwrap().server_pin();
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Stop)
+        .unwrap();
+    let reference = supervisor
+        .assess_runtime_lifecycle(capture, &authority, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    fixture
+        .clock
+        .0
+        .store(reference.expires_at.millis, Ordering::SeqCst);
+    test_support::fail_next_mutation_completion_sync();
+    assert_eq!(
+        supervisor.poll_runtime_lifecycle_handoff(supervisor.key(), pin, capture),
+        Err(ServiceFailure::Indeterminate)
+    );
+    let NativeLifecycleHandoff::ResolveOriginal { progress } = supervisor
+        .poll_runtime_lifecycle_handoff(supervisor.key(), pin, capture)
+        .unwrap()
+    else {
+        panic!("original durable expiry publication must be reconciled")
+    };
+    assert_eq!(progress.request_digest, reference.request_digest);
+    assert_eq!(progress.phase, ServicePhase::Completed);
+    assert_eq!(
+        progress.state,
+        ServiceRequestState::NotApplied(ServiceFailure::StaleAssessment)
+    );
+    assert_eq!(
+        supervisor
+            .restore_runtime_lifecycle_reference(capture)
+            .unwrap(),
+        reference
+    );
+    assert!(!fixture.processes.reserved.load(Ordering::SeqCst));
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn paired_owned_handoff_drains_only_prior_durable_originals_retired_by_expiry_or_pressure() {
+    use spaceterm_host::account_service::NativeLifecycleHandoff;
+    let fixture = Fixture::new(false, true);
+    let custody = paired_custody(&fixture);
+    let authority = paired_authority(&fixture, &custody, 1, 1, 3, 1);
+    let supervisor = fixture.supervisor();
+    let pin = supervisor.discover().unwrap().unwrap().server_pin();
+    let unsigned_id = supervisor.allocate_request().unwrap();
+    let unsigned = supervisor
+        .capture_runtime_request(unsigned_id, ServiceAction::Stop)
+        .unwrap();
+    let unsigned_owner = supervisor
+        .native_lifecycle_owner_token(supervisor.key(), pin, unsigned)
+        .unwrap();
+    let signed_id = supervisor.allocate_request().unwrap();
+    let signed = supervisor
+        .capture_runtime_request(signed_id, ServiceAction::Restart)
+        .unwrap();
+    let signed_owner = supervisor
+        .native_lifecycle_owner_token(supervisor.key(), pin, signed)
+        .unwrap();
+    let reference = supervisor
+        .assess_runtime_lifecycle(signed, &authority, fixture.processes.as_ref())
+        .await
+        .unwrap();
+    fixture
+        .clock
+        .0
+        .store(reference.expires_at.millis, Ordering::SeqCst);
+    // Another helper's ordinary reservation reclaims only the expired unreserved
+    // signed original. The owner never claims a particular result from its absence.
+    let other = fixture.supervisor();
+    other.allocate_request().unwrap();
+    assert_eq!(
+        other.poll_runtime_lifecycle_handoff(other.key(), pin, signed),
+        Err(ServiceFailure::RequestRetired)
+    );
+    assert_eq!(
+        other
+            .poll_owned_runtime_lifecycle_handoff(&signed_owner)
+            .unwrap(),
+        NativeLifecycleHandoff::RetiredOriginal { original: signed }
+    );
+    for _ in 0..256 {
+        other.allocate_request().unwrap();
+    }
+    assert_eq!(
+        other.poll_runtime_lifecycle_handoff(other.key(), pin, unsigned),
+        Err(ServiceFailure::RequestRetired)
+    );
+    assert_eq!(
+        other
+            .poll_owned_runtime_lifecycle_handoff(&unsigned_owner)
+            .unwrap(),
+        NativeLifecycleHandoff::RetiredOriginal { original: unsigned }
+    );
+    assert_eq!(
+        other
+            .assess_runtime_lifecycle(signed, &authority, fixture.processes.as_ref())
+            .await,
+        Err(ServiceFailure::RequestRetired)
+    );
+    assert!(!fixture.processes.reserved.load(Ordering::SeqCst));
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn paired_owned_handoff_refuses_forwarded_capture_foreign_namespace_and_replaced_native_object()
+ {
+    let fixture = Fixture::new(false, true);
+    let supervisor = fixture.supervisor();
+    let pin = supervisor.discover().unwrap().unwrap().server_pin();
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Stop)
+        .unwrap();
+    let token = supervisor
+        .native_lifecycle_owner_token(supervisor.key(), pin, capture)
+        .unwrap();
+    let mut forwarded = capture;
+    forwarded.action = ServiceAction::Restart;
+    assert!(matches!(
+        supervisor.native_lifecycle_owner_token(supervisor.key(), pin, forwarded),
+        Err(ServiceFailure::RequestConflict)
+    ));
+    forwarded = capture;
+    forwarded.request = supervisor.allocate_request().unwrap();
+    assert!(matches!(
+        supervisor.native_lifecycle_owner_token(supervisor.key(), pin, forwarded),
+        Err(ServiceFailure::RequestConflict)
+    ));
+    let mut foreign_id = *request.as_bytes();
+    foreign_id[0] ^= 1;
+    forwarded.request = NativeRequestId::new(foreign_id).unwrap();
+    assert!(matches!(
+        supervisor.native_lifecycle_owner_token(supervisor.key(), pin, forwarded),
+        Err(ServiceFailure::UnknownRequest)
+    ));
+    let foreign = Fixture::new(false, true);
+    assert_eq!(
+        foreign
+            .supervisor()
+            .poll_owned_runtime_lifecycle_handoff(&token),
+        Err(ServiceFailure::IdentityMismatch)
+    );
+    let old_anchor = fixture
+        .account
+        .anchor()
+        .with_file_name("retained-owner-old-anchor");
+    std::fs::rename(fixture.account.anchor(), &old_anchor).unwrap();
+    std::fs::create_dir(fixture.account.anchor()).unwrap();
+    assert_eq!(
+        supervisor.poll_owned_runtime_lifecycle_handoff(&token),
+        Err(ServiceFailure::UnsafeStorage)
+    );
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn paired_owned_handoff_cannot_mint_or_drain_from_uncertain_retirement_publication() {
+    let fixture = Fixture::new(false, true);
+    let supervisor = fixture.supervisor();
+    let pin = supervisor.discover().unwrap().unwrap().server_pin();
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Stop)
+        .unwrap();
+    let token = supervisor
+        .native_lifecycle_owner_token(supervisor.key(), pin, capture)
+        .unwrap();
+    for _ in 0..255 {
+        supervisor.allocate_request().unwrap();
+    }
+    test_support::fail_next_mutation_completion_sync();
+    assert_eq!(
+        supervisor.allocate_request(),
+        Err(ServiceFailure::Indeterminate)
+    );
+    assert!(matches!(
+        supervisor.native_lifecycle_owner_token(supervisor.key(), pin, capture),
+        Err(ServiceFailure::Indeterminate)
+    ));
+    assert!(matches!(
+        supervisor.poll_owned_runtime_lifecycle_handoff(&token),
+        Err(ServiceFailure::Indeterminate | ServiceFailure::RequestRetired)
+    ));
+    assert!(matches!(
+        supervisor.discover(),
+        Err(ServiceFailure::Indeterminate)
+    ));
+    assert!(!fixture.processes.reserved.load(Ordering::SeqCst));
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
 }

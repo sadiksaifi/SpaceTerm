@@ -7,12 +7,18 @@ pub(crate) mod model;
 mod pairing_port;
 mod pairing_projection;
 mod persistence;
+mod remote_native;
 pub use attachments::JournalAttachment;
 pub(crate) use controller::PaneJournalAdmission;
 pub use controller::{JournalController, JournalHealth};
 pub use pairing_projection::{
     JournalCredentialSlot, JournalEnrollment, JournalEnrollmentAcknowledgement,
     JournalEnrollmentReservation, JournalSshCapture, PairingJournalProjection,
+};
+pub use remote_native::{
+    HistoricalRemoteNativePort, MAX_REMOTE_NATIVE_BYTES, MAX_REMOTE_NATIVE_REQUESTS,
+    RemoteNativeOriginalBlocker, RemoteNativeOriginalPending, RemoteNativeOriginalState,
+    RemoteNativeRequest,
 };
 
 use crate::pairing::{
@@ -468,6 +474,8 @@ pub struct RecoveredClientState {
     attachment_incarnation_high_water: u64,
     #[serde(default, deserialize_with = "bounded::headers")]
     suppressed_attachments: Vec<JournalAttachment>,
+    #[serde(default, deserialize_with = "bounded::remote_native_requests")]
+    remote_native_requests: Vec<RemoteNativeRequest>,
 }
 impl std::fmt::Debug for RecoveredClientState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -492,6 +500,7 @@ impl RecoveredClientState {
             pairing: PairingJournalProjection::default(),
             attachment_incarnation_high_water: 0,
             suppressed_attachments: vec![],
+            remote_native_requests: vec![],
         }
     }
     pub fn pairing(&self) -> &PairingJournalProjection {
@@ -580,6 +589,42 @@ pub struct ClientJournalTransaction {
 }
 #[derive(Clone)]
 pub enum ClientJournalChange {
+    RetainRemoteNativeRequest(RemoteNativeRequest),
+    RetainRemoteNativeIntent {
+        pairing: LocalPairingKey,
+        client: ClientId,
+        request: [u8; 16],
+        original_scope: Vec<u8>,
+        intent: Vec<u8>,
+    },
+    RetainRemoteNativeAssessment {
+        pairing: LocalPairingKey,
+        client: ClientId,
+        request: [u8; 16],
+        original_scope: Vec<u8>,
+        assessment: Vec<u8>,
+    },
+    SubmitRemoteNativeRequest {
+        pairing: LocalPairingKey,
+        client: ClientId,
+        request: [u8; 16],
+        original_scope: Vec<u8>,
+        assessment: Option<Vec<u8>>,
+    },
+    CompleteRemoteNativeRequest {
+        pairing: LocalPairingKey,
+        client: ClientId,
+        request: [u8; 16],
+        original_scope: Vec<u8>,
+        result: Vec<u8>,
+    },
+    RetireRemoteNativeRequest {
+        pairing: LocalPairingKey,
+        client: ClientId,
+        request: [u8; 16],
+        original_scope: Vec<u8>,
+        result: Vec<u8>,
+    },
     RecordAttachment(JournalAttachment),
     SuppressAttachment(JournalAttachment),
     ReserveCredential(JournalCredentialSlot),
@@ -675,7 +720,7 @@ mod bounded {
         de::{Error, IgnoredAny, SeqAccess, Visitor},
     };
     use std::{fmt, marker::PhantomData};
-    fn sequence<'de, D: Deserializer<'de>, T: Deserialize<'de>, const MAX: usize>(
+    pub(super) fn sequence<'de, D: Deserializer<'de>, T: Deserialize<'de>, const MAX: usize>(
         deserializer: D,
     ) -> Result<Vec<T>, D::Error> {
         struct Bounded<T, const MAX: usize>(PhantomData<T>);
@@ -725,6 +770,11 @@ mod bounded {
     }
     pub fn request<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
         sequence::<D, u8, 65536>(d)
+    }
+    pub fn remote_native_requests<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Vec<super::RemoteNativeRequest>, D::Error> {
+        sequence::<D, super::RemoteNativeRequest, { super::MAX_REMOTE_NATIVE_REQUESTS }>(d)
     }
 }
 

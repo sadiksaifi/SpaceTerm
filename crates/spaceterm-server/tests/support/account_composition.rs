@@ -198,7 +198,7 @@ impl ServiceProcesses for ObservedProcesses {
         assessment: &'a RuntimeAssessment,
     ) -> ServiceFuture<'a, Vec<SessionCleanupObservation>> {
         Box::pin(async move {
-            if self.reserved.lock().unwrap().as_ref() != Some(assessment) {
+            if assessment.epoch != Some(self.epoch) || assessment.sessions != self.sessions {
                 return Err(ServiceFailure::StaleAssessment);
             }
             tokio::time::timeout(Duration::from_secs(10), async {
@@ -274,17 +274,23 @@ async fn retire(
             kind: Some(v2::message::Kind::AccountRuntimeRequest(
                 spaceterm_protocol::wire::common::AccountRuntimeMessage {
                     request,
+                    request_generation: request,
                     body: serde_json::to_vec(&call).unwrap(),
                 },
             )),
         })
     };
-    let original = tokio::time::timeout(Duration::from_secs(10), async {
+    let supervisor = seed.supervisor(ObservedProcesses::new(epoch, sessions.clone(), pid));
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(request, requested)
+        .unwrap();
+    let assessment = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let response = round_trip(
                 &transport,
                 &mut codec,
-                payload(1, AccountRuntimeCall::Assess),
+                payload(1, AccountRuntimeCall::AssessNativeLifecycle(capture)),
             )
             .await;
             let Payload::Major2(v2::Message {
@@ -293,80 +299,62 @@ async fn retire(
             else {
                 panic!("runtime reply");
             };
+            assert_eq!(value.request_generation, 1);
             match serde_json::from_slice::<AccountRuntimeReply>(&value.body).unwrap() {
-                AccountRuntimeReply::Assessment(original) => {
-                    assert_eq!(original.epoch, Some(epoch));
-                    assert_eq!(original.sessions, sessions);
-                    // Reserve this exact actor scope before slow host-journal I/O.
-                    // Startup metadata may legitimately stale an unreserved scope.
-                    let response = round_trip(
-                        &transport,
-                        &mut codec,
-                        payload(2, AccountRuntimeCall::Reserve(original.clone())),
-                    )
-                    .await;
-                    let Payload::Major2(v2::Message {
-                        kind: Some(v2::message::Kind::AccountRuntimeReply(value)),
-                    }) = response
-                    else {
-                        panic!("runtime reserve reply");
-                    };
-                    match serde_json::from_slice::<AccountRuntimeReply>(&value.body).unwrap() {
-                        AccountRuntimeReply::Reserved => break original,
-                        AccountRuntimeReply::Failed(
-                            ServiceFailure::Pending | ServiceFailure::StaleAssessment,
-                        ) => {
-                            tokio::time::sleep(Duration::from_millis(10)).await;
-                        }
-                        other => panic!("runtime reservation: {other:?}"),
-                    }
+                AccountRuntimeReply::NativeLifecycleAssessment(assessment) => {
+                    assert_eq!(assessment.original, capture);
+                    assert_eq!(assessment.epoch, epoch);
+                    assert_eq!(assessment.affected_sessions as usize, sessions.len());
+                    break assessment;
                 }
                 AccountRuntimeReply::Failed(
                     ServiceFailure::Pending | ServiceFailure::StaleAssessment,
                 ) => {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                other => panic!("runtime assessment: {other:?}"),
+                other => panic!("native assessment: {other:?}"),
             }
         }
     })
     .await
     .unwrap();
-    assert_eq!(original.epoch, Some(epoch));
-    assert_eq!(original.sessions, sessions);
-    let processes = ObservedProcesses::new(epoch, sessions, pid);
-    *processes.original.lock().unwrap() = Some(original.clone());
-    let supervisor = seed.supervisor(processes);
-    let request = supervisor.allocate_request().unwrap();
-    let action = supervisor
-        .assess(request, requested)
-        .await
-        .unwrap()
-        .confirm()
-        .unwrap();
+    // The owner cannot turn an assessment into accepted native work by resolving
+    // it. Explicit confirmation is sent over the original authenticated connection.
+    assert_eq!(
+        supervisor.resolve(request).await.unwrap().phase,
+        spaceterm_host::account_service::ServicePhase::Reserved
+    );
+    let confirmed = assessment.confirm();
     let response = round_trip(
         &transport,
         &mut codec,
-        payload(2, AccountRuntimeCall::Reserve(original)),
+        payload(
+            2,
+            AccountRuntimeCall::AdmitNativeLifecycle(confirmed.into_reference()),
+        ),
     )
     .await;
     let Payload::Major2(v2::Message {
         kind: Some(v2::message::Kind::AccountRuntimeReply(value)),
     }) = response
     else {
-        panic!("runtime reply");
+        panic!("native acceptance reply");
     };
+    assert_eq!(value.request_generation, 2);
+    let AccountRuntimeReply::NativeLifecycleAccepted(accepted) =
+        serde_json::from_slice::<AccountRuntimeReply>(&value.body).unwrap()
+    else {
+        panic!("native acceptance");
+    };
+    assert_eq!(accepted.request, request);
     assert_eq!(
-        serde_json::from_slice::<AccountRuntimeReply>(&value.body).unwrap(),
-        AccountRuntimeReply::Reserved
+        accepted.phase,
+        spaceterm_host::account_service::ServicePhase::Accepted
     );
+    // No server-side manager operation may wait for this server to terminate.
+    // Native advancement happens only after acceptance, without a guest client key.
     transport.close().await.unwrap();
-    let progress = match requested {
-        ServiceAction::Stop => supervisor.stop(action).await,
-        ServiceAction::Restart => supervisor.restart(action).await,
-        _ => panic!("unsupported fixture action"),
-    }
-    .unwrap();
+    let progress = supervisor.resolve(request).await.unwrap();
     assert_eq!(
         progress.phase,
         spaceterm_host::account_service::ServicePhase::Completed
@@ -1650,4 +1638,820 @@ async fn native_crash_recovery_does_not_cleanup_a_checkpointed_unrelated_orphan(
     })
     .await
     .unwrap();
+}
+
+fn native_authenticated_session(
+    fixture: &Fixture,
+    principal: authentication::Principal,
+    key: Arc<DeviceKey>,
+    major: u32,
+    generation: u64,
+) -> spaceterm_server::api::AuthenticatedSession {
+    use spaceterm_protocol::negotiation::{
+        CAPABILITY_ACCOUNT_RUNTIME, CAPABILITY_REMOTE_NATIVE_LIFECYCLE,
+    };
+    native_authenticated_codecs(
+        fixture,
+        principal,
+        key,
+        major,
+        generation,
+        vec![
+            CAPABILITY_ACCOUNT_RUNTIME,
+            CAPABILITY_REMOTE_NATIVE_LIFECYCLE,
+        ],
+        vec![
+            CAPABILITY_ACCOUNT_RUNTIME,
+            CAPABILITY_REMOTE_NATIVE_LIFECYCLE,
+        ],
+    )
+    .0
+}
+
+fn native_authenticated_codecs(
+    fixture: &Fixture,
+    principal: authentication::Principal,
+    key: Arc<DeviceKey>,
+    major: u32,
+    generation: u64,
+    client_capabilities: Vec<u32>,
+    server_capabilities: Vec<u32>,
+) -> (
+    spaceterm_server::api::AuthenticatedSession,
+    spaceterm_protocol::connection::AuthenticatedConnection,
+) {
+    let lookup = PairingProtocolLookup::new(fixture.server.handle());
+    let client_config = authentication::HandshakeConfig {
+        majors: vec![major],
+        capabilities: client_capabilities,
+        ..Default::default()
+    };
+    let server_config = authentication::HandshakeConfig {
+        majors: vec![major],
+        capabilities: server_capabilities,
+        ..Default::default()
+    };
+    let (client, hello) = authentication::ClientHandshake::begin(
+        fixture.identity.pin(),
+        principal,
+        authentication::Purpose::Ordinary,
+        client_config,
+        key,
+    )
+    .unwrap();
+    let (server, reply) = authentication::ServerHandshake::accept(
+        principal.server,
+        fixture.server.handle().snapshot().epoch().get(),
+        server_config,
+        fixture.identity.clone(),
+        &lookup,
+        &hello,
+    )
+    .unwrap();
+    let (client, proof) = client.receive_server(&reply).unwrap();
+    let (established, ready) = server.receive_device(&lookup, &proof).unwrap();
+    let authentication::Established::Ordinary(client_codec) = client.receive_ready(&ready).unwrap()
+    else {
+        panic!("ordinary native runtime client");
+    };
+    let authentication::Established::Ordinary(codec) = established else {
+        panic!("ordinary native runtime principal");
+    };
+    (
+        spaceterm_server::api::AuthenticatedSession::new(
+            codec,
+            ConnectionGeneration::new(generation),
+        )
+        .unwrap(),
+        client_codec,
+    )
+}
+
+fn native_lifecycle_payload(
+    major: u32,
+    call: spaceterm_host::account_service::runtime_inventory::AccountRuntimeCall,
+) -> Payload {
+    let message = spaceterm_protocol::wire::common::AccountRuntimeMessage {
+        request: 31,
+        request_generation: 7,
+        body: serde_json::to_vec(&call).unwrap(),
+    };
+    if major == 1 {
+        Payload::Major1(spaceterm_protocol::wire::v1::Message {
+            kind: Some(spaceterm_protocol::wire::v1::message::Kind::AccountRuntimeRequest(message)),
+        })
+    } else {
+        Payload::Major2(v2::Message {
+            kind: Some(v2::message::Kind::AccountRuntimeRequest(message)),
+        })
+    }
+}
+
+async fn native_lifecycle_call(
+    runtime: &Arc<spaceterm_server::account_runtime::AccountRuntimeProcesses>,
+    major: u32,
+    uid: u32,
+    session: &spaceterm_server::api::AuthenticatedSession,
+    call: spaceterm_host::account_service::runtime_inventory::AccountRuntimeCall,
+) -> spaceterm_host::account_service::runtime_inventory::AccountRuntimeReply {
+    let response = runtime
+        .dispatch(&native_lifecycle_payload(major, call), Some(uid), session)
+        .await
+        .unwrap()
+        .unwrap();
+    let message = match response {
+        Payload::Major1(spaceterm_protocol::wire::v1::Message {
+            kind: Some(spaceterm_protocol::wire::v1::message::Kind::AccountRuntimeReply(message)),
+        }) => message,
+        Payload::Major2(v2::Message {
+            kind: Some(v2::message::Kind::AccountRuntimeReply(message)),
+        }) => message,
+        _ => panic!("native lifecycle reply"),
+    };
+    assert_eq!(message.request, 31);
+    assert_eq!(message.request_generation, 7);
+    serde_json::from_slice(&message.body).unwrap()
+}
+
+#[tokio::test]
+async fn paired_native_dispatch_requires_actual_private_guest_uid_in_both_protocol_majors() {
+    use spaceterm_host::account_service::runtime_inventory::{
+        AccountRuntimeCall, AccountRuntimeReply,
+    };
+    for major in [1, 2] {
+        let fixture = Fixture::new_registered(true).await;
+        let (_, comparison, key) = fixture.enroll(major).await;
+        let session = native_authenticated_session(&fixture, comparison, key, major, 1);
+        let principal = session.principal;
+        let handle = fixture.server.handle();
+        handle.register(principal).await.unwrap();
+        let supervisor = test_support::supervisor(
+            fixture._root.path(),
+            ObservedProcesses::new(handle.snapshot().epoch(), Vec::new(), None),
+        )
+        .unwrap();
+        let runtime = spaceterm_server::account_runtime::AccountRuntimeProcesses::new(
+            handle.clone(),
+            supervisor.as_ref().clone(),
+            fixture.identity.clone(),
+        )
+        .unwrap();
+        let request = supervisor.allocate_request().unwrap();
+        let capture = supervisor
+            .capture_runtime_request(request, ServiceAction::Stop)
+            .unwrap();
+        let payload =
+            native_lifecycle_payload(major, AccountRuntimeCall::AssessNativeLifecycle(capture));
+        assert_eq!(
+            runtime
+                .dispatch(&payload, None, &session)
+                .await
+                .unwrap_err()
+                .class,
+            spaceterm_server::contracts::ServerFailureClass::Authentication
+        );
+        assert_eq!(
+            runtime
+                .dispatch(&payload, Some(supervisor.key().account_uid + 1), &session)
+                .await
+                .unwrap_err()
+                .class,
+            spaceterm_server::contracts::ServerFailureClass::Authentication
+        );
+        let response = native_lifecycle_call(
+            &runtime,
+            major,
+            supervisor.key().account_uid,
+            &session,
+            AccountRuntimeCall::AssessNativeLifecycle(capture),
+        )
+        .await;
+        assert!(matches!(
+            response,
+            AccountRuntimeReply::NativeLifecycleAssessment(_)
+        ));
+        assert_eq!(
+            supervisor.request_progress(request).unwrap().phase,
+            spaceterm_host::account_service::ServicePhase::Reserved
+        );
+        handle
+            .shutdown(TrustedShutdownRequest {
+                authority: fixture.stop,
+            })
+            .await
+            .unwrap();
+        fixture.server.wait().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn paired_native_dispatch_does_not_admit_a_disconnected_or_different_authenticated_caller() {
+    use spaceterm_host::account_service::runtime_inventory::{
+        AccountRuntimeCall, AccountRuntimeReply,
+    };
+    let fixture = Fixture::new_registered(true).await;
+    let (_, comparison, key) = fixture.enroll(2).await;
+    let (_, other_comparison, other_key) = fixture.enroll_with_seed(2, 81).await;
+    let session = native_authenticated_session(&fixture, comparison, key, 2, 1);
+    let principal = session.principal;
+    let other_session = native_authenticated_session(&fixture, other_comparison, other_key, 2, 1);
+    let other = other_session.principal;
+    let handle = fixture.server.handle();
+    handle.register(principal).await.unwrap();
+    handle.register(other).await.unwrap();
+    let supervisor = test_support::supervisor(
+        fixture._root.path(),
+        ObservedProcesses::new(handle.snapshot().epoch(), Vec::new(), None),
+    )
+    .unwrap();
+    let runtime = spaceterm_server::account_runtime::AccountRuntimeProcesses::new(
+        handle.clone(),
+        supervisor.as_ref().clone(),
+        fixture.identity.clone(),
+    )
+    .unwrap();
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Stop)
+        .unwrap();
+    let AccountRuntimeReply::NativeLifecycleAssessment(reference) = native_lifecycle_call(
+        &runtime,
+        2,
+        supervisor.key().account_uid,
+        &session,
+        AccountRuntimeCall::AssessNativeLifecycle(capture),
+    )
+    .await
+    else {
+        panic!("native assessment");
+    };
+    assert_eq!(
+        native_lifecycle_call(
+            &runtime,
+            2,
+            supervisor.key().account_uid,
+            &other_session,
+            AccountRuntimeCall::AdmitNativeLifecycle(reference.clone())
+        )
+        .await,
+        AccountRuntimeReply::Failed(ServiceFailure::PairingRequired)
+    );
+    handle.disconnect(principal).await.unwrap();
+    assert!(matches!(
+        native_lifecycle_call(
+            &runtime,
+            2,
+            supervisor.key().account_uid,
+            &session,
+            AccountRuntimeCall::AdmitNativeLifecycle(reference)
+        )
+        .await,
+        AccountRuntimeReply::Failed(_)
+    ));
+    assert_eq!(
+        supervisor.resolve(request).await.unwrap().phase,
+        spaceterm_host::account_service::ServicePhase::Reserved
+    );
+    assert_eq!(
+        supervisor.discover().unwrap().unwrap().desired_state(),
+        DesiredServerState::Running
+    );
+    handle
+        .shutdown(TrustedShutdownRequest {
+            authority: fixture.stop,
+        })
+        .await
+        .unwrap();
+    fixture.server.wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_retirement_requires_full_original_assessment_not_only_server_and_epoch() {
+    use spaceterm_host::account_service::{
+        ServicePhase as NativePhase,
+        runtime_inventory::{AccountRuntimeCall, AccountRuntimeReply},
+    };
+    let fixture = Fixture::new_registered(true).await;
+    let (_, comparison, key) = fixture.enroll(2).await;
+    let session = native_authenticated_session(&fixture, comparison, key, 2, 1);
+    let principal = session.principal;
+    let handle = fixture.server.handle();
+    handle.register(principal).await.unwrap();
+    let epoch = handle.snapshot().epoch();
+    let supervisor = test_support::supervisor(
+        fixture._root.path(),
+        ObservedProcesses::new(epoch, Vec::new(), None),
+    )
+    .unwrap();
+    let runtime = spaceterm_server::account_runtime::AccountRuntimeProcesses::new(
+        handle.clone(),
+        supervisor.as_ref().clone(),
+        fixture.identity.clone(),
+    )
+    .unwrap();
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Stop)
+        .unwrap();
+    let AccountRuntimeReply::NativeLifecycleAssessment(reference) = native_lifecycle_call(
+        &runtime,
+        2,
+        supervisor.key().account_uid,
+        &session,
+        AccountRuntimeCall::AssessNativeLifecycle(capture),
+    )
+    .await
+    else {
+        panic!("native assessment");
+    };
+    // This second scope really was issued by the actor for the same Server,
+    // epoch, generation and Sessions. Its token still belongs to another scope.
+    let replacement = handle.assess_account_runtime().await.unwrap();
+    let AccountRuntimeReply::NativeLifecycleAccepted(accepted) = native_lifecycle_call(
+        &runtime,
+        2,
+        supervisor.key().account_uid,
+        &session,
+        AccountRuntimeCall::AdmitNativeLifecycle(reference),
+    )
+    .await
+    else {
+        panic!("native acceptance");
+    };
+    spaceterm_host::account_service::test_support::interrupt_after_phase(
+        NativePhase::IntentCommitted,
+    );
+    assert_eq!(
+        supervisor.resolve(request).await,
+        Err(ServiceFailure::SupervisorUnavailable)
+    );
+    let registration = supervisor.discover().unwrap().unwrap();
+    let original = supervisor
+        .retirement_runtime_assessment(handle.snapshot().state().server, epoch)
+        .unwrap();
+    assert_eq!(replacement.server, original.server);
+    assert_eq!(replacement.epoch, original.epoch);
+    assert_eq!(replacement.generation, original.generation);
+    assert_eq!(replacement.sessions, original.sessions);
+    assert_ne!(replacement.token, original.token);
+    let comparison = NativeManagementRequestRef::new(
+        original.server,
+        *request.as_bytes(),
+        accepted.request_digest,
+    )
+    .unwrap();
+    assert_eq!(
+        runtime
+            .quiesce(
+                &registration,
+                comparison,
+                NativeRetirementAction::Stop,
+                &replacement
+            )
+            .await,
+        Err(ServiceFailure::RequestConflict)
+    );
+    let mut changed_generation = original.clone();
+    changed_generation.generation += 1;
+    assert_eq!(
+        runtime
+            .quiesce(
+                &registration,
+                comparison,
+                NativeRetirementAction::Stop,
+                &changed_generation
+            )
+            .await,
+        Err(ServiceFailure::RequestConflict)
+    );
+    let mut changed_sessions = original.clone();
+    changed_sessions.sessions.push(SessionKey {
+        epoch,
+        pane: PaneId::new(original.server, 1).unwrap(),
+        generation: SessionGeneration::new(1),
+    });
+    assert_eq!(
+        runtime
+            .quiesce(
+                &registration,
+                comparison,
+                NativeRetirementAction::Stop,
+                &changed_sessions
+            )
+            .await,
+        Err(ServiceFailure::RequestConflict)
+    );
+    runtime.start_original_retirement().await.unwrap();
+    runtime.finish_retirements().await.unwrap();
+    fixture.server.wait().await.unwrap();
+    assert_eq!(
+        supervisor.resolve(request).await.unwrap().state,
+        spaceterm_host::account_service::ServiceRequestState::Completed(
+            spaceterm_host::account_service::ServiceOutcome::Stopped
+        )
+    );
+}
+
+#[tokio::test]
+async fn native_non_admission_monitor_retires_only_original_actor_barrier_and_keeps_reserved_origin_unaccepted()
+ {
+    use spaceterm_host::account_service::{
+        ServicePhase as NativePhase,
+        runtime_inventory::{AccountRuntimeCall, AccountRuntimeReply, RetainedRuntimeProcesses},
+    };
+    let fixture = Fixture::new_registered(true).await;
+    let (_, comparison, key) = fixture.enroll(2).await;
+    let session = native_authenticated_session(&fixture, comparison, key, 2, 1);
+    let principal = session.principal;
+    let handle = fixture.server.handle();
+    handle.register(principal).await.unwrap();
+    let supervisor =
+        test_support::supervisor(fixture._root.path(), Arc::new(RetainedRuntimeProcesses)).unwrap();
+    let runtime = spaceterm_server::account_runtime::AccountRuntimeProcesses::new(
+        handle.clone(),
+        supervisor.as_ref().clone(),
+        fixture.identity.clone(),
+    )
+    .unwrap();
+    let request = supervisor.allocate_request().unwrap();
+    let capture = supervisor
+        .capture_runtime_request(request, ServiceAction::Stop)
+        .unwrap();
+    let AccountRuntimeReply::NativeLifecycleAssessment(reference) = native_lifecycle_call(
+        &runtime,
+        2,
+        supervisor.key().account_uid,
+        &session,
+        AccountRuntimeCall::AssessNativeLifecycle(capture),
+    )
+    .await
+    else {
+        panic!("native assessment");
+    };
+    // Interrupt before Accepted. The durable reserving record is exactly the
+    // crash state that the original native owner, not a new caller, must resolve.
+    spaceterm_host::account_service::test_support::interrupt_after_phase(NativePhase::Reserved);
+    assert_eq!(
+        native_lifecycle_call(
+            &runtime,
+            2,
+            supervisor.key().account_uid,
+            &session,
+            AccountRuntimeCall::AdmitNativeLifecycle(reference.clone())
+        )
+        .await,
+        AccountRuntimeReply::Failed(ServiceFailure::SupervisorUnavailable)
+    );
+    assert_eq!(
+        supervisor.resolve(request).await,
+        Err(ServiceFailure::Pending)
+    );
+    let server = handle.snapshot().state().server;
+    let (original, scope) = supervisor
+        .runtime_origin_abort_request(server, handle.snapshot().epoch())
+        .unwrap()
+        .unwrap();
+    // The uncontrolled runtime boundary models a crash after actor reservation
+    // but before its journal publication. It does not perform a native effect.
+    handle.reserve_account_runtime(scope.clone()).await.unwrap();
+    assert!(handle.assess_account_runtime().await.is_err());
+    runtime.resolve_original_non_admission().await.unwrap();
+    let registration = supervisor.discover().unwrap().unwrap();
+    assert_eq!(
+        RetainedRuntimeProcesses
+            .abort_native_origin(&registration, original, &scope)
+            .await,
+        Ok(())
+    );
+    assert_eq!(
+        supervisor.resolve(request).await.unwrap().phase,
+        NativePhase::Reserved
+    );
+    assert_eq!(
+        handle
+            .reserve_account_runtime(scope)
+            .await
+            .unwrap_err()
+            .class,
+        spaceterm_server::contracts::ServerFailureClass::StaleAuthority
+    );
+    assert_eq!(
+        native_lifecycle_call(
+            &runtime,
+            2,
+            supervisor.key().account_uid,
+            &session,
+            AccountRuntimeCall::AdmitNativeLifecycle(reference)
+        )
+        .await,
+        AccountRuntimeReply::Failed(ServiceFailure::StaleAssessment)
+    );
+    assert_eq!(
+        supervisor.request_progress(request).unwrap().phase,
+        NativePhase::Reserved
+    );
+    assert_eq!(
+        supervisor.discover().unwrap().unwrap().desired_state(),
+        DesiredServerState::Running
+    );
+    let fresh = handle.assess_account_runtime().await.unwrap();
+    runtime.resolve_original_non_admission().await.unwrap();
+    handle.reserve_account_runtime(fresh.clone()).await.unwrap();
+    handle.abort_account_runtime(fresh).await.unwrap();
+    handle
+        .shutdown(TrustedShutdownRequest {
+            authority: fixture.stop,
+        })
+        .await
+        .unwrap();
+    fixture.server.wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn production_monitor_completes_original_non_admission_without_a_guest_client_key_or_native_effect()
+ {
+    use spaceterm_host::account_service::{
+        ServicePhase as NativePhase,
+        runtime_inventory::{AccountRuntimeCall, AccountRuntimeReply, RetainedRuntimeProcesses},
+    };
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let seed = Seed::new().await;
+        let startup_supervisor = seed.supervisor(Arc::new(test_support::StartupAbsence));
+        let startup = AccountStartup::admit(&startup_supervisor).unwrap();
+        let server = RecoveredAccountServer::recover(startup_supervisor, startup, seed.launch())
+            .await
+            .unwrap();
+        let handle = server.handle();
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let stop = shutdown.clone();
+        let run = tokio::spawn(server.run_until(async move { stop.notified().await }));
+        while handle.phase() != ServicePhase::Serving {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let transport = IpcTransport::connect(
+            &seed.registration.endpoint().unwrap(),
+            MessageLimit::envelope(),
+        )
+        .await
+        .unwrap();
+        let mut codec = handshake(
+            &transport,
+            seed.identity.pin(),
+            seed.principal,
+            seed.key.clone(),
+            2,
+        )
+        .await;
+        let supervisor = seed.supervisor(Arc::new(RetainedRuntimeProcesses));
+        let request = supervisor.allocate_request().unwrap();
+        let capture = supervisor
+            .capture_runtime_request(request, ServiceAction::Stop)
+            .unwrap();
+        let reply = round_trip(
+            &transport,
+            &mut codec,
+            native_lifecycle_payload(2, AccountRuntimeCall::AssessNativeLifecycle(capture)),
+        )
+        .await;
+        let Payload::Major2(v2::Message {
+            kind: Some(v2::message::Kind::AccountRuntimeReply(reply)),
+        }) = reply
+        else {
+            panic!("native assessment reply");
+        };
+        let AccountRuntimeReply::NativeLifecycleAssessment(reference) =
+            serde_json::from_slice::<AccountRuntimeReply>(&reply.body).unwrap()
+        else {
+            panic!("native assessment");
+        };
+        spaceterm_host::account_service::test_support::interrupt_after_phase(NativePhase::Reserved);
+        let reply = round_trip(
+            &transport,
+            &mut codec,
+            native_lifecycle_payload(2, AccountRuntimeCall::AdmitNativeLifecycle(reference)),
+        )
+        .await;
+        let Payload::Major2(v2::Message {
+            kind: Some(v2::message::Kind::AccountRuntimeReply(reply)),
+        }) = reply
+        else {
+            panic!("native admission reply");
+        };
+        assert_eq!(
+            serde_json::from_slice::<AccountRuntimeReply>(&reply.body).unwrap(),
+            AccountRuntimeReply::Failed(ServiceFailure::SupervisorUnavailable)
+        );
+        transport.close().await.unwrap();
+        // From this point only the original native journal and pinned signed
+        // custody are available. The guest owner has no Client credential.
+        let mut pending = false;
+        loop {
+            match supervisor.resolve(request).await {
+                Ok(progress) => {
+                    assert_eq!(progress.phase, NativePhase::Reserved);
+                    break;
+                }
+                Err(ServiceFailure::Pending) => {
+                    pending = true;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                other => panic!("original non-admission: {other:?}"),
+            }
+        }
+        assert!(pending);
+        assert_eq!(
+            supervisor.discover().unwrap().unwrap().desired_state(),
+            DesiredServerState::Running
+        );
+        assert!(!seed.root.path().join("shell-pid").exists());
+        assert!(handle.assess_account_runtime().await.is_ok());
+        shutdown.notify_one();
+        let report = run.await.unwrap().unwrap();
+        assert!(
+            report.cleanup_confirmed && report.listeners_closed && report.started_writes_finished
+        );
+    })
+    .await
+    .unwrap();
+}
+
+#[path = "account_native_lifecycle.rs"]
+mod native_lifecycle_wire;
+
+#[path = "account_native_stage.rs"]
+mod native_stage_wire;
+
+#[tokio::test]
+async fn paired_native_receiver_requires_both_negotiated_capabilities_in_both_majors_before_dispatch()
+ {
+    use spaceterm_host::account_service::{
+        NativeLifecycleAssessmentRef, NativeStageAssessmentRef, NativeStageRequest, ServiceTime,
+        runtime_inventory::{AccountRuntimeCall, AccountRuntimeReply},
+    };
+    use spaceterm_protocol::negotiation::{
+        CAPABILITY_ACCOUNT_RUNTIME as ACCOUNT, CAPABILITY_REMOTE_NATIVE_LIFECYCLE as NATIVE,
+    };
+    use spaceterm_server::contracts::ServerFailureClass;
+    for major in [1, 2] {
+        let fixture = Fixture::new_registered(true).await;
+        let (_, comparison, key) = fixture.enroll(major).await;
+        let handle = fixture.server.handle();
+        let native_account =
+            spaceterm_host::account_service::test_support::AccountServiceFixture::new(
+                fixture._root.path(),
+                BuildIdentity::Development,
+            )
+            .unwrap();
+        let supervisor = test_support::supervisor(
+            fixture._root.path(),
+            ObservedProcesses::new(handle.snapshot().epoch(), Vec::new(), None),
+        )
+        .unwrap();
+        let runtime = spaceterm_server::account_runtime::AccountRuntimeProcesses::new(
+            handle.clone(),
+            supervisor.as_ref().clone(),
+            fixture.identity.clone(),
+        )
+        .unwrap();
+        let request = supervisor.allocate_request().unwrap();
+        let capture = supervisor
+            .capture_runtime_request(request, ServiceAction::Stop)
+            .unwrap();
+        let reference = NativeLifecycleAssessmentRef {
+            original: capture,
+            request_digest: RequestDigest::from_bytes([30; 32]),
+            proof_digest: RequestDigest::from_bytes([31; 32]),
+            epoch: handle.snapshot().epoch(),
+            affected_sessions: 0,
+            expires_at: ServiceTime {
+                boot: [1; 32],
+                millis: 30_100,
+            },
+        };
+        let stage = NativeStageRequest {
+            request,
+            artifact_sha256: [32; 32],
+            capture_digest: RequestDigest::from_bytes([33; 32]),
+        };
+        let stage_reference = NativeStageAssessmentRef {
+            original: stage,
+            request_digest: RequestDigest::from_bytes([34; 32]),
+            proof_digest: RequestDigest::from_bytes([35; 32]),
+            epoch: handle.snapshot().epoch(),
+            expires_at: reference.expires_at,
+        };
+        for (index, (client_caps, server_caps)) in [
+            (vec![ACCOUNT], vec![ACCOUNT, NATIVE]),
+            (vec![ACCOUNT, NATIVE], vec![ACCOUNT]),
+            (vec![NATIVE], vec![ACCOUNT, NATIVE]),
+            (vec![ACCOUNT, NATIVE], vec![NATIVE]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (mut session, mut client_codec) = native_authenticated_codecs(
+                &fixture,
+                comparison,
+                key.clone(),
+                major,
+                index as u64 + 1,
+                client_caps,
+                server_caps,
+            );
+            handle.register(session.principal).await.unwrap();
+            let before = fs::read(native_account.anchor().join("requests")).unwrap();
+            let before_revision = handle.snapshot().state().revision;
+            for call in [
+                AccountRuntimeCall::AssessNativeLifecycle(capture),
+                AccountRuntimeCall::AdmitNativeLifecycle(reference.clone()),
+                AccountRuntimeCall::AssessNativeStage(stage),
+                AccountRuntimeCall::AdmitNativeStage(stage_reference.clone()),
+            ] {
+                let payload = native_lifecycle_payload(major, call);
+                let received = if session.codec.capabilities().contains(&ACCOUNT) {
+                    // The old 507 envelope grammar admits these opaque bodies.
+                    // The native receiver must independently require negotiated 514.
+                    let frame = client_codec.encode(&payload).unwrap();
+                    session.codec.decode(&frame).unwrap()
+                } else {
+                    assert!(client_codec.encode(&payload).is_err());
+                    // Exercise the receiver's own gate even when the outer codec
+                    // would already refuse an unnegotiated 507 envelope.
+                    payload
+                };
+                assert_eq!(
+                    runtime
+                        .dispatch(&received, Some(supervisor.key().account_uid), &session)
+                        .await
+                        .unwrap_err()
+                        .class,
+                    ServerFailureClass::ScopeMismatch
+                );
+                assert_eq!(
+                    fs::read(native_account.anchor().join("requests")).unwrap(),
+                    before
+                );
+                assert_eq!(handle.snapshot().state().revision, before_revision);
+                assert_eq!(
+                    supervisor.restore_runtime_request(request).unwrap(),
+                    capture
+                );
+                assert_eq!(
+                    supervisor.restore_runtime_lifecycle_reference(capture),
+                    Err(ServiceFailure::RequestConflict)
+                );
+            }
+        }
+        let (mut session, mut client_codec) = native_authenticated_codecs(
+            &fixture,
+            comparison,
+            key,
+            major,
+            5,
+            vec![ACCOUNT, NATIVE],
+            vec![ACCOUNT, NATIVE],
+        );
+        handle.register(session.principal).await.unwrap();
+        let payload =
+            native_lifecycle_payload(major, AccountRuntimeCall::AssessNativeLifecycle(capture));
+        let received = session
+            .codec
+            .decode(&client_codec.encode(&payload).unwrap())
+            .unwrap();
+        let response = runtime
+            .dispatch(&received, Some(supervisor.key().account_uid), &session)
+            .await
+            .unwrap()
+            .unwrap();
+        let reply = match response {
+            Payload::Major1(spaceterm_protocol::wire::v1::Message {
+                kind: Some(spaceterm_protocol::wire::v1::message::Kind::AccountRuntimeReply(reply)),
+            })
+            | Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::AccountRuntimeReply(reply)),
+            }) => reply,
+            _ => panic!("exact native assessment reply"),
+        };
+        assert_eq!(reply.request, 31);
+        assert_eq!(reply.request_generation, 7);
+        assert!(matches!(
+            serde_json::from_slice::<AccountRuntimeReply>(&reply.body).unwrap(),
+            AccountRuntimeReply::NativeLifecycleAssessment(_)
+        ));
+        assert_eq!(
+            supervisor.request_progress(request).unwrap().phase,
+            spaceterm_host::account_service::ServicePhase::Reserved
+        );
+        assert_eq!(
+            supervisor.discover().unwrap().unwrap().desired_state(),
+            DesiredServerState::Running
+        );
+        handle
+            .shutdown(TrustedShutdownRequest {
+                authority: fixture.stop,
+            })
+            .await
+            .unwrap();
+        fixture.server.wait().await.unwrap();
+    }
 }

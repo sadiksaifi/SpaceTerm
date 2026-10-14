@@ -77,6 +77,9 @@ pub const CAPABILITY_NATIVE_PASTE_CORRELATION: u32 = 520_011;
 pub const CAPABILITY_ENHANCED_COPY: u32 = 520_012;
 /// Render-only owning-server platform, permission, and bind-scope comparisons.
 pub const CAPABILITY_SERVER_MACHINE_FACTS: u32 = 520_013;
+/// Exact paired admission of native lifecycle requests through the owning account.
+/// Older account-runtime implementations cannot authorize this operation.
+pub const CAPABILITY_REMOTE_NATIVE_LIFECYCLE: u32 = 520_014;
 
 /// Additive envelope registration: tag, authenticated capability, permitted directions.
 pub const EXTENSION_ENVELOPES: &[(u32, u32, bool, bool)] = &[

@@ -311,6 +311,69 @@ pub struct ServerHandle {
         watch::Receiver<Option<spaceterm_core::pairing::policy::PairingSnapshot>>,
 }
 impl ServerHandle {
+    /// Revalidates the actual authenticated connection against the actor's durable
+    /// PairingAuthorization. UID and public pairing comparisons grant no authority.
+    pub async fn authorize_account_lifecycle(
+        &self,
+        principal: VerifiedPrincipal,
+    ) -> Result<
+        (
+            spaceterm_core::pairing::policy::PairingPrincipal,
+            FieldVersion,
+        ),
+        ServerFailure,
+    > {
+        let (reply, result) = oneshot::channel();
+        self.lifecycle
+            .send(LifecycleRequest::NativeAuthorize { principal, reply })
+            .await
+            .map_err(|_| failure(ServerFailureClass::RecoveryRequired))?;
+        receive(result).await
+    }
+    /// Revalidates the actual paired connection and current authorization, then
+    /// publishes signed native Stage Accepted in the same serialized actor turn.
+    /// Stage neither reserves nor pauses Terminal Sessions.
+    pub async fn admit_account_stage(
+        &self,
+        principal: VerifiedPrincipal,
+        admission: spaceterm_host::account_service::RuntimeStageAdmission,
+    ) -> Result<
+        spaceterm_host::account_service::ServiceProgress,
+        spaceterm_host::account_service::ServiceFailure,
+    > {
+        let (reply, result) = oneshot::channel();
+        self.lifecycle
+            .send(LifecycleRequest::NativeStageAdmission {
+                principal,
+                admission: Box::new(admission),
+                reply,
+            })
+            .await
+            .map_err(|_| spaceterm_host::account_service::ServiceFailure::Indeterminate)?;
+        result
+            .await
+            .map_err(|_| spaceterm_host::account_service::ServiceFailure::Indeterminate)?
+    }
+    /// Atomically rechecks pairing, connection and exact runtime scope before the
+    /// native journal can publish Accepted. The reservation blocks pairing writes.
+    pub async fn reserve_paired_account_runtime(
+        &self,
+        principal: VerifiedPrincipal,
+        authorization_version: FieldVersion,
+        assessment: spaceterm_host::account_service::RuntimeAssessment,
+    ) -> Result<(), ServerFailure> {
+        let (reply, result) = oneshot::channel();
+        self.lifecycle
+            .send(LifecycleRequest::NativePairedReserve {
+                principal,
+                authorization_version,
+                assessment,
+                reply,
+            })
+            .await
+            .map_err(|_| failure(ServerFailureClass::RecoveryRequired))?;
+        receive(result).await
+    }
     /// Obtains exact content-free scope for native account lifecycle confirmation.
     pub async fn assess_account_runtime(
         &self,

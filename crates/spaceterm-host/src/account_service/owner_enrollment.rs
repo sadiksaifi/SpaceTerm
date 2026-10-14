@@ -208,6 +208,9 @@ impl ServiceSupervisor {
         self.mutate_request(request, |journal, index| {
             if journal.reservations[index].service.is_some()
                 || journal.reservations[index].install.is_some()
+                || journal.reservations[index].runtime_intent.is_some()
+                || journal.reservations[index].stopped_native.is_some()
+                || journal.reservations[index].running_stage.is_some()
             {
                 return Err(ServiceFailure::RequestConflict);
             }

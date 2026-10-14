@@ -221,10 +221,9 @@ pub struct RetryState {
 pub struct ConnectionCapabilities(u16);
 impl ConnectionCapabilities {
     pub const NONE: Self = Self(0);
-    pub(crate) fn from_advertisement(values: &[u32]) -> Self {
+    const SUPPORTED: &[u32] = {
         use spaceterm_protocol::negotiation::*;
-        let mut flags = 0;
-        for (index, capability) in [
+        &[
             CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
             CAPABILITY_CANONICAL_DOMAIN,
             CAPABILITY_SERVER_GIT,
@@ -238,35 +237,28 @@ impl ConnectionCapabilities {
             CAPABILITY_NATIVE_PASTE_CORRELATION,
             CAPABILITY_ENHANCED_COPY,
             CAPABILITY_SERVER_MACHINE_FACTS,
+            CAPABILITY_ACCOUNT_RUNTIME,
+            CAPABILITY_REMOTE_NATIVE_LIFECYCLE,
         ]
-        .into_iter()
-        .enumerate()
-        {
-            if values.contains(&capability) {
+    };
+    pub(crate) fn optional_advertisement() -> &'static [u32] {
+        // The first two capabilities are the registry's required domain baseline.
+        &Self::SUPPORTED[2..]
+    }
+    pub(crate) fn from_advertisement(values: &[u32]) -> Self {
+        let mut flags = 0;
+        for (index, capability) in Self::SUPPORTED.iter().enumerate() {
+            if values.contains(capability) {
                 flags |= 1 << index;
             }
         }
         Self(flags)
     }
     pub fn supports(self, capability: u32) -> bool {
-        use spaceterm_protocol::negotiation::*;
-        let index = match capability {
-            CAPABILITY_NORMALIZED_CREATION_TOPOLOGY => 0,
-            CAPABILITY_CANONICAL_DOMAIN => 1,
-            CAPABILITY_SERVER_GIT => 2,
-            CAPABILITY_SERVER_DIRECTORIES => 3,
-            CAPABILITY_ORGANIZATION_COMPARISONS => 4,
-            CAPABILITY_TERMINAL_STREAMS => 5,
-            CAPABILITY_NATIVE_NOTIFICATIONS => 6,
-            CAPABILITY_APPLICATION_MOUSE => 7,
-            CAPABILITY_RUNTIME_METADATA => 8,
-            CAPABILITY_RUNTIME_METADATA_FRAGMENTS => 9,
-            CAPABILITY_NATIVE_PASTE_CORRELATION => 10,
-            CAPABILITY_ENHANCED_COPY => 11,
-            CAPABILITY_SERVER_MACHINE_FACTS => 12,
-            _ => return false,
-        };
-        self.0 & (1 << index) != 0
+        Self::SUPPORTED
+            .iter()
+            .position(|installed| *installed == capability)
+            .is_some_and(|index| self.0 & (1 << index) != 0)
     }
 }
 
@@ -315,15 +307,17 @@ pub use crate::connection::queries::{PairedDevicePage, ServerQueries, ServerStat
 mod capability_tests {
     use super::*;
     #[test]
-    fn native_metadata_fragments_copy_and_paste_are_independent_connection_capabilities() {
+    fn native_runtime_metadata_copy_paste_and_facts_are_independent_connection_capabilities() {
         use spaceterm_protocol::negotiation::*;
         let features = [
             CAPABILITY_RUNTIME_METADATA_FRAGMENTS,
             CAPABILITY_NATIVE_PASTE_CORRELATION,
             CAPABILITY_ENHANCED_COPY,
             CAPABILITY_SERVER_MACHINE_FACTS,
+            CAPABILITY_ACCOUNT_RUNTIME,
+            CAPABILITY_REMOTE_NATIVE_LIFECYCLE,
         ];
-        for mask in 0u8..16 {
+        for mask in 0u8..64 {
             let advertised: Vec<u32> = features
                 .iter()
                 .enumerate()

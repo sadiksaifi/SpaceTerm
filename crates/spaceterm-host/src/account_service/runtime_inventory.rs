@@ -22,7 +22,7 @@ use spaceterm_protocol::authentication::SigningKey;
 use super::{RegisteredServer, RuntimeAssessment, ServiceFailure, ServiceFuture, ServiceProcesses};
 
 /// Maximum native lifecycle comparison or custody record size.
-pub const RUNTIME_MESSAGE_LIMIT: usize = 32 * 1024;
+pub const RUNTIME_MESSAGE_LIMIT: usize = spaceterm_protocol::limits::MAX_ACCOUNT_RUNTIME_BYTES;
 const RECORD_LIMIT: usize = 256 * 1024;
 const STARTING: &str = "runtime-starting";
 const RECORD: &str = "runtime-custody";
@@ -35,6 +35,14 @@ const DOMAIN: &[u8] = b"spaceterm-account-runtime-custody-v1\0";
 pub enum AccountRuntimeCall {
     /// Reads the live actor scope without changing admissions.
     Assess,
+    /// Assesses the guest-captured original request using the actual paired principal.
+    AssessNativeLifecycle(super::NativeLifecycleRequest),
+    /// Admits only this retained exact assessment; never advances native effects.
+    AdmitNativeLifecycle(super::NativeLifecycleAssessmentRef),
+    /// Assesses the exact original signed-package Stage without reserving Sessions.
+    AssessNativeStage(super::NativeStageRequest),
+    /// Admits Stage with current paired authority in one serialized actor turn.
+    AdmitNativeStage(super::NativeStageAssessmentRef),
     /// Reserves admissions against the original actor-issued scope.
     Reserve(RuntimeAssessment),
     /// Releases this original reservation after durable non-admission.
@@ -55,6 +63,14 @@ pub enum AccountRuntimeCall {
 pub enum AccountRuntimeReply {
     /// Original actor-issued assessment.
     Assessment(RuntimeAssessment),
+    /// Bounded summary and reference; the authority remains in the native journal.
+    NativeLifecycleAssessment(super::NativeLifecycleAssessmentRef),
+    /// Exact durable original acceptance, without native service effects.
+    NativeLifecycleAccepted(super::ServiceProgress),
+    /// Exact original signed-package Stage comparison; no code is approved.
+    NativeStageAssessment(super::NativeStageAssessmentRef),
+    /// Durable original Stage acceptance, with no archive or manager effects.
+    NativeStageAccepted(super::ServiceProgress),
     /// This original scope owns the admission barrier.
     Reserved,
     /// The original token can no longer reserve admissions.
@@ -72,16 +88,24 @@ struct Cleanup {
     action: NativeRetirementAction,
     assessment: RuntimeAssessment,
 }
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeNonAdmission {
+    request: NativeManagementRequestRef,
+    assessment: RuntimeAssessment,
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct State {
+pub(super) struct State {
     schema: u16,
-    server: ServerId,
-    epoch: Option<ServerEpoch>,
+    pub(super) server: ServerId,
+    pub(super) epoch: Option<ServerEpoch>,
     instance: [u8; 32],
     generation: u64,
     clean: bool,
     cleanup: Option<Cleanup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_non_admission: Option<NativeNonAdmission>,
     #[serde(default)]
     graceful: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,8 +133,8 @@ struct Signed {
 /// The actual runtime's privately held publication scope. It cannot be decoded
 /// from a client request or reconstructed from an empty runtime registry.
 pub struct RuntimeCustody {
-    state: State,
-    signer: Arc<dyn SigningKey>,
+    pub(super) state: State,
+    pub(super) signer: Arc<dyn SigningKey>,
 }
 impl RuntimeCustody {
     /// Publishes a fresh unclean instance before opening any runtime listeners.
@@ -156,6 +180,7 @@ impl RuntimeCustody {
             })?,
             clean: false,
             cleanup: None,
+            native_non_admission: None,
             graceful: false,
             owner: Some(owner),
             stopped_owner: None,
@@ -237,6 +262,36 @@ impl RuntimeCustody {
         completed.clean = true;
         completed.graceful = true;
         publish(registration, &completed, self.signer.as_ref())
+    }
+
+    /// Retains completion of only an originally proved-unaccepted actor barrier.
+    /// This is not a retirement result and does not claim native process absence.
+    pub fn reservation_aborted(
+        &self,
+        registration: &RegisteredServer,
+        request: NativeManagementRequestRef,
+        assessment: &RuntimeAssessment,
+    ) -> Result<(), ServiceFailure> {
+        assessment.validate(registration)?;
+        if assessment.epoch != self.state.epoch || request.server() != self.state.server {
+            return Err(ServiceFailure::IdentityMismatch);
+        }
+        let (mut current, _) = read(registration)?.ok_or(ServiceFailure::CleanupUnresolved)?;
+        if current.instance != self.state.instance
+            || current.epoch != self.state.epoch
+            || !marker_matches(registration, &current)?
+        {
+            return Err(ServiceFailure::IdentityMismatch);
+        }
+        let original = NativeNonAdmission {
+            request,
+            assessment: assessment.clone(),
+        };
+        if current.native_non_admission.as_ref() == Some(&original) {
+            return Ok(());
+        }
+        current.native_non_admission = Some(original);
+        publish(registration, &current, self.signer.as_ref())
     }
 
     /// Retains immutable parent facts for same-boot crash reconciliation. A missed
@@ -426,6 +481,36 @@ impl RetainedRuntimeProcesses {
             .map_err(|_| ServiceFailure::CleanupUnresolved)?;
         Ok((state, digest))
     }
+    /// Adds physical instance absence to signed clean custody. Manager scope
+    /// alone cannot discharge a retained owner that escaped or outlived it.
+    pub(super) fn verify_native_instance_absent(
+        registration: &RegisteredServer,
+        boot: [u8; 32],
+        observer: &dyn super::native_processes::InstanceProcessObserver,
+    ) -> Result<(), ServiceFailure> {
+        if boot == [0; 32] {
+            return Err(ServiceFailure::SupervisorUnavailable);
+        }
+        let (state, _) = Self::absent(registration)?;
+        let marker = read_marker(registration)?;
+        let retained = lineage::retained(registration, &state)?;
+        if let Some(owner) = state.owner {
+            super::native_processes::previous_owner_absent(owner, boot, &retained, observer)?;
+        } else if state.epoch.is_some()
+            && state.stopped_owner.is_none()
+            && marker.as_ref().is_none_or(|marker| marker.owner.is_none())
+        {
+            // A prior runtime with no retained birth cannot be reinterpreted as
+            // never started. Completed runtime-free stopped epochs are distinct.
+            return Err(ServiceFailure::CleanupUnresolved);
+        }
+        if let Some(owner) = marker.and_then(|marker| marker.owner)
+            && Some(owner) != state.owner
+        {
+            super::native_processes::previous_owner_absent(owner, boot, &retained, observer)?;
+        }
+        Ok(())
+    }
     fn token(
         registration: &RegisteredServer,
         assessment: &RuntimeAssessment,
@@ -540,8 +625,69 @@ impl ServiceProcesses for RetainedRuntimeProcesses {
         assessment: &'a RuntimeAssessment,
     ) -> ServiceFuture<'a, ()> {
         Box::pin(async move {
+            if assessment.epoch.is_some() {
+                return Err(ServiceFailure::Pending);
+            }
             Self::check_absent(registration, assessment)?;
             Self::token(registration, assessment, true)
+        })
+    }
+    fn abort_native_origin<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+        request: NativeManagementRequestRef,
+        assessment: &'a RuntimeAssessment,
+    ) -> ServiceFuture<'a, ()> {
+        Box::pin(async move {
+            assessment.validate(registration)?;
+            let (state, _) = read(registration)?.ok_or(ServiceFailure::CleanupUnresolved)?;
+            if state.epoch != assessment.epoch
+                || request.server() != state.server
+                || !marker_matches(registration, &state)?
+            {
+                return Err(ServiceFailure::IdentityMismatch);
+            }
+            let original = NativeNonAdmission {
+                request,
+                assessment: assessment.clone(),
+            };
+            match &state.native_non_admission {
+                Some(retained) if *retained == original => Ok(()),
+                Some(_) => Err(ServiceFailure::RequestConflict),
+                None => Err(ServiceFailure::Pending),
+            }
+        })
+    }
+    fn abort_reservation_with_absence<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+        assessment: &'a RuntimeAssessment,
+        absence: &'a NativeInstanceAbsence,
+    ) -> ServiceFuture<'a, ()> {
+        Box::pin(async move {
+            assessment.validate(registration)?;
+            if assessment.epoch != Some(absence.epoch)
+                || absence.key != registration.key()
+                || absence.server != assessment.server
+                || absence.boot == [0; 32]
+            {
+                return Err(ServiceFailure::IdentityMismatch);
+            }
+            let (state, _) = read(registration)?.ok_or(ServiceFailure::CleanupUnresolved)?;
+            if state.epoch != assessment.epoch || !marker_matches(registration, &state)? {
+                return Err(ServiceFailure::IdentityMismatch);
+            }
+            super::native_processes::previous_owner_absent(
+                state.owner.ok_or(ServiceFailure::CleanupUnresolved)?,
+                absence.boot,
+                &lineage::retained(registration, &state)?,
+                absence.observer.as_ref(),
+            )?;
+            registration
+                .endpoint()?
+                .prove_no_listener()
+                .map_err(|_| ServiceFailure::CleanupUnresolved)?;
+            Ok(())
         })
     }
     fn quiesce<'a>(
@@ -621,6 +767,7 @@ pub(super) fn initialize(
         generation: 1,
         clean: true,
         cleanup: None,
+        native_non_admission: None,
         graceful: false,
         owner: None,
         stopped_owner: None,
@@ -723,6 +870,12 @@ fn decode_state(registration: &RegisteredServer, bytes: &[u8]) -> Result<State, 
             .is_some_and(|owner| !owner.validate())
     {
         return Err(ServiceFailure::InvalidRecord);
+    }
+    if let Some(original) = &state.native_non_admission {
+        original.assessment.validate(registration)?;
+        if original.request.server() != state.server || original.assessment.epoch != state.epoch {
+            return Err(ServiceFailure::InvalidRecord);
+        }
     }
     if let Some(cleanup) = &state.cleanup {
         cleanup.assessment.validate(registration)?;

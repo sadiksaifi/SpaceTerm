@@ -6,17 +6,20 @@ use crate::platform::{
     client_view_store::NativeViewStore,
     desktop_client_startup::{
         DesktopClientComposition, NativeOwnerFactory,
-        native::{Factory, test_composition},
+        native::{Context, Factory, test_composition},
     },
     local_server_client::tests::Root,
+    secure_filesystem::{SecureDirectory, SecureFilesystemError},
     unix_secure_filesystem::UnixSecureFilesystem,
 };
 use spaceterm_client::{
+    api::{CompatibilityExplanation, ConnectingPhase},
+    journal::{JournalHealth, RetainedOperationState},
     pane_channel::{
         EffectKind, ExplicitUseOutcome, ExplicitUseSource, PaneChannel, PaneContextFacts,
         RuntimeEffect, WorkspaceLease,
     },
-    replica::ReplicaState,
+    replica::{ReplicaState, ResyncReason},
     view::{ReplicaFacts, ReplicaObservation, ReplicaReadiness, ServerViewStatus},
 };
 use spaceterm_core::{
@@ -33,6 +36,7 @@ use spaceterm_server::{
 };
 use std::{
     io::{self, Read, Write},
+    os::unix::fs::MetadataExt,
     sync::{atomic::AtomicBool, mpsc},
     time::Duration,
 };
@@ -218,12 +222,146 @@ impl RouteConnector for CountingRoutes {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FixtureReopenFailure {
+    MissingStorage,
+    ChangedStorage,
+    IdentityUnavailable,
+    Open(ClientFailureClass),
+}
+
+#[derive(Clone)]
+struct FixtureJournalIdentity {
+    directory: SecureDirectory,
+    database: (u64, u64),
+    // Keep the same native provider and retain the existing journal owner, not
+    // a new database descriptor. Its live inode cannot be recycled on relaunch.
+    context: Arc<Context>,
+}
+impl FixtureJournalIdentity {
+    fn capture(paths: &AppPaths, context: Arc<Context>) -> Result<Self, FixtureReopenFailure> {
+        let directory = paths
+            .filesystem()
+            .open_private_directory(&fixture_journal_directory(paths))
+            .map_err(fixture_identity_failure)?
+            .ok_or(FixtureReopenFailure::MissingStorage)?;
+        paths
+            .filesystem()
+            .verify_directory(&directory)
+            .map_err(fixture_identity_failure)?;
+        Ok(Self {
+            directory,
+            database: fixture_database_identity(paths)?,
+            context,
+        })
+    }
+    fn verify(&self, paths: &AppPaths) -> Result<(), FixtureReopenFailure> {
+        paths
+            .filesystem()
+            .verify_directory(&self.directory)
+            .map_err(fixture_identity_failure)?;
+        if fixture_database_identity(paths)? != self.database {
+            return Err(FixtureReopenFailure::ChangedStorage);
+        }
+        Ok(())
+    }
+}
+fn fixture_journal_directory(paths: &AppPaths) -> std::path::PathBuf {
+    paths
+        .directories()
+        .root(crate::platform::app_directories::AppDirectoryRoot::State)
+        .join("client-connections")
+        .join("desktop")
+}
+fn fixture_identity_failure(failure: SecureFilesystemError) -> FixtureReopenFailure {
+    match failure {
+        SecureFilesystemError::Missing => FixtureReopenFailure::MissingStorage,
+        SecureFilesystemError::Unavailable => FixtureReopenFailure::IdentityUnavailable,
+        _ => FixtureReopenFailure::ChangedStorage,
+    }
+}
+fn fixture_database_identity(paths: &AppPaths) -> Result<(u64, u64), FixtureReopenFailure> {
+    // stat does not open/close a second live database descriptor, which could
+    // release process-wide POSIX byte-range locks held by its existing owner.
+    let metadata = std::fs::symlink_metadata(
+        fixture_journal_directory(paths).join(spaceterm_host::storage::DATABASE_FILE_NAME),
+    )
+    .map_err(|failure| match failure.kind() {
+        io::ErrorKind::NotFound => FixtureReopenFailure::MissingStorage,
+        _ => FixtureReopenFailure::IdentityUnavailable,
+    })?;
+    if !metadata.is_file() {
+        return Err(FixtureReopenFailure::ChangedStorage);
+    }
+    Ok((metadata.dev(), metadata.ino()))
+}
+async fn existing_fixture_context(
+    paths: &AppPaths,
+    original: &Context,
+) -> Result<Arc<Context>, ClientFailure> {
+    // Factory::context may initialize an absent directory. Relaunch has
+    // existing-only authority and keeps the initial native provider unchanged.
+    let journal = crate::platform::client_journal::open(
+        paths,
+        crate::platform::client_journal::JournalOpenMode::Existing,
+        Arc::new(spaceterm_core::operation_ledger::canonical::CanonicalCodec),
+        Arc::new(crate::platform::desktop_client_startup::native::Verifier),
+        spaceterm_client::journal::JournalLimits::default(),
+    )
+    .await?;
+    Ok(Arc::new(Context {
+        journal,
+        native: original.native.clone(),
+        native_failure: original.native_failure,
+    }))
+}
+async fn reopen_retained_context(
+    major: u32,
+    paths: &AppPaths,
+    original: &FixtureJournalIdentity,
+    mut open: impl AsyncFnMut() -> Result<Arc<Context>, ClientFailure>,
+) -> Result<Arc<Context>, FixtureReopenFailure> {
+    for attempt in 1..=5 {
+        let verify = || {
+            original.verify(paths).inspect_err(|failure| {
+                eprintln!(
+                    "fixture context reopen refused: major={major} reopen_attempt={attempt} failure={failure:?}"
+                );
+            })
+        };
+        verify()?;
+        let result = open().await;
+        // Missing or replaced storage cannot inherit retry permission from an
+        // earlier StorageUnavailable result. No attempt may initialize storage.
+        verify()?;
+        match result {
+            Ok(context) => {
+                eprintln!("fixture context reopened: major={major} reopen_attempt={attempt}");
+                return Ok(context);
+            }
+            Err(failure) => {
+                let class = failure.class();
+                eprintln!(
+                    "fixture context reopen failed: major={major} reopen_attempt={attempt} failure={class:?}"
+                );
+                if class != ClientFailureClass::StorageUnavailable || attempt == 5 {
+                    return Err(FixtureReopenFailure::Open(class));
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
+    unreachable!("the fixed final reopen attempt always returns")
+}
+
 pub(super) struct ProductionFixture {
+    major: u32,
     root: Root,
     pub(super) pty: RecordingPty,
     pub(super) server: spaceterm_server::api::ServerHandle,
     paths: Arc<AppPaths>,
     credentials: test_composition::MemoryCredentials,
+    original_journal: Mutex<Option<FixtureJournalIdentity>>,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     running: tokio::task::JoinHandle<
         Result<
@@ -278,11 +416,13 @@ impl ProductionFixture {
             AppPaths::from_directories(directories, 104, Arc::new(UnixSecureFilesystem)).unwrap(),
         );
         Self {
+            major,
             root,
             pty,
             server,
             paths,
             credentials: Default::default(),
+            original_journal: Mutex::new(None),
             stop: Some(stop),
             running,
         }
@@ -348,7 +488,40 @@ impl ProductionFixture {
             fixture: Some(fixture),
         };
         assert!(factory.foreground_setup().await.unwrap().is_none());
-        let context = factory.context().await.unwrap();
+        let context = if !initialize && !restore_additional_client {
+            let original = self
+                .original_journal
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("same-original relaunch requires the initial fixture journal");
+            let context = reopen_retained_context(self.major, &paths, &original, async || {
+                existing_fixture_context(&paths, &original.context).await
+            })
+            .await
+            .unwrap_or_else(|failure| {
+                panic!(
+                    "same-original fixture context reopen failed: major={} failure={failure:?}",
+                    self.major
+                )
+            });
+            *factory.context.lock().await = Some(context.clone());
+            context
+        } else {
+            // Initial and additional-client setup still exercise normal Factory
+            // context creation. Existing-only recovery belongs to relaunch alone.
+            let context = factory.context().await.unwrap();
+            if !restore_additional_client {
+                let original = FixtureJournalIdentity::capture(&paths, context.clone()).unwrap();
+                let mut retained = self.original_journal.lock().unwrap();
+                if let Some(retained) = retained.as_ref() {
+                    retained.verify(&paths).unwrap();
+                } else {
+                    *retained = Some(original);
+                }
+            }
+            context
+        };
         if restore_additional_client {
             use spaceterm_client::journal::JournalLimits;
             use spaceterm_client_native::journal::NativeClientJournal;
@@ -460,28 +633,208 @@ async fn wait_for<T>(reason: &str, mut observe: impl FnMut() -> Option<T>) -> T 
     .await
     .unwrap_or_else(|_| panic!("{reason}"))
 }
-async fn ready(composition: &Composition) -> (ServerHandle, ConnectedInfo, Arc<ReplicaSnapshot>) {
+#[derive(Clone, Copy, Debug)]
+pub(super) enum ReadyStage {
+    MeasuredInitial,
+    MeasuredInitialAttachment,
+    MeasuredRelaunch,
+    MeasuredReattachment,
+    MeasuredRestoredAttachment,
+    CopyAttachment,
+    UnsafePasteAttachment,
+    UnsafePasteReattachment,
+    EqualPasteFirstAttachment,
+    EqualPasteFirstObservation,
+    EqualPasteSecondObservation,
+    EqualPasteSecondAttachment,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReadyCheckpoint {
+    BeforeConnect,
+    AfterQueueAdmission,
+    Poll,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReadyConnection {
+    Connecting(ConnectingPhase),
+    Connected {
+        epoch: u64,
+        revision: u64,
+        attempt: u64,
+        generation: u64,
+    },
+    Offline {
+        failure: ClientFailureClass,
+        failures: u32,
+        automatic_retry: bool,
+    },
+    Incompatible(CompatibilityExplanation),
+    Stopped,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReadyReplica {
+    Empty,
+    Ready {
+        epoch: u64,
+        revision: u64,
+    },
+    Stale {
+        epoch: u64,
+        revision: u64,
+        reason: ResyncReason,
+    },
+    Resynchronizing {
+        retained: Option<(u64, u64)>,
+    },
+}
+#[derive(Debug)]
+struct ReadyTransition {
+    checkpoint: ReadyCheckpoint,
+    connection: ReadyConnection,
+    replica: ReadyReplica,
+    route_opens: u64,
+    journal_health: JournalHealth,
+}
+#[derive(Default)]
+struct ReadyTrace {
+    transitions: Vec<ReadyTransition>,
+    dropped: usize,
+}
+impl ReadyTrace {
+    fn record(
+        &mut self,
+        checkpoint: ReadyCheckpoint,
+        composition: &Composition,
+        handle: &ServerHandle,
+        opens: &AtomicU64,
+    ) -> (ConnectionState, ReplicaState) {
+        let state = handle.state().borrow().clone();
+        let replica = handle.replica().borrow().clone();
+        let connection = match state {
+            ConnectionState::Connecting { phase } => ReadyConnection::Connecting(phase),
+            ConnectionState::Connected { info } => ReadyConnection::Connected {
+                epoch: info.epoch.get(),
+                revision: info.organization_revision.get(),
+                attempt: info.attempt,
+                generation: info.binding.generation.get(),
+            },
+            ConnectionState::Offline { failure, retry } => ReadyConnection::Offline {
+                failure: failure.class(),
+                failures: retry.failures,
+                automatic_retry: retry.delay.is_some(),
+            },
+            ConnectionState::Incompatible { explanation } => {
+                ReadyConnection::Incompatible(explanation)
+            }
+            ConnectionState::Stopped => ReadyConnection::Stopped,
+        };
+        let replica_phase = match &replica {
+            ReplicaState::Empty => ReadyReplica::Empty,
+            ReplicaState::Ready { snapshot } => ReadyReplica::Ready {
+                epoch: snapshot.cursor.epoch.get(),
+                revision: snapshot.cursor.revision.get(),
+            },
+            ReplicaState::Stale { retained, reason } => ReadyReplica::Stale {
+                epoch: retained.cursor.epoch.get(),
+                revision: retained.cursor.revision.get(),
+                reason: *reason,
+            },
+            ReplicaState::Resynchronizing { retained } => ReadyReplica::Resynchronizing {
+                retained: retained
+                    .as_ref()
+                    .map(|snapshot| (snapshot.cursor.epoch.get(), snapshot.cursor.revision.get())),
+            },
+        };
+        let route_opens = opens.load(Ordering::SeqCst);
+        let journal_health = *composition.tracker.journal().health().borrow();
+        let unchanged = self.transitions.last().is_some_and(|previous| {
+            previous.checkpoint != ReadyCheckpoint::BeforeConnect
+                && previous.connection == connection
+                && previous.replica == replica_phase
+                && previous.route_opens == route_opens
+                && previous.journal_health == journal_health
+        });
+        if checkpoint != ReadyCheckpoint::Poll || !unchanged {
+            // Keep the two admission checkpoints and the latest fourteen changes.
+            if self.transitions.len() == 16 {
+                self.transitions.remove(2);
+                self.dropped = self.dropped.saturating_add(1);
+            }
+            self.transitions.push(ReadyTransition {
+                checkpoint,
+                connection,
+                replica: replica_phase,
+                route_opens,
+                journal_health,
+            });
+        }
+        (state, replica)
+    }
+}
+async fn ready(
+    composition: &Composition,
+    fixture: &ProductionFixture,
+    opens: &AtomicU64,
+    stage: ReadyStage,
+) -> (ServerHandle, ConnectedInfo, Arc<ReplicaSnapshot>) {
     let handle = composition
         .registry
         .server(composition.servers[0].server)
         .unwrap();
-    handle.connect().await.unwrap();
-    let (info, snapshot) = wait_for(
-        "authenticated production replica did not become Ready",
-        || {
-            let state = handle.state().borrow().clone();
-            let replica = handle.replica().borrow().clone();
+    let mut trace = ReadyTrace::default();
+    trace.record(ReadyCheckpoint::BeforeConnect, composition, &handle, opens);
+    let admission = handle.connect().await;
+    trace.record(
+        ReadyCheckpoint::AfterQueueAdmission,
+        composition,
+        &handle,
+        opens,
+    );
+    admission.unwrap_or_else(|failure| {
+        panic!(
+            "production connect admission failed: major={} stage={stage:?} failure={:?} transitions={:?}",
+            fixture.major, failure.class(), trace.transitions
+        )
+    });
+    let result = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let (state, replica) = trace.record(ReadyCheckpoint::Poll, composition, &handle, opens);
             match (state, replica) {
                 (ConnectionState::Connected { info }, ReplicaState::Ready { snapshot })
                     if info.organization_revision == snapshot.cursor.revision =>
                 {
-                    Some((info, snapshot))
+                    return (info, snapshot);
                 }
-                _ => None,
+                _ => {}
             }
-        },
-    )
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
     .await;
+    let (info, snapshot) = result.unwrap_or_else(|_| {
+        trace.record(ReadyCheckpoint::Poll, composition, &handle, opens);
+        let pending_operations = composition.tracker.journal().snapshot().map(|state| {
+            state.operations().iter().filter(|record| {
+                matches!(record.state, RetainedOperationState::Pending)
+            }).count()
+        }).map_err(ClientFailure::class);
+        panic!(
+            "authenticated production replica did not become Ready: major={} stage={stage:?} transitions={:?} dropped={} server_phase={:?} server_task_finished={} pty_launches={} pty_resizes={} attached_workspaces={} registered_servers={} pending_operations={pending_operations:?}",
+            fixture.major,
+            trace.transitions,
+            trace.dropped,
+            fixture.server.phase(),
+            fixture.running.is_finished(),
+            fixture.pty.launches().len(),
+            fixture.pty.resizes().len(),
+            composition.view.workspaces().len(),
+            composition.registry.servers().len(),
+        )
+    });
+    eprintln!(
+        "production replica Ready: major={} stage={stage:?} transitions={:?} dropped={}",
+        fixture.major, trace.transitions, trace.dropped
+    );
     (handle, info, snapshot)
 }
 fn binding(composition: &Composition) -> PairedServerBinding {
@@ -507,14 +860,22 @@ fn observe<'a>(
     )
     .unwrap()
 }
-pub(super) async fn attach(composition: &mut Composition) -> (WorkspaceLease, PaneChannel) {
-    attach_workspace(composition, 0).await
+pub(super) async fn attach(
+    composition: &mut Composition,
+    fixture: &ProductionFixture,
+    opens: &AtomicU64,
+    stage: ReadyStage,
+) -> (WorkspaceLease, PaneChannel) {
+    attach_workspace(composition, 0, fixture, opens, stage).await
 }
 async fn attach_workspace(
     composition: &mut Composition,
     index: usize,
+    fixture: &ProductionFixture,
+    opens: &AtomicU64,
+    stage: ReadyStage,
 ) -> (WorkspaceLease, PaneChannel) {
-    let (_, info, snapshot) = ready(composition).await;
+    let (_, info, snapshot) = ready(composition, fixture, opens, stage).await;
     let binding = binding(composition);
     let observation = observe(&snapshot, &binding, info);
     composition.view.reconcile(&observation).unwrap();
@@ -689,13 +1050,19 @@ async fn desktop_native_production_listener_measured_startup_and_reattachment_bo
     for major in [1, 2] {
         let fixture = ProductionFixture::new(major).await;
         let (mut client, opens) = fixture.client(true).await;
-        let (_, info, _) = ready(&client).await;
+        let (_, info, _) = ready(&client, &fixture, &opens, ReadyStage::MeasuredInitial).await;
         assert_eq!(info.major, major);
         assert_eq!(info.attempt, 1);
         let client_identity = (info.server, info.pairing, info.client);
         assert_eq!(opens.load(Ordering::SeqCst), 1);
         assert_idle(&fixture.pty, 0).await;
-        let (lease, pane) = attach(&mut client).await;
+        let (lease, pane) = attach(
+            &mut client,
+            &fixture,
+            &opens,
+            ReadyStage::MeasuredInitialAttachment,
+        )
+        .await;
         focus(&pane);
         assert_idle(&fixture.pty, 0).await;
         start(&pane, &fixture.pty).await;
@@ -774,12 +1141,18 @@ async fn desktop_native_production_listener_measured_startup_and_reattachment_bo
             relaunched.view.workspaces().is_empty(),
             "durable detach must survive desktop relaunch"
         );
-        let (_, info, _) = ready(&relaunched).await;
+        let (_, info, _) = ready(&relaunched, &fixture, &opens, ReadyStage::MeasuredRelaunch).await;
         assert_eq!(info.major, major);
         assert_eq!(info.attempt, 1);
         assert_eq!((info.server, info.pairing, info.client), client_identity);
         assert_idle(&fixture.pty, 1).await;
-        let (_lease, reattached) = attach(&mut relaunched).await;
+        let (_lease, reattached) = attach(
+            &mut relaunched,
+            &fixture,
+            &opens,
+            ReadyStage::MeasuredReattachment,
+        )
+        .await;
         focus(&reattached);
         assert_idle(&fixture.pty, 1).await;
         assert!(matches!(
@@ -799,7 +1172,13 @@ async fn desktop_native_production_listener_measured_startup_and_reattachment_bo
 
         let (mut quit_relaunch, opens) = fixture.client(false).await;
         assert_eq!(quit_relaunch.view.workspaces().len(), 1);
-        let (_lease, restored) = attach(&mut quit_relaunch).await;
+        let (_lease, restored) = attach(
+            &mut quit_relaunch,
+            &fixture,
+            &opens,
+            ReadyStage::MeasuredRestoredAttachment,
+        )
+        .await;
         focus(&restored);
         screen_contains(&restored, "reattached-output").await;
         assert_idle(&fixture.pty, 1).await;
@@ -810,7 +1189,22 @@ async fn desktop_native_production_listener_measured_startup_and_reattachment_bo
     }
 }
 
-async fn input_barrier(pane: &PaneChannel, pty: &RecordingPty, marker: &str) {
+#[derive(Clone, Copy, Debug)]
+enum InputBarrierStage {
+    CopyLegacy,
+    CopyControl,
+    CopyPlatform,
+    CopyHidden,
+    CopyDisabled,
+    PasteReconnect,
+}
+async fn input_barrier(
+    pane: &PaneChannel,
+    pty: &RecordingPty,
+    marker: &str,
+    major: u32,
+    stage: InputBarrierStage,
+) {
     let permit = pane.permit(EffectKind::ImeCommit).unwrap();
     pane.try_effect(
         &permit,
@@ -820,9 +1214,10 @@ async fn input_barrier(pane: &PaneChannel, pty: &RecordingPty, marker: &str) {
         ),
     )
     .unwrap();
-    wait_for("ordered native input did not reach its PTY", || {
-        pty.input().ends_with(marker.as_bytes()).then_some(())
-    })
+    wait_for(
+        &format!("ordered native input did not reach its PTY: major={major} stage={stage:?}"),
+        || pty.input().ends_with(marker.as_bytes()).then_some(()),
+    )
     .await;
 }
 
@@ -832,8 +1227,9 @@ async fn desktop_native_enhanced_copy_is_never_legacy_input() {
     use spaceterm_terminal::InputModifiers;
     for major in [1, 2] {
         let fixture = ProductionFixture::new(major).await;
-        let (mut client, _) = fixture.client(true).await;
-        let (_lease, pane) = attach(&mut client).await;
+        let (mut client, opens) = fixture.client(true).await;
+        let (_lease, pane) =
+            attach(&mut client, &fixture, &opens, ReadyStage::CopyAttachment).await;
         start(&pane, &fixture.pty).await;
         let modifiers = InputModifiers {
             control: true,
@@ -844,18 +1240,26 @@ async fn desktop_native_enhanced_copy_is_never_legacy_input() {
         let before = fixture.pty.input().len();
         pane.try_effect(&permit, PaneRuntimeEffect::Copy(modifiers))
             .unwrap();
-        input_barrier(&pane, &fixture.pty, "legacy-barrier").await;
+        input_barrier(
+            &pane,
+            &fixture.pty,
+            "legacy-barrier",
+            major,
+            InputBarrierStage::CopyLegacy,
+        )
+        .await;
         assert!(
             fixture.pty.input()[before..] == *b"legacy-barrier",
             "unavailable enhanced reporting must suppress Copy, not encode Ctrl+C"
         );
         fixture.pty.output(b"\x1b[>11uCOPY-ENHANCED");
         screen_contains(&pane, "COPY-ENHANCED").await;
-        for (modifiers, expected, marker) in [
+        for (modifiers, expected, marker, stage) in [
             (
                 modifiers,
                 b"\x1b[99;6u\x1b[99;6:3u".as_slice(),
                 "copy-control-barrier",
+                InputBarrierStage::CopyControl,
             ),
             (
                 InputModifiers {
@@ -864,12 +1268,13 @@ async fn desktop_native_enhanced_copy_is_never_legacy_input() {
                 },
                 b"\x1b[99;9u\x1b[99;9:3u".as_slice(),
                 "copy-platform-barrier",
+                InputBarrierStage::CopyPlatform,
             ),
         ] {
             let before = fixture.pty.input().len();
             pane.try_effect(&permit, PaneRuntimeEffect::Copy(modifiers))
                 .unwrap();
-            input_barrier(&pane, &fixture.pty, marker).await;
+            input_barrier(&pane, &fixture.pty, marker, major, stage).await;
             let input = fixture.pty.input();
             let mut bytes = expected.to_vec();
             bytes.extend_from_slice(marker.as_bytes());
@@ -882,7 +1287,14 @@ async fn desktop_native_enhanced_copy_is_never_legacy_input() {
         let before = fixture.pty.input().len();
         pane.try_effect(&permit, PaneRuntimeEffect::Copy(modifiers))
             .unwrap();
-        input_barrier(&pane, &fixture.pty, "hidden-barrier").await;
+        input_barrier(
+            &pane,
+            &fixture.pty,
+            "hidden-barrier",
+            major,
+            InputBarrierStage::CopyHidden,
+        )
+        .await;
         assert!(
             fixture.pty.input()[before..] == *b"hidden-barrier",
             "hidden input must suppress native Copy forwarding"
@@ -893,7 +1305,14 @@ async fn desktop_native_enhanced_copy_is_never_legacy_input() {
         let before = fixture.pty.input().len();
         pane.try_effect(&permit, PaneRuntimeEffect::Copy(modifiers))
             .unwrap();
-        input_barrier(&pane, &fixture.pty, "disabled-barrier").await;
+        input_barrier(
+            &pane,
+            &fixture.pty,
+            "disabled-barrier",
+            major,
+            InputBarrierStage::CopyDisabled,
+        )
+        .await;
         assert!(fixture.pty.input()[before..] == *b"disabled-barrier");
         assert_eq!(fixture.pty.launches().len(), 1);
         quit(client).await;
@@ -928,8 +1347,14 @@ async fn desktop_native_unsafe_paste_preserves_runtime_and_native_request_correl
     use spaceterm_core::native_requests::*;
     for major in [1, 2] {
         let fixture = ProductionFixture::new(major).await;
-        let (mut client, _) = fixture.client(true).await;
-        let (_lease, pane) = attach(&mut client).await;
+        let (mut client, opens) = fixture.client(true).await;
+        let (_lease, pane) = attach(
+            &mut client,
+            &fixture,
+            &opens,
+            ReadyStage::UnsafePasteAttachment,
+        )
+        .await;
         start(&pane, &fixture.pty).await;
         let mut events = pane.events().unwrap();
         // Make the originating transport identity visibly distinct from the
@@ -1113,8 +1538,14 @@ async fn desktop_native_unsafe_paste_preserves_runtime_and_native_request_correl
                 .class(),
             ClientFailureClass::StaleAuthority
         );
-        let (mut client, _) = fixture.client(false).await;
-        let (_lease, reattached) = attach(&mut client).await;
+        let (mut client, opens) = fixture.client(false).await;
+        let (_lease, reattached) = attach(
+            &mut client,
+            &fixture,
+            &opens,
+            ReadyStage::UnsafePasteReattachment,
+        )
+        .await;
         focus(&reattached);
         assert!(matches!(
             reattached
@@ -1132,7 +1563,14 @@ async fn desktop_native_unsafe_paste_preserves_runtime_and_native_request_correl
                 .class(),
             ClientFailureClass::StaleAuthority
         );
-        input_barrier(&reattached, &fixture.pty, "reconnect-barrier").await;
+        input_barrier(
+            &reattached,
+            &fixture.pty,
+            "reconnect-barrier",
+            major,
+            InputBarrierStage::PasteReconnect,
+        )
+        .await;
         assert!(
             fixture.pty.input() == b"one\rtworeconnect-barrier",
             "reconnect must never replay the pending unsafe paste"
@@ -1150,18 +1588,43 @@ async fn desktop_native_equal_paste_request_ids_remain_session_local_both_majors
     use spaceterm_core::native_requests::*;
     for major in [1, 2] {
         let fixture = ProductionFixture::new(major).await;
-        let (mut first_client, _) = fixture.client(true).await;
-        let (_first_lease, first) = attach(&mut first_client).await;
+        let (mut first_client, first_opens) = fixture.client(true).await;
+        let (_first_lease, first) = attach(
+            &mut first_client,
+            &fixture,
+            &first_opens,
+            ReadyStage::EqualPasteFirstAttachment,
+        )
+        .await;
         start(&first, &fixture.pty).await;
         // One connection has one focused Pane. Keep both approvals live under
         // independent paired clients instead of claiming two input foci at once.
-        let (mut second_client, _) = fixture.independent_client().await;
-        let (_, first_info, _) = ready(&first_client).await;
-        let (_, second_info, _) = ready(&second_client).await;
+        let (mut second_client, second_opens) = fixture.independent_client().await;
+        let (_, first_info, _) = ready(
+            &first_client,
+            &fixture,
+            &first_opens,
+            ReadyStage::EqualPasteFirstObservation,
+        )
+        .await;
+        let (_, second_info, _) = ready(
+            &second_client,
+            &fixture,
+            &second_opens,
+            ReadyStage::EqualPasteSecondObservation,
+        )
+        .await;
         assert_eq!(first_info.server, second_info.server);
         assert_eq!(first_info.pairing, second_info.pairing);
         assert_ne!(first_info.client, second_info.client);
-        let (_second_lease, second) = attach_workspace(&mut second_client, 1).await;
+        let (_second_lease, second) = attach_workspace(
+            &mut second_client,
+            1,
+            &fixture,
+            &second_opens,
+            ReadyStage::EqualPasteSecondAttachment,
+        )
+        .await;
         start(&second, &fixture.pty).await;
         live_input_authority(&first).await;
         let mut first_events = first.events().unwrap();
@@ -1271,5 +1734,168 @@ async fn desktop_native_equal_paste_request_ids_remain_session_local_both_majors
         quit(first_client).await;
         quit(second_client).await;
         fixture.close().await;
+    }
+}
+
+mod retained_context_reopen_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    async fn original() -> (Root, Arc<AppPaths>, Arc<Context>, FixtureJournalIdentity) {
+        let root = Root::new();
+        let directories = AppDirectories::resolve_xdg(
+            "production-acceptance-reopen",
+            &AppDirectoryEnvironment {
+                home: Some(root.0.clone().into_os_string()),
+                xdg_state_home: Some(root.0.join("client-state").into_os_string()),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+        let paths = Arc::new(
+            AppPaths::from_directories(directories, 104, Arc::new(UnixSecureFilesystem)).unwrap(),
+        );
+        let journal = crate::platform::client_journal::open(
+            &paths,
+            crate::platform::client_journal::JournalOpenMode::Initialize,
+            Arc::new(spaceterm_core::operation_ledger::canonical::CanonicalCodec),
+            Arc::new(crate::platform::desktop_client_startup::native::Verifier),
+            spaceterm_client::journal::JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        let context = Arc::new(Context {
+            journal,
+            native: None,
+            native_failure: None,
+        });
+        let identity = FixtureJournalIdentity::capture(&paths, context.clone()).unwrap();
+        (root, paths, context, identity)
+    }
+
+    #[tokio::test]
+    async fn retained_context_reopen_retries_only_transient_storage_failure() {
+        let (_root, paths, expected, identity) = original().await;
+        let attempts = Cell::new(0);
+        let recovered = reopen_retained_context(1, &paths, &identity, async || {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() < 3 {
+                Err(ClientFailure::new(ClientFailureClass::StorageUnavailable))
+            } else {
+                existing_fixture_context(&paths, &expected).await
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(attempts.get(), 3);
+        assert!(!Arc::ptr_eq(&recovered.journal, &expected.journal));
+        assert_eq!(
+            recovered.journal.snapshot().unwrap().revision(),
+            expected.journal.snapshot().unwrap().revision(),
+        );
+        identity.verify(&paths).unwrap();
+    }
+
+    #[tokio::test]
+    async fn retained_context_reopen_exhausts_after_five_attempts() {
+        let (_root, paths, _context, identity) = original().await;
+        let attempts = Cell::new(0);
+        let result = reopen_retained_context(2, &paths, &identity, async || {
+            attempts.set(attempts.get() + 1);
+            Err(ClientFailure::new(ClientFailureClass::StorageUnavailable))
+        })
+        .await;
+        assert_eq!(attempts.get(), 5);
+        assert_eq!(
+            result.err().unwrap(),
+            FixtureReopenFailure::Open(ClientFailureClass::StorageUnavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_context_reopen_refuses_every_other_failure_without_retry() {
+        let (_root, paths, _context, identity) = original().await;
+        for class in [
+            ClientFailureClass::Unavailable,
+            ClientFailureClass::AuthorizationDenied,
+            ClientFailureClass::PinMismatch,
+            ClientFailureClass::Incompatible,
+            ClientFailureClass::MissingCapability,
+            ClientFailureClass::InvalidPeer,
+            ClientFailureClass::UnsafeEndpoint,
+            ClientFailureClass::StaleAuthority,
+            ClientFailureClass::TargetNotFound,
+            ClientFailureClass::ResourceLimit,
+            ClientFailureClass::UnsafeStorage,
+            ClientFailureClass::InvalidStorage,
+            ClientFailureClass::UnknownSchema,
+            ClientFailureClass::RecoveryRequired,
+            ClientFailureClass::CounterExhausted,
+            ClientFailureClass::Cancelled,
+        ] {
+            let attempts = Cell::new(0);
+            let result = reopen_retained_context(1, &paths, &identity, async || {
+                attempts.set(attempts.get() + 1);
+                Err(ClientFailure::new(class))
+            })
+            .await;
+            assert_eq!(attempts.get(), 1, "{class:?}");
+            assert_eq!(result.err().unwrap(), FixtureReopenFailure::Open(class));
+        }
+    }
+
+    #[tokio::test]
+    async fn retained_context_reopen_refuses_missing_storage_after_an_unavailable_attempt() {
+        let (_root, paths, _context, identity) = original().await;
+        let database =
+            fixture_journal_directory(&paths).join(spaceterm_host::storage::DATABASE_FILE_NAME);
+        let retained = database.with_file_name("original-fixture-database");
+        let attempts = Cell::new(0);
+        let result = reopen_retained_context(2, &paths, &identity, async || {
+            attempts.set(attempts.get() + 1);
+            // Fault injection preserves the original bytes and inode. Recovery
+            // must not create a replacement after the name disappears.
+            std::fs::rename(&database, &retained).unwrap();
+            Err(ClientFailure::new(ClientFailureClass::StorageUnavailable))
+        })
+        .await;
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(result.err().unwrap(), FixtureReopenFailure::MissingStorage);
+        let existing_only = existing_fixture_context(&paths, &identity.context).await;
+        // The retained native owner knows this original inode. Its disappearance
+        // is unsafe storage, not a missing database that this process never saw.
+        assert_eq!(
+            existing_only.err().unwrap().class(),
+            ClientFailureClass::UnsafeStorage
+        );
+        assert!(
+            !database.exists(),
+            "existing-only reopen must not initialize missing storage"
+        );
+        assert!(retained.exists());
+    }
+
+    #[tokio::test]
+    async fn retained_context_reopen_refuses_changed_database_identity() {
+        let (_root, paths, _context, identity) = original().await;
+        let database =
+            fixture_journal_directory(&paths).join(spaceterm_host::storage::DATABASE_FILE_NAME);
+        let retained = database.with_file_name("original-fixture-database");
+        let replacement = database.with_file_name("replacement-fixture-entry");
+        std::fs::write(&replacement, b"").unwrap();
+        let attempts = Cell::new(0);
+        let result = reopen_retained_context(1, &paths, &identity, async || {
+            attempts.set(attempts.get() + 1);
+            // Replace only the test name with a distinct pre-existing inode.
+            // The original database is retained and never opened by this check.
+            std::fs::rename(&database, &retained).unwrap();
+            std::fs::rename(&replacement, &database).unwrap();
+            Err(ClientFailure::new(ClientFailureClass::StorageUnavailable))
+        })
+        .await;
+        assert_eq!(attempts.get(), 1);
+        assert_eq!(result.err().unwrap(), FixtureReopenFailure::ChangedStorage);
+        assert!(retained.exists());
     }
 }

@@ -12,6 +12,7 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(super) struct Context {
     pub(super) directory: Arc<Directory>,
+    pub(super) read_only: bool,
     native_vfs: usize,
     canonical: CString,
     failure: Mutex<Option<StorageFailure>>,
@@ -163,7 +164,7 @@ pub(super) struct Registration {
 unsafe impl Send for Registration {}
 
 impl Registration {
-    pub(super) fn new(directory: Arc<Directory>) -> Result<Self, StorageFailure> {
+    pub(super) fn new(directory: Arc<Directory>, read_only: bool) -> Result<Self, StorageFailure> {
         // SAFETY: SQLite initializes its VFS registry internally. The native VFS
         // is borrowed only for clock, randomness, and sleep, never file access.
         let native = unsafe { ffi::sqlite3_vfs_find(c"unix".as_ptr()) };
@@ -180,6 +181,7 @@ impl Registration {
         .map_err(|_| StorageFailure::Unavailable)?;
         let context = Arc::new(Context {
             directory,
+            read_only,
             native_vfs: native as usize,
             canonical,
             failure: Mutex::new(None),
@@ -249,6 +251,9 @@ struct OpenFile {
 
 impl OpenFile {
     fn verify(&self) -> Result<(), StorageFailure> {
+        if self.context.read_only {
+            self.context.directory.check_frozen()?;
+        }
         self.entry.verify(&self.context.directory)
     }
     fn fail(&self, failure: StorageFailure, code: i32, uncertain: bool) -> i32 {
@@ -294,18 +299,27 @@ unsafe extern "C" fn open(
         Kind::Journal => flags & ffi::SQLITE_OPEN_MAIN_JOURNAL != 0,
         _ => false,
     };
-    if !admitted
-        || flags & ffi::SQLITE_OPEN_READWRITE == 0
-        || flags & ffi::SQLITE_OPEN_DELETEONCLOSE != 0
-    {
+    let access_admitted = if ctx.read_only {
+        kind == Kind::Database
+            && flags & ffi::SQLITE_OPEN_READONLY != 0
+            && flags & (ffi::SQLITE_OPEN_READWRITE | ffi::SQLITE_OPEN_CREATE) == 0
+    } else {
+        flags & ffi::SQLITE_OPEN_READWRITE != 0
+    };
+    if !admitted || !access_admitted || flags & ffi::SQLITE_OPEN_DELETEONCLOSE != 0 {
         return ctx.fail(StorageFailure::InvalidState, ffi::SQLITE_CANTOPEN, false);
     }
-    let (entry, created) = match ctx
-        .directory
-        .open_entry_with_evidence(kind, flags & ffi::SQLITE_OPEN_CREATE != 0)
-    {
+    let result = if ctx.read_only {
+        ctx.directory
+            .open_read_only_entry()
+            .map(|entry| (entry, false))
+    } else {
+        ctx.directory
+            .open_entry_with_evidence(kind, flags & ffi::SQLITE_OPEN_CREATE != 0)
+    };
+    let (entry, created) = match result {
         Ok(entry) => entry,
-        Err(error) => return ctx.fail(error, ffi::SQLITE_CANTOPEN, true),
+        Err(error) => return ctx.fail(error, ffi::SQLITE_CANTOPEN, !ctx.read_only),
     };
     if kind == Kind::Database {
         ctx.created.store(created, Ordering::Relaxed);
@@ -342,6 +356,13 @@ unsafe extern "C" fn delete(
     _sync: c_int,
 ) -> c_int {
     let ctx = unsafe { context(vfs) };
+    if ctx.read_only {
+        return ctx.fail(
+            StorageFailure::RecoveryRequired,
+            ffi::SQLITE_READONLY,
+            false,
+        );
+    }
     let result = ctx
         .kind(name)
         .and_then(|kind| ctx.directory.delete(kind))
@@ -365,6 +386,11 @@ unsafe extern "C" fn access(
     let ctx = unsafe { context(vfs) };
     unsafe {
         *out = 0;
+    }
+    if ctx.read_only
+        && let Err(error) = ctx.directory.check_frozen()
+    {
+        return ctx.fail(error, ffi::SQLITE_IOERR_ACCESS, false);
     }
     match ctx.kind(name).and_then(|kind| ctx.directory.check(kind)) {
         Ok(identity) => {
@@ -510,6 +536,9 @@ unsafe extern "C" fn write(
     offset: i64,
 ) -> c_int {
     let state = unsafe { opened(file) };
+    if state.context.read_only {
+        return state.fail(StorageFailure::Unavailable, ffi::SQLITE_READONLY, false);
+    }
     if let Err(error) = state.verify() {
         return state.fail(error, ffi::SQLITE_IOERR_WRITE, true);
     }
@@ -550,6 +579,9 @@ unsafe extern "C" fn write(
 
 unsafe extern "C" fn truncate(file: *mut ffi::sqlite3_file, length: i64) -> c_int {
     let state = unsafe { opened(file) };
+    if state.context.read_only {
+        return state.fail(StorageFailure::Unavailable, ffi::SQLITE_READONLY, false);
+    }
     if let Err(error) = state.verify() {
         return state.fail(error, ffi::SQLITE_IOERR_TRUNCATE, true);
     }
@@ -561,6 +593,9 @@ unsafe extern "C" fn truncate(file: *mut ffi::sqlite3_file, length: i64) -> c_in
 
 unsafe extern "C" fn sync(file: *mut ffi::sqlite3_file, _flags: c_int) -> c_int {
     let state = unsafe { opened(file) };
+    if state.context.read_only {
+        return state.fail(StorageFailure::Unavailable, ffi::SQLITE_READONLY, false);
+    }
     if let Err(error) = state.verify() {
         return state.fail(error, ffi::SQLITE_IOERR_FSYNC, true);
     }
@@ -610,6 +645,9 @@ unsafe extern "C" fn size(file: *mut ffi::sqlite3_file, out: *mut i64) -> c_int 
 
 unsafe extern "C" fn lock(file: *mut ffi::sqlite3_file, requested: c_int) -> c_int {
     let state = unsafe { opened(file) };
+    if state.context.read_only && requested > ffi::SQLITE_LOCK_SHARED {
+        return state.fail(StorageFailure::Unavailable, ffi::SQLITE_READONLY, false);
+    }
     if let Err(error) = state.verify() {
         return state.fail(error, ffi::SQLITE_IOERR_LOCK, false);
     }

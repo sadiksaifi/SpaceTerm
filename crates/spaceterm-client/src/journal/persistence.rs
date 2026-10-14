@@ -25,6 +25,7 @@ impl RecoveredClientState {
             #[serde(with = "fixed_u64")]
             attachment_incarnation_high_water: u64,
             suppressed_attachments: &'a [JournalAttachment],
+            remote_native_requests: &'a [RemoteNativeRequest],
         }
         #[derive(Serialize)]
         struct PairingMetadata<'a> {
@@ -57,6 +58,7 @@ impl RecoveredClientState {
             },
             attachment_incarnation_high_water: self.attachment_incarnation_high_water,
             suppressed_attachments: &self.suppressed_attachments,
+            remote_native_requests: &self.remote_native_requests,
         }
     }
 }

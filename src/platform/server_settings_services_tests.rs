@@ -1,5 +1,5 @@
 use super::*;
-use spaceterm_client_native::NativeClientProvider;
+use spaceterm_client_native::{NativeClientProvider, native::NativeServiceManagement};
 use spaceterm_core::{
     authority::{ServerEpoch, SessionKey},
     identity::{ClientId, DeviceId},
@@ -232,6 +232,13 @@ fn binding(registration: &RegisteredServer, generation: u64) -> PairedServerBind
     )
 }
 
+fn host_services(
+    native: Arc<NativeServiceManagement>,
+    binding: &PairedServerBinding,
+) -> Arc<dyn HostServiceManagement> {
+    Arc::new(LocalHostServices::new(native, binding.clone()).unwrap())
+}
+
 #[test]
 fn servers_settings_uses_real_native_provider_for_selected_local_pairing() {
     let fixture = Fixture::new(Some(DesiredServerState::Stopped));
@@ -248,7 +255,7 @@ fn servers_settings_uses_real_native_provider_for_selected_local_pairing() {
         .admit_native(&provider, &registration, &original)
         .unwrap();
     assert_eq!(services.hosts.len(), 1);
-    assert!(Arc::ptr_eq(&services.hosts[0].1, &provider.management()));
+    assert_eq!(services.hosts[0].1.binding(), &original);
     assert_eq!(
         services.hosts[0].0,
         original.target().local_pairing().unwrap()
@@ -274,6 +281,101 @@ fn servers_settings_uses_real_native_provider_for_selected_local_pairing() {
             .flat_map(|scope| &scope.endpoints)
             .all(|endpoint| endpoint.port() == 47232)
     );
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[test]
+fn servers_settings_binds_native_authority_only_to_the_exact_client_binding() {
+    let fixture = Fixture::new(Some(DesiredServerState::Stopped));
+    let provider = fixture.provider();
+    let registration = provider
+        .management()
+        .supervisor()
+        .discover()
+        .unwrap()
+        .unwrap();
+    let original = binding(&registration, 1);
+    let target = original.target();
+    let other_client = PairedServerBinding::new(
+        spaceterm_client::api::ConnectionTarget::new(
+            target.pin(),
+            target.device(),
+            target.pairing(),
+            ClientId::new(target.server(), 2).unwrap(),
+            target.route().clone(),
+            target.credential(),
+            target.incarnation(),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        original.target().local_pairing().unwrap(),
+        other_client.target().local_pairing().unwrap()
+    );
+    assert_ne!(original, other_client);
+    let mut services = SettingsServices::default();
+    services
+        .admit_native(&provider, &registration, &original)
+        .unwrap();
+    let (_connection, state) = watch::channel(ConnectionState::Stopped);
+    let (_replica, replica) = watch::channel(ReplicaState::Empty);
+    let mut source = SettingsConnection {
+        binding: original.clone(),
+        name: DesktopServerInfo {
+            server: target.server(),
+            name: crate::ui::pane_presentation::DisplayName::reported("Local server"),
+            local: true,
+        },
+        state,
+        replica,
+        queries: None,
+        native: None,
+        lifecycle: None,
+        inventory: None,
+        machine: None,
+    };
+    services.bind(&mut source).unwrap();
+    assert_eq!(source.native.as_ref().unwrap().binding(), &original);
+
+    // The same local pairing does not authorize another Client, including a previously bound source.
+    source.binding = other_client;
+    services.bind(&mut source).unwrap();
+    assert!(source.native.is_none());
+
+    source.binding = original.clone();
+    services.bind(&mut source).unwrap();
+    assert_eq!(source.native.as_ref().unwrap().binding(), &original);
+    assert!(matches!(*source.state.borrow(), ConnectionState::Stopped));
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+}
+
+#[test]
+fn servers_settings_admits_composed_host_only_for_the_exact_selected_binding() {
+    let fixture = Fixture::new(Some(DesiredServerState::Stopped));
+    let provider = fixture.provider();
+    let registration = provider
+        .management()
+        .supervisor()
+        .discover()
+        .unwrap()
+        .unwrap();
+    let original = binding(&registration, 1);
+    let changed = binding(&registration, 2);
+    let host = host_services(provider.management(), &original);
+    let mut services = SettingsServices::default();
+
+    assert_eq!(
+        services
+            .admit_host(&changed, host.clone())
+            .unwrap_err()
+            .class(),
+        ClientFailureClass::StaleAuthority
+    );
+    assert!(services.hosts.is_empty());
+    services.admit_host(&original, host.clone()).unwrap();
+    services.admit_host(&original, host).unwrap();
+    assert_eq!(services.hosts.len(), 1);
+    assert_eq!(services.hosts[0].1.binding(), &original);
     assert!(fixture.manager.effects.lock().unwrap().is_empty());
 }
 
@@ -321,13 +423,14 @@ async fn servers_settings_native_pending_request_resolves_without_reallocation()
     let native = provider.management();
     let registration = native.supervisor().discover().unwrap().unwrap();
     let binding = binding(&registration, 1);
+    let host = host_services(native.clone(), &binding);
     let original = native.supervisor().allocate_request().unwrap();
     fixture.manager.block_start.store(true, Ordering::SeqCst);
     let submitted = native.clone();
     let start = tokio::spawn(async move { submitted.start(original).await });
     fixture.manager.start_entered.notified().await;
     // A new application owner uses the same durable host journal while the original effect is in flight.
-    let reopened = fixture.provider().management();
+    let reopened = host_services(fixture.provider().management(), &binding);
     let read = recover_native(&reopened, &binding).await.unwrap();
     assert_eq!(read.status.pending, Some(original));
     assert!(
@@ -345,15 +448,14 @@ async fn servers_settings_native_pending_request_resolves_without_reallocation()
     let completed = start.await.unwrap().unwrap();
     assert!(matches!(completed.state, ServiceRequestState::Completed(_)));
     // The lost completed reply is recovered under that same ID, without replaying Start.
-    let read = recover_native(&fixture.provider().management(), &binding)
-        .await
-        .unwrap();
+    let completed_host = host_services(fixture.provider().management(), &binding);
+    let read = recover_native(&completed_host, &binding).await.unwrap();
     assert!(
         matches!(read.recovered, Some(ResultPublication::Native { request, unresolved: false, failure: None }) if request == original)
     );
     apply_native_read(
         &mut presentation,
-        recover_native(&native, &binding).await.unwrap(),
+        recover_native(&host, &binding).await.unwrap(),
     );
     assert!(
         !presentation.is_busy(),
@@ -377,17 +479,18 @@ async fn servers_settings_uses_real_native_provider_for_stop_assessment() {
     let native = fixture.provider().management();
     let registration = native.supervisor().discover().unwrap().unwrap();
     let original = binding(&registration, 1);
-    check_native(&native, &original).await.unwrap();
-    let assessment = native.assess(ServiceAction::Stop).await.unwrap();
-    let prompt = NativeActionPrompt::from_assessment(&assessment).unwrap();
-    let restored = native
+    let host = host_services(native.clone(), &original);
+    check_native(&host, &original).await.unwrap();
+    let request = host.reserve_request().await.unwrap();
+    let assessment = host.assess(request, ServiceAction::Stop).await.unwrap();
+    let prompt = assessment.prompt;
+    assert_eq!(prompt.request, request);
+    let restored = host
         .restore_assessment(ServiceAction::Stop, prompt.token)
         .await
         .unwrap();
-    let result = native_result(
-        prompt.request,
-        native.stop(restored.confirm().unwrap()).await,
-    );
+    assert_eq!(restored.prompt.request, request);
+    let result = native_result(prompt.request, host.submit(restored).await);
     assert!(
         matches!(result, ResultPublication::Native { request, unresolved: false, failure: None } if request == prompt.request)
     );
@@ -463,8 +566,9 @@ async fn settings_native_update_assessment_retains_exact_running_and_stopped_sco
         let native = fixture.provider().management();
         let registration = native.supervisor().discover().unwrap().unwrap();
         let original = binding(&registration, 1);
+        let host = host_services(native.clone(), &original);
         let server = original.target().server();
-        let read = check_native(&native, &original).await.unwrap();
+        let read = check_native(&host, &original).await.unwrap();
         let mut state = ServerState::default();
         apply_native_read(&mut state, read);
         let presentation = state.native.as_ref().unwrap();
@@ -497,7 +601,7 @@ async fn settings_native_update_assessment_retains_exact_running_and_stopped_sco
             permissions: None,
             remote_access: None,
         };
-        let (assessment, observed) = assess_update(&native, &original, &summary).await.unwrap();
+        let (assessment, observed) = assess_update(&host, &original, &summary).await.unwrap();
         assert_eq!(assessment.candidate.artifact_sha256, [2; 32]);
         assert_eq!(assessment.selection_generation.get(), 2);
         assert_eq!(assessment.approved, Some(artifact(1).installation));
@@ -524,7 +628,7 @@ async fn settings_native_update_assessment_retains_exact_running_and_stopped_sco
             .account
             .stage_installation(artifact(replacement))
             .unwrap();
-        apply_native_read(&mut state, check_native(&native, &original).await.unwrap());
+        apply_native_read(&mut state, check_native(&host, &original).await.unwrap());
         assert!(
             state.native.as_ref().unwrap().activation.is_none(),
             "a changed candidate or selection invalidates the confirmation"

@@ -54,6 +54,7 @@ impl StoppedRuntimeCustody {
         if epoch == owner.next {
             state.epoch = Some(epoch);
             state.cleanup = None;
+            state.native_non_admission = None;
             state.graceful = false;
         }
         state.clean = true;
@@ -113,6 +114,7 @@ impl StoppedRuntimeCustody {
             if epoch == owner.next {
                 state.epoch = Some(epoch);
                 state.cleanup = None;
+                state.native_non_admission = None;
                 state.graceful = false;
             }
             state.clean = true;
@@ -164,6 +166,7 @@ impl StoppedRuntimeCustody {
         }
         state.epoch = Some(epoch);
         state.cleanup = None;
+        state.native_non_admission = None;
         state.graceful = false;
         state.clean = false;
         publish(registration, &state, self.signer.as_ref())

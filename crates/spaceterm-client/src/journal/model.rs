@@ -85,6 +85,10 @@ pub(super) fn validate(
         permanent.checked_mul(256).ok_or_else(resource_limit)?,
         state.pairing.validate(state, verifier, limits)?,
     )?;
+    resident = charge(
+        resident,
+        super::remote_native::validate_retained(state, limits)?,
+    )?;
     for saved in &state.bindings {
         saved.validate(verifier)?;
         let binding = saved.binding()?;
@@ -511,6 +515,7 @@ pub(super) fn apply(
     if state.revision != tx.expected_revision || tx.changes.is_empty() || tx.changes.len() > 256 {
         return Err(invalid());
     }
+    super::remote_native::validate_retirements(state, &tx.changes)?;
     let mut next = state.clone();
     for change in &tx.changes {
         apply_change(&mut next, change, codec, verifier)?;
@@ -539,7 +544,16 @@ fn apply_change(
         }
         return Ok(());
     }
+    if super::remote_native::apply(state, change)? {
+        return Ok(());
+    }
     match change {
+        ClientJournalChange::RetainRemoteNativeRequest(_)
+        | ClientJournalChange::RetainRemoteNativeIntent { .. }
+        | ClientJournalChange::RetainRemoteNativeAssessment { .. }
+        | ClientJournalChange::SubmitRemoteNativeRequest { .. }
+        | ClientJournalChange::CompleteRemoteNativeRequest { .. }
+        | ClientJournalChange::RetireRemoteNativeRequest { .. } => return Err(invalid()),
         ClientJournalChange::RecordAttachment(marker) => {
             marker.validate()?;
             if marker.incarnation <= state.attachment_incarnation_high_water
@@ -1133,9 +1147,22 @@ fn apply_change(
             }) {
                 return Err(invalid());
             }
+            let record = &state.revocations[index];
+            // The native owner has already deleted this pairing key, or observed
+            // it missing. Preserve only existing comparison provenance until
+            // every exact submitted native original has a separately durable
+            // result and guest ACK retirement. This grants no signing authority.
+            // An idempotent cleanup retry releases these facts after retirement;
+            // native retirement itself cannot assume key deletion has run.
+            if state.remote_native_requests.iter().any(|original| {
+                original.submitted()
+                    && original.local_pairing() == &record.task.parts().local_pairing
+                    && original.client() == record.task.parts().original.client()
+            }) {
+                return Ok(());
+            }
             // Release only the original credential slot's public route capture.
             // The reference and generation cannot identify a later pairing.
-            let record = &state.revocations[index];
             if let Some(slot) = state.pairing.slots.iter_mut().find(|slot| {
                 slot.reference == record.task.parts().original.credential()
                     && slot.generation == record.task.parts().local_pairing.parts().generation
