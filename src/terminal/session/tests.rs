@@ -3215,7 +3215,10 @@ fn kitty_auto_sizing_from_pty_pixels_should_agree_with_size_replies_and_not_wrap
     assert_eq!(exit, Some(TerminalSessionExit::Success));
     let snapshot = snapshot.expect("the completed icat script must publish its final Screen");
     assert_eq!(
-        snapshot.cursor.position.map(|position| (position.row, position.column)),
+        snapshot
+            .cursor
+            .position
+            .map(|position| (position.row, position.column)),
         Some((2, 0)),
     );
     assert_eq!(snapshot.graphics.images.len(), 1);

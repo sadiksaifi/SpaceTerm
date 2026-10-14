@@ -6,7 +6,6 @@ with an independently pinned keyring and primary signer. No custody collection,
 credential delivery, or administrator SpaceTerm command belongs here.
 """
 
-import ctypes
 import errno
 import hashlib
 import json
@@ -16,47 +15,16 @@ import selectors
 import signal
 import stat
 import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
 
 from spaceterm_tasks import TaskError, server_artifacts
+from spaceterm_tasks.processes import darwin_zombie_group as _darwin_zombie_group
 
 _ISO_BLOCK = 2048
 MAX_OUTPUT = 64 * 1024
 ENVIRONMENT = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
-
-
-def _darwin_zombie_group(pid):
-    """Darwin returns EPERM for a group containing only its unreaped zombie.
-
-    The kernel group listing must contain exactly the reserved leader, and BSD
-    process info must report ESRCH. Any live or additional member fails cleanup.
-    This check happens before consuming wait, never against a reusable group.
-    """
-    if sys.platform != "darwin":
-        return False
-    native = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
-    native.proc_listpids.argtypes = (ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p, ctypes.c_int)
-    native.proc_listpids.restype = ctypes.c_int
-    native.proc_pidinfo.argtypes = (
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_uint64,
-        ctypes.c_void_p,
-        ctypes.c_int,
-    )
-    native.proc_pidinfo.restype = ctypes.c_int
-    members = (ctypes.c_int * 257)()
-    size = native.proc_listpids(2, pid, members, ctypes.sizeof(members))
-    if size != ctypes.sizeof(ctypes.c_int) or members[0] != pid:
-        return False
-    info = ctypes.create_string_buffer(136)  # Darwin proc_bsdinfo.
-    ctypes.set_errno(0)
-    return (
-        native.proc_pidinfo(pid, 3, 0, info, len(info)) == 0 and ctypes.get_errno() == errno.ESRCH
-    )
 
 
 def run_tool(

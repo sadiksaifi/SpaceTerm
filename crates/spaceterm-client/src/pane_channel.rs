@@ -149,7 +149,7 @@ pub struct PaneChannelState {
     pub facts: PaneContextFacts,
     pub content: Option<ContentBase>,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 struct PaneAuthority {
     server: ServerId,
     pairing: spaceterm_core::identity::PairingId,
@@ -179,10 +179,15 @@ struct ChannelInner {
     effect_slots: Arc<Semaphore>,
     _slot: tokio::sync::OwnedSemaphorePermit,
 }
+#[derive(Clone, Copy)]
+struct AuthorizedIntent {
+    intent: StartupIntent,
+    attempt: u64,
+}
 struct ChannelState {
     facts: PaneChannelState,
     content_confirmed: bool,
-    intent: Option<StartupIntent>,
+    intent: Option<AuthorizedIntent>,
     intent_pending: Option<Arc<()>>,
     events: Option<events::Subscription>,
     native_high_water: u64,
@@ -224,9 +229,6 @@ struct Shared {
     leases: Mutex<BTreeMap<(WorkspaceId, AttachmentIncarnation), Weak<LeaseInner>>>,
 }
 impl Shared {
-    fn admitted(&self, info: ConnectedInfo) -> bool {
-        self.admitted_identity(info.into())
-    }
     fn admitted_identity(&self, authority: PaneAuthority) -> bool {
         self.admission.lock().is_ok_and(|gate| {
             gate.as_ref().is_none_or(|gate| {
@@ -240,9 +242,23 @@ impl Shared {
         })
     }
     fn admitted_binding(&self, binding: &crate::api::PairedServerBinding) -> bool {
-        self.admission.lock().is_ok_and(|gate| {
-            gate.as_ref()
-                .is_none_or(|gate| gate.allows_binding(binding))
+        let Ok(gate) = self.admission.lock().map(|gate| gate.clone()) else {
+            return false;
+        };
+        gate.as_ref()
+            .is_none_or(|gate| gate.allows_binding(binding))
+    }
+    fn publication_admitted(&self, authority: PaneAuthority) -> bool {
+        let Ok(gate) = self.admission.lock().map(|gate| gate.clone()) else {
+            return false;
+        };
+        gate.as_ref().is_none_or(|gate| {
+            gate.allows_identity_publication(
+                authority.server,
+                authority.pairing,
+                authority.client,
+                authority.incarnation,
+            )
         })
     }
     fn next_context(&self) -> Result<ContextGeneration, ClientFailure> {
@@ -363,7 +379,7 @@ impl PaneChannels {
         info: ConnectedInfo,
         snapshot: Arc<ReplicaSnapshot>,
     ) -> Result<(), ClientFailure> {
-        if !self.shared.admitted(info) {
+        if !self.shared.publication_admitted(info.into()) {
             return Err(stale());
         }
         if snapshot.cursor.server != info.server
@@ -417,6 +433,10 @@ impl PaneChannels {
             .map_err(|_| stale())?
             .remove(&info.server);
         for channel in self.channels(info.server)? {
+            // Cold channels retain their exact pairing generation across reconnect.
+            if !self.shared.publication_admitted(channel.authority) {
+                return Err(stale());
+            }
             channel.apply(info, &snapshot)?;
         }
         self.shared.peer.presentation_changed();
@@ -530,9 +550,11 @@ impl PaneChannels {
         }
         for channel in self.channels(server)? {
             let mut state = channel.state.lock().map_err(|_| stale())?;
-            // Publication temporarily withholds effects while its complete authority
-            // is checked. It must not cancel the deliberate startup that produced it.
-            // Every other invalidation ends that request immediately.
+
+            // Pending and authorized intents are comparison state, not effect
+            // authority. Publication disables admission until their fences are
+            // revalidated against the installed graph and connection attempt.
+
             if reason != ConnectionInvalidation::Publication {
                 state.intent = None;
                 state.intent_pending = None;
@@ -671,6 +693,21 @@ impl WorkspaceLease {
         if !self.0.active.load(Ordering::Acquire) {
             return Err(stale());
         }
+        let admitted_authority = {
+            let servers = self.0.shared.servers.lock().map_err(|_| stale())?;
+            if let Some(server) = servers.get(&self.0.workspace.server()) {
+                server.info.into()
+            } else {
+                let retained = self.0.shared.retained.lock().map_err(|_| stale())?;
+                retained
+                    .get(&self.0.workspace.server())
+                    .ok_or_else(stale)?
+                    .authority
+            }
+        };
+        if !self.0.shared.publication_admitted(admitted_authority) {
+            return Err(stale());
+        }
         let mut channels = self.0.channels.lock().map_err(|_| stale())?;
         channels.retain(|_, channel| channel.strong_count() != 0);
         if let Some(channel) = channels.get(&pane).and_then(Weak::upgrade) {
@@ -679,6 +716,8 @@ impl WorkspaceLease {
                 lease: Arc::clone(&self.0),
             });
         }
+        // A publication can finish while admission or construction is waiting.
+        // Capture its current graph under the channel insertion ordering.
         let (authority, info, snapshot, active) = {
             let servers = self.0.shared.servers.lock().map_err(|_| stale())?;
             if let Some(server) = servers.get(&self.0.workspace.server()) {
@@ -694,7 +733,7 @@ impl WorkspaceLease {
                 (server.authority, None, Arc::clone(&server.snapshot), false)
             }
         };
-        if !self.0.shared.admitted_identity(authority) {
+        if authority != admitted_authority {
             return Err(stale());
         }
         let record = snapshot
@@ -841,7 +880,9 @@ impl PaneChannel {
         fence: EffectFence,
         snapshot: RuntimeMetadataSnapshot,
     ) -> Result<(), ClientFailure> {
-        if !self.inner.admitted() || !self.lease.active.load(Ordering::Acquire) {
+        if !self.inner.shared.publication_admitted(self.inner.authority)
+            || !self.lease.active.load(Ordering::Acquire)
+        {
             return Err(stale());
         }
         let mut state = self.inner.state.lock().map_err(|_| stale())?;
@@ -897,7 +938,7 @@ impl PaneChannel {
         fence: EffectFence,
         base: ContentBase,
     ) -> Result<(), ClientFailure> {
-        if !self.inner.admitted() {
+        if !self.inner.shared.publication_admitted(self.inner.authority) {
             return Err(stale());
         }
         let mut state = self.inner.state.lock().map_err(|_| stale())?;
@@ -1183,7 +1224,10 @@ impl PaneChannel {
         }
         let outcome = match reply {
             PaneUseReply::AwaitingMeasurement(intent) => {
-                state.intent = Some(intent);
+                state.intent = Some(AuthorizedIntent {
+                    intent,
+                    attempt: request.info.attempt,
+                });
                 ExplicitUseOutcome::AwaitingMeasurement(Box::new(IntentToken {
                     intent,
                     channel: Arc::downgrade(&self.inner),
@@ -1209,7 +1253,13 @@ impl PaneChannel {
             if !Weak::ptr_eq(&token.channel, &Arc::downgrade(&self.inner))
                 || token.incarnation != self.lease.incarnation
                 || !self.lease.active.load(Ordering::Acquire)
-                || state.intent != Some(token.intent)
+                || !state.intent.is_some_and(|saved| {
+                    saved.intent == token.intent
+                        && state
+                            .facts
+                            .connection
+                            .is_some_and(|info| info.attempt == saved.attempt)
+                })
                 || !token.intent.fence().is_current(&current_fence(
                     &state.facts,
                     self.inner.pane,
@@ -1241,7 +1291,10 @@ impl PaneChannel {
             return;
         }
         let removed = self.inner.state.lock().is_ok_and(|mut state| {
-            if state.intent == Some(token.intent) {
+            if state
+                .intent
+                .is_some_and(|saved| saved.intent == token.intent)
+            {
                 state.intent = None;
                 true
             } else {
@@ -1395,10 +1448,9 @@ impl ChannelInner {
         self.shared.admitted_identity(self.authority)
     }
     fn apply(&self, info: ConnectedInfo, snapshot: &ReplicaSnapshot) -> Result<(), ClientFailure> {
-        if !self.admitted()
-            || info.pairing != self.authority.pairing
-            || info.client != self.authority.client
-        {
+        // Publication and pane construction validate journal authority before
+        // taking pane locks. Native effects retain their nonblocking gate.
+        if info.pairing != self.authority.pairing || info.client != self.authority.client {
             return Err(stale());
         }
         let mut state = self.state.lock().map_err(|_| stale())?;
@@ -1408,7 +1460,11 @@ impl ChannelInner {
             .lock()
             .map_err(|_| stale())?
             .get(&info.server)
-            .is_some_and(|server| server.active && same_attempt(server.info, info))
+            .is_some_and(|server| {
+                server.active
+                    && same_attempt(server.info, info)
+                    && server.snapshot.cursor == snapshot.cursor
+            })
         {
             return Err(stale());
         }
@@ -1471,13 +1527,6 @@ impl ChannelInner {
         }
         state.facts.runtime = runtime;
         state.facts.connection = Some(info);
-        if state.intent.is_some_and(|intent| {
-            !same_runtime
-                || !bound_fence(&state.facts, self.pane, false)
-                    .is_ok_and(|fence| intent.fence().is_current(&fence))
-        }) {
-            state.intent = None;
-        }
         state.facts.readiness = if self
             .lease
             .upgrade()
@@ -1496,6 +1545,14 @@ impl ChannelInner {
         } else {
             PaneReadiness::Live
         };
+        if state.intent.is_some_and(|saved| {
+            !same_runtime
+                || saved.attempt != info.attempt
+                || !bound_fence(&state.facts, self.pane, false)
+                    .is_ok_and(|current| saved.intent.fence().is_current(&current))
+        }) {
+            state.intent = None;
+        }
         self.update_projection(&state)?;
         if changed {
             events::publish(&mut state, PaneEvent::Invalidated, true);

@@ -547,6 +547,7 @@ fn reply_policy(payload: &spaceterm_protocol::codec::Payload) -> Result<bool, Eg
                     | Kind::ContentReadResponse(_)
                     | Kind::ContentPublication(_)
                     | Kind::MetadataPublication(_)
+                    | Kind::MetadataFragment(_)
                     | Kind::ContentInvalidation(_)
                     | Kind::NativeRequest(_)
                     | Kind::ResourceChunk(_),

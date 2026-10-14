@@ -285,6 +285,203 @@ macro_rules! profile {
                     }),
                 }
             }
+            fn check_stamp(
+                value: &wire::QueryStamp,
+                expected: QueryStamp,
+            ) -> Result<(), ProtocolError> {
+                if decode_stamp(value)? != expected {
+                    return Err(ProtocolError::Malformed);
+                }
+                Ok(())
+            }
+            fn decode_failure(
+                value: &wire::ContentFailure,
+                stamp: QueryStamp,
+            ) -> Result<ContentReadFailure, ProtocolError> {
+                check_stamp(required(&value.stamp)?, stamp)?;
+                Ok(match value.reason {
+                    1 => ContentReadFailure::StaleAuthority,
+                    2 => ContentReadFailure::Cancelled,
+                    3 => ContentReadFailure::Retired,
+                    4 => ContentReadFailure::Capacity,
+                    5 => ContentReadFailure::MissingResource,
+                    6 => ContentReadFailure::InvalidRange,
+                    7 => ContentReadFailure::Exhausted,
+                    _ => return Err(ProtocolError::Malformed),
+                })
+            }
+            pub fn decode_topology_result(
+                value: &wire::ContentReadResponse,
+                request: &TopologyPageRequest,
+            ) -> Result<TopologyPageResult, ProtocolError> {
+                let stamp = request.stamp();
+                Ok(match required(&value.result)? {
+                    wire::content_read_response::Result::Topology(value) => {
+                        check_stamp(required(&value.stamp)?, stamp)?;
+                        if value.rows.len() > usize::from(request.limits().rows()) {
+                            return Err(ProtocolError::LimitExceeded);
+                        }
+                        let rows = value
+                            .rows
+                            .iter()
+                            .map(decode_topology_row)
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let continuation = value
+                            .after
+                            .as_ref()
+                            .map(|row| {
+                                TopologyContinuation::new(stamp, decode_topology_row(row)?)
+                                    .map_err(|_| ProtocolError::Malformed)
+                            })
+                            .transpose()?;
+                        ContentReadResult::Ready(
+                            TopologyPage::new(request, rows, continuation)
+                                .map_err(|_| ProtocolError::Malformed)?,
+                        )
+                    }
+                    wire::content_read_response::Result::ResyncRequired(value) => {
+                        check_stamp(required(&value.stamp)?, stamp)?;
+                        let current = decode_base(required(&value.current)?)?;
+                        if current.session != stamp.base().session {
+                            return Err(ProtocolError::Malformed);
+                        }
+                        ContentReadResult::ResyncRequired {
+                            request: stamp,
+                            current,
+                        }
+                    }
+                    wire::content_read_response::Result::Rejected(value) => {
+                        ContentReadResult::Rejected {
+                            request: stamp,
+                            reason: decode_failure(value, stamp)?,
+                        }
+                    }
+                    _ => return Err(ProtocolError::Malformed),
+                })
+            }
+            pub fn decode_copy_event(
+                value: &wire::CopyEvent,
+                request: &CopyRequest,
+            ) -> Result<CopyStreamItem, ProtocolError> {
+                let stamp = request.stamp();
+                Ok(match required(&value.item)? {
+                    wire::copy_event::Item::Chunk(value) => {
+                        check_stamp(required(&value.stamp)?, stamp)?;
+                        let part = match value.part {
+                            1 => CopyPart::Plain,
+                            2 => CopyPart::Html,
+                            _ => return Err(ProtocolError::Malformed),
+                        };
+                        CopyStreamItem::Chunk(
+                            CopyChunk::new(
+                                request,
+                                ResourceTransferId::new(value.transfer)
+                                    .map_err(|_| ProtocolError::Malformed)?,
+                                part,
+                                value.offset,
+                                value.total,
+                                value.data.clone(),
+                            )
+                            .map_err(|_| ProtocolError::Malformed)?,
+                        )
+                    }
+                    wire::copy_event::Item::Complete(value) => {
+                        check_stamp(required(&value.stamp)?, stamp)?;
+                        let html = match (&value.html_bytes, &value.html_digest) {
+                            (Some(bytes), Some(digest)) => Some((
+                                *bytes,
+                                digest
+                                    .as_slice()
+                                    .try_into()
+                                    .map_err(|_| ProtocolError::Malformed)?,
+                            )),
+                            (None, None) => None,
+                            _ => return Err(ProtocolError::Malformed),
+                        };
+                        CopyStreamItem::Complete(
+                            CopyCompletion::new(
+                                request,
+                                ResourceTransferId::new(value.transfer)
+                                    .map_err(|_| ProtocolError::Malformed)?,
+                                value.plain_bytes,
+                                value
+                                    .plain_digest
+                                    .as_slice()
+                                    .try_into()
+                                    .map_err(|_| ProtocolError::Malformed)?,
+                                html,
+                            )
+                            .map_err(|_| ProtocolError::Malformed)?,
+                        )
+                    }
+                    wire::copy_event::Item::ContentFailure(value) => CopyStreamItem::Failed {
+                        stamp,
+                        reason: decode_failure(value, stamp)?,
+                    },
+                    _ => return Err(ProtocolError::Malformed),
+                })
+            }
+            pub fn decode_find_event(
+                value: &wire::FindEvent,
+                request: &FindRequest,
+            ) -> Result<FindStreamItem, ProtocolError> {
+                let stamp = request.stamp();
+                Ok(match required(&value.item)? {
+                    wire::find_event::Item::Chunk(value) => {
+                        check_stamp(required(&value.stamp)?, stamp)?;
+                        if value.matches.len() > MAX_FIND_CHUNK_MATCHES {
+                            return Err(ProtocolError::LimitExceeded);
+                        }
+                        let matches = value
+                            .matches
+                            .iter()
+                            .map(|value| {
+                                FindMatch::new(
+                                    stamp,
+                                    decode_cell(required(&value.start)?)?,
+                                    decode_cell(required(&value.end)?)?,
+                                )
+                                .map_err(|_| ProtocolError::Malformed)
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let continuation = value
+                            .continuation
+                            .as_ref()
+                            .map(|value| {
+                                check_stamp(required(&value.stamp)?, stamp)?;
+                                let continuation = FindContinuation::new(
+                                    stamp,
+                                    request.query(),
+                                    decode_cell(required(&value.next)?)?,
+                                )
+                                .map_err(|_| ProtocolError::Malformed)?;
+                                if value.query_fingerprint.as_slice()
+                                    != continuation.query_fingerprint()
+                                {
+                                    return Err(ProtocolError::Malformed);
+                                }
+                                Ok(continuation)
+                            })
+                            .transpose()?;
+                        FindStreamItem::Chunk(Box::new(
+                            FindChunk::new(request, value.index, matches, continuation)
+                                .map_err(|_| ProtocolError::Malformed)?,
+                        ))
+                    }
+                    wire::find_event::Item::Complete(value) => {
+                        check_stamp(required(&value.stamp)?, stamp)?;
+                        FindStreamItem::Complete {
+                            stamp,
+                            chunks: value.chunks,
+                        }
+                    }
+                    wire::find_event::Item::ContentFailure(value) => FindStreamItem::Failed {
+                        stamp,
+                        reason: decode_failure(value, stamp)?,
+                    },
+                    _ => return Err(ProtocolError::Malformed),
+                })
+            }
             pub fn encode_copy_event(value: &CopyStreamItem) -> wire::CopyEvent {
                 wire::CopyEvent {
                     item: Some(match value {

@@ -158,6 +158,43 @@ impl Journal {
     }
 }
 
+/// Byte pressure and slot pressure retire only never-admitted requests. The permanent
+/// high-water mark prevents a displaced assessment from becoming fresh authority.
+fn retire_unsubmitted(journal: &mut Journal, protected: Option<u64>) -> bool {
+    let eligible = |reservation: &&Reservation| {
+        Some(reservation.sequence) != protected
+            && reservation.owner.is_none()
+            && reservation.install.is_none()
+    };
+    // Prefer IDs that have no assessment before displacing a retained scope.
+    let unbound = journal
+        .reservations
+        .iter()
+        .enumerate()
+        .filter(|(_, reservation)| eligible(reservation))
+        .find(|(_, reservation)| reservation.service.is_none())
+        .map(|(index, _)| index);
+    let Some(index) = unbound.or_else(|| {
+        journal
+            .reservations
+            .iter()
+            .enumerate()
+            .filter(|(_, reservation)| eligible(reservation))
+            .find(|(_, reservation)| {
+                reservation.service.as_ref().is_some_and(|service| {
+                    service.phase == ServicePhase::Reserved
+                        && !service.reserving
+                        && !service.aborting
+                })
+            })
+            .map(|(index, _)| index)
+    }) else {
+        return false;
+    };
+    journal.reservations.remove(index);
+    true
+}
+
 /// Current-account discovery and durable request authority for the compiled identity.
 ///
 /// This retained provider has no public account, directory or identity override.
@@ -351,14 +388,9 @@ impl ServiceSupervisor {
                 // oldest unsubmitted ID, never an unacknowledged original outcome.
                 // Its sequence remains below the permanent high-water mark, so a
                 // delayed submitter gets RequestRetired rather than fresh authority.
-                let Some(unsubmitted) = journal
-                    .reservations
-                    .iter()
-                    .position(|r| r.owner.is_none() && r.service.is_none() && r.install.is_none())
-                else {
+                if !retire_unsubmitted(&mut journal, None) {
                     return Err(ServiceFailure::LimitExceeded);
-                };
-                journal.reservations.remove(unsubmitted);
+                }
             }
             journal.high_water = journal
                 .high_water
@@ -372,10 +404,15 @@ impl ServiceSupervisor {
                 service: None,
                 install: None,
             });
-            match self.publish_journal(&directory, &journal, snapshot.as_ref()) {
-                Ok(()) => return Ok(request),
-                Err(ServiceFailure::RequestConflict) => continue,
-                Err(error) => return Err(error),
+            let protected = journal.sequence(request)?;
+            loop {
+                match self.publish_journal(&directory, &journal, snapshot.as_ref()) {
+                    Ok(()) => return Ok(request),
+                    Err(ServiceFailure::RequestConflict) => break,
+                    Err(ServiceFailure::LimitExceeded)
+                        if retire_unsubmitted(&mut journal, Some(protected)) => {}
+                    Err(error) => return Err(error),
+                }
             }
         }
         Err(ServiceFailure::Pending)
@@ -461,10 +498,15 @@ impl ServiceSupervisor {
             let (directory, snapshot, mut journal) = self.read_journal()?;
             let index = journal.reservation(request)?;
             mutation(&mut journal, index)?;
-            match self.publish_journal(&directory, &journal, Some(&snapshot)) {
-                Ok(()) => return Ok(()),
-                Err(ServiceFailure::RequestConflict) => continue,
-                Err(error) => return Err(error),
+            let protected = journal.sequence(request)?;
+            loop {
+                match self.publish_journal(&directory, &journal, Some(&snapshot)) {
+                    Ok(()) => return Ok(()),
+                    Err(ServiceFailure::RequestConflict) => break,
+                    Err(ServiceFailure::LimitExceeded)
+                        if retire_unsubmitted(&mut journal, Some(protected)) => {}
+                    Err(error) => return Err(error),
+                }
             }
         }
         Err(ServiceFailure::Pending)
@@ -1082,6 +1124,7 @@ impl ServiceSupervisor {
                 };
             }
             let lease = self.lifecycle_lease()?;
+            self.reconcile_started_install(&lease).await?;
             self.ensure_no_pending(request)?;
             let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
             if !registration.is_installed() {
@@ -1278,7 +1321,7 @@ impl ServiceSupervisor {
                     registration.validate(key).map_err(|_| Failure::Unsafe)
                 },
             );
-            if registration_recovery.is_err() && self.reconcile_initial_creation(request).is_err() {
+            if registration_recovery.is_err() {
                 self.reconcile_owner_archive(request)?;
             }
         }
@@ -1318,6 +1361,7 @@ impl ServiceSupervisor {
             }
             Err(error) => return Err(error),
         };
+        self.reconcile_started_install(&lease).await?;
         self.ensure_no_pending(request)?;
         let mut record = if let Some(original) = self.original(request)? {
             original
@@ -1771,6 +1815,12 @@ impl ServiceSupervisor {
         }
         let directory = Directory::open(&self.anchor)?.ok_or(ServiceFailure::Missing)?;
         let lease = directory.lease("instance-lock")?;
+        let recovery = RegisteredServer {
+            directory: Directory::open_for_recovery(&record.data)?
+                .ok_or(ServiceFailure::Missing)?,
+            record,
+        };
+        super::runtime_inventory::recover_publications(&recovery)?;
         let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
         if registration.desired_state() == DesiredServerState::Stopped {
             return Ok(AccountStartupAdmission::Stopped);

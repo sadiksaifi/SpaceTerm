@@ -2,6 +2,8 @@
 //! The ordinary desktop binding is published only by the portable enrollment driver.
 
 mod channel;
+#[cfg(test)]
+mod recovery_tests;
 
 use super::classify;
 use channel::{NativeOwnerChannel, OwnerChannelProvider};
@@ -120,13 +122,6 @@ async fn enroll_using<N: NativeDeviceCredentials + Clone + 'static>(
         .map_err(pairing_failure)?;
         let store = JournalPairingStore::new(journal.clone());
         let inventory = store.recover().await.map_err(pairing_failure)?;
-        // Incomplete owner work must be recovered with its original request. It
-        // cannot be replaced merely because a foreground observer disappeared.
-        if inventory.credential_preparations.iter().any(|preparation| {
-            preparation.scope.parts().purpose == CredentialPurpose::PairingAuthentication { server }
-        }) {
-            return Err(failure(ClientFailureClass::RecoveryRequired));
-        }
         let device = if let Some(preparation) =
             inventory
                 .credential_preparations
@@ -148,33 +143,114 @@ async fn enroll_using<N: NativeDeviceCredentials + Clone + 'static>(
                 .map_err(pairing_failure)?
                 .1
         };
-        let scope = DeviceCredentials::new_scope(
-            namespace,
-            CredentialPurpose::PairingAuthentication { server },
-        )
-        .map_err(pairing_failure)?;
-        let (generation, authentication) = prepare_native_credential(&store, &credentials, scope)
-            .await
+        let pending = inventory
+            .credential_preparations
+            .iter()
+            .find(|preparation| {
+                preparation.scope.parts().namespace == namespace
+                    && preparation.scope.parts().purpose
+                        == CredentialPurpose::PairingAuthentication { server }
+            });
+        let retained_preparation = inventory.prepared.iter().find(|prepared| {
+            prepared.pin == pin
+                && prepared.credential.scope.parts().namespace == namespace
+                && !inventory.is_suppressed(&prepared.local_pairing)
+        });
+        let (generation, authentication) = if let Some(prepared) = retained_preparation {
+            let credential = credentials
+                .recover_preparation(&prepared.credential.scope)
+                .await
+                .map_err(pairing_failure)?
+                .ok_or_else(|| failure(ClientFailureClass::StorageUnavailable))?;
+            if credential != prepared.credential {
+                return Err(failure(ClientFailureClass::InvalidStorage));
+            }
+            (prepared.local_pairing.parts().generation, credential)
+        } else if let Some(pending) = pending {
+            let credential = recover_native_credential(&store, &credentials, pending.generation)
+                .await
+                .map_err(pairing_failure)?
+                .ok_or_else(|| failure(ClientFailureClass::StorageUnavailable))?;
+            (pending.generation, credential)
+        } else {
+            let scope = DeviceCredentials::new_scope(
+                namespace,
+                CredentialPurpose::PairingAuthentication { server },
+            )
             .map_err(pairing_failure)?;
-        let mut nonce = [0; 32];
-        getrandom::fill(&mut nonce).map_err(|_| failure(ClientFailureClass::Unavailable))?;
-        let mut device_id = [0; 16];
-        let hash = ring::digest::digest(&ring::digest::SHA256, &device.public_key);
-        device_id.copy_from_slice(&hash.as_ref()[..16]);
-        let proposal = EnrollmentProposal::new(EnrollmentProposalParts {
-            server,
-            device: DeviceId::new(device_id),
-            keys: PairingKeys::new(PairingKeysParts {
-                device_identity_public_key: device.public_key,
-                pairing_authentication_public_key: authentication.public_key,
-            })
-            .map_err(|_| failure(ClientFailureClass::InvalidStorage))?,
-            claim_nonce: nonce,
+            prepare_native_credential(&store, &credentials, scope)
+                .await
+                .map_err(pairing_failure)?
+        };
+        let keys = PairingKeys::new(PairingKeysParts {
+            device_identity_public_key: device.public_key,
+            pairing_authentication_public_key: authentication.public_key,
         })
         .map_err(|_| failure(ClientFailureClass::InvalidStorage))?;
-        let mut reference = [0; 16];
-        getrandom::fill(&mut reference).map_err(|_| failure(ClientFailureClass::Unavailable))?;
-        let reference = RevocationRouteReference::new(reference);
+        let original = supervisor
+            .retained_owner_proposal(server, &keys)
+            .map_err(classify)?;
+        let (request, proposal) = if let Some(original) = original {
+            original
+        } else {
+            // Legacy incomplete work has no retained claim. It cannot authorize a
+            // replacement ticket merely because the original observer disappeared.
+            if pending.is_some() || retained_preparation.is_some() {
+                return Err(failure(ClientFailureClass::RecoveryRequired));
+            }
+            let mut nonce = [0; 32];
+            getrandom::fill(&mut nonce).map_err(|_| failure(ClientFailureClass::Unavailable))?;
+            let mut device_id = [0; 16];
+            let hash = ring::digest::digest(&ring::digest::SHA256, &device.public_key);
+            device_id.copy_from_slice(&hash.as_ref()[..16]);
+            let proposal = EnrollmentProposal::new(EnrollmentProposalParts {
+                server,
+                device: DeviceId::new(device_id),
+                keys,
+                claim_nonce: nonce,
+            })
+            .map_err(|_| failure(ClientFailureClass::InvalidStorage))?;
+            let request = supervisor.allocate_request().map_err(classify)?;
+            supervisor
+                .record_owner_proposal(request, proposal.clone())
+                .map_err(classify)?;
+            (request, proposal)
+        };
+        let captured = journal.snapshot()?;
+        let slot = captured
+            .pairing()
+            .slot(authentication.scope.reference())
+            .cloned()
+            .ok_or_else(|| failure(ClientFailureClass::InvalidStorage))?;
+        let reference = match slot.route_reference {
+            Some(reference)
+                if slot.route.as_ref() == Some(&route)
+                    || captured.pairing().prepared().iter().any(|prepared| {
+                        prepared.route_reference == reference
+                            && prepared.target.target().is_ok_and(|target| {
+                                target.credential() == authentication.scope.reference()
+                                    && target.route() == &route
+                            })
+                    }) =>
+            {
+                reference
+            }
+            Some(_) => return Err(failure(ClientFailureClass::StaleAuthority)),
+            None => {
+                let mut reference = [0; 16];
+                getrandom::fill(&mut reference)
+                    .map_err(|_| failure(ClientFailureClass::Unavailable))?;
+                let reference = RevocationRouteReference::new(reference);
+                journal
+                    .transact(vec![ClientJournalChange::BindCredentialRoute {
+                        reference: authentication.scope.reference(),
+                        route_reference: reference,
+                        route: route.clone(),
+                    }])
+                    .await?;
+                reference
+            }
+        };
         let attempt = DirectEnrollmentAttempt::new(pin, reference, generation.get())
             .map_err(pairing_failure)?;
         // Local native registration is the out-of-band authority. No remote
@@ -201,14 +277,13 @@ async fn enroll_using<N: NativeDeviceCredentials + Clone + 'static>(
         let (device_proof, authentication_proof) =
             VerifiedDeviceClaim::proofs(&proposal, device_signer.as_ref(), auth_signer.as_ref())
                 .map_err(|_| failure(ClientFailureClass::AuthorizationDenied))?;
-        let request = supervisor.allocate_request().map_err(classify)?;
         let claim = enrollment_proposal_digest(&proposal)
             .map_err(|_| failure(ClientFailureClass::InvalidStorage))?;
         let digest = supervisor
             .owner_enrollment_digest(request, server, claim)
             .map_err(classify)?;
         supervisor
-            .record_owner_enrollment(request, digest, server, claim)
+            .validate_owner_enrollment(&request, digest, server, claim)
             .map_err(classify)?;
         let initial = serde_json::to_vec(&serde_json::json!({
             "request": request,
@@ -277,13 +352,15 @@ async fn enroll_using<N: NativeDeviceCredentials + Clone + 'static>(
             reservation: Some(reservation.clone()),
         };
         prepared.validate().map_err(pairing_failure)?;
-        journal
-            .transact(vec![ClientJournalChange::BindCredentialRoute {
-                reference: prepared.credential.scope.reference(),
-                route_reference: reference,
-                route,
-            }])
-            .await?;
+        if retained_preparation.is_none() {
+            journal
+                .transact(vec![ClientJournalChange::BindCredentialRoute {
+                    reference: prepared.credential.scope.reference(),
+                    route_reference: reference,
+                    route,
+                }])
+                .await?;
+        }
         let connector = OwnerConnector {
             pin,
             reference,
@@ -324,12 +401,22 @@ async fn enroll_using<N: NativeDeviceCredentials + Clone + 'static>(
         return Ok(());
     }
     spaceterm_client_native::native::consumer::NativeConsumer::new(
-        native.management(), spaceterm_client_native::native::consumer::NativeConsumerKind::Cli,
-    ).with_credentials(provisioning_credentials).provision_journal(journal).await.map(|_| ()).map_err(|error| {
+        native.management(),
+        spaceterm_client_native::native::consumer::NativeConsumerKind::Cli,
+    )
+    .with_credentials(provisioning_credentials)
+    .provision_journal(journal)
+    .await
+    .map(|_| ())
+    .map_err(|error| {
         use spaceterm_client::management_cli::ManagementFailure;
         failure(match error {
-            ManagementFailure::CredentialUnavailable | ManagementFailure::StorageUnavailable => ClientFailureClass::StorageUnavailable,
-            ManagementFailure::AuthorizationDenied | ManagementFailure::Revoked => ClientFailureClass::AuthorizationDenied,
+            ManagementFailure::CredentialUnavailable | ManagementFailure::StorageUnavailable => {
+                ClientFailureClass::StorageUnavailable
+            }
+            ManagementFailure::AuthorizationDenied | ManagementFailure::Revoked => {
+                ClientFailureClass::AuthorizationDenied
+            }
             ManagementFailure::OutcomePending => ClientFailureClass::RecoveryRequired,
             _ => ClientFailureClass::Unavailable,
         })

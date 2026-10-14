@@ -31,7 +31,7 @@ use spaceterm_client_native::{
     route::{LocalRouteAuthority, NativeRouteConnector},
 };
 use spaceterm_core::{
-    identity::{ServerId, TabId, WorkspaceId},
+    identity::{PaneId, ServerId, TabId, WorkspaceId},
     operations::{Command, Outcome, TabCreationSource, WorkspaceCreationSource},
     organization::{NameDraft, SessionPhase, SplitAxis, SplitEdge},
     pairing::{CredentialReference, LocalPairingGeneration, SignedPairingReceipt},
@@ -257,6 +257,27 @@ impl Desktop {
             window,
         }
     }
+    fn connected_frame(&self, server: ServerId) -> Option<Arc<DesktopServerFrame>> {
+        let handle = self.registry.server(server).unwrap();
+        let ConnectionState::Connected { info } = handle.state().borrow().clone() else {
+            return None;
+        };
+        let snapshot = {
+            let replica = handle.replica();
+            let replica = replica.borrow();
+            replica.retained().filter(|_| replica.is_ready()).cloned()
+        }?;
+        let frame = self.provider.frame(server)?;
+        (snapshot.cursor.server == server
+            && snapshot.cursor.epoch == info.epoch
+            && snapshot.cursor.revision == info.organization_revision
+            && matches!(frame.connection, ConnectionState::Connected { info: shown } if shown == info)
+            && frame.replica_status == crate::ui::server_desktop_contracts::ReplicaStatus::Ready
+            && frame.organization.epoch() == snapshot.cursor.epoch
+            && frame.organization.state().revision == snapshot.cursor.revision
+            && frame.organization.runtime() == snapshot.organization.runtime())
+        .then_some(frame)
+    }
     fn wait_connected(
         &self,
         server: ServerId,
@@ -265,21 +286,48 @@ impl Desktop {
     ) {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         let handle = self.registry.server(server).unwrap();
-        while !self
-            .provider
-            .frame(server)
-            .is_some_and(|frame| matches!(frame.connection, ConnectionState::Connected { .. }))
-        {
+        while self.connected_frame(server).is_none() {
+            let current = handle.state().borrow().clone();
+            let shown = self
+                .provider
+                .frame(server)
+                .map(|frame| frame.connection.clone());
             assert!(
                 std::time::Instant::now() < deadline,
-                "connection did not settle: {:?}; desktop: {:?}",
-                *handle.state().borrow(),
-                self.provider
-                    .frame(server)
-                    .map(|frame| frame.connection.clone())
+                "connection did not settle: {current:?}; desktop: {shown:?}",
             );
             drive(executor, cx);
         }
+    }
+    fn wait_running(
+        &self,
+        server: &authenticated::Fixture,
+        pane: PaneId,
+        executor: &tokio::runtime::Runtime,
+        cx: &mut TestAppContext,
+    ) {
+        // Native launch completion precedes its client publication. Initial Connected
+        // state and the server's Running phase do not prove installed Pane authority.
+        let channel = self.provider.pane_channel(pane).unwrap();
+        settle_until(executor, cx, || {
+            let snapshot = server.handle.snapshot();
+            let Some(runtime) = snapshot
+                .runtime()
+                .iter()
+                .find(|runtime| runtime.pane == pane)
+            else {
+                return false;
+            };
+            matches!(runtime.phase, SessionPhase::Running { .. })
+                && self.connected_frame(pane.server()).is_some_and(|frame| {
+                    let observed = *channel.state().borrow();
+                    frame.organization.state().revision >= snapshot.state().revision
+                        && frame.organization.runtime().contains(runtime)
+                        && observed.runtime == Some(*runtime)
+                        && matches!(frame.connection, ConnectionState::Connected { info }
+                            if observed.connection == Some(info))
+                })
+        });
     }
     fn wait_workspaces(
         &self,
@@ -320,31 +368,73 @@ impl Desktop {
         cx.foreground_executor().block_test(task).unwrap();
         drive(executor, cx);
     }
-    fn shared(&self, command: Command, executor: &tokio::runtime::Runtime) -> Outcome {
-        executor.block_on(async {
+    fn shared(
+        &self,
+        command: Command,
+        executor: &tokio::runtime::Runtime,
+        cx: &mut TestAppContext,
+    ) -> Outcome {
+        let server = command.server();
+        self.wait_connected(server, executor, cx);
+        let ConnectionState::Connected { info: captured } = self.frame(server).connection else {
+            panic!("coherent connection before shared command")
+        };
+        let kind = std::mem::discriminant(&command);
+        let (outcome, publication_revision) = executor.block_on(async {
             let binding = self
                 .bindings
                 .iter()
                 .find(|binding| binding.target().server() == command.server())
                 .unwrap();
+            let snapshot = self.registry.server(command.server()).unwrap().replica();
+            let workspace = crate::ui::server_client_runtime::composed::shared_command_workspace(
+                &command,
+                &snapshot.borrow().retained().unwrap().organization,
+            )
+            .unwrap();
             let ticket = self
                 .tracker
-                .submit(binding, command, None, self.protocol.as_ref())
+                .submit(binding, command, workspace, self.protocol.as_ref())
                 .await
-                .unwrap();
+                .unwrap_or_else(|failure| {
+                    let handle = self.registry.server(binding.target().server()).unwrap();
+                    panic!(
+                        "shared command {kind:?} failed: {failure:?}; connection={:?}; replica_ready={}",
+                        *handle.state().borrow(),
+                        handle.replica().borrow().is_ready(),
+                    )
+                });
             let mut status = ticket.status();
             tokio::time::timeout(Duration::from_secs(20), async {
                 loop {
                     let current = status.borrow().clone();
-                    if let OperationStatus::Completed { outcome, .. } = current {
-                        return outcome;
+                    if let OperationStatus::Completed {
+                        outcome,
+                        publication_revision,
+                    } = current
+                    {
+                        return (outcome, publication_revision);
                     }
                     status.changed().await.unwrap();
                 }
             })
             .await
             .unwrap()
-        })
+        });
+        // A durable receipt can precede publication or survive a reconnect. Keep
+        // the original result and pairing scope; never resubmit the command or
+        // reuse the old connection's native authority.
+        settle_until(executor, cx, || {
+            self.connected_frame(server).is_some_and(|frame| {
+                matches!(frame.connection, ConnectionState::Connected { info }
+                    if info.server == captured.server
+                        && info.pairing == captured.pairing
+                        && info.client == captured.client
+                        && info.epoch == captured.epoch
+                        && info.organization_revision >= publication_revision)
+            })
+        });
+        outcome
     }
     fn workspace_entity(&self, workspace: WorkspaceId, cx: &TestAppContext) -> Entity<TabManager> {
         self.manager.read_with(cx, |manager, _| {
@@ -385,6 +475,7 @@ fn create_workspace(
     desktop: &Desktop,
     server: ServerId,
     executor: &tokio::runtime::Runtime,
+    cx: &mut TestAppContext,
 ) -> (WorkspaceId, TabId, spaceterm_core::identity::PaneId) {
     let outcome = desktop.shared(
         Command::CreateWorkspace {
@@ -393,6 +484,7 @@ fn create_workspace(
             name: NameDraft::Automatic,
         },
         executor,
+        cx,
     );
     let Outcome::CreatedWithControl(created) = outcome else {
         panic!("workspace creation: {outcome:?}")
@@ -435,8 +527,8 @@ fn authenticated_desktop_two_servers_preserve_independent_views_and_inactive_ent
             desktop.wait_connected(server, &executor, cx);
         }
     }
-    let (workspace, tab, pane) = create_workspace(&a, first_id, &executor);
-    let (other, _, _) = create_workspace(&a, second_id, &executor);
+    let (workspace, tab, pane) = create_workspace(&a, first_id, &executor, cx);
+    let (other, _, _) = create_workspace(&a, second_id, &executor, cx);
     b.wait_workspaces(first_id, 1, &executor, cx);
     b.wait_workspaces(second_id, 1, &executor, cx);
     for desktop in [&a, &b] {
@@ -464,6 +556,7 @@ fn authenticated_desktop_two_servers_preserve_independent_views_and_inactive_ent
             source: TabCreationSource::Pane(pane),
         },
         &executor,
+        cx,
     );
     let Outcome::CreatedWithControl(created) = outcome else {
         panic!("tab creation: {outcome:?}")
@@ -510,6 +603,7 @@ fn authenticated_desktop_two_servers_preserve_independent_views_and_inactive_ent
             edge: SplitEdge::After,
         },
         &executor,
+        cx,
     );
     let Outcome::CreatedWithControl(created) = split else {
         panic!("split creation: {split:?}")
@@ -706,12 +800,16 @@ fn authenticated_desktop_two_servers_preserve_independent_views_and_inactive_ent
         &b_arrangement
     );
     let target = spaceterm_core::operations::CloseTarget::Tab(new_tab);
-    let assessment = match a.shared(Command::AssessClose { target }, &executor) {
+    let assessment = match a.shared(Command::AssessClose { target }, &executor, cx) {
         Outcome::Assessment(assessment) => assessment.reference(),
         outcome => panic!("close assessment: {outcome:?}"),
     };
     assert_eq!(
-        a.shared(Command::CloseConfirmed { target, assessment }, &executor),
+        a.shared(
+            Command::CloseConfirmed { target, assessment },
+            &executor,
+            cx
+        ),
         Outcome::Applied
     );
     settle_until(&executor, cx, || {
@@ -805,9 +903,11 @@ fn authenticated_desktop_settings_closure_and_native_reopen_preserve_ended_and_d
     let desktop = Desktop::new(&executor, &[&server], 0, cx);
     let server_id = server.handle.snapshot().state().server;
     desktop.wait_connected(server_id, &executor, cx);
-    let (workspace, _, pane) = create_workspace(&desktop, server_id, &executor);
+    let (workspace, _, pane) = create_workspace(&desktop, server_id, &executor, cx);
     desktop.wait_workspaces(server_id, 1, &executor, cx);
     desktop.request(DesktopRequest::AttachWorkspace(workspace), &executor, cx);
+    desktop.wait_connected(server_id, &executor, cx);
+    drive(&executor, cx);
     desktop.request(
         DesktopRequest::StartSession {
             pane,
@@ -816,12 +916,7 @@ fn authenticated_desktop_settings_closure_and_native_reopen_preserve_ended_and_d
         &executor,
         cx,
     );
-    settle_until(&executor, cx, || {
-        matches!(
-            server.handle.snapshot().runtime()[0].phase,
-            SessionPhase::Running { .. }
-        )
-    });
+    desktop.wait_running(&server, pane, &executor, cx);
     let control = server.handle.snapshot().runtime()[0].control;
     cx.update(|cx| settings_window::open_or_activate(None, cx));
     drive(&executor, cx);
@@ -834,6 +929,7 @@ fn authenticated_desktop_settings_closure_and_native_reopen_preserve_ended_and_d
     let assessment = match desktop.shared(
         Command::AssessEndAllSessions { server: server_id },
         &executor,
+        cx,
     ) {
         Outcome::Assessment(assessment) => assessment.reference(),
         outcome => panic!("End All assessment: {outcome:?}"),
@@ -844,7 +940,8 @@ fn authenticated_desktop_settings_closure_and_native_reopen_preserve_ended_and_d
                 server: server_id,
                 assessment
             },
-            &executor
+            &executor,
+            cx,
         ),
         Outcome::Applied
     );
@@ -1121,4 +1218,146 @@ fn authenticated_desktop_native_geometry_and_offline_settings_preserve_client_do
         );
     }
     executor.block_on(second.shutdown());
+}
+
+#[gpui::test]
+fn desktop_restart_with_unresolved_detach_release(cx: &mut TestAppContext) {
+    use spaceterm_client::pending::PendingTasks;
+    use spaceterm_core::organization::ControlRecord;
+    cx.update(crate::ui::init).unwrap();
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let server = fresh_server(&executor, 2);
+    let desktop = Desktop::new(&executor, &[&server], 0, cx);
+    let server_id = server.handle.snapshot().state().server;
+    desktop.wait_connected(server_id, &executor, cx);
+    let (workspace, _, pane) = create_workspace(&desktop, server_id, &executor, cx);
+    desktop.wait_workspaces(server_id, 1, &executor, cx);
+    desktop.request(DesktopRequest::AttachWorkspace(workspace), &executor, cx);
+    desktop.wait_connected(server_id, &executor, cx);
+    desktop.request(
+        DesktopRequest::StartSession {
+            pane,
+            source: crate::ui::server_desktop_contracts::SelectionSource::Pointer,
+        },
+        &executor,
+        cx,
+    );
+    desktop.wait_running(&server, pane, &executor, cx);
+    let attachment = desktop
+        .frame(server_id)
+        .personal
+        .workspace(workspace)
+        .unwrap()
+        .attachment();
+    let binding = desktop.bindings[0].clone();
+    let pending = PendingTasks::new(desktop.journal.clone(), desktop.protocol.clone());
+    // Commit the local detach, then quit before the presentation owner can drain its release.
+    executor
+        .block_on(pending.detach_attachment(&binding, attachment))
+        .unwrap();
+    let original = desktop.journal.snapshot().unwrap().detaches()[0].clone();
+    assert!(!original.grants.is_empty());
+    let quit = cx.update(|cx| desktop.provider.prepare_quit(cx));
+    settle_until(&executor, cx, || quit.is_ready());
+    cx.foreground_executor().block_test(quit).unwrap();
+    assert!(desktop.journal.snapshot().unwrap().detaches() == std::slice::from_ref(&original));
+    assert!(matches!(
+        server.handle.snapshot().runtime()[0].control,
+        ControlRecord::Held { .. }
+    ));
+
+    let (composition, registry, journal) = executor.block_on(async {
+        let codec = Arc::new(spaceterm_core::operation_ledger::canonical::CanonicalCodec);
+        let native = Arc::new(
+            NativeClientJournal::open_existing(
+                desktop.journal_path.clone(),
+                codec.clone(),
+                Arc::new(Verifier),
+                JournalLimits::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        let journal = Arc::new(
+            JournalController::recover(native, codec, Arc::new(Verifier), JournalLimits::default())
+                .await
+                .unwrap(),
+        );
+        assert!(journal.snapshot().unwrap().detaches() == std::slice::from_ref(&original));
+        let tracker = OperationTracker::new(journal.clone());
+        let protocol = Arc::new(AcceptanceProtocol::new(journal.clone(), tracker.clone()));
+        let channels = Arc::new(
+            PaneChannels::new(protocol.clone(), ProjectionBudgets::supported().unwrap()).unwrap(),
+        );
+        protocol.set_channels(channels.clone()).unwrap();
+        let composition = desktop_client_startup::recover(
+            NativeDesktopOwners {
+                #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+                fixture: false,
+                services: spaceterm_client::ports::ClientServices {
+                    routes: Arc::new(
+                        NativeRouteConnector::new(
+                            vec![LocalRouteAuthority::new(server.endpoint.clone()).unwrap()],
+                            None,
+                        )
+                        .unwrap(),
+                    ),
+                    credentials: Arc::new(TestSigning),
+                    journal: journal.clone(),
+                    organization: Arc::new(AcceptanceDecoder),
+                    delegate: protocol.clone(),
+                    discovery: None,
+                    limits: Default::default(),
+                    additional_capabilities: desktop_client_startup::NATIVE_PROTOCOL_CAPABILITIES
+                        .to_vec(),
+                },
+                journal: journal.clone(),
+                channels,
+                operations: protocol.clone(),
+                invalidator: protocol.clone(),
+                local_server: None,
+                tracker: Some(tracker),
+                registry_binding: Some(protocol),
+                settings: Default::default(),
+            },
+            NativeViewStore::new(desktop.paths.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(composition.view.attachments().is_empty());
+        let registry = composition.registry.clone();
+        (composition, registry, journal)
+    });
+    let (notifier, _notifications) = notification_channel();
+    let reopened =
+        cx.update(|cx| ComposedDesktopClientProvider::new(composition, notifier, cx).unwrap());
+    executor
+        .block_on(registry.server(server_id).unwrap().connect())
+        .unwrap();
+    settle_until(&executor, cx, || {
+        journal.snapshot().unwrap().detaches().is_empty()
+    });
+    assert!(matches!(
+        server.handle.snapshot().runtime()[0].control,
+        ControlRecord::Unclaimed
+    ));
+    assert!(matches!(
+        server.handle.snapshot().runtime()[0].phase,
+        SessionPhase::Running { .. }
+    ));
+    assert!(
+        reopened
+            .frame(server_id)
+            .unwrap()
+            .personal
+            .attachments()
+            .is_empty()
+    );
+    let quit = cx.update(|cx| reopened.prepare_quit(cx));
+    settle_until(&executor, cx, || quit.is_ready());
+    cx.foreground_executor().block_test(quit).unwrap();
+    executor.block_on(server.shutdown());
 }

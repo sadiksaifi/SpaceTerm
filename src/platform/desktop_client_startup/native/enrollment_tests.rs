@@ -52,13 +52,17 @@ async fn desktop_production_factory_installs_foreground_enrollment_with_empty_re
             fixture: None,
             paths: paths.clone(),
             ssh: crate::platform::server_client_route::SshStartup {
-                executable: "/usr/bin/ssh".into(), home: root.0.clone(), environment: vec![],
+                executable: "/usr/bin/ssh".into(),
+                home: root.0.clone(),
+                environment: vec![],
             },
             askpass: crate::platform::server_client_route::askpass::DesktopTunnelAskPass::new(
-                paths.clone(), Arc::new(crate::platform::unix_askpass_transport::AskPassWindowFactory::new(None)),
+                paths.clone(),
+                Arc::new(crate::platform::unix_askpass_transport::AskPassWindowFactory::new(None)),
             ),
             // Journal storage and native account discovery are external boundaries.
             // The real Factory, route connector, pairing runtime and installer remain.
+            legacy: std::sync::Mutex::new(None),
             context: tokio::sync::Mutex::new(Some(Arc::new(Context {
                 journal: journal.clone(),
                 native: None,

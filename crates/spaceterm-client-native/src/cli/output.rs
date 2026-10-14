@@ -138,7 +138,11 @@ impl CliOutput {
             }
             Self::ServiceProgress(p) => {
                 // Serialize only bounded lifecycle facts, never installation paths.
-                json!({"kind":"native_operation","native_request":hex(p.request.as_bytes()),"phase":p.phase,"state":service_state_name(&p.state),"failure":match p.state {spaceterm_host::account_service::ServiceRequestState::NotApplied(failure)=>Some(crate::native::classify_service(failure)),_=>None},"outcome":service_outcome_name(&p.state)})
+                let mut result = json!({"kind":"native_operation","native_request":hex(p.request.as_bytes()),"phase":p.phase,"state":service_state_name(&p.state),"failure":match p.state {spaceterm_host::account_service::ServiceRequestState::NotApplied(failure)=>Some(crate::native::classify_service(failure)),_=>None},"outcome":service_outcome_name(&p.state)});
+                if let Some(operation) = starting_service_operation(p) {
+                    result["follow_up"] = json!({"command":"status", "operation":operation});
+                }
+                result
             }
             Self::Unpair(p) => {
                 json!({"kind":"unpair","server":hex(&p.server.bytes()),"device":hex(&p.device.bytes()),"pairing":p.pairing.local(),"local_connection_removed":p.local_connection_removed,"revocation":p.revocation})
@@ -155,6 +159,14 @@ impl CliOutput {
         };
         json!({"schema":1,"result":body})
     }
+}
+
+fn starting_service_operation(
+    progress: &spaceterm_host::account_service::ServiceProgress,
+) -> Option<String> {
+    (progress.phase == spaceterm_host::account_service::ServicePhase::Starting
+        && progress.state == spaceterm_host::account_service::ServiceRequestState::Pending)
+        .then(|| format!("native:{}", hex(progress.request.as_bytes())))
 }
 
 fn service_state_name(
@@ -455,13 +467,21 @@ fn human_output(output: &CliOutput) -> String {
             hex(a.request.as_bytes()),
             a.token.as_str()
         ),
-        CliOutput::ServiceProgress(p) => format!(
-            "Request: native:{}\nState: {}\nPhase: {:?}\nOutcome: {}\n",
-            hex(p.request.as_bytes()),
-            service_state_name(&p.state),
-            p.phase,
-            service_outcome_name(&p.state).unwrap_or("unresolved")
-        ),
+        CliOutput::ServiceProgress(p) => {
+            let mut result = format!(
+                "Request: native:{}\nState: {}\nPhase: {:?}\nOutcome: {}\n",
+                hex(p.request.as_bytes()),
+                service_state_name(&p.state),
+                p.phase,
+                service_outcome_name(&p.state).unwrap_or("unresolved")
+            );
+            if let Some(operation) = starting_service_operation(p) {
+                result.push_str(&format!(
+                    "Server is still starting. Check status --operation {operation}.\n"
+                ));
+            }
+            result
+        }
         CliOutput::Unpair(p) => format!(
             "Server: {}\nDevice: {}\nLocal connection removed: {}\nServer revocation: {:?}\n",
             hex(&p.server.bytes()),

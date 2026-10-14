@@ -179,6 +179,14 @@ fn cgroup_scope(
     Ok(pids.into_iter().collect())
 }
 
+pub(super) fn instance_birth(pid: u32) -> Result<Option<u64>, ServiceFailure> {
+    match read(&PathBuf::from(format!("/proc/{pid}/stat"))) {
+        Ok(bytes) => start(&bytes, pid).map(Some),
+        Err(ServiceFailure::Missing) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,13 +222,5 @@ mod tests {
             cgroup_scope(root.path(), 43, "/unit"),
             Err(ServiceFailure::CleanupUnresolved)
         );
-    }
-}
-
-pub(super) fn instance_birth(pid: u32) -> Result<Option<u64>, ServiceFailure> {
-    match read(&PathBuf::from(format!("/proc/{pid}/stat"))) {
-        Ok(bytes) => start(&bytes, pid).map(Some),
-        Err(ServiceFailure::Missing) => Ok(None),
-        Err(error) => Err(error),
     }
 }

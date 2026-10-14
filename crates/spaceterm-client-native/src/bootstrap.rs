@@ -631,6 +631,7 @@ pub fn service_failure(value: ServiceFailure, phase: BootstrapPhase) -> Bootstra
         | ServiceFailure::Indeterminate
         | ServiceFailure::CleanupUnresolved => PairingFailure::RecoveryRequired,
         ServiceFailure::ConfirmationRequired => PairingFailure::ExplicitStartRequired,
+        ServiceFailure::PairingRequired => PairingFailure::AuthorizationRequired,
         ServiceFailure::RequestConflict => PairingFailure::RequestIdentityReused,
         ServiceFailure::UnknownRequest | ServiceFailure::RequestRetired => {
             PairingFailure::InvalidRequest

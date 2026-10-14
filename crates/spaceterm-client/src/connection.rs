@@ -413,17 +413,33 @@ async fn run_attempt(
             return Ok(());
         }
         if is_organization(&message) {
+            let publication = match services.organization.decode(message) {
+                Ok(publication) => publication,
+                Err(error) => {
+                    services
+                        .delegate
+                        .invalidate(binding, ConnectionInvalidation::Publication);
+                    return Err(error);
+                }
+            };
+            if let OrganizationPublication::Snapshot(part) = &publication
+                && !replica.current_snapshot_publication(part)
+            {
+                continue;
+            }
             // Eligibility goes first, including invalid delta paths. Subscriber
             // notification never becomes a window for old native permits.
             services
                 .delegate
                 .invalidate(binding, ConnectionInvalidation::Publication);
-            let update = match services.organization.decode(message)? {
+            let update = match publication {
                 OrganizationPublication::Delta(delta) => replica.apply_delta(&delta),
                 OrganizationPublication::DeltaPart { stamp, delta } => {
                     replica.stage_delta(stamp, delta)
                 }
-                OrganizationPublication::Snapshot(_) => Err(invalid_peer()),
+                OrganizationPublication::Snapshot(part) => {
+                    replica.stage_publication_snapshot(*part)
+                }
             };
             if matches!(update, Ok(ReplicaUpdate::Installed)) {
                 let snapshot = replica
@@ -572,7 +588,9 @@ async fn synchronize(
                                     OrganizationPublication::DeltaPart { stamp, delta } => {
                                         replica.stage_delta(stamp, delta)
                                     }
-                                    OrganizationPublication::Snapshot(_) => Err(invalid_peer()),
+                                    OrganizationPublication::Snapshot(part) => {
+                                        replica.stage_publication_snapshot(*part)
+                                    }
                                 };
                                 match update {
                                     Ok(ReplicaUpdate::Installed) => {

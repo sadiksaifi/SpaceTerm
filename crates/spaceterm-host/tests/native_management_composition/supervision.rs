@@ -631,10 +631,11 @@ fn stable_launcher_rereads_staged_heads_and_revalidates_a_racing_stop_before_ret
 fn system_supervisor_adapter_bounds_native_output_and_reaps_timed_out_utility_children() {
     use commands::SystemSupervisorCommands;
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let directory =
-        std::env::temp_dir().join(format!("spaceterm-supervisor-{}", std::process::id()));
-    assert!(std::fs::create_dir(&directory).is_ok());
-    let binary = directory.join("utility");
+    let directory = tempfile::Builder::new()
+        .prefix("spaceterm-supervisor-")
+        .tempdir()
+        .unwrap();
+    let binary = directory.path().join("utility");
     let compilation = Command::new("/usr/bin/cc")
         .args(["-std=c11", "-Wall", "-Wextra", "-Werror"])
         .arg(root.join("tests/native_management_composition/supervisor_fixture.c"))
@@ -657,7 +658,14 @@ fn system_supervisor_adapter_bounds_native_output_and_reaps_timed_out_utility_ch
             scenario,
         };
         let mut lease = custody.retain(&Transaction { original: id(42) }).unwrap();
-        let guard = HelperLifetimeGuard::install_for(std::time::Duration::from_secs(5)).unwrap();
+        // Ordinary utility startup uses the production budget, including native
+        // executable validation under concurrent builds. Only the timeout case
+        // needs a short execution deadline.
+        let guard = if scenario == "wait" {
+            HelperLifetimeGuard::install_for(std::time::Duration::from_secs(5)).unwrap()
+        } else {
+            HelperLifetimeGuard::install().unwrap()
+        };
         let deadline = if scenario == "wait" {
             guard
                 .deadline()
@@ -680,11 +688,17 @@ fn system_supervisor_adapter_bounds_native_output_and_reaps_timed_out_utility_ch
                 ),
                 "typed reply {reply:?}"
             ),
-            Some(expected) => assert!(matches!(reply, Err(failure) if failure == expected)),
+            Some(expected) => assert!(
+                matches!(reply, Err(failure) if failure == expected),
+                "scenario {scenario}, typed reply {reply:?}"
+            ),
         }
+        assert!(
+            !peer.0.lock().unwrap().utility_pending,
+            "scenario {scenario} must reap the utility and release its exclusion"
+        );
     }
-    assert!(std::fs::remove_file(&binary).is_ok());
-    assert!(std::fs::remove_dir(&directory).is_ok());
+    directory.close().unwrap();
 }
 
 #[test]

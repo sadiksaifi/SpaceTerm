@@ -8499,14 +8499,44 @@ fn tab_shortcuts_should_create_and_activate_tabs_while_sidebar_is_focused(cx: &m
 }
 
 #[gpui::test]
-fn command_w_from_sidebar_should_close_the_globally_final_operating_system_window(
+fn command_w_from_sidebar_should_confirm_the_owning_workspace(cx: &mut TestAppContext) {
+    let (manager, records, cx) = workspace_manager(cx);
+
+    cx.simulate_keystrokes("cmd-shift-e");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-w");
+    cx.run_until_parked();
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .close_confirmation
+            .pending()
+            .map(|pending| pending.target)),
+        Some(CloseTarget::Workspace(WorkspaceId::new(1)))
+    );
+    assert!(records.dropped_session_ids().is_empty());
+    click("modal-action-close-confirmation-confirm", cx);
+
+    let state = manager.read_with(cx, |manager, _| {
+        (
+            manager.workspaces.len(),
+            manager.workspaces.active_workspace_id(),
+            records.dropped_session_ids(),
+            records.session_count(),
+        )
+    });
+    assert_eq!(state, (1, WorkspaceId::new(2), vec![1], 2));
+    assert_eq!(cx.windows().len(), 1);
+}
+
+#[gpui::test]
+fn close_pane_from_sidebar_should_close_the_globally_final_operating_system_window(
     cx: &mut TestAppContext,
 ) {
     let (manager, records, cx) = workspace_manager(cx);
 
     cx.simulate_keystrokes("cmd-shift-e");
     cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-w");
+    cx.dispatch_action(crate::ui::ClosePane);
     cx.run_until_parked();
     click("modal-action-close-confirmation-confirm", cx);
 

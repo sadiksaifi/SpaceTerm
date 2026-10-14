@@ -117,7 +117,12 @@ def test_gate(name):
                 command.extend(("--features", "runtime"))
             try:
                 output = native.run_tool(
-                    command, cwd=ROOT, environment=environment, timeout=300, maximum=1024 * 1024
+                    command,
+                    cwd=ROOT,
+                    environment=environment,
+                    timeout=300,
+                    maximum=1024 * 1024,
+                    reject_stderr=False,
                 )
             except TaskError as error:
                 classification = str(error)
@@ -132,7 +137,12 @@ def test_gate(name):
                 raise TaskError(
                     f"package={package} target={target} classification={classification}"
                 ) from None
-            count = require_nonempty(output)
+            try:
+                count = require_nonempty(output)
+            except TaskError:
+                raise TaskError(
+                    f"package={package} target={target} classification=target-incomplete"
+                ) from None
             total += count
             target_count += 1
             print(f"package={package} target={target} tests={count} classification=passed")

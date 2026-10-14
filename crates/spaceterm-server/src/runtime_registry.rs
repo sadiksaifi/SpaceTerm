@@ -518,6 +518,38 @@ impl RuntimeRegistry {
         failure_result.map_or(Ok(()), Err)
     }
 }
+/// A foreground native absence proof can be inconclusive while the terminal's
+/// retained cleanup service still owns the original PTY and retries that proof.
+/// Keep the owner through a bounded retry window, without changing its terminal
+/// result or turning a timeout into a positive cleanup receipt.
+async fn await_cleanup_reproof(
+    owner: &dyn RuntimeOwnerPort,
+    first: SessionCleanupObservation,
+) -> Result<SessionCleanupObservation, ServerFailure> {
+    if matches!(first.result(), CleanupResult::Confirmed(_)) {
+        return Ok(first);
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Some(latest) = owner.cleanup_snapshot() {
+            if latest.session() != first.session() || latest.first_reason() != first.first_reason()
+            {
+                return Err(failure(ServerFailureClass::CleanupIncomplete));
+            }
+            if matches!(latest.result(), CleanupResult::Confirmed(_)) {
+                return Ok(latest);
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(first);
+        }
+        tokio::time::sleep_until(
+            deadline.min(tokio::time::Instant::now() + std::time::Duration::from_millis(50)),
+        )
+        .await;
+    }
+}
+
 async fn owner_loop(
     mut owner: Box<dyn RuntimeOwnerPort>,
     mut requests: mpsc::Receiver<OwnerRequest>,
@@ -550,6 +582,10 @@ async fn owner_loop(
                 let result = match first_cleanup {
                     Some(value) => Ok(value),
                     None => owner.retire(request.request()).await,
+                };
+                let result = match result {
+                    Ok(value) => await_cleanup_reproof(owner.as_ref(), value).await,
+                    Err(error) => Err(error),
                 };
                 if let Ok(value) = result {
                     first_cleanup = Some(value);

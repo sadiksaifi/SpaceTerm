@@ -1146,18 +1146,20 @@ mod socket_provenance {
         })
         .await
         .unwrap();
+        // Linux connects through the pinned foreign inode and never reaches the
+        // substituted listener. macOS rejects the listener's original bound address.
+        // Advancing macOS time here races that rejection on the supervisor thread.
+        #[cfg(target_os = "linux")]
         tokio::time::advance(Duration::from_secs(5)).await;
-        match start.await.unwrap() {
-            Ok(tunnel) => {
-                tunnel.cancel().await.unwrap();
-            }
-            Err(error) => {
-                #[cfg(target_os = "linux")]
-                assert_eq!(error, TransportError::HandshakeExpired);
-                #[cfg(target_os = "macos")]
-                assert_eq!(error, TransportError::UnsafeEndpoint);
-            }
+        let result = fixture_watchdog(start).await.unwrap().unwrap();
+        let error = result.as_ref().err().copied();
+        if let Ok(tunnel) = result {
+            tunnel.cancel().await.unwrap();
         }
+        #[cfg(target_os = "linux")]
+        assert_eq!(error, Some(TransportError::HandshakeExpired));
+        #[cfg(target_os = "macos")]
+        assert_eq!(error, Some(TransportError::UnsafeEndpoint));
         CONNECT_GATE.lock().unwrap().take();
         assert!(
             swapped.load(Ordering::Acquire),

@@ -222,16 +222,36 @@ async fn controller(directory: &std::path::Path, create: bool) -> Arc<JournalCon
     )
 }
 
-async fn exercise(
-    kind: NativeConsumerKind,
-    major: u32,
+struct ConsumerScenario {
     self_remove: bool,
     offline: Option<DesiredServerState>,
     operation_count: usize,
     restart: bool,
     processes: bool,
     recover_pairing: bool,
-) {
+}
+impl Default for ConsumerScenario {
+    fn default() -> Self {
+        Self {
+            self_remove: false,
+            offline: None,
+            operation_count: 1,
+            restart: false,
+            processes: false,
+            recover_pairing: false,
+        }
+    }
+}
+
+async fn exercise(kind: NativeConsumerKind, major: u32, scenario: ConsumerScenario) {
+    let ConsumerScenario {
+        self_remove,
+        offline,
+        operation_count,
+        restart,
+        processes,
+        recover_pairing,
+    } = scenario;
     use std::os::unix::fs::DirBuilderExt;
     let root = tempfile::Builder::new()
         .prefix("st-consumer-")
@@ -617,6 +637,23 @@ async fn exercise(
     .unwrap();
     let mut original_result = None;
     if kind == NativeConsumerKind::Cli {
+        // Native lifecycle comparisons must reuse the saved CLI principal and
+        // its canonical journal, not an unprovisioned management identity.
+        let runtime = spaceterm_client_native::native::runtime::RuntimeClientIdentity::access(
+            &consumer,
+            &registration,
+        )
+        .await
+        .unwrap();
+        assert_eq!(runtime.binding, binding);
+        assert_eq!(runtime.signer.public_key(), device.public_key());
+        assert!(
+            runtime
+                .journal
+                .ordinary_use_allowed(&binding)
+                .await
+                .unwrap()
+        );
         assert_eq!(
             ProtocolManagement::status(&consumer)
                 .await
@@ -884,17 +921,7 @@ async fn exercise(
 async fn production_cli_reopens_saved_additional_client_and_executes_authenticated_management_in_both_majors()
  {
     for major in [1, 2] {
-        exercise(
-            NativeConsumerKind::Cli,
-            major,
-            false,
-            None,
-            1,
-            false,
-            false,
-            false,
-        )
-        .await;
+        exercise(NativeConsumerKind::Cli, major, ConsumerScenario::default()).await;
     }
 }
 #[tokio::test]
@@ -904,12 +931,7 @@ async fn production_companion_reopens_saved_additional_client_and_subscribes_ove
         exercise(
             NativeConsumerKind::StatusCompanion,
             major,
-            false,
-            None,
-            1,
-            false,
-            false,
-            false,
+            ConsumerScenario::default(),
         )
         .await;
     }
@@ -922,12 +944,10 @@ async fn production_cli_self_unpair_closes_ordinary_worker_before_restricted_ret
         exercise(
             NativeConsumerKind::Cli,
             major,
-            true,
-            None,
-            1,
-            false,
-            false,
-            false,
+            ConsumerScenario {
+                self_remove: true,
+                ..Default::default()
+            },
         )
         .await;
     }
@@ -939,12 +959,10 @@ async fn cli_assessment_survives_consumer_and_journal_restart_without_refreshing
         exercise(
             NativeConsumerKind::Cli,
             major,
-            false,
-            None,
-            1,
-            true,
-            false,
-            false,
+            ConsumerScenario {
+                restart: true,
+                ..Default::default()
+            },
         )
         .await;
     }
@@ -1054,12 +1072,10 @@ async fn cli_assess_and_confirm_work_in_separate_processes() {
             exercise(
                 NativeConsumerKind::Cli,
                 major,
-                false,
-                None,
-                1,
-                false,
-                true,
-                false,
+                ConsumerScenario {
+                    processes: true,
+                    ..Default::default()
+                },
             )
             .await;
         }
@@ -1073,12 +1089,10 @@ async fn lost_assess_unpair_reply_recovers_original_operation_over_authenticated
         exercise(
             NativeConsumerKind::Cli,
             major,
-            false,
-            None,
-            1,
-            false,
-            false,
-            true,
+            ConsumerScenario {
+                recover_pairing: true,
+                ..Default::default()
+            },
         )
         .await;
     }
@@ -1090,12 +1104,11 @@ async fn offline_cli_self_unpair_removes_stopped_and_unreachable_pairings() {
         exercise(
             NativeConsumerKind::Cli,
             2,
-            true,
-            Some(desired),
-            1,
-            false,
-            false,
-            false,
+            ConsumerScenario {
+                self_remove: true,
+                offline: Some(desired),
+                ..Default::default()
+            },
         )
         .await;
     }
@@ -1105,12 +1118,10 @@ async fn cli_protocol_results_release_capacity_after_more_than_128_operations() 
     exercise(
         NativeConsumerKind::Cli,
         2,
-        false,
-        None,
-        130,
-        false,
-        false,
-        false,
+        ConsumerScenario {
+            operation_count: 130,
+            ..Default::default()
+        },
     )
     .await;
 }
@@ -1620,4 +1631,48 @@ impl spaceterm_client_native::cli::runner::CliIo for RepeatPairIo {
     > {
         panic!("explicit fingerprint must not prompt")
     }
+}
+
+#[tokio::test]
+async fn running_unclean_custody_without_saved_cli_binding_reports_pairing_required() {
+    use spaceterm_client_native::native::{classify_service, runtime::NativeRuntimeIdentity};
+    let root = tempfile::tempdir().unwrap();
+    let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+    let registration = account.initialize(DesiredServerState::Running).unwrap();
+    use std::os::unix::fs::DirBuilderExt;
+    let directory = root.path().canonicalize().unwrap().join("unpaired-client");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&directory)
+        .unwrap();
+    let journal = controller(&directory, true).await;
+    let signer = ServerKeyStore::open(&registration)
+        .unwrap()
+        .load_identity(registration.server_pin())
+        .unwrap();
+    let _custody = spaceterm_host::account_service::runtime_inventory::RuntimeCustody::begin(
+        &registration,
+        ServerEpoch::new(1),
+        signer,
+    )
+    .unwrap();
+    let identity = NativeRuntimeIdentity::from_journal(
+        journal,
+        Arc::new(Credentials(Arc::new(Key(
+            Ed25519KeyPair::from_seed_unchecked(&[27; 32]).unwrap(),
+        )))),
+    );
+    let processes =
+        spaceterm_client_native::native::runtime::RuntimeServiceProcesses::new(Arc::new(identity));
+    let failure =
+        match spaceterm_host::account_service::ServiceProcesses::assess(&processes, &registration)
+            .await
+        {
+            Ok(_) => panic!("an unpaired Client cannot acquire runtime authority"),
+            Err(failure) => failure,
+        };
+    assert_eq!(
+        classify_service(failure),
+        spaceterm_client::management_cli::ManagementFailure::PairingRequired
+    );
 }

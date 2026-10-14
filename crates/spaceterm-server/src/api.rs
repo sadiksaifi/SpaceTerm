@@ -372,6 +372,20 @@ impl ServerHandle {
     pub fn subscribe_snapshot(&self) -> watch::Receiver<Arc<OrganizationSnapshot>> {
         self.snapshot.clone()
     }
+    /// Read bounded committed deltas without changing effect reconciliation.
+    pub async fn organization_changes(
+        &self,
+        principal: VerifiedPrincipal,
+        base: OrganizationRevision,
+    ) -> Result<crate::publication::PublicationPlan, ServerFailure> {
+        let (reply, result) = oneshot::channel();
+        self.send(ActorRequest::OrganizationChanges {
+            principal,
+            base,
+            reply,
+        })?;
+        receive(result).await
+    }
     /// Plan one bounded organization transfer from the committed actor hub.
     /// A transfer is read-only and cannot establish effect reconciliation.
     pub async fn organization_snapshot(

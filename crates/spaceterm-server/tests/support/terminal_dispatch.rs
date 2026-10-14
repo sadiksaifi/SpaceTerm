@@ -641,6 +641,36 @@ impl spaceterm_core::observations::RuntimeClock for actor_fixture::Clock {
     }
 }
 
+// PTY scheduling is real, but native-effect deadline assertions own their time.
+struct ManualClock(std::sync::atomic::AtomicU64);
+impl ManualClock {
+    fn new() -> Self {
+        Self(std::sync::atomic::AtomicU64::new(1))
+    }
+    fn advance(&self, millis: u64) {
+        self.0
+            .fetch_add(millis, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+impl ServerClock for ManualClock {
+    fn now(&self) -> Result<spaceterm_core::observations::MonotonicTick, ServerFailure> {
+        Ok(spaceterm_core::observations::MonotonicTick::new(
+            self.0.load(std::sync::atomic::Ordering::SeqCst),
+        ))
+    }
+}
+impl spaceterm_core::observations::RuntimeClock for ManualClock {
+    fn now(
+        &self,
+    ) -> Result<
+        spaceterm_core::observations::MonotonicTick,
+        spaceterm_core::observations::ObservationError,
+    > {
+        ServerClock::now(self)
+            .map_err(|_| spaceterm_core::observations::ObservationError::ZeroCounter)
+    }
+}
+
 async fn started_terminal_with_limits(
     major: u32,
     limits: spaceterm_protocol::limits::NegotiatedLimits,
@@ -842,6 +872,7 @@ where
 #[tokio::test]
 async fn authenticated_ipc_terminal_input_pages_and_two_client_takeover_both_majors() {
     for major in [1, 2] {
+        let clock = Arc::new(ManualClock::new());
         let StartedTerminal {
             directory,
             stream2,
@@ -858,8 +889,46 @@ async fn authenticated_ipc_terminal_input_pages_and_two_client_takeover_both_maj
             created,
             pane,
             session,
-        } = started_terminal(major).await;
-        let mut original = fence(first.principal, session, created.control(), 2);
+        } = started_terminal_with_clock(major, Default::default(), Arc::clone(&clock)).await;
+        // The provider is inert in this read-only projection. All content and
+        // authority facts below come from the real authenticated server.
+        let fake = spaceterm_client::testing::FakeServer::new(11, vec![major]).unwrap();
+        let provider = spaceterm_client::testing::FakePaneConnection::new(fake, 1, major)
+            .await
+            .unwrap();
+        let channels = spaceterm_client::pane_channel::PaneChannels::new(
+            provider,
+            spaceterm_client::projection::ProjectionBudgets::supported().unwrap(),
+        )
+        .unwrap();
+        let snapshot = handle.snapshot();
+        channels
+            .publish(
+                client_info(first.principal, major, snapshot.state().revision),
+                client_replica(&snapshot),
+            )
+            .unwrap();
+        let lease = channels
+            .attach(
+                snapshot.state().workspaces[0].id,
+                spaceterm_client::view::AttachmentIncarnation::new(1).unwrap(),
+            )
+            .unwrap();
+        let projection_pane = lease.pane(pane).unwrap();
+        let projection_context = projection_pane
+            .update_context(spaceterm_client::pane_channel::PaneContextFacts {
+                presentable: true,
+                focused_pane: true,
+                terminal_input_focus: true,
+            })
+            .unwrap();
+        first.context(pane, projection_context.get(), true).await;
+        let mut original = fence(
+            first.principal,
+            session,
+            created.control(),
+            projection_context.get(),
+        );
         first.subscribe(original, 1, false).await;
         first.line(1, original, "PS1=; echo spaceterm-ok").await;
         first.output("spaceterm-ok").await;
@@ -902,38 +971,6 @@ async fn authenticated_ipc_terminal_input_pages_and_two_client_takeover_both_maj
                 _ => resource_payload!(v2, Major2),
             })
             .await;
-        // The provider is inert in this read-only projection. All content and
-        // authority facts below come from the real authenticated server.
-        let fake = spaceterm_client::testing::FakeServer::new(11, vec![major]).unwrap();
-        let provider = spaceterm_client::testing::FakePaneConnection::new(fake, 1, major)
-            .await
-            .unwrap();
-        let channels = spaceterm_client::pane_channel::PaneChannels::new(
-            provider,
-            spaceterm_client::projection::ProjectionBudgets::supported().unwrap(),
-        )
-        .unwrap();
-        let snapshot = handle.snapshot();
-        channels
-            .publish(
-                client_info(first.principal, major, snapshot.state().revision),
-                client_replica(&snapshot),
-            )
-            .unwrap();
-        let lease = channels
-            .attach(
-                snapshot.state().workspaces[0].id,
-                spaceterm_client::view::AttachmentIncarnation::new(1).unwrap(),
-            )
-            .unwrap();
-        let projection_pane = lease.pane(pane).unwrap();
-        projection_pane
-            .update_context(spaceterm_client::pane_channel::PaneContextFacts {
-                presentable: true,
-                focused_pane: true,
-                terminal_input_focus: true,
-            })
-            .unwrap();
         projection_pane
             .publish_content_base(original, stamp.base())
             .unwrap();
@@ -1074,7 +1111,7 @@ async fn authenticated_ipc_terminal_input_pages_and_two_client_takeover_both_maj
         // The original one-second deadline survives dispatch and a late completion.
         first.line(11, original, r"stty -echo -icanon; printf '\033]52;c;?\033\\'; dd bs=1 count=9 2>/dev/null | od -An -tx1 | tr -d ' \n'; stty echo icanon; printf '\n'").await;
         let expired = first.native_request().await;
-        tokio::time::sleep(Duration::from_millis(1050)).await;
+        clock.advance(1050);
         assert_eq!(
             first
                 .complete_native(
@@ -1093,7 +1130,7 @@ async fn authenticated_ipc_terminal_input_pages_and_two_client_takeover_both_maj
             matches!(permission.kind(), NativeRequestKind::Permission(notice) if notice.screen_recording() && notice.accessibility())
         );
         assert_eq!(permission.not_before().get(), 500);
-        tokio::time::sleep(Duration::from_millis(501)).await;
+        clock.advance(501);
         assert_eq!(
             first
                 .complete_native(&permission, NativeCompletionKind::PermissionAcknowledged)
@@ -1123,10 +1160,15 @@ async fn authenticated_ipc_terminal_input_pages_and_two_client_takeover_both_maj
             None
         );
         first.output("bell-ok").await;
-        first.line(17, original, r"printf '\033]133;C;cmdline=true\007'; sleep 0.1; printf '\033]133;D;3\007'; echo command-notification-ok").await;
+        // Observe the start before releasing the finish. A busy PTY worker can
+        // otherwise parse both shell markers in one batch and measure zero time.
+        first.line(17, original, r"printf '\033]133;C;cmdline=true\007'; echo command-notification-started; while [ ! -f command-notification-ready ]; do sleep 0.01; done; printf '\033]133;D;3\007'; echo command-notification-ok").await;
+        first.output("command-notification-started").await;
+        clock.advance(100);
+        std::fs::write(directory.0.join("command-notification-ready"), []).unwrap();
         let command_notice = first.native_request().await;
         assert!(
-            matches!(command_notice.kind(), NativeRequestKind::Notification(spaceterm_core::native_requests::NotificationNotice::CommandFinished { exit_status: Some(3), duration_millis }) if *duration_millis >= 100)
+            matches!(command_notice.kind(), NativeRequestKind::Notification(spaceterm_core::native_requests::NotificationNotice::CommandFinished { exit_status: Some(3), duration_millis }) if *duration_millis == 100)
         );
         assert_eq!(
             first
@@ -1224,8 +1266,9 @@ async fn authenticated_ipc_terminal_input_pages_and_two_client_takeover_both_maj
         first.output("paste-ok").await;
         assert!(!first.text.contains("must-not-paste"));
         // IME keeps the Focused Pane exception, unlike ordinary keys.
-        first.context(pane, 3, false).await;
-        let ime_fence = fence(first.principal, session, created.control(), 3);
+        let ime_context = original.context().get() + 1;
+        first.context(pane, ime_context, false).await;
+        let ime_fence = fence(first.principal, session, created.control(), ime_context);
         assert_eq!(
             first
                 .effect(
@@ -1248,8 +1291,8 @@ async fn authenticated_ipc_terminal_input_pages_and_two_client_takeover_both_maj
                 .await,
             None
         );
-        first.context(pane, 4, true).await;
-        original = fence(first.principal, session, created.control(), 4);
+        first.context(pane, ime_context + 1, true).await;
+        original = fence(first.principal, session, created.control(), ime_context + 1);
         let mut enter = spaceterm_terminal::KeyInput::text_input("");
         enter.physical_key = spaceterm_terminal::PhysicalKey::Enter;
         enter.logical_key = "enter".into();

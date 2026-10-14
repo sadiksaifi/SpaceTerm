@@ -662,6 +662,14 @@ async fn cancelled_partial_snapshot_requires_fresh_generation_and_bounds_connect
 }
 
 #[tokio::test]
+async fn live_organization_journal_gap_requires_a_fresh_request_generation() {
+    for major in [1, 2] {
+        authenticated_publication_case(major, PublicationCase::JournalGap).await;
+        authenticated_publication_case(major, PublicationCase::StaleJournalGapGeneration).await;
+    }
+}
+
+#[tokio::test]
 async fn progressing_native_writes_can_outlive_the_five_second_send_window() {
     for major in [1, 2] {
         authenticated_publication_case(major, PublicationCase::ProgressingWrite).await;
@@ -726,6 +734,8 @@ enum PublicationCase {
     Idle,
     PinCancellation,
     StaleResyncGeneration,
+    JournalGap,
+    StaleJournalGapGeneration,
 }
 
 struct PageGate {
@@ -838,6 +848,11 @@ async fn authenticated_publication_case(major: u32, case: PublicationCase) {
     );
     let deny_reply_capacity = matches!(case, PublicationCase::ReplyPressure);
     let stale_resync_generation = matches!(case, PublicationCase::StaleResyncGeneration);
+    let journal_gap = matches!(
+        case,
+        PublicationCase::JournalGap | PublicationCase::StaleJournalGapGeneration
+    );
+    let stale_journal_generation = matches!(case, PublicationCase::StaleJournalGapGeneration);
     let cancel_pin = matches!(
         case,
         PublicationCase::PinCancellation | PublicationCase::StaleResyncGeneration
@@ -1007,7 +1022,7 @@ async fn authenticated_publication_case(major: u32, case: PublicationCase) {
             stalled: stalled_write,
         });
     }
-    let page_gate = cancel_pin.then(|| {
+    let page_gate = (cancel_pin || journal_gap).then(|| {
         Arc::new(PageGate {
             transport: peer.transport.clone(),
             armed: std::sync::atomic::AtomicBool::new(true),
@@ -1082,6 +1097,202 @@ async fn authenticated_publication_case(major: u32, case: PublicationCase) {
         );
         another.close().await.unwrap();
         drop(pending);
+        authenticator.close().await.unwrap();
+        stop_physical_server(&handle, host).await;
+        server.wait().await.unwrap();
+        listener.close().unwrap();
+        assert_eq!(budget.usage().bytes, 0);
+        return;
+    }
+    if journal_gap {
+        let gate = page_gate.as_ref().unwrap();
+        let bytes = client.recv().await.unwrap().unwrap();
+        let initial = match codec.decode(&bytes).unwrap() {
+            Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::OrganizationSnapshot(value)),
+            }) => organization::v1::decode_snapshot_part(&value).unwrap(),
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::OrganizationSnapshot(value)),
+            }) => organization::v2::decode_snapshot_part(&value).unwrap(),
+            _ => panic!("initial organization snapshot"),
+        };
+        assert_eq!((initial.part.index, initial.part.total), (0, 1));
+        gate.blocked.notified().await;
+        handle
+            .reconcile(principal, initial.part.revision)
+            .await
+            .unwrap();
+        // Hold the initial completed write while committed deltas evict its base.
+        // Store-thread latency must not consume the native-write deadline.
+        let (release_clock, clock_gate) = std::sync::mpsc::channel();
+        let clock_hold = tokio::task::spawn_blocking(move || {
+            let _ = clock_gate.recv();
+        });
+        tokio::time::pause();
+        for sequence in 1..=spaceterm_server::publication::MAX_JOURNAL_DELTAS as u64 + 1 {
+            let command = if sequence == 1 {
+                Command::CreateWorkspace {
+                    server: physical::identity().server,
+                    source: WorkspaceCreationSource::ServerHome {
+                        server: physical::identity().server,
+                    },
+                    name: NameDraft::Custom(NameText::new("journal base".into()).unwrap()),
+                }
+            } else {
+                let workspace = handle.snapshot().state().workspaces[0].clone();
+                Command::RenameWorkspace {
+                    workspace: workspace.id,
+                    expected_version: workspace.name.version,
+                    draft: NameDraft::Custom(
+                        NameText::new(format!("revision {sequence}")).unwrap(),
+                    ),
+                }
+            };
+            let request = CanonicalOperationRequest::new(
+                OperationId::new(stream, OperationSequence::new(sequence).unwrap()),
+                command,
+                &CanonicalCodec,
+            )
+            .unwrap();
+            assert!(matches!(
+                handle.submit(principal, request).await.unwrap(),
+                spaceterm_server::api::OperationResponse::Completed { .. }
+            ));
+            // Outcome acknowledgement frees ledger slots, not journal entries.
+            if sequence % 32 == 0 {
+                handle
+                    .acknowledge(principal, stream, OperationSequence::new(sequence).unwrap())
+                    .await
+                    .unwrap();
+            }
+        }
+        tokio::time::resume();
+        release_clock.send(()).unwrap();
+        clock_hold.await.unwrap();
+        gate.released.add_permits(1);
+        let bytes = tokio::time::timeout(Duration::from_secs(5), client.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let marker = match codec.decode(&bytes).unwrap() {
+            Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::OrganizationResync(value)),
+            }) => (
+                value.request,
+                value.request_generation,
+                value.epoch,
+                value.revision,
+            ),
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::OrganizationResync(value)),
+            }) => (
+                value.request,
+                value.request_generation,
+                value.epoch,
+                value.revision,
+            ),
+            _ => panic!("a live journal gap requires an explicit reset, not a snapshot"),
+        };
+        let current = handle.snapshot();
+        assert_eq!(
+            marker,
+            (1, 1, current.epoch().get(), current.state().revision.get())
+        );
+        let generation = if stale_journal_generation { 1 } else { 2 };
+        let query = match major {
+            1 => Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::OrganizationQuery(
+                    v1::OrganizationQuery {
+                        request: 2,
+                        request_generation: generation,
+                        ..Default::default()
+                    },
+                )),
+            }),
+            _ => Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::OrganizationQuery(
+                    v2::OrganizationQuery {
+                        request: 2,
+                        request_generation: generation,
+                        ..Default::default()
+                    },
+                )),
+            }),
+        };
+        client.send(&codec.encode(&query).unwrap()).await.unwrap();
+        if stale_journal_generation {
+            assert!(
+                tokio::time::timeout(Duration::from_secs(5), client.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(
+                running.await.unwrap().unwrap_err().class,
+                spaceterm_server::contracts::ServerFailureClass::StaleAuthority
+            );
+        } else {
+            let bytes = tokio::time::timeout(Duration::from_secs(5), client.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let recovered = match codec.decode(&bytes).unwrap() {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::OrganizationSnapshot(value)),
+                }) => organization::v1::decode_snapshot_part(&value).unwrap(),
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::OrganizationSnapshot(value)),
+                }) => organization::v2::decode_snapshot_part(&value).unwrap(),
+                _ => panic!("only the fresh query may start the replacement snapshot"),
+            };
+            assert_eq!((recovered.part.request, recovered.part.generation), (2, 2));
+            assert_eq!((recovered.part.index, recovered.part.total), (0, 1));
+            assert_eq!(
+                OrganizationSnapshot::new(recovered.part.epoch, recovered.state, recovered.runtime)
+                    .unwrap(),
+                *current
+            );
+            let workspace = &current.state().workspaces[0];
+            let request = CanonicalOperationRequest::new(
+                OperationId::new(
+                    stream,
+                    OperationSequence::new(
+                        spaceterm_server::publication::MAX_JOURNAL_DELTAS as u64 + 2,
+                    )
+                    .unwrap(),
+                ),
+                Command::RenameWorkspace {
+                    workspace: workspace.id,
+                    expected_version: workspace.name.version,
+                    draft: NameDraft::Custom(NameText::new("after resync".into()).unwrap()),
+                },
+                &CanonicalCodec,
+            )
+            .unwrap();
+            handle.submit(principal, request).await.unwrap();
+            let bytes = tokio::time::timeout(Duration::from_secs(5), client.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let part = match codec.decode(&bytes).unwrap() {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::OrganizationDelta(value)),
+                }) => organization::v1::decode_part(value.part.as_ref().unwrap()).unwrap(),
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::OrganizationDelta(value)),
+                }) => organization::v2::decode_part(value.part.as_ref().unwrap()).unwrap(),
+                _ => panic!("fresh synchronization must resume live deltas"),
+            };
+            assert_eq!((part.request, part.generation), (2, 2));
+            assert_eq!(part.base, current.state().revision);
+            assert_eq!(part.revision, handle.snapshot().state().revision);
+            client.close().await.unwrap();
+            running.await.unwrap().unwrap();
+        }
         authenticator.close().await.unwrap();
         stop_physical_server(&handle, host).await;
         server.wait().await.unwrap();
@@ -1363,25 +1574,67 @@ async fn authenticated_publication_case(major: u32, case: PublicationCase) {
         .unwrap()
         .unwrap()
         .unwrap();
-    let publication = match codec.decode(&publication).unwrap() {
+    macro_rules! workspace_delta {
+        ($value:expr, $p:ident) => {{
+            let value = $value;
+            assert!(value.complete);
+            assert!(value.continuation.is_empty());
+            assert_eq!(value.workspaces.len(), 1);
+            let part = organization::$p::decode_part(value.part.as_ref().unwrap()).unwrap();
+            assert_eq!(part.epoch.get(), value.epoch);
+            assert_eq!(part.base.get(), value.base_revision);
+            assert_eq!(part.revision.get(), value.revision);
+            assert_eq!(
+                (part.request, part.generation, part.index, part.total),
+                (1, 1, 0, 1)
+            );
+            let (workspace, _) =
+                organization::$p::decode_workspace_record(&value.workspaces[0]).unwrap();
+            (part, workspace)
+        }};
+    }
+    let (publication, workspace) = match codec.decode(&publication).unwrap() {
         Payload::Major1(v1::Message {
-            kind: Some(v1::message::Kind::OrganizationSnapshot(value)),
-        }) => organization::v1::decode_snapshot_part(&value).unwrap(),
+            kind: Some(v1::message::Kind::OrganizationDelta(value)),
+        }) => workspace_delta!(value, v1),
         Payload::Major2(v2::Message {
-            kind: Some(v2::message::Kind::OrganizationSnapshot(value)),
-        }) => organization::v2::decode_snapshot_part(&value).unwrap(),
-        _ => panic!("organization snapshot"),
+            kind: Some(v2::message::Kind::OrganizationDelta(value)),
+        }) => workspace_delta!(value, v2),
+        _ => panic!("a live mutation must publish a delta, not another snapshot"),
     };
-    assert_eq!(
-        publication.state.workspaces[0].name.value.display.as_str(),
-        "unfocused workspace"
-    );
-    assert_eq!(
-        publication.part.revision,
-        handle.snapshot().state().revision
-    );
-    assert_eq!(publication.part.request, 1);
-    assert_eq!(publication.part.generation, 1);
+    assert_eq!(workspace.name.value.display.as_str(), "unfocused workspace");
+    assert_eq!(publication.base, initial.part.revision);
+    assert_eq!(publication.revision, handle.snapshot().state().revision);
+    if !deny_reply_capacity {
+        let request = CanonicalOperationRequest::new(
+            OperationId::new(stream, OperationSequence::new(2).unwrap()),
+            Command::RenameWorkspace {
+                workspace: workspace.id,
+                expected_version: workspace.name.version,
+                draft: NameDraft::Custom(NameText::new("still connected".into()).unwrap()),
+            },
+            &CanonicalCodec,
+        )
+        .unwrap();
+        handle.submit(principal, request).await.unwrap();
+        let bytes = tokio::time::timeout(Duration::from_secs(5), client.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let (renamed, workspace) = match codec.decode(&bytes).unwrap() {
+            Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::OrganizationDelta(value)),
+            }) => workspace_delta!(value, v1),
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::OrganizationDelta(value)),
+            }) => workspace_delta!(value, v2),
+            _ => panic!("subsequent mutations must retain the live delta cursor"),
+        };
+        assert_eq!(renamed.base, publication.revision);
+        assert_eq!(renamed.revision, handle.snapshot().state().revision);
+        assert_eq!(workspace.name.value.display.as_str(), "still connected");
+    }
     let mut reservations = Vec::new();
     let mut rejected = None;
     if deny_reply_capacity {
@@ -1392,8 +1645,8 @@ async fn authenticated_publication_case(major: u32, case: PublicationCase) {
         let request = CanonicalOperationRequest::new(
             OperationId::new(stream, OperationSequence::new(2).unwrap()),
             Command::RenameWorkspace {
-                workspace: publication.state.workspaces[0].id,
-                expected_version: publication.state.workspaces[0].name.version,
+                workspace: workspace.id,
+                expected_version: workspace.name.version,
                 draft: NameDraft::Custom(NameText::new("must not commit".into()).unwrap()),
             },
             &CanonicalCodec,

@@ -63,6 +63,7 @@ message Message {
     spaceterm.common.AccountRuntimeMessage account_runtime_request = 51;
     spaceterm.common.AccountRuntimeMessage account_runtime_reply = 52;
     MetadataPublication metadata_publication = 53;
+    MetadataFragment metadata_fragment = 54;
   }
 }
 message OrganizationQuery { uint64 known_revision = 1; bytes continuation = 2; uint64 known_epoch = 3; uint64 request = 4; uint64 request_generation = 5; PublicationPart part = 6; }
@@ -471,3 +472,6 @@ message ApplicationWheel { QueryStamp stamp = 1; CellRef cell = 2; sint32 horizo
 
 // Metadata advances independently of the active grid revision.
 message MetadataPublication { spaceterm.common.EffectFence fence = 1; uint64 request = 2; uint64 request_generation = 3; spaceterm.common.RuntimeMetadataSnapshot snapshot = 4; }
+
+// RUNTIME_METADATA_FRAGMENTS retains the complete bounded snapshot across small frames.
+message MetadataFragment { spaceterm.common.EffectFence fence = 1; uint64 request = 2; uint64 request_generation = 3; uint64 sequence = 4; uint32 offset = 5; uint32 total_bytes = 6; bytes data = 7; }
