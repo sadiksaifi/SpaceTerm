@@ -1806,6 +1806,34 @@ mod account_installation {
     }
 
     #[test]
+    fn stored_packaging_feed_with_build_commit_reopens_compatible_approved_executable() {
+        let root = installation_root();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registered = account.initialize(DesiredServerState::Running).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let feed: serde_json::Value = serde_json::from_slice(artifact.feed().bytes()).unwrap();
+        assert_eq!(
+            feed["build_commit"],
+            "0101010101010101010101010101010101010101"
+        );
+        let store = test_support::store(&registered, key.clone()).unwrap();
+        let approved = store.stage(&artifact).unwrap();
+        store
+            .activate(approved, store.snapshot().unwrap().generation, 1)
+            .unwrap();
+        drop(store);
+        let selected = test_support::existing_store(&registered, key)
+            .unwrap()
+            .retain_compatible_approved(1)
+            .unwrap();
+        assert_eq!(selected.status().installation, approved);
+        assert_eq!(
+            selected.status().artifact_sha256,
+            artifact.artifact_sha256()
+        );
+    }
+
+    #[test]
     fn signed_staging_preserves_approved_code_resources_and_intent() {
         use std::os::unix::fs::MetadataExt as _;
         for desired in [DesiredServerState::Running, DesiredServerState::Stopped] {

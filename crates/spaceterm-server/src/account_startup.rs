@@ -127,13 +127,148 @@ pub enum StartupFailure {
 impl StartupFailure {
     pub const fn classification(self) -> &'static str {
         match self {
-            Self::Account(_) => "server account unavailable",
+            Self::Account(value) => match value {
+                ServiceFailure::RootAccount => "server account unavailable: RootAccount",
+                ServiceFailure::UnsupportedHost => "server account unavailable: UnsupportedHost",
+                ServiceFailure::Missing => "server account unavailable: Missing",
+                ServiceFailure::StorageLocked => "server account unavailable: StorageLocked",
+                ServiceFailure::StorageUnavailable => {
+                    "server account unavailable: StorageUnavailable"
+                }
+                ServiceFailure::UnsafeStorage => "server account unavailable: UnsafeStorage",
+                ServiceFailure::InvalidRecord => "server account unavailable: InvalidRecord",
+                ServiceFailure::UnsupportedSchema => {
+                    "server account unavailable: UnsupportedSchema"
+                }
+                ServiceFailure::IdentityMismatch => "server account unavailable: IdentityMismatch",
+                ServiceFailure::ArtifactRejected => "server account unavailable: ArtifactRejected",
+                ServiceFailure::IncompatibleStorage => {
+                    "server account unavailable: IncompatibleStorage"
+                }
+                ServiceFailure::UnknownRequest => "server account unavailable: UnknownRequest",
+                ServiceFailure::RequestConflict => "server account unavailable: RequestConflict",
+                ServiceFailure::RequestRetired => "server account unavailable: RequestRetired",
+                ServiceFailure::StaleAssessment => "server account unavailable: StaleAssessment",
+                ServiceFailure::ConfirmationRequired => {
+                    "server account unavailable: ConfirmationRequired"
+                }
+                ServiceFailure::AuthorizationDenied => {
+                    "server account unavailable: AuthorizationDenied"
+                }
+                ServiceFailure::AuthorizationCancelled => {
+                    "server account unavailable: AuthorizationCancelled"
+                }
+                ServiceFailure::AuthorizationUnavailable => {
+                    "server account unavailable: AuthorizationUnavailable"
+                }
+                ServiceFailure::SupervisorUnavailable => {
+                    "server account unavailable: SupervisorUnavailable"
+                }
+                ServiceFailure::LoginSessionUnavailable => {
+                    "server account unavailable: LoginSessionUnavailable"
+                }
+                ServiceFailure::Suppressed => "server account unavailable: Suppressed",
+                ServiceFailure::LimitExceeded => "server account unavailable: LimitExceeded",
+                ServiceFailure::Pending => "server account unavailable: Pending",
+                ServiceFailure::CleanupUnresolved => {
+                    "server account unavailable: CleanupUnresolved"
+                }
+                ServiceFailure::Indeterminate => "server account unavailable: Indeterminate",
+            },
+            Self::Key(value) => match value {
+                KeyStoreFailure::Missing => "server key unavailable: Missing",
+                KeyStoreFailure::StorageLocked => "server key unavailable: StorageLocked",
+                KeyStoreFailure::StorageUnavailable => "server key unavailable: StorageUnavailable",
+                KeyStoreFailure::UnsafeStorage => "server key unavailable: UnsafeStorage",
+                KeyStoreFailure::InvalidRecord => "server key unavailable: InvalidRecord",
+                KeyStoreFailure::IdentityMismatch => "server key unavailable: IdentityMismatch",
+                KeyStoreFailure::AlreadyExists => "server key unavailable: AlreadyExists",
+                KeyStoreFailure::Conflict => "server key unavailable: Conflict",
+                KeyStoreFailure::LimitExceeded => "server key unavailable: LimitExceeded",
+                KeyStoreFailure::Indeterminate => "server key unavailable: Indeterminate",
+            },
+            Self::Storage(value) => match value {
+                StorageFailure::Unavailable => "server storage unavailable: Unavailable",
+                StorageFailure::UnsafeStorage => "server storage unavailable: UnsafeStorage",
+                StorageFailure::UnknownSchema { .. } => "server storage unavailable: UnknownSchema",
+                StorageFailure::InvalidState => "server storage unavailable: InvalidState",
+                StorageFailure::Io => "server storage unavailable: Io",
+                StorageFailure::RecoveryRequired => "server storage unavailable: RecoveryRequired",
+            },
+            Self::Store(value) => match value {
+                StoreFailure::Locked => "server storage unavailable: Locked",
+                StoreFailure::Unavailable => "server storage unavailable: Unavailable",
+                StoreFailure::UnsafeStorage => "server storage unavailable: UnsafeStorage",
+                StoreFailure::UnknownSchema => "server storage unavailable: UnknownSchema",
+                StoreFailure::InvalidDurableState => {
+                    "server storage unavailable: InvalidDurableState"
+                }
+                StoreFailure::Io => "server storage unavailable: Io",
+                StoreFailure::RevisionConflict => "server storage unavailable: RevisionConflict",
+                StoreFailure::Exhausted => "server storage unavailable: Exhausted",
+                StoreFailure::InvalidTransaction => {
+                    "server storage unavailable: InvalidTransaction"
+                }
+                StoreFailure::IdentityMismatch => "server storage unavailable: IdentityMismatch",
+                StoreFailure::RecoveryRequired => "server storage unavailable: RecoveryRequired",
+            },
+            Self::Runtime(value) => match value.class {
+                crate::contracts::ServerFailureClass::Authentication => {
+                    "server runtime unavailable: Authentication"
+                }
+                crate::contracts::ServerFailureClass::ScopeMismatch => {
+                    "server runtime unavailable: ScopeMismatch"
+                }
+                crate::contracts::ServerFailureClass::StaleAuthority => {
+                    "server runtime unavailable: StaleAuthority"
+                }
+                crate::contracts::ServerFailureClass::Capacity => {
+                    "server runtime unavailable: Capacity"
+                }
+                crate::contracts::ServerFailureClass::Exhausted => {
+                    "server runtime unavailable: Exhausted"
+                }
+                crate::contracts::ServerFailureClass::StorageUnavailable => {
+                    "server runtime unavailable: StorageUnavailable"
+                }
+                crate::contracts::ServerFailureClass::RecoveryRequired => {
+                    "server runtime unavailable: RecoveryRequired"
+                }
+                crate::contracts::ServerFailureClass::RuntimeUnavailable => {
+                    "server runtime unavailable: RuntimeUnavailable"
+                }
+                crate::contracts::ServerFailureClass::NativeUnavailable => {
+                    "server runtime unavailable: NativeUnavailable"
+                }
+                crate::contracts::ServerFailureClass::CleanupIncomplete => {
+                    "server runtime unavailable: CleanupIncomplete"
+                }
+            },
+            Self::Distribution(value) => match value {
+                spaceterm_distribution::DistributionFailure::Verification => {
+                    "server distribution metadata unavailable: Verification"
+                }
+                spaceterm_distribution::DistributionFailure::InvalidRecord => {
+                    "server distribution metadata unavailable: InvalidRecord"
+                }
+                spaceterm_distribution::DistributionFailure::UnsupportedSchema => {
+                    "server distribution metadata unavailable: UnsupportedSchema"
+                }
+                spaceterm_distribution::DistributionFailure::IdentityMismatch => {
+                    "server distribution metadata unavailable: IdentityMismatch"
+                }
+                spaceterm_distribution::DistributionFailure::LimitExceeded => {
+                    "server distribution metadata unavailable: LimitExceeded"
+                }
+                spaceterm_distribution::DistributionFailure::ArchiveRejected => {
+                    "server distribution metadata unavailable: ArchiveRejected"
+                }
+                spaceterm_distribution::DistributionFailure::ManifestRejected => {
+                    "server distribution metadata unavailable: ManifestRejected"
+                }
+            },
             Self::RegistrationMissing => "server registration missing",
             Self::DeliberatelyStopped => "server deliberately stopped",
-            Self::Key(_) => "server key unavailable",
-            Self::Storage(_) | Self::Store(_) => "server storage unavailable",
-            Self::Runtime(_) => "server runtime unavailable",
-            Self::Distribution(_) => "server distribution metadata unavailable",
         }
     }
 }
@@ -229,6 +364,11 @@ impl AccountStartup {
                     Self::admit_with_storage(supervisor, storage.as_ref())
                 }
                 Ok(None) => return Err(StartupFailure::RegistrationMissing),
+                // Only explicit startup admission may reconcile an interrupted signed
+                // custody publication. Read-only discovery must never repair it.
+                Err(StartupFailure::Account(ServiceFailure::Indeterminate)) => {
+                    Self::admit_with_storage(supervisor, storage.as_ref())
+                }
                 Err(error) => Err(error),
             };
             match result {

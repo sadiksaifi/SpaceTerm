@@ -1,6 +1,7 @@
 //! Signed, account-local runtime custody records. Wire replies never carry native
 //! cleanup proofs. Only a validated registration can read this private record.
 
+pub(super) mod lineage;
 mod stopped_owner;
 use stopped_owner::StoppedEpoch;
 pub use stopped_owner::StoppedRuntimeCustody;
@@ -238,6 +239,15 @@ impl RuntimeCustody {
         publish(registration, &completed, self.signer.as_ref())
     }
 
+    /// Retains immutable parent facts for same-boot crash reconciliation. A missed
+    /// checkpoint never grants absence; unknown ancestry still refuses recovery.
+    pub fn checkpoint_lineage(
+        &self,
+        registration: &RegisteredServer,
+    ) -> Result<(), ServiceFailure> {
+        lineage::checkpoint(registration, self)
+    }
+
     /// Records exact joined cleanup only after the actor confirms all descendants,
     /// started writes and listeners. The original host request is retained.
     pub fn completed(
@@ -290,6 +300,7 @@ pub struct NativeInstanceAbsence {
     pub(super) server: ServerId,
     pub(super) epoch: ServerEpoch,
     pub(super) boot: [u8; 32],
+    pub(super) observer: Arc<dyn super::native_processes::InstanceProcessObserver>,
 }
 
 /// Native absence/replay authority shared by callers after reconstruction. It
@@ -330,12 +341,16 @@ impl RetainedRuntimeProcesses {
                 super::native_processes::previous_owner_absent(
                     state.owner.ok_or(ServiceFailure::CleanupUnresolved)?,
                     absence.boot,
+                    &lineage::retained(registration, &state)?,
+                    absence.observer.as_ref(),
                 )?;
             }
             if let Some(marker) = pending {
                 super::native_processes::previous_owner_absent(
                     marker.owner.ok_or(ServiceFailure::CleanupUnresolved)?,
                     absence.boot,
+                    &[],
+                    absence.observer.as_ref(),
                 )?;
             }
         }
@@ -671,8 +686,13 @@ fn read(registration: &RegisteredServer) -> Result<Option<(State, [u8; 32])>, Se
     let Some(record) = registration.directory.read(RECORD, RECORD_LIMIT)? else {
         return Ok(None);
     };
+    let state = decode_state(registration, &record.bytes)?;
+    Ok(Some((state, Sha256::digest(&record.bytes).into())))
+}
+
+fn decode_state(registration: &RegisteredServer, bytes: &[u8]) -> Result<State, ServiceFailure> {
     let signed: Signed =
-        serde_json::from_slice(&record.bytes).map_err(|_| ServiceFailure::InvalidRecord)?;
+        serde_json::from_slice(bytes).map_err(|_| ServiceFailure::InvalidRecord)?;
     if signed.signature.len() != 64 || signed.body.len() > RECORD_LIMIT {
         return Err(ServiceFailure::InvalidRecord);
     }
@@ -710,7 +730,7 @@ fn read(registration: &RegisteredServer) -> Result<Option<(State, [u8; 32])>, Se
             return Err(ServiceFailure::InvalidRecord);
         }
     }
-    Ok(Some((state, Sha256::digest(&record.bytes).into())))
+    Ok(state)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -728,8 +748,15 @@ fn read_marker(registration: &RegisteredServer) -> Result<Option<Starting>, Serv
     let Some(record) = registration.directory.read(STARTING, RECORD_LIMIT)? else {
         return Ok(None);
     };
+    decode_marker(registration, &record.bytes).map(Some)
+}
+
+fn decode_marker(
+    registration: &RegisteredServer,
+    bytes: &[u8],
+) -> Result<Starting, ServiceFailure> {
     let signed: Signed =
-        serde_json::from_slice(&record.bytes).map_err(|_| ServiceFailure::InvalidRecord)?;
+        serde_json::from_slice(bytes).map_err(|_| ServiceFailure::InvalidRecord)?;
     if signed.signature.len() != 64 {
         return Err(ServiceFailure::InvalidRecord);
     }
@@ -751,8 +778,41 @@ fn read_marker(registration: &RegisteredServer) -> Result<Option<Starting>, Serv
     {
         return Err(ServiceFailure::InvalidRecord);
     }
-    Ok(Some(marker))
+    Ok(marker)
 }
+
+/// Called only under native instance admission. Replays an exact original signed
+/// publication; it grants no process absence and never resets unclean custody.
+pub(super) fn recover_publications(registration: &RegisteredServer) -> Result<(), ServiceFailure> {
+    use crate::private_filesystem::Failure;
+    match registration.directory.verify() {
+        Ok(()) => return Ok(()),
+        Err(Failure::Indeterminate) => {}
+        Err(error) => return Err(error.into()),
+    }
+    for name in [RECORD, STARTING] {
+        let result =
+            registration
+                .directory
+                .reconcile_retained_publication(name, RECORD_LIMIT, |bytes| {
+                    let valid = if name == RECORD {
+                        decode_state(registration, bytes).map(|_| ())
+                    } else {
+                        decode_marker(registration, bytes).map(|_| ())
+                    };
+                    valid.map_err(|_| Failure::Unsafe)
+                });
+        match result {
+            Ok(()) | Err(Failure::Conflict) => {
+                return registration.directory.verify().map_err(Into::into);
+            }
+            Err(Failure::Indeterminate) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(ServiceFailure::Indeterminate)
+}
+
 fn marker_matches(registration: &RegisteredServer, state: &State) -> Result<bool, ServiceFailure> {
     Ok(match read_marker(registration)? {
         Some(marker) => marker.instance == state.instance,

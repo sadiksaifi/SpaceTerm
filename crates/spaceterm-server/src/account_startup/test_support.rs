@@ -116,6 +116,23 @@ pub fn retained_supervisor_with_clock(
     root: &Path,
     clock: Option<Arc<dyn ServiceClock>>,
 ) -> Result<Arc<ServiceSupervisor>, StartupFailure> {
+    retained_supervisor_with_observations(root, clock, None)
+}
+
+/// Injects previous-instance process observations while retaining real signed custody,
+/// startup leases, private endpoints, storage, and the production reconciliation path.
+pub fn retained_supervisor_with_observer(
+    root: &Path,
+    observer: Arc<dyn spaceterm_host::account_service::InstanceProcessObserver>,
+) -> Result<Arc<ServiceSupervisor>, StartupFailure> {
+    retained_supervisor_with_observations(root, None, Some(observer))
+}
+
+fn retained_supervisor_with_observations(
+    root: &Path,
+    clock: Option<Arc<dyn ServiceClock>>,
+    observer: Option<Arc<dyn spaceterm_host::account_service::InstanceProcessObserver>>,
+) -> Result<Arc<ServiceSupervisor>, StartupFailure> {
     use spaceterm_host::account_service::{
         NativeServiceProcesses, runtime_inventory::RetainedRuntimeProcesses,
     };
@@ -128,6 +145,10 @@ pub fn retained_supervisor_with_clock(
         .with_runtime(Arc::new(RetainedRuntimeProcesses));
     let processes = match clock {
         Some(clock) => processes.with_clock(clock),
+        None => processes,
+    };
+    let processes = match observer {
+        Some(observer) => processes.with_instance_observer(observer),
         None => processes,
     };
     Ok(Arc::new(fixture.with_providers(

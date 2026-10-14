@@ -452,3 +452,118 @@ async fn interrupted_recovery_reconciles_only_its_signed_prospective_epoch() {
         DesiredServerState::Running
     );
 }
+
+fn installed_fixture() -> (
+    tempfile::TempDir,
+    AccountServiceFixture,
+    spaceterm_host::account_service::RegisteredServer,
+) {
+    let root = root();
+    let fixture = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+    let registration = fixture
+        .initialize_with_installation(
+            DesiredServerState::Running,
+            Some(spaceterm_host::account_service::InstallationStatus {
+                installation: spaceterm_host::startup::InstallationId(std::num::NonZeroU64::MIN),
+                version: spaceterm_distribution::BuildVersion::parse("1.2.3").unwrap(),
+                artifact_sha256: [1; 32],
+            }),
+        )
+        .unwrap();
+    (root, fixture, registration)
+}
+
+#[test]
+fn startup_admission_reconciles_signed_pending_start_without_claiming_process_cleanup() {
+    use spaceterm_host::account_service::{
+        AccountStartupAdmission, test_support::fail_next_publication_durability,
+    };
+    let (_root, fixture, registration) = installed_fixture();
+    let pin = registration.server_pin();
+    let signer = ServerKeyStore::open(&registration)
+        .unwrap()
+        .load_identity(pin)
+        .unwrap();
+    let original = std::fs::read(registration.data_directory().join("runtime-custody")).unwrap();
+    fail_next_publication_durability();
+    assert_eq!(
+        RuntimeCustody::prepare_start_for_epoch(
+            &registration,
+            signer.as_ref(),
+            ServerEpoch::new(1)
+        ),
+        Err(ServiceFailure::Indeterminate)
+    );
+    assert!(matches!(
+        fixture.reopen().discover(),
+        Err(ServiceFailure::Indeterminate)
+    ));
+    let supervisor = fixture.with_providers(
+        Arc::new(ScopeManager),
+        Arc::new(RetainedRuntimeProcesses),
+        Arc::new(BootClock([1; 32])),
+        None,
+    );
+    let AccountStartupAdmission::Ready(admission) = supervisor.admit_startup().unwrap() else {
+        panic!("original publication should be reconciled under startup admission");
+    };
+    assert_eq!(admission.registration().server_pin(), pin);
+    assert_eq!(
+        std::fs::read(registration.data_directory().join("runtime-custody")).unwrap(),
+        original
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    assert_eq!(
+        runtime.block_on(RetainedRuntimeProcesses.verify_absent(admission.registration())),
+        Err(ServiceFailure::CleanupUnresolved)
+    );
+}
+
+#[test]
+fn startup_admission_reconciles_signed_unclean_custody_without_replacing_identity() {
+    use spaceterm_host::account_service::{
+        AccountStartupAdmission, test_support::fail_next_publication_durability,
+    };
+    let (_root, fixture, registration) = installed_fixture();
+    let pin = registration.server_pin();
+    let signer = ServerKeyStore::open(&registration)
+        .unwrap()
+        .load_identity(pin)
+        .unwrap();
+    RuntimeCustody::prepare_start_for_epoch(&registration, signer.as_ref(), ServerEpoch::new(1))
+        .unwrap();
+    fail_next_publication_durability();
+    assert!(matches!(
+        RuntimeCustody::begin(&registration, ServerEpoch::new(1), signer),
+        Err(ServiceFailure::Indeterminate)
+    ));
+    assert!(matches!(
+        fixture.reopen().discover(),
+        Err(ServiceFailure::Indeterminate)
+    ));
+    let supervisor = fixture.with_providers(
+        Arc::new(ScopeManager),
+        Arc::new(RetainedRuntimeProcesses),
+        Arc::new(BootClock([1; 32])),
+        None,
+    );
+    let AccountStartupAdmission::Ready(admission) = supervisor.admit_startup().unwrap() else {
+        panic!("original signed custody must survive recovery");
+    };
+    assert_eq!(admission.registration().server_pin(), pin);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    assert_eq!(
+        runtime.block_on(RetainedRuntimeProcesses.verify_absent(admission.registration())),
+        Err(ServiceFailure::CleanupUnresolved)
+    );
+    assert_eq!(
+        admission.registration().desired_state(),
+        DesiredServerState::Running
+    );
+}
