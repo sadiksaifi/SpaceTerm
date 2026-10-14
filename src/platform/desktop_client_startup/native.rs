@@ -308,27 +308,32 @@ impl Factory {
             .map_err(|_| fail(ClientFailureClass::Unavailable))?;
             // Ordinary IPC still refreshes registration and requires an
             // unsuppressed binding on every attempt through RefreshingRoutes.
-            let (remote, pairing_routes): (Arc<dyn spaceterm_client::ports::RouteConnector>, _) =
-                match configuration {
-                    Ok((configuration, owner)) => {
-                        let shared = crate::platform::server_client_route::connector(
-                            local_routes,
-                            Some(configuration),
-                        )?;
-                        (
-                            crate::platform::server_client_route::retain_runtime(
-                                shared.clone(),
-                                owner,
-                            ),
-                            shared,
-                        )
-                    }
-                    Err(_) => {
-                        let shared =
-                            crate::platform::server_client_route::connector(local_routes, None)?;
-                        (shared.clone(), shared)
-                    }
-                };
+            let (configuration, owner) = match configuration {
+                Ok((configuration, owner)) => (Some(configuration), Some(owner)),
+                Err(_) => (None, None),
+            };
+            // A missing runtime directory at recovery must not freeze restricted
+            // retries offline. Renewal reads only this trusted account/build
+            // provider and still requires the original task's pin and exact route.
+            let pairing_routes = match native.clone() {
+                Some(provider) => Arc::new(
+                    spaceterm_client_native::route::NativeRouteConnector::new(
+                        local_routes,
+                        configuration,
+                    )?
+                    .with_restricted_local_discovery(provider),
+                ),
+                None => {
+                    crate::platform::server_client_route::connector(local_routes, configuration)?
+                }
+            };
+            let remote: Arc<dyn spaceterm_client::ports::RouteConnector> = match owner {
+                Some(owner) => crate::platform::server_client_route::retain_runtime(
+                    pairing_routes.clone(),
+                    owner,
+                ),
+                None => pairing_routes.clone(),
+            };
             let routes = crate::platform::server_client_route::refreshing_connector_with_failure(
                 native.clone(),
                 context.native_failure,

@@ -1124,6 +1124,7 @@ fn serve_pending_ipc(
 enum NativeIpcRestart {
     PendingOnly,
     NewerWssPairing,
+    MissingRuntimeDirectory,
 }
 
 fn production_pending_only_ipc_restart(
@@ -1144,6 +1145,7 @@ fn production_pending_only_ipc_restart(
         startup::{BuildIdentity, DesiredServerState},
         transport::{AdmissionLimits, MessageLimit},
     };
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     cx.executor().allow_parking();
     #[cfg(target_os = "macos")]
     let parent = "/private/tmp";
@@ -1153,11 +1155,16 @@ fn production_pending_only_ipc_restart(
     let root = directory.path();
     let fixture = AccountServiceFixture::new(root, BuildIdentity::Development).unwrap();
     let registration = fixture.initialize(DesiredServerState::Running).unwrap();
+    assert!(!fixture.anchor().join("requests").exists());
     let identity = ServerKeyStore::open(&registration)
         .unwrap()
         .load_identity(registration.server_pin())
         .unwrap();
-    let route = LocalRouteAuthority::new(registration.endpoint().unwrap()).unwrap();
+    let endpoint = registration.endpoint().unwrap();
+    let runtime_directory = endpoint.path().parent().unwrap().to_owned();
+    let original_runtime = std::fs::metadata(&runtime_directory).unwrap();
+    let original_data = std::fs::metadata(registration.data_directory()).unwrap();
+    let route = LocalRouteAuthority::new(endpoint).unwrap();
     let environment = AppDirectoryEnvironment {
         home: Some(root.as_os_str().to_owned()),
         xdg_state_home: Some(root.join("state").into_os_string()),
@@ -1234,6 +1241,15 @@ fn production_pending_only_ipc_restart(
     });
     h.quit(&runtime, cx);
     drop((startup, runtime, journal));
+    if restart == NativeIpcRestart::MissingRuntimeDirectory {
+        // The server's ephemeral endpoint can disappear while its trusted
+        // registration and original private data identity remain established.
+        std::fs::remove_dir_all(&runtime_directory).unwrap();
+        assert!(matches!(
+            fixture.reopen().discover().unwrap().unwrap().endpoint(),
+            Err(spaceterm_host::account_service::ServiceFailure::Missing)
+        ));
+    }
 
     let mut restarted = cx.new_app();
     let journal = h.reopen();
@@ -1327,7 +1343,9 @@ fn production_pending_only_ipc_restart(
         &mut restarted,
     );
     match restart {
-        NativeIpcRestart::PendingOnly => assert!(h.snapshot(&mut restarted).servers.is_empty()),
+        NativeIpcRestart::PendingOnly | NativeIpcRestart::MissingRuntimeDirectory => {
+            assert!(h.snapshot(&mut restarted).servers.is_empty());
+        }
         NativeIpcRestart::NewerWssPairing => {
             assert_eq!(h.snapshot(&mut restarted).servers.len(), 1);
             assert_eq!(
@@ -1344,6 +1362,51 @@ fn production_pending_only_ipc_restart(
         || journal.snapshot().unwrap().revocations()[0].attempts > attempts,
     );
     assert!(!journal.ordinary_use_allowed(&h.old.binding).unwrap());
+    if restart == NativeIpcRestart::MissingRuntimeDirectory {
+        let pending = journal.snapshot().unwrap().revocations()[0].clone();
+        assert_eq!(pending.task, original.task);
+        assert_eq!(pending.target, original.target);
+        assert!(matches!(
+            journal
+                .snapshot()
+                .unwrap()
+                .pairing_snapshot()
+                .unwrap()
+                .task(h.old.operation())
+                .unwrap()
+                .phase,
+            RevocationPhase::AwaitingConfirmation
+        ));
+        assert!(!runtime_directory.exists());
+        assert_eq!(h.endpoint.opens.load(Ordering::SeqCst), 0);
+        assert_eq!(h.endpoint.acknowledgements.load(Ordering::SeqCst), 0);
+        assert!(h.credentials.deletions.lock().unwrap().is_empty());
+        assert_eq!(
+            h.ordinary_credentials.0.load(Ordering::SeqCst),
+            ordinary_reads
+        );
+        // Only the isolated server fixture recreates its approved private
+        // runtime directory. Recovery and retries never create or repair it.
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&runtime_directory)
+            .unwrap();
+        let renewed_runtime = std::fs::metadata(&runtime_directory).unwrap();
+        assert_ne!(
+            (renewed_runtime.dev(), renewed_runtime.ino()),
+            (original_runtime.dev(), original_runtime.ino())
+        );
+        let renewed = fixture.reopen().discover().unwrap().unwrap();
+        assert_eq!(renewed.server_pin(), registration.server_pin());
+        assert_eq!(renewed.key(), registration.key());
+        assert_eq!(renewed.generation(), registration.generation());
+        assert_eq!(
+            LocalRouteAuthority::new(renewed.endpoint().unwrap())
+                .unwrap()
+                .description(),
+            h.old.binding.target().route()
+        );
+    }
     let ordinary_routes = crate::platform::server_client_route::refreshing_connector(
         Some(NativeClientProvider::from_supervisor(fixture.reopen())),
         journal.clone(),
@@ -1357,16 +1420,16 @@ fn production_pending_only_ipc_restart(
         h.executor.block_on(ordinary_routes.open(h.old.binding.target(), ConnectionPurpose::Ordinary)),
         Err(failure) if failure.class() == ClientFailureClass::StaleAuthority
     ));
-    if restart == NativeIpcRestart::PendingOnly {
+    if restart != NativeIpcRestart::NewerWssPairing {
         assert_eq!(
             h.ordinary_credentials.0.load(Ordering::SeqCst),
             ordinary_reads
         );
     }
 
-    // The original empty restart retains its later same-route pairing. The new
-    // scenario already recovered with a durable different-route pairing. Neither
-    // may redirect the old route, credential, pin or operation, or be cleaned up.
+    // Empty restarts retain their later same-route pairing. The WSS scenario
+    // recovers with a durable different-route pairing. Neither may redirect
+    // the old route, credential, pin or operation, or be cleaned up.
     let (device, attachment) = retained.unwrap_or_else(|| h.retain_newer_pairing(&newer, &journal));
     let (stop, service) = recovered_ipc.unwrap_or_else(start_ipc);
     h.drive_until(
@@ -1410,7 +1473,7 @@ fn production_pending_only_ipc_restart(
     assert_eq!(saved.incarnation_floor(), Some(attachment.incarnation()));
     assert!(journal.ordinary_use_allowed(&newer.binding).unwrap());
     match restart {
-        NativeIpcRestart::PendingOnly => {
+        NativeIpcRestart::PendingOnly | NativeIpcRestart::MissingRuntimeDirectory => {
             assert!(
                 runtime
                     .read_with(&mut restarted, |runtime, _| runtime.servers())
@@ -1445,6 +1508,13 @@ fn production_pending_only_ipc_restart(
     assert_eq!(found.key(), registration.key());
     assert_eq!(found.generation(), registration.generation());
     assert_eq!(found.desired_state(), DesiredServerState::Running);
+    assert!(!fixture.anchor().join("requests").exists());
+    assert_eq!(found.data_directory(), registration.data_directory());
+    let retained_data = std::fs::metadata(found.data_directory()).unwrap();
+    assert_eq!(
+        (retained_data.dev(), retained_data.ino()),
+        (original_data.dev(), original_data.ino())
+    );
     h.quit(&runtime, &mut restarted);
     drop((startup, runtime));
     stop.send(()).unwrap();
@@ -1476,6 +1546,20 @@ fn desktop_production_pending_only_ipc_restart_completes_exact_revocation_major2
     cx: &mut TestAppContext,
 ) {
     production_pending_only_ipc_restart(2, NativeIpcRestart::PendingOnly, cx);
+}
+
+#[gpui::test]
+fn desktop_production_pending_ipc_retry_renews_missing_runtime_authority_major1(
+    cx: &mut TestAppContext,
+) {
+    production_pending_only_ipc_restart(1, NativeIpcRestart::MissingRuntimeDirectory, cx);
+}
+
+#[gpui::test]
+fn desktop_production_pending_ipc_retry_renews_missing_runtime_authority_major2(
+    cx: &mut TestAppContext,
+) {
+    production_pending_only_ipc_restart(2, NativeIpcRestart::MissingRuntimeDirectory, cx);
 }
 
 #[gpui::test]
