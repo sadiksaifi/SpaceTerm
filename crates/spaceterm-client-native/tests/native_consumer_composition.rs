@@ -222,6 +222,10 @@ async fn controller(directory: &std::path::Path, create: bool) -> Arc<JournalCon
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The fixture independently selects consumer, protocol, and native recovery faults."
+)]
 async fn exercise(
     kind: NativeConsumerKind,
     major: u32,

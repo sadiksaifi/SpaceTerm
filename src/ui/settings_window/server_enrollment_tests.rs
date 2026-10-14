@@ -496,6 +496,7 @@ impl PairingTransport for Transport {
 struct Provider {
     fixture: Fixture,
     inspections: Cell<usize>,
+    claim_exports: Cell<usize>,
     publications: RefCell<Vec<SavedPairing>>,
     authorizations: RefCell<Vec<bool>>,
     ssh_facts: RefCell<Option<BootstrapHostFacts>>,
@@ -514,6 +515,7 @@ impl Provider {
         Rc::new(Self {
             fixture: Fixture::new(major, lose_reply),
             inspections: Cell::new(0),
+            claim_exports: Cell::new(0),
             publications: RefCell::new(Vec::new()),
             authorizations: RefCell::new(Vec::new()),
             ssh_facts: RefCell::new(None),
@@ -530,6 +532,16 @@ impl Provider {
     }
 }
 impl EnrollmentProvider for Provider {
+    fn prepare_claim(&self, address: String, descriptor: Zeroizing<String>, compared_fingerprint: String, attempt: EnrollmentAttempt, _: &mut App) -> Task<Result<String, EnrollmentFailure>> {
+        if let Err(error) = attempt.validate() { return Task::ready(Err(error)) }
+        if address != "wss://enrollment.invalid" || descriptor.as_str() != "public-server-identity" || compared_fingerprint != fingerprint(self.fixture.prepared.pin.public_key) {
+            return Task::ready(Err(PairingFailure::FingerprintMismatch.into()));
+        }
+        self.claim_exports.set(self.claim_exports.get() + 1);
+        // Native key custody and proof verification are covered by the public
+        // native-provider suite. This boundary supplies public clipboard bytes.
+        Task::ready(Ok("verified-public-device-claim".into()))
+    }
     fn inspect(
         &self,
         target: EnrollmentTarget,
@@ -1274,4 +1286,28 @@ fn self_unpair_fence_rejects_a_historical_receipt_before_the_tombstone_is_writte
 #[gpui::test]
 async fn foreground_enrollment_production_composition(cx: &mut TestAppContext) {
     super::native::tests::foreground_composition(cx).await;
+}
+
+#[gpui::test]
+fn add_server_public_claim_copy_requires_a_deliberate_fingerprint_action_and_never_enrolls(cx: &mut TestAppContext) {
+    let provider = Provider::new(2, false);
+    let fingerprint = fingerprint(provider.fixture.prepared.pin.public_key);
+    let cx = open(provider.clone(), cx);
+    cx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("unchanged".into())));
+    click("settings-server-enrollment-copy-claim", cx);
+    assert_eq!(provider.claim_exports.get(), 0);
+    assert_eq!(cx.update(|_, cx| cx.read_from_clipboard().unwrap().text().unwrap()), "unchanged");
+    write_field("Server address or SSH host", "wss://enrollment.invalid", cx);
+    write_field("Single-use pairing invitation", "public-server-identity", cx);
+    write_field("Fingerprint from the server's owner", &fingerprint, cx);
+    let tree = A11yTree::read(cx);
+    perform(cx, tree.node("Copy Public Device Claim"), accesskit::Action::Click);
+    cx.run_until_parked();
+    assert_eq!(provider.claim_exports.get(), 1);
+    assert_eq!(cx.update(|_, cx| cx.read_from_clipboard().unwrap().text().unwrap()), "verified-public-device-claim");
+    assert_eq!(provider.inspections.get(), 0);
+    assert!(provider.authorizations.borrow().is_empty());
+    assert!(provider.publications.borrow().is_empty());
+    assert_eq!(provider.fixture.endpoint.submissions.load(Ordering::SeqCst), 0);
+    assert!(!tree_json(cx).contains("public-server-identity"));
 }

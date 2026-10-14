@@ -347,6 +347,61 @@ impl ServiceSupervisor {
                 .map_err(|_| ServiceFailure::Indeterminate)?
         })
     }
+    /// Resubmits only the exact archive of an already accepted installation.
+    /// Roots and one-time desktop seed come from the original native request,
+    /// never current client settings. No replacement confirmation or ID is issued.
+    pub fn resume_install_artifact(
+        &self,
+        request: NativeRequestId,
+        artifact: VerifiedServerArtifact,
+    ) -> ServiceFuture<'_, ServiceProgress> {
+        let supervisor = self.clone();
+        Box::pin(async move {
+            let original = supervisor
+                .original_install(request)?
+                .ok_or(ServiceFailure::UnknownRequest)?;
+            if original.artifact_sha256 != artifact.artifact_sha256()
+                || original.version != artifact.manifest().version
+            {
+                return Err(ServiceFailure::RequestConflict);
+            }
+            let confirmation = ConfirmedServiceInstall {
+                artifact,
+                roots: original.roots.ok_or(ServiceFailure::InvalidRecord)?,
+                desktop_seed: original.desktop_seed,
+                stage_basis: original.stage_basis,
+            };
+            supervisor.install(request, confirmation).await
+        })
+    }
+
+    /// Reads accepted first installations, including creation without registration.
+    /// Discovery does not resume effects or allocate replacement request identities.
+    pub fn retained_initial_install_requests(
+        &self,
+    ) -> Result<Vec<ServiceProgress>, ServiceFailure> {
+        let journal = match self.read_journal() {
+            Ok((_, _, journal)) => journal,
+            Err(ServiceFailure::Missing | ServiceFailure::UnknownRequest) => return Ok(Vec::new()),
+            Err(failure) => return Err(failure),
+        };
+        journal
+            .reservations
+            .iter()
+            .filter_map(|reservation| {
+                let record = reservation.install.as_ref()?;
+                if !record.new_organization || record.stage_basis.is_some() {
+                    return None;
+                }
+                Some(
+                    journal
+                        .request(reservation.sequence)
+                        .map(|request| record.progress(request)),
+                )
+            })
+            .collect()
+    }
+
     /// Reads the original accepted install without resuming publication or startup.
     /// A reserved ID without accepted contents remains unknown.
     pub fn inspect_install_request(

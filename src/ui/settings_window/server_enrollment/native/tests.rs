@@ -681,3 +681,139 @@ async fn desktop_native_direct_invitation_uses_owned_credentials_and_canonical_j
         1
     );
 }
+
+#[derive(Default)]
+struct ClaimKeys(std::sync::Mutex<Vec<PreparedCredential>>);
+impl spaceterm_client::pairing::credentials::NativeDeviceCredentials for ClaimKeys {
+    fn create(&self, reservation: spaceterm_client::pairing::credentials::CredentialCreationReservation) -> PairingFuture<'_, Result<PreparedCredential, PairingFailure>> {
+        Box::pin(async move {
+            use spaceterm_client::pairing::credentials::CredentialPurpose;
+            use spaceterm_protocol::authentication::SigningKey;
+            let scope = reservation.scope().clone();
+            let prepared = PreparedCredential { public_key: spaceterm_client::testing::DeterministicKey::new(if scope.parts().purpose == CredentialPurpose::DeviceIdentity { 3 } else { 2 }).unwrap().public_key(), scope };
+            self.0.lock().unwrap().push(prepared.clone());
+            Ok(prepared)
+        })
+    }
+    fn recover_preparation<'a>(&'a self, scope: &'a spaceterm_client::pairing::credentials::CredentialScope) -> PairingFuture<'a, Result<Option<PreparedCredential>, PairingFailure>> {
+        Box::pin(async move { Ok(self.0.lock().unwrap().iter().find(|credential| &credential.scope == scope).cloned()) })
+    }
+    fn signing_key<'a>(&'a self, credential: &'a PreparedCredential, authorization: &'a spaceterm_client::pairing::credentials::CredentialUse) -> PairingFuture<'a, Result<Arc<dyn spaceterm_protocol::authentication::SigningKey>, PairingFailure>> {
+        Box::pin(async move {
+            authorization.validate(&credential.scope)?;
+            Ok(Arc::new(spaceterm_client::testing::DeterministicKey::new(if credential.scope.parts().purpose == spaceterm_client::pairing::credentials::CredentialPurpose::DeviceIdentity { 3 } else { 2 }).unwrap()) as Arc<dyn spaceterm_protocol::authentication::SigningKey>)
+        })
+    }
+    fn delete_pairing_key<'a>(&'a self, _: &'a PreparedCredential) -> PairingFuture<'a, Result<spaceterm_client::pairing::credentials::CredentialDeletion, PairingFailure>> {
+        panic!("claim export cannot delete credentials")
+    }
+}
+struct ClaimVerifier;
+impl spaceterm_client::journal::ReceiptVerifier for ClaimVerifier {
+    fn verify(&self, pin: spaceterm_protocol::authentication::ServerPin, receipt: &spaceterm_core::pairing::SignedPairingReceipt) -> Result<(), ClientFailure> {
+        spaceterm_protocol::pairing_adapter::ReceiptCodec::new(pin).verify(receipt).map(|_| ()).map_err(Into::into)
+    }
+}
+
+#[gpui::test]
+async fn desktop_first_use_remote_claim_prepares_native_keys_and_exports_only_verified_public_proofs(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let h = Harness::new(2);
+    let storage = Arc::new(spaceterm_client::testing::MemoryJournal::default());
+    let journal = Arc::new(h.fixture.storage.runtime.block_on(spaceterm_client::journal::JournalController::recover(storage, Arc::new(spaceterm_core::operation_ledger::canonical::CanonicalCodec), Arc::new(ClaimVerifier), spaceterm_client::journal::JournalLimits::default())).unwrap());
+    let keys = Arc::new(ClaimKeys::default());
+    let pairing = Arc::new(NativePairingRuntime::with_adapters(journal.clone(), keys.clone(), Arc::new(h.fixture.endpoint.clone()), Arc::new(h.fixture.endpoint.clone()), Arc::new(Invalidator), HandshakeConfig::default()));
+    let provider = NativeEnrollmentProvider::new(NativeEnrollmentServices { pairing, direct: Arc::new(direct::NativeDirectInvitation), bootstrap: None, executor: h.fixture.storage.runtime.handle().clone(), local: None }, h.provider.registry.clone(), h.publication.clone());
+    let descriptor = serde_json::json!({"schema": 1, "server_identity": h.fixture.prepared.pin.identity, "server_public_key": h.fixture.prepared.pin.public_key}).to_string();
+    let wrong = cx.update(|cx| provider.prepare_claim("wss://127.0.0.1:443".into(), Zeroizing::new(descriptor.clone()), "wrong".into(), EnrollmentAttempt::new(1), cx)).await;
+    assert!(matches!(wrong, Err(EnrollmentFailure::Pairing(PairingFailure::FingerprintMismatch))));
+    assert!(keys.0.lock().unwrap().is_empty());
+    let fingerprint = spaceterm_client::pairing::enrollment::fingerprint(h.fixture.prepared.pin.public_key);
+    let claim = cx.update(|cx| provider.prepare_claim("wss://127.0.0.1:443".into(), Zeroizing::new(descriptor.clone()), fingerprint.clone(), EnrollmentAttempt::new(2), cx)).await.unwrap();
+    let public: serde_json::Value = serde_json::from_str(&claim).unwrap();
+    assert_eq!(public.as_object().unwrap().len(), 6);
+    assert_eq!(public["schema"], 1);
+    let proposal: spaceterm_core::pairing::EnrollmentProposal = serde_json::from_value(public["proposal"].clone()).unwrap();
+    let device_proof: Vec<u8> = serde_json::from_value(public["device_proof"].clone()).unwrap();
+    let authentication_proof: Vec<u8> = serde_json::from_value(public["authentication_proof"].clone()).unwrap();
+    spaceterm_protocol::pairing_adapter::VerifiedDeviceClaim::verify(proposal.clone(), &device_proof, &authentication_proof).unwrap();
+    assert_eq!(proposal.parts().server.bytes(), h.fixture.prepared.pin.identity);
+    assert_eq!(keys.0.lock().unwrap().len(), 2);
+    assert!(journal.snapshot().unwrap().bindings().is_empty());
+    assert_eq!(h.fixture.endpoint.submissions.load(Ordering::SeqCst), 0);
+    assert_eq!(h.ports.opens.load(Ordering::SeqCst), 0);
+    let second = cx.update(|cx| provider.prepare_claim("wss://127.0.0.1:443".into(), Zeroizing::new(descriptor), fingerprint, EnrollmentAttempt::new(3), cx)).await.unwrap();
+    let second: serde_json::Value = serde_json::from_str(&second).unwrap();
+    let second: spaceterm_core::pairing::EnrollmentProposal = serde_json::from_value(second["proposal"].clone()).unwrap();
+    assert_eq!(proposal.parts().keys, second.parts().keys);
+    assert_eq!(keys.0.lock().unwrap().len(), 2);
+}
+
+#[gpui::test]
+async fn desktop_explicit_repair_publishes_new_incarnation_after_old_binding_suppression(cx: &mut TestAppContext) {
+    use spaceterm_client::{journal::{ClientJournalChange, JournalCredentialSlot, SavedBinding}, pairing::journal::LocalPairingStore};
+    use spaceterm_core::{
+        authority::StoreRevision,
+        identity::{ClientId, OperationStreamId, OperationStreamKey, PairingId},
+        operations::{OperationBinding, OperationId, OperationSequence, RequestDigest},
+        pairing::{ClientRecord, CredentialReference, LocalPairingGeneration, LocalPairingKeyParts, PairingClientStreams, PairingClientStreamsParts, PairingReceiptBody, PairingTarget, PairingTargetParts},
+    };
+    cx.executor().allow_parking();
+    let h = Harness::new(2);
+    let server = h.fixture.prepared.local_pairing.parts().server;
+    let pairing = PairingId::new(server, 2).unwrap();
+    let client = ClientId::new(server, 2).unwrap();
+    let streams = PairingClientStreams::new(PairingClientStreamsParts {
+        client: ClientRecord { id: client, pairing },
+        ordinary: OperationStreamId::new(OperationStreamKey::new(server, 11).unwrap(), pairing, client).unwrap(),
+        self_revocation: OperationStreamId::new(OperationStreamKey::new(server, 12).unwrap(), pairing, client).unwrap(),
+    }).unwrap();
+    let route = h.fixture.storage.journal.snapshot().unwrap().pairing().slot(h.fixture.prepared.credential.scope.reference()).unwrap().route.clone().unwrap();
+    let old_binding = PairedServerBinding::new(ConnectionTarget::new(
+        h.fixture.prepared.pin, h.fixture.prepared.device, pairing, client, route.clone(), h.fixture.prepared.credential.scope.reference(), LocalPairingGeneration::new(1).unwrap(),
+    ).unwrap());
+    let proof = spaceterm_protocol::pairing_adapter::ReceiptCodec::new(h.fixture.prepared.pin).sign(
+        PairingReceiptBody::ClientBinding {
+            target: PairingTarget::new(PairingTargetParts { server, pairing, device: h.fixture.prepared.device }).unwrap(),
+            keys: h.fixture.prepared.keys.clone(), client: streams.clone(),
+            operation: OperationBinding { id: OperationId::new(streams.parts().ordinary, OperationSequence::new(1).unwrap()), digest: RequestDigest::from_bytes([13; 32]) },
+            revision: StoreRevision::new(1),
+        }, h.fixture.endpoint.server.as_ref(),
+    ).unwrap();
+    let old_self_revocation = streams.parts().self_revocation;
+    let old_saved = SavedBinding::verified(old_binding.clone(), streams, proof, &ClaimVerifier).unwrap();
+    h.fixture.storage.runtime.block_on(h.fixture.storage.journal.transact(vec![ClientJournalChange::SaveBinding(Box::new(old_saved))])).unwrap();
+    let old = h.fixture.storage.runtime.block_on(h.provider.registry.register(old_binding.clone())).unwrap();
+    let old_key = old_binding.target().local_pairing().unwrap();
+    h.fixture.storage.runtime.block_on(async {
+        let store = h.fixture.storage.store();
+        let authority = store.ordinary_authority(&old_key).await.unwrap();
+        spaceterm_client::pairing::revocation::PairingController::new(store, Arc::new(spaceterm_core::operation_ledger::canonical::CanonicalCodec))
+            .self_unpair(&authority, spaceterm_client::pairing::revocation::ConfirmedSelfUnpair::confirm(old_key.clone(), OperationId::new(old_self_revocation, OperationSequence::new(1).unwrap())).unwrap()).await.unwrap();
+    });
+    let mut prepared = h.fixture.prepared.clone();
+    let mut scope = prepared.credential.scope.parts().clone();
+    scope.reference = CredentialReference::new([43; 16]);
+    prepared.credential.scope = spaceterm_client::pairing::credentials::CredentialScope::new(scope).unwrap();
+    prepared.local_pairing = LocalPairingKey::new(LocalPairingKeyParts { server, pairing: prepared.local_pairing.parts().pairing, generation: LocalPairingGeneration::new(3).unwrap() }).unwrap();
+    h.fixture.storage.runtime.block_on(h.fixture.storage.journal.transact(vec![
+        ClientJournalChange::ReserveCredential(JournalCredentialSlot { namespace: prepared.credential.scope.parts().namespace.as_str().into(), server: Some(server), reference: prepared.credential.scope.reference(), public_key: None, route_reference: None, route: None, ssh_capture: None, generation: LocalPairingGeneration::new(3).unwrap() }),
+        ClientJournalChange::RecordCredentialPublicKey { reference: prepared.credential.scope.reference(), public_key: prepared.credential.public_key },
+        ClientJournalChange::BindCredentialRoute { reference: prepared.credential.scope.reference(), route_reference: prepared.route, route: route.clone() },
+    ])).unwrap();
+    let original = h.provider.services.direct.prepare("wss://enrollment.invalid".into(), Zeroizing::new("one-use-test-delivery".into()), EnrollmentAttempt::new(1), &h.provider.services.pairing).await.unwrap();
+    let mut services = h.provider.services.as_ref().clone();
+    services.direct = Arc::new(Preparation(Mutex::new(Some(DirectPreparation { prepared: prepared.clone(), device: h.fixture.device.clone(), authorization: original.authorization, route, majors: vec![2] }))));
+    let provider = NativeEnrollmentProvider::new(services, h.provider.registry.clone(), h.publication.clone());
+    let discovery = cx.update(|cx| provider.inspect(EnrollmentTarget::Direct { address: "wss://enrollment.invalid".into(), invitation: Zeroizing::new("one-use-test-delivery".into()) }, EnrollmentAttempt::new(2), cx)).await.unwrap();
+    let EnrollmentDiscovery::Direct(mut candidate) = discovery else { panic!("direct repair expected") };
+    let verifier = candidate.verifier().unwrap();
+    let approval = candidate.approve(&verifier, &verifier.fingerprint()).unwrap();
+    let enrollment = cx.update(|cx| provider.enroll_direct(approval, cx)).await.unwrap();
+    assert_eq!(enrollment.saved.key(), &prepared.local_pairing);
+    assert_eq!(provider.registry.servers().len(), 1);
+    assert!(h.fixture.storage.runtime.block_on(old.connect()).is_err());
+    assert_eq!(h.ports.opens.load(Ordering::SeqCst), 0);
+    cx.update(|cx| provider.publish(enrollment, cx)).unwrap();
+    assert_eq!(h.publication.0.borrow().as_slice(), &[prepared.local_pairing]);
+}

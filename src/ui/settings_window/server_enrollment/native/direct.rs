@@ -23,7 +23,49 @@ struct Invitation<'a> {
     authorization_delivery: &'a str,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServerDescriptor {
+    schema: u16,
+    server_identity: [u8; 16],
+    server_public_key: [u8; 32],
+}
+
 impl DirectInvitationPreparation for NativeDirectInvitation {
+    fn prepare_claim<'a>(
+        &'a self,
+        address: String,
+        descriptor: Zeroizing<String>,
+        compared_fingerprint: String,
+        attempt: EnrollmentAttempt,
+        pairing: &'a NativePairingRuntime,
+    ) -> PairingFuture<'a, Result<String, EnrollmentFailure>> {
+        Box::pin(async move {
+            attempt.validate()?;
+            if address.is_empty() || address.len() > 2048 || address.chars().any(char::is_control)
+                || descriptor.is_empty() || descriptor.len() > 4096 || compared_fingerprint.len() > 96
+            {
+                return Err(PairingFailure::InvalidRequest.into());
+            }
+            let descriptor: ServerDescriptor = serde_json::from_str(&descriptor)
+                .map_err(|_| PairingFailure::InvalidRequest)?;
+            if descriptor.schema != 1 { return Err(PairingFailure::InvalidRequest.into()); }
+            let pin = ServerPin { identity: descriptor.server_identity, public_key: descriptor.server_public_key };
+            if spaceterm_client::pairing::enrollment::fingerprint(pin.public_key) != compared_fingerprint {
+                return Err(PairingFailure::FingerprintMismatch.into());
+            }
+            let route = route(&address).await?;
+            attempt.validate()?;
+            let namespace = spaceterm_client::pairing::credentials::CredentialNamespace::new(
+                if cfg!(spaceterm_packaged) && cfg!(spaceterm_release) { "app.spaceterm.desktop" }
+                else if cfg!(spaceterm_packaged) { "app.spaceterm.preflight.desktop" }
+                else { "dev.spaceterm.desktop" }.into(),
+            )?;
+            let claim = pairing.prepare_public_claim(namespace, pin, route, &compared_fingerprint).await?;
+            attempt.validate()?;
+            serde_json::to_string(&claim).map_err(|_| PairingFailure::InvalidDurableState.into())
+        })
+    }
     fn prepare<'a>(
         &'a self,
         address: String,

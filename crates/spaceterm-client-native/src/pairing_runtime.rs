@@ -1,6 +1,9 @@
 //! Pairing composition over the caller's one journal controller. Construction
 //! neither discovers a server nor creates credentials, enrolls, starts or repairs.
 
+mod claim;
+pub use claim::PublicDeviceClaim;
+
 use crate::{
     credentials::adapter::DeviceCredentials, restricted_routes::NativePairingConnector,
     route::NativeRouteConnector,
