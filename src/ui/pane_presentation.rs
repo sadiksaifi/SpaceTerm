@@ -45,6 +45,7 @@ use crate::repository_status::presentation::sanitize_for_display;
 use crate::ui::appearance::{ChromeAppearance, gpui_color, shared_chrome};
 use crate::ui::chrome_icons::IconRole;
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
+use crate::ui::directory_picker::pane_repair::PaneRepairStatus;
 
 pub(in crate::ui) use content_unavailable::{ContentUnavailable, ContentUnavailablePaint};
 
@@ -699,6 +700,8 @@ struct Screen {
     title: SharedString,
     detail: SharedString,
     actions: Vec<ScreenAction>,
+    /// What the screen's live status announces when it differs from the title.
+    announcement: Option<SharedString>,
 }
 
 impl Screen {
@@ -714,7 +717,35 @@ impl Screen {
             title: title.into(),
             detail: detail.into(),
             actions: Vec::new(),
+            announcement: None,
         }
+    }
+
+    /// Shows the progress or result of the Pane's directory repair in the screen's detail and
+    /// live status. Retry is unavailable while a check is already running.
+    fn repair(mut self, status: Option<PaneRepairStatus>) -> Self {
+        let Some(status) = status else {
+            return self;
+        };
+        let message = status.message();
+        match status {
+            PaneRepairStatus::Pending | PaneRepairStatus::Unresolved => {
+                self.detail = message.into();
+                for action in &mut self.actions {
+                    if action.action == PanePresentationAction::Retry {
+                        action.available = false;
+                    }
+                }
+            }
+            PaneRepairStatus::StillUnavailable | PaneRepairStatus::Conflict => {
+                self.detail = format!("{message} {}", self.detail).into();
+            }
+            PaneRepairStatus::Choosing
+            | PaneRepairStatus::Cancelled
+            | PaneRepairStatus::Completed => return self,
+        }
+        self.announcement = Some(format!("{}. {message}", self.title).into());
+        self
     }
 
     fn offline_actions(mut self, cause: &OfflineCause) -> Self {
@@ -873,6 +904,7 @@ pub(crate) struct PanePresentationLayer {
     on_action: Option<ActionHandler>,
     armed: Option<bool>,
     focused: bool,
+    repair: Option<PaneRepairStatus>,
 }
 
 impl PanePresentationLayer {
@@ -889,7 +921,14 @@ impl PanePresentationLayer {
             on_action: None,
             armed: None,
             focused: false,
+            repair: None,
         }
+    }
+
+    /// The status of this Pane's directory repair, shown on its Directory unavailable screen.
+    pub(crate) fn repair_status(mut self, status: Option<PaneRepairStatus>) -> Self {
+        self.repair = status;
+        self
     }
 
     /// The focus the Pane shares with the layer. Escape from an action returns to the Pane, and so
@@ -945,6 +984,7 @@ impl RenderOnce for PanePresentationLayer {
             on_action,
             armed,
             focused,
+            repair,
             ..
         } = self;
         let child = |name: &'static str| ElementId::NamedChild(Arc::new(id.clone()), name.into());
@@ -989,6 +1029,11 @@ impl RenderOnce for PanePresentationLayer {
             _ => {
                 let Some(screen) = presentation.screen() else {
                     return gpui::Empty.into_any_element();
+                };
+                let screen = if presentation == PanePresentation::DirectoryUnavailable {
+                    screen.repair(repair)
+                } else {
+                    screen
                 };
                 if presentation.guards_take_over() {
                     use super::server_pane_actions::PanePresentationMenuCommand;
@@ -1368,8 +1413,13 @@ fn render_screen(
                 .into_any_element()
         })
         .collect::<Vec<_>>();
-    let announcement = screen.title.clone();
-    let focused = actions.focused;
+    // A repair result is announced even when the Pane lost focus to the button that ran it.
+    let live = actions.focused || screen.announcement.is_some();
+    let announcement = screen
+        .announcement
+        .clone()
+        .unwrap_or_else(|| screen.title.clone());
+    let title = screen.title.clone();
     let content = ContentUnavailable::new(
         ElementId::NamedChild(Arc::new(id.clone()), "content".into()),
         "pane-presentation-screen",
@@ -1386,11 +1436,11 @@ fn render_screen(
                 .id(id)
                 .debug_selector(|| "pane-presentation-replacement".to_owned())
                 .role(accesskit::Role::Group)
-                .aria_label(announcement.clone())
+                .aria_label(title)
                 .a11y_synthetic_children(move |builder| {
                     let mut status = accesskit::Node::new(accesskit::Role::Status);
                     status.set_label(announcement.as_ref());
-                    if focused {
+                    if live {
                         status.set_live(accesskit::Live::Polite);
                     }
                     builder.push_child(builder.synthetic_node_id("presentation-status"), status);

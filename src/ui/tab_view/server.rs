@@ -1034,7 +1034,6 @@ impl TabView {
     }
 
     /// A presented server Pane's Terminal Pane.
-    #[cfg(test)]
     pub(crate) fn server_terminal(&self, pane: ServerPaneId) -> Option<Entity<TerminalPane>> {
         self.panes.pane(PaneKey::Server(pane)).cloned()
     }
