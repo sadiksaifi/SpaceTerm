@@ -752,7 +752,7 @@ async fn terminal_acceptance(
             spaceterm_core::native_requests::NativeRequestId::new(1000).unwrap(),
             spaceterm_core::observations::MonotonicTick::new(0),
             spaceterm_core::observations::MonotonicTick::new(0),
-            None,
+            Some(spaceterm_core::observations::MonotonicTick::new(10_000)),
             spaceterm_core::native_requests::NativeRequestKind::Notification(
                 spaceterm_core::native_requests::NotificationNotice::Bell,
             ),
