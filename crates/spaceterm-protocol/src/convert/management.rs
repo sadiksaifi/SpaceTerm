@@ -122,11 +122,137 @@ macro_rules! profile {
                     subscribe: value.subscribe,
                 })
             }
+            fn encode_permission(value: ServerPermissionState) -> u32 {
+                match value {
+                    ServerPermissionState::Unknown => 0,
+                    ServerPermissionState::Granted => 1,
+                    ServerPermissionState::NotGranted => 2,
+                    ServerPermissionState::NotNeeded => 3,
+                    ServerPermissionState::Unavailable => 4,
+                }
+            }
+            fn decode_permission(value: u32) -> Result<ServerPermissionState, ProtocolError> {
+                Ok(match value {
+                    0 => ServerPermissionState::Unknown,
+                    1 => ServerPermissionState::Granted,
+                    2 => ServerPermissionState::NotGranted,
+                    3 => ServerPermissionState::NotNeeded,
+                    4 => ServerPermissionState::Unavailable,
+                    _ => return Err(ProtocolError::Malformed),
+                })
+            }
+            fn encode_machine_facts(value: &ServerMachineFacts) -> wire::ServerMachineFacts {
+                wire::ServerMachineFacts {
+                    platform: match value.platform {
+                        ServerPlatform::Unknown => 0,
+                        ServerPlatform::MacOs => 1,
+                        ServerPlatform::Linux => 2,
+                    },
+                    permissions: Some(wire::ServerPermissionFacts {
+                        microphone: encode_permission(value.permissions.microphone),
+                        screen_recording: encode_permission(value.permissions.screen_recording),
+                        accessibility: encode_permission(value.permissions.accessibility),
+                        accessibility_naming: match value.permissions.accessibility_naming {
+                            ServerAccessibilityNaming::Unknown => 0,
+                            ServerAccessibilityNaming::Accessibility => 1,
+                            ServerAccessibilityNaming::DeviceControl => 2,
+                        },
+                    }),
+                    bind_scope_availability: match value.bind_scope_availability {
+                        MachineFactsAvailability::Unknown => 0,
+                        MachineFactsAvailability::Available => 1,
+                        MachineFactsAvailability::Unavailable => 2,
+                    },
+                    bind_scopes: value
+                        .bind_scopes
+                        .iter()
+                        .map(|offer| wire::ServerBindScopeOffer {
+                            scope: match offer.scope {
+                                ServerBindScope::Loopback => 1,
+                                ServerBindScope::AllInterfaces => 2,
+                            },
+                            endpoints: offer
+                                .endpoints
+                                .iter()
+                                .copied()
+                                .map(encode_endpoint)
+                                .collect(),
+                        })
+                        .collect(),
+                }
+            }
+            fn decode_machine_facts(
+                value: &wire::ServerMachineFacts,
+            ) -> Result<ServerMachineFacts, ProtocolError> {
+                let permissions = value
+                    .permissions
+                    .as_ref()
+                    .map(|p| {
+                        Ok(ServerPermissionFacts {
+                            microphone: decode_permission(p.microphone)?,
+                            screen_recording: decode_permission(p.screen_recording)?,
+                            accessibility: decode_permission(p.accessibility)?,
+                            accessibility_naming: match p.accessibility_naming {
+                                0 => ServerAccessibilityNaming::Unknown,
+                                1 => ServerAccessibilityNaming::Accessibility,
+                                2 => ServerAccessibilityNaming::DeviceControl,
+                                _ => return Err(ProtocolError::Malformed),
+                            },
+                        })
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                Ok(ServerMachineFacts {
+                    platform: match value.platform {
+                        0 => ServerPlatform::Unknown,
+                        1 => ServerPlatform::MacOs,
+                        2 => ServerPlatform::Linux,
+                        _ => return Err(ProtocolError::Malformed),
+                    },
+                    permissions,
+                    bind_scope_availability: match value.bind_scope_availability {
+                        0 => MachineFactsAvailability::Unknown,
+                        1 => MachineFactsAvailability::Available,
+                        2 => MachineFactsAvailability::Unavailable,
+                        _ => return Err(ProtocolError::Malformed),
+                    },
+                    bind_scopes: value
+                        .bind_scopes
+                        .iter()
+                        .map(|offer| {
+                            Ok(ServerBindScopeOffer {
+                                scope: match offer.scope {
+                                    1 => ServerBindScope::Loopback,
+                                    2 => ServerBindScope::AllInterfaces,
+                                    _ => return Err(ProtocolError::Malformed),
+                                },
+                                endpoints: offer
+                                    .endpoints
+                                    .iter()
+                                    .map(decode_endpoint)
+                                    .collect::<Result<Vec<_>, _>>()?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, ProtocolError>>()?,
+                })
+            }
+            /// Omit nested additions unknown to older authenticated peers.
+            pub fn encode_status_for_capabilities(
+                value: &ServerStatus,
+                capabilities: &[u32],
+            ) -> wire::ManagementStatus {
+                let mut encoded = encode_status(value);
+                if !capabilities.contains(&crate::negotiation::CAPABILITY_SERVER_MACHINE_FACTS) {
+                    encoded.machine_facts = None;
+                }
+                encoded
+            }
             pub fn encode_status(value: &ServerStatus) -> wire::ManagementStatus {
                 let parts = value.parts();
                 wire::ManagementStatus {
                     request: 0,
                     state: 1,
+                    machine_facts: value.machine_facts().map(encode_machine_facts),
                     storage_state: match parts.runtime.storage {
                         StorageStatus::Unknown => 0,
                         StorageStatus::Ready => 1,
@@ -341,6 +467,25 @@ macro_rules! profile {
                     progress,
                 })
                 .map_err(|_| ProtocolError::Malformed)
+                .and_then(|status| match &value.machine_facts {
+                    Some(facts) => status
+                        .with_machine_facts(decode_machine_facts(facts)?)
+                        .map_err(|_| ProtocolError::Malformed),
+                    None => Ok(status),
+                })
+            }
+            /// Preserve the envelope while omitting unsupported nested comparisons.
+            pub fn encode_publication_for_capabilities(
+                value: &StatusPublication,
+                capabilities: &[u32],
+            ) -> wire::StatusPublication {
+                let mut encoded = encode_publication(value);
+                if !capabilities.contains(&crate::negotiation::CAPABILITY_SERVER_MACHINE_FACTS)
+                    && let Some(status) = &mut encoded.status
+                {
+                    status.machine_facts = None;
+                }
+                encoded
             }
             pub fn encode_publication(value: &StatusPublication) -> wire::StatusPublication {
                 match value {
@@ -455,6 +600,154 @@ mod tests {
         })
         .unwrap()
     }
+    fn machine_facts() -> ServerMachineFacts {
+        ServerMachineFacts {
+            platform: ServerPlatform::Linux,
+            permissions: ServerPermissionFacts {
+                microphone: ServerPermissionState::NotNeeded,
+                screen_recording: ServerPermissionState::Unavailable,
+                accessibility: ServerPermissionState::NotGranted,
+                accessibility_naming: ServerAccessibilityNaming::Accessibility,
+            },
+            bind_scope_availability: MachineFactsAvailability::Available,
+            bind_scopes: vec![ServerBindScopeOffer {
+                scope: ServerBindScope::Loopback,
+                endpoints: vec![
+                    "127.0.0.1:47230".parse().unwrap(),
+                    "[::1]:47230".parse().unwrap(),
+                ],
+            }],
+        }
+    }
+    #[test]
+    fn machine_facts_attachment_rejects_unbounded_duplicate_and_inexact_offers() {
+        let valid = machine_facts();
+        let mut invalid = Vec::new();
+        let mut value = valid.clone();
+        value.bind_scopes = vec![value.bind_scopes[0].clone(); 3];
+        invalid.push((value, StatusError::Limit));
+        let mut value = valid.clone();
+        value.bind_scopes.push(value.bind_scopes[0].clone());
+        invalid.push((value, StatusError::InvalidBinding));
+        for endpoints in [
+            vec![],
+            vec!["127.0.0.1:47230", "127.0.0.1:47230"],
+            vec!["127.0.0.2:47230", "[::1]:47230"],
+            vec!["127.0.0.1:0", "[::1]:0"],
+            vec!["127.0.0.1:47230", "[::1]:47231"],
+            vec!["127.0.0.1:47230", "[::1%1]:47230"],
+        ] {
+            let mut value = valid.clone();
+            value.bind_scopes[0].endpoints = endpoints.iter().map(|v| v.parse().unwrap()).collect();
+            invalid.push((value, StatusError::InvalidBinding));
+        }
+        let mut value = valid.clone();
+        value.bind_scopes[0].endpoints = vec!["127.0.0.1:47230".parse().unwrap(); 9];
+        invalid.push((value, StatusError::Limit));
+        let mut value = valid;
+        value.bind_scope_availability = MachineFactsAvailability::Unavailable;
+        invalid.push((value, StatusError::InvalidBinding));
+        for (facts, error) in invalid {
+            assert_eq!(status().with_machine_facts(facts), Err(error));
+        }
+    }
+    macro_rules! machine_tests {
+        ($name:ident, $p:ident) => {
+            #[test]
+            fn $name() {
+                let cap = [crate::negotiation::CAPABILITY_SERVER_MACHINE_FACTS];
+                for permission in [
+                    ServerPermissionState::Unknown,
+                    ServerPermissionState::Granted,
+                    ServerPermissionState::NotGranted,
+                    ServerPermissionState::NotNeeded,
+                    ServerPermissionState::Unavailable,
+                ] {
+                    let mut facts = machine_facts();
+                    facts.permissions.microphone = permission;
+                    let status = status().with_machine_facts(facts).unwrap();
+                    let encoded = $p::encode_status_for_capabilities(&status, &cap);
+                    assert_eq!(
+                        $p::decode_status(&encoded, &|_| Err(ProtocolError::UnexpectedMessage)),
+                        Ok(status.clone())
+                    );
+                    let omitted = $p::encode_status_for_capabilities(&status, &[]);
+                    assert!(omitted.machine_facts.is_none());
+                    assert_eq!(
+                        $p::decode_status(&omitted, &|_| Err(ProtocolError::UnexpectedMessage)),
+                        Ok(status.clone().without_machine_facts())
+                    );
+                    for publication in [
+                        StatusPublication::Snapshot {
+                            request: NonZeroU64::MIN,
+                            generation: 1,
+                            status: status.clone(),
+                        },
+                        StatusPublication::Changed {
+                            request: NonZeroU64::MIN,
+                            generation: 1,
+                            base: NonZeroU64::new(6).unwrap(),
+                            status,
+                        },
+                    ] {
+                        let supported = $p::encode_publication_for_capabilities(&publication, &cap);
+                        assert_eq!(
+                            $p::decode_publication(&supported, &|_| Err(
+                                ProtocolError::UnexpectedMessage
+                            )),
+                            Ok(publication.clone())
+                        );
+                        let omitted = $p::encode_publication_for_capabilities(&publication, &[]);
+                        assert!(omitted.status.unwrap().machine_facts.is_none());
+                    }
+                }
+                let unavailable = status()
+                    .with_machine_facts(ServerMachineFacts {
+                        platform: ServerPlatform::MacOs,
+                        permissions: ServerPermissionFacts {
+                            microphone: ServerPermissionState::Unavailable,
+                            screen_recording: ServerPermissionState::Unavailable,
+                            accessibility: ServerPermissionState::Unavailable,
+                            ..Default::default()
+                        },
+                        bind_scope_availability: MachineFactsAvailability::Unavailable,
+                        bind_scopes: vec![],
+                    })
+                    .unwrap();
+                assert_eq!(
+                    $p::decode_status(&$p::encode_status(&unavailable), &|_| Err(
+                        ProtocolError::UnexpectedMessage
+                    )),
+                    Ok(unavailable)
+                );
+                let legacy = $p::decode_status(&$p::encode_status(&status()), &|_| {
+                    Err(ProtocolError::UnexpectedMessage)
+                })
+                .unwrap();
+                assert!(legacy.machine_facts().is_none());
+                let mut wire =
+                    $p::encode_status(&status().with_machine_facts(machine_facts()).unwrap());
+                wire.machine_facts.as_mut().unwrap().bind_scopes[0].scope = 99;
+                assert_eq!(
+                    $p::decode_status(&wire, &|_| Err(ProtocolError::UnexpectedMessage)),
+                    Err(ProtocolError::Malformed)
+                );
+                wire.machine_facts.as_mut().unwrap().bind_scopes[0].scope = 2;
+                assert_eq!(
+                    $p::decode_status(&wire, &|_| Err(ProtocolError::UnexpectedMessage)),
+                    Err(ProtocolError::Malformed)
+                );
+            }
+        };
+    }
+    machine_tests!(
+        major_1_machine_facts_preserve_unavailable_and_omit_for_legacy_peers,
+        v1
+    );
+    machine_tests!(
+        major_2_machine_facts_preserve_unavailable_and_omit_for_legacy_peers,
+        v2
+    );
     #[test]
     fn shared_progress_never_requires_the_initiating_clients_digest() {
         use spaceterm_core::identity::*;

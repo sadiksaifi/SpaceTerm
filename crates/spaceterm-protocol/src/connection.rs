@@ -384,6 +384,26 @@ fn ordinary_field_capabilities(
     payload: &Payload,
     capabilities: &[u32],
 ) -> Result<(), ProtocolError> {
+    macro_rules! machine_facts {
+        ($message:expr, $p:ident) => {{
+            use crate::wire::$p;
+            match &$message.kind {
+                Some($p::message::Kind::ManagementStatus(status)) => status.machine_facts.is_some(),
+                Some($p::message::Kind::StatusPublication(publication)) => publication
+                    .status
+                    .as_ref()
+                    .is_some_and(|status| status.machine_facts.is_some()),
+                _ => false,
+            }
+        }};
+    }
+    let facts = match payload {
+        Payload::Major1(message) => machine_facts!(message, v1),
+        Payload::Major2(message) => machine_facts!(message, v2),
+    };
+    if facts && !capabilities.contains(&crate::negotiation::CAPABILITY_SERVER_MACHINE_FACTS) {
+        return Err(ProtocolError::Negotiation);
+    }
     macro_rules! organization_comparisons {
         ($message:expr, $p:ident) => {{
             use crate::wire::$p;

@@ -573,3 +573,52 @@ fn beginning_startup_cannot_alias_another_operation_as_its_intent() {
         Err(RequestError::WrongScope)
     );
 }
+
+#[test]
+fn server_status_serialization_preserves_optional_machine_facts_and_validates_attachment() {
+    use spaceterm_core::{management::*, remote_access::RemoteAccessPolicy};
+    use std::num::NonZeroU64;
+    let status = ServerStatus::new(ServerStatusParts {
+        runtime: Default::default(),
+        server: server(),
+        epoch: ServerEpoch::new(3),
+        revision: NonZeroU64::MIN,
+        running: None,
+        approved: None,
+        staged: None,
+        native_verification: NativeVerification::Unverified,
+        capabilities: vec![],
+        remote_access: Versioned {
+            value: RemoteAccessPolicy::disabled(server()),
+            version: FieldVersion::new(1),
+        },
+        listeners: vec![],
+        progress: vec![],
+    })
+    .unwrap();
+    // The older flattened record remains readable without local default offers.
+    let legacy = serde_json::to_vec(status.parts()).unwrap();
+    let decoded: ServerStatus = serde_json::from_slice(&legacy).unwrap();
+    assert_eq!(decoded, status);
+    assert!(decoded.machine_facts().is_none());
+    let status = status
+        .with_machine_facts(ServerMachineFacts {
+            platform: ServerPlatform::Linux,
+            bind_scope_availability: MachineFactsAvailability::Available,
+            bind_scopes: vec![ServerBindScopeOffer {
+                scope: ServerBindScope::AllInterfaces,
+                endpoints: vec![
+                    "0.0.0.0:47232".parse().unwrap(),
+                    "[::]:47232".parse().unwrap(),
+                ],
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+    let recovered: ServerStatus =
+        serde_json::from_slice(&serde_json::to_vec(&status).unwrap()).unwrap();
+    assert_eq!(recovered, status);
+    let mut invalid = serde_json::to_value(&status).unwrap();
+    invalid["machine_facts"]["bind_scopes"][0]["endpoints"][1] = serde_json::json!("[::1]:47232");
+    assert!(serde_json::from_value::<ServerStatus>(invalid).is_err());
+}

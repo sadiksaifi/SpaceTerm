@@ -167,6 +167,15 @@ pub fn production_listener_factories_with_dispatch<S: PairingSnapshotPort + 'sta
         &NativeStatusObservation::default(),
         handle.management_progress(),
     )?;
+    let key = config.registration.key();
+    let initial = attach_machine_facts(
+        initial,
+        config
+            .ports
+            .native
+            .as_ref()
+            .and_then(|native| native.machine_facts(key)),
+    )?;
     let (status_sender, status_receiver) = watch::channel(initial);
     let account_runtime = config
         .ports
@@ -228,6 +237,7 @@ pub fn production_listener_factories_with_dispatch<S: PairingSnapshotPort + 'sta
             running: config.running,
             status: status_sender,
             native: config.ports.native.clone(),
+            key,
             native_facts: Arc::new(Mutex::new(NativeStatusObservation::default())),
             monitor: Mutex::new(None),
             stop: watch::channel(false).0,
@@ -270,6 +280,7 @@ impl<S: PairingSnapshotPort + 'static> AuthenticationFactoryPort for ProductionA
             spaceterm_protocol::negotiation::CAPABILITY_APPLICATION_MOUSE,
             spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA,
             spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA_FRAGMENTS,
+            spaceterm_protocol::negotiation::CAPABILITY_SERVER_MACHINE_FACTS,
         ]);
         capabilities.extend_from_slice(&self.extensions);
         capabilities.sort_unstable();
@@ -409,6 +420,18 @@ pub(crate) fn retirement_progress(
     }
 }
 
+fn attach_machine_facts(
+    status: ServerStatus,
+    facts: Option<spaceterm_core::management::ServerMachineFacts>,
+) -> Result<ServerStatus, ServerFailure> {
+    match facts {
+        Some(facts) => status
+            .with_machine_facts(facts)
+            .map_err(|_| failure(ServerFailureClass::ScopeMismatch)),
+        None => Ok(status),
+    }
+}
+
 struct StatusListeners {
     ordinary: Arc<dyn OrdinaryDispatchPort>,
     listeners: Arc<ServerListeners>,
@@ -417,6 +440,7 @@ struct StatusListeners {
     status: watch::Sender<ServerStatus>,
     native: Option<Arc<dyn NativeStatusObserver>>,
     native_facts: Arc<Mutex<NativeStatusObservation>>,
+    key: spaceterm_host::startup::AccountBuildKey,
     monitor: Mutex<Option<JoinHandle<Result<(), ServerFailure>>>>,
     stop: watch::Sender<bool>,
 }
@@ -444,6 +468,7 @@ impl ListenerLifecyclePort for StatusListeners {
                 let running = self.running.clone();
                 let source = handle.clone();
                 let native = self.native.clone();
+                let key = self.key;
                 let native_facts = self.native_facts.clone();
                 *monitor = Some(tokio::spawn(async move {
                     let mut poll = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -469,7 +494,16 @@ impl ListenerLifecyclePort for StatusListeners {
                         listeners.mark_unchanged();
                         runtime.mark_unchanged();
                         progress.mark_unchanged();
-                        publish_status(&sender, &source, &running, &listeners, &native_facts)?;
+                        publish_status(
+                            &sender,
+                            &source,
+                            &running,
+                            &listeners,
+                            &native_facts,
+                            native
+                                .as_ref()
+                                .and_then(|provider| provider.machine_facts(key)),
+                        )?;
                     }
                 }));
             }
@@ -518,6 +552,9 @@ impl StatusListeners {
             &self.running,
             &self.listeners.subscribe_status(),
             &self.native_facts,
+            self.native
+                .as_ref()
+                .and_then(|provider| provider.machine_facts(self.key)),
         )
     }
 }
@@ -528,6 +565,7 @@ fn publish_status(
     running: &spaceterm_distribution::BuildVersion,
     listeners: &watch::Receiver<Vec<spaceterm_core::management::ListenerStatus>>,
     native: &Mutex<NativeStatusObservation>,
+    machine_facts: Option<spaceterm_core::management::ServerMachineFacts>,
 ) -> Result<(), ServerFailure> {
     let mut result = Ok(());
     sender.send_if_modified(|current| {
@@ -543,6 +581,7 @@ fn publish_status(
                     .map_err(|_| failure(ServerFailureClass::RecoveryRequired))?,
                 handle.management_progress(),
             )?;
+            let next = attach_machine_facts(next, machine_facts)?;
             if next == *current {
                 return Ok(None);
             }
@@ -551,9 +590,9 @@ fn publish_status(
                 .revision
                 .checked_add(1)
                 .ok_or_else(|| failure(ServerFailureClass::Exhausted))?;
-            ServerStatus::new(parts)
-                .map(Some)
-                .map_err(|_| failure(ServerFailureClass::RecoveryRequired))
+            let revised = ServerStatus::new(parts)
+                .map_err(|_| failure(ServerFailureClass::RecoveryRequired))?;
+            attach_machine_facts(revised, next.machine_facts().cloned()).map(Some)
         })();
         match replacement {
             Ok(Some(next)) => {

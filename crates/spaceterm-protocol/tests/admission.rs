@@ -928,3 +928,259 @@ fn canonical_physical_page_row_budget_rejects_limit_plus_one_in_both_majors() {
         );
     }
 }
+
+fn machine_fact_connections(
+    fixture: &Fixture,
+    major: u32,
+    client_facts: bool,
+    server_facts: bool,
+) -> (
+    spaceterm_protocol::connection::AuthenticatedConnection,
+    spaceterm_protocol::connection::AuthenticatedConnection,
+) {
+    machine_fact_connections_with_features(fixture, major, client_facts, server_facts, &[])
+}
+
+fn machine_fact_connections_with_features(
+    fixture: &Fixture,
+    major: u32,
+    client_facts: bool,
+    server_facts: bool,
+    independent_features: &[u32],
+) -> (
+    spaceterm_protocol::connection::AuthenticatedConnection,
+    spaceterm_protocol::connection::AuthenticatedConnection,
+) {
+    use spaceterm_protocol::{authentication::*, negotiation::*};
+    let config = |facts| {
+        let mut capabilities = vec![CAPABILITY_CANONICAL_DOMAIN];
+        capabilities.extend_from_slice(independent_features);
+        if facts {
+            capabilities.push(CAPABILITY_SERVER_MACHINE_FACTS);
+        }
+        HandshakeConfig {
+            majors: vec![major],
+            capabilities,
+            ..Default::default()
+        }
+    };
+    let (client, hello) = ClientHandshake::begin(
+        fixture.pin,
+        fixture.principal,
+        Purpose::Ordinary,
+        config(client_facts),
+        fixture.device_key.clone(),
+    )
+    .unwrap();
+    let (server, reply) = ServerHandshake::accept(
+        fixture.principal.server,
+        7,
+        config(server_facts),
+        fixture.server_key.clone(),
+        &fixture.pairings,
+        &hello,
+    )
+    .unwrap();
+    let (client, proof) = client.receive_server(&reply).unwrap();
+    let (Established::Ordinary(server), ready) =
+        server.receive_device(&fixture.pairings, &proof).unwrap()
+    else {
+        panic!("ordinary server")
+    };
+    let Established::Ordinary(client) = client.receive_ready(&ready).unwrap() else {
+        panic!("ordinary client")
+    };
+    (client, server)
+}
+
+fn machine_fact_payload(major: u32, publication: bool, facts: bool) -> Payload {
+    macro_rules! profile {
+        ($p:ident, $variant:ident) => {{
+            let status = $p::ManagementStatus {
+                request: if publication { 0 } else { 1 },
+                state: 1,
+                epoch: 7,
+                server: Some(support::id(1)),
+                status_revision: 1,
+                remote_access: Some($p::RemoteAccessPolicy {
+                    server: Some(support::id(1)),
+                    version: 1,
+                    ..Default::default()
+                }),
+                machine_facts: facts.then($p::ServerMachineFacts::default),
+                ..Default::default()
+            };
+            Payload::$variant($p::Message {
+                kind: Some(if publication {
+                    $p::message::Kind::StatusPublication($p::StatusPublication {
+                        request: 1,
+                        request_generation: 1,
+                        status: Some(status),
+                        ..Default::default()
+                    })
+                } else {
+                    $p::message::Kind::ManagementStatus(status)
+                }),
+            })
+        }};
+    }
+    match major {
+        1 => profile!(v1, Major1),
+        2 => profile!(v2, Major2),
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn machine_facts_require_both_advertisements_and_sender_receiver_gates_in_both_majors() {
+    use spaceterm_protocol::{
+        authentication::SigningKey, negotiation::CAPABILITY_SERVER_MACHINE_FACTS,
+    };
+    let fixture = Fixture::new();
+    for major in [1, 2] {
+        for publication in [false, true] {
+            for (client_facts, server_facts) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let (mut client, mut server) =
+                    machine_fact_connections(&fixture, major, client_facts, server_facts);
+                let supported = client_facts && server_facts;
+                assert_eq!(
+                    client
+                        .capabilities()
+                        .contains(&CAPABILITY_SERVER_MACHINE_FACTS),
+                    supported
+                );
+                let facts = machine_fact_payload(major, publication, true);
+                if supported {
+                    assert_eq!(client.decode(&server.encode(&facts).unwrap()), Ok(facts));
+                    continue;
+                }
+                assert_eq!(server.encode(&facts), Err(ProtocolError::Negotiation));
+                // An outgoing rejection must not consume the first sequence.
+                let omitted = machine_fact_payload(major, publication, false);
+                assert_eq!(
+                    client.decode(&server.encode(&omitted).unwrap()),
+                    Ok(omitted)
+                );
+                // A paired sender can sign a structurally valid but unnegotiated
+                // field. Verify the receive gate after genuine signature checks.
+                let body = common::AuthenticatedEnvelope {
+                    direction: common::Direction::ServerToClient as i32,
+                    major,
+                    binding: client.binding().to_vec(),
+                    sequence: 2,
+                    payload: facts.encode().unwrap(),
+                    purpose: 1,
+                }
+                .encode_to_vec();
+                let mut transcript = Vec::new();
+                for component in [
+                    b"SpaceTerm Protocol Ed25519 v1".as_slice(),
+                    b"authenticated-envelope".as_slice(),
+                    body.as_slice(),
+                ] {
+                    transcript.extend_from_slice(&(component.len() as u64).to_be_bytes());
+                    transcript.extend_from_slice(component);
+                }
+                let bytes = common::Signed {
+                    signature: fixture.server_key.sign(&transcript).unwrap().to_vec(),
+                    body,
+                }
+                .encode_to_vec();
+                assert_eq!(client.decode(&bytes), Err(ProtocolError::Negotiation));
+                assert_eq!(client.decode(&bytes), Err(ProtocolError::Authentication));
+            }
+        }
+    }
+}
+
+#[test]
+fn machine_facts_are_independent_of_reserved_metadata_paste_and_copy_features_in_both_majors() {
+    use spaceterm_protocol::negotiation::CAPABILITY_SERVER_MACHINE_FACTS;
+    // The integrated feature namespace is reserved even before this lane receives its converters.
+    let reserved = [520_010, 520_011, 520_012];
+    let fixture = Fixture::new();
+    for major in [1, 2] {
+        for independent in [
+            &[][..],
+            &reserved[..1],
+            &reserved[1..2],
+            &reserved[2..],
+            &reserved[..],
+        ] {
+            for facts_supported in [false, true] {
+                for publication in [false, true] {
+                    let (mut client, mut server) = machine_fact_connections_with_features(
+                        &fixture,
+                        major,
+                        facts_supported,
+                        facts_supported,
+                        independent,
+                    );
+                    assert_eq!(
+                        client
+                            .capabilities()
+                            .contains(&CAPABILITY_SERVER_MACHINE_FACTS),
+                        facts_supported
+                    );
+                    let facts = machine_fact_payload(major, publication, true);
+                    if facts_supported {
+                        assert_eq!(client.decode(&server.encode(&facts).unwrap()), Ok(facts));
+                    } else {
+                        assert_eq!(server.encode(&facts), Err(ProtocolError::Negotiation));
+                        let omitted = machine_fact_payload(major, publication, false);
+                        assert_eq!(
+                            client.decode(&server.encode(&omitted).unwrap()),
+                            Ok(omitted)
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn machine_fact_scope_and_endpoint_limits_apply_before_decode_in_both_majors() {
+    macro_rules! check {
+        ($p:ident, $variant:ident, $major:expr) => {{
+            for (scopes, endpoints) in [(3, 2), (1, 9)] {
+                let payload = $p::Message {
+                    kind: Some($p::message::Kind::ManagementStatus($p::ManagementStatus {
+                        state: 1,
+                        machine_facts: Some($p::ServerMachineFacts {
+                            bind_scope_availability: 1,
+                            bind_scopes: vec![
+                                $p::ServerBindScopeOffer {
+                                    scope: 1,
+                                    endpoints: vec![
+                                        $p::RemoteEndpoint {
+                                            address: vec![127, 0, 0, 1],
+                                            port: 47230,
+                                            ..Default::default()
+                                        };
+                                        endpoints
+                                    ],
+                                };
+                                scopes
+                            ],
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })),
+                };
+                assert_eq!(
+                    Payload::$variant(payload.clone()).encode(),
+                    Err(ProtocolError::LimitExceeded)
+                );
+                assert_eq!(
+                    Payload::decode($major, &payload.encode_to_vec()),
+                    Err(ProtocolError::LimitExceeded)
+                );
+            }
+        }};
+    }
+    check!(v1, Major1, 1);
+    check!(v2, Major2, 2);
+}

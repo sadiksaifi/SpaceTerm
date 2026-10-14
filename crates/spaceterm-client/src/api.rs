@@ -235,6 +235,7 @@ impl ConnectionCapabilities {
             CAPABILITY_APPLICATION_MOUSE,
             CAPABILITY_RUNTIME_METADATA,
             CAPABILITY_RUNTIME_METADATA_FRAGMENTS,
+            CAPABILITY_SERVER_MACHINE_FACTS,
         ]
         .into_iter()
         .enumerate()
@@ -258,6 +259,7 @@ impl ConnectionCapabilities {
             CAPABILITY_APPLICATION_MOUSE => 7,
             CAPABILITY_RUNTIME_METADATA => 8,
             CAPABILITY_RUNTIME_METADATA_FRAGMENTS => 9,
+            CAPABILITY_SERVER_MACHINE_FACTS => 10,
             _ => return false,
         };
         self.0 & (1 << index) != 0

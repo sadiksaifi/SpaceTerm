@@ -53,13 +53,75 @@ impl Fixture {
         Self::build_servers(cx, lose_reply, false)
     }
     fn build_servers(cx: &mut TestAppContext, lose_reply: bool, multiple: bool) -> Self {
+        Self::build_sources(cx, lose_reply, multiple, false)
+    }
+    fn build_machine_servers(cx: &mut TestAppContext, multiple: bool) -> Self {
+        Self::build_sources(cx, false, multiple, true)
+    }
+    fn build_sources(
+        cx: &mut TestAppContext,
+        lose_reply: bool,
+        multiple: bool,
+        remote_routes: bool,
+    ) -> Self {
         let tokio = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         let pane = tokio.block_on(crate::ui::server_pane_session::tests::Fixture::new(false));
         let info = pane.channel.state().borrow().connection.unwrap();
-        let journal = pane.peer.journal().clone();
+        let journal = if remote_routes {
+            use spaceterm_client::journal::{
+                ClientJournalChange, JournalController, JournalLimits,
+            };
+            let original = pane.peer.journal().snapshot().unwrap();
+            let journal = Arc::new(
+                tokio
+                    .block_on(JournalController::recover(
+                        Arc::new(spaceterm_client::testing::MemoryJournal::default()),
+                        Arc::new(spaceterm_core::operation_ledger::canonical::CanonicalCodec),
+                        Arc::new(FactsReceiptVerifier),
+                        JournalLimits::default(),
+                    ))
+                    .unwrap(),
+            );
+            // Routes are chosen before initial storage. Saved bindings are immutable.
+            let saved = saved_remote_route(
+                &original.bindings()[0],
+                RouteParts::Ssh {
+                    destination: "studio".into(),
+                    remote_socket: "/fixture/server.sock".into(),
+                },
+            );
+            let mut changes = vec![ClientJournalChange::SaveBinding(Box::new(saved))];
+            for operation in original.operations() {
+                let mut pending = operation.clone();
+                pending.state = RetainedOperationState::Pending;
+                changes.push(ClientJournalChange::Prepare(pending));
+                if let RetainedOperationState::Completed {
+                    outcome,
+                    publication_revision,
+                    consumed,
+                } = &operation.state
+                {
+                    changes.push(ClientJournalChange::Complete {
+                        binding: operation.binding,
+                        outcome: outcome.clone(),
+                        publication_revision: *publication_revision,
+                    });
+                    if *consumed {
+                        changes.push(ClientJournalChange::ConsumeResult(operation.binding.id));
+                    }
+                } else {
+                    assert!(matches!(operation.state, RetainedOperationState::Pending));
+                }
+            }
+            tokio.block_on(journal.transact(changes)).unwrap();
+            journal
+        } else {
+            pane.peer.journal().clone()
+        };
+        let primary_binding = journal.snapshot().unwrap().bindings()[0].binding().unwrap();
         let tracker = OperationTracker::new(journal.clone());
         let operations: Arc<dyn OperationPeer> = if lose_reply {
             Arc::new(LostReplyPeer(
@@ -74,11 +136,11 @@ impl Fixture {
             snapshot: pane.server.replica().unwrap(),
         });
         let mut connections = vec![SettingsConnection {
-            binding: pane.server.binding(1).unwrap(),
+            binding: primary_binding,
             name: DesktopServerInfo {
                 server: info.server,
                 name: DisplayName::reported("Studio Mac"),
-                local: true,
+                local: !remote_routes,
             },
             state,
             replica: snapshots,
@@ -98,6 +160,18 @@ impl Fixture {
                 ))
                 .unwrap();
             let saved = peer.journal().snapshot().unwrap().bindings()[0].clone();
+            let saved = if remote_routes {
+                saved_remote_route(
+                    &saved,
+                    RouteParts::Wss {
+                        address: "127.0.0.1:443".parse().unwrap(),
+                        server_name: "paired-server".into(),
+                    },
+                )
+            } else {
+                saved
+            };
+            let binding = saved.binding().unwrap();
             tokio
                 .block_on(journal.transact(vec![
                     spaceterm_client::journal::ClientJournalChange::SaveBinding(Box::new(saved)),
@@ -110,7 +184,7 @@ impl Fixture {
                 snapshot: server.replica().unwrap(),
             });
             connections.push(SettingsConnection {
-                binding: server.binding(1).unwrap(),
+                binding,
                 name: DesktopServerInfo {
                     server: server.server(),
                     name: DisplayName::reported("Studio Mac"),
@@ -1139,4 +1213,594 @@ fn servers_settings_native_recovery_does_not_clear_protocol_pending(cx: &mut Tes
         fixture.snapshot(cx).servers[0].management.pending,
         "a completed native request cannot complete unrelated protocol work"
     );
+}
+
+struct FactsReceiptVerifier;
+impl spaceterm_client::journal::ReceiptVerifier for FactsReceiptVerifier {
+    fn verify(
+        &self,
+        pin: spaceterm_protocol::authentication::ServerPin,
+        receipt: &spaceterm_core::pairing::SignedPairingReceipt,
+    ) -> Result<(), ClientFailure> {
+        spaceterm_protocol::pairing_adapter::ReceiptCodec::new(pin)
+            .verify(receipt)
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+}
+
+fn saved_remote_route(
+    saved: &spaceterm_client::journal::SavedBinding,
+    route: RouteParts,
+) -> spaceterm_client::journal::SavedBinding {
+    let original = saved.binding().unwrap();
+    let target = original.target();
+    let binding = PairedServerBinding::new(
+        spaceterm_client::api::ConnectionTarget::new(
+            target.pin(),
+            target.device(),
+            target.pairing(),
+            target.client(),
+            spaceterm_client::api::RouteDescription::new(route).unwrap(),
+            target.credential(),
+            target.incarnation(),
+        )
+        .unwrap(),
+    );
+    spaceterm_client::journal::SavedBinding::verified(
+        binding,
+        saved.streams().clone(),
+        saved.proof().clone(),
+        &FactsReceiptVerifier,
+    )
+    .unwrap()
+}
+
+impl Fixture {
+    fn machine_status(
+        &self,
+        server: &spaceterm_client::testing::FakeServer,
+        facts: Option<spaceterm_core::management::ServerMachineFacts>,
+        cx: &mut TestAppContext,
+    ) -> spaceterm_core::management::ServerStatus {
+        use spaceterm_core::management::{
+            NativeVerification, ServerStatus as Status, ServerStatusParts,
+        };
+        let runtime = cx.update(|cx| cx.global::<InstalledSettingsRuntime>().0.clone());
+        let ConnectionState::Connected { info } = runtime
+            .connections
+            .borrow()
+            .iter()
+            .find(|source| source.name.server == server.server())
+            .unwrap()
+            .state
+            .borrow()
+            .clone()
+        else {
+            panic!("connected fixture")
+        };
+        let snapshot = server.snapshot().unwrap();
+        let status = Status::new(ServerStatusParts {
+            runtime: Default::default(),
+            server: info.server,
+            epoch: info.epoch,
+            revision: std::num::NonZeroU64::MIN,
+            running: None,
+            approved: None,
+            staged: None,
+            native_verification: NativeVerification::Unverified,
+            capabilities: Vec::new(),
+            remote_access: snapshot
+                .state()
+                .retained
+                .as_ref()
+                .unwrap()
+                .remote_access()
+                .clone(),
+            listeners: Vec::new(),
+            progress: Vec::new(),
+        })
+        .unwrap();
+        let status = facts.map_or_else(
+            || status.clone(),
+            |facts| status.clone().with_machine_facts(facts).unwrap(),
+        );
+        {
+            let mut states = runtime.state.borrow_mut();
+            let state = states.entry(server.server()).or_default();
+            state.status = Some(status.clone());
+            state.status_connection = Some(info.binding);
+        }
+        cx.update(|cx| runtime.publish(cx));
+        status
+    }
+}
+
+fn offered_machine(
+    platform: spaceterm_core::management::ServerPlatform,
+    state: spaceterm_core::management::ServerPermissionState,
+    port: u16,
+) -> spaceterm_core::management::ServerMachineFacts {
+    use spaceterm_core::management::*;
+    ServerMachineFacts {
+        platform,
+        permissions: ServerPermissionFacts {
+            microphone: state,
+            screen_recording: state,
+            accessibility: state,
+            accessibility_naming: match platform {
+                ServerPlatform::MacOs => ServerAccessibilityNaming::DeviceControl,
+                _ => ServerAccessibilityNaming::Accessibility,
+            },
+        },
+        bind_scope_availability: MachineFactsAvailability::Available,
+        bind_scopes: vec![
+            ServerBindScopeOffer {
+                scope: ServerBindScope::Loopback,
+                endpoints: vec![
+                    std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+                    std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port)),
+                ],
+            },
+            ServerBindScopeOffer {
+                scope: ServerBindScope::AllInterfaces,
+                endpoints: vec![
+                    std::net::SocketAddr::from(([0, 0, 0, 0], port)),
+                    std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)),
+                ],
+            },
+        ],
+    }
+}
+
+#[gpui::test]
+fn servers_settings_authenticated_machine_facts_isolate_ssh_and_wss_without_native_authority(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_core::management::{ServerPermissionState as PermissionState, ServerPlatform};
+    let fixture = Fixture::build_machine_servers(cx, true);
+    let other = fixture.secondary.as_ref().unwrap();
+    let before = fixture.journal.snapshot().unwrap().operations().len();
+    let mac = offered_machine(ServerPlatform::MacOs, PermissionState::Unavailable, 48484);
+    let linux = offered_machine(ServerPlatform::Linux, PermissionState::NotNeeded, 59595);
+    fixture.machine_status(&fixture.server, Some(mac.clone()), cx);
+    fixture.machine_status(other, Some(linux.clone()), cx);
+    let snapshot = fixture.snapshot(cx);
+    for (id, facts, expected) in [
+        (
+            fixture.server.server(),
+            mac,
+            ServerPermissionState::Unavailable,
+        ),
+        (other.server(), linux, ServerPermissionState::NotNeeded),
+    ] {
+        let server = snapshot
+            .servers
+            .iter()
+            .find(|server| server.pairing.parts().server == id)
+            .unwrap();
+        assert!(!server.route.is_local());
+        assert!(server.service_lifecycle.is_none());
+        assert_eq!(server.permissions.as_ref().unwrap().entries.len(), 3);
+        assert!(
+            server
+                .permissions
+                .as_ref()
+                .unwrap()
+                .entries
+                .iter()
+                .all(|entry| entry.state == expected)
+        );
+        let access = server.remote_access.as_ref().unwrap();
+        assert!(!access.enabled, "offers must not enable network policy");
+        assert!(access.endpoints.is_empty());
+        assert_eq!(access.scopes.len(), 2);
+        assert_eq!(access.scopes[0].endpoints, facts.bind_scopes[0].endpoints);
+        let bound = BoundServerRequest::bind(
+            ServerRequest::EnableRemoteAccess {
+                server: server.key.clone(),
+                scope: access.scopes[0].id.clone(),
+            },
+            &snapshot,
+        )
+        .unwrap();
+        let model::ServerRequestTarget::Server {
+            pairing,
+            remote_policy: Some((version, policy)),
+            ..
+        } = bound.target
+        else {
+            panic!("offered scope binds explicit mutation")
+        };
+        assert_eq!(pairing.parts().server, id);
+        assert_eq!(version, access.version);
+        assert_eq!(policy.endpoints(), facts.bind_scopes[0].endpoints);
+    }
+    let runtime = cx.update(|cx| cx.global::<InstalledSettingsRuntime>().0.clone());
+    assert!(
+        runtime
+            .connections
+            .borrow()
+            .iter()
+            .all(|source| source.native.is_none()
+                && source.lifecycle.is_none()
+                && source.machine.is_none())
+    );
+    assert_eq!(
+        fixture.journal.snapshot().unwrap().operations().len(),
+        before
+    );
+    let other_key = server_key(other.server());
+    let mut settings =
+        crate::ui::settings_window::servers::tests::open_from_publisher(fixture.source.clone(), cx);
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(settings.cx);
+    assert!(tree.find_text("Unavailable").is_some());
+    assert!(tree.find_text("Not Needed").is_none());
+    settings.click(&format!("settings-server-option-{}", other_key.0));
+    let tree = spaceterm_ui::a11y_testing::A11yTree::read(settings.cx);
+    assert!(tree.find_text("Not Needed").is_some());
+    assert!(tree.find_text("Unavailable").is_none());
+}
+
+#[gpui::test]
+fn servers_settings_authenticated_machine_facts_require_current_server_epoch_connection_and_replica(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_core::{
+        authority::{ConnectionBinding, ConnectionGeneration, ServerEpoch},
+        management::{
+            ServerPermissionState as PermissionState, ServerPlatform, ServerStatus as Status,
+        },
+    };
+    let fixture = Fixture::build_machine_servers(cx, false);
+    let status = fixture.machine_status(
+        &fixture.server,
+        Some(offered_machine(
+            ServerPlatform::MacOs,
+            PermissionState::Granted,
+            48484,
+        )),
+        cx,
+    );
+    let runtime = cx.update(|cx| cx.global::<InstalledSettingsRuntime>().0.clone());
+    let assert_absent = |snapshot: model::ServersSnapshot| {
+        assert!(snapshot.servers[0].permissions.is_none());
+        assert!(
+            snapshot.servers[0]
+                .remote_access
+                .as_ref()
+                .unwrap()
+                .scopes
+                .is_empty()
+        );
+    };
+    assert!(
+        fixture.snapshot(cx).servers[0]
+            .permissions
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .all(|entry| entry.state == ServerPermissionState::Allowed)
+    );
+    for foreign_server in [false, true] {
+        let mut parts = status.parts().clone();
+        if foreign_server {
+            parts.server = ServerId::new([42; 16]);
+            parts.remote_access.value =
+                spaceterm_core::remote_access::RemoteAccessPolicy::disabled(parts.server);
+        } else {
+            parts.epoch = ServerEpoch::new(parts.epoch.get() + 1);
+        }
+        runtime
+            .state
+            .borrow_mut()
+            .get_mut(&fixture.server.server())
+            .unwrap()
+            .status = Some(
+            Status::new(parts)
+                .unwrap()
+                .with_machine_facts(status.machine_facts().unwrap().clone())
+                .unwrap(),
+        );
+        cx.update(|cx| runtime.publish(cx));
+        assert_absent(fixture.snapshot(cx));
+    }
+    fixture.machine_status(
+        &fixture.server,
+        Some(status.machine_facts().unwrap().clone()),
+        cx,
+    );
+    runtime
+        .state
+        .borrow_mut()
+        .get_mut(&fixture.server.server())
+        .unwrap()
+        .status_connection = Some(ConnectionBinding::new(
+        fixture.server.binding(1).unwrap().target().client(),
+        ConnectionGeneration::new(99),
+    ));
+    cx.update(|cx| runtime.publish(cx));
+    assert_absent(fixture.snapshot(cx));
+    fixture.machine_status(
+        &fixture.server,
+        Some(status.machine_facts().unwrap().clone()),
+        cx,
+    );
+    fixture.replica.send_replace(ReplicaState::Resynchronizing {
+        retained: Some(fixture.server.replica().unwrap()),
+    });
+    fixture.drain(cx);
+    assert_absent(fixture.snapshot(cx));
+    fixture.replica.send_replace(ReplicaState::Ready {
+        snapshot: fixture.server.replica().unwrap(),
+    });
+    fixture.connection.send_replace(ConnectionState::Offline {
+        failure: ClientFailure::new(ClientFailureClass::Unavailable),
+        retry: RetryState {
+            failures: 1,
+            delay: None,
+        },
+    });
+    fixture.drain(cx);
+    assert_absent(fixture.snapshot(cx));
+}
+
+#[gpui::test]
+fn servers_settings_unknown_unavailable_and_legacy_machine_facts_keep_disable_independent_of_offers(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_core::management::{
+        MachineFactsAvailability, ServerMachineFacts, ServerPermissionFacts,
+        ServerPermissionState as PermissionState,
+    };
+    let fixture = Fixture::build_machine_servers(cx, false);
+    fixture.machine_status(&fixture.server, None, cx);
+    let legacy = fixture.snapshot(cx);
+    assert!(legacy.servers[0].permissions.is_none());
+    assert!(
+        legacy.servers[0]
+            .remote_access
+            .as_ref()
+            .unwrap()
+            .scopes
+            .is_empty()
+    );
+    for (availability, state, expected) in [
+        (
+            MachineFactsAvailability::Unknown,
+            PermissionState::Unknown,
+            ServerPermissionState::Unknown,
+        ),
+        (
+            MachineFactsAvailability::Unavailable,
+            PermissionState::Unavailable,
+            ServerPermissionState::Unavailable,
+        ),
+    ] {
+        fixture.machine_status(
+            &fixture.server,
+            Some(ServerMachineFacts {
+                bind_scope_availability: availability,
+                permissions: ServerPermissionFacts {
+                    microphone: state,
+                    screen_recording: state,
+                    accessibility: state,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            cx,
+        );
+        let snapshot = fixture.snapshot(cx);
+        assert!(
+            snapshot.servers[0]
+                .permissions
+                .as_ref()
+                .unwrap()
+                .entries
+                .iter()
+                .all(|entry| entry.state == expected)
+        );
+        assert!(
+            snapshot.servers[0]
+                .remote_access
+                .as_ref()
+                .unwrap()
+                .scopes
+                .is_empty()
+        );
+        assert!(!snapshot.servers[0].remote_access.as_ref().unwrap().enabled);
+    }
+    let status = fixture.machine_status(&fixture.server, Some(ServerMachineFacts::default()), cx);
+    // Status can report a committed policy before its organization publication arrives.
+    let mut parts = status.parts().clone();
+    parts.revision = std::num::NonZeroU64::new(2).unwrap();
+    parts.remote_access = spaceterm_core::organization::Versioned {
+        value: spaceterm_core::remote_access::RemoteAccessPolicy::enabled(
+            fixture.server.server(),
+            vec!["127.0.0.1:48484".parse().unwrap()],
+        )
+        .unwrap(),
+        version: FieldVersion::new(2),
+    };
+    let enabled = spaceterm_core::management::ServerStatus::new(parts)
+        .unwrap()
+        .with_machine_facts(ServerMachineFacts::default())
+        .unwrap();
+    let runtime = cx.update(|cx| cx.global::<InstalledSettingsRuntime>().0.clone());
+    runtime
+        .state
+        .borrow_mut()
+        .get_mut(&fixture.server.server())
+        .unwrap()
+        .status = Some(enabled);
+    cx.update(|cx| runtime.publish(cx));
+    let snapshot = fixture.snapshot(cx);
+    let server = &snapshot.servers[0];
+    assert!(server.remote_access.as_ref().unwrap().enabled);
+    assert!(server.remote_access.as_ref().unwrap().scopes.is_empty());
+    let bound = BoundServerRequest::bind(
+        ServerRequest::DisableRemoteAccess(server.key.clone()),
+        &snapshot,
+    )
+    .unwrap();
+    let model::ServerRequestTarget::Server {
+        remote_policy: Some((version, policy)),
+        ..
+    } = bound.target
+    else {
+        panic!("disable must not require scope offers")
+    };
+    assert_eq!(version, server.remote_access.as_ref().unwrap().version);
+    assert!(!policy.is_enabled());
+    assert!(policy.endpoints().is_empty());
+}
+
+#[gpui::test]
+fn servers_settings_authenticated_machine_facts_disappear_during_status_resync_until_replacement(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_client::management_cli::status::{
+        StatusResync, StatusSubscription, StatusUpdate,
+    };
+    use spaceterm_core::management::{
+        ServerPermissionState as PermissionState, ServerPlatform, ServerStatus as Status,
+        StatusPublication, StatusQuery,
+    };
+    struct Resync;
+    impl StatusResync for Resync {
+        fn request_resync(&self) {}
+    }
+    let fixture = Fixture::build_machine_servers(cx, false);
+    let runtime = cx.update(|cx| cx.global::<InstalledSettingsRuntime>().0.clone());
+    let ConnectionState::Connected { info } = fixture.connection.borrow().clone() else {
+        panic!("connected fixture")
+    };
+    let query = StatusQuery {
+        request: std::num::NonZeroU64::MIN,
+        generation: 1,
+        connection: info.binding,
+        known_epoch: Some(info.epoch),
+        known_revision: None,
+        subscribe: true,
+    };
+    let original = fixture.machine_status(
+        &fixture.server,
+        Some(offered_machine(
+            ServerPlatform::MacOs,
+            PermissionState::Granted,
+            48484,
+        )),
+        cx,
+    );
+    let observe = |subscription: &StatusSubscription, cx: &mut TestAppContext| {
+        runtime
+            .state
+            .borrow_mut()
+            .entry(fixture.server.server())
+            .or_default()
+            .observe_status(subscription);
+        cx.update(|cx| runtime.publish(cx));
+    };
+    for delta_gap in [false, true] {
+        let subscription =
+            StatusSubscription::new(fixture.server.server(), query, Arc::new(Resync)).unwrap();
+        assert_eq!(
+            subscription
+                .apply(StatusPublication::Snapshot {
+                    request: query.request,
+                    generation: query.generation,
+                    status: original.clone()
+                })
+                .unwrap(),
+            StatusUpdate::Replaced
+        );
+        observe(&subscription, cx);
+        assert!(
+            fixture.snapshot(cx).servers[0]
+                .permissions
+                .as_ref()
+                .unwrap()
+                .entries
+                .iter()
+                .all(|entry| entry.state == ServerPermissionState::Allowed)
+        );
+        let mut parts = original.parts().clone();
+        parts.revision = std::num::NonZeroU64::new(3).unwrap();
+        let replacement = Status::new(parts)
+            .unwrap()
+            .with_machine_facts(offered_machine(
+                ServerPlatform::MacOs,
+                PermissionState::Unavailable,
+                59595,
+            ))
+            .unwrap();
+        let gap = if delta_gap {
+            StatusPublication::Changed {
+                request: query.request,
+                generation: query.generation,
+                base: std::num::NonZeroU64::new(2).unwrap(),
+                status: replacement.clone(),
+            }
+        } else {
+            StatusPublication::ResyncRequired {
+                request: query.request,
+                generation: query.generation,
+            }
+        };
+        assert_eq!(
+            subscription.apply(gap).unwrap(),
+            StatusUpdate::ResyncRequired
+        );
+        assert_eq!(
+            subscription.latest().unwrap(),
+            Some(original.clone()),
+            "the subscription deliberately retains historical evidence"
+        );
+        assert!(subscription.current().unwrap().is_none());
+        observe(&subscription, cx);
+        assert!(matches!(
+            *fixture.connection.borrow(),
+            ConnectionState::Connected { .. }
+        ));
+        assert!(fixture.replica.borrow().is_ready());
+        let stale = fixture.snapshot(cx);
+        assert!(stale.servers[0].permissions.is_none());
+        assert!(
+            stale.servers[0]
+                .remote_access
+                .as_ref()
+                .unwrap()
+                .scopes
+                .is_empty()
+        );
+        assert_eq!(
+            subscription
+                .apply(StatusPublication::Snapshot {
+                    request: query.request,
+                    generation: query.generation,
+                    status: replacement
+                })
+                .unwrap(),
+            StatusUpdate::Replaced
+        );
+        observe(&subscription, cx);
+        let current = fixture.snapshot(cx);
+        assert!(
+            current.servers[0]
+                .permissions
+                .as_ref()
+                .unwrap()
+                .entries
+                .iter()
+                .all(|entry| entry.state == ServerPermissionState::Unavailable)
+        );
+        assert!(
+            current.servers[0].remote_access.as_ref().unwrap().scopes[0]
+                .endpoints
+                .iter()
+                .all(|endpoint| endpoint.port() == 59595)
+        );
+    }
 }
