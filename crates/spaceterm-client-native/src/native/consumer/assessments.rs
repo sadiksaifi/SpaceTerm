@@ -2,6 +2,7 @@
 //! SQLite owns durability, private-directory validation and process contention.
 
 use serde::{Deserialize, Serialize};
+use spaceterm_client::journal::ClientJournalRevision;
 use spaceterm_client::management_cli::{
     AssessmentEvidence, AssessmentToken, AuthenticatedManagementContext, ManagementAction,
     ManagementAssessment, ManagementFailure,
@@ -38,12 +39,15 @@ pub(super) struct Scope {
     stream: OperationStreamId,
     device: DeviceId,
     epoch: ServerEpoch,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revision: Option<ClientJournalRevision>,
 }
 impl Scope {
     pub(super) fn local(
         stream: OperationStreamId,
         device: DeviceId,
         pin: ServerPin,
+        revision: ClientJournalRevision,
     ) -> Result<Self, ManagementFailure> {
         if pin.identity != stream.server().bytes() {
             return Err(ManagementFailure::AuthorizationDenied);
@@ -58,6 +62,7 @@ impl Scope {
             device,
             // Local removal depends on retained pairing authority, not a live server epoch.
             epoch: ServerEpoch::new(0),
+            revision: Some(revision),
         })
     }
     pub(super) fn new(
@@ -76,7 +81,15 @@ impl Scope {
             stream: context.stream(),
             device: context.device(),
             epoch: context.epoch(),
+            revision: None,
         })
+    }
+    fn same_owner(&self, other: &Self) -> bool {
+        self.boot == other.boot
+            && self.server == other.server
+            && self.public_key == other.public_key
+            && self.stream == other.stream
+            && self.device == other.device
     }
 }
 
@@ -291,6 +304,40 @@ pub(super) async fn restore(
     .await
     .map_err(|_| ManagementFailure::Indeterminate)?
 }
+/// Loads from retained local pairing authority without dialing. Protocol actions
+/// keep their original epoch and must revalidate it against the live connection
+/// before execution. Local removal additionally keeps its original journal revision.
+pub(super) async fn restore_owned(
+    directory: PathBuf,
+    owner: Scope,
+    token: AssessmentToken,
+    now: MonotonicTick,
+) -> Result<ManagementAssessment, ManagementFailure> {
+    tokio::task::spawn_blocking(move || {
+        let database = open(&directory, false)?;
+        let bytes: Option<Vec<u8>> = database.query_row(
+            "SELECT (SELECT payload FROM assessments WHERE token=?1 AND issued<=?2 AND expires>?2)",
+            (token.as_str(), tick(now)?), |row| row.get(0),
+        ).map_err(classify)?;
+        let bytes = bytes.ok_or(ManagementFailure::StaleAssessment)?;
+        if bytes.len() > MAX_RECORD_BYTES {
+            return Err(ManagementFailure::UnsafeNativeState);
+        }
+        let record: Record =
+            serde_json::from_slice(&bytes).map_err(|_| ManagementFailure::UnsafeNativeState)?;
+        if !record.scope.same_owner(&owner)
+            || (matches!(record.evidence, Evidence::LocalSelfUnpair { .. })
+                && (record.scope.revision.is_none() || record.scope.revision != owner.revision))
+        {
+            return Err(ManagementFailure::StaleAssessment);
+        }
+        let original_scope = record.scope.clone();
+        record.assessment(&original_scope, &token, now)
+    })
+    .await
+    .map_err(|_| ManagementFailure::Indeterminate)?
+}
+
 pub(super) async fn consume(
     directory: PathBuf,
     scope: Scope,
@@ -342,6 +389,7 @@ mod tests {
             .unwrap(),
             device: DeviceId::new([7; 16]),
             epoch: ServerEpoch::new(8),
+            revision: None,
         }
     }
     fn assessments(scope: &Scope) -> Vec<ManagementAssessment> {
@@ -418,8 +466,10 @@ mod tests {
             .collect()
     }
     fn directory() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
         tempfile::Builder::new()
             .prefix("st-assessment-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir_in("/var/tmp")
             .unwrap()
     }
@@ -498,6 +548,28 @@ mod tests {
     }
     #[tokio::test]
     async fn separate_consumers_atomically_consume_only_the_exact_original_assessment() {
+        async fn consume_after_contention(
+            directory: PathBuf,
+            scope: Scope,
+            expected: ManagementAssessment,
+        ) -> Result<(), ManagementFailure> {
+            // Both nonblocking SQLite openers can temporarily refuse admission.
+            // Retry only that refusal, never stale consent or an uncertain commit.
+            for _ in 0..100 {
+                let result = consume(
+                    directory.clone(),
+                    scope.clone(),
+                    expected.clone(),
+                    MonotonicTick::new(200),
+                )
+                .await;
+                if result != Err(ManagementFailure::StorageUnavailable) {
+                    return result;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(ManagementFailure::StorageUnavailable)
+        }
         let root = directory();
         let directory = root.path().canonicalize().unwrap().join("assessments");
         let scope = scope();
@@ -512,18 +584,8 @@ mod tests {
         .await
         .unwrap();
         let (first, second) = tokio::join!(
-            consume(
-                directory.clone(),
-                scope.clone(),
-                assessment.clone(),
-                MonotonicTick::new(200)
-            ),
-            consume(
-                directory.clone(),
-                scope.clone(),
-                assessment.clone(),
-                MonotonicTick::new(200)
-            ),
+            consume_after_contention(directory.clone(), scope.clone(), assessment.clone()),
+            consume_after_contention(directory.clone(), scope.clone(), assessment.clone()),
         );
         assert_eq!(
             usize::from(first.is_ok()) + usize::from(second.is_ok()),
