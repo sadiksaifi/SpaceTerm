@@ -41,7 +41,7 @@ pub use processes::{
 pub use registration::RegisteredServer;
 pub use supervisor::{
     AccountStartup, AccountStartupAdmission, ClientProvisioning, ServiceSupervisor,
-    StoppedOwnerAdmission, StorageWait,
+    StoppedOwnerAdmission, StoppedServerExpectation, StorageWait,
 };
 
 use crate::{

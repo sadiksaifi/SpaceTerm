@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use super::owner_enrollment::OwnerEnrollment;
 use super::{
-    ConfirmedServiceAction, LingerAuthorization, LingerRequest, LingerState, RuntimeAssessment,
-    ServiceAction, ServiceAssessment, ServiceClock, ServiceFuture, ServiceManager, ServiceOutcome,
-    ServicePhase, ServiceProcesses, ServiceProgress, ServiceRequestState, ServiceStatus,
-    ServiceTime, SupervisorState,
+    ConfirmedServiceAction, InstallationStatus, LingerAuthorization, LingerRequest, LingerState,
+    RuntimeAssessment, ServiceAction, ServiceAssessment, ServiceClock, ServiceFuture,
+    ServiceManager, ServiceOutcome, ServicePhase, ServiceProcesses, ServiceProgress,
+    ServiceRequestState, ServiceStatus, ServiceTime, SupervisorState,
     processes::{NativeClock, cleanup_matches},
 };
 use super::{
@@ -546,6 +546,29 @@ pub(super) fn current_account() -> Result<(u32, PathBuf), ServiceFailure> {
     Ok((account.uid(), account.home().to_owned()))
 }
 
+/// Exact stopped registration and approved code covered by a deliberate Start.
+///
+/// These comparison facts grant no mutation authority. Admission validates them
+/// under the lifecycle lease before binding the original request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoppedServerExpectation {
+    /// Original registered public server identity.
+    pub pin: spaceterm_protocol::authentication::ServerPin,
+    /// Original nonzero registration generation.
+    pub generation: u64,
+    /// Exact approved installation, version and authenticated archive digest.
+    pub approved: InstallationStatus,
+}
+impl StoppedServerExpectation {
+    fn matches(&self, basis: &RegistrationBasis) -> bool {
+        basis.desired == DesiredServerState::Stopped
+            && basis.server == self.pin.identity
+            && basis.public_key == self.pin.public_key
+            && basis.generation == self.generation
+            && basis.approved.as_ref() == Some(&self.approved)
+    }
+}
+
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RegistrationBasis {
@@ -631,11 +654,44 @@ enum RequestBinding {
     Confirmed(AssessmentRecord),
 }
 impl RequestBinding {
+    fn matches_submission(
+        &self,
+        assessment: Option<&AssessmentRecord>,
+        expected: Option<&StoppedServerExpectation>,
+    ) -> bool {
+        match (self, assessment) {
+            (Self::Start(basis), None) => expected.is_none_or(|expected| expected.matches(basis)),
+            (Self::Confirmed(original), Some(assessment)) => {
+                expected.is_none() && original == assessment
+            }
+            _ => false,
+        }
+    }
     fn basis(&self) -> &RegistrationBasis {
         match self {
             Self::Start(basis) => basis,
             Self::Confirmed(assessment) => &assessment.basis,
         }
+    }
+    fn verify_start_registration(
+        &self,
+        registration: &RegisteredServer,
+    ) -> Result<(), ServiceFailure> {
+        let Self::Start(basis) = self else {
+            return Ok(());
+        };
+        let mut expected = basis.clone();
+        if expected.desired != DesiredServerState::Running {
+            expected.desired = DesiredServerState::Running;
+            expected.generation = expected
+                .generation
+                .checked_add(1)
+                .ok_or(ServiceFailure::LimitExceeded)?;
+        }
+        if !expected.matches(registration) {
+            return Err(ServiceFailure::RequestConflict);
+        }
+        Ok(())
     }
     fn retirement(&self) -> Option<NativeRetirementAction> {
         match self {
@@ -1165,7 +1221,17 @@ impl ServiceSupervisor {
     }
     /// Starts only approved code under an ID retained before submission.
     pub fn start(&self, request: NativeRequestId) -> ServiceFuture<'_, ServiceProgress> {
-        self.observe(request, None)
+        self.observe(request, None, None)
+    }
+    /// Starts only the exact stopped registration and approved code the caller confirmed.
+    /// A changed registration fails with StaleAssessment before any Start binding or effect.
+    /// Replays compare against the immutable original binding, not current registration.
+    pub fn start_stopped(
+        &self,
+        request: NativeRequestId,
+        expected: StoppedServerExpectation,
+    ) -> ServiceFuture<'_, ServiceProgress> {
+        self.observe(request, None, Some(expected))
     }
     /// Durably suspends startup before requesting runtime or manager Stop.
     pub fn stop(&self, action: ConfirmedServiceAction) -> ServiceFuture<'_, ServiceProgress> {
@@ -1195,19 +1261,20 @@ impl ServiceSupervisor {
         if action.0.record.action != expected {
             return Box::pin(async { Err(ServiceFailure::RequestConflict) });
         }
-        self.observe(action.0.request, Some(action.0.record))
+        self.observe(action.0.request, Some(action.0.record), None)
     }
     fn observe(
         &self,
         request: NativeRequestId,
         assessment: Option<AssessmentRecord>,
+        expected: Option<StoppedServerExpectation>,
     ) -> ServiceFuture<'_, ServiceProgress> {
         let supervisor = self.clone();
         Box::pin(async move {
             let handle = tokio::runtime::Handle::try_current()
                 .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
-            let worker =
-                handle.spawn(async move { supervisor.run(request, assessment, false).await });
+            let worker = handle
+                .spawn(async move { supervisor.run(request, assessment, expected, false).await });
             worker.await.map_err(|_| ServiceFailure::Indeterminate)?
         })
     }
@@ -1233,7 +1300,8 @@ impl ServiceSupervisor {
             }
             let handle = tokio::runtime::Handle::try_current()
                 .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
-            let worker = handle.spawn(async move { supervisor.run(request, None, true).await });
+            let worker =
+                handle.spawn(async move { supervisor.run(request, None, None, true).await });
             worker.await.map_err(|_| ServiceFailure::Indeterminate)?
         })
     }
@@ -1289,18 +1357,16 @@ impl ServiceSupervisor {
         &self,
         request: NativeRequestId,
         assessment: Option<AssessmentRecord>,
+        expected: Option<StoppedServerExpectation>,
         resolving: bool,
     ) -> Result<ServiceProgress, ServiceFailure> {
         if let Some(original) = self.original(request)? {
-            if !resolving {
-                let matches = match (&original.binding, &assessment) {
-                    (RequestBinding::Start(_), None) => true,
-                    (RequestBinding::Confirmed(old), Some(new)) => old == new,
-                    _ => false,
-                };
-                if !matches {
-                    return Err(ServiceFailure::RequestConflict);
-                }
+            if !resolving
+                && !original
+                    .binding
+                    .matches_submission(assessment.as_ref(), expected.as_ref())
+            {
+                return Err(ServiceFailure::RequestConflict);
             }
             if original.phase == ServicePhase::Completed {
                 return Ok(original.progress(request));
@@ -1311,22 +1377,45 @@ impl ServiceSupervisor {
         let lease = match self.lifecycle_lease() {
             Ok(lease) => lease,
             Err(ServiceFailure::Pending) => {
-                return self
-                    .original(request)?
-                    .map(|original| original.progress(request))
-                    .ok_or(ServiceFailure::Pending);
+                let original = self.original(request)?.ok_or(ServiceFailure::Pending)?;
+                if !resolving
+                    && !original
+                        .binding
+                        .matches_submission(assessment.as_ref(), expected.as_ref())
+                {
+                    return Err(ServiceFailure::RequestConflict);
+                }
+                return Ok(original.progress(request));
             }
             Err(error) => return Err(error),
         };
         self.ensure_no_pending(request)?;
         let mut record = if let Some(original) = self.original(request)? {
+            if !resolving
+                && !original
+                    .binding
+                    .matches_submission(assessment.as_ref(), expected.as_ref())
+            {
+                return Err(ServiceFailure::RequestConflict);
+            }
             original
         } else {
-            let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
+            let registration = self.discover()?.ok_or(if expected.is_some() {
+                ServiceFailure::StaleAssessment
+            } else {
+                ServiceFailure::Missing
+            })?;
+            let basis = RegistrationBasis::capture(&registration);
+            if expected
+                .as_ref()
+                .is_some_and(|expected| !expected.matches(&basis))
+            {
+                return Err(ServiceFailure::StaleAssessment);
+            }
             if !registration.is_installed() {
                 return Err(ServiceFailure::Missing);
             }
-            let binding = RequestBinding::Start(RegistrationBasis::capture(&registration));
+            let binding = RequestBinding::Start(basis);
             RequestRecord {
                 digest: binding.digest(self.key, request)?,
                 binding,
@@ -1568,6 +1657,7 @@ impl ServiceSupervisor {
                     _ => {}
                 }
             }
+            record.binding.verify_start_registration(&registration)?;
             if registration.desired_state() == DesiredServerState::Running {
                 self.manager()?.verify_installation(&registration)?;
             }
@@ -1581,6 +1671,7 @@ impl ServiceSupervisor {
         }
         if record.phase == ServicePhase::Starting {
             let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
+            record.binding.verify_start_registration(&registration)?;
             if registration.desired_state() != DesiredServerState::Running {
                 return Err(ServiceFailure::RequestConflict);
             }

@@ -289,8 +289,15 @@ mod account_installation {
 
     use super::signed_installation::{fixture, native_machine};
 
+    #[derive(Default)]
+    struct ConfigurationPause {
+        reached: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
     struct InstallManager {
         key: UpdateKey,
+        configuration_pause: std::sync::Mutex<Option<std::sync::Arc<ConfigurationPause>>>,
         running: std::sync::atomic::AtomicBool,
         starting_observations: std::sync::atomic::AtomicUsize,
         startup_observed: tokio::sync::Notify,
@@ -302,6 +309,7 @@ mod account_installation {
         fn new(key: UpdateKey) -> Self {
             Self {
                 key,
+                configuration_pause: std::sync::Mutex::new(None),
                 running: std::sync::atomic::AtomicBool::new(false),
                 starting_observations: std::sync::atomic::AtomicUsize::new(0),
                 startup_observed: tokio::sync::Notify::new(),
@@ -364,6 +372,11 @@ mod account_installation {
         ) -> spaceterm_host::account_service::ServiceFuture<'a, ()> {
             Box::pin(async move {
                 self.verify_installation(registration)?;
+                let pause = self.configuration_pause.lock().unwrap().take();
+                if let Some(pause) = pause {
+                    pause.reached.notify_one();
+                    pause.release.notified().await;
+                }
                 self.effects.lock().unwrap().push("configure");
                 Ok(())
             })
@@ -673,6 +686,244 @@ mod account_installation {
             )
             .unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn confirmed_stopped_start_rejects_activation_after_endpoint_inspection_before_admission()
+    {
+        use spaceterm_host::{
+            account_service::{
+                InstallationStatus, ServiceAction, ServiceFailure, ServiceOutcome,
+                ServiceRequestState, StoppedServerExpectation,
+            },
+            bootstrap::setup::{AccountBootstrapSetup, BootstrapAccountRegistration},
+        };
+        let root = installation_root();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let approved = InstallationStatus {
+            installation: spaceterm_host::startup::InstallationId(
+                std::num::NonZeroU64::new(1).unwrap(),
+            ),
+            version: artifact.manifest().version.clone(),
+            artifact_sha256: artifact.artifact_sha256(),
+        };
+        let registration = account
+            .initialize_with_installation(DesiredServerState::Stopped, Some(approved.clone()))
+            .unwrap();
+        let store = test_support::store(&registration, key.clone()).unwrap();
+        let id = store.stage(&artifact).unwrap();
+        store
+            .activate(id, store.snapshot().unwrap().generation, 1)
+            .unwrap();
+        drop(store);
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let supervisor = account.with_installation_trust(
+            account.with_providers(
+                manager.clone(),
+                std::sync::Arc::new(
+                    spaceterm_host::account_service::runtime_inventory::RetainedRuntimeProcesses,
+                ),
+                std::sync::Arc::new(InstallClock),
+                None,
+            ),
+            key,
+        );
+        let (_, candidate) = fixture("1.2.4", 7, native_machine());
+        let staged = supervisor
+            .stage_installation(
+                supervisor.allocate_request().unwrap(),
+                account.confirm_install(candidate),
+            )
+            .await
+            .unwrap();
+        let ServiceRequestState::Completed(ServiceOutcome::Staged(staged)) = staged.state else {
+            panic!("the candidate must be staged without changing Stopped");
+        };
+        let setup = AccountBootstrapSetup::new(supervisor.clone());
+        let confirmed = setup.inspect().await.unwrap().registration;
+        let BootstrapAccountRegistration::Stopped { pin, generation } = confirmed.clone() else {
+            panic!("Start confirmation must cover a stopped registration");
+        };
+        let expected = StoppedServerExpectation {
+            pin,
+            generation,
+            approved,
+        };
+        let activation = supervisor
+            .assess(
+                supervisor.allocate_request().unwrap(),
+                ServiceAction::Activate(staged.installation),
+            )
+            .await
+            .unwrap()
+            .confirm()
+            .unwrap();
+        let pause = std::sync::Arc::new(ConfigurationPause::default());
+        *manager.configuration_pause.lock().unwrap() = Some(pause.clone());
+        let worker = supervisor.clone();
+        let activation = tokio::spawn(async move { worker.activate(activation).await });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            pause.reached.notified(),
+        )
+        .await
+        .expect("activation must hold the lifecycle lease before publishing its selection");
+        assert_eq!(setup.inspect().await.unwrap().registration, confirmed);
+        let request = supervisor.allocate_request().unwrap();
+        let start = supervisor.start_stopped(request, expected.clone());
+
+        // Delay Start admission until the competing lease owner publishes its new selection.
+        pause.release.notify_one();
+        activation.await.unwrap().unwrap();
+        let current = supervisor.discover().unwrap().unwrap();
+        assert_eq!(current.server_pin(), expected.pin);
+        assert!(current.generation() > expected.generation);
+        assert_eq!(current.desired_state(), DesiredServerState::Stopped);
+        assert_eq!(current.approved_installation(), Some(&staged));
+        let effects = manager.effects.lock().unwrap().clone();
+        let journal = std::fs::read(account.anchor().join("requests")).unwrap();
+
+        assert_eq!(start.await, Err(ServiceFailure::StaleAssessment));
+        assert_eq!(*manager.effects.lock().unwrap(), effects);
+        assert_eq!(
+            std::fs::read(account.anchor().join("requests")).unwrap(),
+            journal
+        );
+        assert_eq!(
+            supervisor.request_progress(request),
+            Err(ServiceFailure::Pending)
+        );
+        assert_eq!(
+            supervisor.resolve(request).await,
+            Err(ServiceFailure::Pending)
+        );
+        assert_eq!(
+            supervisor.discover().unwrap().unwrap().desired_state(),
+            DesiredServerState::Stopped
+        );
+    }
+
+    #[tokio::test]
+    async fn confirmed_stopped_start_replays_original_binding_and_rejects_changed_expectations() {
+        use spaceterm_host::account_service::{
+            InstallationStatus, ServiceFailure, ServiceOutcome, ServicePhase, ServiceRequestState,
+            StoppedServerExpectation,
+        };
+        let root = installation_root();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let approved = InstallationStatus {
+            installation: spaceterm_host::startup::InstallationId(
+                std::num::NonZeroU64::new(1).unwrap(),
+            ),
+            version: artifact.manifest().version.clone(),
+            artifact_sha256: artifact.artifact_sha256(),
+        };
+        let registration = account
+            .initialize_with_installation(DesiredServerState::Stopped, Some(approved.clone()))
+            .unwrap();
+        let store = test_support::store(&registration, key.clone()).unwrap();
+        let id = store.stage(&artifact).unwrap();
+        store
+            .activate(id, store.snapshot().unwrap().generation, 1)
+            .unwrap();
+        drop(store);
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let supervisor = installer(&account, key.clone(), manager.clone());
+        let expected = StoppedServerExpectation {
+            pin: registration.server_pin(),
+            generation: registration.generation(),
+            approved,
+        };
+        let rejected_request = supervisor.allocate_request().unwrap();
+        let mut changed_artifact = expected.clone();
+        changed_artifact.approved.artifact_sha256[0] ^= 1;
+        let journal = std::fs::read(account.anchor().join("requests")).unwrap();
+        assert_eq!(
+            supervisor
+                .start_stopped(rejected_request, changed_artifact)
+                .await,
+            Err(ServiceFailure::StaleAssessment)
+        );
+        assert!(manager.effects.lock().unwrap().is_empty());
+        assert_eq!(
+            std::fs::read(account.anchor().join("requests")).unwrap(),
+            journal
+        );
+        let request = supervisor.allocate_request().unwrap();
+        let completed = supervisor
+            .start_stopped(request, expected.clone())
+            .await
+            .unwrap();
+        assert_eq!(completed.request, request);
+        assert_eq!(completed.phase, ServicePhase::Completed);
+        assert_eq!(
+            completed.state,
+            ServiceRequestState::Completed(ServiceOutcome::Started)
+        );
+        let current = supervisor.discover().unwrap().unwrap();
+        assert_eq!(current.server_pin(), expected.pin);
+        assert_eq!(current.desired_state(), DesiredServerState::Running);
+        assert!(current.generation() > expected.generation);
+        assert_eq!(
+            manager.effects.lock().unwrap().as_slice(),
+            &["configure", "start"]
+        );
+        let reopened = installer(&account, key, manager.clone());
+        assert_eq!(
+            reopened
+                .start_stopped(request, expected.clone())
+                .await
+                .unwrap(),
+            completed
+        );
+        assert_eq!(reopened.start(request).await.unwrap(), completed);
+        assert_eq!(reopened.resolve(request).await.unwrap(), completed);
+        let journal = std::fs::read(account.anchor().join("requests")).unwrap();
+        for field in 0..4 {
+            let mut changed = expected.clone();
+            match field {
+                0 => changed.pin.identity[0] ^= 1,
+                1 => changed.pin.public_key[0] ^= 1,
+                2 => changed.generation = current.generation(),
+                _ => changed.approved.artifact_sha256[0] ^= 1,
+            }
+            assert_eq!(
+                reopened.start_stopped(request, changed).await,
+                Err(ServiceFailure::RequestConflict)
+            );
+            assert_eq!(reopened.request_progress(request).unwrap(), completed);
+        }
+        assert_eq!(
+            std::fs::read(account.anchor().join("requests")).unwrap(),
+            journal
+        );
+
+        // Matching pin and generation cannot satisfy the stopped-state expectation on Running.
+        let running_request = reopened.allocate_request().unwrap();
+        let journal = std::fs::read(account.anchor().join("requests")).unwrap();
+        assert_eq!(
+            reopened
+                .start_stopped(
+                    running_request,
+                    StoppedServerExpectation {
+                        pin: current.server_pin(),
+                        generation: current.generation(),
+                        approved: current.approved_installation().unwrap().clone(),
+                    },
+                )
+                .await,
+            Err(ServiceFailure::StaleAssessment)
+        );
+        assert_eq!(
+            std::fs::read(account.anchor().join("requests")).unwrap(),
+            journal
+        );
+        assert_eq!(
+            manager.effects.lock().unwrap().as_slice(),
+            &["configure", "start"]
+        );
     }
 
     #[tokio::test]

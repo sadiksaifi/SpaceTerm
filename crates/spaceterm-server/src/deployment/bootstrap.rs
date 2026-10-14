@@ -4,13 +4,15 @@ use super::owner::OwnerEndpointFailure;
 use spaceterm_core::identity::ServerId;
 use spaceterm_distribution::{BuildChannel, ServerPlatform, server_feed::MAX_ARCHIVE_BYTES};
 use spaceterm_host::{
-    account_service::{ServiceFailure, ServiceRequestState, ServiceSupervisor},
+    account_service::{
+        ServiceFailure, ServiceRequestState, ServiceSupervisor, StoppedServerExpectation,
+    },
     bootstrap::{
         artifact::receive_artifact,
         setup::{AccountBootstrapSetup, BootstrapAccountRegistration},
         wire::*,
     },
-    startup::BuildIdentity,
+    startup::{BuildIdentity, DesiredServerState},
     transport::MessageTransport,
 };
 use std::{
@@ -197,14 +199,32 @@ async fn handle(
         }
         AccountRequest::Start { expected } => {
             let facts = setup.inspect().await?;
-            if facts.registration != expected
-                || !matches!(expected, BootstrapAccountRegistration::Stopped { .. })
+            if facts.registration != expected {
+                return Err(ServiceFailure::StaleAssessment);
+            }
+            let BootstrapAccountRegistration::Stopped { pin, generation } = expected else {
+                return Err(ServiceFailure::StaleAssessment);
+            };
+            let registration = supervisor
+                .discover()?
+                .ok_or(ServiceFailure::StaleAssessment)?;
+            if registration.server_pin() != pin
+                || registration.generation() != generation
+                || registration.desired_state() != DesiredServerState::Stopped
             {
                 return Err(ServiceFailure::StaleAssessment);
             }
+            let expected = StoppedServerExpectation {
+                pin,
+                generation,
+                approved: registration
+                    .approved_installation()
+                    .cloned()
+                    .ok_or(ServiceFailure::Missing)?,
+            };
             // Start is a separate deliberate entry. Install, resolve and owner never call it.
             let request = supervisor.allocate_request()?;
-            supervisor.start(request).await?;
+            supervisor.start_stopped(request, expected).await?;
             Ok(AccountReply::Observation(
                 observation(setup, supervisor).await?,
             ))

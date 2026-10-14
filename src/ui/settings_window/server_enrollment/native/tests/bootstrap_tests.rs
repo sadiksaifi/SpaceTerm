@@ -249,6 +249,7 @@ struct Remote {
     owner_authorizations: Arc<AtomicUsize>,
     owner_helpers: Arc<AtomicUsize>,
     failed_owner_exit: Mutex<Option<Arc<OwnerExit>>>,
+    before_start_admission: Mutex<Option<Arc<StartAdmissionGate>>>,
     prompt_allowed: AtomicBool,
     start_during_prompt: AtomicBool,
     prompt_count: AtomicUsize,
@@ -486,8 +487,28 @@ impl BootstrapRemoteConnection for Remote {
                         if setup.inspect().await?.registration != expected {
                             return Err(ServiceFailure::StaleAssessment);
                         }
+                        let spaceterm_host::bootstrap::setup::BootstrapAccountRegistration::Stopped { pin, generation } = expected else {
+                            return Err(ServiceFailure::StaleAssessment);
+                        };
+                        let registration = self.supervisor.discover()?.ok_or(ServiceFailure::StaleAssessment)?;
+                        if registration.server_pin() != pin
+                            || registration.generation() != generation
+                            || registration.desired_state() != DesiredServerState::Stopped
+                        {
+                            return Err(ServiceFailure::StaleAssessment);
+                        }
+                        let expected = spaceterm_host::account_service::StoppedServerExpectation {
+                            pin,
+                            generation,
+                            approved: registration.approved_installation().cloned().ok_or(ServiceFailure::Missing)?,
+                        };
+                        let gate = self.before_start_admission.lock().unwrap().take();
+                        if let Some(gate) = gate {
+                            gate.inspected.notify_one();
+                            gate.admit.notified().await;
+                        }
                         self.supervisor
-                            .start(self.supervisor.allocate_request()?)
+                            .start_stopped(self.supervisor.allocate_request()?, expected)
                             .await?;
                         Ok(AccountReply::Observation(self.observed().await?))
                     }
@@ -654,6 +675,11 @@ impl BootstrapRemoteConnection for Remote {
             Ok(())
         })
     }
+}
+#[derive(Default)]
+struct StartAdmissionGate {
+    inspected: tokio::sync::Notify,
+    admit: tokio::sync::Notify,
 }
 #[derive(Default)]
 struct OwnerExit {
@@ -853,6 +879,7 @@ impl Harness {
             owner_authorizations: Arc::new(AtomicUsize::new(0)),
             owner_helpers: Arc::new(AtomicUsize::new(0)),
             failed_owner_exit: Mutex::new(None),
+            before_start_admission: Mutex::new(None),
             prompt_allowed: AtomicBool::new(false),
             start_during_prompt: AtomicBool::new(false),
             prompt_count: AtomicUsize::new(0),
@@ -2246,4 +2273,75 @@ async fn desktop_ssh_bootstrap_stopped_registration_change_during_prompt_blocks_
         &["configure", "start"]
     );
     assert_eq!(h.remote.owners.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_activation_after_final_inspection_rejects_stale_start() {
+    use spaceterm_host::account_service::{ServiceOutcome, ServiceRequestState};
+
+    let h = Harness::new().await;
+    h.stop_existing().await;
+    let original = h.remote.supervisor.discover().unwrap().unwrap();
+    let candidate = h.candidate(1).await;
+    let gate = Arc::new(StartAdmissionGate::default());
+    *h.remote.before_start_admission.lock().unwrap() = Some(gate.clone());
+    let start = h.provider.start(candidate);
+    tokio::pin!(start);
+    let failure = tokio::time::timeout(std::time::Duration::from_secs(300), async {
+        tokio::select! {
+            _ = gate.inspected.notified() => (),
+            _ = &mut start => panic!("Start must wait at the post-inspection native admission boundary"),
+        }
+        let (_, artifact) = signed::fixture("9.0.1", 7, signed::native_machine());
+        let staged = h.remote.supervisor.stage_installation(
+            h.remote.supervisor.allocate_request().unwrap(),
+            h.remote.fixture.confirm_install(artifact),
+        ).await.unwrap();
+        let ServiceRequestState::Completed(ServiceOutcome::Staged(staged)) = staged.state else {
+            panic!("the newer artifact must remain staged before activation");
+        };
+        let activator = h.remote.fixture.with_installation_trust(
+            h.remote.fixture.with_providers(
+                h.remote.manager.clone(),
+                Arc::new(spaceterm_host::account_service::runtime_inventory::RetainedRuntimeProcesses),
+                Arc::new(Clock),
+                None,
+            ),
+            h.remote.manager.key.clone(),
+        );
+        let activation = activator.assess(
+            activator.allocate_request().unwrap(),
+            ServiceAction::Activate(staged.installation),
+        ).await.unwrap().confirm().unwrap();
+        activator.activate(activation).await.unwrap();
+        let changed = h.remote.supervisor.discover().unwrap().unwrap();
+        assert_eq!(changed.server_pin(), original.server_pin());
+        assert!(changed.generation() > original.generation());
+        assert_eq!(changed.desired_state(), DesiredServerState::Stopped);
+        assert_eq!(changed.approved_installation(), Some(&staged));
+        assert_ne!(changed.approved_installation(), original.approved_installation());
+        h.remote.manager.effects.lock().unwrap().clear();
+        gate.admit.notify_one();
+        start.await
+    }).await.unwrap();
+    assert!(matches!(
+        failure,
+        Err(EnrollmentFailure::Bootstrap(
+            BootstrapFailureClass::Pairing(PairingFailure::RouteChanged)
+        ))
+    ));
+    assert_eq!(
+        h.remote
+            .supervisor
+            .discover()
+            .unwrap()
+            .unwrap()
+            .desired_state(),
+        DesiredServerState::Stopped
+    );
+    assert!(h.remote.manager.effects.lock().unwrap().is_empty());
+    assert!(!h.remote.manager.running.load(Ordering::SeqCst));
+    assert_eq!(h.remote.owners.load(Ordering::SeqCst), 0);
+    assert!(h.journal.snapshot().unwrap().bindings().is_empty());
+    h.remote.close().await;
 }
