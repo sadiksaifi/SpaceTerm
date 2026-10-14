@@ -558,9 +558,19 @@ async fn owner_loop(
     cleanup: Arc<dyn RuntimeCleanupPort>,
 ) -> Result<(), ServerFailure> {
     let mut first_cleanup = None;
+    // A retirement can hold this owner's lane while its native cleanup is
+    // re-proved. Other owners must keep refreshing their own retained facts.
+    let mut poll = tokio::time::interval(std::time::Duration::from_millis(50));
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         let request = tokio::select! { biased;
             Some(request) = requests.recv() => Some(request),
+            // Disable the timer after both ingress lanes close so it cannot
+            // keep an otherwise drained owner alive and prevent its join.
+            _ = poll.tick(), if !requests.is_closed() || !subscriptions.is_closed() => {
+                observations.send_replace(RetainedRuntimeObservations::capture(owner.as_ref()));
+                None
+            },
             Some(request) = subscriptions.recv() => {
                 let _ = request.reply.send(owner.subscribe(request.fence));
                 None

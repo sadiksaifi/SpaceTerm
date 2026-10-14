@@ -2153,3 +2153,237 @@ async fn native_stop_waits_for_unstarted_gate_and_commits_without_process_admiss
     let mut store = physical::reopen(&fixture.directory.0).unwrap();
     assert!(store.recover().unwrap().native_retirements.is_empty());
 }
+
+#[tokio::test]
+async fn retiring_session_does_not_stall_another_sessions_later_lifecycle_publication() {
+    use spaceterm_core::{observations::*, retirement::*, runtime_authority::*};
+    use std::time::Duration;
+
+    // Release the async fixture callback even if a setup assertion unwinds.
+    struct ReleaseRetirement(Arc<native::Gate>, Arc<native::Factory>);
+    impl Drop for ReleaseRetirement {
+        fn drop(&mut self) {
+            self.1.retirement_gate.lock().unwrap().take();
+            self.0.release();
+        }
+    }
+
+    let fixture = Fixture::new();
+    let creates = [1, 4].map(|sequence| {
+        fixture.request(
+            sequence,
+            Command::CreateWorkspace {
+                server: fixture.stream.server(),
+                source: WorkspaceCreationSource::ServerHome {
+                    server: fixture.stream.server(),
+                },
+                name: NameDraft::Automatic,
+            },
+        )
+    });
+    let server = RecoveredServer::recover(fixture.config, fixture.dependencies)
+        .await
+        .unwrap();
+    let handle = server.handle();
+    native::connect(&handle, fixture.principal).await;
+    let mut sessions = Vec::new();
+    for (create, sequence) in creates.into_iter().zip([2, 5]) {
+        let OperationResponse::Completed {
+            outcome: Outcome::CreatedWithControl(created),
+            ..
+        } = handle.submit(fixture.principal, create).await.unwrap()
+        else {
+            panic!("created Workspace with control")
+        };
+        let OperationResponse::Completed {
+            outcome: Outcome::SessionStarted(session),
+            ..
+        } = explicit_start_response(
+            &handle,
+            fixture.principal,
+            fixture.stream,
+            created.control().grant(),
+            sequence,
+        )
+        .await
+        else {
+            panic!("started Session")
+        };
+        sessions.push(session);
+    }
+    let [first, second] = sessions.as_slice() else {
+        panic!("two Sessions")
+    };
+    let (first, second) = (*first, *second);
+    let mut snapshots = handle.subscribe_snapshot();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while ![first, second].iter().all(|session| {
+            snapshots.borrow().runtime().iter().any(|record| {
+                record.pane == session.pane
+                    && record.phase
+                        == SessionPhase::Running {
+                            generation: session.generation,
+                        }
+            })
+        }) {
+            snapshots.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("both Sessions published Running");
+
+    let target = CloseTarget::Pane(first.pane);
+    let assess = CanonicalOperationRequest::new(
+        OperationId::new(fixture.stream, OperationSequence::new(7).unwrap()),
+        Command::AssessClose { target },
+        &CanonicalCodec,
+    )
+    .unwrap();
+    let OperationResponse::Completed {
+        outcome: Outcome::Assessment(assessment),
+        ..
+    } = handle.submit(fixture.principal, assess).await.unwrap()
+    else {
+        panic!("close assessment")
+    };
+    let close = CanonicalOperationRequest::new(
+        OperationId::new(fixture.stream, OperationSequence::new(8).unwrap()),
+        Command::CloseConfirmed {
+            target,
+            assessment: assessment.reference(),
+        },
+        &CanonicalCodec,
+    )
+    .unwrap();
+    let held = native::Gate::new();
+    let release = ReleaseRetirement(held.clone(), fixture.runtime.clone());
+    *fixture.runtime.retirement_gate.lock().unwrap() = Some(held.clone());
+    assert!(matches!(
+        handle.submit(fixture.principal, close).await.unwrap(),
+        OperationResponse::Pending(_)
+    ));
+    tokio::time::timeout(Duration::from_secs(5), held.entered())
+        .await
+        .expect("first Session entered retirement");
+    // Only the first retirement keeps its cloned gate. Teardown must not gate B.
+    fixture.runtime.retirement_gate.lock().unwrap().take();
+    let states = fixture.runtime.states.lock().unwrap().clone();
+    let first_state = states
+        .iter()
+        .find(|state| state.lock().unwrap().authority.session() == first)
+        .unwrap();
+    let second_state = states
+        .iter()
+        .find(|state| state.lock().unwrap().authority.session() == second)
+        .unwrap();
+
+    // This new fact cannot be in B's startup cache. Its committed publication
+    // proves B answered an inspection after A entered the held retirement.
+    let inspected_directory = ServerDirectory::new(
+        fixture.stream.server(),
+        fixture.directory.0.as_os_str().as_encoded_bytes().to_vec(),
+    )
+    .unwrap();
+    second_state.lock().unwrap().directory = Some(
+        ConfirmedDirectoryObservation::new(
+            second,
+            RuntimeObservationSequence::new(1).unwrap(),
+            MonotonicTick::new(900),
+            inspected_directory.clone(),
+        )
+        .unwrap(),
+    );
+    let first_inspection = tokio::time::timeout(Duration::from_secs(5), async {
+        while !snapshots.borrow().state().panes.iter().any(|record| {
+            record.id == second.pane
+                && record.confirmed_restoration_directory.value.as_ref()
+                    == Some(&inspected_directory)
+        }) {
+            snapshots.changed().await.unwrap();
+        }
+    })
+    .await;
+    let later_lifecycle = if first_inspection.is_ok() {
+        assert!(snapshots.borrow().runtime().iter().any(|record| {
+            record.pane == second.pane
+                && record.phase
+                    == SessionPhase::Running {
+                        generation: second.generation,
+                    }
+        }));
+        let terminal = SessionTerminalResult::new(
+            second,
+            RuntimeTerminalStatus::OrdinaryExit {
+                exit_status: Some(0),
+            },
+        )
+        .unwrap();
+        let cleanup = SessionCleanupObservation::new(
+            second,
+            RetirementReason::OrdinaryExit,
+            CleanupResult::Confirmed(ConfirmedCleanupClass::ReapedAndReleased),
+        )
+        .unwrap();
+        {
+            let mut state = second_state.lock().unwrap();
+            state.lifecycle =
+                RuntimeLifecycle::Finished(RuntimeCompletion::new(terminal, cleanup).unwrap());
+            state.cleanup = Some(cleanup);
+        }
+        Some(
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while snapshots
+                    .borrow()
+                    .runtime()
+                    .iter()
+                    .any(|record| record.pane == second.pane)
+                {
+                    snapshots.changed().await.unwrap();
+                }
+            })
+            .await,
+        )
+    } else {
+        None
+    };
+    // Check before releasing A, then always release and join before reporting RED.
+    let first_still_held = {
+        let state = first_state.lock().unwrap();
+        state.retire_calls == 1
+            && state.cleanup.is_none()
+            && matches!(state.lifecycle, RuntimeLifecycle::Retiring { terminal }
+                if terminal.retirement_reason() == RetirementReason::ConfirmedClose)
+    };
+    drop(release);
+    let teardown = tokio::time::timeout(Duration::from_secs(10), async {
+        // Let a stale baseline catch up after release before requesting Stop, so
+        // teardown cannot retag B's already-exited Session with a Stop reason.
+        while snapshots
+            .borrow()
+            .runtime()
+            .iter()
+            .any(|record| record.pane == second.pane)
+        {
+            snapshots.changed().await.unwrap();
+        }
+        let stopped = handle
+            .shutdown(TrustedShutdownRequest {
+                authority: fixture.stop,
+            })
+            .await;
+        let joined = server.wait().await;
+        (stopped, joined)
+    })
+    .await;
+    first_inspection.expect("B published its first inspection while A retirement stayed held");
+    let (stopped, joined) = teardown.expect("bounded retirement release and server teardown");
+    stopped.unwrap();
+    joined.unwrap();
+    assert!(
+        first_still_held,
+        "A kept its original retirement and first reason without cleanup proof"
+    );
+    later_lifecycle
+        .unwrap()
+        .expect("B's exit after its first inspection must publish before A retirement is released");
+}
