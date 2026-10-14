@@ -436,8 +436,19 @@ impl RecoveredAccountServer {
         let cleanup = account_runtime.clone();
         let monitor = async move {
             let mut interval = tokio::time::interval(Duration::from_millis(100));
+            #[cfg(target_os = "macos")]
+            let mut checkpoint_ticks = 0_u8;
             loop {
                 interval.tick().await;
+                #[cfg(target_os = "macos")]
+                {
+                    if checkpoint_ticks == 0 {
+                        // Sampling is not absence evidence. A failed or missed sample
+                        // retains conservative refusal rather than fabricating ancestry.
+                        let _ = account_runtime.checkpoint_lineage();
+                    }
+                    checkpoint_ticks = (checkpoint_ticks + 1) % 10;
+                }
                 let snapshot = handle.snapshot();
                 if management
                     .verify_stopped(snapshot.state().server, snapshot.epoch())

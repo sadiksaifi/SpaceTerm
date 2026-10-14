@@ -18,7 +18,8 @@ mod processes;
 pub mod runtime_inventory;
 pub use installations::NativeServiceInstallations;
 pub use native_processes::{
-    NativeServiceProcessTable, NativeServiceProcesses, ServiceProcessIdentity,
+    InstanceProcessObserver, NativeServiceProcessTable, NativeServiceProcesses,
+    ServiceProcessIdentity,
 };
 mod systemd;
 
