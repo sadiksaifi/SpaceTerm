@@ -26,7 +26,7 @@ use spaceterm_host::{
     server_installation::test_support::existing_store,
     startup::{BuildIdentity, DesiredServerState},
 };
-use std::{path::PathBuf, sync::Arc};
+use std::{os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc};
 
 const FEED_URL: &str = "https://github.com/sadiksaifi/SpaceTerm/releases/latest/download/latest-server-development-darwin-arm64.json";
 const ARCHIVE_URL: &str = "https://github.com/sadiksaifi/SpaceTerm/releases/download/vdev.010101010101/spaceterm-server.tar.gz";
@@ -47,7 +47,10 @@ fn private_root() -> tempfile::TempDir {
             .home()
             .to_owned()
     };
-    tempfile::tempdir_in(parent).unwrap()
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(parent)
+        .unwrap()
 }
 struct LocalFixture {
     root: tempfile::TempDir,
@@ -288,9 +291,7 @@ async fn install_through_native_fake(systemd: bool) {
     let progress = supervisor
         .install(request, account.confirm_install(verified))
         .await
-        .unwrap_or_else(|error| {
-            panic!("install failed: {error:?}; calls={:?}", runner.arguments())
-        });
+        .unwrap_or_else(|error| panic!("install failed: {error:?}"));
     assert!(matches!(
         progress.state,
         ServiceRequestState::Completed(ServiceOutcome::Installed { reused: false, .. })
@@ -298,6 +299,17 @@ async fn install_through_native_fake(systemd: bool) {
     let registration = supervisor.discover().unwrap().unwrap();
     assert_eq!(registration.desired_state(), DesiredServerState::Running);
     assert!(registration.approved_installation().is_some());
+    let endpoint = registration.endpoint().unwrap();
+    for directory in [
+        registration.data_directory(),
+        endpoint.path().parent().unwrap(),
+    ] {
+        assert_eq!(
+            std::fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "installation-created data and runtime must remain private"
+        );
+    }
     let calls = runner.arguments();
     if systemd {
         assert!(
@@ -305,10 +317,23 @@ async fn install_through_native_fake(systemd: bool) {
                 .iter()
                 .any(|args| args.iter().any(|arg| arg == "start"))
         );
-        assert!(
-            root_path
-                .join(".config/systemd/user/spaceterm-development-server.service")
-                .is_file()
+        for directory in [".config", ".config/systemd", ".config/systemd/user"] {
+            assert_eq!(
+                std::fs::metadata(root_path.join(directory))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700,
+                "manager-created configuration directories must remain private"
+            );
+        }
+        let unit = root_path.join(".config/systemd/user/spaceterm-development-server.service");
+        assert!(unit.is_file());
+        assert_eq!(
+            std::fs::metadata(unit).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the published unit must remain private"
         );
     } else {
         assert!(
@@ -334,4 +359,132 @@ async fn local_signed_fixture_installs_through_systemd_supervisor_fake() {
 #[tokio::test]
 async fn local_signed_fixture_installs_through_launchd_supervisor_fake() {
     install_through_native_fake(false).await;
+}
+
+#[tokio::test]
+async fn cli_request_resolution_redelivers_accepted_stage_with_original_verified_artifact() {
+    use spaceterm_client::management_cli::{ConfirmationPrompt, ConfirmationReply};
+    use spaceterm_client_native::{
+        NativeClientProvider,
+        cli::{
+            CliFailure,
+            bindings::{UnavailablePairingBindings, UnavailableProtocolManagement},
+            output::hex,
+            runner::{CliDependencies, CliIo, Dispatch, dispatch},
+        },
+    };
+    use spaceterm_host::account_service::{InstallationStatus, ServicePhase, test_support};
+    struct NoDownloads;
+    impl ArtifactTransport for NoDownloads {
+        fn get(&self, _: &str, _: usize) -> Result<Vec<u8>, ManagementFailure> {
+            panic!("request resolution must not redownload an artifact")
+        }
+    }
+    struct Io(Vec<u8>);
+    impl CliIo for Io {
+        fn write_stdout(&mut self, bytes: &[u8]) -> Result<(), CliFailure> {
+            self.0.extend_from_slice(bytes);
+            Ok(())
+        }
+        fn write_stderr(&mut self, bytes: &[u8]) -> Result<(), CliFailure> {
+            panic!(
+                "unexpected typed failure: {}",
+                String::from_utf8_lossy(bytes)
+            )
+        }
+        fn read_confirmation(
+            &mut self,
+            _: &ConfirmationPrompt,
+        ) -> Result<ConfirmationReply, CliFailure> {
+            panic!("resolution must not ask for new consent")
+        }
+    }
+    let artifact = LocalFixture::new(BuildChannel::Development);
+    let original = artifact.verify(&artifact.key).unwrap();
+    let approved = InstallationStatus {
+        installation: spaceterm_host::startup::InstallationId(
+            std::num::NonZeroU64::new(1).unwrap(),
+        ),
+        version: original.manifest().version.clone(),
+        artifact_sha256: original.artifact_sha256(),
+    };
+    let root = private_root();
+    let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+    let registration = account
+        .initialize_with_installation(DesiredServerState::Stopped, Some(approved.clone()))
+        .unwrap();
+    let store = spaceterm_host::server_installation::test_support::store(
+        &registration,
+        artifact.key.clone(),
+    )
+    .unwrap();
+    let id = store.stage(&original).unwrap();
+    store
+        .activate(id, store.snapshot().unwrap().generation, 1)
+        .unwrap();
+    drop(store);
+    drop(original);
+    let supervisor = account.with_installation_trust(account.reopen(), artifact.key.clone());
+    let request = supervisor.allocate_request().unwrap();
+    test_support::interrupt_after_phase(ServicePhase::Accepted);
+    assert_eq!(
+        supervisor
+            .stage_installation(
+                request,
+                account.confirm_install(artifact.verify(&artifact.key).unwrap())
+            )
+            .await,
+        Err(ServiceFailure::SupervisorUnavailable)
+    );
+    let (accepted, _) = supervisor.inspect_install_request(request).unwrap();
+    drop(supervisor);
+    // Delete the local source. Resolution must use the original durable bytes,
+    // not download latest, allocate a replacement ID, or reopen a local path.
+    drop(artifact.root);
+    let provider = NativeClientProvider::from_supervisor(
+        account.with_installation_trust(account.reopen(), artifact.key),
+    )
+    .with_artifact_transport(Arc::new(NoDownloads));
+    let dependencies = CliDependencies::new(
+        Ok(provider.key()),
+        Arc::new(UnavailableProtocolManagement),
+        provider.management(),
+        Arc::new(UnavailablePairingBindings),
+    );
+    let selector = format!("native:{}", hex(request.as_bytes()));
+    let invocation = spaceterm_client_native::cli::parse(
+        [
+            "--json",
+            "--non-interactive",
+            "status",
+            "--operation",
+            &selector,
+        ]
+        .map(Into::into),
+    )
+    .unwrap();
+    let mut io = Io(Vec::new());
+    let Dispatch::Exit(exit) = dispatch(invocation, &dependencies, &mut io).await else {
+        panic!("client only")
+    };
+    assert_eq!(exit.code(), 0);
+    let output: serde_json::Value = serde_json::from_slice(&io.0).unwrap();
+    assert_eq!(output["result"]["native_request"], hex(request.as_bytes()));
+    assert_eq!(output["result"]["state"], "completed");
+    assert_eq!(output["result"]["outcome"], "staged");
+    let recovered = provider.management().resolve(request).await.unwrap();
+    assert_eq!(recovered.request_digest, accepted.request_digest);
+    assert_eq!(
+        provider.management().supervisor().request_progress(request),
+        Err(ServiceFailure::RequestRetired)
+    );
+    let registration = provider
+        .management()
+        .supervisor()
+        .discover()
+        .unwrap()
+        .unwrap();
+    assert_eq!(registration.approved_installation(), Some(&approved));
+    assert_eq!(registration.desired_state(), DesiredServerState::Stopped);
+    assert!(registration.staged_installation().is_some());
 }

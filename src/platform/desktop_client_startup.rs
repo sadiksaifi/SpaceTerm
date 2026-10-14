@@ -6,6 +6,8 @@
 use std::{rc::Rc, sync::Arc};
 
 mod native;
+#[cfg(test)]
+pub(crate) use native::pending_ipc_startup;
 pub(crate) use native::production;
 #[cfg(test)]
 pub(crate) use native::protocol::{

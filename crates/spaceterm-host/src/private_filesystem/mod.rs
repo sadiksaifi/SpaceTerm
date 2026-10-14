@@ -29,6 +29,20 @@ use secure_filesystem::{
 use unix_secure_filesystem::UnixSecureFilesystem;
 use zeroize::Zeroizing;
 
+// Storage uses the same atomic no-replace primitive for publishing its own
+// exclusive-created inode. Database descriptors remain owned by storage/VFS.
+pub(crate) fn rename_noreplace_at(
+    directory: &std::fs::File,
+    from: &std::ffi::CStr,
+    to: &std::ffi::CStr,
+) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    use linux_atomic_rename as atomic_rename;
+    #[cfg(target_os = "macos")]
+    use macos_atomic_rename as atomic_rename;
+    atomic_rename::rename_noreplace_at(directory, from, to)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Failure {
     Missing,

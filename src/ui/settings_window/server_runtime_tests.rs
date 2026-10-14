@@ -1,5 +1,9 @@
 use super::*;
 use gpui::TestAppContext;
+
+#[path = "../server_client_runtime/composed/pending_pairing_tests.rs"]
+mod pending_pairing;
+
 use spaceterm_client::{
     api::{ConnectionState, RetryState},
     failure::{ClientFailure, ClientFailureClass},

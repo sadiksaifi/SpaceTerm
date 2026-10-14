@@ -66,6 +66,152 @@ fn entries(path: &Path) -> Vec<OsString> {
     entries
 }
 
+fn native_registration_fixture() -> (
+    tempfile::TempDir,
+    spaceterm_host::account_service::test_support::AccountServiceFixture,
+    spaceterm_host::account_service::RegisteredServer,
+) {
+    use spaceterm_host::{
+        account_service::test_support::AccountServiceFixture,
+        startup::{BuildIdentity, DesiredServerState},
+    };
+    #[cfg(target_os = "macos")]
+    let parent = "/private/tmp";
+    #[cfg(not(target_os = "macos"))]
+    let parent = "/var/tmp";
+    let directory = tempfile::tempdir_in(parent).unwrap();
+    let fixture = AccountServiceFixture::new(directory.path(), BuildIdentity::Development).unwrap();
+    let registration = fixture.initialize(DesiredServerState::Running).unwrap();
+    (directory, fixture, registration)
+}
+
+#[tokio::test]
+async fn restricted_local_renewal_requires_original_pin_route_and_build_registration() {
+    use spaceterm_host::{
+        account_service::test_support::AccountServiceFixture, startup::BuildIdentity,
+    };
+    let (directory, fixture, registration) = native_registration_fixture();
+    let endpoint = registration.endpoint().unwrap();
+    let original = LocalRouteAuthority::new(endpoint.clone()).unwrap();
+    let route = original.description().clone();
+    let other = LocalRouteAuthority::new(
+        PrivateIpcDirectory::open(endpoint.path().parent().unwrap())
+            .unwrap()
+            .endpoint("other")
+            .unwrap(),
+    )
+    .unwrap();
+    let other_route = other.description().clone();
+    let listener = UnixListener::bind(endpoint.path()).unwrap();
+    fs::set_permissions(endpoint.path(), fs::Permissions::from_mode(0o600)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let connector = NativeRouteConnector::new(vec![original, other], None)
+        .unwrap()
+        .with_restricted_local_discovery(crate::NativeClientProvider::from_supervisor(
+            fixture.reopen(),
+        ));
+    let wrong_pin = ServerPin {
+        public_key: [2; 32],
+        ..registration.server_pin()
+    };
+    assert!(matches!(
+        connector
+            .open_restricted_pairing_route(wrong_pin, &route, None)
+            .await,
+        Err(error) if error.class() == ClientFailureClass::PinMismatch
+    ));
+    assert!(matches!(
+        connector
+            .open_restricted_pairing_route(registration.server_pin(), &other_route, None)
+            .await,
+        Err(error) if error.class() == ClientFailureClass::StaleAuthority
+    ));
+    // A missing registration for another build cannot borrow the supplied
+    // static endpoint, even though it has the original route and owning UID.
+    let foreign = AccountServiceFixture::new(directory.path(), BuildIdentity::Preflight).unwrap();
+    let foreign_connector =
+        NativeRouteConnector::new(vec![LocalRouteAuthority::new(endpoint).unwrap()], None)
+            .unwrap()
+            .with_restricted_local_discovery(crate::NativeClientProvider::from_supervisor(
+                foreign.reopen(),
+            ));
+    assert!(matches!(
+        foreign_connector
+            .open_restricted_pairing_route(registration.server_pin(), &route, None)
+            .await,
+        Err(error) if error.class() == ClientFailureClass::Unavailable
+    ));
+    assert!(matches!(
+        listener.accept(),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+}
+
+#[tokio::test]
+async fn restricted_local_renewal_rejects_unsafe_runtime_without_repair_or_ordinary_admission() {
+    let (_directory, fixture, registration) = native_registration_fixture();
+    let endpoint = registration.endpoint().unwrap();
+    let runtime = endpoint.path().parent().unwrap();
+    let authority = LocalRouteAuthority::new(endpoint.clone()).unwrap();
+    let route = authority.description().clone();
+    let listener = UnixListener::bind(endpoint.path()).unwrap();
+    fs::set_permissions(endpoint.path(), fs::Permissions::from_mode(0o600)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let native = crate::NativeClientProvider::from_supervisor(fixture.reopen());
+    let connector = NativeRouteConnector::new(vec![authority], None)
+        .unwrap()
+        .with_restricted_local_discovery(native.clone());
+    fs::set_permissions(runtime, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(matches!(
+        connector
+            .open_restricted_pairing_route(registration.server_pin(), &route, None)
+            .await,
+        Err(error) if error.class() == ClientFailureClass::UnsafeEndpoint
+    ));
+    assert_eq!(fs::metadata(runtime).unwrap().mode() & 0o7777, 0o755);
+    assert!(matches!(
+        listener.accept(),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+
+    // Only the fixture repairs its directory. No invalid admission is cached,
+    // and the read-only renewal does not grant ordinary or enrollment access.
+    fs::set_permissions(runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    let empty = NativeRouteConnector::new(vec![], None)
+        .unwrap()
+        .with_restricted_local_discovery(native);
+    let server = ServerId::new(registration.server_pin().identity);
+    let target = ConnectionTarget::new(
+        registration.server_pin(),
+        DeviceId::new([3; 16]),
+        PairingId::new(server, 1).unwrap(),
+        ClientId::new(server, 1).unwrap(),
+        route.clone(),
+        CredentialReference::new([4; 16]),
+        LocalPairingGeneration::new(1).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        empty.open(&target, ConnectionPurpose::Ordinary).await,
+        Err(error) if error.class() == ClientFailureClass::UnsafeEndpoint
+    ));
+    assert!(matches!(
+        empty.open_pairing_route(registration.server_pin(), &route, None).await,
+        Err(error) if error.class() == ClientFailureClass::UnsafeEndpoint
+    ));
+    assert!(matches!(
+        listener.accept(),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+    let connected = connector
+        .open_restricted_pairing_route(registration.server_pin(), &route, None)
+        .await
+        .unwrap();
+    assert!(connected.peer.local_account_verified);
+    let (_stream, _) = listener.accept().unwrap();
+    connected.sender.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn missing_or_refused_endpoint_is_unavailable_and_never_mutated() {
     let directory = Directory::new();

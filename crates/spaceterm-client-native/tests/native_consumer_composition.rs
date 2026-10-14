@@ -44,7 +44,7 @@ use spaceterm_protocol::{
     pairing_adapter::ReceiptCodec,
     wire::{v1, v2},
 };
-use std::{num::NonZeroU64, sync::Arc, time::Duration};
+use std::{num::NonZeroU64, os::unix::fs::PermissionsExt, sync::Arc, time::Duration};
 
 struct Key(Ed25519KeyPair);
 impl SigningKey for Key {
@@ -222,39 +222,35 @@ async fn controller(directory: &std::path::Path, create: bool) -> Arc<JournalCon
     )
 }
 
-struct ConsumerScenario {
+struct Exercise {
+    kind: NativeConsumerKind,
+    major: u32,
     self_remove: bool,
     offline: Option<DesiredServerState>,
     operation_count: usize,
     restart: bool,
     processes: bool,
     recover_pairing: bool,
+    missing_runtime: bool,
+    confirm_obsolete_token: bool,
 }
-impl Default for ConsumerScenario {
-    fn default() -> Self {
-        Self {
-            self_remove: false,
-            offline: None,
-            operation_count: 1,
-            restart: false,
-            processes: false,
-            recover_pairing: false,
-        }
-    }
-}
-
-async fn exercise(kind: NativeConsumerKind, major: u32, scenario: ConsumerScenario) {
-    let ConsumerScenario {
+async fn exercise(options: Exercise) {
+    let Exercise {
+        kind,
+        major,
         self_remove,
         offline,
         operation_count,
         restart,
         processes,
         recover_pairing,
-    } = scenario;
+        missing_runtime,
+        confirm_obsolete_token,
+    } = options;
     use std::os::unix::fs::DirBuilderExt;
     let root = tempfile::Builder::new()
         .prefix("st-consumer-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir_in("/var/tmp")
         .unwrap();
     let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
@@ -355,16 +351,18 @@ async fn exercise(kind: NativeConsumerKind, major: u32, scenario: ConsumerScenar
         )
         .unwrap();
     let saved = SavedBinding::verified(binding.clone(), streams, proof, &Verifier).unwrap();
-    let directory = root
-        .path()
-        .canonicalize()
-        .unwrap()
-        .join(if kind == NativeConsumerKind::Cli {
-            "cli"
-        } else {
-            "companion"
-        });
+    let journal_root = if processes && offline.is_none() {
+        root.path().canonicalize().unwrap()
+    } else {
+        account.reopen().client_connections_directory()
+    };
+    let directory = journal_root.join(if kind == NativeConsumerKind::Cli {
+        "cli"
+    } else {
+        "companion"
+    });
     std::fs::DirBuilder::new()
+        .recursive(true)
         .mode(0o700)
         .create(&directory)
         .unwrap();
@@ -398,6 +396,165 @@ async fn exercise(kind: NativeConsumerKind, major: u32, scenario: ConsumerScenar
     // The connection uses a physically reopened canonical journal, not a fixture
     // identity or an already authenticated desktop connection.
     let journal = controller(&directory, false).await;
+    if offline.is_some() && processes {
+        drop(journal);
+        let assessed = run_offline_cli_process(root.path(), None).await;
+        assert_eq!(assessed["exit"], 0);
+        let token = assessed["output"]["result"]["token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let obsolete_token = if confirm_obsolete_token {
+            let second = run_offline_cli_process(root.path(), None).await;
+            assert_eq!(second["exit"], 0);
+            let second_token = second["output"]["result"]["token"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            assert_ne!(token, second_token);
+            Some(second_token)
+        } else {
+            None
+        };
+        let other = AccountServiceFixture::new(root.path(), BuildIdentity::Preflight).unwrap();
+        let other_registration = other.initialize(DesiredServerState::Stopped).unwrap();
+        let other_path = other
+            .reopen()
+            .client_connections_directory()
+            .parent()
+            .unwrap()
+            .join("registration");
+        let other_bytes = std::fs::read(&other_path).unwrap();
+        if recover_pairing {
+            let registration_path = account
+                .reopen()
+                .client_connections_directory()
+                .parent()
+                .unwrap()
+                .join("registration");
+            std::fs::remove_file(registration_path).unwrap();
+        }
+        let removed_runtime = if missing_runtime {
+            let endpoint = registration.endpoint().unwrap();
+            let runtime = endpoint.path().parent().unwrap().to_owned();
+            std::fs::remove_dir_all(&runtime).unwrap();
+            assert_eq!(
+                account.reopen().discover().unwrap().unwrap().server_pin(),
+                registration.server_pin()
+            );
+            let provider = NativeClientProvider::from_supervisor(account.reopen());
+            let consumer = NativeConsumer::new(provider.management(), NativeConsumerKind::Cli)
+                .with_credentials(Arc::new(Credentials(device.clone())));
+            assert_eq!(
+                ProtocolManagement::status(&consumer).await,
+                Err(spaceterm_client::management_cli::ManagementFailure::NativeUnavailable)
+            );
+            consumer.shutdown().await.unwrap();
+            Some(runtime)
+        } else {
+            None
+        };
+        if restart {
+            let journal = controller(&directory, false).await;
+            journal
+                .transact(vec![ClientJournalChange::ReserveCredential(
+                    JournalCredentialSlot {
+                        namespace: "dev.spaceterm.other-server".to_owned(),
+                        server: Some(ServerId::new([42; 16])),
+                        reference: CredentialReference::new([42; 16]),
+                        public_key: None,
+                        route_reference: None,
+                        route: None,
+                        ssh_capture: None,
+                        generation: LocalPairingGeneration::new(2).unwrap(),
+                    },
+                )])
+                .await
+                .unwrap();
+        }
+        let confirmed = run_offline_cli_process(root.path(), Some(token)).await;
+        let mut journal = controller(&directory, false).await;
+        if restart {
+            assert_eq!(
+                confirmed["exit"],
+                spaceterm_client::management_cli::ManagementFailure::StaleAssessment.exit_code()
+            );
+            assert_eq!(confirmed["output"]["error"], "stale_assessment");
+            assert_eq!(journal.snapshot().unwrap().bindings().len(), 1);
+            assert!(journal.snapshot().unwrap().revocations().is_empty());
+        } else {
+            assert_eq!(confirmed["exit"], 75);
+            assert_eq!(
+                confirmed["output"]["result"]["local_connection_removed"],
+                true
+            );
+            assert_eq!(confirmed["output"]["result"]["revocation"], "pending");
+            assert!(journal.snapshot().unwrap().bindings().is_empty());
+            assert_eq!(journal.snapshot().unwrap().revocations().len(), 1);
+            if let Some(token) = obsolete_token {
+                let original = journal.snapshot().unwrap().revocations()[0].task.clone();
+                drop(journal);
+                let stale = run_offline_cli_process(root.path(), Some(token)).await;
+                assert_eq!(
+                    stale["exit"],
+                    spaceterm_client::management_cli::ManagementFailure::StaleAssessment
+                        .exit_code()
+                );
+                assert_eq!(stale["output"]["error"], "stale_assessment");
+                let fresh = run_offline_cli_process(root.path(), None).await;
+                assert_eq!(
+                    fresh["exit"],
+                    spaceterm_client::management_cli::ManagementFailure::PairingRequired
+                        .exit_code()
+                );
+                assert_eq!(fresh["output"]["error"], "pairing_required");
+                journal = controller(&directory, false).await;
+                let snapshot = journal.snapshot().unwrap();
+                assert!(snapshot.bindings().is_empty());
+                assert_eq!(snapshot.revocations().len(), 1);
+                assert_eq!(snapshot.revocations()[0].task, original);
+            }
+        }
+        if let Some(runtime) = removed_runtime {
+            use spaceterm_client_native::cli::bindings::{PairingCommandBindings, RevocationState};
+            let original = journal.snapshot().unwrap().revocations()[0]
+                .task
+                .parts()
+                .original
+                .operation();
+            drop(journal);
+            let provider = NativeClientProvider::from_supervisor(account.reopen());
+            let retry = NativeConsumer::new(provider.management(), NativeConsumerKind::Cli)
+                .with_credentials(Arc::new(Credentials(device)));
+            let reports = retry.retry_pending().await.unwrap();
+            assert_eq!(reports.len(), 1);
+            assert_eq!(reports[0].revocation, RevocationState::Pending);
+            let inventory = retry
+                .pairing_runtime()
+                .await
+                .unwrap()
+                .inventory()
+                .await
+                .unwrap();
+            assert!(inventory.saved.is_empty());
+            assert_eq!(inventory.revocations.len(), 1);
+            assert_eq!(
+                inventory.revocations[0].task.parts().original.operation(),
+                original
+            );
+            assert!(
+                !runtime.exists(),
+                "restoration must not recreate runtime storage"
+            );
+            retry.shutdown().await.unwrap();
+        }
+        assert_eq!(std::fs::read(&other_path).unwrap(), other_bytes);
+        assert_eq!(
+            other.reopen().discover().unwrap().unwrap().server_pin(),
+            other_registration.server_pin()
+        );
+        return;
+    }
     if offline.is_some() {
         use spaceterm_client_native::cli::bindings::{PairingCommandBindings, RevocationState};
         let provider = NativeClientProvider::from_supervisor(account.reopen());
@@ -447,6 +604,44 @@ async fn exercise(kind: NativeConsumerKind, major: u32, scenario: ConsumerScenar
             assessment,
             "offline local confirmation retains its original scope across restart",
         );
+        if restart {
+            journal
+                .transact(vec![ClientJournalChange::ReserveCredential(
+                    JournalCredentialSlot {
+                        namespace: "dev.spaceterm.other-server".to_owned(),
+                        server: Some(ServerId::new([42; 16])),
+                        reference: CredentialReference::new([42; 16]),
+                        public_key: None,
+                        route_reference: None,
+                        route: None,
+                        ssh_capture: None,
+                        generation: LocalPairingGeneration::new(2).unwrap(),
+                    },
+                )])
+                .await
+                .unwrap();
+            assert_eq!(
+                consumer
+                    .assess_unpair(DeviceId::new([6; 16]), Some(token))
+                    .await,
+                Err(spaceterm_client::management_cli::ManagementFailure::StaleAssessment),
+                "offline confirmation must retain the original journal revision",
+            );
+            assert_eq!(
+                consumer
+                    .pairing_runtime()
+                    .await
+                    .unwrap()
+                    .inventory()
+                    .await
+                    .unwrap()
+                    .saved
+                    .len(),
+                1
+            );
+            consumer.shutdown().await.unwrap();
+            return;
+        }
         let confirmed = spaceterm_client::management_cli::confirm_exact(
             assessment,
             spaceterm_client::management_cli::ConfirmationReply::new(token),
@@ -622,19 +817,10 @@ async fn exercise(kind: NativeConsumerKind, major: u32, scenario: ConsumerScenar
         return;
     }
     let provider = NativeClientProvider::from_supervisor(account.reopen());
-    let mut consumer = NativeConsumer::restore(
-        provider.management(),
-        kind,
-        journal.clone(),
-        Arc::new(Credentials(device.clone())),
-        NativeRouteConnector::new(
-            vec![LocalRouteAuthority::new(registration.endpoint().unwrap()).unwrap()],
-            None,
-        )
-        .unwrap(),
-    )
-    .await
-    .unwrap();
+    // The registered runtime lives outside the fixed authority directory. Fresh
+    // CLI and companion construction must restore its locally approved endpoint.
+    let mut consumer = NativeConsumer::new(provider.management(), kind)
+        .with_credentials(Arc::new(Credentials(device.clone())));
     let mut original_result = None;
     if kind == NativeConsumerKind::Cli {
         // Native lifecycle comparisons must reuse the saved CLI principal and
@@ -921,18 +1107,37 @@ async fn exercise(kind: NativeConsumerKind, major: u32, scenario: ConsumerScenar
 async fn production_cli_reopens_saved_additional_client_and_executes_authenticated_management_in_both_majors()
  {
     for major in [1, 2] {
-        exercise(NativeConsumerKind::Cli, major, ConsumerScenario::default()).await;
+        exercise(Exercise {
+            kind: NativeConsumerKind::Cli,
+            major,
+            self_remove: false,
+            offline: None,
+            operation_count: 1,
+            restart: false,
+            processes: false,
+            recover_pairing: false,
+            missing_runtime: false,
+            confirm_obsolete_token: false,
+        })
+        .await;
     }
 }
 #[tokio::test]
 async fn production_companion_reopens_saved_additional_client_and_subscribes_over_authenticated_ipc()
  {
     for major in [1, 2] {
-        exercise(
-            NativeConsumerKind::StatusCompanion,
+        exercise(Exercise {
+            kind: NativeConsumerKind::StatusCompanion,
             major,
-            ConsumerScenario::default(),
-        )
+            self_remove: false,
+            offline: None,
+            operation_count: 1,
+            restart: false,
+            processes: false,
+            recover_pairing: false,
+            missing_runtime: false,
+            confirm_obsolete_token: false,
+        })
         .await;
     }
 }
@@ -941,14 +1146,18 @@ async fn production_companion_reopens_saved_additional_client_and_subscribes_ove
 async fn production_cli_self_unpair_closes_ordinary_worker_before_restricted_retry_in_both_majors()
 {
     for major in [1, 2] {
-        exercise(
-            NativeConsumerKind::Cli,
+        exercise(Exercise {
+            kind: NativeConsumerKind::Cli,
             major,
-            ConsumerScenario {
-                self_remove: true,
-                ..Default::default()
-            },
-        )
+            self_remove: true,
+            offline: None,
+            operation_count: 1,
+            restart: false,
+            processes: false,
+            recover_pairing: false,
+            missing_runtime: false,
+            confirm_obsolete_token: false,
+        })
         .await;
     }
 }
@@ -956,14 +1165,18 @@ async fn production_cli_self_unpair_closes_ordinary_worker_before_restricted_ret
 #[tokio::test]
 async fn cli_assessment_survives_consumer_and_journal_restart_without_refreshing_scope() {
     for major in [1, 2] {
-        exercise(
-            NativeConsumerKind::Cli,
+        exercise(Exercise {
+            kind: NativeConsumerKind::Cli,
             major,
-            ConsumerScenario {
-                restart: true,
-                ..Default::default()
-            },
-        )
+            self_remove: false,
+            offline: None,
+            operation_count: 1,
+            restart: true,
+            processes: false,
+            recover_pairing: false,
+            missing_runtime: false,
+            confirm_obsolete_token: false,
+        })
         .await;
     }
 }
@@ -1069,14 +1282,18 @@ async fn cli_assess_and_confirm_work_in_separate_processes() {
             .unwrap();
     } else {
         for major in [1, 2] {
-            exercise(
-                NativeConsumerKind::Cli,
+            exercise(Exercise {
+                kind: NativeConsumerKind::Cli,
                 major,
-                ConsumerScenario {
-                    processes: true,
-                    ..Default::default()
-                },
-            )
+                self_remove: false,
+                offline: None,
+                operation_count: 1,
+                restart: false,
+                processes: true,
+                recover_pairing: false,
+                missing_runtime: false,
+                confirm_obsolete_token: false,
+            })
             .await;
         }
     }
@@ -1086,14 +1303,211 @@ async fn cli_assess_and_confirm_work_in_separate_processes() {
 async fn lost_assess_unpair_reply_recovers_original_operation_over_authenticated_ipc_in_both_majors()
  {
     for major in [1, 2] {
-        exercise(
-            NativeConsumerKind::Cli,
+        exercise(Exercise {
+            kind: NativeConsumerKind::Cli,
             major,
-            ConsumerScenario {
-                recover_pairing: true,
-                ..Default::default()
-            },
+            self_remove: false,
+            offline: None,
+            operation_count: 1,
+            restart: false,
+            processes: false,
+            recover_pairing: true,
+            missing_runtime: false,
+            confirm_obsolete_token: false,
+        })
+        .await;
+    }
+}
+
+async fn run_offline_cli_process(
+    root: &std::path::Path,
+    token: Option<String>,
+) -> serde_json::Value {
+    let root = root.to_owned();
+    let child_root = root.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .arg("--exact")
+            .arg("offline_cli_assess_and_confirm_work_in_separate_processes")
+            .arg("--nocapture")
+            .env("SPACETERM_OFFLINE_TEST_ROOT", child_root);
+        if let Some(token) = token {
+            command.env("SPACETERM_OFFLINE_TEST_TOKEN", token);
+        }
+        command.output().unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "child offline CLI failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&std::fs::read(root.join("offline-cli-result.json")).unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn offline_cli_assess_and_confirm_work_in_separate_processes() {
+    use spaceterm_client::management_cli::{ConfirmationPrompt, ConfirmationReply};
+    use spaceterm_client_native::cli::{
+        CliFailure,
+        arguments::parse,
+        runner::{CliDependencies, CliIo, Dispatch, dispatch},
+    };
+    if let Some(root) = std::env::var_os("SPACETERM_OFFLINE_TEST_ROOT") {
+        struct Io(Vec<u8>);
+        impl CliIo for Io {
+            fn write_stdout(&mut self, bytes: &[u8]) -> Result<(), CliFailure> {
+                self.0.extend_from_slice(bytes);
+                Ok(())
+            }
+            fn write_stderr(&mut self, bytes: &[u8]) -> Result<(), CliFailure> {
+                self.0.extend_from_slice(bytes);
+                Ok(())
+            }
+            fn read_confirmation(
+                &mut self,
+                _: &ConfirmationPrompt,
+            ) -> Result<ConfirmationReply, CliFailure> {
+                panic!("noninteractive CLI must not prompt")
+            }
+        }
+        let root = std::path::PathBuf::from(root).canonicalize().unwrap();
+        let account = AccountServiceFixture::new(&root, BuildIdentity::Development).unwrap();
+        let provider = NativeClientProvider::from_supervisor(account.reopen());
+        let consumer = Arc::new(
+            NativeConsumer::new(provider.management(), NativeConsumerKind::Cli).with_credentials(
+                Arc::new(Credentials(Arc::new(Key(
+                    Ed25519KeyPair::from_seed_unchecked(&[27; 32]).unwrap(),
+                )))),
+            ),
+        );
+        let dependencies = CliDependencies::new(
+            Ok(provider.key()),
+            consumer.clone(),
+            provider.management(),
+            consumer.clone(),
+        );
+        let mut args = vec![
+            "--json".to_owned(),
+            "--non-interactive".to_owned(),
+            "unpair".to_owned(),
+            "--device".to_owned(),
+            "06060606060606060606060606060606".to_owned(),
+        ];
+        if let Ok(token) = std::env::var("SPACETERM_OFFLINE_TEST_TOKEN") {
+            args.extend(["--confirm".to_owned(), token]);
+        } else {
+            args.push("--assess".to_owned());
+        }
+        let invocation = parse(args.into_iter().map(std::ffi::OsString::from)).unwrap();
+        let mut io = Io(Vec::new());
+        let Dispatch::Exit(exit) = dispatch(invocation, &dependencies, &mut io).await else {
+            panic!("client only")
+        };
+        let output: serde_json::Value = serde_json::from_slice(&io.0).unwrap();
+        std::fs::write(
+            root.join("offline-cli-result.json"),
+            serde_json::to_vec(&serde_json::json!({"exit":exit.code(), "output":output})).unwrap(),
         )
+        .unwrap();
+        drop(dependencies);
+        Arc::try_unwrap(consumer)
+            .ok()
+            .unwrap()
+            .shutdown()
+            .await
+            .unwrap();
+    } else {
+        for desired in [DesiredServerState::Stopped, DesiredServerState::Running] {
+            exercise(Exercise {
+                kind: NativeConsumerKind::Cli,
+                major: 2,
+                self_remove: true,
+                offline: Some(desired),
+                operation_count: 1,
+                restart: false,
+                processes: true,
+                recover_pairing: false,
+                missing_runtime: false,
+                confirm_obsolete_token: false,
+            })
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn offline_cli_confirmation_without_registration_preserves_other_builds() {
+    exercise(Exercise {
+        kind: NativeConsumerKind::Cli,
+        major: 2,
+        self_remove: true,
+        offline: Some(DesiredServerState::Stopped),
+        operation_count: 1,
+        restart: false,
+        processes: true,
+        recover_pairing: true,
+        missing_runtime: false,
+        confirm_obsolete_token: false,
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn missing_registration_rejects_changed_offline_cli_confirmation_without_partial_removal() {
+    exercise(Exercise {
+        kind: NativeConsumerKind::Cli,
+        major: 2,
+        self_remove: true,
+        offline: Some(DesiredServerState::Stopped),
+        operation_count: 1,
+        restart: true,
+        processes: true,
+        recover_pairing: true,
+        missing_runtime: false,
+        confirm_obsolete_token: false,
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn offline_cli_confirmation_without_approved_runtime_preserves_other_builds() {
+    for desired in [DesiredServerState::Stopped, DesiredServerState::Running] {
+        exercise(Exercise {
+            kind: NativeConsumerKind::Cli,
+            major: 2,
+            self_remove: true,
+            offline: Some(desired),
+            operation_count: 1,
+            restart: false,
+            processes: true,
+            recover_pairing: false,
+            missing_runtime: true,
+            confirm_obsolete_token: false,
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn offline_cli_confirmation_after_original_pairing_removal_is_stale_and_preserves_revocation()
+{
+    for desired in [DesiredServerState::Stopped, DesiredServerState::Running] {
+        exercise(Exercise {
+            kind: NativeConsumerKind::Cli,
+            major: 2,
+            self_remove: true,
+            offline: Some(desired),
+            operation_count: 1,
+            restart: false,
+            processes: true,
+            recover_pairing: false,
+            missing_runtime: false,
+            confirm_obsolete_token: true,
+        })
         .await;
     }
 }
@@ -1101,28 +1515,52 @@ async fn lost_assess_unpair_reply_recovers_original_operation_over_authenticated
 #[tokio::test]
 async fn offline_cli_self_unpair_removes_stopped_and_unreachable_pairings() {
     for desired in [DesiredServerState::Stopped, DesiredServerState::Running] {
-        exercise(
-            NativeConsumerKind::Cli,
-            2,
-            ConsumerScenario {
-                self_remove: true,
-                offline: Some(desired),
-                ..Default::default()
-            },
-        )
+        exercise(Exercise {
+            kind: NativeConsumerKind::Cli,
+            major: 2,
+            self_remove: true,
+            offline: Some(desired),
+            operation_count: 1,
+            restart: false,
+            processes: false,
+            recover_pairing: false,
+            missing_runtime: false,
+            confirm_obsolete_token: false,
+        })
         .await;
     }
 }
 #[tokio::test]
+async fn offline_cli_self_unpair_rejects_confirmation_when_original_journal_changed() {
+    exercise(Exercise {
+        kind: NativeConsumerKind::Cli,
+        major: 2,
+        self_remove: true,
+        offline: Some(DesiredServerState::Stopped),
+        operation_count: 1,
+        restart: true,
+        processes: false,
+        recover_pairing: false,
+        missing_runtime: false,
+        confirm_obsolete_token: false,
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn cli_protocol_results_release_capacity_after_more_than_128_operations() {
-    exercise(
-        NativeConsumerKind::Cli,
-        2,
-        ConsumerScenario {
-            operation_count: 130,
-            ..Default::default()
-        },
-    )
+    exercise(Exercise {
+        kind: NativeConsumerKind::Cli,
+        major: 2,
+        self_remove: false,
+        offline: None,
+        operation_count: 130,
+        restart: false,
+        processes: false,
+        recover_pairing: false,
+        missing_runtime: false,
+        confirm_obsolete_token: false,
+    })
     .await;
 }
 struct ProvisionCredentials {
@@ -1228,6 +1666,7 @@ async fn deliberate_provisioning_creates_three_server_issued_clients_before_nati
     for major in [1, 2] {
         let root = tempfile::Builder::new()
             .prefix("st-provision-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir_in("/var/tmp")
             .unwrap();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
@@ -1472,10 +1911,24 @@ async fn deliberate_provisioning_creates_three_server_issued_clients_before_nati
                     Payload::Major1(m) => respond!(m, v1, Major1),
                     Payload::Major2(m) => respond!(m, v2, Major2),
                 };
-                transport
+                if transport
                     .send(&codec.encode(&response).unwrap())
                     .await
-                    .unwrap();
+                    .is_err()
+                {
+                    assert!(
+                        matches!(
+                            response,
+                            Payload::Major1(v1::Message {
+                                kind: Some(v1::message::Kind::AcknowledgementConfirmation(_))
+                            }) | Payload::Major2(v2::Message {
+                                kind: Some(v2::message::Kind::AcknowledgementConfirmation(_))
+                            })
+                        ),
+                        "only a redundant acknowledgement may race completed provisioning"
+                    );
+                    break;
+                }
             }
             listener.close().unwrap();
             observed
@@ -1485,6 +1938,14 @@ async fn deliberate_provisioning_creates_three_server_issued_clients_before_nati
             .unwrap()
             .with_credentials(credentials.clone());
         let cli = consumer.provision_consumers(origin.clone()).await.unwrap();
+        let origin_state = journal.snapshot().unwrap();
+        let header = origin_state
+            .stream(streams_for(original_client).parts().ordinary)
+            .unwrap();
+        assert_eq!(
+            header.confirmed_prefix, header.durable_prefix,
+            "provisioning must durably confirm every originating operation before disconnect"
+        );
         let observed = served.await.unwrap();
         assert_eq!(observed.len(), 3);
         assert_eq!(cli, observed[0]);
@@ -1571,6 +2032,7 @@ async fn pair_enroll_requires_fingerprint_confirmation_before_native_credentials
     }
     let root = tempfile::Builder::new()
         .prefix("st-provision-consent-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir_in("/var/tmp")
         .unwrap();
     let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();

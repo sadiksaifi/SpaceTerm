@@ -1,6 +1,6 @@
 //! Enrollment and self-revocation reachability share the native journal's exact
-//! captured route. This connector has no registry, service manager, bootstrap,
-//! enrollment authorization or credential-loading capability.
+//! captured route. Restricted IPC attempts reconsult native registration without
+//! ordinary authentication, service mutation, bootstrap or credential loading.
 
 use crate::route::NativeRouteConnector;
 use spaceterm_client::{
@@ -31,6 +31,10 @@ use zeroize::Zeroizing;
 pub struct NativePairingConnector {
     journal: Arc<dyn ClientJournal>,
     routes: Arc<NativeRouteConnector>,
+}
+enum PairingRouteUse<'a> {
+    Enrollment(Option<&'a CredentialUse>),
+    Restricted,
 }
 impl NativePairingConnector {
     /// Supply the same journal controller used by enrollment and pending work.
@@ -81,7 +85,7 @@ impl NativePairingConnector {
         pin: ServerPin,
         reference: CredentialReference,
         route: &RouteDescription,
-        foreground: Option<&CredentialUse>,
+        purpose: PairingRouteUse<'_>,
     ) -> Result<Box<dyn PairingTransport>, PairingFailure> {
         let slot = state
             .pairing()
@@ -97,8 +101,8 @@ impl NativePairingConnector {
         }
         // Every native dial already owns its deadline and exact cleanup. Do not
         // drop that cleanup future merely because an outer deadline expired.
-        let route = match foreground {
-            Some(authorization) => {
+        let route = match purpose {
+            PairingRouteUse::Enrollment(Some(authorization)) => {
                 self.routes
                     .open_foreground_pairing_route(
                         pin,
@@ -108,9 +112,14 @@ impl NativePairingConnector {
                     )
                     .await
             }
-            None => {
+            PairingRouteUse::Enrollment(None) => {
                 self.routes
                     .open_pairing_route(pin, route, slot.ssh_capture.as_ref())
+                    .await
+            }
+            PairingRouteUse::Restricted => {
+                self.routes
+                    .open_restricted_pairing_route(pin, route, slot.ssh_capture.as_ref())
                     .await
             }
         }
@@ -190,8 +199,14 @@ impl NativePairingConnector {
                 return Err(PairingFailure::AuthorizationDenied);
             }
         }
-        self.connect(&state, pin, slot.reference, &concrete, foreground)
-            .await
+        self.connect(
+            &state,
+            pin,
+            slot.reference,
+            &concrete,
+            PairingRouteUse::Enrollment(foreground),
+        )
+        .await
     }
 }
 impl EnrollmentConnector for NativePairingConnector {
@@ -243,7 +258,7 @@ impl RestrictedConnector for NativePairingConnector {
                 target.pin(),
                 original.credential(),
                 target.route(),
-                None,
+                PairingRouteUse::Restricted,
             )
             .await
         })
