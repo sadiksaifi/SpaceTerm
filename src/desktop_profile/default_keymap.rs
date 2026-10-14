@@ -60,7 +60,10 @@ pub(crate) fn profile(
             Command::PreviousWorktree,
             Some(DefaultBinding::new("alt-cmd-[", &[])),
         ),
-        (Command::CloseWorkspace, None),
+        (
+            Command::CloseWorkspace,
+            Some(DefaultBinding::new("cmd-w", &[])),
+        ),
         (
             Command::ActivateWorkspace1,
             Some(DefaultBinding::new("ctrl-1", &[])),
@@ -148,7 +151,7 @@ pub(crate) fn profile(
         ),
         (Command::MoveTabRight, None),
         (Command::MoveTabLeft, None),
-        (Command::ClosePane, Some(DefaultBinding::new("cmd-w", &[]))),
+        (Command::ClosePane, None),
         (Command::SplitRight, Some(DefaultBinding::new("cmd-d", &[]))),
         (
             Command::SplitDown,

@@ -244,13 +244,15 @@ fn desktop_server_kill_uses_close_workspace_command_and_exact_confirmation(
 ) {
     let (manager, runtime, cx) = harness(cx);
     servers(&runtime, &[A]);
-    publish(&replica(A), 1, &runtime, cx);
+    let mut workspace = replica(A);
+    workspace.org.add_tab(1, 2, 2, None);
+    publish(&workspace, 1, &runtime, cx);
     cx.update(|window, cx| {
         window.activate_window();
         manager.update(cx, |manager, cx| manager.focus(window, cx));
     });
     cx.run_until_parked();
-    cx.update(|window, cx| window.dispatch_action(Box::new(crate::ui::CloseWorkspace), cx));
+    cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
     assert_eq!(
         runtime.begun(),
@@ -297,18 +299,49 @@ fn desktop_server_kill_uses_close_workspace_command_and_exact_confirmation(
         cx.debug_bounds("modal-action-close-confirmation-cancel")
             .is_some()
     );
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.confirm_server_close(assessment, window, cx)
-        })
-    });
+    let cancel = cx
+        .debug_bounds("modal-action-close-confirmation-cancel")
+        .unwrap()
+        .center();
+    cx.simulate_click(cancel, gpui::Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(runtime.begun().len(), 1, "Cancel must not submit Kill");
+    assert!(manager.read_with(cx, |manager, _| {
+        manager.server.as_ref().unwrap().confirmation.is_none()
+    }));
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
+    cx.simulate_keystrokes("cmd-w");
+    cx.run_until_parked();
+    assert_eq!(runtime.begun()[1], runtime.begun()[0]);
+    let op = operation(server(A), 2);
+    let confirmed_assessment = CloseAssessment::new(
+        AssessmentRef {
+            operation: op,
+            digest: assessment.reference().digest,
+        },
+        assessment.epoch(),
+        assessment.summary(),
+    )
+    .unwrap();
+    runtime.provider.set_outcome(
+        op,
+        Arc::new(Outcome::Assessment(Box::new(confirmed_assessment))),
+    );
+    runtime.provider.finish(1, Ok(Some(op)));
+    cx.run_until_parked();
+    let confirm = cx
+        .debug_bounds("modal-action-close-confirmation-confirm")
+        .unwrap()
+        .center();
+    cx.simulate_click(confirm, gpui::Modifiers::none());
+    cx.run_until_parked();
     assert_eq!(
-        runtime.begun()[1],
+        runtime.begun()[2],
         DesktopRequest::Shared {
             server: server(A),
             command: Command::KillWorkspaceConfirmed {
                 workspace: ws(A, 1),
-                assessment: assessment.reference()
+                assessment: confirmed_assessment.reference()
             }
         }
     );
@@ -1603,4 +1636,51 @@ fn desktop_server_sidebar_keyboard_navigation_reveals_rows_in_a_tall_section(
         row.top() >= list.top() && row.bottom() <= list.bottom(),
         "the cursor row {row:?} is inside the list {list:?}"
     );
+}
+
+pub(in crate::ui) fn stopped_pane_settings(
+    cx: &mut TestAppContext,
+) -> gpui::WindowHandle<crate::ui::settings_window::SettingsWindow> {
+    use crate::ui::{
+        pane_presentation::{OfflineCause, OfflinePrior, PanePresentation, PanePresentationAction},
+        server_desktop_contracts::PaneAction,
+    };
+    let (manager, runtime, cx) = harness(cx);
+    servers(&runtime, &[A, B]);
+    let replica = replica(B);
+    let pane = replica.org.snapshot().state().panes[0].id;
+    publish(&replica, 1, &runtime, cx);
+    let mut stopped = frame(&replica, ReplicaStatus::Ready);
+    stopped.connection = ConnectionState::Stopped;
+    runtime.provider.set_frame(Arc::new(stopped));
+    runtime.notifier.frame_changed(server(B));
+    cx.run_until_parked();
+    let presentation = PanePresentation::Offline {
+        prior: OfflinePrior::Frozen,
+        cause: OfflineCause::Stopped(DisplayName::reported("Remote")),
+    };
+    assert!(presentation.offers_action(PanePresentationAction::OpenServerSettings, true));
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.server_tab_event(
+                ServerTabManagerEvent::PaneAction {
+                    pane,
+                    action: PaneAction::OpenServerSettings,
+                },
+                window,
+                cx,
+            )
+        })
+    });
+    cx.run_until_parked();
+    assert!(
+        runtime.begun().is_empty(),
+        "opening Settings must not connect, Start, or enroll"
+    );
+    cx.update(|_, cx| {
+        cx.windows()
+            .into_iter()
+            .find_map(|window| window.downcast::<crate::ui::settings_window::SettingsWindow>())
+            .expect("Pane recovery must open Settings")
+    })
 }
