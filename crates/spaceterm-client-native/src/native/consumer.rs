@@ -404,6 +404,34 @@ impl NativeConsumer {
         Ok(self.owner().await?.pairing.clone())
     }
 }
+impl super::runtime::RuntimeClientIdentity for NativeConsumer {
+    fn access<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+    ) -> spaceterm_host::account_service::ServiceFuture<'a, super::runtime::RuntimeClientAccess>
+    {
+        Box::pin(async move {
+            use spaceterm_host::account_service::ServiceFailure;
+            let owner = self.owner().await.map_err(|failure| match failure {
+                ManagementFailure::PairingRequired => ServiceFailure::PairingRequired,
+                ManagementFailure::StorageLocked => ServiceFailure::StorageLocked,
+                ManagementFailure::UnsafeNativeState => ServiceFailure::UnsafeStorage,
+                ManagementFailure::AuthorizationDenied => ServiceFailure::AuthorizationDenied,
+                ManagementFailure::LimitExceeded => ServiceFailure::LimitExceeded,
+                ManagementFailure::Indeterminate => ServiceFailure::Indeterminate,
+                _ => ServiceFailure::StorageUnavailable,
+            })?;
+            super::runtime::RuntimeClientIdentity::access(
+                &super::runtime::NativeRuntimeIdentity::from_journal(
+                    owner.pairing.journal().clone(),
+                    self.credentials.clone(),
+                ),
+                registration,
+            )
+            .await
+        })
+    }
+}
 impl OpenedConsumer {
     fn backend(&self) -> Result<impl StatusBackend + use<>, ManagementFailure> {
         Ok(self
