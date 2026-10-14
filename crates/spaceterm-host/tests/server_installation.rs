@@ -3555,7 +3555,7 @@ mod account_installation {
         use spaceterm_host::bootstrap::setup::{
             AccountBootstrapSetup, BootstrapAccountRegistration,
         };
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
         let digest = artifact.artifact_sha256();
@@ -3584,7 +3584,7 @@ mod account_installation {
     #[tokio::test]
     async fn bootstrap_lost_remote_reply_resolves_original_request_after_restart() {
         use spaceterm_host::bootstrap::setup::AccountBootstrapSetup;
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
         let digest = artifact.artifact_sha256();
@@ -3614,7 +3614,7 @@ mod account_installation {
         use spaceterm_host::bootstrap::setup::{
             AccountBootstrapSetup, BootstrapAccountRegistration,
         };
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
         let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
@@ -3661,7 +3661,7 @@ mod account_installation {
             account_service::{ServiceFailure, ServicePhase},
             bootstrap::setup::AccountBootstrapSetup,
         };
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
         let digest = artifact.artifact_sha256();
@@ -3695,7 +3695,7 @@ mod account_installation {
         use spaceterm_host::{
             account_service::ServiceFailure, bootstrap::setup::AccountBootstrapSetup,
         };
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
         let digest = artifact.artifact_sha256();

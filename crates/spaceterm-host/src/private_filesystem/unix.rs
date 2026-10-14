@@ -1,3 +1,5 @@
+use sha2::{Digest as _, Sha256};
+
 // Share the desktop engine without maintaining a second file transaction implementation.
 include!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -525,7 +527,7 @@ pub(super) fn begin_publication(
     }
     let directory = directory(handle)?;
     verify_directory_entry(&directory)?;
-    let mut phase = mutation_record(1, name, Sha256::digest(bytes).into())?;
+    let mut phase = mutation_record(1, name, fingerprint(bytes))?;
     phase[4] = 2;
     let guard = begin_mutation(&directory.file, OsStr::new(MUTATION_NAME), phase)?;
     let mut payload = zeroize::Zeroizing::new(Vec::new());
@@ -894,7 +896,7 @@ pub(super) fn reconcile_retained_publication(
             return Err(super::Failure::Indeterminate);
         }
         let bytes = &payload[PROPOSAL_HEADER + name_bytes..];
-        if phase[56..88] != Sha256::digest(bytes)[..] {
+        if phase[56..88] != fingerprint(bytes) {
             return Err(super::Failure::Indeterminate);
         }
         let already_published = current
@@ -917,7 +919,7 @@ pub(super) fn reconcile_retained_publication(
         Some(bytes) => bytes,
         None => {
             let current = current.as_ref().ok_or(super::Failure::Indeterminate)?;
-            if phase[56..88] != Sha256::digest(&current.bytes)[..] {
+            if phase[56..88] != fingerprint(&current.bytes) {
                 return Err(super::Failure::Indeterminate);
             }
             current.bytes.as_slice()
