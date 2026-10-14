@@ -1496,6 +1496,22 @@ async fn near_ceiling_journal_reserves_nonempty_scope_and_original_outcome_befor
                 generation: spaceterm_core::authority::SessionGeneration::new(1),
             })
             .collect();
+        // Bind the original nonempty scope while admission is still available.
+        // Later requests must not consume capacity already owed to its outcome.
+        let request = supervisor.allocate_request().unwrap();
+        let action = supervisor
+            .assess(
+                request,
+                if activate {
+                    ServiceAction::Activate(installation(2).installation)
+                } else {
+                    ServiceAction::Stop
+                },
+            )
+            .await
+            .unwrap()
+            .confirm()
+            .unwrap();
         // Retain exact nonempty scopes until another assessment no longer fits.
         for _ in 0..32 {
             let next = match supervisor.allocate_request() {
@@ -1532,22 +1548,7 @@ async fn near_ceiling_journal_reserves_nonempty_scope_and_original_outcome_befor
                 .len()
                 > 240 * 1024
         );
-        // Unsubmitted IDs may be retired under pressure. Capture this original
-        // confirmation after pressure, then test its reserved completion budget.
-        let request = supervisor.allocate_request().unwrap();
-        let action = supervisor
-            .assess(
-                request,
-                if activate {
-                    ServiceAction::Activate(installation(2).installation)
-                } else {
-                    ServiceAction::Stop
-                },
-            )
-            .await
-            .unwrap()
-            .confirm()
-            .unwrap();
+        assert!(fixture.manager.effects.lock().unwrap().is_empty());
         let result = if activate {
             supervisor.activate(action).await
         } else {

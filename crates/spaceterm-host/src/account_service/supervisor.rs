@@ -1320,7 +1320,7 @@ impl ServiceSupervisor {
                     registration.validate(key).map_err(|_| Failure::Unsafe)
                 },
             );
-            if registration_recovery.is_err() && self.reconcile_initial_creation(request).is_err() {
+            if registration_recovery.is_err() {
                 self.reconcile_owner_archive(request)?;
             }
         }

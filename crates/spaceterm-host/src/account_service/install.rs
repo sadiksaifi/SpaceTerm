@@ -403,44 +403,29 @@ impl ServiceSupervisor {
         record.phase = phase;
         self.write_install(request, record)
     }
-    pub(super) fn reconcile_initial_creation(
-        &self,
-        request: NativeRequestId,
-    ) -> Result<(), ServiceFailure> {
+    fn reconcile_initial_creation(&self, original: &InstallRecord) -> Result<(), ServiceFailure> {
         use crate::private_filesystem::{Directory, Failure};
-        let directory =
-            Directory::open_for_recovery(&self.anchor)?.ok_or(ServiceFailure::Missing)?;
-        let snapshot = directory
-            .read_for_recovery("requests", super::supervisor::JOURNAL_LIMIT)?
-            .ok_or(ServiceFailure::UnknownRequest)?;
-        let journal: super::supervisor::Journal =
-            super::supervisor::decode(&snapshot.bytes, super::supervisor::JOURNAL_LIMIT)?;
-        journal.validate(self.key)?;
-        let index = journal.reservation(request)?;
-        let original = journal.reservations[index]
-            .install
-            .as_ref()
-            .ok_or(ServiceFailure::Indeterminate)?;
         if !original.new_organization || !original.pending() || original.reused {
             return Err(ServiceFailure::RequestConflict);
         }
-        let snapshot = directory
-            .read_for_recovery("registration", super::registration::REGISTRATION_LIMIT)?
-            .ok_or(ServiceFailure::Missing)?;
-        let registration: super::registration::Registration =
-            super::supervisor::decode(&snapshot.bytes, super::registration::REGISTRATION_LIMIT)?;
-        registration.validate(self.key)?;
+        let Some((_, _, registration)) = self.read_registration()? else {
+            // Acceptance can precede registration and every organization effect.
+            return Ok(());
+        };
+        // Creation records share the registered data directory with identity
+        // custody, not the account anchor holding requests and registration.
+        match Directory::open(&registration.data) {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => return Err(ServiceFailure::Missing),
+            Err(Failure::Indeterminate) => {}
+            Err(error) => return Err(error.into()),
+        }
         let binding = creation_binding(
             original.digest,
             registration.server,
             registration.public_key,
         );
-        crate::storage::InitialCreation::reconcile(&self.anchor, binding).map_err(|error| {
-            match error {
-                Failure::Indeterminate => ServiceFailure::Indeterminate,
-                other => other.into(),
-            }
-        })
+        crate::storage::InitialCreation::reconcile(&registration.data, binding).map_err(Into::into)
     }
 
     fn initialize_organization(
@@ -658,6 +643,11 @@ impl ServiceSupervisor {
         };
         if record.phase == ServicePhase::Completed {
             return Ok(record.progress(request));
+        }
+        if record.new_organization && !record.reused {
+            lease.verify()?;
+            self.reconcile_initial_creation(&record)?;
+            lease.verify()?;
         }
         if record.stage_basis.is_some() {
             return self.run_stage_install(request, record, artifact, &lease);
