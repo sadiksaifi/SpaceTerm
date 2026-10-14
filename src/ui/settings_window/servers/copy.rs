@@ -271,7 +271,7 @@ pub(super) fn update_confirmation(server: &ServerSummary, version: &str) -> Conf
     if server.status == ServerStatus::Stopped {
         return Confirmation {
             id: "settings-server-update",
-            title: format!("Update {name} to version {version}?").into(),
+            title: format!("Update {name} to Version {version}?").into(),
             message: format!("{name} is stopped and stays stopped after the update.").into(),
             detail: Some(
                 "Its identity, paired devices, and saved Workspaces, Tabs, and Panes remain."
@@ -283,7 +283,7 @@ pub(super) fn update_confirmation(server: &ServerSummary, version: &str) -> Conf
     }
     Confirmation {
         id: "settings-server-update",
-        title: format!("Update {name} to version {version}?").into(),
+        title: format!("Update {name} to Version {version}?").into(),
         message: format!(
             "{name} restarts to finish the update. Every Terminal Session on {name} ends for every client."
         )
@@ -318,7 +318,7 @@ pub(super) fn unpair_confirmation(server: &ServerSummary) -> Confirmation {
     let name = &server.name;
     Confirmation {
         id: "settings-server-unpair",
-        title: format!("Unpair this device from {name}?").into(),
+        title: format!("Unpair This Device from {name}?").into(),
         message: format!(
             "This device stops using {name} now. {name}'s Workspaces leave this device's windows, and {name} leaves this list."
         )
@@ -341,7 +341,7 @@ pub(super) fn enable_remote_access_confirmation(
     let name = &server.name;
     Confirmation {
         id: "settings-server-remote-access-enable",
-        title: format!("Allow remote connections to {name}?").into(),
+        title: format!("Allow Remote Connections to {name}?").into(),
         message: format!(
             "{name} accepts SpaceTerm connections over the network on {} ({}). Paired devices can then connect without SSH.",
             scope.label, scope.addresses
@@ -407,7 +407,7 @@ pub(super) fn disable_remote_access_confirmation(server: &ServerSummary) -> Conf
     };
     Confirmation {
         id: "settings-server-remote-access-disable",
-        title: format!("Turn off remote connections to {name}?").into(),
+        title: format!("Turn Off Remote Connections to {name}?").into(),
         message: message.into(),
         detail: Some(detail.into()),
         confirm: "Turn Off",

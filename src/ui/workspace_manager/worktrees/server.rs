@@ -1364,20 +1364,22 @@ fn removal_message(assessment: &GitAssessmentPage, organization: &OrganizationSn
         message.push(match workspaces.len() {
             1 => format!("Closes {tabs} in {names} for every client."),
             count => format!(
-                "Closes {tabs} in {}: {names}, for every client.",
+                "Closes {tabs} in {} for every client: {names}.",
                 plural(count as u64, "Workspace")
             ),
         });
     }
     if !assessment.panes.is_empty() {
-        message.push(format!(
-            "Affects {}. Any live or starting Terminal Sessions in them end.",
-            plural(assessment.panes.len() as u64, "Pane")
-        ));
+        message.push(match assessment.panes.len() {
+            1 => "The Terminal Session in 1 Pane ends. Any command running in it stops.".to_owned(),
+            panes => format!(
+                "The Terminal Sessions in {panes} Panes end. Any commands running in them stop."
+            ),
+        });
     }
     for fallback in assessment.fallbacks.iter().take(MAXIMUM_LISTED_WORKSPACES) {
         message.push(format!(
-            "{} falls back to {}.",
+            "{} gets a new Tab in {}.",
             name(fallback.workspace).unwrap_or_else(|| "A Workspace".to_owned()),
             sanitize_for_display(
                 &String::from_utf8_lossy(fallback.directory.bytes()),
@@ -1391,9 +1393,9 @@ fn removal_message(assessment: &GitAssessmentPage, organization: &OrganizationSn
         .saturating_sub(MAXIMUM_LISTED_WORKSPACES)
     {
         0 => {}
-        1 => message.push("1 more Workspace falls back to another directory.".to_owned()),
+        1 => message.push("1 more Workspace gets a new Tab in another directory.".to_owned()),
         more => message.push(format!(
-            "{more} more Workspaces fall back to other directories."
+            "{more} more Workspaces each get a new Tab in another directory."
         )),
     }
     message.push("The branch and its commits stay in the repository.".to_owned());

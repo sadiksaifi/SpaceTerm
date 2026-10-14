@@ -53,7 +53,7 @@ impl PaneRepairStatus {
         match self {
             Self::Choosing => "Choose Directory",
             Self::Pending => "Checking directory…",
-            Self::Unresolved => "Resolving the original directory repair…",
+            Self::Unresolved => "Checking the result of the last directory change…",
             Self::StillUnavailable => "Still unavailable.",
             Self::Conflict => "The Pane directory changed. Choose Directory again.",
             Self::Cancelled => "Directory repair cancelled.",

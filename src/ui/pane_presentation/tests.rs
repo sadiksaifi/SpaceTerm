@@ -1244,10 +1244,10 @@ fn directory_unavailable_screen_shows_and_announces_the_repair_status() {
     );
 
     let failed = screen(Some(PaneRepairStatus::StillUnavailable));
-    assert!(failed.detail.starts_with("Still unavailable. "));
+    assert!(failed.detail.starts_with("Checked again. "));
     assert!(retry(&failed));
     assert_eq!(
         failed.announcement.as_ref().map(AsRef::as_ref),
-        Some("Directory unavailable. Still unavailable.")
+        Some("Directory still unavailable.")
     );
 }

@@ -447,7 +447,7 @@ fn device_confirmation(
     let name = display_name(&server.name, "Server");
     let device_name = display_name(&device.name, "Unnamed device");
     let subject = if this {
-        "this device"
+        "This Device"
     } else {
         device_name.as_ref()
     };

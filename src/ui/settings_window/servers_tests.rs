@@ -1580,7 +1580,7 @@ fn remote_access_is_off_by_default_and_turning_it_on_names_the_server_and_scope(
     );
 
     let confirmation = copy::enable_remote_access_confirmation(&local(), &scopes()[1]);
-    assert_eq!(confirmation.title, "Allow remote connections to Studio?");
+    assert_eq!(confirmation.title, "Allow Remote Connections to Studio?");
     assert_eq!(
         confirmation.message,
         "Studio accepts SpaceTerm connections over the network on Tailnet (100.64.0.20). Paired devices can then connect without SSH."

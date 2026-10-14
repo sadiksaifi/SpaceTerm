@@ -215,7 +215,7 @@ fn this_and_last_device_removal_explain_local_detachment_without_stopping_sessio
     server.unpair_assessment = Some(assessment(&server, target.clone(), "last-device"));
     fixture.publish(snapshot(vec![server.clone()]));
     let tree = A11yTree::read(fixture.cx);
-    assert!(tree.find_text("Unpair this device from Studio?").is_some());
+    assert!(tree.find_text("Unpair This Device from Studio?").is_some());
     assert!(tree.find_text("This device stops using Studio now. Studio's Workspaces leave this device's windows, and its saved connection is removed. Studio and its Terminal Sessions keep running. This is the server's last paired device. Pair a device again before using the server.").is_some());
     fixture.click("modal-action-settings-paired-device-unpair-confirm");
     assert!(

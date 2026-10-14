@@ -737,7 +737,14 @@ impl Screen {
                     }
                 }
             }
-            PaneRepairStatus::StillUnavailable | PaneRepairStatus::Conflict => {
+            PaneRepairStatus::StillUnavailable => {
+                // The title already says the directory is unavailable, so the result says only
+                // that a check ran and changed nothing.
+                self.detail = format!("Checked again. {}", self.detail).into();
+                self.announcement = Some("Directory still unavailable.".into());
+                return self;
+            }
+            PaneRepairStatus::Conflict => {
                 self.detail = format!("{message} {}", self.detail).into();
             }
             PaneRepairStatus::Choosing

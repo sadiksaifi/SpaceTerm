@@ -288,11 +288,16 @@ fn server_worktree_removal_displays_every_page_without_local_holder_reduction(
         vec![ws(A, 1), ws(A, 2)]
     );
     let message = removal_message(&assessment, &organization().org.snapshot());
-    assert!(message.contains("Closes 2 Tabs in 2 Workspaces: work and work, for every client."));
+    assert!(message.contains("Closes 2 Tabs in 2 Workspaces for every client: work and work."));
     assert!(
         !message.contains("Tab 2") && !message.contains("Pane 2"),
         "the confirmation names Workspaces instead of listing local IDs: {message}"
     );
+    assert!(
+        message
+            .contains("The Terminal Sessions in 2 Panes end. Any commands running in them stop.")
+    );
+    assert!(message.contains("work gets a new Tab in /server-only/main."));
     assert!(message.contains("uncommitted changes"));
     assert!(message.contains("submodule checkouts"));
     assert!(message.contains("for every client"));
