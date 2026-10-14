@@ -320,7 +320,7 @@ pub fn classify_native(failure: NativeFailure) -> ManagementFailure {
     }
 }
 
-pub const CLI_VERSION: &str = "spaceterm-cli";
+pub const CLI_VERSION: &str = concat!("spaceterm-cli ", env!("SPACETERM_CLI_VERSION"));
 
 /// Uses the host's compiled identity and independently resolved account.
 /// Environment values and command-line flags cannot choose another registration.
