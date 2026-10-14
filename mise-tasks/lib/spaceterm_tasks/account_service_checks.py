@@ -86,7 +86,10 @@ def require_nonempty(output):
 
 def test_gate(name):
     environment = signing_environment(os.environ)
-    environment["CARGO_BUILD_JOBS"] = "4"
+    if name == "startup":
+        environment.setdefault("CARGO_BUILD_JOBS", "4")
+    else:
+        environment["CARGO_BUILD_JOBS"] = "4"
     if name == "startup":
         # Compile the fixture dependency graph before the bounded test runs.
         # A cold build is not evidence that runtime startup exceeded its bound.

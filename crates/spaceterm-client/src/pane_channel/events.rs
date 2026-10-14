@@ -313,7 +313,8 @@ impl PaneChannel {
         )?;
         if !request.fence().is_current(&current)
             || !permit.fence.is_current(&current)
-            || request.id().get() <= state.native_high_water
+            || (correlation.is_none() && request.id().get() <= state.native_high_water)
+            || state.native.contains_key(&request.id().get())
         {
             return Err(stale());
         }
@@ -326,6 +327,9 @@ impl PaneChannel {
                 || !matches!(pending.kind, effects::PendingEffectKind::PasteWrite)
                 || pending.correlation != correlation
                 || request.fence() != correlation.fence()
+                || request
+                    .runtime_request()
+                    .is_some_and(|origin| origin.get() != correlation.request())
                 || Instant::now() >= pending.expires
             {
                 return Err(stale());
@@ -389,7 +393,17 @@ impl PaneChannel {
         let deadline = timing
             .expires_after
             .map(|duration| now.checked_add(duration).ok_or_else(invalid_peer))
-            .transpose()?;
+            .transpose()?
+            .map(|deadline| {
+                correlation
+                    .and_then(|origin| {
+                        state
+                            .effects
+                            .get(&origin.request())
+                            .map(|pending| pending.expires)
+                    })
+                    .map_or(deadline, |original| deadline.min(original))
+            });
         let text_bytes = match request.kind() {
             NativeRequestKind::ClipboardWrite(text)
             | NativeRequestKind::UnsafePaste { text, .. } => text.as_str().len(),
@@ -414,7 +428,7 @@ impl PaneChannel {
             permit: captured,
             _charge: charge,
         }));
-        state.native_high_water = request.id().get();
+        state.native_high_water = state.native_high_water.max(request.id().get());
         state.native.insert(
             request.id().get(),
             PendingNative {
@@ -483,7 +497,8 @@ impl PaneChannel {
                     .permit
                     .native
                     .is_none_or(|guard| !guard.allows(&self.inner))
-                || NativeCompletion::new(&pending.request, completion.kind().clone()).is_err()
+                || !NativeCompletion::new(&pending.request, completion.kind().clone())
+                    .is_ok_and(|expected| expected == completion)
             {
                 return Err(stale());
             }

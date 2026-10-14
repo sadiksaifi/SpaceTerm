@@ -149,8 +149,25 @@ pub struct PaneChannelState {
     pub facts: PaneContextFacts,
     pub content: Option<ContentBase>,
 }
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct PaneAuthority {
+    server: ServerId,
+    pairing: spaceterm_core::identity::PairingId,
+    client: spaceterm_core::identity::ClientId,
+    incarnation: Option<spaceterm_core::pairing::LocalPairingGeneration>,
+}
+impl From<ConnectedInfo> for PaneAuthority {
+    fn from(info: ConnectedInfo) -> Self {
+        Self {
+            server: info.server,
+            pairing: info.pairing,
+            client: info.client,
+            incarnation: None,
+        }
+    }
+}
 struct ChannelInner {
-    authority: ConnectedInfo,
+    authority: PaneAuthority,
     pane: PaneId,
     tab: TabId,
     lease: Weak<LeaseInner>,
@@ -194,6 +211,10 @@ struct ServerState {
     transfers: Arc<Semaphore>,
     requests: Arc<AtomicU64>,
 }
+struct RetainedServer {
+    authority: PaneAuthority,
+    snapshot: Arc<ReplicaSnapshot>,
+}
 struct Shared {
     admission: Mutex<Option<crate::journal::PaneJournalAdmission>>,
     peer: Arc<dyn PaneConnectionPort>,
@@ -204,20 +225,41 @@ struct Shared {
     // channels without retaining comparison entries for deleted Panes.
     context_high_water: AtomicU64,
     servers: Mutex<BTreeMap<ServerId, ServerState>>,
+    retained: Mutex<BTreeMap<ServerId, RetainedServer>>,
     leases: Mutex<BTreeMap<(WorkspaceId, AttachmentIncarnation), Weak<LeaseInner>>>,
 }
 impl Shared {
-    fn admitted(&self, info: ConnectedInfo) -> bool {
-        self.admission
-            .lock()
-            .is_ok_and(|gate| gate.as_ref().is_none_or(|gate| gate.allows(info)))
+    fn admitted_identity(&self, authority: PaneAuthority) -> bool {
+        self.admission.lock().is_ok_and(|gate| {
+            gate.as_ref().is_none_or(|gate| {
+                gate.allows_identity(
+                    authority.server,
+                    authority.pairing,
+                    authority.client,
+                    authority.incarnation,
+                )
+            })
+        })
     }
-    fn publication_admitted(&self, info: ConnectedInfo) -> bool {
+    fn admitted_binding(&self, binding: &crate::api::PairedServerBinding) -> bool {
         let Ok(gate) = self.admission.lock().map(|gate| gate.clone()) else {
             return false;
         };
         gate.as_ref()
-            .is_none_or(|gate| gate.allows_publication(info))
+            .is_none_or(|gate| gate.allows_binding(binding))
+    }
+    fn publication_admitted(&self, authority: PaneAuthority) -> bool {
+        let Ok(gate) = self.admission.lock().map(|gate| gate.clone()) else {
+            return false;
+        };
+        gate.as_ref().is_none_or(|gate| {
+            gate.allows_identity_publication(
+                authority.server,
+                authority.pairing,
+                authority.client,
+                authority.incarnation,
+            )
+        })
     }
     fn next_context(&self) -> Result<ContextGeneration, ClientFailure> {
         self.context_high_water
@@ -250,6 +292,7 @@ impl PaneChannels {
                 slots: Arc::new(Semaphore::new(4096)),
                 context_high_water: AtomicU64::new(1),
                 servers: Mutex::new(BTreeMap::new()),
+                retained: Mutex::new(BTreeMap::new()),
                 leases: Mutex::new(BTreeMap::new()),
             }),
         })
@@ -293,6 +336,42 @@ impl PaneChannels {
         leases.insert((workspace, incarnation), Arc::downgrade(&lease));
         Ok(WorkspaceLease(lease))
     }
+    /// Materialize readonly membership from an exact saved pairing before a cold reconnect.
+    /// This retains the replica's residency charge and creates no connection, grant or intent.
+    pub fn retain(
+        &self,
+        binding: &crate::api::PairedServerBinding,
+        snapshot: Arc<ReplicaSnapshot>,
+    ) -> Result<(), ClientFailure> {
+        let target = binding.target();
+        let authority = PaneAuthority {
+            server: target.server(),
+            pairing: target.pairing(),
+            client: target.client(),
+            incarnation: Some(target.incarnation()),
+        };
+        if snapshot.cursor.server != authority.server || !self.shared.admitted_binding(binding) {
+            return Err(stale());
+        }
+        let servers = self.shared.servers.lock().map_err(|_| stale())?;
+        if servers.contains_key(&authority.server) {
+            return Ok(());
+        }
+        let mut retained = self.shared.retained.lock().map_err(|_| stale())?;
+        if retained.len() >= crate::limits::ClientLimits::default().saved_servers
+            && !retained.contains_key(&authority.server)
+        {
+            return Err(resource_limit());
+        }
+        retained.insert(
+            authority.server,
+            RetainedServer {
+                authority,
+                snapshot,
+            },
+        );
+        Ok(())
+    }
     /// Called only with the authenticated, reconciled replica. The allocation is
     /// retained by Arc, keeping the replica owner's residency charge intact.
     pub fn publish(
@@ -300,7 +379,7 @@ impl PaneChannels {
         info: ConnectedInfo,
         snapshot: Arc<ReplicaSnapshot>,
     ) -> Result<(), ClientFailure> {
-        if !self.shared.publication_admitted(info) {
+        if !self.shared.publication_admitted(info.into()) {
             return Err(stale());
         }
         if snapshot.cursor.server != info.server
@@ -348,7 +427,16 @@ impl PaneChannels {
                 },
             );
         }
+        self.shared
+            .retained
+            .lock()
+            .map_err(|_| stale())?
+            .remove(&info.server);
         for channel in self.channels(info.server)? {
+            // Cold channels retain their exact pairing generation across reconnect.
+            if !self.shared.publication_admitted(channel.authority) {
+                return Err(stale());
+            }
             channel.apply(info, &snapshot)?;
         }
         self.shared.peer.presentation_changed();
@@ -449,6 +537,11 @@ impl PaneChannels {
                 ConnectionInvalidation::Shutdown | ConnectionInvalidation::BindingRemoved
             ) {
                 servers.remove(&server);
+                self.shared
+                    .retained
+                    .lock()
+                    .map_err(|_| stale())?
+                    .remove(&server);
             } else if let Some(retained) = servers.get_mut(&server) {
                 // Retained membership serves personal navigation only. It grants no
                 // connection, content permit, startup intent or runtime effect.
@@ -598,14 +691,19 @@ impl WorkspaceLease {
         if !self.0.active.load(Ordering::Acquire) {
             return Err(stale());
         }
-        let admitted_info = {
+        let admitted_authority = {
             let servers = self.0.shared.servers.lock().map_err(|_| stale())?;
-            servers
-                .get(&self.0.workspace.server())
-                .ok_or_else(stale)?
-                .info
+            if let Some(server) = servers.get(&self.0.workspace.server()) {
+                server.info.into()
+            } else {
+                let retained = self.0.shared.retained.lock().map_err(|_| stale())?;
+                retained
+                    .get(&self.0.workspace.server())
+                    .ok_or_else(stale)?
+                    .authority
+            }
         };
-        if !self.0.shared.publication_admitted(admitted_info) {
+        if !self.0.shared.publication_admitted(admitted_authority) {
             return Err(stale());
         }
         let mut channels = self.0.channels.lock().map_err(|_| stale())?;
@@ -618,12 +716,22 @@ impl WorkspaceLease {
         }
         // A publication can finish while admission or construction is waiting.
         // Capture its current graph under the channel insertion ordering.
-        let (info, snapshot, active) = {
+        let (authority, info, snapshot, active) = {
             let servers = self.0.shared.servers.lock().map_err(|_| stale())?;
-            let server = servers.get(&self.0.workspace.server()).ok_or_else(stale)?;
-            (server.info, Arc::clone(&server.snapshot), server.active)
+            if let Some(server) = servers.get(&self.0.workspace.server()) {
+                (
+                    server.info.into(),
+                    Some(server.info),
+                    Arc::clone(&server.snapshot),
+                    server.active,
+                )
+            } else {
+                let retained = self.0.shared.retained.lock().map_err(|_| stale())?;
+                let server = retained.get(&self.0.workspace.server()).ok_or_else(stale)?;
+                (server.authority, None, Arc::clone(&server.snapshot), false)
+            }
         };
-        if info.client != admitted_info.client || info.pairing != admitted_info.pairing {
+        if authority != admitted_authority {
             return Err(stale());
         }
         let record = snapshot
@@ -664,9 +772,9 @@ impl WorkspaceLease {
         };
         let projection = TerminalProjection::new(self.0.shared.budgets.clone())?;
         let shared = Arc::clone(&self.0.shared);
-        projection.bind_admission(Arc::new(move || shared.admitted(info)));
+        projection.bind_admission(Arc::new(move || shared.admitted_identity(authority)));
         let channel = Arc::new(ChannelInner {
-            authority: info,
+            authority,
             pane,
             tab,
             lease: Arc::downgrade(&self.0),
@@ -695,7 +803,7 @@ impl WorkspaceLease {
                 .map_err(|_| resource_limit())?,
         });
         channels.insert(pane, Arc::downgrade(&channel));
-        if active {
+        if let Some(info) = info.filter(|_| active) {
             channel.apply(info, &snapshot)?;
         }
         drop(channels);
@@ -1335,7 +1443,7 @@ impl Drop for PendingIntent {
 }
 impl ChannelInner {
     fn admitted(&self) -> bool {
-        self.shared.admitted(self.authority)
+        self.shared.admitted_identity(self.authority)
     }
     fn apply(&self, info: ConnectedInfo, snapshot: &ReplicaSnapshot) -> Result<(), ClientFailure> {
         // Publication and pane construction validate journal authority before
@@ -1371,7 +1479,8 @@ impl ChannelInner {
             .find(|runtime| runtime.pane == self.pane)
             .copied()
             .filter(|_| present);
-        let changed = state.facts.runtime != runtime
+        let same_runtime = state.facts.runtime == runtime;
+        let changed = !same_runtime
             || state
                 .facts
                 .connection
@@ -1435,8 +1544,9 @@ impl ChannelInner {
             PaneReadiness::Live
         };
         if state.intent.is_some_and(|saved| {
-            saved.attempt != info.attempt
-                || !current_fence(&state.facts, self.pane, false)
+            !same_runtime
+                || saved.attempt != info.attempt
+                || !bound_fence(&state.facts, self.pane, false)
                     .is_ok_and(|current| saved.intent.fence().is_current(&current))
         }) {
             state.intent = None;
@@ -1546,13 +1656,15 @@ fn allows(kind: EffectKind, facts: PaneContextFacts) -> bool {
 }
 fn effect_kind(effect: &RuntimeEffect) -> EffectKind {
     match effect {
-        RuntimeEffect::Key(_) => EffectKind::Key,
+        RuntimeEffect::Key(_) | RuntimeEffect::Copy(_) => EffectKind::Key,
         RuntimeEffect::InputMethodCommit(_) => EffectKind::ImeCommit,
         RuntimeEffect::Pointer(_) | RuntimeEffect::Wheel(_) => EffectKind::Pointer,
         RuntimeEffect::Resize(_) | RuntimeEffect::CellPixelMetrics(_) => EffectKind::Resize,
         RuntimeEffect::FocusReport(_) => EffectKind::FocusReport,
         RuntimeEffect::Appearance(_) => EffectKind::Appearance,
-        RuntimeEffect::RequestPaste(_) | RuntimeEffect::ResolvePaste(_, _) => EffectKind::Paste,
+        RuntimeEffect::RequestPaste(_)
+        | RuntimeEffect::RequestCorrelatedPaste(..)
+        | RuntimeEffect::ResolvePaste(_, _) => EffectKind::Paste,
         RuntimeEffect::CompleteNativeRequest(_) => EffectKind::NativeCompletion,
         RuntimeEffect::ClearScreenAndScrollback => EffectKind::Key,
     }

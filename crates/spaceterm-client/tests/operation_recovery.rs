@@ -716,3 +716,74 @@ mod ticket_publication;
 
 #[path = "operation_recovery/pairing_projection.rs"]
 mod pairing_projection;
+
+#[tokio::test]
+async fn empty_server_pairing_assessment_at_zero_revision_survives_journal_recovery() {
+    use spaceterm_client::journal::{JournalController, JournalLimits};
+    use spaceterm_core::{
+        authority::FieldVersion,
+        operations::{AssessmentRef, Command, RequestDigest},
+        pairing::{
+            ClientRecord, PairingCommand, PairingOutcome, PairingTarget, PairingTargetParts,
+            UnpairAssessment, UnpairAssessmentParts,
+        },
+    };
+    use std::sync::Arc;
+    let fixture = Fixture::new().await;
+    let tracker = OperationTracker::new(fixture.journal.clone());
+    let target = fixture.binding.target();
+    let target = PairingTarget::new(PairingTargetParts {
+        server: target.server(),
+        device: target.device(),
+        pairing: target.pairing(),
+    })
+    .unwrap();
+    let ticket = tracker
+        .submit(
+            &fixture.binding,
+            Command::Pairing(PairingCommand::AssessUnpair {
+                target: target.clone(),
+            }),
+            None,
+            &fixture.peer,
+        )
+        .await
+        .unwrap();
+    let assessment = UnpairAssessment::new(UnpairAssessmentParts {
+        reference: AssessmentRef {
+            operation: ticket.id(),
+            digest: RequestDigest::from_bytes([9; 32]),
+        },
+        target,
+        authorization_version: FieldVersion::new(1),
+        clients: vec![ClientRecord {
+            id: fixture.binding.target().client(),
+            pairing: fixture.binding.target().pairing(),
+        }],
+    })
+    .unwrap();
+    let outcome = Outcome::Pairing(Box::new(PairingOutcome::UnpairAssessed(assessment)));
+    tracker
+        .resolve(
+            ticket.id(),
+            OperationLookup::Completed {
+                result: outcome.clone(),
+                publication_revision: OrganizationRevision::new(0),
+            },
+            &fixture.peer,
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(&*ticket.status().borrow(), OperationStatus::Completed { outcome: retained, publication_revision } if *retained == outcome && publication_revision.get() == 0)
+    );
+    let recovered = JournalController::recover(
+        fixture.storage.clone(),
+        fixture.codec.clone(),
+        Arc::new(Verifier),
+        JournalLimits::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(recovered.snapshot().unwrap().operations().len(), 1);
+}

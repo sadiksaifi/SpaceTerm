@@ -160,6 +160,10 @@ pub(crate) enum ServerPermissionState {
     NotSetUp,
     /// The server's system has no such permission.
     NotNeeded,
+    /// The owning server has no current observation.
+    Unknown,
+    /// The owning server cannot query this permission.
+    Unavailable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

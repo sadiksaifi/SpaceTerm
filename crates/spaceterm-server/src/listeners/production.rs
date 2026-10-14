@@ -56,6 +56,7 @@ pub struct ProductionListenerPorts {
     status: Mutex<Option<watch::Receiver<ServerStatus>>>,
     account_runtime: Mutex<Option<Arc<crate::account_runtime::AccountRuntimeProcesses>>>,
     native: Option<Arc<dyn NativeStatusObserver>>,
+    protocol_majors: Option<Vec<u32>>,
 }
 impl ProductionListenerPorts {
     pub fn new() -> Arc<Self> {
@@ -81,6 +82,29 @@ impl ProductionListenerPorts {
             native: Some(native),
             ..Self::default()
         })
+    }
+    /// Restricts negotiation to supported profiles for a rolling-version host.
+    pub fn with_native_status_and_protocol_majors(
+        native: Arc<dyn NativeStatusObserver>,
+        protocol_majors: Vec<u32>,
+    ) -> Result<Arc<Self>, ServerFailure> {
+        let supported = HandshakeConfig::default().majors;
+        if protocol_majors.is_empty()
+            || protocol_majors
+                .iter()
+                .any(|major| !supported.contains(major))
+            || protocol_majors
+                .iter()
+                .enumerate()
+                .any(|(index, major)| protocol_majors[..index].contains(major))
+        {
+            return Err(failure(ServerFailureClass::ScopeMismatch));
+        }
+        Ok(Arc::new(Self {
+            native: Some(native),
+            protocol_majors: Some(protocol_majors),
+            ..Self::default()
+        }))
     }
     /// The same bounded feed used by authenticated clients, retained after close.
     /// Status is comparison data and grants no native-management authority.
@@ -167,6 +191,15 @@ pub fn production_listener_factories_with_dispatch<S: PairingSnapshotPort + 'sta
         &NativeStatusObservation::default(),
         handle.management_progress(),
     )?;
+    let key = config.registration.key();
+    let initial = attach_machine_facts(
+        initial,
+        config
+            .ports
+            .native
+            .as_ref()
+            .and_then(|native| native.machine_facts(key)),
+    )?;
     let (status_sender, status_receiver) = watch::channel(initial);
     let account_runtime = config
         .ports
@@ -178,6 +211,7 @@ pub fn production_listener_factories_with_dispatch<S: PairingSnapshotPort + 'sta
         uid: config.registration.key().account_uid,
         account_runtime: account_runtime.is_some(),
         extensions: ordinary.capabilities(),
+        protocol_majors: config.ports.protocol_majors.clone(),
         identity: config.identity.clone(),
         lookup,
         server: snapshot.state().server,
@@ -228,6 +262,7 @@ pub fn production_listener_factories_with_dispatch<S: PairingSnapshotPort + 'sta
             running: config.running,
             status: status_sender,
             native: config.ports.native.clone(),
+            key,
             native_facts: Arc::new(Mutex::new(NativeStatusObservation::default())),
             monitor: Mutex::new(None),
             stop: watch::channel(false).0,
@@ -237,6 +272,7 @@ pub fn production_listener_factories_with_dispatch<S: PairingSnapshotPort + 'sta
 
 struct ProductionAuthentication<S> {
     extensions: Vec<u32>,
+    protocol_majors: Option<Vec<u32>>,
     account_runtime: bool,
     uid: u32,
     identity: Arc<ServerIdentity>,
@@ -271,6 +307,9 @@ impl<S: PairingSnapshotPort + 'static> AuthenticationFactoryPort for ProductionA
             spaceterm_protocol::negotiation::CAPABILITY_APPLICATION_MOUSE,
             spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA,
             spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA_FRAGMENTS,
+            spaceterm_protocol::negotiation::CAPABILITY_NATIVE_PASTE_CORRELATION,
+            spaceterm_protocol::negotiation::CAPABILITY_ENHANCED_COPY,
+            spaceterm_protocol::negotiation::CAPABILITY_SERVER_MACHINE_FACTS,
         ]);
         capabilities.extend_from_slice(&self.extensions);
         capabilities.sort_unstable();
@@ -280,6 +319,10 @@ impl<S: PairingSnapshotPort + 'static> AuthenticationFactoryPort for ProductionA
             epoch: self.epoch,
             owning_uid: self.uid,
             handshake: HandshakeConfig {
+                majors: self
+                    .protocol_majors
+                    .clone()
+                    .unwrap_or_else(|| HandshakeConfig::default().majors),
                 capabilities,
                 ..HandshakeConfig::default()
             },
@@ -410,6 +453,18 @@ pub(crate) fn retirement_progress(
     }
 }
 
+fn attach_machine_facts(
+    status: ServerStatus,
+    facts: Option<spaceterm_core::management::ServerMachineFacts>,
+) -> Result<ServerStatus, ServerFailure> {
+    match facts {
+        Some(facts) => status
+            .with_machine_facts(facts)
+            .map_err(|_| failure(ServerFailureClass::ScopeMismatch)),
+        None => Ok(status),
+    }
+}
+
 struct StatusListeners {
     ordinary: Arc<dyn OrdinaryDispatchPort>,
     listeners: Arc<ServerListeners>,
@@ -418,6 +473,7 @@ struct StatusListeners {
     status: watch::Sender<ServerStatus>,
     native: Option<Arc<dyn NativeStatusObserver>>,
     native_facts: Arc<Mutex<NativeStatusObservation>>,
+    key: spaceterm_host::startup::AccountBuildKey,
     monitor: Mutex<Option<JoinHandle<Result<(), ServerFailure>>>>,
     stop: watch::Sender<bool>,
 }
@@ -445,6 +501,7 @@ impl ListenerLifecyclePort for StatusListeners {
                 let running = self.running.clone();
                 let source = handle.clone();
                 let native = self.native.clone();
+                let key = self.key;
                 let native_facts = self.native_facts.clone();
                 *monitor = Some(tokio::spawn(async move {
                     let mut poll = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -470,7 +527,16 @@ impl ListenerLifecyclePort for StatusListeners {
                         listeners.mark_unchanged();
                         runtime.mark_unchanged();
                         progress.mark_unchanged();
-                        publish_status(&sender, &source, &running, &listeners, &native_facts)?;
+                        publish_status(
+                            &sender,
+                            &source,
+                            &running,
+                            &listeners,
+                            &native_facts,
+                            native
+                                .as_ref()
+                                .and_then(|provider| provider.machine_facts(key)),
+                        )?;
                     }
                 }));
             }
@@ -519,6 +585,9 @@ impl StatusListeners {
             &self.running,
             &self.listeners.subscribe_status(),
             &self.native_facts,
+            self.native
+                .as_ref()
+                .and_then(|provider| provider.machine_facts(self.key)),
         )
     }
 }
@@ -529,6 +598,7 @@ fn publish_status(
     running: &spaceterm_distribution::BuildVersion,
     listeners: &watch::Receiver<Vec<spaceterm_core::management::ListenerStatus>>,
     native: &Mutex<NativeStatusObservation>,
+    machine_facts: Option<spaceterm_core::management::ServerMachineFacts>,
 ) -> Result<(), ServerFailure> {
     let mut result = Ok(());
     sender.send_if_modified(|current| {
@@ -544,6 +614,7 @@ fn publish_status(
                     .map_err(|_| failure(ServerFailureClass::RecoveryRequired))?,
                 handle.management_progress(),
             )?;
+            let next = attach_machine_facts(next, machine_facts)?;
             if next == *current {
                 return Ok(None);
             }
@@ -552,9 +623,9 @@ fn publish_status(
                 .revision
                 .checked_add(1)
                 .ok_or_else(|| failure(ServerFailureClass::Exhausted))?;
-            ServerStatus::new(parts)
-                .map(Some)
-                .map_err(|_| failure(ServerFailureClass::RecoveryRequired))
+            let revised = ServerStatus::new(parts)
+                .map_err(|_| failure(ServerFailureClass::RecoveryRequired))?;
+            attach_machine_facts(revised, next.machine_facts().cloned()).map(Some)
         })();
         match replacement {
             Ok(Some(next)) => {

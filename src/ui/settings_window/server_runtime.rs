@@ -122,6 +122,80 @@ pub(crate) struct SettingsMachineFacts {
     pub(crate) scopes: Vec<BindScope>,
 }
 
+impl SettingsMachineFacts {
+    /// Display values only. The enclosing authenticated status supplies server and epoch binding.
+    pub(crate) fn from_server(facts: &spaceterm_core::management::ServerMachineFacts) -> Self {
+        use spaceterm_core::management::{
+            ServerAccessibilityNaming, ServerBindScope, ServerPermissionState as PermissionState,
+        };
+        let state = |state| match state {
+            PermissionState::Unknown => ServerPermissionState::Unknown,
+            PermissionState::Granted => ServerPermissionState::Allowed,
+            PermissionState::NotGranted => ServerPermissionState::NotAllowed,
+            PermissionState::NotNeeded => ServerPermissionState::NotNeeded,
+            PermissionState::Unavailable => ServerPermissionState::Unavailable,
+        };
+        Self {
+            permissions: Some(ServerPermissions {
+                naming: match facts.permissions.accessibility_naming {
+                    ServerAccessibilityNaming::DeviceControl => {
+                        crate::platform::permission_access::AccessibilityNaming::DeviceControl
+                    }
+                    // Unknown uses the generic permission name, never this client's OS version.
+                    ServerAccessibilityNaming::Unknown
+                    | ServerAccessibilityNaming::Accessibility => {
+                        crate::platform::permission_access::AccessibilityNaming::Accessibility
+                    }
+                },
+                entries: [
+                    (
+                        ServerPermissionKind::Microphone,
+                        facts.permissions.microphone,
+                    ),
+                    (
+                        ServerPermissionKind::ScreenRecording,
+                        facts.permissions.screen_recording,
+                    ),
+                    (
+                        ServerPermissionKind::Accessibility,
+                        facts.permissions.accessibility,
+                    ),
+                ]
+                .into_iter()
+                .map(|(kind, value)| ServerPermission {
+                    kind,
+                    state: state(value),
+                })
+                .collect(),
+            }),
+            scopes: facts
+                .bind_scopes
+                .iter()
+                .map(|offer| {
+                    let (id, label) = match offer.scope {
+                        ServerBindScope::Loopback => ("loopback", "This computer only"),
+                        ServerBindScope::AllInterfaces => {
+                            ("all-interfaces", "All network interfaces")
+                        }
+                    };
+                    BindScope {
+                        id: id.into(),
+                        label: label.into(),
+                        addresses: offer
+                            .endpoints
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                            .into(),
+                        endpoints: offer.endpoints.clone(),
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
 struct AuthenticatedInventory(ServerQueries);
 impl SettingsInventory for AuthenticatedInventory {
     fn page(
@@ -330,6 +404,14 @@ impl ServerState {
     fn is_busy(&self) -> bool {
         self.busy || self.native_pending.is_some()
     }
+
+    fn observe_status(
+        &mut self,
+        subscription: &spaceterm_client::management_cli::StatusSubscription,
+    ) {
+        self.status = subscription.current().unwrap_or(None);
+        self.status_connection = self.status.as_ref().map(|_| subscription.connection());
+    }
 }
 
 struct NativePresentation {
@@ -479,6 +561,15 @@ impl SettingsRuntime {
                 }
                 _ => false,
             };
+            let allow_legacy_machine = match &connection {
+                ConnectionState::Connected { info } => {
+                    ready
+                        && !info.capabilities.supports(
+                            spaceterm_protocol::negotiation::CAPABILITY_SERVER_MACHINE_FACTS,
+                        )
+                }
+                _ => false,
+            };
             let (status, runtime_epoch, compatibility) = match connection {
                 ConnectionState::Connected { info } if ready => (
                     ServerStatus::Running,
@@ -528,6 +619,14 @@ impl SettingsRuntime {
                 let same_connection = matches!(*source.state.borrow(), ConnectionState::Connected { info } if personal.and_then(|state| state.status_connection) == Some(info.binding));
                 ready && same_connection && status.parts().server == source.name.server && Some(status.parts().epoch) == runtime_epoch
             });
+            let reported_machine = verified_status
+                .and_then(|status| status.machine_facts())
+                .map(SettingsMachineFacts::from_server);
+            // A facts-capable peer needs current authenticated facts, including during resync.
+            // Only a ready legacy peer can use the exact registered IPC provider's local facts.
+            let machine = reported_machine
+                .as_ref()
+                .or_else(|| source.machine.as_ref().filter(|_| allow_legacy_machine));
             // Both status and organization frames arrive through the authenticated worker.
             // Retained policy is display data while disconnected, never mutation authority.
             let retained_remote = replica
@@ -569,17 +668,14 @@ impl SettingsRuntime {
                     version: current.version,
                     enabled: current.value.is_enabled(),
                     // A policy is not an inventory of selectable machine scopes.
-                    scope: source.machine.as_ref().and_then(|machine| {
+                    scope: machine.and_then(|machine| {
                         machine
                             .scopes
                             .iter()
                             .find(|scope| scope.endpoints == current.value.endpoints())
                             .map(|scope| scope.id.clone())
                     }),
-                    scopes: source
-                        .machine
-                        .as_ref()
-                        .map_or_else(Vec::new, |machine| machine.scopes.clone()),
+                    scopes: machine.map_or_else(Vec::new, |machine| machine.scopes.clone()),
                     pending: personal.is_some_and(|state| state.is_busy())
                         || edit
                             .as_ref()
@@ -647,10 +743,7 @@ impl SettingsRuntime {
                         })
                     }),
                 worktree_location,
-                permissions: source
-                    .machine
-                    .as_ref()
-                    .and_then(|machine| machine.permissions.clone()),
+                permissions: machine.and_then(|machine| machine.permissions.clone()),
                 remote_access,
             });
         }
@@ -736,18 +829,27 @@ impl SettingsRuntime {
                             if let Ok(Ok(mut subscription)) = subscription {
                                 loop {
                                     let Some(runtime) = weak.upgrade() else { return; };
-                                    if let Ok(latest) = subscription.latest() {
-                                        {
-                                            let mut states = runtime.state.borrow_mut();
-                                            let state = states.entry(server).or_default();
-                                            state.status = latest;
-                                            state.status_connection = Some(subscription.connection());
-                                        }
-                                        cx.update(|cx| runtime.publish(cx));
+                                    {
+                                        let mut states = runtime.state.borrow_mut();
+                                        let state = states.entry(server).or_default();
+                                        state.observe_status(&subscription);
                                     }
+                                    cx.update(|cx| runtime.publish(cx));
                                     drop(runtime);
                                     let changed = tokio::select! { result = subscription.changed() => result.is_ok(), _ = connection.changed() => false };
                                     if !changed { break; }
+                                }
+                                if let Some(runtime) = weak.upgrade() {
+                                    {
+                                        let mut states = runtime.state.borrow_mut();
+                                        if let Some(state) = states.get_mut(&server)
+                                            && state.status_connection == Some(subscription.connection())
+                                        {
+                                            state.status = None;
+                                            state.status_connection = None;
+                                        }
+                                    }
+                                    cx.update(|cx| runtime.publish(cx));
                                 }
                                 // Re-establish subscription immediately after a connection generation changes.
                                 continue;

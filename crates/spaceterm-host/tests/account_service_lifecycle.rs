@@ -293,12 +293,15 @@ struct Fixture {
 }
 impl Fixture {
     fn for_install() -> Self {
-        // Initial installation creates the real durable SQLite store. Linux /tmp
-        // can be tmpfs, which the production storage contract correctly rejects.
-        #[cfg(target_os = "linux")]
-        let root = tempfile::tempdir_in("/var/tmp").unwrap();
-        #[cfg(target_os = "macos")]
-        let root = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+
+        // First installation opens real organization storage, so a tmpfs tempdir is unsafe.
+        let home = spaceterm_host::account_service::TrustedAccountFacts::current().unwrap();
+        let root = tempfile::Builder::new()
+            .prefix("spaceterm-lifecycle-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in(home.home())
+            .unwrap();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         Self {
             _root: root,

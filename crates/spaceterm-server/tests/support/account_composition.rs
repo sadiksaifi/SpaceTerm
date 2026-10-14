@@ -1321,7 +1321,8 @@ async fn real_binary_retains_only_explicit_remote_scope_across_stop_start_and_di
                         fact.state,
                         ListenerState::Binding | ListenerState::Listening
                     )),
-                    "restored listener failure"
+                    "restored listener failure: {:?}",
+                    status.parts().listeners
                 );
                 // Binding already publishes every retained endpoint. The count
                 // alone does not mean the restarted listeners are ready.
@@ -1347,7 +1348,9 @@ async fn real_binary_retains_only_explicit_remote_scope_across_stop_start_and_di
                 .parts()
                 .listeners
                 .iter()
-                .all(|fact| fact.state == ListenerState::Listening)
+                .all(|fact| fact.state == ListenerState::Listening),
+            "restored listener states: {:?}",
+            status.parts().listeners
         );
         operation(
             &seed,

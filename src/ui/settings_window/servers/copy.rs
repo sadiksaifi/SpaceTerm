@@ -163,6 +163,8 @@ pub(super) fn permission_state(state: ServerPermissionState) -> &'static str {
         ServerPermissionState::NotAllowed => "Not Allowed",
         ServerPermissionState::NotSetUp => "Not Set Up",
         ServerPermissionState::NotNeeded => "Not Needed",
+        ServerPermissionState::Unknown => "Unknown",
+        ServerPermissionState::Unavailable => "Unavailable",
     }
 }
 

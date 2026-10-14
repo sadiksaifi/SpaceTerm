@@ -380,7 +380,18 @@ async fn handshake(
     key: Arc<DeviceKey>,
     major: u32,
 ) -> spaceterm_protocol::connection::AuthenticatedConnection {
-    let config = authentication::HandshakeConfig {
+    handshake_with_machine_facts(transport, pin, principal, key, major, false).await
+}
+
+async fn handshake_with_machine_facts(
+    transport: &dyn MessageTransport,
+    pin: authentication::ServerPin,
+    principal: authentication::Principal,
+    key: Arc<DeviceKey>,
+    major: u32,
+    machine_facts: bool,
+) -> spaceterm_protocol::connection::AuthenticatedConnection {
+    let mut config = authentication::HandshakeConfig {
         majors: vec![major],
         capabilities: vec![
             spaceterm_protocol::negotiation::CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
@@ -395,6 +406,12 @@ async fn handshake(
         ],
         ..Default::default()
     };
+    if machine_facts {
+        config
+            .capabilities
+            .push(spaceterm_protocol::negotiation::CAPABILITY_SERVER_MACHINE_FACTS);
+    }
+    config.capabilities.sort_unstable();
     let (client, hello) = authentication::ClientHandshake::begin(
         pin,
         principal,
@@ -581,6 +598,50 @@ async fn query_status(
         panic!("snapshot");
     };
     status
+}
+
+async fn query_legacy_status(
+    transport: &dyn MessageTransport,
+    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+) -> ServerStatus {
+    let request = match codec.major() {
+        1 => Payload::Major1(v1::Message {
+            kind: Some(v1::message::Kind::ManagementRequest(
+                v1::ManagementRequest {
+                    request: 2,
+                    action: 1,
+                    ..Default::default()
+                },
+            )),
+        }),
+        2 => Payload::Major2(v2::Message {
+            kind: Some(v2::message::Kind::ManagementRequest(
+                v2::ManagementRequest {
+                    request: 2,
+                    action: 1,
+                    ..Default::default()
+                },
+            )),
+        }),
+        _ => unreachable!(),
+    };
+    match round_trip(transport, codec, request).await {
+        Payload::Major1(v1::Message {
+            kind: Some(v1::message::Kind::ManagementStatus(value)),
+        }) => {
+            assert_eq!(value.request, 2);
+            management::v1::decode_status(&value, &|_| Err(ProtocolError::UnexpectedMessage))
+                .unwrap()
+        }
+        Payload::Major2(v2::Message {
+            kind: Some(v2::message::Kind::ManagementStatus(value)),
+        }) => {
+            assert_eq!(value.request, 2);
+            management::v2::decode_status(&value, &|_| Err(ProtocolError::UnexpectedMessage))
+                .unwrap()
+        }
+        _ => panic!("legacy status reply"),
+    }
 }
 
 async fn inventory_query(
@@ -1259,6 +1320,14 @@ async fn native_status_observations_reach_both_majors_and_clear_after_provider_f
     use std::sync::atomic::{AtomicBool, Ordering};
     struct Native(AtomicBool);
     impl NativeStatusObserver for Native {
+        fn machine_facts(
+            &self,
+            key: spaceterm_host::startup::AccountBuildKey,
+        ) -> Option<ServerMachineFacts> {
+            Some(spaceterm_host::server_machine_facts::observe(
+                key.build_identity,
+            ))
+        }
         fn observe(
             &self,
             _: ServerId,
@@ -1318,8 +1387,48 @@ async fn native_status_observations_reach_both_majors_and_clear_after_provider_f
         let ipc = IpcTransport::connect(&endpoint, MessageLimit::envelope())
             .await
             .unwrap();
-        let mut codec = handshake(&ipc, fixture.identity.pin(), principal, device, major).await;
+        let mut codec = handshake(
+            &ipc,
+            fixture.identity.pin(),
+            principal,
+            device.clone(),
+            major,
+        )
+        .await;
+        let legacy = query_status(&ipc, &mut codec).await;
+        assert!(legacy.machine_facts().is_none());
+        assert!(
+            query_legacy_status(&ipc, &mut codec)
+                .await
+                .machine_facts()
+                .is_none()
+        );
+        assert!(status.borrow().machine_facts().is_some());
+        ipc.close().await.unwrap();
+        let ipc = IpcTransport::connect(&endpoint, MessageLimit::envelope())
+            .await
+            .unwrap();
+        let mut codec = handshake_with_machine_facts(
+            &ipc,
+            fixture.identity.pin(),
+            principal,
+            device,
+            major,
+            true,
+        )
+        .await;
         let first = query_status(&ipc, &mut codec).await;
+        let machine = first.machine_facts().unwrap().clone();
+        assert_eq!(
+            query_legacy_status(&ipc, &mut codec).await.machine_facts(),
+            Some(&machine)
+        );
+        assert_eq!(
+            machine.bind_scope_availability,
+            MachineFactsAvailability::Available
+        );
+        assert_eq!(machine.bind_scopes.len(), 2);
+        assert!(first.parts().listeners.is_empty());
         assert_eq!(first.parts().approved.as_ref().unwrap().as_str(), "1.2.3");
         assert_eq!(first.parts().staged.as_ref().unwrap().as_str(), "1.2.4");
         assert_eq!(
@@ -1354,6 +1463,8 @@ async fn native_status_observations_reach_both_majors_and_clear_after_provider_f
                 .all(|value| value.availability == CapabilityAvailability::Unavailable)
         );
         assert!(failed.parts().revision > first.parts().revision);
+        assert_eq!(failed.machine_facts(), Some(&machine));
+        assert!(failed.parts().listeners.is_empty());
         assert!(!failed.parts().remote_access.value.is_enabled());
         ipc.close().await.unwrap();
         handle
@@ -1765,4 +1876,32 @@ async fn production_listener_shutdown_joins_a_cancelled_directory_observation() 
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn account_machine_facts_are_read_only_build_bound_and_independent_of_missing_native_status()
+{
+    use spaceterm_server::listeners::{AccountNativeStatusObserver, NativeStatusObserver};
+    let root = tempfile::tempdir().unwrap();
+    let account = AccountServiceFixture::new(root.path(), BuildIdentity::Preflight).unwrap();
+    let supervisor = Arc::new(account.reopen());
+    let key = supervisor.key();
+    let observer = AccountNativeStatusObserver::new(supervisor);
+    let facts = observer.machine_facts(key).unwrap();
+    assert_eq!(
+        facts.bind_scopes[0].endpoints,
+        vec![
+            "127.0.0.1:47231".parse::<SocketAddr>().unwrap(),
+            "[::1]:47231".parse::<SocketAddr>().unwrap(),
+        ]
+    );
+    let mut foreign = key;
+    foreign.build_identity = BuildIdentity::Release;
+    assert!(observer.machine_facts(foreign).is_none());
+    foreign = key;
+    foreign.account_uid += 1;
+    assert!(observer.machine_facts(foreign).is_none());
+    assert!(observer.observe(ServerId::new([7; 16])).await.is_err());
+    assert_eq!(observer.machine_facts(key), Some(facts));
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
 }

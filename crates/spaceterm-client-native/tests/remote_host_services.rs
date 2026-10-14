@@ -726,6 +726,7 @@ struct Peer {
     processes: Arc<Processes>,
     capabilities: Vec<u32>,
     withdraw_native: AtomicBool,
+    ordinary_route_available: AtomicBool,
     major: u32,
     opens: AtomicUsize,
     handshakes: AtomicUsize,
@@ -756,6 +757,9 @@ impl RouteConnector for Connector {
         Box::pin(async move {
             assert_eq!(target, self.0.binding.target());
             assert_eq!(purpose, ConnectionPurpose::Ordinary);
+            if !self.0.ordinary_route_available.load(Ordering::SeqCst) {
+                return Err(ClientFailure::new(ClientFailureClass::Unavailable));
+            }
             let connection = spaceterm_core::authority::ConnectionGeneration::new(
                 self.0.opens.fetch_add(1, Ordering::SeqCst) as u64 + 1,
             );
@@ -1534,6 +1538,7 @@ impl Fixture {
             processes,
             capabilities: capabilities.clone(),
             withdraw_native: AtomicBool::new(false),
+            ordinary_route_available: AtomicBool::new(true),
             major,
             opens: AtomicUsize::new(0),
             handshakes: AtomicUsize::new(0),
@@ -2141,6 +2146,13 @@ async fn lost_admission_reply_resolves_original_after_disconnect_and_never_repla
     let provider = fixture.provider().await;
     let request = provider.reserve_request().await.unwrap();
     let original = provider.assess(request, ServiceAction::Stop).await.unwrap();
+    // Keep the existing worker for admission, but make the injected ordinary
+    // route stay disconnected after its reply is lost. Registry backoff must
+    // not turn slow canonical recovery into an unrelated healthy reconnect.
+    fixture
+        .peer
+        .ordinary_route_available
+        .store(false, Ordering::SeqCst);
     fixture.peer.lose_admit.store(true, Ordering::SeqCst);
     assert!(provider.submit(original.clone()).await.is_err());
     assert!(fixture.records()[0].submitted());
@@ -2154,8 +2166,10 @@ async fn lost_admission_reply_resolves_original_after_disconnect_and_never_repla
         progress.state,
         ServiceRequestState::Completed(ServiceOutcome::Stopped)
     );
+    assert_eq!(fixture.peer.assess_calls.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.peer.admit_calls.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.peer.opens.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.peer.handshakes.load(Ordering::SeqCst), 1);
     assert!(fixture.records().is_empty());
     fixture.worker.shutdown().await.unwrap();
 }
@@ -2168,6 +2182,10 @@ async fn lost_unaccepted_admission_remains_exact_reserved_original_after_seal_wi
     let request = provider.reserve_request().await.unwrap();
     let assessment = provider.assess(request, ServiceAction::Stop).await.unwrap();
     let retained = fixture.records()[0].assessment().unwrap().to_vec();
+    fixture
+        .peer
+        .ordinary_route_available
+        .store(false, Ordering::SeqCst);
     fixture.peer.lose_before_admit.store(true, Ordering::SeqCst);
     assert!(provider.submit(assessment.clone()).await.is_err());
     seal_pairing(&fixture).await;
@@ -2184,6 +2202,7 @@ async fn lost_unaccepted_admission_remains_exact_reserved_original_after_seal_wi
     assert_eq!(fixture.peer.assess_calls.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.peer.admit_calls.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.peer.opens.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.peer.handshakes.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.manager.effects.load(Ordering::SeqCst), 0);
     fixture.worker.shutdown().await.unwrap();
 }

@@ -234,6 +234,9 @@ impl ConnectionCapabilities {
             CAPABILITY_APPLICATION_MOUSE,
             CAPABILITY_RUNTIME_METADATA,
             CAPABILITY_RUNTIME_METADATA_FRAGMENTS,
+            CAPABILITY_NATIVE_PASTE_CORRELATION,
+            CAPABILITY_ENHANCED_COPY,
+            CAPABILITY_SERVER_MACHINE_FACTS,
             CAPABILITY_ACCOUNT_RUNTIME,
             CAPABILITY_REMOTE_NATIVE_LIFECYCLE,
         ]
@@ -303,6 +306,31 @@ pub use crate::connection::queries::{PairedDevicePage, ServerQueries, ServerStat
 #[cfg(test)]
 mod capability_tests {
     use super::*;
+    #[test]
+    fn native_runtime_metadata_copy_paste_and_facts_are_independent_connection_capabilities() {
+        use spaceterm_protocol::negotiation::*;
+        let features = [
+            CAPABILITY_RUNTIME_METADATA_FRAGMENTS,
+            CAPABILITY_NATIVE_PASTE_CORRELATION,
+            CAPABILITY_ENHANCED_COPY,
+            CAPABILITY_SERVER_MACHINE_FACTS,
+            CAPABILITY_ACCOUNT_RUNTIME,
+            CAPABILITY_REMOTE_NATIVE_LIFECYCLE,
+        ];
+        for mask in 0u8..64 {
+            let advertised: Vec<u32> = features
+                .iter()
+                .enumerate()
+                .filter_map(|(index, capability)| {
+                    ((mask & (1 << index)) != 0).then_some(*capability)
+                })
+                .collect();
+            let capabilities = ConnectionCapabilities::from_advertisement(&advertised);
+            for (index, feature) in features.iter().enumerate() {
+                assert_eq!(capabilities.supports(*feature), (mask & (1 << index)) != 0);
+            }
+        }
+    }
     #[test]
     fn installed_terminal_capabilities_survive_connection_negotiation() {
         use spaceterm_protocol::negotiation::*;

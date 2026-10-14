@@ -23,7 +23,31 @@ struct Context {
 }
 struct PendingContext {
     context: Context,
+    owner: Arc<()>,
     reply: oneshot::Sender<Result<(), ClientFailure>>,
+}
+struct PendingContextGuard<'a> {
+    transport: &'a TerminalTransport,
+    key: (ServerId, u64),
+    owner: Arc<()>,
+    received: oneshot::Receiver<Result<(), ClientFailure>>,
+}
+impl Drop for PendingContextGuard<'_> {
+    fn drop(&mut self) {
+        // Close before taking the invalidation lock: an abandoned waiter must
+        // not authorize a late acknowledgement, even while cleanup is waiting.
+        self.received.close();
+        if let Ok(mut state) = self.transport.state.lock()
+            && state
+                .pending_contexts
+                .get(&self.key)
+                .is_some_and(|pending| Arc::ptr_eq(&pending.owner, &self.owner))
+        {
+            state.pending_contexts.remove(&self.key);
+        }
+        // The dispatch may still be queued or accepted by the server. Its
+        // generation reservation belongs to the binding, not to this waiter.
+    }
 }
 struct Subscription {
     fence: EffectFence,
@@ -42,14 +66,21 @@ struct CancelledRead {
     stamp: QueryStamp,
     resource: Option<ResourceTransferId>,
 }
+struct PasteCompletion {
+    confirm: spaceterm_core::native_requests::NativeCompletion,
+    cancel: spaceterm_core::native_requests::NativeCompletion,
+    expires: tokio::time::Instant,
+}
 #[derive(Default)]
 struct State {
     synchronizers: BTreeMap<ServerId, Arc<tokio::sync::Mutex<()>>>,
     contexts: BTreeMap<ServerId, Context>,
+    reserved_contexts: BTreeMap<ServerId, Context>,
     pending_contexts: BTreeMap<(ServerId, u64), PendingContext>,
     subscriptions: BTreeMap<PaneId, Subscription>,
     reads: BTreeMap<(ServerId, u64), PendingRead>,
     cancellations: BTreeMap<(ServerId, u64), CancelledRead>,
+    native_requests: BTreeMap<(SessionKey, u64), PasteCompletion>,
 }
 #[derive(Default)]
 pub(super) struct TerminalTransport {
@@ -58,20 +89,18 @@ pub(super) struct TerminalTransport {
     pub(super) effects_changed: Arc<Notify>,
 }
 impl TerminalTransport {
-    pub(super) fn invalidate_publication(&self, server: ServerId) {
+    pub(super) fn invalidate(&self, server: ServerId, reason: ConnectionInvalidation) {
         if let Ok(mut state) = self.state.lock() {
-            // Organization publication replaces content authority, not the
-            // connection's acknowledged native context or an in-flight update.
-            state
-                .subscriptions
-                .retain(|pane, _| pane.server() != server);
-            state.reads.retain(|(owner, _), _| *owner != server);
-        }
-    }
-    pub(super) fn invalidate(&self, server: ServerId) {
-        if let Ok(mut state) = self.state.lock() {
-            state.synchronizers.remove(&server);
-            state.contexts.remove(&server);
+            // Replica refresh does not reset the server's acknowledged context or
+            // release the owner serializing updates on this connection.
+            if !matches!(
+                reason,
+                ConnectionInvalidation::Publication | ConnectionInvalidation::Reconciliation
+            ) {
+                state.synchronizers.remove(&server);
+                state.contexts.remove(&server);
+                state.reserved_contexts.remove(&server);
+            }
             state
                 .pending_contexts
                 .retain(|(owner, _), _| *owner != server);
@@ -80,10 +109,99 @@ impl TerminalTransport {
                 .retain(|pane, _| pane.server() != server);
             state.reads.retain(|(owner, _), _| *owner != server);
             state.cancellations.retain(|(owner, _), _| *owner != server);
+            state
+                .native_requests
+                .retain(|(session, _), _| session.pane.server() != server);
         }
     }
 }
 impl NativeProtocol {
+    pub(super) fn paste_completion(
+        &self,
+        fence: EffectFence,
+        approval: spaceterm_core::native_requests::PasteApprovalId,
+        decision: spaceterm_core::native_requests::PasteDecision,
+    ) -> Result<spaceterm_core::native_requests::NativeCompletion, ClientFailure> {
+        let mut state = self.terminal.state.lock().map_err(|_| invalid())?;
+        state
+            .native_requests
+            .retain(|_, pending| tokio::time::Instant::now() < pending.expires);
+        let pending = state.native_requests.values().find(|pending| {
+            pending.confirm.fence() == fence && matches!(pending.confirm.kind(),
+                spaceterm_core::native_requests::NativeCompletionKind::Paste { approval: expected, .. } if *expected == approval)
+        }).ok_or_else(stale)?;
+        Ok(match decision {
+            spaceterm_core::native_requests::PasteDecision::Confirm => pending.confirm.clone(),
+            spaceterm_core::native_requests::PasteDecision::Cancel => pending.cancel.clone(),
+        })
+    }
+    fn remember_paste(
+        &self,
+        request: &spaceterm_core::native_requests::NativeRequest,
+        timing: NativeTiming,
+    ) -> Result<(), ClientFailure> {
+        use spaceterm_core::native_requests::{
+            NativeCompletion, NativeCompletionKind, NativeRequestKind, PasteDecision,
+        };
+        let mut state = self.terminal.state.lock().map_err(|_| invalid())?;
+        state
+            .native_requests
+            .retain(|_, pending| tokio::time::Instant::now() < pending.expires);
+        if state
+            .native_requests
+            .contains_key(&(request.fence().session(), request.id().get()))
+        {
+            return Err(stale());
+        }
+        if state.native_requests.len() >= 64 {
+            return Err(fail(ClientFailureClass::ResourceLimit));
+        }
+        let NativeRequestKind::UnsafePaste { approval, .. } = request.kind() else {
+            return Err(invalid());
+        };
+        let completion = |decision| {
+            NativeCompletion::new(
+                request,
+                NativeCompletionKind::Paste {
+                    approval: *approval,
+                    decision,
+                },
+            )
+            .map_err(|_| invalid())
+        };
+        let expires = tokio::time::Instant::now()
+            .checked_add(
+                timing
+                    .expires_after
+                    .unwrap_or_default()
+                    .min(Duration::from_secs(30)),
+            )
+            .ok_or_else(invalid)?;
+        // Publish correlation metadata before exposing the permission to a subscriber.
+        // A fast resolution cannot race the registration, and this map holds no paste text.
+        state.native_requests.insert(
+            (request.fence().session(), request.id().get()),
+            PasteCompletion {
+                confirm: completion(PasteDecision::Confirm)?,
+                cancel: completion(PasteDecision::Cancel)?,
+                expires,
+            },
+        );
+        Ok(())
+    }
+    pub(super) fn forget_native(
+        &self,
+        session: SessionKey,
+        request: u64,
+    ) -> Result<(), ClientFailure> {
+        self.terminal
+            .state
+            .lock()
+            .map_err(|_| invalid())?
+            .native_requests
+            .remove(&(session, request));
+        Ok(())
+    }
     pub(super) fn start_presentation(self: &Arc<Self>) {
         self.start_effect_dispatch();
         let owner = Arc::downgrade(self);
@@ -100,10 +218,17 @@ impl NativeProtocol {
                     if let Err(error) = owner.synchronize_presentation(info).await {
                         // Stale demand is disposable. A connection failure is published
                         // by the registry, which revokes its subscriptions and reads.
-                        if error.class() != ClientFailureClass::StaleAuthority {
-                            // Local presentation or capacity failures do not
-                            // revoke an acknowledged connection context.
-                            owner.terminal.invalidate_publication(info.server);
+                        if error.class() == ClientFailureClass::ResourceLimit {
+                            // A busy account listener has not acknowledged this demand.
+                            // Retry without discarding the last acknowledged context.
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                            changed.notify_one();
+                        } else if error.class() != ClientFailureClass::StaleAuthority {
+                            // Local presentation failures retain the acknowledged
+                            // context while cancelling uncertain in-flight work.
+                            owner
+                                .terminal
+                                .invalidate(info.server, ConnectionInvalidation::Reconciliation);
                         } else if owner.handle(info.server).is_ok_and(|handle| {
                             !matches!(*handle.state().borrow(), ConnectionState::Connected { .. })
                         }) {
@@ -181,16 +306,29 @@ impl NativeProtocol {
         }
         let channels = self.channels()?;
         let panes = channels.presentation_channels(info.server)?;
-        let previous = self
-            .terminal
-            .state
-            .lock()
-            .map_err(|_| invalid())?
-            .contexts
-            .get(&info.server)
-            .copied();
+        let (previous, reserved) = {
+            let state = self.terminal.state.lock().map_err(|_| invalid())?;
+            (
+                state
+                    .contexts
+                    .get(&info.server)
+                    .copied()
+                    .filter(|context| context.binding == info.binding),
+                state
+                    .reserved_contexts
+                    .get(&info.server)
+                    .copied()
+                    .filter(|context| context.binding == info.binding),
+            )
+        };
         let maximum = panes.iter().map(|pane| pane.state().borrow().context).max();
-        let Some(generation) = maximum.or_else(|| previous.map(|old| old.generation)) else {
+        let Some(generation) = maximum.or_else(|| {
+            previous
+                .into_iter()
+                .chain(reserved)
+                .map(|old| old.generation)
+                .max()
+        }) else {
             return Ok(());
         };
         let focused = panes
@@ -207,46 +345,71 @@ impl NativeProtocol {
             input: facts.terminal_input_focus,
             native: facts.presentable && facts.terminal_input_focus,
         };
-        if let Some(previous) = previous
-            && previous != context
-            && context.generation <= previous.generation
+        // A confirmed context can be reused only when no newer attempt may
+        // have replaced it on the server. Ordinary unchanged publication must
+        // not replay the confirmed generation merely because it was reserved.
+        let uncertain = reserved.is_some_and(|reserved| {
+            previous.is_none_or(|previous| reserved.generation > previous.generation)
+        });
+        if (previous != Some(context) || uncertain)
+            && previous
+                .into_iter()
+                .chain(reserved)
+                .any(|old| context.generation <= old.generation)
         {
             context.generation = channels.next_connection_context()?;
         }
         channels.align_connection_context(info.server, context.generation)?;
-        if previous != Some(context) {
+        if previous != Some(context) || uncertain {
             let request = self.next()?;
-            let (reply, received) = oneshot::channel();
-            self.terminal
-                .state
-                .lock()
-                .map_err(|_| invalid())?
-                .pending_contexts
-                .insert((info.server, request), PendingContext { context, reply });
             let payload = context_payload(info.major, request, info.epoch, context)?;
-            let result = async {
-                handle.dispatch(info, payload).await?;
-                tokio::time::timeout(Duration::from_secs(15), received)
-                    .await
-                    .map_err(|_| fail(ClientFailureClass::Unavailable))?
-                    .map_err(|_| stale())?
+            let (reply, received) = oneshot::channel();
+            let owner = Arc::new(());
+            let mut pending = PendingContextGuard {
+                transport: &self.terminal,
+                key: (info.server, request),
+                owner: owner.clone(),
+                received,
+            };
+            {
+                let mut state = self.terminal.state.lock().map_err(|_| invalid())?;
+                if state
+                    .synchronizers
+                    .get(&info.server)
+                    .is_none_or(|current| !Arc::ptr_eq(current, &synchronized))
+                {
+                    return Err(stale());
+                }
+                // Reserve before dispatch, which can queue the message even if
+                // its future is later cancelled or reports an uncertain error.
+                let reserved = state
+                    .reserved_contexts
+                    .entry(info.server)
+                    .or_insert(context);
+                if reserved.binding != context.binding || reserved.generation < context.generation {
+                    *reserved = context;
+                }
+                state.pending_contexts.insert(
+                    pending.key,
+                    PendingContext {
+                        context,
+                        owner,
+                        reply,
+                    },
+                );
             }
-            .await;
-            if let Err(error) = result {
-                self.terminal
-                    .state
-                    .lock()
-                    .map_err(|_| invalid())?
-                    .pending_contexts
-                    .remove(&(info.server, request));
-                return Err(error);
-            }
-            self.terminal
-                .state
-                .lock()
-                .map_err(|_| invalid())?
-                .contexts
-                .insert(info.server, context);
+            let result = tokio::time::timeout(Duration::from_secs(15), async {
+                tokio::select! {
+                    biased;
+                    result = &mut pending.received => return result.map_err(|_| stale())?,
+                    result = handle.dispatch(info, payload) => result?,
+                }
+                (&mut pending.received).await.map_err(|_| stale())?
+            })
+            .await
+            .map_err(|_| fail(ClientFailureClass::Unavailable));
+            drop(pending);
+            result??;
         }
         let mut wanted = BTreeMap::new();
         for pane in &panes {
@@ -450,16 +613,14 @@ impl NativeProtocol {
             ($message:expr, $p:ident) => {{
                 match $message.kind.as_ref().ok_or_else(invalid)? {
                     $p::message::Kind::ClientContext(value) => {
-                        let pending = self
-                            .terminal
-                            .state
-                            .lock()
-                            .map_err(|_| invalid())?
+                        let mut state = self.terminal.state.lock().map_err(|_| invalid())?;
+                        let pending = state
                             .pending_contexts
                             .remove(&(info.server, value.request))
                             .ok_or_else(stale)?;
                         let context = pending.context;
-                        if !value.acknowledged
+                        if value.acknowledged != value.failure.is_none()
+                            || context.binding != info.binding
                             || value.epoch != info.epoch.get()
                             || value.connection_generation != context.binding.generation.get()
                             || value.context_generation != context.generation.get()
@@ -469,11 +630,27 @@ impl NativeProtocol {
                         {
                             return Err(invalid());
                         }
-                        let _ = pending.reply.send(if value.failure.is_some() {
-                            Err(stale())
-                        } else {
-                            Ok(())
-                        });
+                        use spaceterm_protocol::wire::common::FailureClass;
+                        let result = match (value.acknowledged, value.failure.as_ref()) {
+                            (true, None) => Ok(()),
+                            (false, Some(failure)) => {
+                                match FailureClass::try_from(failure.classification) {
+                                    Ok(FailureClass::Stale) => Err(stale()),
+                                    Ok(FailureClass::Busy) => {
+                                        Err(fail(ClientFailureClass::ResourceLimit))
+                                    }
+                                    _ => return Err(invalid()),
+                                }
+                            }
+                            _ => return Err(invalid()),
+                        };
+                        let acknowledged = result.is_ok();
+                        // Delivery and installation share the invalidation lock.
+                        // A closed waiter leaves only the generation reservation,
+                        // never acknowledged connection authority.
+                        if pending.reply.send(result).is_ok() && acknowledged {
+                            state.contexts.insert(info.server, context);
+                        }
                         Ok(true)
                     }
                     $p::message::Kind::ContentPublication(value) => {
@@ -743,11 +920,31 @@ impl NativeProtocol {
                                 .remaining_ms
                                 .map(|value| Duration::from_millis(u64::from(value))),
                         };
-                        match pane.receive_native(request, timing) {
-                            Ok(()) => Ok(true),
-                            Err(error) if error.class() == ClientFailureClass::StaleAuthority => {
-                                Ok(true)
+                        let correlation = if matches!(request.kind(), spaceterm_core::native_requests::NativeRequestKind::UnsafePaste { .. }) {
+                            let Some(origin) = request.runtime_request() else {
+                                // An older provider cannot prove which paste requested this permission.
+                                // Suppress it instead of guessing from the native request number.
+                                return Ok(true);
+                            };
+                            Some(EffectCorrelation::new(origin.get(), request.fence())?)
+                        } else { None };
+                        if correlation.is_some() {
+                            match self.remember_paste(&request, timing) {
+                                Ok(()) => {},
+                                Err(error) if error.class() == ClientFailureClass::StaleAuthority => return Ok(true),
+                                Err(error) => return Err(error),
                             }
+                        }
+                        let received = match correlation {
+                            Some(correlation) => pane.receive_paste_approval(correlation, request.clone(), timing),
+                            None => pane.receive_native(request.clone(), timing),
+                        };
+                        if received.is_err() && correlation.is_some() {
+                            self.forget_native(request.fence().session(), request.id().get())?;
+                        }
+                        match received {
+                            Ok(()) => Ok(true),
+                            Err(error) if error.class() == ClientFailureClass::StaleAuthority => Ok(true),
                             Err(error) => Err(error),
                         }
                     }
@@ -1113,6 +1310,109 @@ impl Drop for ReadSource {
             if let Some(pending) = pending {
                 owner.cancel_read(pending.request);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spaceterm_client::testing::{FakePaneConnection, FakeServer};
+    use spaceterm_core::native_requests::{
+        NativeCompletion, NativeCompletionKind, NativeRequest, NativeRequestId, NativeRequestKind,
+        NativeText, PasteApprovalId, PasteDecision,
+    };
+
+    #[tokio::test]
+    async fn equal_native_ids_keep_session_local_paste_metadata_after_late_cleanup() {
+        let server = FakeServer::new(1, vec![2]).unwrap();
+        let peer = FakePaneConnection::new(server.clone(), 1, 2).await.unwrap();
+        let journal = peer.journal().clone();
+        let protocol = NativeProtocol::new(journal.clone(), OperationTracker::new(journal));
+        let client = server.binding(1).unwrap().target().client();
+        let approval = PasteApprovalId::new(1).unwrap();
+        let request = |pane, generation, context, runtime_request| {
+            let pane = PaneId::new(server.server(), pane).unwrap();
+            let fence = EffectFence::new(
+                SessionKey {
+                    pane,
+                    epoch: ServerEpoch::new(1),
+                    generation: SessionGeneration::new(generation),
+                },
+                ControlGrant::new(pane, client, ControlGeneration::new(1)).unwrap(),
+                ConnectionBinding::new(client, ConnectionGeneration::new(1)),
+                ContextGeneration::new(context),
+                None,
+            )
+            .unwrap();
+            NativeRequest::new(
+                fence,
+                NativeRequestId::new(1).unwrap(),
+                MonotonicTick::new(0),
+                MonotonicTick::new(0),
+                Some(MonotonicTick::new(30_000)),
+                NativeRequestKind::UnsafePaste {
+                    approval,
+                    text: NativeText::new("unsafe\npaste".into()).unwrap(),
+                },
+            )
+            .unwrap()
+            .with_runtime_request(runtime_request)
+            .unwrap()
+        };
+        // Only correlation metadata is exercised here. Successive focus contexts
+        // do not claim two live Pane foci or admit terminal input. The production
+        // acceptance case separately proves independent focus and PTY delivery.
+        let first = request(1, 1, 1, 41);
+        let second = request(2, 1, 2, 42);
+        let replacement = request(1, 2, 3, 43);
+        let timing = NativeTiming {
+            not_before: Duration::ZERO,
+            expires_after: Some(Duration::from_secs(30)),
+        };
+        protocol.remember_paste(&first, timing).unwrap();
+        protocol.remember_paste(&second, timing).unwrap();
+        let confirm = |request: &NativeRequest| {
+            NativeCompletion::new(
+                request,
+                NativeCompletionKind::Paste {
+                    approval,
+                    decision: PasteDecision::Confirm,
+                },
+            )
+            .unwrap()
+        };
+        for request in [&first, &second] {
+            assert_eq!(
+                protocol
+                    .paste_completion(request.fence(), approval, PasteDecision::Confirm)
+                    .unwrap(),
+                confirm(request),
+            );
+        }
+        protocol
+            .forget_native(first.fence().session(), first.id().get())
+            .unwrap();
+        assert_eq!(
+            protocol
+                .paste_completion(first.fence(), approval, PasteDecision::Confirm)
+                .unwrap_err()
+                .class(),
+            ClientFailureClass::StaleAuthority,
+        );
+        protocol.remember_paste(&replacement, timing).unwrap();
+        // A late cleanup for the retired Session must spare both its replacement
+        // and the other Pane's equal native request ID in this same protocol map.
+        protocol
+            .forget_native(first.fence().session(), first.id().get())
+            .unwrap();
+        for request in [&second, &replacement] {
+            assert_eq!(
+                protocol
+                    .paste_completion(request.fence(), approval, PasteDecision::Confirm)
+                    .unwrap(),
+                confirm(request),
+            );
         }
     }
 }

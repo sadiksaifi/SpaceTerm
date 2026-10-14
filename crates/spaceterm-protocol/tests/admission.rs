@@ -928,3 +928,691 @@ fn canonical_physical_page_row_budget_rejects_limit_plus_one_in_both_majors() {
         );
     }
 }
+
+fn machine_fact_connections(
+    fixture: &Fixture,
+    major: u32,
+    client_facts: bool,
+    server_facts: bool,
+) -> (
+    spaceterm_protocol::connection::AuthenticatedConnection,
+    spaceterm_protocol::connection::AuthenticatedConnection,
+) {
+    machine_fact_connections_with_features(fixture, major, client_facts, server_facts, &[])
+}
+
+fn machine_fact_connections_with_features(
+    fixture: &Fixture,
+    major: u32,
+    client_facts: bool,
+    server_facts: bool,
+    independent_features: &[u32],
+) -> (
+    spaceterm_protocol::connection::AuthenticatedConnection,
+    spaceterm_protocol::connection::AuthenticatedConnection,
+) {
+    use spaceterm_protocol::{authentication::*, negotiation::*};
+    let config = |facts| {
+        let mut capabilities = vec![CAPABILITY_CANONICAL_DOMAIN];
+        capabilities.extend_from_slice(independent_features);
+        if facts {
+            capabilities.push(CAPABILITY_SERVER_MACHINE_FACTS);
+        }
+        HandshakeConfig {
+            majors: vec![major],
+            capabilities,
+            ..Default::default()
+        }
+    };
+    let (client, hello) = ClientHandshake::begin(
+        fixture.pin,
+        fixture.principal,
+        Purpose::Ordinary,
+        config(client_facts),
+        fixture.device_key.clone(),
+    )
+    .unwrap();
+    let (server, reply) = ServerHandshake::accept(
+        fixture.principal.server,
+        7,
+        config(server_facts),
+        fixture.server_key.clone(),
+        &fixture.pairings,
+        &hello,
+    )
+    .unwrap();
+    let (client, proof) = client.receive_server(&reply).unwrap();
+    let (Established::Ordinary(server), ready) =
+        server.receive_device(&fixture.pairings, &proof).unwrap()
+    else {
+        panic!("ordinary server")
+    };
+    let Established::Ordinary(client) = client.receive_ready(&ready).unwrap() else {
+        panic!("ordinary client")
+    };
+    (client, server)
+}
+
+fn machine_fact_payload(major: u32, publication: bool, facts: bool) -> Payload {
+    macro_rules! profile {
+        ($p:ident, $variant:ident) => {{
+            let status = $p::ManagementStatus {
+                request: if publication { 0 } else { 1 },
+                state: 1,
+                epoch: 7,
+                server: Some(support::id(1)),
+                status_revision: 1,
+                remote_access: Some($p::RemoteAccessPolicy {
+                    server: Some(support::id(1)),
+                    version: 1,
+                    ..Default::default()
+                }),
+                machine_facts: facts.then($p::ServerMachineFacts::default),
+                ..Default::default()
+            };
+            Payload::$variant($p::Message {
+                kind: Some(if publication {
+                    $p::message::Kind::StatusPublication($p::StatusPublication {
+                        request: 1,
+                        request_generation: 1,
+                        status: Some(status),
+                        ..Default::default()
+                    })
+                } else {
+                    $p::message::Kind::ManagementStatus(status)
+                }),
+            })
+        }};
+    }
+    match major {
+        1 => profile!(v1, Major1),
+        2 => profile!(v2, Major2),
+        _ => unreachable!(),
+    }
+}
+
+fn machine_fact_discriminator_payload(
+    major: u32,
+    publication: bool,
+    field: &str,
+    future: u32,
+) -> Payload {
+    let mut payload = machine_fact_payload(major, publication, true);
+    macro_rules! populate {
+        ($message:expr, $p:ident) => {{
+            let status = match $message.kind.as_mut().unwrap() {
+                $p::message::Kind::ManagementStatus(status) => status,
+                $p::message::Kind::StatusPublication(publication) => {
+                    publication.status.as_mut().unwrap()
+                }
+                _ => unreachable!(),
+            };
+            let facts = status.machine_facts.as_mut().unwrap();
+            *facts = $p::ServerMachineFacts {
+                platform: 2,
+                permissions: Some($p::ServerPermissionFacts {
+                    microphone: 1,
+                    screen_recording: 2,
+                    accessibility: 3,
+                    accessibility_naming: 2,
+                }),
+                bind_scope_availability: 1,
+                bind_scopes: vec![
+                    $p::ServerBindScopeOffer {
+                        scope: 1,
+                        endpoints: vec![
+                            $p::RemoteEndpoint {
+                                address: vec![127, 0, 0, 1],
+                                port: 47230,
+                                ..Default::default()
+                            },
+                            $p::RemoteEndpoint {
+                                address: std::net::Ipv6Addr::LOCALHOST.octets().to_vec(),
+                                port: 47230,
+                                ..Default::default()
+                            },
+                        ],
+                    },
+                    $p::ServerBindScopeOffer {
+                        scope: 2,
+                        endpoints: vec![
+                            $p::RemoteEndpoint {
+                                address: vec![0; 4],
+                                port: 47230,
+                                ..Default::default()
+                            },
+                            $p::RemoteEndpoint {
+                                address: vec![0; 16],
+                                port: 47230,
+                                ..Default::default()
+                            },
+                        ],
+                    },
+                ],
+            };
+            match field {
+                "known" => {}
+                "platform" => facts.platform = future,
+                "bind_scope_availability" => facts.bind_scope_availability = future,
+                "accessibility_naming" => {
+                    facts.permissions.as_mut().unwrap().accessibility_naming = future;
+                }
+                "microphone" => facts.permissions.as_mut().unwrap().microphone = future,
+                "screen_recording" => facts.permissions.as_mut().unwrap().screen_recording = future,
+                "accessibility" => facts.permissions.as_mut().unwrap().accessibility = future,
+                "scope" => facts.bind_scopes[1].scope = future,
+                "unsupported_scope_endpoint_shape" => {
+                    facts.bind_scopes[1].scope = future;
+                    facts.bind_scopes[1].endpoints.truncate(1);
+                    facts.bind_scopes[1].endpoints[0].address = vec![192, 0, 2, 1];
+                    facts.bind_scopes[1].endpoints[0].port = 44000;
+                }
+                "unsupported_scopes_only" => {
+                    facts.bind_scopes.remove(0);
+                    facts.bind_scopes[0].scope = future;
+                }
+                _ => unreachable!(),
+            }
+        }};
+    }
+    match &mut payload {
+        Payload::Major1(message) => populate!(message, v1),
+        Payload::Major2(message) => populate!(message, v2),
+    }
+    payload
+}
+
+fn known_machine_facts() -> spaceterm_core::management::ServerMachineFacts {
+    use spaceterm_core::management::*;
+    ServerMachineFacts {
+        platform: ServerPlatform::Linux,
+        permissions: ServerPermissionFacts {
+            microphone: ServerPermissionState::Granted,
+            screen_recording: ServerPermissionState::NotGranted,
+            accessibility: ServerPermissionState::NotNeeded,
+            accessibility_naming: ServerAccessibilityNaming::DeviceControl,
+        },
+        bind_scope_availability: MachineFactsAvailability::Available,
+        bind_scopes: vec![
+            ServerBindScopeOffer {
+                scope: ServerBindScope::Loopback,
+                endpoints: vec![
+                    "127.0.0.1:47230".parse().unwrap(),
+                    "[::1]:47230".parse().unwrap(),
+                ],
+            },
+            ServerBindScopeOffer {
+                scope: ServerBindScope::AllInterfaces,
+                endpoints: vec![
+                    "0.0.0.0:47230".parse().unwrap(),
+                    "[::]:47230".parse().unwrap(),
+                ],
+            },
+        ],
+    }
+}
+
+fn machine_fact_status(payload: &Payload) -> spaceterm_core::management::ServerStatus {
+    use spaceterm_core::management::StatusPublication;
+    use spaceterm_protocol::convert::management;
+    macro_rules! decode {
+        ($message:expr, $p:ident) => {
+            match $message.kind.as_ref().unwrap() {
+                $p::message::Kind::ManagementStatus(status) => {
+                    management::$p::decode_status(status, &|_| {
+                        Err(ProtocolError::UnexpectedMessage)
+                    })
+                    .expect("admitted machine facts must convert to a safe status")
+                }
+                $p::message::Kind::StatusPublication(publication) => {
+                    match management::$p::decode_publication(publication, &|_| {
+                        Err(ProtocolError::UnexpectedMessage)
+                    })
+                    .expect("admitted machine facts must convert to a safe publication")
+                    {
+                        StatusPublication::Snapshot { status, .. } => status,
+                        _ => panic!("expected a status snapshot"),
+                    }
+                }
+                _ => unreachable!(),
+            }
+        };
+    }
+    match payload {
+        Payload::Major1(message) => decode!(message, v1),
+        Payload::Major2(message) => decode!(message, v2),
+    }
+}
+
+fn assert_future_machine_fact_discriminator(field: &str, values: &[u32]) {
+    use spaceterm_core::management::*;
+    use spaceterm_protocol::negotiation::CAPABILITY_SERVER_MACHINE_FACTS;
+    let fixture = Fixture::new();
+    for major in [1, 2] {
+        for publication in [false, true] {
+            for &future in values {
+                let (mut client, mut server) =
+                    machine_fact_connections(&fixture, major, true, true);
+                assert!(
+                    client
+                        .capabilities()
+                        .contains(&CAPABILITY_SERVER_MACHINE_FACTS)
+                );
+                // Render-only facts do not negotiate Remote Lifecycle authority.
+                assert!(!client.capabilities().contains(&520_014));
+                let payload = machine_fact_discriminator_payload(major, publication, field, future);
+                let frame = server.encode(&payload).unwrap_or_else(|error| {
+                    panic!(
+                        "major {major}, publication {publication}, {field}={future}: bounded future discriminator rejected during encode: {error:?}"
+                    )
+                });
+                let received = client.decode(&frame).unwrap_or_else(|error| {
+                    panic!(
+                        "major {major}, publication {publication}, {field}={future}: bounded future discriminator rejected during authenticated decode: {error:?}"
+                    )
+                });
+                let status = machine_fact_status(&received);
+                let facts = status
+                    .machine_facts()
+                    .expect("known machine facts must survive");
+                let mut expected = known_machine_facts();
+                match field {
+                    "platform" => expected.platform = ServerPlatform::Unknown,
+                    "accessibility_naming" => {
+                        expected.permissions.accessibility_naming =
+                            ServerAccessibilityNaming::Unknown;
+                    }
+                    "microphone" => {
+                        expected.permissions.microphone = ServerPermissionState::Unknown
+                    }
+                    "screen_recording" => {
+                        expected.permissions.screen_recording = ServerPermissionState::Unknown;
+                    }
+                    "accessibility" => {
+                        expected.permissions.accessibility = ServerPermissionState::Unknown;
+                    }
+                    "scope" | "unsupported_scope_endpoint_shape" => {
+                        expected.bind_scopes.pop();
+                    }
+                    "bind_scope_availability" | "unsupported_scopes_only" => {
+                        assert!(matches!(
+                            facts.bind_scope_availability,
+                            MachineFactsAvailability::Unknown
+                                | MachineFactsAvailability::Unavailable
+                        ));
+                        expected.bind_scope_availability = facts.bind_scope_availability;
+                        expected.bind_scopes.clear();
+                    }
+                    _ => unreachable!(),
+                }
+                assert_eq!(facts, &expected, "major {major}, {field}={future}");
+                assert!(!status.parts().remote_access.value.is_enabled());
+                assert!(status.parts().listeners.is_empty());
+                assert!(status.parts().capabilities.is_empty());
+                assert_eq!(status.parts().epoch.get(), 7);
+                assert_eq!(status.parts().revision.get(), 1);
+
+                // A successful conversion alone does not prove the authenticated
+                // connection survived admission of the future discriminator.
+                let followup = machine_fact_discriminator_payload(major, false, "known", 0);
+                let frame = server.encode(&followup).unwrap();
+                let received = client
+                    .decode(&frame)
+                    .expect("a following valid status must remain usable on the same connection");
+                assert_eq!(
+                    machine_fact_status(&received).machine_facts(),
+                    Some(&known_machine_facts())
+                );
+            }
+        }
+    }
+}
+
+macro_rules! future_machine_fact_test {
+    ($name:ident, $field:literal, $values:expr) => {
+        #[test]
+        fn $name() {
+            assert_future_machine_fact_discriminator($field, $values);
+        }
+    };
+}
+future_machine_fact_test!(
+    future_machine_fact_platform_is_unknown_without_disconnect_in_both_majors,
+    "platform",
+    &[3, 99, u32::MAX]
+);
+future_machine_fact_test!(
+    future_machine_fact_availability_is_nonactionable_without_disconnect_in_both_majors,
+    "bind_scope_availability",
+    &[3, 99, u32::MAX]
+);
+future_machine_fact_test!(
+    future_machine_fact_naming_is_unknown_without_disconnect_in_both_majors,
+    "accessibility_naming",
+    &[3, 99, u32::MAX]
+);
+future_machine_fact_test!(
+    future_machine_fact_scope_preserves_known_offer_without_disconnect_in_both_majors,
+    "scope",
+    &[3, 99, u32::MAX]
+);
+future_machine_fact_test!(
+    future_machine_fact_scope_does_not_require_known_endpoint_shape_in_both_majors,
+    "unsupported_scope_endpoint_shape",
+    &[3, 99, u32::MAX]
+);
+future_machine_fact_test!(
+    future_machine_fact_only_unsupported_scopes_are_nonactionable_in_both_majors,
+    "unsupported_scopes_only",
+    &[3, 99, u32::MAX]
+);
+
+#[test]
+fn future_machine_fact_permission_states_are_unknown_without_disconnect_in_both_majors() {
+    for field in ["microphone", "screen_recording", "accessibility"] {
+        assert_future_machine_fact_discriminator(field, &[5, 99, u32::MAX]);
+    }
+}
+
+#[test]
+fn machine_fact_known_availability_keeps_wire_offer_invariants_in_both_majors() {
+    use spaceterm_protocol::convert::management;
+    macro_rules! check {
+        ($message:expr, $p:ident, $availability:expr, $empty:expr) => {{
+            let status = match $message.kind.as_mut().unwrap() {
+                $p::message::Kind::ManagementStatus(status) => status,
+                $p::message::Kind::StatusPublication(publication) => {
+                    publication.status.as_mut().unwrap()
+                }
+                _ => unreachable!(),
+            };
+            let facts = status.machine_facts.as_mut().unwrap();
+            facts.bind_scope_availability = $availability;
+            if $empty {
+                facts.bind_scopes.clear();
+            }
+            let result = match $message.kind.as_ref().unwrap() {
+                $p::message::Kind::ManagementStatus(status) => {
+                    management::$p::decode_status(status, &|_| {
+                        Err(ProtocolError::UnexpectedMessage)
+                    })
+                    .map(|_| ())
+                }
+                $p::message::Kind::StatusPublication(publication) => {
+                    management::$p::decode_publication(publication, &|_| {
+                        Err(ProtocolError::UnexpectedMessage)
+                    })
+                    .map(|_| ())
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(result, Err(ProtocolError::Malformed));
+        }};
+    }
+    for major in [1, 2] {
+        for publication in [false, true] {
+            for (availability, empty) in [(0, false), (2, false), (1, true)] {
+                let mut payload = machine_fact_discriminator_payload(
+                    major,
+                    publication,
+                    "unsupported_scopes_only",
+                    99,
+                );
+                match &mut payload {
+                    Payload::Major1(message) => check!(message, v1, availability, empty),
+                    Payload::Major2(message) => check!(message, v2, availability, empty),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn future_machine_fact_scope_does_not_hide_invalid_endpoints_status_or_limits_in_both_majors() {
+    use spaceterm_protocol::convert::management;
+    macro_rules! check {
+        ($message:expr, $p:ident, $major:expr, $fault:expr) => {{
+            let status = match $message.kind.as_mut().unwrap() {
+                $p::message::Kind::ManagementStatus(status) => status,
+                $p::message::Kind::StatusPublication(publication) => {
+                    publication.status.as_mut().unwrap()
+                }
+                _ => unreachable!(),
+            };
+            let facts = status.machine_facts.as_mut().unwrap();
+            match $fault {
+                "address_length" => facts.bind_scopes[1].endpoints[0].address = vec![127, 0, 0],
+                "empty_address" => facts.bind_scopes[1].endpoints[0].address.clear(),
+                "address_limit" => facts.bind_scopes[1].endpoints[0].address = vec![0; 17],
+                "port" => facts.bind_scopes[1].endpoints[0].port = u32::from(u16::MAX) + 1,
+                "zero_port" => facts.bind_scopes[1].endpoints[0].port = 0,
+                "empty_endpoints" => facts.bind_scopes[1].endpoints.clear(),
+                "flowinfo" => facts.bind_scopes[1].endpoints[0].flowinfo = 1,
+                "scope_id" => facts.bind_scopes[1].endpoints[0].scope_id = 1,
+                "known_scope_shape" => {
+                    facts.bind_scopes[0].endpoints[0].address = vec![127, 0, 0, 2];
+                }
+                "duplicate_known_scopes" => {
+                    facts.bind_scopes[1] = facts.bind_scopes[0].clone();
+                }
+                "policy_mismatch" => status.remote_access_enabled = true,
+                "revision" => status.status_revision = 0,
+                "endpoint_limit" => {
+                    facts.bind_scopes[1].endpoints =
+                        vec![facts.bind_scopes[1].endpoints[0].clone(); 9];
+                }
+                "scope_limit" => facts.bind_scopes.push(facts.bind_scopes[1].clone()),
+                _ => unreachable!(),
+            }
+            if matches!($fault, "address_limit" | "endpoint_limit" | "scope_limit") {
+                assert_eq!(
+                    Payload::decode($major, &$message.encode_to_vec()).map(|_| ()),
+                    Err(ProtocolError::LimitExceeded),
+                    "{} must remain bounded with a future machine-fact discriminator",
+                    $fault
+                );
+            }
+            // Omission must not skip endpoint encodings, vector bounds, known
+            // offer shapes, or enclosing status validation, even without preflight.
+            let result = match $message.kind.as_ref().unwrap() {
+                $p::message::Kind::ManagementStatus(status) => {
+                    management::$p::decode_status(status, &|_| {
+                        Err(ProtocolError::UnexpectedMessage)
+                    })
+                    .map(|_| ())
+                }
+                $p::message::Kind::StatusPublication(publication) => {
+                    management::$p::decode_publication(publication, &|_| {
+                        Err(ProtocolError::UnexpectedMessage)
+                    })
+                    .map(|_| ())
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(result, Err(ProtocolError::Malformed), "{}", $fault);
+        }};
+    }
+    for major in [1, 2] {
+        for publication in [false, true] {
+            for field in ["scope", "bind_scope_availability"] {
+                for fault in [
+                    "address_length",
+                    "empty_address",
+                    "address_limit",
+                    "port",
+                    "zero_port",
+                    "empty_endpoints",
+                    "flowinfo",
+                    "scope_id",
+                    "known_scope_shape",
+                    "duplicate_known_scopes",
+                    "policy_mismatch",
+                    "revision",
+                    "endpoint_limit",
+                    "scope_limit",
+                ] {
+                    let mut payload =
+                        machine_fact_discriminator_payload(major, publication, field, 99);
+                    match &mut payload {
+                        Payload::Major1(message) => check!(message, v1, 1, fault),
+                        Payload::Major2(message) => check!(message, v2, 2, fault),
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn machine_facts_require_both_advertisements_and_sender_receiver_gates_in_both_majors() {
+    use spaceterm_protocol::{
+        authentication::SigningKey, negotiation::CAPABILITY_SERVER_MACHINE_FACTS,
+    };
+    let fixture = Fixture::new();
+    for major in [1, 2] {
+        for publication in [false, true] {
+            for (client_facts, server_facts) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let (mut client, mut server) =
+                    machine_fact_connections(&fixture, major, client_facts, server_facts);
+                let supported = client_facts && server_facts;
+                assert_eq!(
+                    client
+                        .capabilities()
+                        .contains(&CAPABILITY_SERVER_MACHINE_FACTS),
+                    supported
+                );
+                let facts = machine_fact_payload(major, publication, true);
+                if supported {
+                    assert_eq!(client.decode(&server.encode(&facts).unwrap()), Ok(facts));
+                    continue;
+                }
+                assert_eq!(server.encode(&facts), Err(ProtocolError::Negotiation));
+                // An outgoing rejection must not consume the first sequence.
+                let omitted = machine_fact_payload(major, publication, false);
+                assert_eq!(
+                    client.decode(&server.encode(&omitted).unwrap()),
+                    Ok(omitted)
+                );
+                // A paired sender can sign a structurally valid but unnegotiated
+                // field. Verify the receive gate after genuine signature checks.
+                let body = common::AuthenticatedEnvelope {
+                    direction: common::Direction::ServerToClient as i32,
+                    major,
+                    binding: client.binding().to_vec(),
+                    sequence: 2,
+                    payload: facts.encode().unwrap(),
+                    purpose: 1,
+                }
+                .encode_to_vec();
+                let mut transcript = Vec::new();
+                for component in [
+                    b"SpaceTerm Protocol Ed25519 v1".as_slice(),
+                    b"authenticated-envelope".as_slice(),
+                    body.as_slice(),
+                ] {
+                    transcript.extend_from_slice(&(component.len() as u64).to_be_bytes());
+                    transcript.extend_from_slice(component);
+                }
+                let bytes = common::Signed {
+                    signature: fixture.server_key.sign(&transcript).unwrap().to_vec(),
+                    body,
+                }
+                .encode_to_vec();
+                assert_eq!(client.decode(&bytes), Err(ProtocolError::Negotiation));
+                assert_eq!(client.decode(&bytes), Err(ProtocolError::Authentication));
+            }
+        }
+    }
+}
+
+#[test]
+fn machine_facts_are_independent_of_reserved_metadata_paste_and_copy_features_in_both_majors() {
+    use spaceterm_protocol::negotiation::CAPABILITY_SERVER_MACHINE_FACTS;
+    // The integrated feature namespace is reserved even before this lane receives its converters.
+    let reserved = [520_010, 520_011, 520_012];
+    let fixture = Fixture::new();
+    for major in [1, 2] {
+        for independent in [
+            &[][..],
+            &reserved[..1],
+            &reserved[1..2],
+            &reserved[2..],
+            &reserved[..],
+        ] {
+            for facts_supported in [false, true] {
+                for publication in [false, true] {
+                    let (mut client, mut server) = machine_fact_connections_with_features(
+                        &fixture,
+                        major,
+                        facts_supported,
+                        facts_supported,
+                        independent,
+                    );
+                    assert_eq!(
+                        client
+                            .capabilities()
+                            .contains(&CAPABILITY_SERVER_MACHINE_FACTS),
+                        facts_supported
+                    );
+                    let facts = machine_fact_payload(major, publication, true);
+                    if facts_supported {
+                        assert_eq!(client.decode(&server.encode(&facts).unwrap()), Ok(facts));
+                    } else {
+                        assert_eq!(server.encode(&facts), Err(ProtocolError::Negotiation));
+                        let omitted = machine_fact_payload(major, publication, false);
+                        assert_eq!(
+                            client.decode(&server.encode(&omitted).unwrap()),
+                            Ok(omitted)
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn machine_fact_scope_and_endpoint_limits_apply_before_decode_in_both_majors() {
+    macro_rules! check {
+        ($p:ident, $variant:ident, $major:expr) => {{
+            for (scopes, endpoints) in [(3, 2), (1, 9)] {
+                let payload = $p::Message {
+                    kind: Some($p::message::Kind::ManagementStatus($p::ManagementStatus {
+                        state: 1,
+                        machine_facts: Some($p::ServerMachineFacts {
+                            bind_scope_availability: 1,
+                            bind_scopes: vec![
+                                $p::ServerBindScopeOffer {
+                                    scope: 1,
+                                    endpoints: vec![
+                                        $p::RemoteEndpoint {
+                                            address: vec![127, 0, 0, 1],
+                                            port: 47230,
+                                            ..Default::default()
+                                        };
+                                        endpoints
+                                    ],
+                                };
+                                scopes
+                            ],
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })),
+                };
+                assert_eq!(
+                    Payload::$variant(payload.clone()).encode(),
+                    Err(ProtocolError::LimitExceeded)
+                );
+                assert_eq!(
+                    Payload::decode($major, &payload.encode_to_vec()),
+                    Err(ProtocolError::LimitExceeded)
+                );
+            }
+        }};
+    }
+    check!(v1, Major1, 1);
+    check!(v2, Major2, 2);
+}

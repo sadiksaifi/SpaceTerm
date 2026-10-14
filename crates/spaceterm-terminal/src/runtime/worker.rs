@@ -9,7 +9,8 @@ use super::owner::Shared;
 use super::ports::*;
 use crate::runtime_contracts::*;
 use spaceterm_core::authority::EffectFence;
-use spaceterm_core::native_requests::{NativeCompletionKind, PasteDecision};
+use spaceterm_core::native_requests::NativeCompletionKind;
+use spaceterm_core::observations::MonotonicTick;
 use spaceterm_core::observations::RuntimeClock;
 use spaceterm_core::organization::FailureClass;
 use spaceterm_core::retirement::{CleanupResult, SessionCleanupObservation};
@@ -473,6 +474,10 @@ impl Worker {
                     }));
                     return Ok(());
                 }
+                let paste_origin = match &command {
+                    RuntimeCommand::RequestCorrelatedPaste(request, _) => Some(*request),
+                    _ => None,
+                };
                 match command {
                     RuntimeCommand::Resize(next) => {
                         drop(authority);
@@ -494,7 +499,8 @@ impl Worker {
                         drop(authority);
                         self.resize(stamp, next, reply)?;
                     }
-                    RuntimeCommand::RequestPaste(text) => {
+                    RuntimeCommand::RequestPaste(text)
+                    | RuntimeCommand::RequestCorrelatedPaste(_, text) => {
                         let bracketed = self.engine()?.bracketed_paste()?;
                         let now = self
                             .clock
@@ -506,7 +512,7 @@ impl Worker {
                             now,
                             bracketed,
                             &shared,
-                            (input, reply),
+                            (input, reply, paste_origin),
                         )?;
                         drop(authority);
                         if let Some((command, input, reply)) = prepared {
@@ -520,20 +526,7 @@ impl Worker {
                             .map_err(|_| RuntimeFailure::internal(RuntimeStage::Counter))?;
                         let prepared = self.native.resolve_paste(approval, decision, stamp, now);
                         drop(authority);
-                        if let Some((text, input)) = prepared {
-                            self.apply_command(
-                                stamp,
-                                RuntimeCommand::RequestPaste(text),
-                                input,
-                                reply,
-                            )?;
-                        } else {
-                            reply.complete(Ok(if decision == PasteDecision::Cancel {
-                                EffectDisposition::Cancelled
-                            } else {
-                                EffectDisposition::StaleAuthority
-                            }));
-                        }
+                        self.apply_paste_resolution(stamp, prepared, reply)?;
                     }
                     RuntimeCommand::CompleteNativeRequest(completion) => {
                         drop(authority);
@@ -558,16 +551,7 @@ impl Worker {
                                     .now()
                                     .map_err(|_| RuntimeFailure::internal(RuntimeStage::Counter))?,
                             );
-                            if let Some((text, input)) = prepared {
-                                self.apply_command(
-                                    stamp,
-                                    RuntimeCommand::RequestPaste(text),
-                                    input,
-                                    reply,
-                                )?;
-                            } else {
-                                reply.complete(Ok(EffectDisposition::StaleAuthority));
-                            }
+                            self.apply_paste_resolution(stamp, prepared, reply)?;
                         } else {
                             self.native.complete(
                                 &completion,
@@ -714,31 +698,79 @@ impl Worker {
         input: BudgetLease,
         reply: super::ingress::ReplySender<EffectDisposition>,
     ) -> Result<(), RuntimeFailure> {
+        self.apply_command_inner(stamp, command, input, InputCompletion::Effect(reply), None)
+    }
+    fn apply_paste_resolution(
+        &mut self,
+        stamp: AuthorityStamp,
+        resolution: super::native_requests::PasteResolution,
+        reply: super::ingress::ReplySender<EffectDisposition>,
+    ) -> Result<(), RuntimeFailure> {
+        match resolution {
+            super::native_requests::PasteResolution::Approved(paste) => self.apply_command_inner(
+                stamp,
+                RuntimeCommand::RequestPaste(paste.text),
+                paste.input,
+                InputCompletion::Paste {
+                    origin: paste.origin_reply,
+                    resolution: reply,
+                },
+                Some(paste.deadline),
+            ),
+            super::native_requests::PasteResolution::Cancelled => {
+                reply.complete(Ok(EffectDisposition::Cancelled));
+                Ok(())
+            }
+            super::native_requests::PasteResolution::Stale => {
+                reply.complete(Ok(EffectDisposition::StaleAuthority));
+                Ok(())
+            }
+        }
+    }
+    fn apply_command_inner(
+        &mut self,
+        stamp: AuthorityStamp,
+        command: RuntimeCommand,
+        input: BudgetLease,
+        completion: InputCompletion,
+        paste_deadline: Option<MonotonicTick>,
+    ) -> Result<(), RuntimeFailure> {
         let shared = Arc::clone(&self.shared);
         let authority = shared.authority.read()?;
-        if reply.cancelled() {
+        if completion.cancelled() {
+            completion.complete(EffectDisposition::Cancelled);
             return Ok(());
         }
         if !authority.permits_stamp(stamp, Some(&command), Some(shared.revision()))
             || shared.validate_command_base(&command).is_err()
         {
-            reply.complete(Ok(EffectDisposition::StaleAuthority));
+            completion.complete(EffectDisposition::StaleAuthority);
             return Ok(());
         }
         if let RuntimeCommand::Appearance(next) = &command
             && let Some(current) = &self.appearance
         {
             if next.generation < current.generation {
-                reply.complete(Ok(EffectDisposition::StaleAuthority));
+                completion.complete(EffectDisposition::StaleAuthority);
                 return Ok(());
             }
             if next.generation == current.generation && next.as_ref() != current {
-                reply.complete(Err(RuntimeFailure::new(
+                completion.fail(RuntimeFailure::new(
                     FailureClass::InvalidRequest,
                     RuntimeStage::Admission,
-                )));
+                ));
                 return Ok(());
             }
+        }
+        if matches!(command, RuntimeCommand::Copy(_))
+            && self
+                .process
+                .as_ref()
+                .ok_or(RuntimeFailure::internal(RuntimeStage::Input))?
+                .hidden_input()?
+        {
+            completion.complete(EffectDisposition::Applied);
+            return Ok(());
         }
         match self.engine()?.apply(&command) {
             Ok(effect) => {
@@ -749,9 +781,15 @@ impl Worker {
                 shared.set_base(base)?;
                 self.input.enqueue(
                     effect.bytes,
-                    InputOrigin::Client(stamp, eligibility(&command)),
+                    if let Some(deadline) = paste_deadline {
+                        InputOrigin::ApprovedPaste(stamp, deadline)
+                    } else if matches!(command, RuntimeCommand::Copy(_)) {
+                        InputOrigin::EnhancedCopy(stamp)
+                    } else {
+                        InputOrigin::Client(stamp, eligibility(&command))
+                    },
                     input,
-                    Some(InputCompletion::Effect(reply)),
+                    Some(completion),
                 )?;
                 drop(authority);
                 if effect.changed {
@@ -759,7 +797,7 @@ impl Worker {
                 }
             }
             Err(error) => {
-                reply.complete(Err(error));
+                completion.fail(error);
                 if !matches!(
                     error.class,
                     FailureClass::InvalidRequest

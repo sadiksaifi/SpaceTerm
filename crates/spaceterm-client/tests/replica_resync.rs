@@ -64,6 +64,81 @@ fn replica(limits: ClientLimits) -> Replica {
 }
 
 #[test]
+fn interleaved_delta_cannot_publish_during_an_incomplete_snapshot_transfer() {
+    for multipart in [false, true] {
+        let server = ServerId::new([1; 16]);
+        let mut replica = replica(ClientLimits::default());
+        let token = replica.begin_resync(ServerEpoch::new(1)).unwrap();
+        replica
+            .install_snapshot(token, snapshot(server, 1, 1))
+            .unwrap();
+        let stamp = PublicationStamp {
+            request: token.get(),
+            request_generation: token.get(),
+            transfer: 2,
+            index: 0,
+            total: 2,
+            cursor: OrganizationCursor {
+                server,
+                epoch: ServerEpoch::new(1),
+                revision: OrganizationRevision::new(2),
+            },
+        };
+        assert_eq!(
+            replica
+                .stage_snapshot(
+                    token,
+                    SnapshotPart {
+                        stamp,
+                        state: snapshot(server, 1, 2).state().clone(),
+                        runtime: vec![],
+                    }
+                )
+                .unwrap(),
+            ReplicaUpdate::Staged
+        );
+        let delta = OrganizationDelta::new(
+            server,
+            ServerEpoch::new(1),
+            OrganizationRevision::new(1),
+            OrganizationRevision::new(3),
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        let result = if multipart {
+            replica.stage_delta(
+                PublicationStamp {
+                    transfer: 3,
+                    total: 1,
+                    cursor: OrganizationCursor {
+                        revision: OrganizationRevision::new(3),
+                        ..stamp.cursor
+                    },
+                    ..stamp
+                },
+                delta,
+            )
+        } else {
+            replica.apply_delta(&delta)
+        };
+        assert_eq!(result.unwrap_err().class(), ClientFailureClass::InvalidPeer);
+        assert_eq!(
+            replica
+                .subscribe()
+                .borrow()
+                .retained()
+                .unwrap()
+                .cursor
+                .revision
+                .get(),
+            1
+        );
+        assert!(!replica.subscribe().borrow().is_ready());
+    }
+}
+
+#[test]
 fn revision_gap_requests_one_resync_and_preserves_last_valid_replica() {
     let server = ServerId::new([1; 16]);
     let mut replica = replica(ClientLimits::default());

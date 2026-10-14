@@ -62,22 +62,49 @@ async fn setup(
     Arc<JournalController>,
     Arc<PeerPlan>,
 ) {
-    setup_with_capabilities(
-        major,
-        reply,
-        &[
-            spaceterm_protocol::negotiation::CAPABILITY_SERVER_DIRECTORIES,
-            spaceterm_protocol::negotiation::CAPABILITY_SERVER_GIT,
-            spaceterm_protocol::negotiation::CAPABILITY_ACCOUNT_RUNTIME,
-        ],
-    )
-    .await
+    setup_with_machine_facts(major, reply, false).await
+}
+
+async fn setup_with_machine_facts(
+    major: u32,
+    reply: Option<QueryHandler>,
+    machine_facts: bool,
+) -> (
+    spaceterm_client::registry::ServerHandle,
+    spaceterm_client::registry::ClientRuntime,
+    Arc<JournalController>,
+    Arc<PeerPlan>,
+) {
+    let capabilities = [
+        spaceterm_protocol::negotiation::CAPABILITY_SERVER_DIRECTORIES,
+        spaceterm_protocol::negotiation::CAPABILITY_SERVER_GIT,
+        spaceterm_protocol::negotiation::CAPABILITY_ACCOUNT_RUNTIME,
+    ];
+    let mut server_capabilities = capabilities.to_vec();
+    if machine_facts {
+        server_capabilities.push(spaceterm_protocol::negotiation::CAPABILITY_SERVER_MACHINE_FACTS);
+    }
+    setup_with_server_capabilities(major, reply, &capabilities, &server_capabilities).await
 }
 
 async fn setup_with_capabilities(
     major: u32,
     reply: Option<QueryHandler>,
     capabilities: &[u32],
+) -> (
+    spaceterm_client::registry::ServerHandle,
+    spaceterm_client::registry::ClientRuntime,
+    Arc<JournalController>,
+    Arc<PeerPlan>,
+) {
+    setup_with_server_capabilities(major, reply, capabilities, capabilities).await
+}
+
+async fn setup_with_server_capabilities(
+    major: u32,
+    reply: Option<QueryHandler>,
+    capabilities: &[u32],
+    server_capabilities: &[u32],
 ) -> (
     spaceterm_client::registry::ServerHandle,
     spaceterm_client::registry::ClientRuntime,
@@ -104,7 +131,7 @@ async fn setup_with_capabilities(
         .await
         .unwrap();
     let mut plan = PeerPlan::new(vec![major]);
-    plan.capabilities.extend_from_slice(capabilities);
+    plan.capabilities.extend_from_slice(server_capabilities);
     plan.capabilities.sort_unstable();
     plan.query_handler = reply;
     let plan = Arc::new(plan);
@@ -1745,5 +1772,162 @@ async fn paired_device_inventory_never_combines_pages_from_different_revisions()
             Err(spaceterm_client::management_cli::ManagementFailure::UnsafeNativeState)
         );
         runtime.shutdown().await.unwrap();
+    }
+}
+
+fn status_with_machine_facts(
+    server: spaceterm_core::identity::ServerId,
+    revision: u64,
+) -> ServerStatus {
+    use spaceterm_core::management::*;
+    status(server, revision)
+        .with_machine_facts(ServerMachineFacts {
+            platform: ServerPlatform::Linux,
+            permissions: ServerPermissionFacts {
+                microphone: ServerPermissionState::NotNeeded,
+                screen_recording: ServerPermissionState::NotNeeded,
+                accessibility: ServerPermissionState::NotNeeded,
+                accessibility_naming: ServerAccessibilityNaming::Accessibility,
+            },
+            bind_scope_availability: MachineFactsAvailability::Available,
+            bind_scopes: vec![ServerBindScopeOffer {
+                scope: ServerBindScope::Loopback,
+                endpoints: vec![
+                    "127.0.0.1:47232".parse().unwrap(),
+                    "[::1]:47232".parse().unwrap(),
+                ],
+            }],
+        })
+        .unwrap()
+}
+
+fn machine_facts_reply(payload: &Payload, target: &ConnectionTarget) -> Option<Payload> {
+    let (request, generation, cancel) = status_request(payload)?;
+    if cancel {
+        return None;
+    }
+    Some(publication(
+        payload.major(),
+        StatusPublication::Snapshot {
+            request: NonZeroU64::new(request).unwrap(),
+            generation,
+            status: status_with_machine_facts(target.server(), 1),
+        },
+    ))
+}
+
+#[tokio::test(start_paused = true)]
+async fn selected_server_machine_facts_use_base_capability_and_have_no_local_fallback_in_both_majors()
+ {
+    use spaceterm_protocol::negotiation::CAPABILITY_SERVER_MACHINE_FACTS;
+    for major in [1, 2] {
+        for supported in [false, true] {
+            let reply = if supported {
+                machine_facts_reply
+            } else {
+                status_reply
+            };
+            let (server, runtime, journal, plan) =
+                setup_with_machine_facts(major, Some(reply), supported).await;
+            let reads = server.queries(journal.clone()).unwrap();
+            let capabilities = match *server.state().borrow() {
+                spaceterm_client::api::ConnectionState::Connected { info } => info.capabilities,
+                _ => panic!("authenticated connection"),
+            };
+            assert_eq!(
+                capabilities.supports(CAPABILITY_SERVER_MACHINE_FACTS),
+                supported
+            );
+            let one_shot = reads.status().await.unwrap();
+            assert_eq!(one_shot.machine_facts().is_some(), supported);
+            assert!(!one_shot.parts().remote_access.value.is_enabled());
+            let mut subscription = reads.subscribe_status().await.unwrap();
+            subscription.changed().await.unwrap();
+            assert_eq!(subscription.latest().unwrap(), Some(one_shot));
+            assert!(journal.snapshot().unwrap().operations().is_empty());
+            assert_eq!(plan.opens.load(Ordering::SeqCst), 1);
+            drop(subscription);
+            runtime.shutdown().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn status_machine_facts_reject_foreign_server_and_noncurrent_authenticated_epoch_in_both_majors()
+ {
+    for major in [1, 2] {
+        for wrong_server in [false, true] {
+            for changed in [false, true] {
+                let (server, runtime, journal, plan) =
+                    setup_with_machine_facts(major, None, true).await;
+                let subscription = server
+                    .queries(journal.clone())
+                    .unwrap()
+                    .subscribe_status()
+                    .await
+                    .unwrap();
+                let (request, generation, _) = plan
+                    .messages
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find_map(status_request)
+                    .unwrap();
+                let current = status_with_machine_facts(server.identity(), 1);
+                plan.control(PeerControl::publication(publication(
+                    major,
+                    StatusPublication::Snapshot {
+                        request: NonZeroU64::new(request).unwrap(),
+                        generation,
+                        status: current.clone(),
+                    },
+                )))
+                .await;
+                settle().await;
+                assert_eq!(subscription.latest().unwrap(), Some(current.clone()));
+                let owner = if wrong_server {
+                    spaceterm_core::identity::ServerId::new([9; 16])
+                } else {
+                    server.identity()
+                };
+                let mut parts = status(owner, 2).parts().clone();
+                if !wrong_server {
+                    parts.epoch = ServerEpoch::new(2);
+                }
+                let mut facts = current.machine_facts().unwrap().clone();
+                facts.permissions.microphone =
+                    spaceterm_core::management::ServerPermissionState::Granted;
+                let invalid = ServerStatus::new(parts)
+                    .unwrap()
+                    .with_machine_facts(facts)
+                    .unwrap();
+                let invalid = if changed {
+                    StatusPublication::Changed {
+                        request: NonZeroU64::new(request).unwrap(),
+                        generation,
+                        base: NonZeroU64::MIN,
+                        status: invalid,
+                    }
+                } else {
+                    StatusPublication::Snapshot {
+                        request: NonZeroU64::new(request).unwrap(),
+                        generation,
+                        status: invalid,
+                    }
+                };
+                plan.control(PeerControl::publication(publication(major, invalid)))
+                    .await;
+                settle().await;
+                assert_eq!(subscription.latest().unwrap(), Some(current));
+                assert!(subscription.needs_resync().unwrap());
+                assert!(!matches!(
+                    *server.state().borrow(),
+                    spaceterm_client::api::ConnectionState::Connected { .. }
+                ));
+                assert!(journal.snapshot().unwrap().operations().is_empty());
+                drop(subscription);
+                runtime.shutdown().await.unwrap();
+            }
+        }
     }
 }

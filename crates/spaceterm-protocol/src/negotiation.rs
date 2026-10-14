@@ -71,6 +71,12 @@ pub const CAPABILITY_RUNTIME_METADATA: u32 = 520_009;
 /// Bounded fragmented metadata snapshots for small negotiated frames.
 pub const CAPABILITY_RUNTIME_METADATA_FRAGMENTS: u32 = 520_010;
 
+/// Exact originating runtime request and independent native completion correlation.
+pub const CAPABILITY_NATIVE_PASTE_CORRELATION: u32 = 520_011;
+/// Enhanced-only Copy, never an ordinary legacy key fallback.
+pub const CAPABILITY_ENHANCED_COPY: u32 = 520_012;
+/// Render-only owning-server platform, permission, and bind-scope comparisons.
+pub const CAPABILITY_SERVER_MACHINE_FACTS: u32 = 520_013;
 /// Exact paired admission of native lifecycle requests through the owning account.
 /// Older account-runtime implementations cannot authorize this operation.
 pub const CAPABILITY_REMOTE_NATIVE_LIFECYCLE: u32 = 520_014;

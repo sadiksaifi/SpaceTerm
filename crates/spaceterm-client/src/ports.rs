@@ -8,7 +8,14 @@ use crate::{
 };
 use spaceterm_core::{operations::OperationId, organization::OrganizationDelta};
 use spaceterm_protocol::{authentication::SigningKey, codec::Payload};
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 pub type ClientFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ClientFailure>> + Send + 'a>>;
 
@@ -53,6 +60,24 @@ pub enum ConnectionPurpose {
     RestrictedRevocation { operation: OperationId },
 }
 
+/// Attempt-local cancellation for foreground prompts. This signal grants no
+/// credential authority. Cancellation ends prompt use, but the owner must still
+/// drain the opening future and join its native cleanup. Clones observe the same
+/// irreversible cancellation.
+#[derive(Clone, Default)]
+pub struct ForegroundCancellation(Arc<AtomicBool>);
+impl ForegroundCancellation {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 pub trait RouteConnector: Send + Sync {
     /// Owns a bounded dial and its cancellation cleanup. A failed open resolves
     /// only after all resources it created have finished cleanup. Native adapters
@@ -64,6 +89,18 @@ pub trait RouteConnector: Send + Sync {
         target: &'a ConnectionTarget,
         purpose: ConnectionPurpose,
     ) -> ClientFuture<'a, ConnectedRoute>;
+    /// One deliberate Retry action may use an interactive native route adapter.
+    /// Automatic retries and initial restoration use `open` and never inherit this action.
+    /// Native prompt authority must also check this attempt's cancellation before
+    /// presentation, while waiting, and before replying. The owner cancels it before
+    /// draining the open on deadline, replacement Retry or shutdown.
+    fn open_foreground<'a>(
+        &'a self,
+        target: &'a ConnectionTarget,
+        _cancellation: ForegroundCancellation,
+    ) -> ClientFuture<'a, ConnectedRoute> {
+        self.open(target, ConnectionPurpose::Ordinary)
+    }
 }
 
 #[derive(Clone)]
@@ -135,6 +172,11 @@ pub enum ConnectionInvalidation {
 /// verifies journal durability or exact ephemeral fences, both before queueing
 /// and immediately before transmission. Lifecycle reserve is not caller-selected.
 pub trait ConnectionDelegate: Send + Sync {
+    /// Finish local publication persistence after every connection actor has stopped.
+    /// This hook cannot send a server lifecycle operation.
+    fn shutdown(&self) -> ClientFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
     fn invalidate(&self, binding: &PairedServerBinding, reason: ConnectionInvalidation);
     fn reconcile<'a>(
         &'a self,
