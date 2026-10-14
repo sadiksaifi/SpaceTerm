@@ -116,7 +116,7 @@ impl ClientRegistry {
                 return Err(ClientFailure::new(ClientFailureClass::InvalidStorage));
             }
         }
-        if services.additional_capabilities.len() > 7
+        if services.additional_capabilities.len() > 8
             || services.additional_capabilities.iter().any(|capability| {
                 !matches!(
                     *capability,
@@ -127,6 +127,7 @@ impl ClientRegistry {
                         | spaceterm_protocol::negotiation::CAPABILITY_NATIVE_NOTIFICATIONS
                         | spaceterm_protocol::negotiation::CAPABILITY_APPLICATION_MOUSE
                         | spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA
+                        | spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA_FRAGMENTS
                 )
             })
         {

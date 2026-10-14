@@ -68,6 +68,7 @@ pub(crate) struct NativeProtocol {
     registry: Mutex<Option<ClientRegistry>>,
     channels: Mutex<Option<Arc<PaneChannels>>>,
     infos: Mutex<BTreeMap<ServerId, ConnectedInfo>>,
+    metadata: Mutex<BTreeMap<ServerId, spaceterm_protocol::convert::metadata::MetadataAssembler>>,
     lookups: Mutex<BTreeMap<OperationId, oneshot::Sender<OperationLookup>>>,
     effects: Mutex<BTreeMap<(ServerId, u64), QueuedEffect>>,
     sequence: AtomicU64,
@@ -85,6 +86,7 @@ impl NativeProtocol {
             registry: Mutex::new(None),
             channels: Mutex::new(None),
             infos: Mutex::new(BTreeMap::new()),
+            metadata: Mutex::new(BTreeMap::new()),
             lookups: Mutex::new(BTreeMap::new()),
             effects: Mutex::new(BTreeMap::new()),
             sequence: AtomicU64::new(0),
@@ -345,6 +347,9 @@ impl ConnectionDelegate for NativeProtocol {
         if let Ok(mut infos) = self.infos.lock() {
             infos.remove(&server);
         }
+        if let Ok(mut metadata) = self.metadata.lock() {
+            metadata.remove(&server);
+        }
         self.terminal.invalidate(server);
     }
     fn reconcile<'a>(
@@ -358,6 +363,10 @@ impl ConnectionDelegate for NativeProtocol {
                 .lock()
                 .map_err(|_| invalid())?
                 .insert(info.server, info);
+            self.metadata
+                .lock()
+                .map_err(|_| invalid())?
+                .insert(info.server, Default::default());
             let binding = self.binding(info.server)?;
             let peer = DirectPeer {
                 owner: self,
@@ -434,6 +443,39 @@ impl ConnectionDelegate for NativeProtocol {
         channel: &'a mut dyn ProtocolChannel,
     ) -> ClientFuture<'a, ()> {
         Box::pin(async move {
+            let fragment = match &message {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::MetadataFragment(value)),
+                }) => Some(
+                    spaceterm_protocol::convert::metadata::v1::decode_fragment(value)
+                        .map_err(ClientFailure::from)?,
+                ),
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::MetadataFragment(value)),
+                }) => Some(
+                    spaceterm_protocol::convert::metadata::v2::decode_fragment(value)
+                        .map_err(ClientFailure::from)?,
+                ),
+                _ => None,
+            };
+            if let Some(fragment) = fragment {
+                let fence = fragment.fence();
+                if fence.connection() != info.binding || fence.session().epoch != info.epoch {
+                    return Err(invalid());
+                }
+                let completed = self
+                    .metadata
+                    .lock()
+                    .map_err(|_| invalid())?
+                    .get_mut(&info.server)
+                    .ok_or_else(stale)?
+                    .receive(fragment)
+                    .map_err(ClientFailure::from)?;
+                if let Some((fence, snapshot)) = completed {
+                    self.channels()?.receive_metadata(fence, snapshot)?;
+                }
+                return Ok(());
+            }
             let metadata = match &message {
                 Payload::Major1(v1::Message {
                     kind: Some(v1::message::Kind::MetadataPublication(value)),
