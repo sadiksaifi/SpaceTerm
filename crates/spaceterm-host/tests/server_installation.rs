@@ -921,6 +921,383 @@ mod account_installation {
     }
 
     #[tokio::test]
+    async fn signed_stage_cache_process_crash_before_sqlite_binding_refuses_empty_replacement() {
+        cache_creation_process_regression(
+            "account_installation::signed_stage_cache_process_crash_before_sqlite_binding_refuses_empty_replacement",
+            &["sqlite-created"],
+            CacheSubstitution::Database,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn signed_stage_cache_process_publication_recovery_preserves_original_scope() {
+        cache_creation_process_regression(
+            "account_installation::signed_stage_cache_process_publication_recovery_preserves_original_scope",
+            &[
+                "identity-before-effect",
+                "identity-durability",
+                "identity-completion",
+                "identity-published",
+                "seal-before-effect",
+                "seal-durability",
+                "seal-completion",
+                "seal-published",
+                "bound-before-database-publication",
+            ],
+            CacheSubstitution::None,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn signed_stage_cache_pending_seal_recovery_refuses_empty_database_replacement() {
+        cache_creation_process_regression(
+            "account_installation::signed_stage_cache_pending_seal_recovery_refuses_empty_database_replacement",
+            &["seal-durability", "seal-completion", "seal-published"],
+            CacheSubstitution::Database,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn signed_stage_cache_pending_publication_recovery_refuses_replaced_directory() {
+        cache_creation_process_regression(
+            "account_installation::signed_stage_cache_pending_publication_recovery_refuses_replaced_directory",
+            &["identity-published", "seal-published"],
+            CacheSubstitution::Directory,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn signed_stage_cache_bound_creation_refuses_replaced_unpublished_inode() {
+        cache_creation_process_regression(
+            "account_installation::signed_stage_cache_bound_creation_refuses_replaced_unpublished_inode",
+            &["bound-before-database-publication"],
+            CacheSubstitution::StagedDatabase,
+        )
+        .await;
+    }
+
+    #[derive(Clone, Copy)]
+    enum CacheSubstitution {
+        None,
+        Database,
+        Directory,
+        StagedDatabase,
+    }
+
+    async fn cache_creation_process_regression(
+        filter: &str,
+        faults: &[&str],
+        substitution: CacheSubstitution,
+    ) {
+        use spaceterm_host::account_service::{
+            InstallationStatus, ServiceFailure, ServiceOutcome, ServiceRequestState,
+        };
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        use spaceterm_host::account_service::test_support as account_faults;
+
+        const ROOT: &str = "SPACETERM_CACHE_CREATION_ROOT";
+        const FAULT: &str = "SPACETERM_CACHE_CREATION_FAULT";
+        const REQUEST: &str = "original-cache-request.json";
+        let replace = !matches!(substitution, CacheSubstitution::None);
+        if let Some(root) = std::env::var_os(ROOT) {
+            let root = std::path::Path::new(&root);
+            let account = AccountServiceFixture::new(root, BuildIdentity::Development).unwrap();
+            let (key, candidate) = fixture("1.2.4", 7, native_machine());
+            let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+            let supervisor = installer(&account, key, manager.clone());
+            let request =
+                serde_json::from_slice(&std::fs::read(root.join(REQUEST)).unwrap()).unwrap();
+            let fault = std::env::var(FAULT).unwrap();
+            let crash_manager = manager.clone();
+            match fault.as_str() {
+                "sqlite-created" => {
+                    spaceterm_host::storage::testing::after_initialization_boundary(6, move || {
+                        assert!(crash_manager.effects.lock().unwrap().is_empty());
+                        std::process::exit(91)
+                    });
+                }
+                "bound-before-database-publication" => {
+                    spaceterm_host::storage::testing::after_initialization_boundary(8, move || {
+                        assert!(crash_manager.effects.lock().unwrap().is_empty());
+                        std::process::exit(91)
+                    });
+                }
+                _ => {
+                    let boundary = if fault.starts_with("identity-") { 5 } else { 2 };
+                    spaceterm_host::storage::testing::after_initialization_boundary(
+                        boundary,
+                        move || match fault.as_str() {
+                            "identity-before-effect" | "seal-before-effect" => {
+                                account_faults::fail_next_publication_before_effect()
+                            }
+                            "identity-durability" | "seal-durability" => {
+                                account_faults::fail_next_publication_durability()
+                            }
+                            "identity-completion" | "seal-completion" => {
+                                account_faults::fail_next_mutation_completion_sync()
+                            }
+                            "identity-published" | "seal-published" => {
+                                spaceterm_host::storage::testing::after_initialization_boundary(
+                                    10,
+                                    move || {
+                                        assert!(crash_manager.effects.lock().unwrap().is_empty());
+                                        std::process::exit(91)
+                                    },
+                                );
+                            }
+                            _ => panic!("unknown bounded cache fault"),
+                        },
+                    );
+                }
+            }
+            let result = supervisor
+                .stage_installation(request, account.confirm_install(candidate))
+                .await;
+            assert!(result.is_err(), "the selected publication fault must fire");
+            assert!(manager.effects.lock().unwrap().is_empty());
+            std::process::exit(91);
+        }
+
+        for fault in faults {
+            for desired in [DesiredServerState::Running, DesiredServerState::Stopped] {
+                let root = installation_root();
+                let account =
+                    AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+                let (key, original) = fixture("1.2.3", 7, native_machine());
+                let approved = InstallationStatus {
+                    installation: spaceterm_host::startup::InstallationId(super::nz(1)),
+                    version: original.manifest().version.clone(),
+                    artifact_sha256: original.artifact_sha256(),
+                };
+                let before = account
+                    .initialize_with_installation(desired, Some(approved.clone()))
+                    .unwrap();
+                let store = test_support::store(&before, key.clone()).unwrap();
+                let id = store.stage(&original).unwrap();
+                store
+                    .activate(id, store.snapshot().unwrap().generation, 1)
+                    .unwrap();
+                drop(store);
+                drop(original);
+                let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+                let supervisor = installer(&account, key.clone(), manager.clone());
+                let request = supervisor.allocate_request().unwrap();
+                std::fs::write(
+                    root.path().join(REQUEST),
+                    serde_json::to_vec(&request).unwrap(),
+                )
+                .unwrap();
+                let runtime_anchor = supervisor.client_connections_directory().to_owned();
+                let cache = runtime_anchor.parent().unwrap().join("stage-artifacts");
+                drop(supervisor);
+                let child_root = root.path().to_owned();
+                let child_filter = filter.to_owned();
+                let child_fault = fault.to_string();
+                let output = tokio::task::spawn_blocking(move || {
+                    std::process::Command::new(std::env::current_exe().unwrap())
+                        .arg("--exact")
+                        .arg(child_filter)
+                        .env(ROOT, child_root)
+                        .env(FAULT, child_fault)
+                        .output()
+                        .unwrap()
+                })
+                .await
+                .unwrap();
+                assert_eq!(
+                    output.status.code(),
+                    Some(91),
+                    "cache crash boundary {fault}"
+                );
+                let directory_inode = std::fs::metadata(&cache).unwrap().ino();
+                let database = cache.join(spaceterm_host::storage::DATABASE_FILE_NAME);
+                let original_inode = std::fs::metadata(&database).ok().map(|meta| meta.ino());
+                let creation: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(cache.join("organization-creation")).unwrap(),
+                )
+                .unwrap();
+                let retained_database_inode = creation["database"]["inode"]
+                    .as_u64()
+                    .or(original_inode)
+                    .or_else(|| {
+                        std::fs::read_dir(&cache)
+                            .unwrap()
+                            .filter_map(Result::ok)
+                            .find(|entry| {
+                                entry
+                                    .file_name()
+                                    .as_encoded_bytes()
+                                    .starts_with(b".organization-create-")
+                            })
+                            .map(|entry| entry.metadata().unwrap().ino())
+                    });
+                let observe_staged = matches!(substitution, CacheSubstitution::StagedDatabase)
+                    || (matches!(substitution, CacheSubstitution::Directory)
+                        && original_inode.is_none());
+                let observed_file = if observe_staged {
+                    cache.join(format!(
+                        ".organization-create-{:016x}-{:016x}",
+                        creation["database"]["device"].as_u64().unwrap(),
+                        creation["database"]["inode"].as_u64().unwrap(),
+                    ))
+                } else {
+                    database.clone()
+                };
+                match substitution {
+                    CacheSubstitution::Database | CacheSubstitution::StagedDatabase => {
+                        // Preserve the original object so its inode cannot be reused.
+                        let old_inode = std::fs::metadata(&observed_file).unwrap().ino();
+                        std::fs::rename(
+                            &observed_file,
+                            observed_file.with_extension("retained-original"),
+                        )
+                        .unwrap();
+                        std::fs::write(&observed_file, []).unwrap();
+                        std::fs::set_permissions(
+                            &observed_file,
+                            std::fs::Permissions::from_mode(0o600),
+                        )
+                        .unwrap();
+                        assert_ne!(std::fs::metadata(&observed_file).unwrap().ino(), old_inode);
+                    }
+                    CacheSubstitution::Directory => {
+                        // Retain every file object, but move them into a different
+                        // private directory. Matching DB bytes/inode are insufficient.
+                        let original = cache.with_extension("retained-original");
+                        std::fs::rename(&cache, &original).unwrap();
+                        std::fs::create_dir(&cache).unwrap();
+                        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o700))
+                            .unwrap();
+                        for entry in std::fs::read_dir(&original).unwrap() {
+                            let entry = entry.unwrap();
+                            std::fs::rename(entry.path(), cache.join(entry.file_name())).unwrap();
+                        }
+                        assert_ne!(std::fs::metadata(&cache).unwrap().ino(), directory_inode);
+                        assert_eq!(
+                            Some(std::fs::metadata(&observed_file).unwrap().ino()),
+                            retained_database_inode,
+                        );
+                    }
+                    CacheSubstitution::None => {}
+                }
+                let replacement_directory_inode = std::fs::metadata(&cache).unwrap().ino();
+                let replacement_inode = std::fs::metadata(&observed_file)
+                    .ok()
+                    .map(|meta| meta.ino());
+                let replacement_bytes = if replace {
+                    std::fs::read(&observed_file).ok()
+                } else {
+                    None
+                };
+                let reopened = installer(&account, key.clone(), manager.clone());
+                assert_eq!(
+                    reopened.request_progress(request),
+                    Err(ServiceFailure::Pending)
+                );
+                let (_, candidate) = fixture("1.2.4", 7, native_machine());
+                let digest = candidate.artifact_sha256();
+                if !replace {
+                    let cache_database = database.clone();
+                    let expected = (
+                        candidate.feed().bytes().to_vec(),
+                        candidate.feed().signature().to_vec(),
+                        candidate.bytes().to_vec(),
+                    );
+                    account_faults::after_next_phase(
+                        spaceterm_host::account_service::ServicePhase::Accepted,
+                        move || {
+                            let database = rusqlite::Connection::open(cache_database).unwrap();
+                            let retained: (Vec<u8>, Vec<u8>, Vec<u8>) = database
+                                .query_row(
+                                    "SELECT feed,signature,archive FROM artifacts WHERE request=?1",
+                                    [request.as_bytes().as_slice()],
+                                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                                )
+                                .unwrap();
+                            assert_eq!(retained, expected);
+                            Ok(())
+                        },
+                    );
+                }
+                let result = reopened
+                    .stage_installation(request, account.confirm_install(candidate))
+                    .await;
+                if replace {
+                    assert!(
+                        result.is_err(),
+                        "a substituted storage object must not be adopted"
+                    );
+                    assert_eq!(
+                        reopened.request_progress(request),
+                        Err(ServiceFailure::Pending)
+                    );
+                    assert_eq!(std::fs::read(&observed_file).ok(), replacement_bytes);
+                    assert_eq!(
+                        std::fs::metadata(&observed_file)
+                            .ok()
+                            .map(|meta| meta.ino()),
+                        replacement_inode,
+                    );
+                    if !matches!(substitution, CacheSubstitution::Database) {
+                        assert_eq!(
+                            std::fs::metadata(&database).ok().map(|meta| meta.ino()),
+                            original_inode,
+                        );
+                    }
+                } else {
+                    let result = result.expect("original cache publication must recover");
+                    let ServiceRequestState::Completed(ServiceOutcome::Staged(staged)) =
+                        &result.state
+                    else {
+                        panic!("original stage request must complete without activation")
+                    };
+                    assert_eq!(result.request, request);
+                    assert_eq!(staged.artifact_sha256, digest);
+                    assert_eq!(
+                        Some(std::fs::metadata(&database).unwrap().ino()),
+                        retained_database_inode.or(original_inode),
+                    );
+                    let after = reopened.discover().unwrap().unwrap();
+                    assert_eq!(after.staged_installation(), Some(staged));
+                    let selection = test_support::existing_store(&after, key.clone())
+                        .unwrap()
+                        .snapshot()
+                        .unwrap();
+                    assert_eq!(selection.approved, Some(id));
+                    assert_eq!(selection.staged, Some(staged.installation));
+                    assert_eq!(reopened.resolve(request).await.unwrap(), result);
+                }
+                let after = reopened.discover().unwrap().unwrap();
+                assert_eq!(after.server_pin(), before.server_pin());
+                assert_eq!(after.data_directory(), before.data_directory());
+                assert_eq!(
+                    after.organization_directory(),
+                    before.organization_directory()
+                );
+                assert_eq!(after.approved_installation(), Some(&approved));
+                assert_eq!(after.desired_state(), desired);
+                if replace {
+                    assert!(after.staged_installation().is_none());
+                }
+                assert_eq!(
+                    reopened.client_connections_directory(),
+                    runtime_anchor.as_path()
+                );
+                assert_eq!(
+                    std::fs::metadata(&cache).unwrap().ino(),
+                    replacement_directory_inode
+                );
+                assert!(manager.effects.lock().unwrap().is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn signed_stage_archive_copy_process_crash_resolves_original_verified_artifact() {
         use spaceterm_host::account_service::{
             InstallationStatus, ServiceOutcome, ServicePhase, ServiceRequestState,
@@ -1103,7 +1480,7 @@ mod account_installation {
 
     #[tokio::test]
     async fn original_first_install_recovers_every_database_initialization_boundary() {
-        for boundary in 0..=6 {
+        for boundary in 0..=9 {
             let root = private_root();
             let account =
                 AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
@@ -1154,6 +1531,8 @@ mod account_installation {
 
     #[tokio::test]
     async fn original_first_install_recovers_uncertain_creation_identity_publication() {
+        use std::os::unix::fs::MetadataExt as _;
+
         let root = private_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
@@ -1170,8 +1549,28 @@ mod account_installation {
                 .is_err()
         );
         assert!(manager.effects.lock().unwrap().is_empty());
+        // The original request's anchor remains readable. Its creation fence is
+        // in registered data storage and must keep ordinary discovery closed.
+        let (original, artifact_sha256) = supervisor.inspect_install_request(request).unwrap();
+        assert!(matches!(
+            supervisor.discover(),
+            Err(spaceterm_host::account_service::ServiceFailure::Indeterminate)
+        ));
+        let registration_path = account.anchor().join("registration");
+        let before: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&registration_path).unwrap()).unwrap();
+        let creation: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(account.data_directory().join("organization-creation")).unwrap(),
+        )
+        .unwrap();
+        let database = account
+            .data_directory()
+            .join("organization")
+            .join(spaceterm_host::storage::DATABASE_FILE_NAME);
+        assert!(!database.exists());
+        assert!(creation["database"]["inode"].as_u64().is_some());
         drop(supervisor);
-        let supervisor = installer(&account, key, manager);
+        let supervisor = installer(&account, key, manager.clone());
         let (_, artifact) = fixture("1.2.3", 7, native_machine());
         let progress = supervisor
             .install(request, account.confirm_install(artifact))
@@ -1181,10 +1580,127 @@ mod account_installation {
             progress.state,
             spaceterm_host::account_service::ServiceRequestState::Completed(_)
         ));
+        assert_eq!(progress.request, request);
+        assert_eq!(progress.request_digest, original.request_digest);
         assert_eq!(
-            read_template(&supervisor.discover().unwrap().unwrap()),
+            supervisor.inspect_install_request(request).unwrap(),
+            (progress, artifact_sha256)
+        );
+        let metadata = std::fs::metadata(database).unwrap();
+        assert_eq!(
+            Some(metadata.dev()),
+            creation["database"]["device"].as_u64()
+        );
+        assert_eq!(Some(metadata.ino()), creation["database"]["inode"].as_u64());
+        let after: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(registration_path).unwrap()).unwrap();
+        for field in [
+            "key",
+            "server",
+            "public_key",
+            "data",
+            "organization",
+            "runtime",
+            "desired",
+        ] {
+            assert_eq!(after[field], before[field], "retained registration {field}");
+        }
+        let registration = supervisor.discover().unwrap().unwrap();
+        assert_eq!(
+            registration
+                .approved_installation()
+                .unwrap()
+                .artifact_sha256,
+            artifact_sha256
+        );
+        assert_eq!(
+            read_template(&registration),
             spaceterm_host::git::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE
         );
+        assert_eq!(
+            manager
+                .effects
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|effect| **effect == "start")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn original_first_install_uncertain_publication_refuses_replaced_staged_inode() {
+        use spaceterm_host::account_service::ServiceFailure;
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let root = private_root();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let supervisor = installer(&account, key.clone(), manager.clone());
+        let request = supervisor.allocate_request().unwrap();
+        spaceterm_host::storage::testing::after_initialization_boundary(5, || {
+            spaceterm_host::account_service::test_support::fail_next_publication_durability();
+        });
+        assert!(
+            supervisor
+                .install(request, account.confirm_install(artifact))
+                .await
+                .is_err()
+        );
+        let original = supervisor.inspect_install_request(request).unwrap();
+        let creation: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(account.data_directory().join("organization-creation")).unwrap(),
+        )
+        .unwrap();
+        let organization = account.data_directory().join("organization");
+        let staged = organization.join(format!(
+            ".organization-create-{:016x}-{:016x}",
+            creation["database"]["device"].as_u64().unwrap(),
+            creation["database"]["inode"].as_u64().unwrap(),
+        ));
+        let retained = staged.with_extension("retained-original");
+        std::fs::rename(&staged, &retained).unwrap();
+        std::fs::write(&staged, []).unwrap();
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let replacement = std::fs::metadata(&staged).unwrap();
+        assert_ne!(
+            replacement.ino(),
+            std::fs::metadata(&retained).unwrap().ino()
+        );
+        let fence_path = account.data_directory().join(".account-mutation");
+        let fence = std::fs::read(&fence_path).unwrap();
+        drop(supervisor);
+        let supervisor = installer(&account, key, manager.clone());
+        let (_, artifact) = fixture("1.2.3", 7, native_machine());
+        assert_eq!(
+            supervisor
+                .install(request, account.confirm_install(artifact))
+                .await,
+            Err(ServiceFailure::UnsafeStorage)
+        );
+        assert_eq!(
+            supervisor.inspect_install_request(request).unwrap(),
+            original
+        );
+        assert!(matches!(
+            supervisor.discover(),
+            Err(ServiceFailure::Indeterminate)
+        ));
+        assert_eq!(std::fs::read(fence_path).unwrap(), fence);
+        assert_eq!(std::fs::metadata(&staged).unwrap().ino(), replacement.ino());
+        assert_eq!(std::fs::read(staged).unwrap(), Vec::<u8>::new());
+        assert_eq!(
+            Some(std::fs::metadata(retained).unwrap().ino()),
+            creation["database"]["inode"].as_u64()
+        );
+        assert!(
+            !organization
+                .join(spaceterm_host::storage::DATABASE_FILE_NAME)
+                .exists()
+        );
+        assert!(manager.effects.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

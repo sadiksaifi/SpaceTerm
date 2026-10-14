@@ -483,12 +483,59 @@ impl ServiceSupervisor {
             registration.server,
             registration.public_key,
         );
-        crate::storage::InitialCreation::reconcile(&self.anchor, binding).map_err(|error| {
-            match error {
-                Failure::Indeterminate => ServiceFailure::Indeterminate,
-                other => other.into(),
-            }
+        crate::storage::InitialCreation::reconcile(
+            &self.anchor,
+            &registration.organization,
+            binding,
+            crate::organization_store::schema::APPLICATION_ID,
+        )
+        .map_err(|error| match error {
+            Failure::Indeterminate => ServiceFailure::Indeterminate,
+            other => other.into(),
         })
+    }
+
+    fn reconcile_organization_creation(
+        &self,
+        record: &InstallRecord,
+        lease: &Lease,
+    ) -> Result<(), ServiceFailure> {
+        use crate::private_filesystem::{Directory, Failure};
+        if !record.new_organization || !record.pending() || record.reused {
+            return Ok(());
+        }
+        let Some((_, _, registration)) = self.read_registration()? else {
+            return Ok(());
+        };
+        let data = record
+            .roots
+            .as_ref()
+            .map_or_else(|| self.anchor.join("data"), |roots| roots.data.clone());
+        let runtime = record.roots.as_ref().map_or_else(
+            || self.anchor.join("runtime"),
+            |roots| roots.runtime.clone(),
+        );
+        if registration.data != data || registration.runtime != runtime {
+            return Err(ServiceFailure::RequestConflict);
+        }
+        match Directory::open(&registration.data) {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => return Err(ServiceFailure::Missing),
+            Err(Failure::Indeterminate) => {}
+            Err(error) => return Err(error.into()),
+        }
+        // Organization creation records belong to registered data storage, not
+        // the supervisor anchor. Its clean journal does not admit this separate
+        // pending publication. Only the original install holding the lifecycle
+        // lease may recover it before discovery can open registered data again.
+        lease.verify()?;
+        crate::storage::InitialCreation::reconcile(
+            &registration.data,
+            &registration.organization,
+            creation_binding(record.digest, registration.server, registration.public_key),
+            crate::organization_store::schema::APPLICATION_ID,
+        )?;
+        lease.verify().map_err(Into::into)
     }
 
     fn initialize_organization(
@@ -712,6 +759,7 @@ impl ServiceSupervisor {
         if record.phase == ServicePhase::Completed {
             return Ok(record.progress(request));
         }
+        self.reconcile_organization_creation(&record, &lease)?;
         if record.stage_basis.is_some() {
             return self.run_stage_install(request, record, artifact, &lease);
         }

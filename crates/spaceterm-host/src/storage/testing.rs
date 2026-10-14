@@ -103,15 +103,24 @@ thread_local! {
     static INITIALIZATION_HOOK: std::cell::RefCell<Option<InitializationHook>> = const { std::cell::RefCell::new(None) };
 }
 /// Interrupts only one original first-install storage/seed boundary.
-/// 0: bound creation, 1: before migration, 2: migrated, 3: before seed,
-/// 4: seeded, 5: creation intent, 6: created before identity publication.
+/// 0: bound SQLite open, 1: before migration, 2: migrated, 3: before seed,
+/// 4: seeded, 5: creation intent, 6: SQLite opened before application ownership,
+/// 7: staged inode before binding publication, 8: durable binding before fixed-name
+/// publication, 9: before creation sealing.
 #[cfg(feature = "test-support")]
 pub fn interrupt_initialization_at(boundary: u8) {
     INITIALIZATION_INTERRUPT.set(Some(boundary));
 }
 /// Runs a controlled filesystem fault at one original creation boundary.
+/// With test-support, boundary 10 is the next private-record publication after
+/// its target sync and before its completion checkpoint. Arm it from a creation
+/// boundary to select identity publication or sealing, not an unrelated write.
 #[cfg(feature = "test-support")]
 pub fn after_initialization_boundary(boundary: u8, operation: impl FnOnce() + 'static) {
+    if boundary == 10 {
+        crate::private_filesystem::test_support::after_next_publication(operation);
+        return;
+    }
     INITIALIZATION_HOOK.with(|hook| {
         *hook.borrow_mut() = Some(InitializationHook {
             boundary,

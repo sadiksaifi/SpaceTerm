@@ -36,17 +36,35 @@ fn database(
 ) -> Result<Option<Database>, ServiceFailure> {
     let path = supervisor.anchor.join("stage-artifacts");
     if create {
-        let directory = Directory::create(&path)?;
         let mut binding = Sha256::new();
         binding.update(b"spaceterm-stage-artifacts-creation-v1\0");
         binding.update(
             serde_json::to_vec(&supervisor.key).map_err(|_| ServiceFailure::InvalidRecord)?,
         );
-        // Cache retention precedes request acceptance. Retain the existing
-        // creation authority in this cache directory, bound to its directory and
-        // database inodes, rather than adopting an unowned empty database.
+        let binding = binding.finalize().into();
+        // Only retention under the original stage's lifecycle lease can recover
+        // this nested publication. Ordinary existing cache reads stay closed.
+        // Recovery validates account/build, application, directory and DB inode;
+        // it never replaces the cache or grants service/activation authority.
+        let directory = match Directory::create(&path) {
+            Ok(directory) => directory,
+            Err(crate::private_filesystem::Failure::Indeterminate) => {
+                Directory::reconcile_initialization(&path)?;
+                match Directory::open(&path) {
+                    Ok(Some(directory)) => directory,
+                    Ok(None) => Directory::create(&path)?,
+                    Err(crate::private_filesystem::Failure::Indeterminate) => {
+                        InitialCreation::reconcile(&path, &path, binding, APPLICATION_ID)?;
+                        Directory::open(&path)?.ok_or(ServiceFailure::StorageUnavailable)?
+                    }
+                    Err(failure) => return Err(failure.into()),
+                }
+            }
+            Err(failure) => return Err(failure.into()),
+        };
         // The cache belongs to the account/build, not to one staging request.
-        let creation = InitialCreation::new(directory, binding.finalize().into());
+        // Its original created object is bound before the fixed DB name exists.
+        let creation = InitialCreation::new(directory, binding);
         let database =
             Database::open_initial_for_application(&path, MIGRATIONS, APPLICATION_ID, &creation)
                 .map_err(classify_storage)?;
