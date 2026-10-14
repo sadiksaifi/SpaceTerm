@@ -2328,3 +2328,111 @@ fn real_vt_correlated_paste_origin_cancellation_completes_live_confirmation_with
     owner.retire(RetirementReason::Stop);
     owner.join().unwrap();
 }
+
+#[cfg(feature = "runtime")]
+#[test]
+fn real_vt_correlated_paste_denial_requires_the_origin_and_never_cancels_a_later_paste() {
+    use spaceterm_core::{native_requests::*, organization::RetirementReason};
+    use spaceterm_terminal::{runtime::budget::RuntimeLimits, runtime_contracts::*};
+    use support::*;
+    let factory = factory(RuntimeLimits::default());
+    let pty = Pty::default();
+    let start = request(1, support::grid(3, 16));
+    let authority = start.authority();
+    let mut owner = real_runtime(&factory, start, &pty);
+    let mut native = owner.take_native_requests().unwrap();
+    let handle = owner.handle();
+    let origin = handle
+        .try_submit(
+            fence(authority),
+            RuntimeCommand::RequestCorrelatedPaste(
+                127,
+                NativeText::new("first\npaste".into()).unwrap(),
+            ),
+        )
+        .unwrap();
+    let first = native.next_blocking().unwrap().unwrap();
+    let wrong_origin = first.clone().with_runtime_request(128).unwrap();
+    let wrong = NativeCompletion::new(&wrong_origin, NativeCompletionKind::Denied).unwrap();
+    assert_eq!(
+        handle
+            .try_submit(first.fence(), RuntimeCommand::CompleteNativeRequest(wrong))
+            .unwrap()
+            .receive_blocking()
+            .unwrap(),
+        EffectDisposition::StaleAuthority
+    );
+    assert!(
+        origin.try_receive().unwrap().is_none(),
+        "a denial of another originating request must not consume this approval"
+    );
+    let denied = NativeCompletion::new(&first, NativeCompletionKind::Denied).unwrap();
+    assert_eq!(
+        handle
+            .try_submit(
+                first.fence(),
+                RuntimeCommand::CompleteNativeRequest(denied.clone())
+            )
+            .unwrap()
+            .receive_blocking()
+            .unwrap(),
+        EffectDisposition::Cancelled
+    );
+    assert_eq!(
+        origin.receive_blocking().unwrap(),
+        EffectDisposition::Cancelled
+    );
+    assert!(pty.inspect(|state| state.written.is_empty()));
+    let origin = handle
+        .try_submit(
+            fence(authority),
+            RuntimeCommand::RequestCorrelatedPaste(
+                129,
+                NativeText::new("second\npaste".into()).unwrap(),
+            ),
+        )
+        .unwrap();
+    let second = native.next_blocking().unwrap().unwrap();
+    assert_ne!(second.id(), first.id());
+    assert_eq!(
+        handle
+            .try_submit(first.fence(), RuntimeCommand::CompleteNativeRequest(denied))
+            .unwrap()
+            .receive_blocking()
+            .unwrap(),
+        EffectDisposition::StaleAuthority
+    );
+    assert!(
+        origin.try_receive().unwrap().is_none(),
+        "a duplicated denial must not cancel the next paste under the same fence"
+    );
+    let NativeRequestKind::UnsafePaste { approval, .. } = second.kind() else {
+        panic!("second unsafe paste approval");
+    };
+    let confirm = NativeCompletion::new(
+        &second,
+        NativeCompletionKind::Paste {
+            approval: *approval,
+            decision: PasteDecision::Confirm,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        handle
+            .try_submit(
+                second.fence(),
+                RuntimeCommand::CompleteNativeRequest(confirm)
+            )
+            .unwrap()
+            .receive_blocking()
+            .unwrap(),
+        EffectDisposition::Applied
+    );
+    assert_eq!(
+        origin.receive_blocking().unwrap(),
+        EffectDisposition::Applied
+    );
+    assert!(pty.inspect(|state| state.written == b"second\rpaste"));
+    owner.retire(RetirementReason::Stop);
+    owner.join().unwrap();
+}
