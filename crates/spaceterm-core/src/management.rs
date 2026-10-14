@@ -15,6 +15,9 @@ use crate::identity::ServerId;
 use crate::organization::{BoundedText, Versioned};
 use crate::remote_access::RemoteAccessPolicy;
 
+mod machine_facts;
+pub use machine_facts::*;
+
 pub const MAX_SERVER_RUNTIME_OWNERS: usize = 64;
 pub const MAX_STATUS_CAPABILITIES: usize = 16;
 pub const MAX_STATUS_PROGRESS: usize = 8;
@@ -152,8 +155,34 @@ pub struct ServerStatusParts {
     pub progress: Vec<ManagementProgress>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(try_from = "ServerStatusParts", into = "ServerStatusParts")]
-pub struct ServerStatus(ServerStatusParts);
+#[serde(try_from = "ServerStatusRecord", into = "ServerStatusRecord")]
+pub struct ServerStatus(ServerStatusParts, Option<ServerMachineFacts>);
+
+#[derive(Deserialize, Serialize)]
+struct ServerStatusRecord {
+    #[serde(flatten)]
+    parts: ServerStatusParts,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    machine_facts: Option<ServerMachineFacts>,
+}
+impl TryFrom<ServerStatusRecord> for ServerStatus {
+    type Error = StatusError;
+    fn try_from(record: ServerStatusRecord) -> Result<Self, Self::Error> {
+        let status = Self::new(record.parts)?;
+        match record.machine_facts {
+            Some(facts) => status.with_machine_facts(facts),
+            None => Ok(status),
+        }
+    }
+}
+impl From<ServerStatus> for ServerStatusRecord {
+    fn from(status: ServerStatus) -> Self {
+        Self {
+            parts: status.0,
+            machine_facts: status.1,
+        }
+    }
+}
 impl ServerStatus {
     pub fn new(parts: ServerStatusParts) -> Result<Self, StatusError> {
         if parts.epoch.get() == 0 || parts.remote_access.value.server() != parts.server {
@@ -196,10 +225,25 @@ impl ServerStatus {
                 return Err(StatusError::InvalidBinding);
             }
         }
-        Ok(Self(parts))
+        Ok(Self(parts, None))
     }
     pub fn parts(&self) -> &ServerStatusParts {
         &self.0
+    }
+    /// Render-only owning-server observations, bound to this status's exact epoch.
+    pub fn machine_facts(&self) -> Option<&ServerMachineFacts> {
+        self.1.as_ref()
+    }
+    /// Validate bounded offers before attaching render-only comparisons.
+    pub fn with_machine_facts(mut self, facts: ServerMachineFacts) -> Result<Self, StatusError> {
+        facts.validate()?;
+        self.1 = Some(facts);
+        Ok(self)
+    }
+    /// Remove additions before communicating with an older authenticated peer.
+    pub fn without_machine_facts(mut self) -> Self {
+        self.1 = None;
+        self
     }
 }
 impl TryFrom<ServerStatusParts> for ServerStatus {

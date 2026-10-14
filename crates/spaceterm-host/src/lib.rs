@@ -49,6 +49,7 @@ pub mod native_deployment;
 pub mod organization_store;
 
 pub mod server_directories;
+pub mod server_machine_facts;
 
 pub mod bootstrap;
 

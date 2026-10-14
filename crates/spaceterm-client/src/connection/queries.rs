@@ -241,6 +241,13 @@ impl QueryHub {
                 let subscription = subscription.clone();
                 let journal = entry.journal.clone();
                 let publication = decode_status(message, &journal)?;
+                if let StatusPublication::Snapshot { status, .. }
+                | StatusPublication::Changed { status, .. } = &publication
+                    && (status.parts().server != entry.info.server
+                        || status.parts().epoch != entry.info.epoch)
+                {
+                    return Err(invalid_peer());
+                }
                 let refresh = refresh.clone();
                 let resync_response =
                     matches!(publication, StatusPublication::ResyncRequired { .. });

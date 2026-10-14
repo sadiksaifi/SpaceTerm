@@ -355,6 +355,7 @@ message ManagementStatus { uint64 request = 1; ServerState state = 2; uint64 epo
   // Additive comparison facts. Zero means the older peer did not observe them.
   uint32 storage_state = 18;
   uint32 run_intent = 19;
+  ServerMachineFacts machine_facts = 20;
 }
 message RepositoryQuery { spaceterm.common.Entity repository = 1; uint64 expected_revision = 2; bytes continuation = 3; }
 message RepositoryPage { spaceterm.common.Entity repository = 1; uint64 revision = 2; string branch = 3; uint32 added = 4; uint32 modified = 5; uint32 deleted = 6; repeated Worktree worktrees = 7; bytes continuation = 8; bool complete = 9; spaceterm.common.Failure failure = 10; }
@@ -476,3 +477,18 @@ message MetadataPublication { spaceterm.common.EffectFence fence = 1; uint64 req
 
 // RUNTIME_METADATA_FRAGMENTS retains the complete bounded snapshot across small frames.
 message MetadataFragment { spaceterm.common.EffectFence fence = 1; uint64 request = 2; uint64 request_generation = 3; uint64 sequence = 4; uint32 offset = 5; uint32 total_bytes = 6; bytes data = 7; }
+
+// Render-only facts bound by the enclosing authenticated ManagementStatus.
+message ServerMachineFacts {
+  uint32 platform = 1;
+  ServerPermissionFacts permissions = 2;
+  uint32 bind_scope_availability = 3;
+  repeated ServerBindScopeOffer bind_scopes = 4;
+}
+message ServerPermissionFacts {
+  uint32 microphone = 1;
+  uint32 screen_recording = 2;
+  uint32 accessibility = 3;
+  uint32 accessibility_naming = 4;
+}
+message ServerBindScopeOffer { uint32 scope = 1; repeated RemoteEndpoint endpoints = 2; }

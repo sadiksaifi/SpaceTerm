@@ -715,6 +715,7 @@ impl ProtocolDispatcher {
                                             session.codec.major(),
                                             query.request.get(),
                                             &snapshot,
+                                            session.codec.capabilities(),
                                         )
                                         .map_err(protocol_failure)?;
                                         self.send(
@@ -944,12 +945,18 @@ impl ProtocolDispatcher {
         let payload = match session.codec.major() {
             1 => Payload::Major1(v1::Message {
                 kind: Some(v1::message::Kind::StatusPublication(
-                    management::v1::encode_publication(&publication),
+                    management::v1::encode_publication_for_capabilities(
+                        &publication,
+                        session.codec.capabilities(),
+                    ),
                 )),
             }),
             2 => Payload::Major2(v2::Message {
                 kind: Some(v2::message::Kind::StatusPublication(
-                    management::v2::encode_publication(&publication),
+                    management::v2::encode_publication_for_capabilities(
+                        &publication,
+                        session.codec.capabilities(),
+                    ),
                 )),
             }),
             _ => return Err(failure(ServerFailureClass::ScopeMismatch)),
@@ -1127,17 +1134,18 @@ fn legacy_status(
     major: u32,
     request: u64,
     status: &ServerStatus,
+    capabilities: &[u32],
 ) -> Result<Payload, ProtocolError> {
     match major {
         1 => {
-            let mut value = management::v1::encode_status(status);
+            let mut value = management::v1::encode_status_for_capabilities(status, capabilities);
             value.request = request;
             Ok(Payload::Major1(v1::Message {
                 kind: Some(v1::message::Kind::ManagementStatus(value)),
             }))
         }
         2 => {
-            let mut value = management::v2::encode_status(status);
+            let mut value = management::v2::encode_status_for_capabilities(status, capabilities);
             value.request = request;
             Ok(Payload::Major2(v2::Message {
                 kind: Some(v2::message::Kind::ManagementStatus(value)),

@@ -128,6 +128,19 @@ impl StatusSubscription {
             .latest
             .clone())
     }
+    /// Current owning-server evidence. `latest` remains historical during resync.
+    /// Freshness and the value are read under the same lock.
+    pub fn current(&self) -> Result<Option<ServerStatus>, ManagementFailure> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| ManagementFailure::UnsafeNativeState)?;
+        Ok(if state.resync_required {
+            None
+        } else {
+            state.latest.clone()
+        })
+    }
     pub fn needs_resync(&self) -> Result<bool, ManagementFailure> {
         Ok(self
             .state

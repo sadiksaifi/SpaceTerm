@@ -71,6 +71,9 @@ pub const CAPABILITY_RUNTIME_METADATA: u32 = 520_009;
 /// Bounded fragmented metadata snapshots for small negotiated frames.
 pub const CAPABILITY_RUNTIME_METADATA_FRAGMENTS: u32 = 520_010;
 
+/// Render-only owning-server platform, permission, and bind-scope comparisons.
+pub const CAPABILITY_SERVER_MACHINE_FACTS: u32 = 520_013;
+
 /// Additive envelope registration: tag, authenticated capability, permitted directions.
 pub const EXTENSION_ENVELOPES: &[(u32, u32, bool, bool)] = &[
     (32, CAPABILITY_SERVER_GIT, true, false),
