@@ -1073,7 +1073,7 @@ fn servers_settings_native_lost_reply_completion_admits_next_action(cx: &mut Tes
     fixture.send(
         ServerRequest::SetWorktreeLocation {
             server: server.key,
-            template: "~/recovered/{repository}".into(),
+            template: "~/recovered/{repository}/{branch}".into(),
             base_revision: server.worktree_location.unwrap().revision,
         },
         cx,
@@ -1088,7 +1088,7 @@ fn servers_settings_native_lost_reply_completion_admits_next_action(cx: &mut Tes
             .worktree_location
             .value
             .as_str(),
-        "~/recovered/{repository}"
+        "~/recovered/{repository}/{branch}"
     );
 }
 
