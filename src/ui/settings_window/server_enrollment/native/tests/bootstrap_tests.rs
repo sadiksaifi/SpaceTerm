@@ -47,20 +47,14 @@ use std::{
     },
 };
 
-#[path = "../../../../../../crates/spaceterm-host/tests/support/signed_installation.rs"]
-mod signed;
+use crate::signed_installation_fixture as signed;
 
-#[derive(Clone, Default)]
-struct Credentials(
-    Arc<
-        Mutex<
-            Vec<(
-                PreparedCredential,
-                Arc<spaceterm_client::testing::DeterministicKey>,
-            )>,
-        >,
-    >,
+type CredentialEntry = (
+    PreparedCredential,
+    Arc<spaceterm_client::testing::DeterministicKey>,
 );
+#[derive(Clone, Default)]
+struct Credentials(Arc<Mutex<Vec<CredentialEntry>>>);
 impl NativeDeviceCredentials for Credentials {
     fn create(
         &self,
@@ -2172,16 +2166,17 @@ async fn desktop_ssh_bootstrap_lost_ack_reopens_after_failed_channel_retirement(
     assert!(inventory.prepared.is_empty());
     assert!(inventory.enrollment_acknowledgements.is_empty());
     assert_eq!(inventory.saved, vec![completion.saved]);
-    let requests = h.remote.requests.lock().unwrap();
-    assert_eq!(
-        requests.iter().filter(|r| **r == "reserve-owner").count(),
-        1
-    );
-    assert_eq!(
-        requests.iter().filter(|r| **r == "authorize-owner").count(),
-        1
-    );
-    drop(requests);
+    {
+        let requests = h.remote.requests.lock().unwrap();
+        assert_eq!(
+            requests.iter().filter(|r| **r == "reserve-owner").count(),
+            1
+        );
+        assert_eq!(
+            requests.iter().filter(|r| **r == "authorize-owner").count(),
+            1
+        );
+    }
     assert!(h.remote.manager.effects.lock().unwrap().is_empty());
     h.remote.close().await;
 }
