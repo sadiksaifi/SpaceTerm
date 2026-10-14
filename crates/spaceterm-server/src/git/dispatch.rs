@@ -56,6 +56,10 @@ impl GitOrdinaryDispatch {
     }
 }
 impl OrdinaryDispatchPort for GitOrdinaryDispatch {
+    fn capabilities(&self) -> Vec<u32> {
+        vec![spaceterm_protocol::negotiation::CAPABILITY_SERVER_GIT]
+    }
+
     fn dispatch(
         &self,
         principal: VerifiedPrincipal,
