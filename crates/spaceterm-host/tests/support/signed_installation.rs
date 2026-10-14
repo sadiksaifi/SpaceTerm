@@ -105,7 +105,6 @@ pub fn fixture(
     let archive = gzip.finish().unwrap();
     let feed = AccountServerFeedV2 {
         schema_version: 2,
-        build_commit: [1; 20],
         component: ServerComponent::Server,
         build_identity: build,
         platform,
