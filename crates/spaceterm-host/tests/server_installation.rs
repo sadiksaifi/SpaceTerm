@@ -767,37 +767,60 @@ mod account_installation {
 
     #[tokio::test]
     async fn original_first_install_recovers_uncertain_creation_identity_publication() {
-        let root = private_root();
-        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
-        let (key, artifact) = fixture("1.2.3", 7, native_machine());
-        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
-        let supervisor = installer(&account, key.clone(), manager.clone());
-        let request = supervisor.allocate_request().unwrap();
-        spaceterm_host::storage::testing::after_initialization_boundary(5, || {
-            spaceterm_host::account_service::test_support::fail_next_publication_durability();
-        });
-        assert!(
-            supervisor
+        // Boundary 5 precedes inode binding; boundary 4 precedes creation sealing.
+        for boundary in [5, 4] {
+            let root = private_root();
+            let account =
+                AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+            let (key, artifact) = fixture("1.2.3", 7, native_machine());
+            let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+            let supervisor = installer(&account, key.clone(), manager.clone());
+            let request = supervisor.allocate_request().unwrap();
+            let replacement = supervisor.allocate_request().unwrap();
+            spaceterm_host::storage::testing::after_initialization_boundary(boundary, || {
+                spaceterm_host::account_service::test_support::fail_next_publication_durability();
+            });
+            assert!(
+                supervisor
+                    .install(request, account.confirm_install(artifact))
+                    .await
+                    .is_err(),
+                "boundary {boundary}"
+            );
+            assert!(manager.effects.lock().unwrap().is_empty());
+            drop(supervisor);
+            let supervisor = installer(&account, key, manager.clone());
+            assert_eq!(
+                supervisor.resolve_install(replacement).await,
+                Err(spaceterm_host::account_service::ServiceFailure::Pending)
+            );
+            assert!(matches!(
+                supervisor.discover(),
+                Err(spaceterm_host::account_service::ServiceFailure::Indeterminate)
+            ));
+            let (_, artifact) = fixture("1.2.3", 7, native_machine());
+            let progress = supervisor
                 .install(request, account.confirm_install(artifact))
                 .await
-                .is_err()
-        );
-        assert!(manager.effects.lock().unwrap().is_empty());
-        drop(supervisor);
-        let supervisor = installer(&account, key, manager);
-        let (_, artifact) = fixture("1.2.3", 7, native_machine());
-        let progress = supervisor
-            .install(request, account.confirm_install(artifact))
-            .await
-            .unwrap();
-        assert!(matches!(
-            progress.state,
-            spaceterm_host::account_service::ServiceRequestState::Completed(_)
-        ));
-        assert_eq!(
-            read_template(&supervisor.discover().unwrap().unwrap()),
-            spaceterm_host::git::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE
-        );
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "original creation publication must recover boundary {boundary}: {error:?}"
+                    )
+                });
+            assert!(matches!(
+                progress.state,
+                spaceterm_host::account_service::ServiceRequestState::Completed(_)
+            ));
+            assert_eq!(
+                read_template(&supervisor.discover().unwrap().unwrap()),
+                spaceterm_host::git::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE
+            );
+            assert_eq!(supervisor.resolve_install(request).await.unwrap(), progress);
+            assert_eq!(
+                manager.effects.lock().unwrap().as_slice(),
+                &["configure", "start"]
+            );
+        }
     }
 
     #[tokio::test]
