@@ -397,6 +397,7 @@ impl RouteConnector for GatedRoutes {
                     "/private/server",
                     MessageLimit::envelope(),
                     None,
+                    None,
                 )
                 .await?;
             *self.tunnel.lock().unwrap() =
