@@ -292,6 +292,8 @@ mod account_installation {
     struct InstallManager {
         key: UpdateKey,
         running: std::sync::atomic::AtomicBool,
+        starting_observations: std::sync::atomic::AtomicUsize,
+        startup_observed: tokio::sync::Notify,
         effects: std::sync::Mutex<Vec<&'static str>>,
         require_organization_store: std::sync::atomic::AtomicBool,
         scope: std::sync::Mutex<Vec<u32>>,
@@ -301,6 +303,8 @@ mod account_installation {
             Self {
                 key,
                 running: std::sync::atomic::AtomicBool::new(false),
+                starting_observations: std::sync::atomic::AtomicUsize::new(0),
+                startup_observed: tokio::sync::Notify::new(),
                 effects: std::sync::Mutex::new(Vec::new()),
                 require_organization_store: std::sync::atomic::AtomicBool::new(false),
                 scope: std::sync::Mutex::new(Vec::new()),
@@ -322,10 +326,21 @@ mod account_installation {
             spaceterm_host::account_service::SupervisorState,
         > {
             Box::pin(async {
-                Ok(if self.running.load(std::sync::atomic::Ordering::SeqCst) {
-                    spaceterm_host::account_service::SupervisorState::Running
-                } else {
+                Ok(if !self.running.load(std::sync::atomic::Ordering::SeqCst) {
                     spaceterm_host::account_service::SupervisorState::Inactive
+                } else if self
+                    .starting_observations
+                    .fetch_update(
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                        |remaining| remaining.checked_sub(1),
+                    )
+                    .is_ok()
+                {
+                    self.startup_observed.notify_one();
+                    spaceterm_host::account_service::SupervisorState::Starting
+                } else {
+                    spaceterm_host::account_service::SupervisorState::Running
                 })
             })
         }
@@ -1032,6 +1047,160 @@ mod account_installation {
             Err(ServiceFailure::RequestRetired)
         );
     }
+    #[tokio::test(start_paused = true)]
+    async fn initial_install_observes_starting_until_running_without_resubmitting_start() {
+        use spaceterm_host::account_service::{ServiceOutcome, ServicePhase, ServiceRequestState};
+        let root = installation_root();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let artifact_sha256 = artifact.artifact_sha256();
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        manager
+            .starting_observations
+            .store(2, std::sync::atomic::Ordering::SeqCst);
+        let supervisor = installer(&account, key.clone(), manager.clone());
+        let request = supervisor.allocate_request().unwrap();
+        let completed = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            supervisor.install(request, account.confirm_install(artifact)),
+        )
+        .await
+        .expect("the accepted install must observe startup without another mutation")
+        .unwrap();
+        let registration = supervisor.discover().unwrap().unwrap();
+        assert_eq!(completed.request, request);
+        assert_eq!(completed.phase, ServicePhase::Completed);
+        assert_eq!(
+            completed.state,
+            ServiceRequestState::Completed(ServiceOutcome::Installed {
+                server: registration.server_pin(),
+                installation: registration.approved_installation().unwrap().clone(),
+                reused: false,
+            })
+        );
+        let reopened = installer(&account, key, manager.clone());
+        assert_eq!(
+            reopened.inspect_install_request(request).unwrap(),
+            (completed, artifact_sha256)
+        );
+        assert_eq!(reopened.status().await.unwrap().pending, None);
+        assert_eq!(
+            manager.effects.lock().unwrap().as_slice(),
+            &["configure", "start"]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn initial_install_observation_survives_observer_cancellation_and_completes_original_request()
+     {
+        use spaceterm_host::account_service::{ServiceOutcome, ServicePhase, ServiceRequestState};
+        let root = installation_root();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let artifact_sha256 = artifact.artifact_sha256();
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        manager
+            .starting_observations
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        let supervisor = installer(&account, key.clone(), manager.clone());
+        let request = supervisor.allocate_request().unwrap();
+        let confirmation = account.confirm_install(artifact);
+        let worker = supervisor.clone();
+        let observer = tokio::spawn(async move { worker.install(request, confirmation).await });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            manager.startup_observed.notified(),
+        )
+        .await
+        .expect("the original worker must reach startup observation");
+        let reopened = installer(&account, key, manager.clone());
+        let (pending, digest) = reopened.inspect_install_request(request).unwrap();
+        assert_eq!(digest, artifact_sha256);
+        assert_eq!(pending.request, request);
+        assert_eq!(pending.phase, ServicePhase::Starting);
+        assert_eq!(pending.state, ServiceRequestState::Pending);
+        observer.abort();
+        assert!(observer.await.unwrap_err().is_cancelled());
+
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let progress = reopened.inspect_install_request(request).unwrap().0;
+                if progress.phase == ServicePhase::Completed {
+                    break progress;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dropping the observer must not cancel accepted startup or its durable result");
+        assert_eq!(completed.request, request);
+        assert_eq!(completed.request_digest, pending.request_digest);
+        assert!(matches!(
+            completed.state,
+            ServiceRequestState::Completed(ServiceOutcome::Installed { reused: false, .. })
+        ));
+        assert_eq!(
+            reopened.inspect_install_request(request).unwrap(),
+            (completed, artifact_sha256)
+        );
+        assert_eq!(reopened.status().await.unwrap().pending, None);
+        assert_eq!(
+            manager.effects.lock().unwrap().as_slice(),
+            &["configure", "start"]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn initial_install_observation_is_bounded_and_keeps_original_starting_request_pending() {
+        use spaceterm_host::account_service::{ServicePhase, ServiceRequestState, SupervisorState};
+        let root = installation_root();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let artifact_sha256 = artifact.artifact_sha256();
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        manager
+            .starting_observations
+            .store(usize::MAX, std::sync::atomic::Ordering::SeqCst);
+        let supervisor = installer(&account, key.clone(), manager.clone());
+        let request = supervisor.allocate_request().unwrap();
+        let started = tokio::time::Instant::now();
+        let pending = tokio::time::timeout(
+            std::time::Duration::from_secs(16),
+            supervisor.install(request, account.confirm_install(artifact)),
+        )
+        .await
+        .expect("an accepted worker must bound its startup observation")
+        .unwrap();
+        assert!(started.elapsed() >= std::time::Duration::from_secs(1));
+        assert_eq!(pending.request, request);
+        assert_eq!(pending.phase, ServicePhase::Starting);
+        assert_eq!(pending.state, ServiceRequestState::Pending);
+        let reopened = installer(&account, key, manager.clone());
+        let journal = std::fs::read(account.anchor().join("requests")).unwrap();
+        assert_eq!(
+            reopened.inspect_install_request(request).unwrap(),
+            (pending.clone(), artifact_sha256)
+        );
+        assert_eq!(
+            reopened.retained_initial_install_requests().unwrap(),
+            vec![pending]
+        );
+        manager
+            .starting_observations
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        let status = reopened.status().await.unwrap();
+        assert_eq!(status.supervisor, SupervisorState::Running);
+        assert_eq!(status.pending, Some(request));
+        assert_eq!(
+            std::fs::read(account.anchor().join("requests")).unwrap(),
+            journal
+        );
+        assert_eq!(
+            manager.effects.lock().unwrap().as_slice(),
+            &["configure", "start"]
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn unrelated_unobservable_process_does_not_block_native_absence() {

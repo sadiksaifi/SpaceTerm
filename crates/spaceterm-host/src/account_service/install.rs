@@ -877,10 +877,25 @@ impl ServiceSupervisor {
         self.manager()?.configure(&registered).await?;
         if registered.desired_state() == DesiredServerState::Running {
             self.manager()?.start(&registered).await?;
-            if self.manager()?.status(Some(&registered)).await? != SupervisorState::Running {
-                return Ok(record.progress(request));
+            // User-service Start is asynchronous. The accepted worker retains
+            // observation and durable completion without configuring or starting again.
+            let observation = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                loop {
+                    lease.verify()?;
+                    if self.manager()?.status(Some(&registered)).await? == SupervisorState::Running
+                    {
+                        return Ok::<(), ServiceFailure>(());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            })
+            .await;
+            match observation {
+                Ok(result) => result?,
+                Err(_) => return Ok(record.progress(request)),
             }
         }
+        lease.verify()?;
         self.finish_install(request, record, &registered)
     }
     fn run_stage_install(
