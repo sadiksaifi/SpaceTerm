@@ -115,6 +115,17 @@ pub(super) struct Fixture {
 }
 impl Fixture {
     pub(super) fn new(major: u32, lose_reply: bool) -> Self {
+        Self::new_with_route(
+            major,
+            lose_reply,
+            RouteDescription::new(RouteParts::Wss {
+                address: "127.0.0.1:443".parse().unwrap(),
+                server_name: "enrollment.invalid".into(),
+            })
+            .unwrap(),
+        )
+    }
+    pub(super) fn new_with_route(major: u32, lose_reply: bool, route: RouteDescription) -> Self {
         let storage = TestStore::new();
         let server_key = Arc::new(DeterministicKey::new(1).unwrap());
         let device_key = Arc::new(DeterministicKey::new(3).unwrap());
@@ -256,11 +267,7 @@ impl Fixture {
             changes.push(ClientJournalChange::BindCredentialRoute {
                 reference: prepared.credential.scope.reference(),
                 route_reference: prepared.route,
-                route: RouteDescription::new(RouteParts::Wss {
-                    address: "127.0.0.1:443".parse().unwrap(),
-                    server_name: "enrollment.invalid".into(),
-                })
-                .unwrap(),
+                route,
             });
             storage.journal.transact(changes).await.unwrap();
         });
@@ -317,9 +324,18 @@ pub(super) struct Keys {
 impl NativeDeviceCredentials for Keys {
     fn recover_preparation<'a>(
         &'a self,
-        _: &'a CredentialScope,
+        scope: &'a CredentialScope,
     ) -> PairingFuture<'a, Result<Option<PreparedCredential>, PairingFailure>> {
-        panic!("the fixture has prepared keys")
+        Box::pin(async move {
+            let public_key = match scope.parts().purpose {
+                CredentialPurpose::DeviceIdentity => self.device.public_key(),
+                CredentialPurpose::PairingAuthentication { .. } => self.auth.public_key(),
+            };
+            Ok(Some(PreparedCredential {
+                scope: scope.clone(),
+                public_key,
+            }))
+        })
     }
     fn create(
         &self,

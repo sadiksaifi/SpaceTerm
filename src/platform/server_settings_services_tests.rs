@@ -384,3 +384,46 @@ async fn servers_settings_uses_real_native_provider_for_stop_assessment() {
         DesiredServerState::Stopped
     );
 }
+
+#[tokio::test]
+async fn desktop_native_server_action_updates_retained_connection_authority() {
+    use spaceterm_client::ports::DiscoveryState;
+    let fixture = Fixture::new(Some(DesiredServerState::Stopped));
+    let provider = fixture.provider();
+    let registration = provider
+        .management()
+        .supervisor()
+        .discover()
+        .unwrap()
+        .unwrap();
+    let binding = binding(&registration, 1);
+    let discovery = crate::platform::local_server_client::trusted_discovery(provider.clone());
+    assert_eq!(
+        discovery.status(binding.target()).await.unwrap(),
+        DiscoveryState::Stopped
+    );
+    let request = provider
+        .management()
+        .supervisor()
+        .allocate_request()
+        .unwrap();
+    provider.management().start(request).await.unwrap();
+    assert_eq!(
+        discovery.status(binding.target()).await.unwrap(),
+        DiscoveryState::Running
+    );
+    assert_eq!(
+        provider
+            .management()
+            .supervisor()
+            .discover()
+            .unwrap()
+            .unwrap()
+            .server_pin(),
+        registration.server_pin()
+    );
+    assert_eq!(
+        fixture.manager.effects.lock().unwrap().as_slice(),
+        &["configure", "start"]
+    );
+}

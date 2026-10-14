@@ -1,6 +1,6 @@
 //! Desktop injection of the shared headless native-client route provider.
 
-use spaceterm_client::{failure::ClientFailure, ports::RouteConnector};
+use spaceterm_client::failure::ClientFailure;
 use spaceterm_client_native::route::{
     LocalRouteAuthority, NativeRouteConnector, SshRouteConfiguration,
 };
@@ -11,7 +11,7 @@ use std::sync::Arc;
 pub(crate) fn connector(
     local: Vec<LocalRouteAuthority>,
     ssh: Option<SshRouteConfiguration>,
-) -> Result<Arc<dyn RouteConnector>, ClientFailure> {
+) -> Result<Arc<NativeRouteConnector>, ClientFailure> {
     Ok(Arc::new(NativeRouteConnector::new(local, ssh)?))
 }
 
