@@ -1489,15 +1489,16 @@ async fn near_ceiling_journal_reserves_nonempty_scope_and_original_outcome_befor
                 .server_pin()
                 .identity,
         );
-        *fixture.processes.sessions.lock().unwrap() = (1..=64)
+        let sessions: Vec<_> = (1..=64)
             .map(|local| SessionKey {
                 epoch: ServerEpoch::new(1),
                 pane: spaceterm_core::identity::PaneId::new(server, local).unwrap(),
                 generation: spaceterm_core::authority::SessionGeneration::new(1),
             })
             .collect();
+        *fixture.processes.sessions.lock().unwrap() = sessions.clone();
         // Bind the original nonempty scope while admission is still available.
-        // Later requests must not consume capacity already owed to its outcome.
+        // Capacity owed to this request must survive later allocation pressure.
         let request = supervisor.allocate_request().unwrap();
         let action = supervisor
             .assess(
@@ -1512,36 +1513,38 @@ async fn near_ceiling_journal_reserves_nonempty_scope_and_original_outcome_befor
             .unwrap()
             .confirm()
             .unwrap();
-        // Retain exact nonempty scopes until another assessment no longer fits.
-        for _ in 0..32 {
-            let next = match supervisor.allocate_request() {
-                Ok(next) => next,
-                Err(ServiceFailure::LimitExceeded) => break,
-                Err(failure) => panic!("unexpected allocation failure {failure:?}"),
-            };
-            match supervisor.assess(next, ServiceAction::Stop).await {
-                Ok(_) => {}
-                Err(ServiceFailure::LimitExceeded) => break,
-                Err(failure) => panic!("unexpected assessment failure {failure:?}"),
+        // Fill the remaining byte budget with progressively smaller exact scopes.
+        // This avoids hundreds of empty IDs whose retirement prevents byte growth.
+        for scope_len in [64, 32, 16, 8, 4, 2, 1] {
+            *fixture.processes.sessions.lock().unwrap() = sessions[..scope_len].to_vec();
+            for _ in 0..32 {
+                let next = match supervisor.allocate_request() {
+                    Ok(next) => next,
+                    Err(ServiceFailure::LimitExceeded) => break,
+                    Err(failure) => panic!("unexpected allocation failure {failure:?}"),
+                };
+                match supervisor.assess(next, ServiceAction::Stop).await {
+                    Ok(_) => {}
+                    Err(ServiceFailure::LimitExceeded) => break,
+                    Err(failure) => panic!("unexpected assessment failure {failure:?}"),
+                }
             }
         }
-        // Later allocations must not consume capacity already owed to this outcome.
-        // Allocation may retire old unsubmitted IDs rather than fail. Padding
-        // is bounded by the journal's 256 slots, not an unreachable byte target.
-        for _ in 0..256 {
-            if std::fs::metadata(fixture.account.anchor().join("requests"))
-                .unwrap()
-                .len()
-                >= (256 * 1024 - 120)
-            {
-                break;
-            }
+        // Prove that allocation admission is exhausted, not just that an arbitrary
+        // file-size target was reached. The original outcome still owns its budget.
+        let mut exhausted = false;
+        for _ in 0..32 {
             match supervisor.allocate_request() {
                 Ok(_) => {}
-                Err(ServiceFailure::LimitExceeded) => break,
+                Err(ServiceFailure::LimitExceeded) => {
+                    exhausted = true;
+                    break;
+                }
                 Err(failure) => panic!("unexpected allocation failure {failure:?}"),
             }
         }
+        assert!(exhausted, "allocation pressure must reach the byte ceiling");
+        *fixture.processes.sessions.lock().unwrap() = sessions;
         assert!(
             std::fs::metadata(fixture.account.anchor().join("requests"))
                 .unwrap()
