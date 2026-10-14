@@ -360,7 +360,7 @@ mod tests {
         let target = platform().unwrap();
         let bytes = serde_json::to_vec(&serde_json::json!({
             "schema_version":2,"component":"server","build_identity":"release","platform":target,
-            "version":"1.2.3","published_at":1,"protocol_majors":[1,2],
+            "version":"1.2.3","build_commit":"01".repeat(20),"published_at":1,"protocol_majors":[1,2],
             "storage":{"read":[1],"write":1,"migrate_from":[]},
             "installation":{"manifest_schema":2,"registration_schema":1,"journal_schema":1},
             "archive":{"name":target.account_archive_name(BuildChannel::Release,"1.2.3"),"size":1,"sha256":"11".repeat(32),"signature":STANDARD.encode([1;64]),"manifest_sha256":"22".repeat(32)}

@@ -554,3 +554,47 @@ fn retained_nonrelease_feed_names_remain_bound_to_the_exact_signed_build() {
         Some(DistributionFailure::IdentityMismatch)
     );
 }
+
+/// The packaging task (mise-tasks/lib/spaceterm_tasks/release_server.py) writes
+/// exactly these descriptor fields. The strict Rust schema must accept every one
+/// of them, or locally packaged signed servers are refused at install time.
+#[test]
+fn account_feed_schema_matches_the_packaging_producer_shape() {
+    let (_, feed, _, _) = artifact_fixture(BuildChannel::Preflight, ServerPlatform::DarwinArm64);
+    let document: serde_json::Value = serde_json::from_slice(&feed).unwrap();
+    fn keys(value: &serde_json::Value) -> Vec<&str> {
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        keys
+    }
+    assert_eq!(
+        keys(&document),
+        [
+            "archive",
+            "build_commit",
+            "build_identity",
+            "component",
+            "installation",
+            "platform",
+            "protocol_majors",
+            "published_at",
+            "schema_version",
+            "storage",
+            "version",
+        ]
+    );
+    assert_eq!(
+        keys(&document["installation"]),
+        ["journal_schema", "manifest_schema", "registration_schema"]
+    );
+    assert_eq!(
+        keys(&document["archive"]),
+        ["manifest_sha256", "name", "sha256", "signature", "size"]
+    );
+    assert_eq!(document["build_commit"], serde_json::json!("01".repeat(20)));
+}
