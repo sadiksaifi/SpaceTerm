@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from spaceterm_tasks import ROOT
 from spaceterm_tasks.accessibility_linux import (
@@ -357,6 +357,8 @@ class AccessibilityAccountServerTests(unittest.TestCase):
         specification = importlib.util.spec_from_file_location(
             "accessibility_account_smoke", ROOT / "mise-tasks/test/accessibility/linux.py"
         )
+        assert specification is not None
+        assert specification.loader is not None
         self.smoke = importlib.util.module_from_spec(specification)
         specification.loader.exec_module(self.smoke)
 
@@ -410,7 +412,7 @@ class AccessibilityAccountServerTests(unittest.TestCase):
             endpoint.parent.mkdir(parents=True)
             endpoint.touch()
             with patch.object(self.smoke, "fixture_endpoint_ready", return_value=True):
-                owner = SimpleNamespace(start=unittest.mock.Mock(side_effect=[initializer, server]))
+                owner = SimpleNamespace(start=Mock(side_effect=[initializer, server]))
                 self.assertIs(
                     self.smoke.start_account_fixture(owner, Path("/server"), Path(directory)),
                     server,
