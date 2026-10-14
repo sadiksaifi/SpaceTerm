@@ -10,8 +10,9 @@ import time
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
+from unittest.mock import patch
 
-from spaceterm_tasks import ROOT, main
+from spaceterm_tasks import ROOT, main, processes
 
 LIBRARY = ROOT / "mise-tasks" / "lib"
 FAKE_CARGO = """#!/bin/sh
@@ -55,6 +56,65 @@ class TaskFailureTests(unittest.TestCase):
         self.assertEqual(
             output.getvalue(), "error: an operating-system operation failed (ENOENT)\n"
         )
+
+
+@unittest.skipUnless(os.name == "posix", "POSIX process groups")
+class GroupCleanupTests(unittest.TestCase):
+    def test_cleanup_keeps_the_leader_owned_until_its_last_group_signal(self):
+        child = subprocess.Popen(
+            ["/bin/sh", "-c", "(trap '' TERM; echo ready; exec sleep 30) & wait"],
+            start_new_session=True,
+            stdout=subprocess.PIPE,
+        )
+        assert child.stdout is not None
+        self.assertEqual(child.stdout.readline(), b"ready\n")
+        killpg = os.killpg
+        consuming_wait = child.wait
+        ownership_closed = False
+
+        def wait(*args, **kwargs):
+            nonlocal ownership_closed
+            ownership_closed = True
+            return consuming_wait(*args, **kwargs)
+
+        def signal_group(pgid, signum):
+            if pgid == child.pid and signum != 0:
+                self.assertFalse(ownership_closed, "a group signal followed consuming wait")
+                self.assertIsNone(child.returncode, "a group signal followed a consuming poll")
+            return killpg(pgid, signum)
+
+        try:
+            with (
+                patch.object(child, "wait", side_effect=wait),
+                patch.object(processes.os, "killpg", side_effect=signal_group),
+            ):
+                processes.stop_group(child, timeout=0.1)
+        finally:
+            processes.stop_group(child, timeout=0.1)
+            child.stdout.close()
+        self.assertIsNotNone(child.returncode)
+
+    def test_cleanup_reaps_a_completed_child_without_signalling_its_group(self):
+        child = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        try:
+            # A closed pipe establishes exit without consuming the leader's wait status.
+            # WNOWAIT exists on Linux; Darwin's process query remains non-consuming.
+            deadline = time.monotonic() + 5
+            while not processes.child_exited(child):
+                self.assertLess(time.monotonic(), deadline, "the child did not exit")
+                time.sleep(0.01)
+            killpg = os.killpg
+            with patch.object(processes.os, "killpg", wraps=killpg) as signal_group:
+                processes.stop_group(child, timeout=0.1)
+            self.assertFalse(
+                any(call.args[1] != 0 for call in signal_group.call_args_list),
+                "cleanup signalled a group with no live members",
+            )
+            self.assertEqual(child.returncode, 0)
+        finally:
+            if child.returncode is None:
+                child.kill()
+                child.wait()
 
 
 @unittest.skipUnless(os.name == "posix", "POSIX signals")
