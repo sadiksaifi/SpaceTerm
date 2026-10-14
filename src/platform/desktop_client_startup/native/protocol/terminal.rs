@@ -3,7 +3,13 @@
 use super::*;
 use spaceterm_client::pane_channel::{NativeTiming, PaneChannel, PaneReadItem};
 use spaceterm_core::{content_queries::*, observations::MonotonicTick};
-use spaceterm_protocol::convert::{content, native_requests};
+use spaceterm_protocol::convert::{
+    content::{
+        self,
+        reads::{self, ReadQuery},
+    },
+    native_requests,
+};
 use std::time::Duration;
 use tokio::sync::{Notify, mpsc};
 
@@ -32,6 +38,10 @@ struct PendingRead {
     request: PaneReadRequest,
     sender: mpsc::Sender<Result<PaneReadItem, ClientFailure>>,
 }
+struct CancelledRead {
+    stamp: QueryStamp,
+    resource: Option<ResourceTransferId>,
+}
 #[derive(Default)]
 struct State {
     synchronizers: BTreeMap<ServerId, Arc<tokio::sync::Mutex<()>>>,
@@ -39,6 +49,7 @@ struct State {
     pending_contexts: BTreeMap<(ServerId, u64), PendingContext>,
     subscriptions: BTreeMap<PaneId, Subscription>,
     reads: BTreeMap<(ServerId, u64), PendingRead>,
+    cancellations: BTreeMap<(ServerId, u64), CancelledRead>,
 }
 #[derive(Default)]
 pub(super) struct TerminalTransport {
@@ -58,6 +69,7 @@ impl TerminalTransport {
                 .subscriptions
                 .retain(|pane, _| pane.server() != server);
             state.reads.retain(|(owner, _), _| *owner != server);
+            state.cancellations.retain(|(owner, _), _| *owner != server);
         }
     }
 }
@@ -368,9 +380,40 @@ impl NativeProtocol {
                         Ok(OutboundClass::Ordinary)
                     }
                     $p::message::Kind::ContentQuery(value) => {
-                        let request =
-                            content::$p::decode_page_request(value).map_err(ClientFailure::from)?;
-                        admit_read(&state, info.server, request.stamp())
+                        if matches!(value.kind, 3..=5) {
+                            let query =
+                                reads::$p::decode_query(value).map_err(ClientFailure::from)?;
+                            if let ReadQuery::Cancel { stamp, .. } = query {
+                                if state
+                                    .cancellations
+                                    .get(&(info.server, stamp.request().get()))
+                                    .map(|read| read.stamp)
+                                    != Some(stamp)
+                                    || stamp.fence().connection() != info.binding
+                                {
+                                    return Err(stale());
+                                }
+                                return Ok(OutboundClass::Lifecycle);
+                            }
+                            admit_read(&state, info.server, query.stamp())
+                        } else {
+                            let request = content::$p::decode_page_request(value)
+                                .map_err(ClientFailure::from)?;
+                            admit_read(&state, info.server, request.stamp())
+                        }
+                    }
+                    $p::message::Kind::ResourceCancel(value) => {
+                        if !state.cancellations.values().any(|read| {
+                            read.resource
+                                .is_some_and(|resource| resource.get() == value.transfer)
+                                && read.stamp.base().session.pane.server() == info.server
+                                && read.stamp.fence().connection() == info.binding
+                                && value.fence.as_ref()
+                                    == Some(&identity::encode_fence(read.stamp.fence()))
+                        }) {
+                            return Err(stale());
+                        }
+                        Ok(OutboundClass::Lifecycle)
                     }
                     $p::message::Kind::ResourceRequest(value) => {
                         let request = content::$p::decode_graphics_request(value)
@@ -538,8 +581,8 @@ impl NativeProtocol {
                             $p::content_read_response::Result::Rejected(value) => {
                                 content::$p::decode_stamp(value.stamp.as_ref().ok_or_else(invalid)?)
                             }
-                            $p::content_read_response::Result::Topology(_) => {
-                                return Err(fail(ClientFailureClass::MissingCapability));
+                            $p::content_read_response::Result::Topology(page) => {
+                                content::$p::decode_stamp(page.stamp.as_ref().ok_or_else(invalid)?)
                             }
                         }
                         .map_err(ClientFailure::from)?;
@@ -561,6 +604,10 @@ impl NativeProtocol {
                                 PaneReadRequest::Page(request) => {
                                     PaneReadItem::Page(decode_result!(response, request, $p)?)
                                 }
+                                PaneReadRequest::Topology(request) => PaneReadItem::Topology(
+                                    reads::$p::decode_topology_result(response, &request)
+                                        .map_err(ClientFailure::from)?,
+                                ),
                                 PaneReadRequest::Graphics(_) => PaneReadItem::Graphics(
                                     match response.result.as_ref().ok_or_else(invalid)? {
                                         $p::content_read_response::Result::ResyncRequired(
@@ -589,6 +636,50 @@ impl NativeProtocol {
                                 .try_send(Ok(item))
                                 .map_err(|_| fail(ClientFailureClass::ResourceLimit))?;
                         }
+                        Ok(true)
+                    }
+                    $p::message::Kind::CopyEvent(value) => {
+                        let stamp = match value.item.as_ref().ok_or_else(invalid)? {
+                            $p::copy_event::Item::Chunk(value) => value.stamp.as_ref(),
+                            $p::copy_event::Item::Complete(value) => value.stamp.as_ref(),
+                            $p::copy_event::Item::ContentFailure(value) => value.stamp.as_ref(),
+                            _ => return Err(invalid()),
+                        }
+                        .ok_or_else(invalid)?;
+                        let stamp =
+                            content::$p::decode_stamp(stamp).map_err(ClientFailure::from)?;
+                        self.deliver_read(info.server, stamp, |request| {
+                            let PaneReadRequest::Copy(request) = request else {
+                                return Err(invalid());
+                            };
+                            let item = reads::$p::decode_copy_event(value, request)
+                                .map_err(ClientFailure::from)?;
+                            let complete = !matches!(item, CopyStreamItem::Chunk(_));
+                            Ok((PaneReadItem::Copy(item), complete))
+                        })
+                        .await?;
+                        Ok(true)
+                    }
+                    $p::message::Kind::FindEvent(value) => {
+                        let stamp = match value.item.as_ref().ok_or_else(invalid)? {
+                            $p::find_event::Item::Chunk(value) => value.stamp.as_ref(),
+                            $p::find_event::Item::Complete(value) => value.stamp.as_ref(),
+                            $p::find_event::Item::ContentFailure(value) => value.stamp.as_ref(),
+                            _ => return Err(invalid()),
+                        }
+                        .ok_or_else(invalid)?;
+                        let stamp =
+                            content::$p::decode_stamp(stamp).map_err(ClientFailure::from)?;
+                        self.deliver_read(info.server, stamp, |request| {
+                            let PaneReadRequest::Find(request) = request else {
+                                return Err(invalid());
+                            };
+                            let item = reads::$p::decode_find_event(value, request)
+                                .map_err(ClientFailure::from)?;
+                            let complete = !matches!(item, FindStreamItem::Chunk(_));
+                            Ok((PaneReadItem::Find(item), complete))
+                        })
+                        .await?;
                         Ok(true)
                     }
                     $p::message::Kind::ResourceChunk(value) => {
@@ -664,6 +755,115 @@ impl NativeProtocol {
             result => result,
         }
     }
+    async fn deliver_read(
+        &self,
+        server: ServerId,
+        stamp: QueryStamp,
+        decode: impl FnOnce(&PaneReadRequest) -> Result<(PaneReadItem, bool), ClientFailure>,
+    ) -> Result<(), ClientFailure> {
+        let delivery = {
+            let mut state = self.terminal.state.lock().map_err(|_| invalid())?;
+            let key = (server, stamp.request().get());
+            let Some(pending) = state.reads.get(&key) else {
+                return Ok(());
+            };
+            if pending.request.stamp() != stamp {
+                return Err(invalid());
+            }
+            let (item, complete) = decode(&pending.request)?;
+            let delivery = pending
+                .permit
+                .is_current()
+                .then(|| (pending.sender.clone(), item));
+            if complete {
+                state.reads.remove(&key);
+            }
+            delivery
+        };
+        if let Some((sender, item)) = delivery {
+            let _ = sender.send(Ok(item)).await;
+        }
+        Ok(())
+    }
+    fn cancel_read(self: &Arc<Self>, request: PaneReadRequest) {
+        let kind = match request {
+            PaneReadRequest::Topology(_) => 3,
+            PaneReadRequest::Find(_) => 4,
+            PaneReadRequest::Copy(_) => 5,
+            PaneReadRequest::Graphics(_) => 0,
+            // Page replies are single-frame and have no retained server demand.
+            PaneReadRequest::Page(_) => return,
+        };
+        let stamp = request.stamp();
+        let server = stamp.base().session.pane.server();
+        let Ok((handle, info)) = self.connected(server) else {
+            return;
+        };
+        if info.binding != stamp.fence().connection() {
+            return;
+        }
+        let key = (server, stamp.request().get());
+        {
+            let Ok(mut state) = self.terminal.state.lock() else {
+                return;
+            };
+            if state.cancellations.len() >= spaceterm_protocol::limits::MAX_EGRESS_ENVELOPES {
+                return;
+            }
+            state.cancellations.insert(
+                key,
+                CancelledRead {
+                    stamp,
+                    resource: match request {
+                        PaneReadRequest::Graphics(request) => Some(request.transfer()),
+                        _ => None,
+                    },
+                },
+            );
+        }
+        let payload = if let PaneReadRequest::Graphics(request) = request {
+            match info.major {
+                1 => Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::ResourceCancel(v1::ResourceCancel {
+                        transfer: request.transfer().get(),
+                        fence: Some(identity::encode_fence(stamp.fence())),
+                    })),
+                }),
+                2 => Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::ResourceCancel(v2::ResourceCancel {
+                        transfer: request.transfer().get(),
+                        fence: Some(identity::encode_fence(stamp.fence())),
+                    })),
+                }),
+                _ => return,
+            }
+        } else {
+            let query = ReadQuery::Cancel { stamp, kind };
+            match info.major {
+                1 => Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::ContentQuery(reads::v1::encode_query(
+                        &query,
+                    ))),
+                }),
+                2 => Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::ContentQuery(reads::v2::encode_query(
+                        &query,
+                    ))),
+                }),
+                _ => return,
+            }
+        };
+        let owner = Arc::downgrade(self);
+        self.executor.spawn(async move {
+            let _ = handle.dispatch(info, payload).await;
+            if let Some(owner) = owner.upgrade()
+                && let Ok(mut state) = owner.terminal.state.lock()
+                && state.cancellations.get(&key).map(|read| read.stamp) == Some(stamp)
+            {
+                state.cancellations.remove(&key);
+            }
+        });
+    }
     pub(super) fn presentation_pane(
         &self,
         server: ServerId,
@@ -698,7 +898,10 @@ impl NativeProtocol {
                 .reads
                 .retain(|_, read| read.permit.is_current() && !read.sender.is_closed());
             if state.reads.len() >= info.limits.concurrent_transfers
+                || state.reads.len().saturating_add(state.cancellations.len())
+                    >= spaceterm_protocol::limits::MAX_EGRESS_ENVELOPES
                 || state.reads.contains_key(&key)
+                || state.cancellations.contains_key(&key)
             {
                 return Err(fail(ClientFailureClass::ResourceLimit));
             }
@@ -852,7 +1055,15 @@ fn read_payload(major: u32, request: &PaneReadRequest) -> Result<Payload, Client
                     PaneReadRequest::Graphics(request) => $p::message::Kind::ResourceRequest(
                         content::$p::encode_graphics_request(*request),
                     ),
-                    _ => return Err(fail(ClientFailureClass::MissingCapability)),
+                    PaneReadRequest::Topology(request) => $p::message::Kind::ContentQuery(
+                        reads::$p::encode_query(&ReadQuery::Topology(*request)),
+                    ),
+                    PaneReadRequest::Copy(request) => $p::message::Kind::ContentQuery(
+                        reads::$p::encode_query(&ReadQuery::Copy(*request)),
+                    ),
+                    PaneReadRequest::Find(request) => $p::message::Kind::ContentQuery(
+                        reads::$p::encode_query(&ReadQuery::Find(request.clone())),
+                    ),
                 }),
             })
         };
@@ -880,10 +1091,16 @@ impl PaneReadSource for ReadSource {
 }
 impl Drop for ReadSource {
     fn drop(&mut self) {
-        if let Some(owner) = self.owner.upgrade()
-            && let Ok(mut state) = owner.terminal.state.lock()
-        {
-            state.reads.remove(&self.key);
+        if let Some(owner) = self.owner.upgrade() {
+            let pending = owner
+                .terminal
+                .state
+                .lock()
+                .ok()
+                .and_then(|mut state| state.reads.remove(&self.key));
+            if let Some(pending) = pending {
+                owner.cancel_read(pending.request);
+            }
         }
     }
 }

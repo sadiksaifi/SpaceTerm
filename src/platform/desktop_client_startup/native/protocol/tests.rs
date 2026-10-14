@@ -174,7 +174,12 @@ async fn authenticated_case(major: u32, cx: &mut TestAppContext, terminal: bool)
                 if let ConnectionState::Connected { info } = *state.borrow() {
                     break info;
                 }
-                state.changed().await.unwrap();
+                assert!(
+                    state.changed().await.is_ok(),
+                    "native worker closed during startup: {:?}; messages {}",
+                    *state.borrow(),
+                    plan.messages.lock().unwrap().len()
+                );
             }
         })
         .await
@@ -477,6 +482,15 @@ fn terminal_publication(request: &Payload, target: &ConnectionTarget) -> Option<
                     let request =
                         spaceterm_protocol::convert::content::$p::decode_graphics_request(value)
                             .unwrap();
+                    if request.resource().key.id.get() == 2 {
+                        return Some(Payload::$variant($p::Message {
+                            kind: Some($p::message::Kind::ResourceChunk(
+                                spaceterm_protocol::convert::content::$p::encode_graphics_chunk(
+                                    &GraphicsChunk::new(request, 0, vec![7; 4], false).unwrap(),
+                                ),
+                            )),
+                        }));
+                    }
                     Some(Payload::$variant($p::Message {
                         kind: Some($p::message::Kind::ContentReadResponse(Box::new(
                             spaceterm_protocol::convert::content::$p::encode_page_result(
@@ -488,6 +502,49 @@ fn terminal_publication(request: &Payload, target: &ConnectionTarget) -> Option<
                             .unwrap(),
                         ))),
                     }))
+                }
+                $p::message::Kind::ContentQuery(query) if query.cancel => None,
+                $p::message::Kind::ContentQuery(query) if matches!(query.kind, 3..=5) => {
+                    use spaceterm_protocol::convert::content::reads::{self, ReadQuery};
+                    let kind = match reads::$p::decode_query(query).unwrap() {
+                        ReadQuery::Topology(request) => {
+                            let row = read_fixture_row(request.stamp());
+                            $p::message::Kind::ContentReadResponse(Box::new(
+                                reads::$p::encode_topology_result(&ContentReadResult::Ready(
+                                    TopologyPage::new(&request, vec![row], None).unwrap(),
+                                )),
+                            ))
+                        }
+                        ReadQuery::Copy(request) => $p::message::Kind::CopyEvent(
+                            reads::$p::encode_copy_event(&CopyStreamItem::Chunk(
+                                CopyChunk::new(
+                                    &request,
+                                    ResourceTransferId::new(50).unwrap(),
+                                    CopyPart::Plain,
+                                    0,
+                                    4,
+                                    b"copy".to_vec(),
+                                )
+                                .unwrap(),
+                            )),
+                        ),
+                        ReadQuery::Find(request) => {
+                            let cell = read_fixture_cell(request.stamp());
+                            $p::message::Kind::FindEvent(reads::$p::encode_find_event(
+                                &FindStreamItem::Chunk(Box::new(
+                                    FindChunk::new(
+                                        &request,
+                                        0,
+                                        vec![FindMatch::new(request.stamp(), cell, cell).unwrap()],
+                                        None,
+                                    )
+                                    .unwrap(),
+                                )),
+                            ))
+                        }
+                        ReadQuery::Cancel { .. } => unreachable!(),
+                    };
+                    Some(Payload::$variant($p::Message { kind: Some(kind) }))
                 }
                 $p::message::Kind::ContentQuery(query) => {
                     let request =
@@ -617,13 +674,30 @@ async fn terminal_acceptance(
                 .unwrap(),
         )
         .unwrap();
-    let pane = lease.pane(snapshot.state().panes[0].id).unwrap();
-    pane.update_context(PaneContextFacts {
-        focused_pane: true,
-        terminal_input_focus: true,
-        presentable: true,
-    })
-    .unwrap();
+    let pane = executor.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let attempt = lease.pane(snapshot.state().panes[0].id).and_then(|pane| {
+                    pane.update_context(PaneContextFacts {
+                        focused_pane: true,
+                        terminal_input_focus: true,
+                        presentable: true,
+                    })?;
+                    Ok(pane)
+                });
+                match attempt {
+                    Ok(pane) => break pane,
+                    // Initial personal-view persistence briefly closes the real journal gate.
+                    Err(error) if error.class() == ClientFailureClass::StaleAuthority => {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(error) => panic!("Pane attachment failed: {error:?}"),
+                }
+            }
+        })
+        .await
+        .expect("initial journal persistence must release Pane admission")
+    });
     executor.block_on(async {
         tokio::time::timeout(std::time::Duration::from_secs(15), async {
             while pane.current_frame().is_none() {
@@ -651,6 +725,8 @@ async fn terminal_acceptance(
             stream.next().await.unwrap(),
             Some(PaneReadItem::Page(ContentReadResult::Ready(_)))
         ));
+        drop(stream);
+        content_read_acceptance(&pane, protocol, plan, info).await;
         let subscription = plan
             .messages
             .lock()
@@ -710,6 +786,8 @@ async fn terminal_acceptance(
                 ..
             }))
         ));
+        drop(graphics);
+        graphics_read_acceptance(&pane, plan, info).await;
         metadata_acceptance(plan, info, &pane).await;
         let permit = pane.permit(EffectKind::ImeCommit).unwrap();
         pane.try_effect(
@@ -896,6 +974,321 @@ async fn metadata_acceptance(
 
 #[gpui::test]
 async fn desktop_native_terminal_stream_publishes_owned_active_grid(cx: &mut TestAppContext) {
-    authenticated_case(1, cx, true).await;
     authenticated_case(2, cx, true).await;
+}
+
+#[gpui::test]
+async fn desktop_native_previous_major_terminal_stream_publishes_owned_active_grid(
+    cx: &mut TestAppContext,
+) {
+    authenticated_case(1, cx, true).await;
+}
+
+fn read_fixture_row(
+    stamp: spaceterm_core::content_queries::QueryStamp,
+) -> spaceterm_core::content_queries::TopologyRow {
+    spaceterm_core::content_queries::TopologyRow::new(
+        spaceterm_core::content::RowId {
+            screen_generation: stamp.base().screen_generation,
+            screen: stamp.base().screen,
+            node_serial: 1,
+            page_row: 0,
+        },
+        1,
+        80,
+        false,
+    )
+    .unwrap()
+}
+fn read_fixture_cell(
+    stamp: spaceterm_core::content_queries::QueryStamp,
+) -> spaceterm_core::content::CellRef {
+    spaceterm_core::content::CellRef {
+        session: stamp.base().session,
+        row: read_fixture_row(stamp).row(),
+        row_revision: 1,
+        column: 0,
+    }
+}
+async fn content_read_acceptance(
+    pane: &spaceterm_client::pane_channel::PaneChannel,
+    protocol: &Arc<NativeProtocol>,
+    plan: &Arc<fixture::peer::PeerPlan>,
+    info: ConnectedInfo,
+) {
+    use sha2::{Digest, Sha256};
+    use spaceterm_client::pane_channel::*;
+    use spaceterm_core::content_queries::*;
+    use spaceterm_protocol::convert::content::reads;
+    let permit = pane.permit(EffectKind::Read).unwrap();
+    let stamp = pane
+        .query_stamp(&permit, RequestGeneration::new(2))
+        .unwrap();
+    let topology = TopologyPageRequest::new(
+        stamp,
+        None,
+        PageLimits::new(256, 16384, 128 * 1024).unwrap(),
+    )
+    .unwrap();
+    let mut rows = pane
+        .read(&permit, PaneReadRequest::Topology(topology))
+        .await
+        .expect("topology must use the authenticated read port");
+    let Some(PaneReadItem::Topology(ContentReadResult::Ready(page))) = rows.next().await.unwrap()
+    else {
+        panic!("topology reply")
+    };
+    assert_eq!(page.rows(), &[read_fixture_row(stamp)]);
+    assert!(rows.next().await.unwrap().is_none());
+    drop(rows);
+    let stamp = pane
+        .query_stamp(&permit, RequestGeneration::new(3))
+        .unwrap();
+    let cell = read_fixture_cell(stamp);
+    let copy = CopyRequest::new(
+        stamp,
+        ContentSelection::new(stamp, cell, cell, false).unwrap(),
+        CopyOptions {
+            unwrap_soft_wraps: true,
+            trim_trailing_spaces: true,
+            include_html: false,
+        },
+    )
+    .unwrap();
+    let mut copied = pane
+        .read(&permit, PaneReadRequest::Copy(copy))
+        .await
+        .expect("Copy must use the authenticated read port");
+    let Some(PaneReadItem::Copy(CopyStreamItem::Chunk(chunk))) = copied.next().await.unwrap()
+    else {
+        panic!("Copy chunk")
+    };
+    assert_eq!(chunk.bytes(), b"copy");
+    let complete = CopyStreamItem::Complete(
+        CopyCompletion::new(
+            &copy,
+            chunk.transfer(),
+            4,
+            Sha256::digest(b"copy").into(),
+            None,
+        )
+        .unwrap(),
+    );
+    let payload = if info.major == 1 {
+        Payload::Major1(v1::Message {
+            kind: Some(v1::message::Kind::CopyEvent(reads::v1::encode_copy_event(
+                &complete,
+            ))),
+        })
+    } else {
+        Payload::Major2(v2::Message {
+            kind: Some(v2::message::Kind::CopyEvent(reads::v2::encode_copy_event(
+                &complete,
+            ))),
+        })
+    };
+    plan.control(fixture::peer::PeerControl::publication(payload))
+        .await;
+    assert!(matches!(
+        copied.next().await.unwrap(),
+        Some(PaneReadItem::Copy(CopyStreamItem::Complete(_)))
+    ));
+    assert!(copied.next().await.unwrap().is_none());
+    drop(copied);
+    let stamp = pane
+        .query_stamp(&permit, RequestGeneration::new(4))
+        .unwrap();
+    let find = FindRequest::new(
+        stamp,
+        BoundedFindQuery::new("literal".into()).unwrap(),
+        None,
+    )
+    .unwrap();
+    let mut found = pane
+        .read(&permit, PaneReadRequest::Find(find))
+        .await
+        .expect("Find must use the authenticated read port");
+    let Some(PaneReadItem::Find(FindStreamItem::Chunk(chunk))) = found.next().await.unwrap() else {
+        panic!("Find chunk")
+    };
+    assert_eq!(
+        chunk.matches(),
+        &[FindMatch::new(stamp, read_fixture_cell(stamp), read_fixture_cell(stamp)).unwrap()]
+    );
+    let complete = FindStreamItem::Complete { stamp, chunks: 1 };
+    let payload = if info.major == 1 {
+        Payload::Major1(v1::Message {
+            kind: Some(v1::message::Kind::FindEvent(reads::v1::encode_find_event(
+                &complete,
+            ))),
+        })
+    } else {
+        Payload::Major2(v2::Message {
+            kind: Some(v2::message::Kind::FindEvent(reads::v2::encode_find_event(
+                &complete,
+            ))),
+        })
+    };
+    plan.control(fixture::peer::PeerControl::publication(payload))
+        .await;
+    assert!(matches!(
+        found.next().await.unwrap(),
+        Some(PaneReadItem::Find(FindStreamItem::Complete {
+            chunks: 1,
+            ..
+        }))
+    ));
+    assert!(found.next().await.unwrap().is_none());
+    drop(found);
+    let stamp = pane
+        .query_stamp(&permit, RequestGeneration::new(5))
+        .unwrap();
+    let find =
+        FindRequest::new(stamp, BoundedFindQuery::new("cancel".into()).unwrap(), None).unwrap();
+    let mut cancelled = pane
+        .read(&permit, PaneReadRequest::Find(find))
+        .await
+        .unwrap();
+    assert!(matches!(
+        cancelled.next().await.unwrap(),
+        Some(PaneReadItem::Find(FindStreamItem::Chunk(_)))
+    ));
+    drop(cancelled);
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            if plan
+                .messages
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|payload| match payload {
+                    Payload::Major1(v1::Message {
+                        kind: Some(v1::message::Kind::ContentQuery(value)),
+                    }) => value.cancel,
+                    Payload::Major2(v2::Message {
+                        kind: Some(v2::message::Kind::ContentQuery(value)),
+                    }) => value.cancel,
+                    _ => false,
+                })
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dropping a streaming read must cancel server demand");
+    assert!(protocol.connected(info.server).is_ok());
+}
+
+fn graphics_fixture_payload(
+    major: u32,
+    chunk: spaceterm_core::content_queries::GraphicsChunk,
+) -> Payload {
+    if major == 1 {
+        Payload::Major1(v1::Message {
+            kind: Some(v1::message::Kind::ResourceChunk(
+                spaceterm_protocol::convert::content::v1::encode_graphics_chunk(&chunk),
+            )),
+        })
+    } else {
+        Payload::Major2(v2::Message {
+            kind: Some(v2::message::Kind::ResourceChunk(
+                spaceterm_protocol::convert::content::v2::encode_graphics_chunk(&chunk),
+            )),
+        })
+    }
+}
+async fn graphics_read_acceptance(
+    pane: &spaceterm_client::pane_channel::PaneChannel,
+    plan: &Arc<fixture::peer::PeerPlan>,
+    info: ConnectedInfo,
+) {
+    use sha2::{Digest, Sha256};
+    use spaceterm_client::pane_channel::*;
+    use spaceterm_core::{content::*, content_queries::*};
+    let permit = pane.permit(EffectKind::Read).unwrap();
+    let stamp = pane
+        .query_stamp(&permit, RequestGeneration::new(6))
+        .unwrap();
+    let resource = GraphicsResourceRef {
+        key: GraphicsResourceKey {
+            session: stamp.base().session,
+            id: GraphicsResourceId::new(2).unwrap(),
+            generation: 1,
+        },
+        width: 2,
+        height: 2,
+        rgba_bytes: 16,
+        digest: Sha256::digest([7; 16]).into(),
+    };
+    let request =
+        GraphicsRequest::new(stamp, ResourceTransferId::new(2).unwrap(), resource, 0).unwrap();
+    let mut stream = pane
+        .read(&permit, PaneReadRequest::Graphics(request))
+        .await
+        .unwrap();
+    let Some(PaneReadItem::Graphics(ContentReadResult::Ready(first))) =
+        stream.next().await.unwrap()
+    else {
+        panic!("first graphics chunk")
+    };
+    assert_eq!(first.offset(), 0);
+    let mut bytes = first.bytes().to_vec();
+    for (offset, length, complete) in [(4, 4, false), (8, 8, true)] {
+        let chunk = GraphicsChunk::new(request, offset, vec![7; length], complete).unwrap();
+        plan.control(fixture::peer::PeerControl::publication(
+            graphics_fixture_payload(info.major, chunk),
+        ))
+        .await;
+        let Some(PaneReadItem::Graphics(ContentReadResult::Ready(chunk))) =
+            stream.next().await.unwrap()
+        else {
+            panic!("successive graphics chunk")
+        };
+        assert_eq!(chunk.offset(), offset);
+        assert_eq!(chunk.complete(), complete);
+        bytes.extend_from_slice(chunk.bytes());
+    }
+    assert_eq!(bytes, [7; 16]);
+    assert!(stream.next().await.unwrap().is_none());
+    drop(stream);
+    let stamp = pane
+        .query_stamp(&permit, RequestGeneration::new(7))
+        .unwrap();
+    let request =
+        GraphicsRequest::new(stamp, ResourceTransferId::new(3).unwrap(), resource, 0).unwrap();
+    let mut cancelled = pane
+        .read(&permit, PaneReadRequest::Graphics(request))
+        .await
+        .unwrap();
+    assert!(matches!(
+        cancelled.next().await.unwrap(),
+        Some(PaneReadItem::Graphics(ContentReadResult::Ready(_)))
+    ));
+    drop(cancelled);
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            if plan
+                .messages
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|payload| match payload {
+                    Payload::Major1(v1::Message {
+                        kind: Some(v1::message::Kind::ResourceCancel(value)),
+                    }) => value.transfer == 3,
+                    Payload::Major2(v2::Message {
+                        kind: Some(v2::message::Kind::ResourceCancel(value)),
+                    }) => value.transfer == 3,
+                    _ => false,
+                })
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dropping a graphics read must cancel its exact transfer");
 }
