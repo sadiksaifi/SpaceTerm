@@ -37,6 +37,16 @@ pub(crate) struct DirectPreparation {
 }
 
 pub(crate) trait DirectInvitationPreparation: Send + Sync {
+    fn prepare_claim<'a>(
+        &'a self,
+        _address: String,
+        _descriptor: Zeroizing<String>,
+        _compared_fingerprint: String,
+        _attempt: EnrollmentAttempt,
+        _pairing: &'a NativePairingRuntime,
+    ) -> PairingFuture<'a, Result<String, EnrollmentFailure>> {
+        Box::pin(async { Err(EnrollmentFailure::ProviderUnavailable) })
+    }
     fn prepare<'a>(
         &'a self,
         address: String,
@@ -179,6 +189,14 @@ async fn prepare_publication(
     // Retire only the exact suppressed incarnation. A healthy old binding
     // remains an error rather than permission to replace its connection actor.
     let state = services.pairing.journal().snapshot().map_err(classify)?;
+    // Saving the new server binding can replace its old saved row. Durable
+    // tombstones still identify the exact registry actor that must be joined.
+    for old in state.tombstones() {
+        if old.parts().server == binding.target().server() {
+            enrollment.attempt.validate()?;
+            registry.remove_suppressed(old).await.map_err(classify)?;
+        }
+    }
     for old in state.bindings() {
         let old = old.binding().map_err(classify)?;
         if old.target().server() == binding.target().server()
@@ -226,6 +244,22 @@ fn classify(error: spaceterm_client::failure::ClientFailure) -> EnrollmentFailur
 }
 
 impl EnrollmentProvider for NativeEnrollmentProvider {
+    fn prepare_claim(
+        &self,
+        address: String,
+        descriptor: Zeroizing<String>,
+        compared_fingerprint: String,
+        attempt: EnrollmentAttempt,
+        cx: &mut App,
+    ) -> Task<Result<String, EnrollmentFailure>> {
+        let services = self.services.clone();
+        self.task(cx, async move {
+            attempt.validate()?;
+            let claim = services.direct.prepare_claim(address, descriptor, compared_fingerprint, attempt.clone(), &services.pairing).await?;
+            attempt.validate()?;
+            Ok(claim)
+        })
+    }
     fn inspect(
         &self,
         target: EnrollmentTarget,

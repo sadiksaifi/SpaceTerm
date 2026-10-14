@@ -117,7 +117,7 @@ async fn desktop_first_run_foreground_action_is_the_only_setup_admission_and_fai
         Some(effects.clone()),
     ))
     .with_artifact_transport(downloads.clone());
-    let setup = crate::platform::local_server_client::setup_offer(native, fixture.journal.clone())
+    let setup = crate::platform::local_server_client::setup_offer(native, fixture.journal.clone(), None)
         .unwrap()
         .unwrap();
     let (offered, _offers) = tokio::sync::watch::channel(0);

@@ -59,6 +59,7 @@ async fn desktop_production_factory_installs_foreground_enrollment_with_empty_re
             ),
             // Journal storage and native account discovery are external boundaries.
             // The real Factory, route connector, pairing runtime and installer remain.
+            legacy: std::sync::Mutex::new(None),
             context: tokio::sync::Mutex::new(Some(Arc::new(Context {
                 journal: journal.clone(),
                 native: None,

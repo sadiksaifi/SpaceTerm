@@ -438,6 +438,17 @@ pub(crate) enum EnrollmentDiscovery {
 /// install, Start, enroll, update, connect ordinarily or publish. Providers capture address/SSH
 /// configuration once, and reject changed native routes rather than reinterpret user text.
 pub(crate) trait EnrollmentProvider {
+    /// Explicit local public-claim export. No bearer, private key or connection is returned.
+    fn prepare_claim(
+        &self,
+        _address: String,
+        _descriptor: Zeroizing<String>,
+        _compared_fingerprint: String,
+        _attempt: EnrollmentAttempt,
+        _cx: &mut App,
+    ) -> Task<Result<String, EnrollmentFailure>> {
+        Task::ready(Err(EnrollmentFailure::ProviderUnavailable))
+    }
     fn inspect(
         &self,
         target: EnrollmentTarget,
@@ -559,7 +570,7 @@ impl ServerEnrollment {
             .map(|installed| installed.0.clone());
         Self {
             status: if provider.is_some() {
-                "Enter an address and a single-use invitation from an already paired device.".into()
+                "Enter an address and a single-use invitation from an already paired device. To prepare this desktop first, paste the server public identity document and compare its fingerprint, then copy the public device claim.".into()
             } else {
                 failure_message(EnrollmentFailure::ProviderUnavailable).into()
             },
@@ -608,7 +619,7 @@ impl ServerEnrollment {
             input.clear(cx);
         });
         self.status = match method {
-            Method::Direct => "Enter an address and a single-use invitation from an already paired device.",
+            Method::Direct => "Enter an address and a single-use invitation from an already paired device. To prepare this desktop first, paste the server public identity document and compare its fingerprint, then copy the public device claim.",
             Method::Ssh => "SSH setup uses OpenSSH host and account trust. Check the host before deliberately installing or reusing its server.",
         }.into();
     }
@@ -616,6 +627,48 @@ impl ServerEnrollment {
         self.attempt
             .as_ref()
             .is_some_and(|current| current.matches(attempt))
+    }
+    fn copy_claim(&mut self, cx: &mut Context<Self>) {
+        if self.busy || self.done || self.method != Method::Direct || self.candidate.is_some() {
+            return;
+        }
+        let Some(provider) = self.provider.clone() else { return };
+        let address = self.address.read(cx).value().trim().to_owned();
+        let comparison = self.comparison.read(cx).value().trim().to_owned();
+        if address.is_empty() || comparison.is_empty() {
+            self.status = "Enter the server address, public identity document and independently received fingerprint before copying a device claim.".into();
+            cx.notify();
+            return;
+        }
+        self.cancel(cx);
+        let Some(generation) = self.generation.checked_add(1) else {
+            self.status = failure_message(PairingFailure::LimitExceeded.into()).into();
+            cx.notify();
+            return;
+        };
+        self.generation = generation;
+        let attempt = EnrollmentAttempt::new(generation);
+        let descriptor = Zeroizing::new(self.invitation.update(cx, |input, cx| input.take_value(cx)));
+        let task = provider.prepare_claim(address, descriptor, comparison, attempt.clone(), cx);
+        self.attempt = Some(attempt.clone());
+        self.busy = true;
+        self.status = "Preparing this desktop's public device claim. No enrollment has been requested.".into();
+        self.operation = Some(cx.spawn(async move |sheet, cx| {
+            let result = task.await;
+            let _ = sheet.update(cx, |sheet, cx| {
+                if !sheet.current(&attempt) { return }
+                sheet.busy = false;
+                match result {
+                    Ok(claim) => {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(claim));
+                        sheet.status = "Public device claim copied. Send it to the server's owner, then paste the owner's single-use invitation here and check the server. No private key or pairing authorization was copied.".into();
+                    }
+                    Err(error) => sheet.status = failure_message(error).into(),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
     }
     fn inspect(&mut self, cx: &mut Context<Self>) {
         if self.busy || self.done {
@@ -932,6 +985,7 @@ impl Render for ServerEnrollment {
         let check = cx.weak_entity();
         let approve = cx.weak_entity();
         let start = cx.weak_entity();
+        let claim = cx.weak_entity();
         let fingerprint = self
             .candidate
             .as_ref()
@@ -994,6 +1048,21 @@ impl Render for ServerEnrollment {
                     "Single-use pairing invitation",
                     &appearance,
                 ))
+            })
+            .when(method == Method::Direct && self.candidate.is_none(), |view| {
+                view.child(field(
+                    self.comparison.clone(),
+                    "Server fingerprint received through another trusted channel",
+                    &appearance,
+                ))
+                .child(Button::new("settings-server-enrollment-copy-claim", "Copy Public Device Claim")
+                    .variant(ButtonVariant::Outline)
+                    .tab_stop(true)
+                    .disabled(!ready)
+                    .debug_selector("settings-server-enrollment-copy-claim")
+                    .on_activate(move |_, _, cx| {
+                        let _ = claim.update(cx, |sheet, cx| sheet.copy_claim(cx));
+                    }))
             })
             .child(
                 Button::new(
