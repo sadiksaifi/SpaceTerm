@@ -8,7 +8,9 @@ use std::{rc::Rc, sync::Arc};
 mod native;
 pub(crate) use native::production;
 #[cfg(test)]
-pub(crate) use native::protocol::{Decoder as AcceptanceDecoder, NativeProtocol as AcceptanceProtocol};
+pub(crate) use native::protocol::{
+    Decoder as AcceptanceDecoder, NativeProtocol as AcceptanceProtocol,
+};
 
 use gpui::{App, Entity, Task};
 use spaceterm_client::{

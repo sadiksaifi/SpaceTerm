@@ -377,10 +377,13 @@ mod tests {
             paths: paths.clone(),
             enrollment: Arc::default(),
             ssh: crate::platform::server_client_route::SshStartup {
-                executable: "/usr/bin/ssh".into(), home: root.0.clone(), environment: vec![],
+                executable: "/usr/bin/ssh".into(),
+                home: root.0.clone(),
+                environment: vec![],
             },
             askpass: crate::platform::server_client_route::askpass::DesktopTunnelAskPass::new(
-                paths.clone(), Arc::new(crate::platform::unix_askpass_transport::AskPassWindowFactory::new(None)),
+                paths.clone(),
+                Arc::new(crate::platform::unix_askpass_transport::AskPassWindowFactory::new(None)),
             ),
             legacy: std::sync::Mutex::new(None),
             context: tokio::sync::Mutex::new(None),

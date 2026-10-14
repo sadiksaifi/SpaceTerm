@@ -278,24 +278,39 @@ impl NativeOwnerFactory for Factory {
             .map_err(|_| fail(ClientFailureClass::Unavailable))?;
             // Restricted pairing shares the same native transport configuration.
             // Ordinary IPC still refreshes trusted registration on every attempt.
-            let local_routes = local.and_then(|local| {
-                local.route.or_else(|| {
-                    local.binding.as_ref()?;
-                    spaceterm_client_native::route::LocalRouteAuthority::new(
-                        local.registration.endpoint().ok()?,
-                    ).ok()
+            let local_routes = local
+                .and_then(|local| {
+                    local.route.or_else(|| {
+                        local.binding.as_ref()?;
+                        spaceterm_client_native::route::LocalRouteAuthority::new(
+                            local.registration.endpoint().ok()?,
+                        )
+                        .ok()
+                    })
                 })
-            }).into_iter().collect();
-            let (remote, pairing_routes): (Arc<dyn spaceterm_client::ports::RouteConnector>, _) = match configuration {
-                Ok((configuration, owner)) => {
-                    let shared = crate::platform::server_client_route::connector(local_routes, Some(configuration))?;
-                    (crate::platform::server_client_route::retain_runtime(shared.clone(), owner), shared)
-                }
-                Err(_) => {
-                    let shared = crate::platform::server_client_route::connector(local_routes, None)?;
-                    (shared.clone(), shared)
-                }
-            };
+                .into_iter()
+                .collect();
+            let (remote, pairing_routes): (Arc<dyn spaceterm_client::ports::RouteConnector>, _) =
+                match configuration {
+                    Ok((configuration, owner)) => {
+                        let shared = crate::platform::server_client_route::connector(
+                            local_routes,
+                            Some(configuration),
+                        )?;
+                        (
+                            crate::platform::server_client_route::retain_runtime(
+                                shared.clone(),
+                                owner,
+                            ),
+                            shared,
+                        )
+                    }
+                    Err(_) => {
+                        let shared =
+                            crate::platform::server_client_route::connector(local_routes, None)?;
+                        (shared.clone(), shared)
+                    }
+                };
             let routes = crate::platform::server_client_route::refreshing_connector_with_failure(
                 native.clone(),
                 context.native_failure,

@@ -361,12 +361,22 @@ async fn enroll_using<N: NativeDeviceCredentials + Clone + 'static>(
         return Ok(());
     }
     spaceterm_client_native::native::consumer::NativeConsumer::new(
-        native.management(), spaceterm_client_native::native::consumer::NativeConsumerKind::Cli,
-    ).with_credentials(provisioning_credentials).provision_journal(journal).await.map(|_| ()).map_err(|error| {
+        native.management(),
+        spaceterm_client_native::native::consumer::NativeConsumerKind::Cli,
+    )
+    .with_credentials(provisioning_credentials)
+    .provision_journal(journal)
+    .await
+    .map(|_| ())
+    .map_err(|error| {
         use spaceterm_client::management_cli::ManagementFailure;
         failure(match error {
-            ManagementFailure::CredentialUnavailable | ManagementFailure::StorageUnavailable => ClientFailureClass::StorageUnavailable,
-            ManagementFailure::AuthorizationDenied | ManagementFailure::Revoked => ClientFailureClass::AuthorizationDenied,
+            ManagementFailure::CredentialUnavailable | ManagementFailure::StorageUnavailable => {
+                ClientFailureClass::StorageUnavailable
+            }
+            ManagementFailure::AuthorizationDenied | ManagementFailure::Revoked => {
+                ClientFailureClass::AuthorizationDenied
+            }
             ManagementFailure::OutcomePending => ClientFailureClass::RecoveryRequired,
             _ => ClientFailureClass::Unavailable,
         })
