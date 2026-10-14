@@ -43,19 +43,10 @@ use std::{
 use tokio::sync::oneshot;
 
 pub(super) fn desktop_capabilities() -> Vec<u32> {
-    use spaceterm_protocol::negotiation::*;
-    vec![
-        CAPABILITY_SERVER_GIT,
-        CAPABILITY_SERVER_DIRECTORIES,
-        CAPABILITY_ORGANIZATION_COMPARISONS,
-        CAPABILITY_TERMINAL_STREAMS,
-        CAPABILITY_NATIVE_NOTIFICATIONS,
-        CAPABILITY_APPLICATION_MOUSE,
-        CAPABILITY_RUNTIME_METADATA,
-    ]
+    super::super::NATIVE_PROTOCOL_CAPABILITIES.to_vec()
 }
 
-pub(super) struct Decoder;
+pub(crate) struct Decoder;
 impl OrganizationDecoder for Decoder {
     fn decode(&self, payload: Payload) -> Result<OrganizationPublication, ClientFailure> {
         organization::decode(payload)
@@ -70,7 +61,7 @@ struct QueuedEffect {
     order: u64,
 }
 
-pub(super) struct NativeProtocol {
+pub(crate) struct NativeProtocol {
     journal: Arc<JournalController>,
     tracker: OperationTracker,
     registry: Mutex<Option<ClientRegistry>>,
@@ -85,7 +76,7 @@ pub(super) struct NativeProtocol {
     owner: std::sync::OnceLock<std::sync::Weak<NativeProtocol>>,
 }
 impl NativeProtocol {
-    pub(super) fn new(journal: Arc<JournalController>, tracker: OperationTracker) -> Self {
+    pub(crate) fn new(journal: Arc<JournalController>, tracker: OperationTracker) -> Self {
         Self {
             journal,
             tracker,
@@ -101,7 +92,7 @@ impl NativeProtocol {
             owner: std::sync::OnceLock::new(),
         }
     }
-    pub(super) fn set_channels(
+    pub(crate) fn set_channels(
         self: &Arc<Self>,
         channels: Arc<PaneChannels>,
     ) -> Result<(), ClientFailure> {

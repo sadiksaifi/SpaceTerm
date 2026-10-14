@@ -81,7 +81,22 @@ impl OrdinaryDispatchPort for ActorOrdinaryDispatch {
                             )
                             .map_err(protocol_failure)?;
                             let binding = request.binding();
-                            match handle.submit(principal, request).await? {
+                            let response = match handle.submit(principal, request).await {
+                                Ok(response) => response,
+                                Err(error) if error.class == ServerFailureClass::Capacity => {
+                                    // Actor contention is not a broken connection. Only an
+                                    // authoritative NeverAdmitted permits resubmission.
+                                    let result = handle.lookup_state(principal, binding).await?;
+                                    return Ok(Some(Payload::$major($p::Message {
+                                        kind: Some($p::message::Kind::OperationLookupResult(
+                                            operations::$p::encode_lookup_result(binding, &result)
+                                                .map_err(protocol_failure)?,
+                                        )),
+                                    })));
+                                }
+                                Err(error) => return Err(error),
+                            };
+                            match response {
                                 OperationResponse::Completed {
                                     binding: completed,
                                     revision,
@@ -221,6 +236,12 @@ impl OrdinaryDispatchPort for ActorOrdinaryDispatch {
                             };
                             match handle.update_client_focus(principal, update).await {
                                 Ok(_) => value.acknowledged = true,
+                                Err(error) if error.class == ServerFailureClass::Capacity => {
+                                    value.failure = Some(common::Failure {
+                                        classification: common::FailureClass::Busy as i32,
+                                        retry_after_ms: 10,
+                                    })
+                                }
                                 Err(error) if error.class == ServerFailureClass::StaleAuthority => {
                                     value.failure = Some(common::Failure {
                                         classification: common::FailureClass::Stale as i32,

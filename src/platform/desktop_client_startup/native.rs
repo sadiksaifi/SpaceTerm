@@ -1,7 +1,7 @@
 //! Production native desktop owners. All routes use the pinned authenticated actor.
 //! Recovery reads retained bindings. Only the explicit foreground setup offer may install or enroll.
 
-mod protocol;
+pub(super) mod protocol;
 
 use super::*;
 use crate::platform::{app_paths::AppPaths, client_view_store::NativeViewStore};

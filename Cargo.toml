@@ -118,6 +118,9 @@ raw-window-handle = "=0.6.2"
 
 [dev-dependencies]
 spaceterm-server = { path = "crates/spaceterm-server", default-features = false, features = ["test-support"] }
+tempfile = "=3.27.0"
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std"] }
+rcgen = { version = "=0.14.5", default-features = false, features = ["ring"] }
 spaceterm-client = { path = "crates/spaceterm-client", default-features = false, features = ["test-support"] }
 spaceterm-terminal = { path = "crates/spaceterm-terminal", features = ["test-support"] }
 accesskit_consumer = "=0.38.0"
