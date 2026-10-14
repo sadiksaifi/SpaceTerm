@@ -303,6 +303,25 @@ run = [
   { task = "test:install:macos" },
   { task = "test:updater:macos" },
   { task = "check:headless" },
+  { task = "check:server:contracts" },
+  { task = "lint:server:core" },
+  { task = "test:server:core" },
+  { task = "test:server:core:rustdoc" },
+  { task = "protocol:check-schema" },
+  { task = "lint:protocol" },
+  { task = "test:protocol" },
+  { task = "check:server:client" },
+  { task = "lint:server:client" },
+  { task = "test:server:client" },
+  { task = "check:client:native" },
+  { task = "lint:client:native" },
+  { task = "test:client:native" },
+  { task = "check:server:org-store" },
+  { task = "lint:server:org-store" },
+  { task = "test:server:org-store" },
+  { task = "lint:server:composition" },
+  { task = "check:server:distribution" },
+  { task = "lint:server:distribution" },
   { task = "test:server:account" },
   { task = "test:server:distribution" },
   { task = "test:server:composition" },
@@ -334,6 +353,25 @@ run = [
   { task = "test:install:linux" },
   { task = "test:updater:linux" },
   { task = "check:headless" },
+  { task = "check:server:contracts" },
+  { task = "lint:server:core" },
+  { task = "test:server:core" },
+  { task = "test:server:core:rustdoc" },
+  { task = "protocol:check-schema" },
+  { task = "lint:protocol" },
+  { task = "test:protocol" },
+  { task = "check:server:client" },
+  { task = "lint:server:client" },
+  { task = "test:server:client" },
+  { task = "check:client:native" },
+  { task = "lint:client:native" },
+  { task = "test:client:native" },
+  { task = "check:server:org-store" },
+  { task = "lint:server:org-store" },
+  { task = "test:server:org-store" },
+  { task = "lint:server:composition" },
+  { task = "check:server:distribution" },
+  { task = "lint:server:distribution" },
   { task = "test:server:account" },
   { task = "test:server:distribution" },
   { task = "test:server:composition" },
@@ -359,9 +397,25 @@ run = [
   { task = "check:portable" },
   { task = "test:portable" },
   { task = "check:headless" },
+  { task = "check:server:contracts" },
+  { task = "lint:server:core" },
+  { task = "test:server:core" },
+  { task = "test:server:core:rustdoc" },
+  { task = "protocol:check-schema" },
+  { task = "lint:protocol" },
+  { task = "test:protocol" },
   { task = "check:server:client" },
   { task = "lint:server:client" },
   { task = "test:server:client" },
+  { task = "check:client:native" },
+  { task = "lint:client:native" },
+  { task = "test:client:native" },
+  { task = "check:server:org-store" },
+  { task = "lint:server:org-store" },
+  { task = "test:server:org-store" },
+  { task = "lint:server:composition" },
+  { task = "check:server:distribution" },
+  { task = "lint:server:distribution" },
   { task = "test:server:account" },
   { task = "test:server:distribution" },
   { task = "test:server:composition" },
@@ -462,11 +516,18 @@ run = "cargo clippy --package spaceterm-core --package spaceterm-client --packag
 
 [tasks."test:protocol"]
 description = "Run both SpaceTerm Protocol major profiles and authentication conformance"
-run = "cargo test --package spaceterm-protocol --locked"
+run = [
+  "cargo test --package spaceterm-protocol --all-targets --locked",
+  "cargo test --package spaceterm-protocol --doc --locked",
+]
 
 [tasks."protocol:check-schema"]
-description = "Generate and check both protocol profiles with pinned Rust schema compilers"
-run = "cargo check --package spaceterm-protocol --locked"
+description = "Generate and check both protocol profiles and targets with pinned Rust schema compilers"
+run = "cargo check --package spaceterm-protocol --all-targets --locked"
+
+[tasks."lint:protocol"]
+description = "Lint both protocol profiles and every authentication target"
+run = "cargo clippy --package spaceterm-protocol --all-targets --locked --no-deps -- -D warnings"
 
 [tasks."check:server:distribution"]
 description = "Check headless release metadata and archive authentication"
@@ -595,6 +656,18 @@ run = [
 [tasks."lint:server:client"]
 description = "Lint portable server client targets and features"
 run = "cargo clippy --package spaceterm-client --all-targets --all-features --locked --no-deps -- -D warnings"
+
+[tasks."check:client:native"]
+description = "Check native client routes, journal, credentials and CLI targets without invoking native services"
+run = "cargo check --package spaceterm-client-native --all-targets --all-features --locked"
+
+[tasks."lint:client:native"]
+description = "Lint native client routes, journal, credentials and CLI targets"
+run = "cargo clippy --package spaceterm-client-native --all-targets --all-features --locked --no-deps -- -D warnings"
+
+[tasks."test:client:native"]
+description = "Test native client adapters and CLI targets without credential-store mutation"
+run = "cargo test --package spaceterm-client-native --all-targets --features cli --locked"
 
 [tasks."test:server:client:native"]
 description = "Test the native client journal and authenticated route adapters"

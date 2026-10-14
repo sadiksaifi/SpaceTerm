@@ -4,10 +4,12 @@ use std::fmt;
 
 use spaceterm_core::{
     authority::{FieldVersion, ServerEpoch},
-    identity::ServerId,
+    identity::{ClientId, ServerId},
     observations::MonotonicTick,
     operations::{AssessmentTarget, CloseAssessment, Command},
-    pairing::{EnrollmentProposal, PairingCommand, PairingTarget, UnpairAssessment},
+    pairing::{
+        EnrollmentProposal, LocalPairingKey, PairingCommand, PairingTarget, UnpairAssessment,
+    },
     remote_access::RemoteAccessPolicy,
 };
 
@@ -75,7 +77,14 @@ impl ManagementAction {
 pub enum AssessmentEvidence {
     EndAllSessions(CloseAssessment),
     Unpair(UnpairAssessment),
-    RemoteAccess { current_version: FieldVersion },
+    /// Exact saved local incarnation. It grants no ordinary server mutation authority.
+    LocalSelfUnpair {
+        pairing: LocalPairingKey,
+        client: ClientId,
+    },
+    RemoteAccess {
+        current_version: FieldVersion,
+    },
     Enrollment,
 }
 
@@ -104,6 +113,14 @@ impl ManagementAssessment {
             ) => value.summary().target() == AssessmentTarget::EndAllSessions(*server),
             (ManagementAction::Unpair { target }, AssessmentEvidence::Unpair(value)) => {
                 &value.parts().target == target
+            }
+            (
+                ManagementAction::Unpair { target },
+                AssessmentEvidence::LocalSelfUnpair { pairing, client },
+            ) => {
+                target.parts().server == pairing.parts().server
+                    && target.parts().pairing == pairing.parts().pairing
+                    && client.server() == pairing.parts().server
             }
             (
                 ManagementAction::RemoteAccess { .. },
@@ -165,6 +182,11 @@ impl ManagementAssessment {
             (ManagementAction::Unpair { .. }, AssessmentEvidence::Unpair(value)) => {
                 Command::Pairing(PairingCommand::UnpairConfirmed {
                     assessment: value.clone(),
+                })
+            }
+            (ManagementAction::Unpair { target }, AssessmentEvidence::LocalSelfUnpair { .. }) => {
+                Command::Pairing(PairingCommand::SelfRevoke {
+                    target: target.clone(),
                 })
             }
             (

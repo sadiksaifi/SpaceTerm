@@ -106,7 +106,15 @@ fn compose(
     startup: StartupDependencies<super::unix_ssh_process::UnixSshProcessAdapter>,
     identity: ApplicationIdentity,
 ) -> Result<HostComposition, DesktopProfileError> {
-    let desktop_client_startup = super::desktop_client_startup::production(startup.paths())?;
+    let askpass: Arc<dyn crate::ssh::askpass::AskPassWindowFactory> =
+        Arc::new(super::unix_askpass_transport::AskPassWindowFactory::new(
+            super::launch_host::running_executable(),
+        ));
+    let desktop_client_startup = super::desktop_client_startup::production(
+        startup.paths(),
+        startup.server_ssh_startup(),
+        askpass.clone(),
+    )?;
     let settings_storage = startup.settings_storage();
     let settings_file = startup.settings_file();
     let background_images =
@@ -149,11 +157,7 @@ fn compose(
             startup.home_directory.to_str(),
         ),
     ));
-    let remote_workspace = startup.remote_backend_factory(Arc::new(
-        super::unix_askpass_transport::AskPassWindowFactory::new(
-            super::launch_host::running_executable(),
-        ),
-    ));
+    let remote_workspace = startup.remote_backend_factory(askpass);
     let repository_status = super::repository_status_host::repository_status_adapters(
         &startup.home_directory,
         Arc::new(super::macos_repository_tools::MacosRepositoryToolDiscovery::new()),

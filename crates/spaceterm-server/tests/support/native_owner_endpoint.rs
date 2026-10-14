@@ -284,10 +284,18 @@ fn malformed_owner_proof_and_oversized_native_frame_have_no_authority_or_store_e
 
 #[tokio::test]
 async fn production_stopped_owner_composes_real_native_providers_before_issuance() {
-    let (root, fixture, _) = initialized_account(DesiredServerState::Stopped);
+    let installation = spaceterm_host::account_service::InstallationStatus {
+        installation: spaceterm_host::startup::InstallationId(
+            std::num::NonZeroU64::new(1).unwrap(),
+        ),
+        version: spaceterm_distribution::BuildVersion::parse("1.0.0").unwrap(),
+        artifact_sha256: [1; 32],
+    };
+    let (root, fixture, _) =
+        initialized_account_with_installation(DesiredServerState::Stopped, Some(installation));
     let supervisor = spaceterm_server::account_startup::test_support::supervisor(
         root.path(),
-        Arc::new(spaceterm_server::account_startup::test_support::StartupAbsence),
+        Arc::new(spaceterm_host::account_service::runtime_inventory::RetainedRuntimeProcesses),
     )
     .unwrap();
     let registration = supervisor.discover().unwrap().unwrap();
@@ -300,7 +308,7 @@ async fn production_stopped_owner_composes_real_native_providers_before_issuance
         .to_owned();
     let executor = spaceterm_server::account_startup::production_stopped_owner(
         supervisor.clone(),
-        home,
+        home.clone(),
         request,
         &claim,
     )
@@ -313,6 +321,24 @@ async fn production_stopped_owner_composes_real_native_providers_before_issuance
     assert!(issued.authorization.is_some());
     let report = executor.close().await.unwrap().unwrap();
     assert!(report.cleanup_confirmed && report.started_writes_finished);
+    let executor = spaceterm_server::account_startup::production_stopped_owner(
+        supervisor.clone(),
+        home,
+        request,
+        &verified_claim(server, 61),
+    )
+    .await
+    .expect("lost owner reply must reconstruct with retained native custody");
+    let replay = executor
+        .issue(request, verified_claim(server, 61))
+        .await
+        .unwrap();
+    assert_eq!(replay.outcome, issued.outcome);
+    executor.close().await.unwrap();
+    supervisor
+        .previous_instance_cleanup(server, spaceterm_core::authority::ServerEpoch::new(2), &[])
+        .await
+        .unwrap();
     assert_eq!(
         fixture
             .reopen()
@@ -322,6 +348,14 @@ async fn production_stopped_owner_composes_real_native_providers_before_issuance
             .desired_state(),
         DesiredServerState::Stopped
     );
+    let start = supervisor.allocate_request().unwrap();
+    supervisor.start(start).await.unwrap();
+    let startup = spaceterm_server::account_startup::AccountStartup::admit(&supervisor).unwrap();
+    assert_eq!(
+        startup.registration().server_pin(),
+        registration.server_pin()
+    );
+    drop(startup);
 }
 
 #[tokio::test]

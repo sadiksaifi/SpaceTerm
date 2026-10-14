@@ -62,6 +62,12 @@ pub const CAPABILITY_NATIVE_NOTIFICATIONS: u32 = 520_006;
 /// Native account lifecycle comparisons on paired local connections.
 pub const CAPABILITY_ACCOUNT_RUNTIME: u32 = 520_007;
 
+/// Revision-exact cell-addressed application pointer and wheel input.
+pub const CAPABILITY_APPLICATION_MOUSE: u32 = 520_008;
+
+/// Sequence-qualified runtime metadata independent of semantic content.
+pub const CAPABILITY_RUNTIME_METADATA: u32 = 520_009;
+
 /// Additive envelope registration: tag, authenticated capability, permitted directions.
 pub const EXTENSION_ENVELOPES: &[(u32, u32, bool, bool)] = &[
     (32, CAPABILITY_SERVER_GIT, true, false),
@@ -85,4 +91,5 @@ pub const EXTENSION_ENVELOPES: &[(u32, u32, bool, bool)] = &[
     (50, CAPABILITY_TERMINAL_STREAMS, false, true),
     (51, CAPABILITY_ACCOUNT_RUNTIME, true, false),
     (52, CAPABILITY_ACCOUNT_RUNTIME, false, true),
+    (53, CAPABILITY_RUNTIME_METADATA, false, true),
 ];

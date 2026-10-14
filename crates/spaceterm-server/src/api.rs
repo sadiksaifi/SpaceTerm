@@ -299,6 +299,7 @@ pub struct ListenerFactories {
 
 #[derive(Clone)]
 pub struct ServerHandle {
+    pub(crate) clock: Arc<dyn crate::contracts::ServerClock>,
     pub(crate) requests: mpsc::Sender<ActorRequest>,
     pub(crate) lifecycle: mpsc::Sender<LifecycleRequest>,
     pub(crate) phase: watch::Receiver<ServicePhase>,

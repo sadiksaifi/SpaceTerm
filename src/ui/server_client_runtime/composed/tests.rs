@@ -716,6 +716,25 @@ fn composed_attachment_is_journaled_and_detach_preserves_another_workspace(
 }
 
 #[gpui::test]
+fn desktop_online_detach_drains_original_control_release(cx: &mut TestAppContext) {
+    let harness = Harness::new(cx);
+    harness.request(DesktopRequest::DetachWorkspace(harness.workspace), cx);
+    assert!(matches!(
+        harness.server.snapshot().unwrap().runtime()[0].control,
+        spaceterm_core::organization::ControlRecord::Unclaimed
+    ));
+    assert!(
+        harness
+            .peer
+            .journal()
+            .snapshot()
+            .unwrap()
+            .detaches()
+            .is_empty()
+    );
+}
+
+#[gpui::test]
 fn composed_journal_uncertainty_hides_frames_and_revokes_pane_delivery_synchronously(
     cx: &mut TestAppContext,
 ) {
@@ -965,4 +984,52 @@ fn composed_admitted_directory_repair_blocks_replacement_before_task_poll(cx: &m
     drop(first);
     cx.run_until_parked();
     assert!(cx.update(|cx| h.provider.begin(request, cx)).is_ok());
+}
+
+#[gpui::test]
+fn desktop_offline_detach_reconnect_drains_original_release(cx: &mut gpui::TestAppContext) {
+    let harness = Harness::new(cx);
+    let retained = harness.server.replica().unwrap();
+    harness.connection.send_replace(ConnectionState::Offline {
+        failure: ClientFailure::new(ClientFailureClass::Unavailable),
+        retry: spaceterm_client::api::RetryState {
+            failures: 1,
+            delay: None,
+        },
+    });
+    harness.replica.send_replace(ReplicaState::Stale {
+        retained,
+        reason: spaceterm_client::replica::ResyncReason::ConnectionLost,
+    });
+    cx.run_until_parked();
+    harness.request(DesktopRequest::DetachWorkspace(harness.workspace), cx);
+    assert_eq!(
+        harness.peer.journal().snapshot().unwrap().detaches().len(),
+        1
+    );
+    assert!(matches!(
+        harness.server.snapshot().unwrap().runtime()[0].control,
+        spaceterm_core::organization::ControlRecord::Held { .. }
+    ));
+    harness.publish(cx);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !harness
+        .peer
+        .journal()
+        .snapshot()
+        .unwrap()
+        .detaches()
+        .is_empty()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "authenticated reconnect did not drain the original task"
+        );
+        harness.tokio.block_on(tokio::task::yield_now());
+        cx.run_until_parked();
+    }
+    assert!(matches!(
+        harness.server.snapshot().unwrap().runtime()[0].control,
+        spaceterm_core::organization::ControlRecord::Unclaimed
+    ));
 }

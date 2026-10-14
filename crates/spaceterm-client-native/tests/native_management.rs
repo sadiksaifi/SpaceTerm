@@ -276,7 +276,10 @@ async fn cli_install_verifies_artifacts_before_allocating_request_or_service_eff
     assert!(matches!(
         run(
             &provider,
-            NativeCliCommand::Install { version: None },
+            NativeCliCommand::Install {
+                version: None,
+                source: None
+            },
             ConfirmationMode::Interactive,
             &mut io,
         )
@@ -296,7 +299,10 @@ async fn cli_install_verifies_artifacts_before_allocating_request_or_service_eff
             .management()
             .run(
                 other,
-                NativeCliCommand::Install { version: None },
+                NativeCliCommand::Install {
+                    version: None,
+                    source: None
+                },
                 ConfirmationMode::Interactive,
                 SudoMode::NonInteractive,
                 &mut io,
@@ -882,4 +888,240 @@ async fn cli_activates_only_the_assessed_staged_installation_and_preserves_stopp
     let result: serde_json::Value = serde_json::from_slice(&replay.stdout).unwrap();
     assert_eq!(result["result"]["outcome"], "activated");
     assert_eq!(fixture.manager.effects.lock().unwrap().as_slice(), effects);
+}
+
+#[tokio::test]
+async fn cli_local_install_rejects_unsigned_inputs_before_request_or_service_effects() {
+    let fixture = Fixture::new(None);
+    let artifacts = Arc::new(DeniedArtifacts(AtomicU64::new(0)));
+    let provider = fixture
+        .provider()
+        .with_artifact_transport(artifacts.clone());
+    let local = tempfile::tempdir().unwrap();
+    let feed = local.path().join("private-path-marker.json");
+    let archive = local.path().join("private-path-marker.tar.gz");
+    std::fs::write(&feed, b"private-content-marker").unwrap();
+    std::fs::write(
+        local.path().join("private-path-marker.json.sig"),
+        b"unsigned",
+    )
+    .unwrap();
+    std::fs::write(&archive, b"private-content-marker").unwrap();
+    let invocation = spaceterm_client_native::cli::parse(
+        [
+            "--json",
+            "--non-interactive",
+            "install",
+            "--feed",
+            feed.to_str().unwrap(),
+            "--archive",
+            archive.to_str().unwrap(),
+        ]
+        .map(Into::into),
+    )
+    .unwrap();
+    let dependencies = CliDependencies::new(
+        Ok(provider.key()),
+        Arc::new(UnavailableProtocolManagement),
+        provider.management(),
+        Arc::new(UnavailablePairingBindings),
+    );
+    let mut io = Io::default();
+    let Dispatch::Exit(exit) = dispatch(invocation, &dependencies, &mut io).await else {
+        panic!("local install cannot serve");
+    };
+    assert_eq!(
+        exit.code(),
+        ManagementFailure::UnsafeNativeState.exit_code()
+    );
+    assert_eq!(
+        artifacts.0.load(Ordering::SeqCst),
+        0,
+        "local install must never download"
+    );
+    assert!(!fixture.account.anchor().exists());
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&io.stdout),
+        String::from_utf8_lossy(&io.stderr)
+    );
+    assert!(!diagnostic.contains("private-path-marker"));
+    assert!(!diagnostic.contains("private-content-marker"));
+    assert!(!diagnostic.contains("native_request"));
+}
+
+#[tokio::test]
+async fn cli_native_results_release_capacity_across_more_than_256_provider_restarts() {
+    let fixture = Fixture::new(Some(DesiredServerState::Running));
+    let mut first = None;
+    for _ in 0..260 {
+        let provider = fixture.provider();
+        let CliOutput::ServiceProgress(progress) = run(
+            &provider,
+            NativeCliCommand::Start,
+            ConfirmationMode::Interactive,
+            &mut Io::default(),
+        )
+        .await
+        .unwrap() else {
+            panic!("missing progress")
+        };
+        assert_eq!(
+            progress.state,
+            ServiceRequestState::Completed(ServiceOutcome::Started)
+        );
+        first.get_or_insert(progress);
+    }
+    let provider = fixture.provider();
+    let first = first.unwrap();
+    let CliOutput::ServiceProgress(recovered) = run(
+        &provider,
+        NativeCliCommand::Resolve {
+            request: first.request,
+        },
+        ConfirmationMode::Interactive,
+        &mut Io::default(),
+    )
+    .await
+    .unwrap() else {
+        panic!("missing original result")
+    };
+    assert_eq!(recovered, first);
+}
+#[tokio::test]
+async fn cli_update_stage_authenticates_artifacts_before_request_or_service_effects() {
+    for desired in [DesiredServerState::Running, DesiredServerState::Stopped] {
+        let fixture = Fixture::new(Some(desired));
+        let artifacts = Arc::new(DeniedArtifacts(AtomicU64::new(0)));
+        let provider = fixture
+            .provider()
+            .with_artifact_transport(artifacts.clone());
+        assert!(matches!(
+            run(
+                &provider,
+                NativeCliCommand::UpdateStage {
+                    version: None,
+                    source: None
+                },
+                ConfirmationMode::Interactive,
+                &mut Io::default()
+            )
+            .await,
+            Err(ManagementFailure::AuthorizationDenied)
+        ));
+        assert_eq!(artifacts.0.load(Ordering::SeqCst), 1);
+        assert!(fixture.manager.effects.lock().unwrap().is_empty());
+        assert_eq!(
+            provider.management().status().await.unwrap().desired,
+            Some(desired)
+        );
+    }
+}
+
+#[tokio::test]
+async fn cli_native_completion_recovery_settles_crashes_before_and_after_host_acknowledgement() {
+    for acknowledged in [false, true] {
+        let fixture = Fixture::new(Some(DesiredServerState::Running));
+        let provider = fixture.provider();
+        let management = provider.management();
+        let request = management.supervisor().allocate_request().unwrap();
+        let original = management.start(request).await.unwrap();
+        assert_eq!(management.retain_cli_completion(request).unwrap(), original);
+        if acknowledged {
+            management.acknowledge_request(request).unwrap();
+        }
+        drop(management);
+        drop(provider);
+        let reopened = fixture.provider();
+        let CliOutput::ServiceProgress(recovered) = run(
+            &reopened,
+            NativeCliCommand::Resolve { request },
+            ConfirmationMode::Interactive,
+            &mut Io::default(),
+        )
+        .await
+        .unwrap() else {
+            panic!("missing original completion")
+        };
+        assert_eq!(recovered, original);
+        assert_eq!(
+            reopened.management().supervisor().request_progress(request),
+            Err(ServiceFailure::RequestRetired)
+        );
+        assert_eq!(
+            fixture
+                .manager
+                .effects
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|effect| **effect == "start")
+                .count(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn cli_local_update_stage_uses_release_verification_without_network_or_lifecycle_effects() {
+    for desired in [DesiredServerState::Running, DesiredServerState::Stopped] {
+        let fixture = Fixture::new(Some(desired));
+        let artifacts = Arc::new(DeniedArtifacts(AtomicU64::new(0)));
+        let provider = fixture
+            .provider()
+            .with_artifact_transport(artifacts.clone());
+        let local = tempfile::tempdir().unwrap();
+        let feed = local.path().join("private-path-marker.json");
+        let archive = local.path().join("private-path-marker.tar.gz");
+        std::fs::write(&feed, b"private-content-marker").unwrap();
+        std::fs::write(
+            local.path().join("private-path-marker.json.sig"),
+            b"unsigned",
+        )
+        .unwrap();
+        std::fs::write(&archive, b"private-content-marker").unwrap();
+        let invocation = spaceterm_client_native::cli::parse(
+            [
+                "--json",
+                "--non-interactive",
+                "update",
+                "stage",
+                "--feed",
+                feed.to_str().unwrap(),
+                "--archive",
+                archive.to_str().unwrap(),
+            ]
+            .map(Into::into),
+        )
+        .unwrap();
+        let dependencies = CliDependencies::new(
+            Ok(provider.key()),
+            Arc::new(UnavailableProtocolManagement),
+            provider.management(),
+            Arc::new(UnavailablePairingBindings),
+        );
+        let mut io = Io::default();
+        let Dispatch::Exit(exit) = dispatch(invocation, &dependencies, &mut io).await else {
+            panic!("staging cannot serve")
+        };
+        assert_eq!(
+            exit.code(),
+            ManagementFailure::UnsafeNativeState.exit_code()
+        );
+        assert_eq!(artifacts.0.load(Ordering::SeqCst), 0);
+        assert!(fixture.manager.effects.lock().unwrap().is_empty());
+        assert_eq!(
+            provider.management().status().await.unwrap().desired,
+            Some(desired)
+        );
+        let diagnostic = format!(
+            "{}{}",
+            String::from_utf8_lossy(&io.stdout),
+            String::from_utf8_lossy(&io.stderr)
+        );
+        assert!(!diagnostic.contains("private-path-marker"));
+        assert!(!diagnostic.contains("private-content-marker"));
+        assert!(!diagnostic.contains("native_request"));
+    }
 }

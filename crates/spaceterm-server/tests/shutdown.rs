@@ -3829,3 +3829,102 @@ async fn complete_startup_waits_for_an_inflight_commit_without_capacity_retries(
     stop(&handle, host).await.unwrap();
     server.wait().await.unwrap();
 }
+
+#[tokio::test]
+async fn focus_reconciliation_and_acknowledgement_wait_for_an_inflight_commit() {
+    let fixture = Fixture::new();
+    let first = fixture.principal(1, 1);
+    let second = fixture.principal(2, 1);
+    let codec = fixture.codec.clone();
+    let host = fixture.host.clone();
+    let db = fixture.db.clone();
+    let server = RecoveredServer::recover(fixture.config, fixture.dependencies)
+        .await
+        .unwrap();
+    let handle = server.handle();
+    connect(&handle, first).await;
+    connect(&handle, second).await;
+    let gate = StoreGate::new();
+    db.lock().unwrap().gate = Some(gate.clone());
+    let mutation = request(
+        &codec,
+        1,
+        1,
+        Command::RenameWorkspace {
+            workspace: workspace(),
+            expected_version: FieldVersion::new(1),
+            draft: NameDraft::Custom(NameText::new("queued context".into()).unwrap()),
+        },
+    );
+    let changed = handle.clone();
+    let mutation = tokio::spawn(async move { changed.submit(first, mutation).await });
+    gate.entered().await;
+    let focused = handle.clone();
+    let mut focus = tokio::spawn(async move {
+        focused
+            .update_client_focus(
+                second,
+                ClientFocusUpdate {
+                    context: ContextGeneration::new(2),
+                    focused_pane: Some(pane()),
+                    terminal_input_focus: true,
+                    native_effects_eligible: true,
+                },
+            )
+            .await
+    });
+    let acknowledged = handle.clone();
+    let mut acknowledgement = tokio::spawn(async move {
+        acknowledged
+            .acknowledge(first, stream(1), OperationSequence::new(1).unwrap())
+            .await
+    });
+    let reconciled = handle.clone();
+    let revision = handle.snapshot().state().revision;
+    let mut reconciliation =
+        tokio::spawn(async move { reconciled.reconcile(second, revision).await });
+    let focus_early = tokio::time::timeout(std::time::Duration::from_millis(50), &mut focus).await;
+    let acknowledgement_early =
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut acknowledgement).await;
+    let reconciliation_early =
+        tokio::time::timeout(std::time::Duration::from_millis(50), &mut reconciliation).await;
+    gate.release();
+    mutation.await.unwrap().unwrap();
+    assert!(
+        focus_early.is_err(),
+        "focus must wait for actor serialization: {focus_early:?}"
+    );
+    assert!(
+        acknowledgement_early.is_err(),
+        "acknowledgement must wait: {acknowledgement_early:?}"
+    );
+    assert!(
+        reconciliation_early.is_err(),
+        "reconciliation must wait: {reconciliation_early:?}"
+    );
+    assert_eq!(focus.await.unwrap().unwrap(), ContextGeneration::new(2));
+    acknowledgement.await.unwrap().unwrap();
+    // The original revision is revalidated, not silently replaced by the queued mutation's revision.
+    assert_eq!(
+        reconciliation.await.unwrap().unwrap_err().class,
+        ServerFailureClass::StaleAuthority
+    );
+    handle
+        .reconcile(second, handle.snapshot().state().revision)
+        .await
+        .unwrap();
+    handle
+        .update_client_focus(
+            second,
+            ClientFocusUpdate {
+                context: ContextGeneration::new(3),
+                focused_pane: None,
+                terminal_input_focus: false,
+                native_effects_eligible: false,
+            },
+        )
+        .await
+        .unwrap();
+    stop(&handle, host).await.unwrap();
+    server.wait().await.unwrap();
+}

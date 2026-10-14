@@ -1,6 +1,10 @@
 //! Signed, account-local runtime custody records. Wire replies never carry native
 //! cleanup proofs. Only a validated registration can read this private record.
 
+mod stopped_owner;
+use stopped_owner::StoppedEpoch;
+pub use stopped_owner::StoppedRuntimeCustody;
+
 use std::sync::Arc;
 
 use ring::signature::{ED25519, UnparsedPublicKey};
@@ -77,6 +81,22 @@ struct State {
     generation: u64,
     clean: bool,
     cleanup: Option<Cleanup>,
+    #[serde(default)]
+    graceful: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner: Option<InstanceOwner>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stopped_owner: Option<StoppedEpoch>,
+}
+
+/// Signed native incarnation. The boot prevents PID or process-birth reuse
+/// across reboot from inheriting a previous instance's runtime authority.
+#[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct InstanceOwner {
+    pub(super) boot: [u8; 32],
+    pub(super) pid: u32,
+    pub(super) birth: u64,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -110,9 +130,17 @@ impl RuntimeCustody {
             return Err(ServiceFailure::IdentityMismatch);
         }
         let old_instance = previous.as_ref().map(|(state, _)| state.instance);
+        let owner = super::native_processes::instance_owner()?;
         let instance = match read_marker(registration)? {
-            Some(marker) if Some(marker.instance) != old_instance => marker.instance,
-            _ => Self::prepare_start(registration, signer.as_ref())?,
+            Some(marker) if Some(marker.instance) != old_instance => {
+                if marker.owner != Some(owner)
+                    || marker.epoch.is_some_and(|prepared| prepared != epoch)
+                {
+                    return Err(ServiceFailure::IdentityMismatch);
+                }
+                marker.instance
+            }
+            _ => Self::prepare_start_for_epoch(registration, signer.as_ref(), epoch)?,
         };
         let state = State {
             schema: 1,
@@ -127,6 +155,9 @@ impl RuntimeCustody {
             })?,
             clean: false,
             cleanup: None,
+            graceful: false,
+            owner: Some(owner),
+            stopped_owner: None,
         };
         publish(registration, &state, signer.as_ref())?;
         Ok(Self { state, signer })
@@ -138,6 +169,28 @@ impl RuntimeCustody {
         registration: &RegisteredServer,
         signer: &dyn SigningKey,
     ) -> Result<[u8; 32], ServiceFailure> {
+        Self::prepare_start_inner(registration, signer, None)
+    }
+
+    /// Retains the prospective epoch before recovery can commit it. If the
+    /// process dies between epoch commit and begin, the next owner reconciles
+    /// this exact attempt rather than replacing the original organization.
+    pub fn prepare_start_for_epoch(
+        registration: &RegisteredServer,
+        signer: &dyn SigningKey,
+        epoch: ServerEpoch,
+    ) -> Result<[u8; 32], ServiceFailure> {
+        if epoch.get() == 0 {
+            return Err(ServiceFailure::InvalidRecord);
+        }
+        Self::prepare_start_inner(registration, signer, Some(epoch))
+    }
+
+    fn prepare_start_inner(
+        registration: &RegisteredServer,
+        signer: &dyn SigningKey,
+        epoch: Option<ServerEpoch>,
+    ) -> Result<[u8; 32], ServiceFailure> {
         if signer.public_key() != registration.server_pin().public_key {
             return Err(ServiceFailure::IdentityMismatch);
         }
@@ -147,6 +200,8 @@ impl RuntimeCustody {
             schema: 1,
             server: ServerId::new(registration.server_pin().identity),
             instance,
+            epoch,
+            owner: Some(super::native_processes::instance_owner()?),
         })
         .map_err(|_| ServiceFailure::InvalidRecord)?;
         let bytes = serde_json::to_vec(&Signed {
@@ -163,6 +218,26 @@ impl RuntimeCustody {
             .publish(STARTING, &bytes, previous.as_ref())?;
         Ok(instance)
     }
+    /// Publishes ordinary instance cleanup after the actor, runtime workers,
+    /// listeners and started writes have joined. This changes no desired intent
+    /// and never manufactures a native request or its replay authority.
+    pub fn completed_instance(
+        &self,
+        registration: &RegisteredServer,
+    ) -> Result<(), ServiceFailure> {
+        let (current, _) = read(registration)?.ok_or(ServiceFailure::CleanupUnresolved)?;
+        if current.instance != self.state.instance || current.epoch != self.state.epoch {
+            return Err(ServiceFailure::IdentityMismatch);
+        }
+        if current.clean {
+            return Ok(());
+        }
+        let mut completed = current;
+        completed.clean = true;
+        completed.graceful = true;
+        publish(registration, &completed, self.signer.as_ref())
+    }
+
     /// Records exact joined cleanup only after the actor confirms all descendants,
     /// started writes and listeners. The original host request is retained.
     pub fn completed(
@@ -207,10 +282,85 @@ impl RuntimeCustody {
     }
 }
 
+/// Opaque native process-scope evidence. Only the account process provider can
+/// issue it after checking the manager scope and listener under startup admission.
+/// It is not serializable and is never accepted from the protocol.
+pub struct NativeInstanceAbsence {
+    pub(super) key: crate::startup::AccountBuildKey,
+    pub(super) server: ServerId,
+    pub(super) epoch: ServerEpoch,
+    pub(super) boot: [u8; 32],
+}
+
 /// Native absence/replay authority shared by callers after reconstruction. It
 /// never treats a missing record, unavailable listener or dead PID as cleanup.
 pub struct RetainedRuntimeProcesses;
 impl RetainedRuntimeProcesses {
+    fn reconcile(
+        registration: &RegisteredServer,
+        epoch: ServerEpoch,
+        expected: &[spaceterm_core::retirement::RetiredSession],
+        absence: Option<&NativeInstanceAbsence>,
+    ) -> Result<Vec<SessionCleanupObservation>, ServiceFailure> {
+        let sessions: Vec<_> = expected.iter().map(|value| value.session()).collect();
+        super::processes::validate_previous_scope(
+            ServerId::new(registration.server_pin().identity),
+            epoch,
+            &sessions,
+        )?;
+        let (state, _) = read(registration)?.ok_or(ServiceFailure::CleanupUnresolved)?;
+        let old_epoch = state.epoch.unwrap_or(ServerEpoch::new(0));
+        let pending = read_marker(registration)?.filter(|marker| marker.instance != state.instance);
+        if old_epoch != epoch
+            && !pending.as_ref().is_some_and(|marker| {
+                marker.epoch == Some(epoch) && old_epoch.checked_successor() == Some(epoch)
+            })
+        {
+            return Err(ServiceFailure::CleanupUnresolved);
+        }
+        if !state.clean || pending.is_some() {
+            let absence = absence.ok_or(ServiceFailure::CleanupUnresolved)?;
+            if absence.key != registration.key()
+                || absence.server != state.server
+                || absence.epoch != epoch
+            {
+                return Err(ServiceFailure::IdentityMismatch);
+            }
+            if !state.clean {
+                super::native_processes::previous_owner_absent(
+                    state.owner.ok_or(ServiceFailure::CleanupUnresolved)?,
+                    absence.boot,
+                )?;
+            }
+            if let Some(marker) = pending {
+                super::native_processes::previous_owner_absent(
+                    marker.owner.ok_or(ServiceFailure::CleanupUnresolved)?,
+                    absence.boot,
+                )?;
+            }
+        }
+        registration
+            .endpoint()?
+            .prove_no_listener()
+            .map_err(|_| ServiceFailure::CleanupUnresolved)?;
+        // Whole-instance cleanup and exact native scope absence prove old-epoch
+        // ownership. The validated store supplies each original first reason;
+        // the historical native request remains unchanged for exact replay.
+        expected
+            .iter()
+            .map(|expected| {
+                SessionCleanupObservation::new(
+                    expected.session(),
+                    expected.first_reason(),
+                    CleanupResult::Confirmed(
+                        ConfirmedCleanupClass::AlreadyAbsentWithConfirmedOwnership,
+                    ),
+                )
+                .map_err(|_| ServiceFailure::InvalidRecord)
+            })
+            .collect()
+    }
+
     /// Resolves only the exact original native request from signed local custody.
     pub fn cleanup(
         registration: &RegisteredServer,
@@ -237,11 +387,22 @@ impl RetainedRuntimeProcesses {
         let Some((state, _)) = read(registration)? else {
             return Ok(false);
         };
-        Ok(state.clean && marker_matches(registration, &state)?)
+        Ok(state.clean
+            && !state
+                .stopped_owner
+                .as_ref()
+                .is_some_and(|owner| owner.pending)
+            && marker_matches(registration, &state)?)
     }
     fn absent(registration: &RegisteredServer) -> Result<(State, [u8; 32]), ServiceFailure> {
         let (state, digest) = read(registration)?.ok_or(ServiceFailure::CleanupUnresolved)?;
-        if !state.clean || !marker_matches(registration, &state)? {
+        if !state.clean
+            || state
+                .stopped_owner
+                .as_ref()
+                .is_some_and(|owner| owner.pending)
+            || !marker_matches(registration, &state)?
+        {
             return Err(ServiceFailure::CleanupUnresolved);
         }
         registration
@@ -313,6 +474,23 @@ impl RetainedRuntimeProcesses {
     }
 }
 impl ServiceProcesses for RetainedRuntimeProcesses {
+    fn reconcile_previous_instance<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+        epoch: ServerEpoch,
+        expected: &'a [spaceterm_core::retirement::RetiredSession],
+    ) -> ServiceFuture<'a, Vec<SessionCleanupObservation>> {
+        Box::pin(async move { Self::reconcile(registration, epoch, expected, None) })
+    }
+    fn reconcile_previous_instance_with_absence<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+        epoch: ServerEpoch,
+        expected: &'a [spaceterm_core::retirement::RetiredSession],
+        absence: &'a NativeInstanceAbsence,
+    ) -> ServiceFuture<'a, Vec<SessionCleanupObservation>> {
+        Box::pin(async move { Self::reconcile(registration, epoch, expected, Some(absence)) })
+    }
     fn assess<'a>(
         &'a self,
         registration: &'a RegisteredServer,
@@ -386,11 +564,27 @@ impl ServiceProcesses for RetainedRuntimeProcesses {
             if !state.clean || state.epoch.unwrap_or(ServerEpoch::new(0)) != epoch {
                 return Err(ServiceFailure::CleanupUnresolved);
             }
-            if epoch.get() == 0 && sessions.is_empty() {
+            if sessions.is_empty()
+                && (epoch.get() == 0
+                    || state
+                        .stopped_owner
+                        .as_ref()
+                        .is_some_and(|owner| !owner.pending))
+            {
+                return Ok(Vec::new());
+            }
+            // Completed native retirement descriptors no longer appear in the
+            // store. Their historical assessment is replay authority, not the
+            // pending recovery scope. NativeServiceProcesses separately verifies
+            // the current manager scope and endpoint before admitting startup.
+            if sessions.is_empty() {
                 return Ok(Vec::new());
             }
             let cleanup = state.cleanup.ok_or(ServiceFailure::CleanupUnresolved)?;
-            if cleanup.assessment.sessions != sessions {
+            if sessions
+                .iter()
+                .any(|session| cleanup.assessment.sessions.binary_search(session).is_err())
+            {
                 return Err(ServiceFailure::CleanupUnresolved);
             }
             observations(sessions, cleanup.action)
@@ -412,6 +606,9 @@ pub(super) fn initialize(
         generation: 1,
         clean: true,
         cleanup: None,
+        graceful: false,
+        owner: None,
+        stopped_owner: None,
     };
     // Only exclusive initial registration calls this. Never repair missing custody
     // metadata on an established store by publishing an empty clean instance.
@@ -489,8 +686,21 @@ fn read(registration: &RegisteredServer) -> Result<Option<(State, [u8; 32])>, Se
         || state.instance == [0; 32]
         || state.generation == 0
         || state.epoch.is_some_and(|epoch| epoch.get() == 0)
-        || (state.epoch.is_none() && (!state.clean || state.cleanup.is_some()))
-        || (state.epoch.is_some() && state.clean != state.cleanup.is_some())
+        || (state.epoch.is_none() && (!state.clean || state.cleanup.is_some() || state.graceful))
+        || (state.epoch.is_some()
+            && state.stopped_owner.is_none()
+            && state.clean != (state.cleanup.is_some() || state.graceful))
+        || (state.cleanup.is_some() && state.graceful)
+        || state.owner.is_some_and(|owner| {
+            owner.boot == [0; 32]
+                || owner.pid == 0
+                || owner.pid > i32::MAX as u32
+                || owner.birth == 0
+        })
+        || state
+            .stopped_owner
+            .as_ref()
+            .is_some_and(|owner| !owner.validate())
     {
         return Err(ServiceFailure::InvalidRecord);
     }
@@ -509,6 +719,10 @@ struct Starting {
     schema: u16,
     server: ServerId,
     instance: [u8; 32],
+    #[serde(default)]
+    epoch: Option<ServerEpoch>,
+    #[serde(default)]
+    owner: Option<InstanceOwner>,
 }
 fn read_marker(registration: &RegisteredServer) -> Result<Option<Starting>, ServiceFailure> {
     let Some(record) = registration.directory.read(STARTING, RECORD_LIMIT)? else {
@@ -527,6 +741,13 @@ fn read_marker(registration: &RegisteredServer) -> Result<Option<Starting>, Serv
     if marker.schema != 1
         || marker.server.bytes() != registration.server_pin().identity
         || marker.instance == [0; 32]
+        || marker.epoch.is_some_and(|epoch| epoch.get() == 0)
+        || marker.owner.is_some_and(|owner| {
+            owner.boot == [0; 32]
+                || owner.pid == 0
+                || owner.pid > i32::MAX as u32
+                || owner.birth == 0
+        })
     {
         return Err(ServiceFailure::InvalidRecord);
     }
@@ -535,7 +756,7 @@ fn read_marker(registration: &RegisteredServer) -> Result<Option<Starting>, Serv
 fn marker_matches(registration: &RegisteredServer, state: &State) -> Result<bool, ServiceFailure> {
     Ok(match read_marker(registration)? {
         Some(marker) => marker.instance == state.instance,
-        None => state.epoch.is_none(),
+        None => state.epoch.is_none() || state.stopped_owner.is_some(),
     })
 }
 

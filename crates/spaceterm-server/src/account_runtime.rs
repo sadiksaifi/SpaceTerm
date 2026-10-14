@@ -206,6 +206,22 @@ impl AccountRuntimeProcesses {
         }
         Ok(())
     }
+    /// Ordinary OS-signal shutdown has no native request. Its successful report
+    /// still proves joined instance cleanup without changing Running intent.
+    pub fn finish_instance(
+        &self,
+        report: crate::shutdown::ShutdownReport,
+    ) -> Result<(), ServiceFailure> {
+        if !report.cleanup_confirmed
+            || !report.listeners_closed
+            || !report.started_writes_finished
+            || report.recovery_required
+        {
+            return Err(ServiceFailure::CleanupUnresolved);
+        }
+        self.custody.completed_instance(&self.registration()?)
+    }
+
     fn authorize(
         &self,
         registration: &RegisteredServer,

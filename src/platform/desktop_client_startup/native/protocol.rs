@@ -43,17 +43,10 @@ use std::{
 use tokio::sync::oneshot;
 
 pub(super) fn desktop_capabilities() -> Vec<u32> {
-    use spaceterm_protocol::negotiation::*;
-    vec![
-        CAPABILITY_SERVER_GIT,
-        CAPABILITY_SERVER_DIRECTORIES,
-        CAPABILITY_ORGANIZATION_COMPARISONS,
-        CAPABILITY_TERMINAL_STREAMS,
-        CAPABILITY_NATIVE_NOTIFICATIONS,
-    ]
+    super::super::NATIVE_PROTOCOL_CAPABILITIES.to_vec()
 }
 
-pub(super) struct Decoder;
+pub(crate) struct Decoder;
 impl OrganizationDecoder for Decoder {
     fn decode(&self, payload: Payload) -> Result<OrganizationPublication, ClientFailure> {
         organization::decode(payload)
@@ -68,9 +61,10 @@ struct QueuedEffect {
     order: u64,
 }
 
-pub(super) struct NativeProtocol {
+pub(crate) struct NativeProtocol {
     journal: Arc<JournalController>,
     tracker: OperationTracker,
+    cache: Mutex<Option<Arc<super::organization_cache::OrganizationCache>>>,
     registry: Mutex<Option<ClientRegistry>>,
     channels: Mutex<Option<Arc<PaneChannels>>>,
     infos: Mutex<BTreeMap<ServerId, ConnectedInfo>>,
@@ -83,10 +77,11 @@ pub(super) struct NativeProtocol {
     owner: std::sync::OnceLock<std::sync::Weak<NativeProtocol>>,
 }
 impl NativeProtocol {
-    pub(super) fn new(journal: Arc<JournalController>, tracker: OperationTracker) -> Self {
+    pub(crate) fn new(journal: Arc<JournalController>, tracker: OperationTracker) -> Self {
         Self {
             journal,
             tracker,
+            cache: Mutex::new(None),
             registry: Mutex::new(None),
             channels: Mutex::new(None),
             infos: Mutex::new(BTreeMap::new()),
@@ -99,7 +94,14 @@ impl NativeProtocol {
             owner: std::sync::OnceLock::new(),
         }
     }
-    pub(super) fn set_channels(
+    pub(super) fn set_cache(
+        &self,
+        cache: Arc<super::organization_cache::OrganizationCache>,
+    ) -> Result<(), ClientFailure> {
+        *self.cache.lock().map_err(|_| invalid())? = Some(cache);
+        Ok(())
+    }
+    pub(crate) fn set_channels(
         self: &Arc<Self>,
         channels: Arc<PaneChannels>,
     ) -> Result<(), ClientFailure> {
@@ -199,10 +201,27 @@ impl NativeProtocol {
             .lock()
             .map_err(|_| invalid())?
             .insert(info.server, info);
+        if let Some(cache) = self.cache.lock().map_err(|_| invalid())?.as_ref() {
+            cache.publish(self.binding(info.server)?, retained.organization.clone())?;
+        }
         self.channels()?.publish(info, retained)
     }
 }
 impl NativeRegistryBinding for NativeProtocol {
+    fn retained_organization(
+        &self,
+    ) -> ClientFuture<'_, Vec<spaceterm_core::organization::OrganizationSnapshot>> {
+        Box::pin(async move {
+            let cache = self.cache.lock().map_err(|_| invalid())?.clone();
+            let journal = self.journal.clone();
+            match cache {
+                Some(cache) => tokio::task::spawn_blocking(move || cache.load(&journal))
+                    .await
+                    .map_err(|_| fail(ClientFailureClass::StorageUnavailable))?,
+                None => Ok(vec![]),
+            }
+        })
+    }
     fn bind(&self, registry: ClientRegistry) -> Result<(), ClientFailure> {
         let mut retained = self.registry.lock().map_err(|_| invalid())?;
         if retained.is_some() {
@@ -415,6 +434,28 @@ impl ConnectionDelegate for NativeProtocol {
         channel: &'a mut dyn ProtocolChannel,
     ) -> ClientFuture<'a, ()> {
         Box::pin(async move {
+            let metadata = match &message {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::MetadataPublication(value)),
+                }) => Some(
+                    spaceterm_protocol::convert::metadata::v1::decode_publication(value)
+                        .map_err(ClientFailure::from)?,
+                ),
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::MetadataPublication(value)),
+                }) => Some(
+                    spaceterm_protocol::convert::metadata::v2::decode_publication(value)
+                        .map_err(ClientFailure::from)?,
+                ),
+                _ => None,
+            };
+            if let Some((fence, snapshot)) = metadata {
+                if fence.connection() != info.binding || fence.session().epoch != info.epoch {
+                    return Err(invalid());
+                }
+                self.channels()?.receive_metadata(fence, snapshot)?;
+                return Ok(());
+            }
             if self.receive_terminal(info, &message).await? {
                 return Ok(());
             }
@@ -447,7 +488,7 @@ impl ConnectionDelegate for NativeProtocol {
                         let mut effects = self.effects.lock().map_err(|_| invalid())?;
                         if effects
                             .get(&(info.server, request))
-                            .is_some_and(|effect| effect.permit.fence() != fence)
+                            .is_some_and(|effect| !fence.is_current(&effect.permit.fence()))
                         {
                             // Native request numbers can repeat in a replacement
                             // Session. An old receipt cannot retire its new permit.
@@ -670,6 +711,16 @@ impl PaneConnectionPort for NativeProtocol {
         }
         let server = command.fence.session().pane.server();
         let (_, info) = self.connected(server)?;
+        if matches!(
+            &command.command,
+            spaceterm_client::pane_channel::RuntimeEffect::Pointer(_)
+                | spaceterm_client::pane_channel::RuntimeEffect::Wheel(_)
+        ) && !info
+            .capabilities
+            .supports(spaceterm_protocol::negotiation::CAPABILITY_APPLICATION_MOUSE)
+        {
+            return Err(fail(ClientFailureClass::MissingCapability));
+        }
         let mut effects = self.effects.lock().map_err(|_| invalid())?;
         effects.retain(|_, queued| queued.permit.is_current());
         let native = match &command.command {

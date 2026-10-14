@@ -1,6 +1,8 @@
 //! Foreground enrollment shares the application's native pairing runtime and registry.
 //! Native invitation delivery and SSH effects remain constructor-injected capabilities.
 
+mod direct;
+
 use std::{rc::Rc, sync::Arc};
 
 use gpui::{App, Task};
@@ -78,6 +80,38 @@ pub(crate) struct NativeEnrollmentServices {
     pub(crate) direct: Arc<dyn DirectInvitationPreparation>,
     pub(crate) bootstrap: Option<Arc<dyn ForegroundBootstrapServices>>,
     pub(crate) executor: tokio::runtime::Handle,
+    pub(crate) local: Option<spaceterm_client_native::NativeClientProvider>,
+}
+
+/// Production enrollment uses the exact ordinary route owner and journal. The
+/// foreground provider is installed even when no server has been paired yet.
+pub(crate) fn production(
+    journal: Arc<spaceterm_client::journal::JournalController>,
+    routes: Arc<spaceterm_client_native::route::NativeRouteConnector>,
+    invalidator: Arc<dyn spaceterm_client::pending::LocalUseInvalidator>,
+    local: Option<spaceterm_client_native::NativeClientProvider>,
+    executor: tokio::runtime::Handle,
+) -> NativeEnrollmentServices {
+    let connector = Arc::new(
+        spaceterm_client_native::restricted_routes::NativePairingConnector::with_shared_routes(
+            journal.clone(),
+            routes,
+        ),
+    );
+    NativeEnrollmentServices {
+        pairing: Arc::new(NativePairingRuntime::with_adapters(
+            journal,
+            Arc::new(spaceterm_client_native::credentials::adapter::DeviceCredentials::native()),
+            connector.clone(),
+            connector,
+            invalidator,
+            spaceterm_protocol::authentication::HandshakeConfig::default(),
+        )),
+        direct: Arc::new(direct::NativeDirectInvitation),
+        bootstrap: None,
+        executor,
+        local,
+    }
 }
 
 pub(crate) trait EnrollmentPublication {
@@ -142,7 +176,39 @@ async fn prepare_publication(
         .binding()
         .binding()
         .map_err(|_| PairingFailure::InvalidDurableState)?;
-    enrollment.handle = Some(registry.register(binding).await.map_err(classify)?);
+    // Retire only the exact suppressed incarnation. A healthy old binding
+    // remains an error rather than permission to replace its connection actor.
+    let state = services.pairing.journal().snapshot().map_err(classify)?;
+    for old in state.bindings() {
+        let old = old.binding().map_err(classify)?;
+        if old.target().server() == binding.target().server()
+            && old != binding
+            && !services
+                .pairing
+                .journal()
+                .ordinary_use_allowed(&old)
+                .map_err(classify)?
+        {
+            enrollment.attempt.validate()?;
+            registry
+                .remove_suppressed(&old.target().local_pairing().map_err(classify)?)
+                .await
+                .map_err(classify)?;
+        }
+    }
+    enrollment.attempt.validate()?;
+    let handle = registry.register(binding.clone()).await.map_err(classify)?;
+    enrollment.attempt.validate()?;
+    enrollment.settings = Some(
+        crate::ui::settings_window::server_runtime::SettingsServices::for_enrollment(
+            &binding,
+            &handle,
+            services.pairing.journal(),
+            services.local.as_ref(),
+        )
+        .map_err(classify)?,
+    );
+    enrollment.handle = Some(handle);
     enrollment.attempt.validate()?;
     Ok(enrollment)
 }

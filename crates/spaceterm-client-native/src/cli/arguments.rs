@@ -34,6 +34,7 @@ pub enum CliCommand {
     },
     Install {
         version: Option<StableVersion>,
+        source: Option<crate::native::artifacts::LocalArtifactSource>,
     },
     Start,
     Restart {
@@ -69,6 +70,7 @@ pub enum CliCommand {
     UpdateCheck,
     UpdateStage {
         version: Option<StableVersion>,
+        source: Option<crate::native::artifacts::LocalArtifactSource>,
     },
     UpdateActivate {
         installation: InstallationId,
@@ -97,6 +99,9 @@ impl fmt::Debug for PublicRequestId {
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct PublicFingerprint([u8; 32]);
 impl PublicFingerprint {
+    pub(crate) fn from_public_key(key: [u8; 32]) -> Self {
+        Self(key)
+    }
     pub fn bytes(self) -> [u8; 32] {
         self.0
     }
@@ -169,9 +174,18 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInvocat
             }).transpose()? }
         }
         ["install", rest @ ..] => {
-            let options = Options::new(rest, &[("--version", Flag::Value)])?;
+            let options = Options::new(
+                rest,
+                &[
+                    ("--version", Flag::Value),
+                    ("--feed", Flag::Value),
+                    ("--archive", Flag::Value),
+                ],
+            )?;
+            let source = options.artifact_source()?;
             CliCommand::Install {
                 version: options.value("--version").map(parse_version).transpose()?,
+                source,
             }
         }
         ["start"] => CliCommand::Start,
@@ -282,9 +296,19 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInvocat
         }
         ["update", "check"] => CliCommand::UpdateCheck,
         ["update", "stage", rest @ ..] => {
-            let options = Options::new(rest, &[("--version", Flag::Value)])?;
+            let options = Options::new(
+                rest,
+                &[
+                    ("--version", Flag::Value),
+                    ("--feed", Flag::Value),
+                    ("--archive", Flag::Value),
+                ],
+            )?;
             let version = options.value("--version").map(parse_version).transpose()?;
-            CliCommand::UpdateStage { version }
+            CliCommand::UpdateStage {
+                version,
+                source: options.artifact_source()?,
+            }
         }
         ["update", "activate", rest @ ..] => {
             let options = Options::new(
@@ -353,6 +377,17 @@ impl<'a> Options<'a> {
     }
     fn required(&self, key: &str) -> Result<&'a str, CliFailure> {
         self.value(key).ok_or(CliFailure::Usage)
+    }
+    fn artifact_source(
+        &self,
+    ) -> Result<Option<crate::native::artifacts::LocalArtifactSource>, CliFailure> {
+        match (self.value("--feed"), self.value("--archive")) {
+            (None, None) => Ok(None),
+            (Some(feed), Some(archive)) => Ok(Some(
+                crate::native::artifacts::LocalArtifactSource::new(feed.into(), archive.into())?,
+            )),
+            _ => Err(CliFailure::Usage),
+        }
     }
     fn confirmation(&self, non_interactive: bool) -> Result<ConfirmationMode, CliFailure> {
         match (self.present("--assess"), self.value("--confirm")) {

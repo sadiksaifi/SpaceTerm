@@ -41,6 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Message.kind.canonical_semantic_page",
             "Message.kind.content_read_response",
             "Message.kind.content_publication",
+            "Message.kind.metadata_publication",
             "ContentReadResponse.result.page",
             "PairingOutcome.operation",
             "PairingOutcome.reservation",
@@ -216,7 +217,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ("GraphicsResourceReference", "rgba_bytes") => {
                             hard::MAX_GRAPHICS_TRANSMISSION_BYTES as u32
                         }
-                        ("Key" | "Pointer", "modifiers" | "consumed_modifiers") => 1023,
+                        (
+                            "Key" | "Pointer" | "ApplicationPointer" | "ApplicationWheel",
+                            "modifiers" | "consumed_modifiers",
+                        ) => 1023,
                         ("Key", "unshifted_codepoint") => 0x10_ffff,
                         ("PhysicalRowId", "page_row")
                         | ("PageContinuation", "columns" | "next_column")
@@ -324,6 +328,7 @@ fn repeated_limit(message: &str, field: &str) -> usize {
 
 fn bytes_limit(message: &str, field: &str) -> usize {
     match (message, field) {
+        ("RuntimeMetadataSnapshot", "title" | "user" | "host") => 1024,
         ("SignedReceipt", "canonical_body") => 1984,
         ("RemoteEndpoint", "address") => 16,
         ("DirectoryEntryName", "value") => 255,
@@ -381,6 +386,9 @@ fn required(message: &str, field: &FieldDescriptorProto) -> bool {
                 | "screen_generation"
                 | "topology_revision"
         ),
+        "MetadataPublication" => matches!(field.name(), "fence" | "request" | "snapshot"),
+        "RuntimeMetadataSnapshot" => matches!(field.name(), "session" | "sequence" | "origin_kind"),
+        "ApplicationPointer" | "ApplicationWheel" => matches!(field.name(), "stamp" | "cell"),
         "RuntimeCommand"
         | "StartupIntent"
         | "ContentQuery"

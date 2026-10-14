@@ -407,13 +407,19 @@ impl<S: ViewStore + 'static>
                 spaceterm_client::api::RouteParts::Ipc { .. }
             ),
         };
-        let settings = crate::ui::settings_window::server_runtime::SettingsConnection::from_handle(
-            binding.clone(),
-            name.clone(),
-            &handle,
-            &self.inner.tracker,
-        )
-        .map_err(|_| PairingFailure::InvalidDurableState)?;
+        let mut settings =
+            crate::ui::settings_window::server_runtime::SettingsConnection::from_handle(
+                binding.clone(),
+                name.clone(),
+                &handle,
+                &self.inner.tracker,
+            )
+            .map_err(|_| PairingFailure::InvalidDurableState)?;
+        if let Some(services) = &enrollment.settings {
+            services
+                .bind(&mut settings)
+                .map_err(|_| PairingFailure::InvalidDurableState)?;
+        }
         crate::ui::settings_window::server_runtime::add_connection(settings, cx)
             .map_err(|_| PairingFailure::InvalidDurableState)?;
         self.inner.sources.borrow_mut().insert(
@@ -518,9 +524,57 @@ impl Inner {
                     }).unwrap_or_default();
                     drop(_edit);
                     let _ = inner.execute(effects, cx).await;
+                    // The authenticated actor continues reading while the presentation owner
+                    // drains the canonical tasks through its shared operation peer.
+                    let _ = inner.drain_detaches(server).await;
                 }
             }));
         Ok(())
+    }
+
+    async fn drain_detaches(&self, server: ServerId) -> Result<(), DesktopClientError> {
+        let source = self.source(&server).ok_or(DesktopClientError::TargetGone)?;
+        if !matches!(*source.state.borrow(), ConnectionState::Connected { .. })
+            || !source.replica.borrow().is_ready()
+        {
+            return Ok(());
+        }
+        let key = source
+            .binding
+            .target()
+            .local_pairing()
+            .map_err(DesktopClientError::from)?;
+        let workspaces: Vec<_> = self
+            .pending
+            .journal()
+            .snapshot()
+            .map_err(DesktopClientError::from)?
+            .detaches()
+            .iter()
+            .filter(|task| task.local_pairing == key)
+            .map(|task| task.workspace)
+            .collect();
+        if workspaces.is_empty() {
+            return Ok(());
+        }
+        let pending = self.pending.clone();
+        let operations = self.operations.clone();
+        self.executor
+            .spawn(async move {
+                for workspace in workspaces {
+                    drain_original_detach(
+                        &pending,
+                        &source.binding,
+                        workspace,
+                        operations.as_ref(),
+                    )
+                    .await?;
+                }
+                Ok::<_, spaceterm_client::failure::ClientFailure>(())
+            })
+            .await
+            .map_err(|_| DesktopClientError::Cancelled)?
+            .map_err(DesktopClientError::from)
     }
 
     fn snapshot(&self, server: ServerId) -> Result<Arc<ReplicaSnapshot>, DesktopClientError> {
@@ -1549,6 +1603,21 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
                     .ok_or(DesktopClientError::TargetGone)?
                     .binding
                     .clone();
+                let retained = inner
+                    .pending
+                    .journal()
+                    .snapshot()
+                    .map_err(DesktopClientError::from)?;
+                inner
+                    .state
+                    .borrow_mut()
+                    .detach_requests
+                    .retain(|_, attachment| {
+                        retained
+                            .detaches()
+                            .iter()
+                            .any(|task| task.workspace == attachment.workspace())
+                    });
                 if inner.state.borrow().detach_requests.len() >= super::MAX_PENDING_UI_REQUESTS {
                     return Err(DesktopClientError::AdmissionFull);
                 }
@@ -1558,6 +1627,7 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
                     .detach_requests
                     .insert(id, attachment);
                 let pending = inner.pending.clone();
+                let detached_binding = binding.clone();
                 Ok(cx.spawn(async move |_| {
                     let _edit = admission;
                     inner
@@ -1589,14 +1659,80 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
                         inner.publish_frames(&mut state)?;
                         state.revision
                     };
-                    inner.state.borrow_mut().detach_requests.remove(&id);
                     inner.notifier.personal_edit_applied(id, revision).await?;
+                    let connected = inner.source(&workspace.server()).is_some_and(|source| {
+                        matches!(*source.state.borrow(), ConnectionState::Connected { .. })
+                    });
+                    if connected {
+                        let pending = inner.pending.clone();
+                        let operations = inner.operations.clone();
+                        let settled = inner
+                            .executor
+                            .spawn(async move {
+                                drain_original_detach(
+                                    &pending,
+                                    &detached_binding,
+                                    workspace,
+                                    operations.as_ref(),
+                                )
+                                .await
+                            })
+                            .await
+                            .map_err(|_| DesktopClientError::Cancelled)?;
+                        if settled == Ok(true) {
+                            inner.state.borrow_mut().detach_requests.remove(&id);
+                        }
+                    }
                     Ok(None)
                 }))
             }
-            DesktopRequest::RetryDetachWorkspace { .. } | DesktopRequest::ServerAction(_) => {
-                Err(DesktopClientError::UnsupportedCapability)
+            DesktopRequest::RetryDetachWorkspace {
+                workspace,
+                original_request,
+            } => {
+                let original = inner
+                    .state
+                    .borrow()
+                    .detach_requests
+                    .get(&original_request)
+                    .copied()
+                    .ok_or(DesktopClientError::StaleContext)?;
+                if original.workspace() != workspace {
+                    return Err(DesktopClientError::StaleContext);
+                }
+                let binding = inner
+                    .source(&workspace.server())
+                    .ok_or(DesktopClientError::TargetGone)?
+                    .binding;
+                let pending = inner.pending.clone();
+                let operations = inner.operations.clone();
+                Ok(cx.spawn(async move |_| {
+                    let _edit = admission;
+                    let settled = inner
+                        .executor
+                        .spawn(async move {
+                            drain_original_detach(
+                                &pending,
+                                &binding,
+                                workspace,
+                                operations.as_ref(),
+                            )
+                            .await
+                        })
+                        .await
+                        .map_err(|_| DesktopClientError::Cancelled)?
+                        .map_err(DesktopClientError::from)?;
+                    if settled {
+                        inner
+                            .state
+                            .borrow_mut()
+                            .detach_requests
+                            .remove(&original_request);
+                    }
+                    Ok(None)
+                }))
             }
+            DesktopRequest::ServerAction(_) => Err(DesktopClientError::UnsupportedCapability),
         }
     }
     fn save_view(&self, cx: &mut App) -> Task<Result<(), DesktopClientError>> {
@@ -1619,6 +1755,40 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
             Ok(())
         })
     }
+}
+
+/// Resume the journaled task only. Each pass uses its original grants and durable operation IDs.
+pub(crate) async fn drain_original_detach(
+    pending: &PendingTasks,
+    binding: &PairedServerBinding,
+    workspace: WorkspaceId,
+    peer: &dyn OperationPeer,
+) -> Result<bool, spaceterm_client::failure::ClientFailure> {
+    let key = binding.target().local_pairing()?;
+    let state = pending.journal().snapshot()?;
+    let Some(task) = state
+        .detaches()
+        .iter()
+        .find(|task| task.local_pairing == key && task.workspace == workspace)
+    else {
+        return Ok(true);
+    };
+    let passes = task
+        .grants
+        .len()
+        .saturating_add(task.dependencies.len())
+        .saturating_mul(2)
+        .saturating_add(2);
+    for _ in 0..passes {
+        let before = pending.journal().snapshot()?.revision();
+        if pending.drain_detach(binding, workspace, peer).await? {
+            return Ok(true);
+        }
+        if pending.journal().snapshot()?.revision() == before {
+            return Ok(false);
+        }
+    }
+    Ok(false)
 }
 
 fn apply_edit(

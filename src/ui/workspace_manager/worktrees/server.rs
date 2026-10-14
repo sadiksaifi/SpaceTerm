@@ -26,7 +26,7 @@ use spaceterm_ui::{
 
 use super::super::WorkspaceManager;
 use crate::repository_status::RepositoryView;
-use crate::repository_status::presentation::{MAXIMUM_PATH_CHARS, sanitize_for_display};
+use crate::repository_status::presentation::{MAXIMUM_PATH_CHARS, plural, sanitize_for_display};
 use crate::ui::server_desktop_contracts::{
     DesktopClientError, DesktopRequest, UiRequestId, ViewEdit,
 };
@@ -1038,7 +1038,10 @@ impl WorkspaceManager {
             })
             .and_then(|info| info.name.get().cloned())
             .unwrap_or_else(|| "the selected server".into());
-        let message = format!("On {server_name}. {}", removal_message(&assessment));
+        let message = format!(
+            "On {server_name}. {}",
+            removal_message(&assessment, &removal.assessed)
+        );
         removal.assessment = Some(assessment.clone());
         let owner = cx.weak_entity();
         let handle = window.window_handle();
@@ -1302,7 +1305,26 @@ async fn complete_assessment(
     Ok(assessment)
 }
 
-fn removal_message(assessment: &GitAssessmentPage) -> String {
+/// Workspaces a confirmation names before it summarizes the rest as a count.
+const MAXIMUM_LISTED_WORKSPACES: usize = 3;
+
+/// Lists the first named Workspaces and counts the rest, so the confirmation stays short.
+fn bounded_names(names: impl ExactSizeIterator<Item = Option<String>>) -> String {
+    let total = names.len();
+    let listed = names
+        .take(MAXIMUM_LISTED_WORKSPACES)
+        .map(|name| name.unwrap_or_else(|| "an unnamed Workspace".to_owned()))
+        .collect::<Vec<_>>();
+    let more = total - listed.len();
+    match (listed.as_slice(), more) {
+        ([], _) => plural(more as u64, "Workspace"),
+        ([only], 0) => only.clone(),
+        ([init @ .., last], 0) => format!("{} and {last}", init.join(", ")),
+        (listed, more) => format!("{} and {more} more", listed.join(", ")),
+    }
+}
+
+fn removal_message(assessment: &GitAssessmentPage, organization: &OrganizationSnapshot) -> String {
     let risk = assessment.removal.as_ref().map(|summary| summary.risk);
     let mut message = Vec::new();
     if matches!(
@@ -1323,41 +1345,56 @@ fn removal_message(assessment: &GitAssessmentPage) -> String {
     ) {
         message.push("Its submodule checkouts will be deleted.".to_owned());
     }
+    let name = |workspace: WorkspaceId| {
+        organization
+            .state()
+            .workspaces
+            .iter()
+            .find(|record| record.id == workspace)
+            .map(|record| record.name.value.display.as_str().to_owned())
+    };
     let workspaces = assessment
         .tabs
         .iter()
         .map(|tab| tab.workspace)
-        .collect::<BTreeSet<_>>()
-        .len();
-    message.push(format!("Closes {} Tabs in {} Workspaces, including Workspaces not attached on this device. Affects {} Panes. Any live or starting Terminal Sessions in them end for every client.", assessment.tabs.len(), workspaces, assessment.panes.len()));
-    for tab in &assessment.tabs {
+        .collect::<BTreeSet<_>>();
+    if !assessment.tabs.is_empty() {
+        let tabs = plural(assessment.tabs.len() as u64, "Tab");
+        let names = bounded_names(workspaces.iter().map(|workspace| name(*workspace)));
+        message.push(match workspaces.len() {
+            1 => format!("Closes {tabs} in {names} for every client."),
+            count => format!(
+                "Closes {tabs} in {}: {names}, for every client.",
+                plural(count as u64, "Workspace")
+            ),
+        });
+    }
+    if !assessment.panes.is_empty() {
         message.push(format!(
-            "Workspace {}, Tab {}.",
-            tab.workspace.local(),
-            tab.tab.local()
+            "Affects {}. Any live or starting Terminal Sessions in them end.",
+            plural(assessment.panes.len() as u64, "Pane")
         ));
     }
-    for pane in &assessment.panes {
+    for fallback in assessment.fallbacks.iter().take(MAXIMUM_LISTED_WORKSPACES) {
         message.push(format!(
-            "Pane {} in Tab {} is affected for every client{}.",
-            pane.pane.local(),
-            pane.tab.local(),
-            if pane.starting {
-                "; its starting Session is cancelled"
-            } else {
-                "; any live Session ends"
-            },
-        ));
-    }
-    for fallback in &assessment.fallbacks {
-        message.push(format!(
-            "Workspace {} falls back to {}.",
-            fallback.workspace.local(),
+            "{} falls back to {}.",
+            name(fallback.workspace).unwrap_or_else(|| "A Workspace".to_owned()),
             sanitize_for_display(
                 &String::from_utf8_lossy(fallback.directory.bytes()),
                 MAXIMUM_PATH_CHARS
             )
         ));
+    }
+    match assessment
+        .fallbacks
+        .len()
+        .saturating_sub(MAXIMUM_LISTED_WORKSPACES)
+    {
+        0 => {}
+        1 => message.push("1 more Workspace falls back to another directory.".to_owned()),
+        more => message.push(format!(
+            "{more} more Workspaces fall back to other directories."
+        )),
     }
     message.push("The branch and its commits stay in the repository.".to_owned());
     message.join(" ")

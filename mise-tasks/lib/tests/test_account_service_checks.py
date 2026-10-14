@@ -30,44 +30,11 @@ class AccountCheckTests(unittest.TestCase):
         self.assertNotIn(marker.encode(), result.stderr)
         self.assertEqual(result.stderr, b"unsupported-update-test-arguments\n")
 
-    def test_lifecycle_mutations_require_approval_before_any_provider_call(self):
-        for operation in checks.MUTATIONS:
-            with (
-                self.subTest(operation=operation),
-                patch.object(checks.package_server, "executable_metadata") as query,
-            ):
-                with self.assertRaises(TaskError):
-                    checks.lifecycle(Path("/unused"), operation, "linux-x86_64", "preflight")
-                query.assert_not_called()
-
-    def test_lifecycle_uses_the_compiled_identity_and_never_wraps_spaceterm_in_sudo(self):
-        with (
-            patch.object(checks.os, "getuid", return_value=501),
-            patch.object(checks.package_server, "executable_metadata") as query,
-            patch.object(
-                checks.native,
-                "run_tool",
-                return_value=b'{"schema":1,"result":{"kind":"native_operation","state":"Complete"}}',
-            ) as run,
-        ):
-            checks.lifecycle(
-                Path("/approved/server"), "stop", "linux-x86_64", "preflight", allow_mutation=True
-            )
-        query.assert_called_once_with(Path("/approved/server"), "linux-x86_64", "preflight")
-        self.assertEqual(
-            run.call_args.args[0], [Path("/approved/server"), "--json", "--non-interactive", "stop"]
-        )
-
-    def test_root_is_refused_before_queries_or_mutation(self):
-        with (
-            patch.object(checks.os, "getuid", return_value=0),
-            patch.object(checks.package_server, "executable_metadata") as query,
-        ):
-            with self.assertRaises(TaskError):
-                checks.lifecycle(
-                    Path("/unused"), "start", "linux-x86_64", "preflight", allow_mutation=True
-                )
-            query.assert_not_called()
+    def test_lifecycle_wrapper_is_removed_in_favor_of_explicit_cli_commands(self):
+        self.assertFalse((ROOT / "mise-tasks/server/deployment/lifecycle.py").exists())
+        with self.assertRaises(SystemExit), patch.object(checks, "test_gate") as gate:
+            checks.run(["lifecycle"])
+        gate.assert_not_called()
 
     def test_nonempty_gate_counts_only_the_selected_targets_completed_tests(self):
         output = (
@@ -119,7 +86,54 @@ class AccountCheckTests(unittest.TestCase):
             with self.subTest(output=output), self.assertRaises(TaskError):
                 checks.require_nonempty(output)
 
-    def test_bootstrap_gate_runs_each_assigned_integration_target(self):
+    def test_vertical_gate_runs_real_two_client_routes_and_resource_admission(self):
+        output = (
+            b"running 1 test\n"
+            b"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; "
+            b"finished in 0.01s\n"
+        )
+        with patch.object(checks.native, "run_tool", return_value=output) as run:
+            self.assertEqual(checks.run(["vertical"]), 0)
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                ["cargo", "test", "--quiet", "--locked", "-p", "spaceterm-server", "--test", target]
+                for target in (
+                    "authenticated_local_vertical",
+                    "authenticated_route_equivalence",
+                    "production_listeners",
+                )
+            ]
+            + [
+                [
+                    "cargo",
+                    "test",
+                    "--quiet",
+                    "--locked",
+                    "-p",
+                    "spaceterm-terminal",
+                    "--test",
+                    "geometry_admission",
+                    "--features",
+                    "runtime",
+                ]
+            ],
+        )
+
+    def test_vertical_gate_still_rejects_an_empty_or_failed_target(self):
+        for output in (
+            b"running 0 tests\n"
+            b"test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; "
+            b"finished in 0.01s\n",
+            b"running 1 test\n"
+            b"test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; "
+            b"finished in 0.01s\n",
+        ):
+            with patch.object(checks.native, "run_tool", return_value=output):
+                with self.assertRaises(TaskError):
+                    checks.run(["vertical"])
+
+    def test_bootstrap_gate_runs_native_library_and_each_assigned_integration_target(self):
         output = (
             b"running 1 test\n"
             b"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; "
@@ -130,9 +144,20 @@ class AccountCheckTests(unittest.TestCase):
         self.assertEqual(
             [call.args[0] for call in run.call_args_list],
             [
+                [
+                    "cargo",
+                    "test",
+                    "--quiet",
+                    "--locked",
+                    "-p",
+                    "spaceterm-client-native",
+                    "--lib",
+                    "bootstrap::",
+                ]
+            ]
+            + [
                 ["cargo", "test", "--quiet", "--locked", "-p", package, "--test", target]
                 for package, target in (
-                    ("spaceterm-client-native", "bootstrap"),
                     ("spaceterm-client", "pairing_bootstrap"),
                     ("spaceterm-host", "bootstrap_probe"),
                     ("spaceterm-host", "bootstrap_process"),
@@ -208,6 +233,29 @@ class AccountCheckTests(unittest.TestCase):
             with self.assertRaises(TaskError):
                 checks.run(["bootstrap"])
         self.assertEqual(run.call_count, 2)
+
+    def test_account_gate_classifies_the_failed_target_without_native_output(self):
+        nonempty = (
+            b"running 1 test\n"
+            b"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; "
+            b"finished in 0.01s\n"
+        )
+        for provider_error, expected in (
+            ("tool-failed", "tool-failed"),
+            ("tool-timeout", "tool-timeout"),
+            ("private-path-and-environment-marker", "tool-failed"),
+        ):
+            with patch.object(
+                checks.native,
+                "run_tool",
+                side_effect=[nonempty, nonempty, TaskError(provider_error)],
+            ):
+                with self.assertRaises(TaskError) as raised:
+                    checks.run(["account"])
+            self.assertEqual(
+                str(raised.exception),
+                f"package=spaceterm-host target=server_installation classification={expected}",
+            )
 
     def test_startup_gate_requires_real_account_and_binary_composition_tests(self):
         output = (

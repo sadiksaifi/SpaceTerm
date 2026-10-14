@@ -128,6 +128,18 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
         })
     }
 
+    pub(crate) fn server_ssh_startup(&self) -> crate::platform::server_client_route::SshStartup {
+        crate::platform::server_client_route::SshStartup {
+            executable: self.executable.as_path().to_owned(),
+            home: self.home_directory.clone(),
+            environment: self
+                .ssh_environment
+                .entries()
+                .map(|(name, value)| (name.into(), value.to_owned()))
+                .collect(),
+        }
+    }
+
     pub(crate) fn remote_backend_factory(
         &self,
         askpass: Arc<dyn crate::ssh::askpass::AskPassWindowFactory>,
@@ -178,7 +190,9 @@ pub(crate) fn init(
         let adapter = application_quit.clone();
         let pending = Rc::new(std::cell::Cell::new(false));
         cx.on_window_closed(move |cx, _| {
-            if cx.windows().is_empty() && !pending.replace(true) {
+            let recovering = cx.try_global::<crate::platform::desktop_client_startup::DesktopStartupState>()
+                .is_some_and(|state| state.pending || state.failure == Some(crate::ui::server_desktop_contracts::DesktopClientError::LocalStorageUnavailable));
+            if !recovering && cx.windows().is_empty() && !pending.replace(true) {
                 let adapter = adapter.clone();
                 let pending = pending.clone();
                 cx.defer(move |cx| {
@@ -677,6 +691,9 @@ pub(crate) fn open(
         workspace_manager.update(cx, |workspace_manager, cx| {
             workspace_manager.focus(window, cx);
         });
+        if let Some(startup) = &host.desktop_client_startup {
+            startup.bind_window(window, cx);
+        }
         let close_manager = workspace_manager.downgrade();
         window.on_window_should_close(cx, move |window, cx| {
             close_manager
@@ -1188,6 +1205,32 @@ fn begin_initial_workspace(
 ) {
     if let Some(startup) = &host.desktop_client_startup {
         crate::platform::desktop_client_startup::begin(startup.clone(), cx, move |result, cx| {
+            if result == Err(crate::ui::server_desktop_contracts::DesktopClientError::LocalStorageUnavailable) {
+                use spaceterm_ui::{Alert, ModalAction, ModalActionEmphasis, ModalActionRole, ModalId};
+                let retry = crate::platform::local_server_client::foreground::show(
+                    Alert::new(
+                        ModalId::new("desktop-storage-recovery"),
+                        "Client storage is unavailable", "Client Storage Is Unavailable",
+                        "Unlock or restore this computer's client storage, then retry. SpaceTerm has kept the original startup owner. It has not replaced your identity, pairings, saved views or connection journal.",
+                        vec![
+                            ModalAction::new(true, "Retry", ModalActionRole::Affirmative, "desktop-storage-retry")
+                                .with_emphasis(ModalActionEmphasis::Prominent),
+                            ModalAction::new(false, "Quit SpaceTerm", ModalActionRole::Cancel, "desktop-storage-quit"),
+                        ],
+                    ), cx,
+                );
+                cx.spawn(async move |cx| {
+                    let retry = retry.await;
+                    cx.update(|cx| {
+                        if retry {
+                            begin_initial_workspace(cx, host, completed);
+                        } else {
+                            cx.dispatch_action(&QuitApplication);
+                        }
+                    });
+                }).detach();
+                return;
+            }
             let result = result
                 .map_err(|_| RuntimeError::Initialization)
                 .and_then(|_| open_initial_workspace(cx, &host));
@@ -2578,7 +2621,12 @@ mod runtime_tests {
             >,
         > {
             self.calls.set(self.calls.get() + 1);
-            let receiver = self.recovered.borrow_mut().take().expect("one recovery");
+            let receiver = self
+                .recovered
+                .borrow()
+                .as_ref()
+                .expect("retained recovery")
+                .clone();
             cx.spawn(async move |_| receiver.recv().await.unwrap())
         }
     }
@@ -2697,13 +2745,71 @@ mod runtime_tests {
             ))
             .unwrap();
         cx.run_until_parked();
-        assert_eq!(result.get(), Some(Err(RuntimeError::Initialization)));
+        assert_eq!(result.get(), None);
         cx.update(|cx| {
+            assert_eq!(cx.global::<crate::platform::desktop_client_startup::DesktopStartupState>().failure,
+                Some(crate::ui::server_desktop_contracts::DesktopClientError::LocalStorageUnavailable));
             restore_default_window(cx, &host);
             assert!(workspace_windows(cx).is_empty());
             assert_eq!(open(cx, &host).unwrap_err(), RuntimeError::Initialization);
         });
         assert_eq!(startup.calls.get(), 1);
+    }
+
+    #[gpui::test]
+    fn desktop_startup_unlock_retry_stays_in_original_application(cx: &mut gpui::TestAppContext) {
+        use crate::ui::server_desktop_contracts::DesktopClientError;
+        use spaceterm_ui::a11y_testing::{A11yTree, perform};
+        let mut host = host_with_settings();
+        let (runtime, _) = desktop_client_runtime(cx);
+        let (sender, receiver) = async_channel::bounded(2);
+        let startup = Rc::new(StartupProvider {
+            recovered: RefCell::new(Some(receiver)),
+            calls: std::cell::Cell::new(0),
+        });
+        Rc::get_mut(&mut host).unwrap().desktop_client_startup = Some(startup.clone());
+        let finished = Rc::new(std::cell::Cell::new(false));
+        let observed = finished.clone();
+        sender
+            .try_send(Err(DesktopClientError::LocalStorageUnavailable))
+            .unwrap();
+        cx.update(|cx| {
+            initialize_application(cx, &host).unwrap();
+            begin_initial_workspace(cx, host.clone(), move |result, _| {
+                result.unwrap();
+                observed.set(true);
+            });
+        });
+        cx.run_until_parked();
+        assert!(!finished.get());
+        assert_eq!(startup.calls.get(), 1);
+        assert_eq!(
+            cx.windows().len(),
+            1,
+            "the original application presents recovery"
+        );
+        let mut window = gpui::VisualTestContext::from_window(cx.windows()[0], cx);
+        let tree = A11yTree::read(&mut window);
+        perform(
+            &mut window,
+            tree.node("Retry"),
+            gpui::accesskit::Action::Click,
+        );
+        cx.run_until_parked();
+        assert_eq!(startup.calls.get(), 2);
+        sender
+            .try_send(Ok(Box::new(RecoveredRuntime(runtime.clone()))))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(finished.get());
+        cx.update(|cx| {
+            assert_eq!(
+                cx.global::<crate::ui::server_client_runtime::InstalledDesktopClient>()
+                    .0,
+                runtime
+            );
+            assert_eq!(workspace_windows(cx).len(), 1);
+        });
     }
 
     #[gpui::test]

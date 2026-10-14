@@ -9,6 +9,34 @@ use spaceterm_server::{
 async fn main() -> ExitCode {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     #[cfg(feature = "test-support")]
+    if arguments.len() == 3
+        && arguments[0] == "--test-account-root"
+        && arguments[2] == "initialize-accessibility"
+    {
+        return match spaceterm_server::account_startup::test_support::initialize(
+            std::path::Path::new(&arguments[1]),
+        ) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(failure) => {
+                eprintln!("{}", failure.classification());
+                ExitCode::FAILURE
+            }
+        };
+    }
+    #[cfg(feature = "test-support")]
+    if arguments.len() == 4
+        && arguments[0] == "--test-account-root"
+        && arguments[2] == "--test-shell-home"
+    {
+        return exit_result(
+            spaceterm_server::account_startup::test_support::run_with_home(
+                std::path::Path::new(&arguments[1]),
+                std::path::Path::new(&arguments[3]),
+            )
+            .await,
+        );
+    }
+    #[cfg(feature = "test-support")]
     if arguments.len() == 2 && arguments[0] == "--test-account-root" {
         return exit_result(
             spaceterm_server::account_startup::test_support::run(std::path::Path::new(

@@ -614,6 +614,8 @@ struct PresentationActionGuard {
 pub(crate) struct TerminalPane {
     server_session: Option<Rc<super::server_pane_session::ServerPaneSession>>,
     server_presentation: PanePresentation,
+    /// The directory repair status the Directory unavailable screen shows.
+    server_repair_status: Option<super::directory_picker::pane_repair::PaneRepairStatus>,
     server_client_runtime: Option<Entity<super::server_client_runtime::DesktopClientRuntime>>,
     _server_provider_subscription: Option<gpui::Subscription>,
     server_presentation_observation: Option<spaceterm_client::pane_channel::PaneChannelState>,
@@ -992,6 +994,7 @@ impl TerminalPane {
             server_client_runtime: None,
             _server_provider_subscription: None,
             server_presentation: PanePresentation::Live,
+            server_repair_status: None,
             server_presentation_observation: None,
             server_offline_cause: super::pane_presentation::OfflineCause::Unreachable,
             server_takeover_armed: false,
@@ -4906,6 +4909,25 @@ impl TerminalPane {
             .map(|server| server.channel().pane())
     }
 
+    /// Shows the progress or result of this Pane's directory repair.
+    pub(crate) fn set_server_repair_status(
+        &mut self,
+        status: Option<super::directory_picker::pane_repair::PaneRepairStatus>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.server_repair_status != status {
+            self.server_repair_status = status;
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn server_repair_status(
+        &self,
+    ) -> Option<super::directory_picker::pane_repair::PaneRepairStatus> {
+        self.server_repair_status
+    }
+
     pub(crate) fn set_presentation(
         &mut self,
         presentation: PanePresentation,
@@ -5461,6 +5483,7 @@ impl TerminalPane {
             self.surface_background,
         )
         .focus(self.presentation_focus.clone())
+        .repair_status(self.server_repair_status)
         .armed(!self.server_presentation.offers_take_over() || self.server_takeover_armed)
         .focused(
             self.product_focus.active_workspace

@@ -3,7 +3,7 @@
 # USAGE flag "--backend <backend>" help="Display backend" default="both" {
 # USAGE   choices "both" "x11" "wayland"
 # USAGE }
-# USAGE flag "--binary <binary>" help="Existing source executable; skips building"
+# USAGE flag "--binary <binary>" help="Existing desktop-test-support executable; skips the desktop build"
 # USAGE flag "--expected-binary-sha256 <sha256>" help="Required SHA256 pin for --binary"
 # USAGE flag "--output-dir <output_dir>" help="Evidence directory; defaults to a fresh temporary directory"
 # USAGE flag "--session-timeout <seconds>" help="Maximum runtime per backend in seconds" default="600"
@@ -26,6 +26,8 @@ import re
 import shlex
 import shutil
 import signal
+import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -67,7 +69,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=("both", "x11", "wayland"), default="both")
     parser.add_argument(
-        "--binary", type=Path, help="Existing source-built executable; skips building"
+        "--binary",
+        type=Path,
+        help="Existing debug executable built with desktop-test-support; skips the desktop build",
     )
     parser.add_argument("--expected-binary-sha256", help="Required SHA256 pin for --binary")
     parser.add_argument(
@@ -86,6 +90,8 @@ def parse_args():
         action="store_true",
         help="Verify private bus and dconf ownership without launching a display",
     )
+    parser.add_argument("--server-binary", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--test-account-root", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--private-session", choices=("x11", "wayland"), help=argparse.SUPPRESS)
     return parser.parse_args()
 
@@ -1270,12 +1276,37 @@ def native_windows(backend):
         return {"query_available": False}
 
 
-def verify_private_settings_bus(bus, output):
-    import dbus
-
-    evidence = {"passed": False, "settings_writes_before_verification": False}
-    expected = {
-        key: str(output / directory)
+def private_settings_directories(output, fixture_root=None):
+    if fixture_root is not None:
+        try:
+            identity = fixture_root.lstat()
+            require(
+                fixture_root.is_absolute()
+                and fixture_root.resolve().parent == Path("/var/tmp").resolve()
+                and stat.S_ISDIR(identity.st_mode)
+                and identity.st_uid == os.getuid()
+                and stat.S_IMODE(identity.st_mode) == 0o700,
+                "private_durable_storage_scope_invalid",
+            )
+            for name in ("data", "state"):
+                identity = (fixture_root / name).lstat()
+                require(
+                    stat.S_ISDIR(identity.st_mode)
+                    and identity.st_uid == os.getuid()
+                    and stat.S_IMODE(identity.st_mode) == 0o700,
+                    "private_durable_storage_scope_invalid",
+                )
+        except OSError:
+            raise SmokeFailure("private_durable_storage_scope_invalid") from None
+    return {
+        key: str(
+            (
+                fixture_root
+                if fixture_root is not None and key in ("XDG_DATA_HOME", "XDG_STATE_HOME")
+                else output
+            )
+            / directory
+        )
         for key, directory in (
             ("HOME", "home"),
             ("XDG_CONFIG_HOME", "config"),
@@ -1284,6 +1315,13 @@ def verify_private_settings_bus(bus, output):
             ("XDG_CACHE_HOME", "cache"),
         )
     }
+
+
+def verify_private_settings_bus(bus, output, fixture_root=None):
+    import dbus
+
+    evidence = {"passed": False, "settings_writes_before_verification": False}
+    expected = private_settings_directories(output, fixture_root)
     runtime = Path(os.environ["XDG_RUNTIME_DIR"]).resolve()
     expected.update(
         XDG_RUNTIME_DIR=str(runtime),
@@ -1461,7 +1499,7 @@ def private_session(args):
     signal.signal(signal.SIGINT, interrupted)
     try:
         bus = dbus.SessionBus()
-        report["isolation"] = verify_private_settings_bus(bus, output)
+        report["isolation"] = verify_private_settings_bus(bus, output, args.test_account_root)
         report["system_bus"] = redirect_private_system_bus(bus, output)
         report["source_binary"] = json.loads((output.parent / "binary-proof.json").read_text())
         require(report["source_binary"]["passed"], "source_executable_identity_not_verified")
@@ -1573,7 +1611,19 @@ def private_session(args):
                 WAYLAND_DISPLAY_absent="WAYLAND_DISPLAY" not in os.environ,
             )
         require(all(expected_backend.values()), "application_backend_environment_invalid")
-        application = processes.start([str(args.binary)], stderr=frame_output.writer)
+        require(
+            args.server_binary is not None and args.test_account_root is not None,
+            "account_fixture_arguments_required",
+        )
+        server = start_account_fixture(
+            processes, args.server_binary, args.test_account_root, Path(os.environ["HOME"])
+        )
+        probe.observers.append(lambda: check_account_fixture(server))
+        report["real_account_server_ready"] = True
+        application = processes.start(
+            [str(args.binary), "--test-account-root", str(args.test_account_root)],
+            stderr=frame_output.writer,
+        )
         probe.application_pid = application.pid
         report["application_private_environment"] = readiness.wait(
             ReadinessStep.APPLICATION_ENVIRONMENT, lambda: runtime_child_environment(application)
@@ -1806,6 +1856,76 @@ def private_session(args):
     return int(not report["passed"])
 
 
+def build_fixture_binaries():
+    environment = {**os.environ, "CARGO_BUILD_JOBS": "4"}
+    desktop = build_executable("--locked", "--features", "desktop-test-support", env=environment)
+    server = build_executable(
+        "--locked",
+        "--package",
+        "spaceterm-server",
+        "--features",
+        "test-support",
+        binary="spaceterm-server",
+        env=environment,
+    )
+    return desktop, server
+
+
+def create_durable_fixture_root():
+    # SQLite refuses tmpfs. Never let TMPDIR choose the account or client journal mount.
+    return Path(tempfile.mkdtemp(prefix="st-a11y-", dir="/var/tmp"))
+
+
+def fixture_endpoint_ready(root):
+    runtime = root / "development" / "runtime"
+    for name in ("server", "owner"):
+        endpoint = runtime / name
+        try:
+            if not stat.S_ISSOCK(endpoint.stat().st_mode):
+                return False
+            with socket.socket(socket.AF_UNIX) as connection:
+                connection.settimeout(0.2)
+                connection.connect(str(endpoint))
+        except OSError:
+            return False
+    return True
+
+
+def check_account_fixture(server):
+    require(server.poll() is None, "account_fixture_process_exited")
+
+
+def start_account_fixture(processes, binary, root, home=None):
+    initialize = processes.start(
+        [str(binary), "--test-account-root", str(root), "initialize-accessibility"]
+    )
+    try:
+        require(initialize.wait(timeout=30) == 0, "account_fixture_initialization_failed")
+    except subprocess.TimeoutExpired:
+        raise SmokeFailure("account_fixture_initialization_timeout") from None
+    server = processes.start(
+        [
+            str(binary),
+            "--test-account-root",
+            str(root),
+            "--test-shell-home",
+            str(root if home is None else home),
+        ]
+    )
+    deadline = time.monotonic() + 30
+    while True:
+        check_account_fixture(server)
+        if fixture_endpoint_ready(root):
+            return server
+        require(time.monotonic() < deadline, "account_fixture_readiness_timeout")
+        time.sleep(0.05)
+
+
+def cleanup_fixture_storage(root, cleanup_complete):
+    if root is not None and cleanup_complete:
+        shutil.rmtree(root)
+
+
 def prepare_binary(args, output):
     require(
         args.binary is None or args.expected_binary_sha256 is not None,
@@ -1820,9 +1940,22 @@ def prepare_binary(args, output):
     require_prerequisites(args.backend)
     if binary is None:
         try:
-            binary = build_executable("--locked", env={**os.environ, "CARGO_BUILD_JOBS": "2"})
+            binary, server_binary = build_fixture_binaries()
         except TaskError:
             raise SmokeFailure("source_build_failed") from None
+    if args.binary is not None:
+        try:
+            server_binary = build_executable(
+                "--locked",
+                "--package",
+                "spaceterm-server",
+                "--features",
+                "test-support",
+                binary="spaceterm-server",
+                env={**os.environ, "CARGO_BUILD_JOBS": "4"},
+            )
+        except TaskError:
+            raise SmokeFailure("account_fixture_build_failed") from None
     require(binary.is_file() and os.access(binary, os.X_OK), "source_executable_missing")
     prefix = output / "prefix"
     destination = prefix / "bin" / "spaceterm"
@@ -1862,7 +1995,14 @@ def prepare_binary(args, output):
             str(ROOT / "assets" / "terminfo" / "xterm-spaceterm.terminfo"),
         ]
     )
-    return destination
+    server_destination = destination.parent / "spaceterm-server"
+    try:
+        os.link(server_binary, server_destination)
+    except OSError as error:
+        if error.errno not in (errno.EXDEV, errno.EPERM, errno.EOPNOTSUPP):
+            raise
+        shutil.copy2(server_binary, server_destination)
+    return destination, server_destination
 
 
 def main():
@@ -1913,13 +2053,16 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     # A fresh directory keeps stale workload signals from satisfying a later run.
     run_output = Path(tempfile.mkdtemp(prefix="run-", dir=output))
-    binary = None if args.isolation_only else prepare_binary(args, run_output)
+    binary, server_binary = (
+        (None, None) if args.isolation_only else prepare_binary(args, run_output)
+    )
     backends = ("x11", "wayland") if args.backend == "both" else (args.backend,)
     status = 0
     for backend in backends:
         backend_output = run_output / backend
         backend_output.mkdir()
         runtime = create_private_runtime(backend_output)
+        fixture_root = None if args.isolation_only else create_durable_fixture_root()
         environment = dict(os.environ)
         for key in (
             "DISPLAY",
@@ -1966,7 +2109,11 @@ def main():
             ("XDG_STATE_HOME", "state"),
             ("XDG_CACHE_HOME", "cache"),
         ):
-            directory = backend_output / name
+            directory = (
+                fixture_root
+                if fixture_root is not None and key in ("XDG_DATA_HOME", "XDG_STATE_HOME")
+                else backend_output
+            ) / name
             directory.mkdir(mode=0o700)
             environment[key] = str(directory)
         environment["ZDOTDIR"] = environment["HOME"]
@@ -2010,7 +2157,16 @@ def main():
             str(backend_output),
         ]
         if binary is not None:
-            command.extend(("--binary", str(binary)))
+            command.extend(
+                (
+                    "--binary",
+                    str(binary),
+                    "--server-binary",
+                    str(server_binary),
+                    "--test-account-root",
+                    str(fixture_root),
+                )
+            )
         if args.isolation_only:
             command.append("--isolation-only")
         process = None
@@ -2059,6 +2215,7 @@ def main():
                 measurement.write_text(json.dumps(report, indent=2) + "\n")
             else:
                 shutil.rmtree(runtime)
+            cleanup_fixture_storage(fixture_root, not cleanup_failed)
         if timed_out:
             measurement = backend_output / "measurement.json"
             report = (

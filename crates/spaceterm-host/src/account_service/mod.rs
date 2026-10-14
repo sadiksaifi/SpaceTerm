@@ -3,6 +3,7 @@
 //! The native manager and runtime producers are selected at composition. Read-only
 //! discovery and owner validation never initialize storage or issue authority.
 
+mod activation;
 mod install;
 pub use install::{ConfirmedServiceInstall, ServiceInstallAssessment};
 mod account;
@@ -39,7 +40,8 @@ pub use processes::{
 };
 pub use registration::RegisteredServer;
 pub use supervisor::{
-    AccountStartup, AccountStartupAdmission, ServiceSupervisor, StoppedOwnerAdmission, StorageWait,
+    AccountStartup, AccountStartupAdmission, ClientProvisioning, ServiceSupervisor,
+    StoppedOwnerAdmission, StorageWait,
 };
 
 use crate::{
@@ -213,7 +215,7 @@ pub enum ServiceRequestState {
     Indeterminate,
 }
 /// Bounded content-free progress retaining caller identity.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ServiceProgress {
     /// The ID retained before submission.
     pub request: NativeRequestId,
@@ -242,6 +244,10 @@ impl ServiceAssessment {
     /// Returns the restore comparison token, not mutation authority.
     pub fn token(&self) -> [u8; 32] {
         self.record.token
+    }
+    /// Returns the exact assessed runtime epoch, absent only with trusted absence evidence.
+    pub fn runtime_epoch(&self) -> Option<spaceterm_core::authority::ServerEpoch> {
+        self.record.runtime.epoch
     }
     /// Returns the runtime-owned affected count.
     pub fn affected_sessions(&self) -> u32 {

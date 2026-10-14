@@ -135,6 +135,7 @@ impl ReliableOutcomePermit for OutcomePermit {
 }
 #[derive(Clone, Copy)]
 enum PublishedReply {
+    NeverAdmitted,
     Pending,
     Completed(spaceterm_core::authority::OrganizationRevision),
     Retired,
@@ -164,9 +165,10 @@ impl ReplyScope {
         let Some(binding) = state.binding else {
             return Ok(());
         };
-        let published = state
-            .published
-            .ok_or_else(|| failure(ServerFailureClass::RecoveryRequired))?;
+        // A capacity refusal has no admitted result to publish. The ordinary
+        // dispatcher obtains its NeverAdmitted comparison from the actor, and
+        // this scope still verifies the exact binding under the reserved charge.
+        let published = state.published.unwrap_or(PublishedReply::NeverAdmitted);
         macro_rules! profile {
             ($message:expr, $p:ident) => {{
                 match (&$message.kind, published) {
@@ -174,8 +176,9 @@ impl ReplyScope {
                         if value.publication_revision != revision.get() { return Err(failure(ServerFailureClass::ScopeMismatch)); }
                         value.operation.as_ref()
                     }
-                    (Some($p::message::Kind::OperationLookupResult(value)), PublishedReply::Pending | PublishedReply::Retired) => {
+                    (Some($p::message::Kind::OperationLookupResult(value)), PublishedReply::NeverAdmitted | PublishedReply::Pending | PublishedReply::Retired) => {
                         let disposition_matches = matches!((&value.disposition, published),
+                            (Some($p::operation_lookup_result::Disposition::NeverAdmitted(true)), PublishedReply::NeverAdmitted) |
                             (Some($p::operation_lookup_result::Disposition::Pending(true)), PublishedReply::Pending) |
                             (Some($p::operation_lookup_result::Disposition::AcknowledgedRetired(true)), PublishedReply::Retired));
                         if !disposition_matches || value.request_digest != binding.digest.bytes() { return Err(failure(ServerFailureClass::ScopeMismatch)); }

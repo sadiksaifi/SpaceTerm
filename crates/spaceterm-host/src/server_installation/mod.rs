@@ -768,6 +768,21 @@ impl ServerInstallationStore {
         self.compatible(version, schema)?;
         self.retain_version(version)
     }
+    /// Authenticates the exact staged candidate without approving or executing it.
+    pub fn retain_compatible_staged(
+        &self,
+        id: InstallationId,
+        schema: u32,
+    ) -> Result<InstalledServerExecutable, ServiceFailure> {
+        let _lock = self.tree.lock()?;
+        let (selection, _) = self.load()?;
+        let version = selection
+            .staged
+            .filter(|version| version.id == id)
+            .ok_or(ServiceFailure::RequestConflict)?;
+        self.compatible(version, schema)?;
+        self.retain_version(version)
+    }
     fn compatible(&self, version: Version, schema: u32) -> Result<(), ServiceFailure> {
         let manifest = self.validate_version(version)?;
         if schema == 0

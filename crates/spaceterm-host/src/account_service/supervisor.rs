@@ -253,6 +253,38 @@ impl ServiceSupervisor {
     pub fn key(&self) -> AccountBuildKey {
         self.key
     }
+    /// Client journals remain account/build scoped even after service registration
+    /// is removed or cannot be read. This path is never selected by remote data.
+    pub fn client_connections_directory(&self) -> PathBuf {
+        self.anchor.join("client-connections")
+    }
+    /// Deliberate enrollment owns the private client storage lease. This never
+    /// reads or opens the server's organization database.
+    pub fn admit_client_provisioning(&self) -> Result<ClientProvisioning, ServiceFailure> {
+        let path = self.client_connections_directory();
+        let directory = Directory::create(&path)?;
+        let lease = directory.lease("provisioning-lock")?;
+        Ok(ClientProvisioning {
+            path,
+            directory,
+            lease,
+        })
+    }
+    /// Restricted local retries may reopen only the fixed account/build runtime.
+    /// Missing runtime storage gives no route authority and creates nothing.
+    pub fn retained_local_endpoint(
+        &self,
+    ) -> Result<Option<crate::ipc::IpcEndpoint>, ServiceFailure> {
+        let runtime = self.anchor.join("runtime");
+        let Some(directory) = Directory::open(&runtime)? else {
+            return Ok(None);
+        };
+        directory.verify()?;
+        crate::ipc::PrivateIpcDirectory::open(&runtime)
+            .and_then(|directory| directory.endpoint("server"))
+            .map(Some)
+            .map_err(|_| ServiceFailure::UnsafeStorage)
+    }
     /// Reads an existing fixed registration and opens its existing private storage.
     /// Missing registration never causes key, directory or database creation.
     pub fn discover(&self) -> Result<Option<RegisteredServer>, ServiceFailure> {
@@ -268,6 +300,19 @@ impl ServiceSupervisor {
         let directory = Directory::open(&record.data)?.ok_or(ServiceFailure::Missing)?;
         directory.verify_established()?;
         Ok(Some(RegisteredServer { record, directory }))
+    }
+    /// Account/build-isolated local CLI receipt storage. The path is compiled local
+    /// authority, never a route or a server-supplied value. Creation is explicit.
+    pub fn cli_result_directory(&self, create: bool) -> Result<Option<PathBuf>, ServiceFailure> {
+        self.available()?;
+        let path = self.anchor.join("cli-results");
+        if create {
+            Directory::create(&self.anchor)?;
+            Directory::create(&path)?;
+            Ok(Some(path))
+        } else {
+            Ok(Directory::open(&path)?.map(|_| path))
+        }
     }
     /// Reserves a durable, provider-issued non-reused ID before submission.
     /// Reservation creates no identity, artifact, service or authorization effect.
@@ -503,7 +548,7 @@ pub(super) fn current_account() -> Result<(u32, PathBuf), ServiceFailure> {
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RegistrationBasis {
+pub(super) struct RegistrationBasis {
     generation: u64,
     server: [u8; 16],
     public_key: [u8; 32],
@@ -513,7 +558,7 @@ struct RegistrationBasis {
     installed: bool,
 }
 impl RegistrationBasis {
-    fn capture(registration: &RegisteredServer) -> Self {
+    pub(super) fn capture(registration: &RegisteredServer) -> Self {
         Self::capture_record(&registration.record)
     }
     fn capture_record(record: &Registration) -> Self {
@@ -527,10 +572,23 @@ impl RegistrationBasis {
             installed: record.installed,
         }
     }
-    fn matches(&self, registration: &RegisteredServer) -> bool {
+    pub(super) fn matches(&self, registration: &RegisteredServer) -> bool {
         *self == Self::capture(registration)
     }
-    fn validate(&self) -> Result<(), ServiceFailure> {
+    pub(super) fn matches_stage_publication(
+        &self,
+        registration: &RegisteredServer,
+        status: &super::InstallationStatus,
+    ) -> bool {
+        let Some(generation) = self.generation.checked_add(1) else {
+            return false;
+        };
+        let mut expected = self.clone();
+        expected.generation = generation;
+        expected.staged = Some(status.clone());
+        expected.matches(registration)
+    }
+    pub(super) fn validate(&self) -> Result<(), ServiceFailure> {
         if self.generation == 0
             || self.server == [0; 16]
             || self.public_key == [0; 32]
@@ -1220,7 +1278,7 @@ impl ServiceSupervisor {
                     registration.validate(key).map_err(|_| Failure::Unsafe)
                 },
             );
-            if registration_recovery.is_err() {
+            if registration_recovery.is_err() && self.reconcile_initial_creation(request).is_err() {
                 self.reconcile_owner_archive(request)?;
             }
         }
@@ -1376,13 +1434,7 @@ impl ServiceSupervisor {
                         .as_ref()
                         .filter(|status| status.installation == id)
                         .ok_or(ServiceFailure::InvalidRecord)?;
-                    let mut record = registration.record.clone();
-                    record.approved = Some(target.clone());
-                    record.staged = None;
-                    self.manager()?.verify_installation(&RegisteredServer {
-                        record,
-                        directory: registration.directory.clone(),
-                    })
+                    self.verify_staged_activation(registration, target)
                 }
                 ServiceAction::Restart => self.manager()?.verify_installation(registration),
             },
@@ -1466,6 +1518,13 @@ impl ServiceSupervisor {
                             .as_ref()
                             .filter(|candidate| candidate.installation == id)
                             .ok_or(ServiceFailure::InvalidRecord)?;
+                        self.activate_installation_selection(
+                            &record.progress(request),
+                            &registration,
+                            lease,
+                            target,
+                            assessment.basis.approved.as_ref(),
+                        )?;
                         if registration.record.approved.as_ref() != Some(target) {
                             if registration.record.staged.as_ref() != Some(target) {
                                 return Err(ServiceFailure::RequestConflict);
@@ -1981,6 +2040,36 @@ impl ServiceSupervisor {
         )
         .map_err(Into::into)
     }
+    /// Reconciles the validated store's exact previous-epoch retirement scope.
+    pub fn reconcile_previous_instance<'a>(
+        &'a self,
+        server: ServerId,
+        epoch: ServerEpoch,
+        expected: &'a [spaceterm_core::retirement::RetiredSession],
+    ) -> ServiceFuture<'a, Vec<SessionCleanupObservation>> {
+        Box::pin(async move {
+            let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
+            if registration.server_pin().identity != server.bytes() {
+                return Err(ServiceFailure::IdentityMismatch);
+            }
+            let sessions: Vec<_> = expected.iter().map(|value| value.session()).collect();
+            super::processes::validate_previous_scope(server, epoch, &sessions)?;
+            let observations = self
+                .processes()?
+                .reconcile_previous_instance(&registration, epoch, expected)
+                .await?;
+            cleanup_matches(&sessions, &observations)?;
+            if !expected
+                .iter()
+                .zip(&observations)
+                .all(|(expected, observed)| expected.first_reason() == observed.first_reason())
+            {
+                return Err(ServiceFailure::CleanupUnresolved);
+            }
+            Ok(observations)
+        })
+    }
+
     /// Requires trusted exact native process-scope evidence even for an empty old Session list.
     pub fn previous_instance_cleanup<'a>(
         &'a self,
@@ -2104,6 +2193,28 @@ impl StoppedOwnerAdmission {
     pub fn registration(&self) -> &RegisteredServer {
         &self.registration
     }
+    /// Retains cleanup custody after an explicit Start changes desired intent.
+    /// This verifies only the existing instance and original owner record. It
+    /// cannot authorize another owner mutation, Stop, Start, or a code selection.
+    pub fn verify_instance_custody(&self) -> Result<(), ServiceFailure> {
+        self.lease.verify()?;
+        let current = self.supervisor.discover()?.ok_or(ServiceFailure::Missing)?;
+        if current.key() != self.registration.key()
+            || current.server_pin() != self.registration.server_pin()
+            || current.record.data != self.registration.record.data
+            || current.record.organization != self.registration.record.organization
+            || current.record.runtime != self.registration.record.runtime
+        {
+            return Err(ServiceFailure::IdentityMismatch);
+        }
+        self.supervisor.validate_owner_enrollment(
+            &self.request,
+            self.digest,
+            spaceterm_core::identity::ServerId::new(self.registration.server_pin().identity),
+            self.claim,
+        )
+    }
+
     /// Rechecks the original journal and exact registration, never Start.
     pub fn revalidate(&self) -> Result<(), ServiceFailure> {
         self.lease.verify()?;
@@ -2162,5 +2273,30 @@ impl ServiceSupervisor {
         };
         admission.revalidate()?;
         Ok(admission)
+    }
+}
+
+/// Account/build storage admission held for one deliberate provisioning action.
+/// Consumer names are fixed; caller or remote paths grant no local authority.
+pub struct ClientProvisioning {
+    path: PathBuf,
+    directory: Directory,
+    lease: crate::private_filesystem::Lease,
+}
+impl ClientProvisioning {
+    /// Opens or explicitly provisions one fixed dedicated consumer directory.
+    /// The boolean distinguishes first creation from read-only reopening.
+    pub fn journal_directory(&self, consumer: &str) -> Result<(PathBuf, bool), ServiceFailure> {
+        if !matches!(consumer, "enrollment" | "cli" | "companion" | "management") {
+            return Err(ServiceFailure::InvalidRecord);
+        }
+        self.directory.verify()?;
+        self.lease.verify()?;
+        let path = self.path.join(consumer);
+        let create = Directory::open(&path)?.is_none();
+        if create {
+            Directory::create(&path)?;
+        }
+        Ok((path, create))
     }
 }

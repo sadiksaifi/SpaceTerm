@@ -4161,3 +4161,7 @@ mod worktrees;
 pub(crate) mod tests;
 
 mod server;
+
+#[cfg(test)]
+#[path = "server_window_acceptance_tests.rs"]
+mod server_window_acceptance_tests;

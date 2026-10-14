@@ -218,7 +218,7 @@ pub struct RetryState {
 
 /// Authenticated optional capabilities, not authorization or release versions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ConnectionCapabilities(u8);
+pub struct ConnectionCapabilities(u16);
 impl ConnectionCapabilities {
     pub const NONE: Self = Self(0);
     pub(crate) fn from_advertisement(values: &[u32]) -> Self {
@@ -232,6 +232,8 @@ impl ConnectionCapabilities {
             CAPABILITY_ORGANIZATION_COMPARISONS,
             CAPABILITY_TERMINAL_STREAMS,
             CAPABILITY_NATIVE_NOTIFICATIONS,
+            CAPABILITY_APPLICATION_MOUSE,
+            CAPABILITY_RUNTIME_METADATA,
         ]
         .into_iter()
         .enumerate()
@@ -252,6 +254,8 @@ impl ConnectionCapabilities {
             CAPABILITY_ORGANIZATION_COMPARISONS => 4,
             CAPABILITY_TERMINAL_STREAMS => 5,
             CAPABILITY_NATIVE_NOTIFICATIONS => 6,
+            CAPABILITY_APPLICATION_MOUSE => 7,
+            CAPABILITY_RUNTIME_METADATA => 8,
             _ => return false,
         };
         self.0 & (1 << index) != 0

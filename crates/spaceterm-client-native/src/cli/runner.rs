@@ -239,11 +239,11 @@ async fn run(
             }
             output::CliOutput::Status(status)
         }
-        CliCommand::Install { version } => {
+        CliCommand::Install { version, source } => {
             deps.native
                 .run(
                     key,
-                    NativeCliCommand::Install { version },
+                    NativeCliCommand::Install { version, source },
                     ConfirmationMode::Interactive,
                     mode,
                     io,
@@ -309,11 +309,11 @@ async fn run(
                 )
                 .await?
         }
-        CliCommand::UpdateStage { version } => {
+        CliCommand::UpdateStage { version, source } => {
             deps.native
                 .run(
                     key,
-                    NativeCliCommand::UpdateStage { version },
+                    NativeCliCommand::UpdateStage { version, source },
                     ConfirmationMode::Interactive,
                     mode,
                     io,

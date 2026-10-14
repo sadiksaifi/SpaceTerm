@@ -1,8 +1,8 @@
-"""Nonempty account/provider gates and explicit owner-only lifecycle commands.
+"""Nonempty account/provider gates without installed-service effects.
 
 Normal validation never installs, starts, stops, or uninstalls a service, enables
-linger, or invokes an administrator tool. The lifecycle entry point requires a
-separate mutation flag and delegates the fixed action to the account CLI.
+linger, or invokes an administrator tool. Real lifecycle checks use spaceterm-cli
+explicitly, as documented in the coordinator's real-host runbook.
 """
 
 import argparse
@@ -29,9 +29,10 @@ GATES = {
     "vertical": {
         "spaceterm-server": (
             "authenticated_local_vertical",
-            "two_client_control",
-            "terminal_resources_wss",
+            "authenticated_route_equivalence",
+            "production_listeners",
         ),
+        "spaceterm-terminal": ("geometry_admission",),
     },
     # Real keys, SQLite, IPC and shell startup. Only service-manager and
     # authorization boundaries use fixtures; no installed service is touched.
@@ -54,7 +55,6 @@ GATES = {
         "spaceterm-server": ("git_shutdown",),
     },
 }
-MUTATIONS = {"install", "start", "stop", "uninstall"}
 
 
 def require_nonempty(output):
@@ -105,12 +105,33 @@ def test_gate(name):
         for target in targets:
             if name == "account" and target == "pty_inheritance" and sys.platform != "darwin":
                 continue
-            command = ["cargo", "test", "--quiet", "--locked", "-p", package, "--test", target]
+            command = ["cargo", "test", "--quiet", "--locked", "-p", package]
+            if package == "spaceterm-client-native" and target == "bootstrap":
+                # The native provider suite lives in the library, not tests/bootstrap.rs.
+                command.extend(("--lib", "bootstrap::"))
+            else:
+                command.extend(("--test", target))
             if name in {"account", "update", "startup"}:
                 command.extend(("--features", "test-support"))
-            output = native.run_tool(
-                command, cwd=ROOT, environment=environment, timeout=300, maximum=1024 * 1024
-            )
+            elif package == "spaceterm-terminal":
+                command.extend(("--features", "runtime"))
+            try:
+                output = native.run_tool(
+                    command, cwd=ROOT, environment=environment, timeout=300, maximum=1024 * 1024
+                )
+            except TaskError as error:
+                classification = str(error)
+                if classification not in {
+                    "tool-failed",
+                    "tool-timeout",
+                    "tool-output-limit",
+                    "tool-cleanup-unresolved",
+                    "child-ownership-unavailable",
+                }:
+                    classification = "tool-failed"
+                raise TaskError(
+                    f"package={package} target={target} classification={classification}"
+                ) from None
             count = require_nonempty(output)
             total += count
             target_count += 1
@@ -139,57 +160,19 @@ def check_startup(executable, platform, build):
     return metadata
 
 
-def lifecycle(executable, operation, platform, build, *, allow_mutation=False):
-    if operation not in MUTATIONS | {"status"}:
-        raise TaskError("unsupported account lifecycle operation")
-    if operation in MUTATIONS and allow_mutation is not True:
-        raise TaskError("explicit account-service mutation approval is required")
-    if os.getuid() == 0:
-        raise TaskError("SpaceTerm account commands cannot run as root")
-    # The compiled build chooses the registration. No runtime identity or
-    # executable path is sent to the provider as an installation authority.
-    package_server.executable_metadata(executable, platform, build)
-    output = native.run_tool(
-        [executable, "--json", "--non-interactive", operation],
-        timeout=60,
-        maximum=64 * 1024,
-        reject_stderr=True,
-    )
-    document = server_artifacts.strict_json(output, 64 * 1024)
-    if (
-        not isinstance(document, dict)
-        or type(document.get("schema")) is not int
-        or document["schema"] != 1
-        or not isinstance(document.get("result"), dict)
-    ):
-        raise TaskError("account CLI returned an unsupported result")
-    # Exit zero is the CLI's completion contract. This task does not manufacture
-    # cleanup evidence or substitute for the coordinator's host observations.
-    return document
-
-
 def run(arguments):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=(*GATES, "lifecycle"))
+    parser.add_argument("mode", choices=tuple(GATES))
     parser.add_argument("--executable", type=Path)
     parser.add_argument("--build", choices=server_artifacts.BUILDS, default="preflight")
-    parser.add_argument("--operation", choices=sorted(MUTATIONS | {"status"}), default="status")
-    parser.add_argument("--allow-mutation", action="store_true")
     args = parser.parse_args(arguments)
     if args.mode in GATES and args.mode != "startup":
         test_gate(args.mode)
     else:
-        if args.mode == "lifecycle" and args.executable is None:
-            raise TaskError("account lifecycle requires an explicit installed executable")
         executable = args.executable or package_server.build()["spaceterm-server"]
         platform = "darwin-arm64" if sys.platform == "darwin" else "linux-x86_64"
-        if args.mode == "startup":
-            check_startup(executable, platform, args.build)
-            test_gate("startup")
-        else:
-            lifecycle(
-                executable, args.operation, platform, args.build, allow_mutation=args.allow_mutation
-            )
+        check_startup(executable, platform, args.build)
+        test_gate("startup")
         print(f"phase={args.mode} classification=cli-succeeded")
     return 0
 

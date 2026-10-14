@@ -52,8 +52,8 @@ impl PaneRepairStatus {
     pub(crate) fn message(self) -> &'static str {
         match self {
             Self::Choosing => "Choose Directory",
-            Self::Pending => "Checking directory...",
-            Self::Unresolved => "Resolving the original directory repair...",
+            Self::Pending => "Checking directory…",
+            Self::Unresolved => "Resolving the original directory repair…",
             Self::StillUnavailable => "Still unavailable.",
             Self::Conflict => "The Pane directory changed. Choose Directory again.",
             Self::Cancelled => "Directory repair cancelled.",

@@ -205,3 +205,67 @@ fn account_install_is_explicit_and_restart_and_uninstall_require_exact_confirmat
         assert_eq!(invocation(&args), Err(CliFailure::Usage));
     }
 }
+
+#[test]
+fn install_accepts_only_a_complete_explicit_local_artifact_source() {
+    assert!(
+        invocation(&[
+            "install",
+            "--feed",
+            "/local/candidate.json",
+            "--archive",
+            "/local/candidate.tar.gz",
+        ])
+        .is_ok()
+    );
+    for args in [
+        vec!["install", "--feed", "/local/candidate.json"],
+        vec!["install", "--archive", "/local/candidate.tar.gz"],
+        vec![
+            "install",
+            "--feed",
+            "https://example.com/feed.json",
+            "--archive",
+            "/local/archive",
+        ],
+        vec![
+            "install",
+            "--feed",
+            "/local/feed",
+            "--archive",
+            "file:///local/archive",
+        ],
+        vec!["install", "--feed", "", "--archive", "/local/archive"],
+    ] {
+        assert_eq!(invocation(&args), Err(CliFailure::Usage));
+    }
+}
+
+#[test]
+fn update_stage_accepts_the_same_complete_explicit_local_artifact_source_as_install() {
+    assert!(
+        invocation(&[
+            "update",
+            "stage",
+            "--feed",
+            "/local/candidate.json",
+            "--archive",
+            "/local/candidate.tar.gz"
+        ])
+        .is_ok()
+    );
+    for args in [
+        vec!["update", "stage", "--feed", "/local/candidate.json"],
+        vec!["update", "stage", "--archive", "/local/candidate.tar.gz"],
+        vec![
+            "update",
+            "stage",
+            "--feed",
+            "https://example.com/feed.json",
+            "--archive",
+            "/local/archive",
+        ],
+    ] {
+        assert_eq!(invocation(&args), Err(CliFailure::Usage));
+    }
+}

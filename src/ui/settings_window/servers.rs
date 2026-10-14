@@ -186,6 +186,7 @@ struct ManagementReview {
 
 #[derive(Clone, Copy)]
 enum ManagementReviewAction {
+    Update,
     Stop,
     Restart,
     EndAll,
@@ -196,16 +197,22 @@ impl ManagementReviewAction {
         match self {
             Self::Stop => ServerRequest::AssessStop(key),
             Self::Restart => ServerRequest::AssessRestart(key),
+            Self::Update => ServerRequest::AssessInstallUpdate(key),
             Self::EndAll => ServerRequest::AssessEndAllSessions(key),
         }
     }
 
-    fn execute(self, key: ServerKey) -> ServerRequest {
-        match self {
-            Self::Stop => ServerRequest::Stop(key),
-            Self::Restart => ServerRequest::Restart(key),
-            Self::EndAll => ServerRequest::EndAllSessions(key),
-        }
+    fn execute(self, server: &ServerSummary) -> Option<ServerRequest> {
+        Some(match self {
+            Self::Stop => ServerRequest::Stop(server.key.clone()),
+            Self::Restart => ServerRequest::Restart(server.key.clone()),
+            Self::EndAll => ServerRequest::EndAllSessions(server.key.clone()),
+            Self::Update => ServerRequest::InstallUpdate {
+                server: server.key.clone(),
+                version: server.staged_version.clone()?,
+                assessment: server.installations.activation.clone()?,
+            },
+        })
     }
 
     fn assessment(
@@ -215,6 +222,7 @@ impl ManagementReviewAction {
         use spaceterm_client::management_cli::confirmation::ManagementAction;
         use spaceterm_host::account_service::ServiceAction;
         match self {
+            Self::Update => server.installations.activation.as_ref().filter(|assessment| server.activation_matches(assessment)).map(|assessment| assessment.reference.clone()),
             Self::Stop => server.management.stop.as_ref().filter(|value| value.action == ServiceAction::Stop).map(|value| value.reference.clone()),
             Self::Restart => server.management.restart.as_ref().filter(|value| value.action == ServiceAction::Restart).map(|value| value.reference.clone()),
             Self::EndAll => server.management.end_all.as_ref().filter(|value| {
@@ -229,11 +237,16 @@ impl ManagementReviewAction {
             Self::Stop => status_action(server) == Some(StatusAction::Stop { enabled: true }),
             Self::Restart => version_action(server) == VersionAction::Restart { enabled: true },
             Self::EndAll => server.connected(),
+            Self::Update => matches!(
+                version_action(server),
+                VersionAction::Update { enabled: true, .. }
+            ),
         }
     }
 
-    fn confirmation(self, server: &ServerSummary) -> Confirmation {
+    fn confirmation(self, server: &ServerSummary) -> Option<Confirmation> {
         let (mut prompt, count) = match self {
+            Self::Update => (copy::update_confirmation(server, server.staged_version.as_ref()?), None),
             Self::Stop => (copy::stop_confirmation(server), server.management.stop.as_ref().map(|value| value.affected_sessions)),
             Self::Restart => (copy::restart_confirmation(server), server.management.restart.as_ref().map(|value| value.affected_sessions)),
             Self::EndAll => (copy::end_all_sessions_confirmation(server), server.management.end_all.as_ref().and_then(|value| match value.evidence() {
@@ -250,7 +263,7 @@ impl ManagementReviewAction {
                 .into(),
             );
         }
-        prompt
+        Some(prompt)
     }
 }
 
@@ -566,13 +579,13 @@ fn version_action(server: &ServerSummary) -> VersionAction {
         Some(version) => VersionAction::Update {
             version: version.clone(),
             enabled: server.route.manages_host()
+                && server.installations.selection_generation.is_some()
                 && server
                     .installations
-                    .activation
+                    .staged
                     .as_ref()
-                    .is_some_and(|assessment| {
-                        server.activation_matches(assessment)
-                            && &assessment.candidate.version == version
+                    .is_some_and(|candidate| {
+                        candidate.artifact_sha256 != [0; 32] && &candidate.version == version
                     })
                 && matches!(
                     server.status,
@@ -1451,40 +1464,12 @@ impl SettingsWindow {
                 },
                 cx,
             ),
-            VersionAction::Update { version, enabled } => server_button(
+            VersionAction::Update { enabled, .. } => server_button(
                 "settings-server-update",
                 "Update Server…",
                 enabled && !server.management.pending,
-                move |settings, window, cx| {
-                    let Some(server) = settings.servers.find(&key) else {
-                        return;
-                    };
-                    // Updating a stopped server leaves it stopped, and its confirmation says so.
-                    // The update goes out only while that still holds.
-                    let confirmation = copy::update_confirmation(server, &version);
-                    let stopped = server.status == ServerStatus::Stopped;
-                    let offered = VersionAction::Update {
-                        version: version.clone(),
-                        enabled: true,
-                    };
-                    let Some(assessment) = server.installations.activation.clone() else {
-                        return;
-                    };
-                    let request = ServerRequest::InstallUpdate {
-                        server: key.clone(),
-                        version: version.clone(),
-                        assessment,
-                    };
-                    settings.present_confirmation(
-                        confirmation,
-                        request,
-                        move |server| {
-                            version_action(server) == offered
-                                && (server.status == ServerStatus::Stopped) == stopped
-                        },
-                        window,
-                        cx,
-                    );
+                move |settings, _, cx| {
+                    settings.review_management(&key, ManagementReviewAction::Update, cx);
                 },
                 cx,
             ),
@@ -1615,9 +1600,15 @@ impl SettingsWindow {
             {
                 return;
             }
+            let Some(confirmation) = review.action.confirmation(current) else {
+                return;
+            };
+            let Some(request) = review.action.execute(current) else {
+                return;
+            };
             settings.present_confirmation(
-                review.action.confirmation(current),
-                review.action.execute(current.key.clone()),
+                confirmation,
+                request,
                 move |server| review.action.allowed(server),
                 window,
                 cx,

@@ -175,3 +175,5 @@ fn failure(error: SecureFilesystemError, stage: ViewStoreStage) -> ViewStoreFail
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::paths_for_root;

@@ -154,7 +154,7 @@ impl SettingsWindow {
                 };
                 let action_owner = cx.weak_entity();
                 let action_label: SharedString = if this {
-                    "Unpair this device…".into()
+                    "Unpair This Device…".into()
                 } else {
                     "Unpair Device…".into()
                 };
@@ -202,9 +202,9 @@ impl SettingsWindow {
             Button::new(
                 "settings-paired-devices-refresh",
                 if page.is_some() {
-                    "Refresh devices"
+                    "Refresh Devices"
                 } else {
-                    "Read devices"
+                    "Read Devices"
                 },
             )
             .variant(ButtonVariant::Outline)
@@ -237,7 +237,7 @@ impl SettingsWindow {
             let owner = cx.weak_entity();
             let after_focus = refresh_focus.clone();
             controls = controls.child(
-                Button::new("settings-paired-devices-next", "Next page")
+                Button::new("settings-paired-devices-next", "Next Page")
                     .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Regular)
                     .tab_stop(true)
@@ -271,7 +271,7 @@ impl SettingsWindow {
             ));
             let owner = cx.weak_entity();
             controls = controls.child(
-                Button::new("settings-paired-devices-cancel-review", "Cancel review")
+                Button::new("settings-paired-devices-cancel-review", "Cancel Review")
                     .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Regular)
                     .tab_stop(true)

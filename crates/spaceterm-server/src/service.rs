@@ -203,6 +203,8 @@ pub(crate) enum LifecycleRequest {
     },
     Listeners(Arc<dyn ListenerLifecyclePort>, Reply<()>),
     CloseOwnerEnrollment(Reply<ShutdownReport>),
+    // Composition-only graceful process exit. It does not authorize native Stop.
+    CloseInstance,
 }
 enum RetirementReply {
     Operation(OperationReply),
@@ -454,6 +456,7 @@ impl RecoveredServer {
         let (snapshot, snapshot_received) = watch::channel(config.core.reducer.snapshot());
         let (owner_drop, owner_dropped) = oneshot::channel();
         let handle = ServerHandle {
+            clock: clock.clone(),
             requests,
             lifecycle,
             phase: phase_received,
@@ -484,7 +487,9 @@ impl RecoveredServer {
             pending: None,
             delivery_pending: None,
             waiting_submissions: VecDeque::new(),
+            waiting_context: VecDeque::new(),
             prefer_submissions: true,
+            prefer_context: true,
             busy: false,
             terminal_barrier: false,
             native_assessments: BTreeMap::new(),
@@ -591,9 +596,9 @@ impl RecoveredServer {
         let result = tokio::select! {
             result = &mut join => result,
             () = shutdown => {
-                if let Some(sender) = self.owner_drop.take() {
-                    let _ = sender.send(());
-                }
+                // A delivered OS signal is an intentional instance close, not
+                // loss of the actor owner. Keep the owner until all joins finish.
+                let _ = self.handle.lifecycle.send(LifecycleRequest::CloseInstance).await;
                 join.await
             }
         }
@@ -670,7 +675,9 @@ struct Actor {
     pending: Option<PendingCommit>,
     delivery_pending: Option<OperationBinding>,
     waiting_submissions: VecDeque<(VerifiedPrincipal, CanonicalOperationRequest, OperationReply)>,
+    waiting_context: VecDeque<ActorRequest>,
     prefer_submissions: bool,
+    prefer_context: bool,
     busy: bool,
     terminal_barrier: bool,
     native_assessments: BTreeMap<[u8; 32], spaceterm_host::account_service::RuntimeAssessment>,
@@ -727,7 +734,17 @@ impl Actor {
                     self.begin_pairing_commit(parts, action);
                 }
             }
+            if self.pending.is_none()
+                && !self.busy
+                && (self.prefer_context
+                    || (self.waiting_submissions.is_empty() && self.git.waiting.is_empty()))
+                && let Some(request) = self.waiting_context.pop_front()
+            {
+                self.prefer_context = false;
+                self.request(request);
+            }
             if self.pending.is_none() && !self.busy {
+                self.prefer_context = true;
                 // Alternate the two bounded mutation queues so continuous Git
                 // reconciliation cannot starve an ordinary startup request.
                 if (self.prefer_submissions && !self.waiting_submissions.is_empty())
@@ -768,6 +785,9 @@ impl Actor {
                     }
                 },
             }
+        }
+        for request in self.waiting_context.drain(..) {
+            reject_context_request(request, failure(ServerFailureClass::RecoveryRequired));
         }
         for (_, _, reply) in self.waiting_submissions.drain(..) {
             reply.send(Err(failure(ServerFailureClass::RecoveryRequired)));
@@ -932,6 +952,24 @@ impl Actor {
         Ok(())
     }
     fn request(&mut self, request: ActorRequest) {
+        // These requests carry their original principal and comparison values.
+        // Ordinary commit serialization must not close an authenticated peer.
+        if (self.pending.is_some() || self.busy)
+            && self.ordinary_open()
+            && matches!(
+                &request,
+                ActorRequest::Focus { .. }
+                    | ActorRequest::Reconcile { .. }
+                    | ActorRequest::Acknowledge { .. }
+            )
+        {
+            if self.waiting_context.len() < self.config.limits.actor_requests {
+                self.waiting_context.push_back(request);
+            } else {
+                reject_context_request(request, failure(ServerFailureClass::Capacity));
+            }
+            return;
+        }
         match request {
             ActorRequest::OrganizationSnapshot {
                 principal,
@@ -3671,6 +3709,16 @@ impl Actor {
                     }
                 }
             }
+            LifecycleRequest::CloseInstance => {
+                if self.shutdown.is_none() {
+                    self.shutdown = Some(ShutdownState {
+                        request: None,
+                        replies: Vec::new(),
+                    });
+                    self.native_completed = true;
+                    self.begin_quiescence();
+                }
+            }
             LifecycleRequest::CloseOwnerEnrollment(reply) => {
                 if self.listeners.is_some()
                     || !self.connections.is_empty()
@@ -4901,5 +4949,20 @@ fn reject_action(action: CommitAction, error: ServerFailure) {
             let _ = reply.send(Err(error));
         }
         _ => {}
+    }
+}
+
+fn reject_context_request(request: ActorRequest, error: ServerFailure) {
+    match request {
+        ActorRequest::Focus { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        ActorRequest::Reconcile { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        ActorRequest::Acknowledge { reply, .. } => {
+            let _ = reply.send(Err(error));
+        }
+        _ => unreachable!("only context requests enter the waiting queue"),
     }
 }

@@ -1,5 +1,7 @@
 //! Checked semantic paging shared by both authenticated protocol majors.
 
+pub mod reads;
+
 use super::{
     identity::*,
     runtime::{rgb, rgb_bits},
@@ -305,6 +307,8 @@ macro_rules! profile {
                     || !value.query.is_empty()
                     || value.case_sensitive
                     || value.regex
+                    || value.topology_after.is_some()
+                    || value.cancel
                     || value.copy_options.is_some()
                     || value.find_continuation.is_some()
                     || value
@@ -363,8 +367,10 @@ macro_rules! profile {
                     }
                 };
                 Ok(wire::ContentQuery {
-                    kind,
                     fence: Some(encode_fence(value.stamp().fence())),
+                    request_generation: value.stamp().generation().get(),
+                    expected_revision: value.stamp().base().revision.get(),
+                    kind,
                     start,
                     end,
                     stamp: Some(Box::new(encode_stamp(value.stamp()))),
