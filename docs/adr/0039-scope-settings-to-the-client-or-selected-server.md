@@ -1,6 +1,6 @@
 # Scope Settings to the client or selected server
 
-For the [server architecture](https://github.com/sadiksaifi/SpaceTerm/issues/162), Client Settings remain specific to the client device, while Server Settings belong to the selected SpaceTerm Server. One Settings Window retains the existing client preference sections and adds a searchable Servers section for connections, paired devices, compatibility, server management, and server-specific settings, so every operation identifies the machine it affects.
+For the planned [server architecture](https://github.com/sadiksaifi/SpaceTerm/issues/520), Client Settings remain specific to the client device, while Server Settings belong to the selected SpaceTerm Server. One Settings Window retains the existing client preference sections and adds a searchable Servers section for connections, paired devices, compatibility, server management, and server-specific settings, so every operation identifies the machine it affects.
 
 End All Sessions follows [ADR 0048](0048-end-all-sessions-from-the-selected-servers-settings.md).
 

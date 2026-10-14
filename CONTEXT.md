@@ -41,7 +41,7 @@ _Avoid_: Window, Terminal Session
 
 ## Server architecture vocabulary
 
-These terms describe the server architecture being designed in [issue #162](https://github.com/sadiksaifi/SpaceTerm/issues/162).
+These terms describe the planned server architecture in [issue #520](https://github.com/sadiksaifi/SpaceTerm/issues/520). The native application retains its current Workspace and Terminal Session ownership until the corresponding implementation changes land.
 
 **SpaceTerm Server**: The application that owns its Workspaces and their Terminal Sessions independently of the applications presenting them.
 

@@ -12,4 +12,6 @@ A Workspace context menu offers Detach Workspace. The existing Workspace Switche
 
 The attached Workspace presents the Worktree information supplied by its owning server under [ADR 0031](0031-retain-workspace-organization-across-server-restarts.md); a sidebar entry does not transfer ownership of that information to the client.
 
-Kill Workspace replaces Close Workspace in the sidebar context menu for both local and remote Workspaces. It ends the selected Workspace's Terminal Sessions and permanently removes that Workspace and its saved organization for every client. The server and its other Workspaces continue running, and repository files and Git Worktree directories remain on disk. Automatic restoration and saved client attachments cannot recreate a killed Workspace.
+Kill Workspace replaces Close Workspace in the sidebar context menu for both local and remote Workspaces. Close Confirmation states that the selected Workspace's Terminal Sessions end and its saved organization is permanently removed for every client. After confirmation, the server performs that removal. The server and its other Workspaces continue running, and repository files and Git Worktree directories remain on disk. Automatic restoration and saved client attachments cannot recreate a killed Workspace.
+
+The retained `close_workspace` Command uses Cmd+W on macOS and opens Close Confirmation before Kill Workspace. ClosePane and Detach Workspace remain distinct operations. Detach Workspace has no default shortcut.

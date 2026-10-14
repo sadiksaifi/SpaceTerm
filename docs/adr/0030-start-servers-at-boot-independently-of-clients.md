@@ -1,8 +1,12 @@
-# Start servers at boot independently of clients
+# Run account servers independently of clients
 
-For the [server architecture](https://github.com/sadiksaifi/SpaceTerm/issues/162), setup registers automatic SpaceTerm Server startup with the host's service manager. Server lifetime is independent of every SpaceTerm Client, whether clients connect through a private local endpoint or over a network, so client exits, crashes, and disconnections leave server-owned terminal work running.
+For the planned [server architecture](https://github.com/sadiksaifi/SpaceTerm/issues/520), the owning nonroot account runs its SpaceTerm Server through the host's service manager. Client exits, crashes, and disconnections leave server-owned terminal work running.
 
-Machine reboot and power loss end live Terminal Sessions and their in-memory terminal state. After the operating system boots again, automatic startup brings up a fresh server using its durably retained identity and paired-device authorization; it does not resume the previous running programs.
+On macOS, an account LaunchAgent starts at login and stops at logout. Installation requires no administrator password. On Linux, a systemd user service starts at boot and survives logout only with confirmed enabled linger. Enabling linger requires one scoped administrator authorization through CLI sudo, desktop pkexec, or explicit SSH Bootstrap. Installation that starts the Linux server and explicit Start Server require confirmed enabled linger.
+
+No root process executes SpaceTerm code. The server may live in account application data. Server keys and pairings use account-private directories with mode `0700` and files with mode `0600`; these modes restrict other accounts, not processes running as the owning account.
+
+Machine reboot and power loss end live Terminal Sessions and their in-memory terminal state. Automatic startup follows the platform's login or boot policy and the retained Stop Server state. A restarted server uses its durably retained identity and paired-device authorization; it does not resume the previous running programs.
 
 [ADR 0043](0043-start-restored-shells-on-first-use.md) defines when retained Panes start fresh shells after a server restart.
 

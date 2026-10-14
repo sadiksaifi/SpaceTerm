@@ -1,6 +1,6 @@
 # Give one client control of each Pane
 
-For the server architecture in [issue #162](https://github.com/sadiksaifi/SpaceTerm/issues/162), each Pane has at most one Controlling Client so terminal input and dimensions come from one client. The client that creates a Pane is its initial Controlling Client. Different clients can control different Panes concurrently. These rules apply equally to clients on the same machine and on different machines.
+For the planned server architecture in [issue #520](https://github.com/sadiksaifi/SpaceTerm/issues/520), each Pane has at most one Controlling Client so terminal input and dimensions come from one client. The client that creates a Pane is its initial Controlling Client. Different clients can control different Panes concurrently. These rules apply equally to clients on the same machine and on different machines.
 
 Other clients present a Takeover Screen that replaces terminal output entirely and centers a "Take Over" button using SpaceTerm's existing blue primary-button style. Take Over transfers control immediately without approval from the previous Controlling Client, so handoff works when that client is asleep or elsewhere.
 
