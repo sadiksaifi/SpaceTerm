@@ -12,7 +12,10 @@ use crate::{
     failure::failure,
     listeners::ConnectionDispatchPort,
 };
-use spaceterm_core::management::{ServerStatus, StatusPublication, StatusQuery};
+use spaceterm_core::{
+    authority::OrganizationRevision,
+    management::{ServerStatus, StatusPublication, StatusQuery},
+};
 use spaceterm_protocol::{
     ProtocolError,
     codec::Payload,
@@ -400,10 +403,16 @@ impl ProtocolDispatcher {
             PeerConnection::Ordinary(session) => session.codec.limits(),
             _ => Default::default(),
         };
-        let mut terminal = terminal::TerminalConnection::new(self.clock.clone(), limits);
+        let mut terminal = terminal::TerminalConnection::new(
+            self.clock.clone(),
+            limits,
+            matches!(&peer.connection, PeerConnection::Ordinary(session)
+                if session.codec.capabilities().contains(&spaceterm_protocol::negotiation::CAPABILITY_NATIVE_PASTE_CORRELATION)),
+        );
         let mut status = self.status.clone();
         let mut organization = handle.subscribe_snapshot();
         let mut organization_query: Option<organization::OrganizationQuery> = None;
+        let mut organization_sent: Option<OrganizationRevision> = None;
         let mut awaiting_organization_resync = false;
         let mut organization_resyncs = 0u8;
         let mut subscription: Option<StatusQuery> = None;
@@ -488,16 +497,68 @@ impl ProtocolDispatcher {
                     let PeerConnection::Ordinary(session) = &mut peer.connection else {
                         return Err(failure(ServerFailureClass::Authentication));
                     };
-                    awaiting_organization_resync = !self
-                        .send_organization(
-                            session,
-                            &peer.transport,
-                            &handle,
-                            query,
-                            &mut egress,
-                            &mut organization_resyncs,
-                        )
-                        .await?;
+                    let base = organization_sent
+                        .ok_or_else(|| failure(ServerFailureClass::StaleAuthority))?;
+                    use crate::publication::PublicationPlan;
+                    match handle.organization_changes(session.principal, base).await? {
+                        PublicationPlan::Current => {}
+                        PublicationPlan::Snapshot(current) => {
+                            self.send_organization_resync(
+                                session,
+                                &peer.transport,
+                                query,
+                                &current,
+                                &mut egress,
+                                &mut organization_resyncs,
+                            )
+                            .await?;
+                            organization_sent = None;
+                            awaiting_organization_resync = true;
+                        }
+                        PublicationPlan::Deltas(deltas) => {
+                            for delta in deltas {
+                                let maximum = organization_payload_limit(session);
+                                // Charge DTO construction and encoding before converting
+                                // the retained journal entry into either wire profile.
+                                let reserved = egress
+                                    .reserve_content_reply(maximum as u32)
+                                    .map_err(egress_failure)?;
+                                let payload = match crate::publication::delta_payload(
+                                    session.codec.major(),
+                                    &delta,
+                                    query,
+                                    maximum,
+                                ) {
+                                    Ok(payload) => payload,
+                                    Err(error) if error.class == ServerFailureClass::Capacity => {
+                                        drop(reserved);
+                                        self.send_organization_resync(
+                                            session,
+                                            &peer.transport,
+                                            query,
+                                            &handle.snapshot(),
+                                            &mut egress,
+                                            &mut organization_resyncs,
+                                        )
+                                        .await?;
+                                        organization_sent = None;
+                                        awaiting_organization_resync = true;
+                                        break;
+                                    }
+                                    Err(error) => return Err(error),
+                                };
+                                self.send(
+                                    session,
+                                    &peer.transport,
+                                    &payload,
+                                    &mut egress,
+                                    Some(reserved),
+                                )
+                                .await?;
+                                organization_sent = Some(delta.revision());
+                            }
+                        }
+                    }
                 }
                 Wake::Status => {
                     let query =
@@ -583,7 +644,7 @@ impl ProtocolDispatcher {
                                     return Err(failure(ServerFailureClass::StaleAuthority));
                                 }
                                 organization.borrow_and_update();
-                                awaiting_organization_resync = !self
+                                organization_sent = self
                                     .send_organization(
                                         session,
                                         &peer.transport,
@@ -593,6 +654,7 @@ impl ProtocolDispatcher {
                                         &mut organization_resyncs,
                                     )
                                     .await?;
+                                awaiting_organization_resync = organization_sent.is_none();
                                 organization_query = Some(query);
                                 continue;
                             }
@@ -658,6 +720,7 @@ impl ProtocolDispatcher {
                                             session.codec.major(),
                                             query.request.get(),
                                             &snapshot,
+                                            session.codec.capabilities(),
                                         )
                                         .map_err(protocol_failure)?;
                                         self.send(
@@ -752,21 +815,14 @@ impl ProtocolDispatcher {
         query: organization::OrganizationQuery,
         egress: &mut ConnectionEgress,
         resyncs: &mut u8,
-    ) -> Result<bool, ServerFailure> {
+    ) -> Result<Option<OrganizationRevision>, ServerFailure> {
         let mut transfer = handle
             .organization_snapshot(
                 session.principal,
                 session.codec.major(),
                 query.request.get(),
                 query.generation,
-                // Both profiles need at most 128 framing bytes: fixed binding,
-                // direction, purpose, major, a full u64 sequence, length prefixes
-                // and Ed25519 signature under the 2 MiB envelope ceiling.
-                session
-                    .codec
-                    .limits()
-                    .management_bytes
-                    .min(session.codec.limits().frame_bytes.saturating_sub(128)),
+                organization_payload_limit(session),
             )
             .await?;
         loop {
@@ -779,46 +835,65 @@ impl ProtocolDispatcher {
                 Err(error) => Err(error),
             };
             match result {
-                Ok(true) => return Ok(true),
+                Ok(true) => return Ok(Some(transfer.revision())),
                 Ok(false) => {}
                 Err(error) if error.class == ServerFailureClass::StaleAuthority => {
-                    // A partially staged client graph can only be replaced by a
-                    // fresh request generation after an explicit reset marker.
-                    if *resyncs != 0 {
-                        return Err(failure(ServerFailureClass::Capacity));
-                    }
-                    *resyncs += 1;
-                    let current = handle.snapshot();
-                    let payload = match session.codec.major() {
-                        1 => Payload::Major1(v1::Message {
-                            kind: Some(v1::message::Kind::OrganizationResync(
-                                v1::OrganizationResync {
-                                    request: query.request.get(),
-                                    request_generation: query.generation,
-                                    epoch: current.epoch().get(),
-                                    revision: current.state().revision.get(),
-                                },
-                            )),
-                        }),
-                        2 => Payload::Major2(v2::Message {
-                            kind: Some(v2::message::Kind::OrganizationResync(
-                                v2::OrganizationResync {
-                                    request: query.request.get(),
-                                    request_generation: query.generation,
-                                    epoch: current.epoch().get(),
-                                    revision: current.state().revision.get(),
-                                },
-                            )),
-                        }),
-                        _ => return Err(failure(ServerFailureClass::ScopeMismatch)),
-                    };
-                    self.send(session, transport, &payload, egress, None)
-                        .await?;
-                    return Ok(false);
+                    self.send_organization_resync(
+                        session,
+                        transport,
+                        query,
+                        &handle.snapshot(),
+                        egress,
+                        resyncs,
+                    )
+                    .await?;
+                    return Ok(None);
                 }
                 Err(error) => return Err(error),
             }
         }
+    }
+    async fn send_organization_resync(
+        &self,
+        session: &mut AuthenticatedSession,
+        transport: &Arc<dyn spaceterm_host::transport::MessageTransport>,
+        query: organization::OrganizationQuery,
+        current: &spaceterm_core::organization::OrganizationSnapshot,
+        egress: &mut ConnectionEgress,
+        resyncs: &mut u8,
+    ) -> Result<(), ServerFailure> {
+        // A missing delta base or cancelled staged graph requires an explicit
+        // reset followed by a client query with a fresh request generation.
+        if *resyncs != 0 {
+            return Err(failure(ServerFailureClass::Capacity));
+        }
+        let payload = match session.codec.major() {
+            1 => Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::OrganizationResync(
+                    v1::OrganizationResync {
+                        request: query.request.get(),
+                        request_generation: query.generation,
+                        epoch: current.epoch().get(),
+                        revision: current.state().revision.get(),
+                    },
+                )),
+            }),
+            2 => Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::OrganizationResync(
+                    v2::OrganizationResync {
+                        request: query.request.get(),
+                        request_generation: query.generation,
+                        epoch: current.epoch().get(),
+                        revision: current.state().revision.get(),
+                    },
+                )),
+            }),
+            _ => return Err(failure(ServerFailureClass::ScopeMismatch)),
+        };
+        self.send(session, transport, &payload, egress, None)
+            .await?;
+        *resyncs += 1;
+        Ok(())
     }
     async fn send_snapshot_page(
         &self,
@@ -875,12 +950,18 @@ impl ProtocolDispatcher {
         let payload = match session.codec.major() {
             1 => Payload::Major1(v1::Message {
                 kind: Some(v1::message::Kind::StatusPublication(
-                    management::v1::encode_publication(&publication),
+                    management::v1::encode_publication_for_capabilities(
+                        &publication,
+                        session.codec.capabilities(),
+                    ),
                 )),
             }),
             2 => Payload::Major2(v2::Message {
                 kind: Some(v2::message::Kind::StatusPublication(
-                    management::v2::encode_publication(&publication),
+                    management::v2::encode_publication_for_capabilities(
+                        &publication,
+                        session.codec.capabilities(),
+                    ),
                 )),
             }),
             _ => return Err(failure(ServerFailureClass::ScopeMismatch)),
@@ -971,6 +1052,16 @@ impl ConnectionDispatchPort for ProtocolDispatcher {
     }
 }
 
+fn organization_payload_limit(session: &AuthenticatedSession) -> usize {
+    // Both profiles need at most 128 framing bytes for binding, direction,
+    // purpose, major, sequence, length prefixes and the Ed25519 signature.
+    session
+        .codec
+        .limits()
+        .management_bytes
+        .min(session.codec.limits().frame_bytes.saturating_sub(128))
+}
+
 fn validate_status(
     principal: VerifiedPrincipal,
     status: &ServerStatus,
@@ -1048,17 +1139,18 @@ fn legacy_status(
     major: u32,
     request: u64,
     status: &ServerStatus,
+    capabilities: &[u32],
 ) -> Result<Payload, ProtocolError> {
     match major {
         1 => {
-            let mut value = management::v1::encode_status(status);
+            let mut value = management::v1::encode_status_for_capabilities(status, capabilities);
             value.request = request;
             Ok(Payload::Major1(v1::Message {
                 kind: Some(v1::message::Kind::ManagementStatus(value)),
             }))
         }
         2 => {
-            let mut value = management::v2::encode_status(status);
+            let mut value = management::v2::encode_status_for_capabilities(status, capabilities);
             value.request = request;
             Ok(Payload::Major2(v2::Message {
                 kind: Some(v2::message::Kind::ManagementStatus(value)),
@@ -1119,10 +1211,10 @@ fn runtime_failure(
     use spaceterm_core::runtime_authority::EffectDisposition;
     let class = match result {
         Ok(EffectDisposition::Applied) => return Ok(None),
-        Ok(EffectDisposition::StaleAuthority | EffectDisposition::Cancelled) => {
-            common::FailureClass::Stale
+        Ok(EffectDisposition::StaleAuthority) => common::FailureClass::Stale,
+        Ok(EffectDisposition::Cancelled | EffectDisposition::Retired) => {
+            common::FailureClass::Retired
         }
-        Ok(EffectDisposition::Retired) => common::FailureClass::Retired,
         Err(error) => match error.class {
             ServerFailureClass::StaleAuthority => common::FailureClass::Stale,
             ServerFailureClass::Capacity => common::FailureClass::Limit,

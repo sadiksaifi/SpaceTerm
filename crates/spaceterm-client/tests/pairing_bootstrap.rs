@@ -50,6 +50,8 @@ struct Effects {
     prompt_attempts: AtomicUsize,
     lost_install_response: AtomicBool,
     lost_owner_response: AtomicBool,
+    hold_resolution: AtomicBool,
+    resolution_started: tokio::sync::Notify,
     resolutions: Mutex<Vec<([u8; 16], [u8; 32])>>,
     outcomes: Mutex<std::collections::HashMap<[u8; 16], BootstrapServer>>,
     local_unavailable: AtomicBool,
@@ -217,6 +219,10 @@ impl NativeServerSetup for Setup {
                 .lock()
                 .unwrap()
                 .push((request, artifact));
+            self.effects.resolution_started.notify_one();
+            if self.effects.hold_resolution.load(Ordering::Acquire) {
+                self.effects.release.notified().await;
+            }
             let server = self
                 .effects
                 .outcomes
@@ -483,6 +489,7 @@ fn artifact_fixture(
         build_identity: build,
         platform,
         version: BuildVersion::parse(version).unwrap(),
+        build_commit: [1; 20],
         published_at: NOW,
         protocol_majors: vec![1, 2],
         storage: StorageCompatibility {
@@ -858,6 +865,119 @@ async fn lost_install_and_owner_responses_resolve_original_requests_without_rein
     );
     assert_eq!(*setup.effects.owner_requests.lock().unwrap(), [[2; 16]]);
     assert_eq!(setup.effects.enrollments.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn initial_install_deadline_preserves_admitted_work_without_late_recovery_or_enrollment() {
+    for lost_response in [false, true] {
+        let mut f = facts();
+        f.registration = BootstrapRegistration::Missing;
+        let (setup, c) = coordinator(f);
+        setup.effects.hold.store(true, Ordering::Release);
+        setup
+            .effects
+            .lost_install_response
+            .store(lost_response, Ordering::Release);
+        let artifact = artifact();
+        let digest = artifact.artifact_sha256();
+        let started = tokio::time::Instant::now();
+        let task = tokio::spawn(async move { c.bootstrap(intent(), Some(artifact)).await });
+        setup.effects.started.notified().await;
+        tokio::time::advance(std::time::Duration::from_secs(15)).await;
+        let failure = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("initial install observation did not expire")
+            .unwrap()
+            .err()
+            .unwrap();
+        assert_eq!(
+            failure,
+            BootstrapFailure::new(PairingFailure::RecoveryRequired, BootstrapPhase::Applied)
+        );
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            std::time::Duration::from_secs(15)
+        );
+        assert_eq!(setup.effects.cleanups.load(Ordering::SeqCst), 0);
+        assert_eq!(setup.effects.installations.load(Ordering::SeqCst), 0);
+        assert!(setup.effects.resolutions.lock().unwrap().is_empty());
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        setup.effects.release.notify_one();
+        setup.effects.completed.notified().await;
+        tokio::task::yield_now().await;
+        assert_eq!(setup.effects.installations.load(Ordering::SeqCst), 1);
+        assert_eq!(setup.effects.cleanups.load(Ordering::SeqCst), 1);
+        assert!(setup.effects.resolutions.lock().unwrap().is_empty());
+        assert_eq!(setup.effects.authorizations.load(Ordering::SeqCst), 1);
+        assert_eq!(setup.effects.enrollments.load(Ordering::SeqCst), 0);
+        assert_eq!(setup.effects.connections.load(Ordering::SeqCst), 0);
+        let recovered = setup.resolve([1; 16], digest).await.unwrap();
+        assert_eq!(recovered.pin, pin());
+        assert_eq!(recovered.approved_artifact_identity, digest);
+        assert_eq!(
+            *setup.effects.resolutions.lock().unwrap(),
+            [([1; 16], digest)]
+        );
+        assert_eq!(setup.effects.mutations.load(Ordering::SeqCst), 1);
+        assert_eq!(setup.effects.authorizations.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn automatic_original_recovery_uses_only_the_remaining_initial_install_deadline() {
+    let mut f = facts();
+    f.registration = BootstrapRegistration::Missing;
+    let (setup, c) = coordinator(f);
+    setup.effects.hold.store(true, Ordering::Release);
+    setup
+        .effects
+        .lost_install_response
+        .store(true, Ordering::Release);
+    setup.effects.hold_resolution.store(true, Ordering::Release);
+    let artifact = artifact();
+    let digest = artifact.artifact_sha256();
+    let started = tokio::time::Instant::now();
+    let task = tokio::spawn(async move { c.bootstrap(intent(), Some(artifact)).await });
+    setup.effects.started.notified().await;
+    tokio::time::advance(std::time::Duration::from_secs(14)).await;
+    setup.effects.release.notify_one();
+    setup.effects.resolution_started.notified().await;
+    assert_eq!(
+        *setup.effects.resolutions.lock().unwrap(),
+        [([1; 16], digest)]
+    );
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    let failure = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+        .await
+        .expect("automatic recovery renewed the initial install deadline")
+        .unwrap()
+        .err()
+        .unwrap();
+    assert_eq!(
+        failure,
+        BootstrapFailure::new(PairingFailure::RecoveryRequired, BootstrapPhase::Applied)
+    );
+    assert_eq!(
+        tokio::time::Instant::now() - started,
+        std::time::Duration::from_secs(15)
+    );
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    setup
+        .effects
+        .hold_resolution
+        .store(false, Ordering::Release);
+    let recovered = setup.resolve([1; 16], digest).await.unwrap();
+    assert_eq!(recovered.pin, pin());
+    assert_eq!(recovered.approved_artifact_identity, digest);
+    assert_eq!(
+        *setup.effects.resolutions.lock().unwrap(),
+        [([1; 16], digest), ([1; 16], digest)]
+    );
+    assert_eq!(setup.effects.installations.load(Ordering::SeqCst), 1);
+    assert_eq!(setup.effects.mutations.load(Ordering::SeqCst), 1);
+    assert_eq!(setup.effects.authorizations.load(Ordering::SeqCst), 1);
+    assert_eq!(setup.effects.enrollments.load(Ordering::SeqCst), 0);
+    assert_eq!(setup.effects.connections.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

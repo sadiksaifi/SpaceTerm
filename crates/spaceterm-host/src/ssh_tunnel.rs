@@ -228,6 +228,29 @@ impl SshEnvironment {
 pub trait TunnelAskPass: Send + Sync + 'static {
     /// Issues one noncloneable spawn-only capability for a live native broker.
     fn handoff(&self) -> Result<AskPassHandoff, TransportError>;
+
+    /// Fences presentation and replies against revocable foreground authority.
+    /// Adapters without this support fail closed rather than checking only at spawn.
+    fn handoff_authorized(
+        &self,
+        _authority: AskPassAuthorityCheck,
+    ) -> Result<AskPassHandoff, TransportError> {
+        Err(TransportError::PeerAccountRejected)
+    }
+}
+
+/// Content-free validation of the exact foreground credential generation.
+/// The native adapter checks it before presentation, while waiting, and before replying.
+pub type AskPassAuthorityCheck = Arc<dyn Fn() -> bool + Send + Sync>;
+
+struct AskPassAttemptLifetime(Option<Box<dyn FnOnce() + Send>>);
+
+impl Drop for AskPassAttemptLifetime {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.0.take() {
+            cancel();
+        }
+    }
 }
 
 /// Spawn-only AskPass helper route and zeroized broker capability, without Debug or Clone.
@@ -235,9 +258,32 @@ pub struct AskPassHandoff {
     helper: PathBuf,
     endpoint: OsString,
     capability: Zeroizing<Vec<u8>>,
+    attempt: Option<AskPassAttemptLifetime>,
 }
 
 impl AskPassHandoff {
+    /// Transfers only the existing broker capability to a supervised native child.
+    /// These values are never derived from a remote reply.
+    pub fn configure(&self, command: &mut std::process::Command) {
+        command
+            .env("SPACETERM_SSH_ASKPASS_MODE", "broker-v1")
+            .env("SSH_ASKPASS", &self.helper)
+            .env("SPACETERM_SSH_ASKPASS_SOCKET", &self.endpoint)
+            .env(
+                "SPACETERM_SSH_ASKPASS_CAPABILITY",
+                std::ffi::OsStr::from_bytes(&self.capability),
+            )
+            .env("SSH_ASKPASS_REQUIRE", "force")
+            .env("DISPLAY", "spaceterm-askpass");
+    }
+    /// Runs the same obscured broker prompt for the fixed linger authorization.
+    pub fn prompt_command(&self) -> std::process::Command {
+        let mut command = std::process::Command::new(&self.helper);
+        command.env_clear();
+        self.configure(&mut command);
+        command.arg("[SpaceTerm linger password]");
+        command
+    }
     /// Validates the existing broker-v1 endpoint and its 64-byte hexadecimal capability.
     /// No authentication response crosses this handoff.
     pub fn new(
@@ -262,7 +308,15 @@ impl AskPassHandoff {
             helper,
             endpoint,
             capability,
+            attempt: None,
         })
+    }
+
+    /// Retains exactly one broker until authentication succeeds or this start ends.
+    /// Cancellation runs on spawn failure, deadline, dropped start, and process exit.
+    pub fn with_attempt_lifetime(mut self, cancel: impl FnOnce() + Send + 'static) -> Self {
+        self.attempt = Some(AskPassAttemptLifetime(Some(Box::new(cancel))));
+        self
     }
 }
 
@@ -418,6 +472,7 @@ impl Drop for SshTunnel {
 struct OwnedChild {
     child: Option<Child>,
     pid: u32,
+    askpass_attempt: Option<AskPassAttemptLifetime>,
 }
 
 impl OwnedChild {
@@ -503,7 +558,7 @@ fn spawn(
     environment: &SshEnvironment,
     askpass: Option<&dyn TunnelAskPass>,
 ) -> Result<OwnedChild, TransportError> {
-    let handoff = askpass.map(TunnelAskPass::handoff).transpose()?;
+    let mut handoff = askpass.map(TunnelAskPass::handoff).transpose()?;
     let mut native = Command::new(&command.executable);
     native
         .args(&command.arguments)
@@ -536,10 +591,12 @@ fn spawn(
     let pid = child.id();
     // Discard the spawn request immediately; the explicit capability owner is zeroized.
     drop(native);
+    let askpass_attempt = handoff.as_mut().and_then(|handoff| handoff.attempt.take());
     drop(handoff);
     Ok(OwnedChild {
         child: Some(child),
         pid,
+        askpass_attempt,
     })
 }
 
@@ -725,9 +782,14 @@ fn supervise(
             break None;
         }
         if became_ready {
+            // OpenSSH has authenticated. Its foreground prompt authority ends here,
+            // not when the long-lived forwarding process eventually exits.
+            drop(child.askpass_attempt.take());
             updates.send_replace(ProcessState::Ready(pid));
         }
     };
+    // Dismiss unanswered prompts before waiting for native process cleanup.
+    drop(child.askpass_attempt.take());
     // Stop before the final ownership probe so a cancellation-time listener remains
     // live long enough to prove its PID. The lease excludes cooperating starts, not
     // foreign native binds. Never infer socket ownership from post-reap refusal.

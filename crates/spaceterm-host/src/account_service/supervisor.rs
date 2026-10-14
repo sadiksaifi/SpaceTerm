@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use super::owner_enrollment::OwnerEnrollment;
 use super::{
-    ConfirmedServiceAction, LingerAuthorization, LingerRequest, LingerState, RuntimeAssessment,
-    ServiceAction, ServiceAssessment, ServiceClock, ServiceFuture, ServiceManager, ServiceOutcome,
-    ServicePhase, ServiceProcesses, ServiceProgress, ServiceRequestState, ServiceStatus,
-    ServiceTime, SupervisorState,
+    ConfirmedServiceAction, InstallationStatus, LingerAuthorization, LingerRequest, LingerState,
+    RuntimeAssessment, ServiceAction, ServiceAssessment, ServiceClock, ServiceFuture,
+    ServiceManager, ServiceOutcome, ServicePhase, ServiceProcesses, ServiceProgress,
+    ServiceRequestState, ServiceStatus, ServiceTime, SupervisorState,
     processes::{NativeClock, cleanup_matches},
 };
 use super::{
@@ -158,6 +158,82 @@ impl Journal {
     }
 }
 
+/// Byte pressure and slot pressure retire only never-admitted requests. The permanent
+/// high-water mark prevents a displaced assessment from becoming fresh authority.
+fn retire_unsubmitted(journal: &mut Journal, protected: Option<u64>) -> bool {
+    let eligible = |reservation: &&Reservation| {
+        Some(reservation.sequence) != protected
+            && reservation.owner.is_none()
+            && reservation.install.is_none()
+    };
+    // Prefer IDs that have no assessment before displacing a retained scope.
+    let unbound = journal
+        .reservations
+        .iter()
+        .enumerate()
+        .filter(|(_, reservation)| eligible(reservation))
+        .find(|(_, reservation)| reservation.service.is_none())
+        .map(|(index, _)| index);
+    let Some(index) = unbound.or_else(|| {
+        journal
+            .reservations
+            .iter()
+            .enumerate()
+            .filter(|(_, reservation)| eligible(reservation))
+            .find(|(_, reservation)| {
+                reservation.service.as_ref().is_some_and(|service| {
+                    service.phase == ServicePhase::Reserved
+                        && !service.reserving
+                        && !service.aborting
+                })
+            })
+            .map(|(index, _)| index)
+    }) else {
+        return false;
+    };
+    journal.reservations.remove(index);
+    true
+}
+
+// Process-local execution custody, shared only by clones of this provider. It
+// carries no request contents or authority and never reopens durable work.
+#[derive(Default)]
+pub(super) struct InstallExecution {
+    active: AtomicUsize,
+    finished: tokio::sync::Notify,
+}
+impl InstallExecution {
+    pub(super) fn admit(self: &Arc<Self>) -> Result<InstallExecutionGuard, ServiceFailure> {
+        self.active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                active.checked_add(1)
+            })
+            .map_err(|_| ServiceFailure::LimitExceeded)?;
+        Ok(InstallExecutionGuard(Arc::clone(self)))
+    }
+    async fn finish(&self) {
+        loop {
+            let finished = self.finished.notified();
+            tokio::pin!(finished);
+            // Register before inspecting the counter so the last worker cannot
+            // finish between the inspection and this wait's first poll.
+            finished.as_mut().enable();
+            if self.active.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            finished.await;
+        }
+    }
+}
+pub(super) struct InstallExecutionGuard(Arc<InstallExecution>);
+impl Drop for InstallExecutionGuard {
+    fn drop(&mut self) {
+        if self.0.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.0.finished.notify_waiters();
+        }
+    }
+}
+
 /// Current-account discovery and durable request authority for the compiled identity.
 ///
 /// This retained provider has no public account, directory or identity override.
@@ -166,6 +242,7 @@ pub struct ServiceSupervisor {
     pub(super) key: AccountBuildKey,
     pub(super) anchor: PathBuf,
     pub(super) indeterminate: Arc<AtomicBool>,
+    pub(super) install_execution: Arc<InstallExecution>,
     pub(super) authorization: Option<Arc<dyn LingerAuthorization>>,
     pub(super) manager: Option<Arc<dyn ServiceManager>>,
     pub(super) processes: Option<Arc<dyn ServiceProcesses>>,
@@ -220,6 +297,7 @@ impl ServiceSupervisor {
             },
             anchor: home.join(".spaceterm-services").join(name),
             indeterminate: Arc::new(AtomicBool::new(false)),
+            install_execution: Arc::new(InstallExecution::default()),
             authorization,
             manager: Some(manager),
             processes: Some(processes),
@@ -249,6 +327,12 @@ impl ServiceSupervisor {
         ));
         Ok(self)
     }
+    /// Waits for install execution already spawned by this provider or its clones.
+    /// Call only after retiring request admission, before dropping the owning runtime.
+    /// This wait allocates no request, resumes no durable work and submits no effects.
+    pub async fn finish_install_execution(&self) {
+        self.install_execution.finish().await;
+    }
     /// Returns the current account and compiled identity.
     pub fn key(&self) -> AccountBuildKey {
         self.key
@@ -258,11 +342,29 @@ impl ServiceSupervisor {
     pub fn client_connections_directory(&self) -> PathBuf {
         self.anchor.join("client-connections")
     }
+    /// Read-only recovery intent for ordinary native admission. Missing storage
+    /// is not created and no credential or organization store is consulted.
+    pub fn retained_account_recovery(&self) -> Result<Option<Vec<u8>>, ServiceFailure> {
+        self.available()?;
+        let Some(directory) = Directory::open(&self.client_connections_directory())? else {
+            return Ok(None);
+        };
+        Ok(directory
+            .read("owner-account-recovery", 64 * 1024)?
+            .map(|snapshot| snapshot.bytes.to_vec()))
+    }
     /// Deliberate enrollment owns the private client storage lease. This never
     /// reads or opens the server's organization database.
     pub fn admit_client_provisioning(&self) -> Result<ClientProvisioning, ServiceFailure> {
         let path = self.client_connections_directory();
-        let directory = Directory::create(&path)?;
+        let directory = match Directory::create(&path) {
+            Ok(directory) => directory,
+            Err(crate::private_filesystem::Failure::Indeterminate) => {
+                ClientProvisioning::recover_metadata_publication(&path)?;
+                Directory::create(&path)?
+            }
+            Err(error) => return Err(error.into()),
+        };
         let lease = directory.lease("provisioning-lock")?;
         Ok(ClientProvisioning {
             path,
@@ -351,14 +453,9 @@ impl ServiceSupervisor {
                 // oldest unsubmitted ID, never an unacknowledged original outcome.
                 // Its sequence remains below the permanent high-water mark, so a
                 // delayed submitter gets RequestRetired rather than fresh authority.
-                let Some(unsubmitted) = journal
-                    .reservations
-                    .iter()
-                    .position(|r| r.owner.is_none() && r.service.is_none() && r.install.is_none())
-                else {
+                if !retire_unsubmitted(&mut journal, None) {
                     return Err(ServiceFailure::LimitExceeded);
-                };
-                journal.reservations.remove(unsubmitted);
+                }
             }
             journal.high_water = journal
                 .high_water
@@ -372,10 +469,15 @@ impl ServiceSupervisor {
                 service: None,
                 install: None,
             });
-            match self.publish_journal(&directory, &journal, snapshot.as_ref()) {
-                Ok(()) => return Ok(request),
-                Err(ServiceFailure::RequestConflict) => continue,
-                Err(error) => return Err(error),
+            let protected = journal.sequence(request)?;
+            loop {
+                match self.publish_journal(&directory, &journal, snapshot.as_ref()) {
+                    Ok(()) => return Ok(request),
+                    Err(ServiceFailure::RequestConflict) => break,
+                    Err(ServiceFailure::LimitExceeded)
+                        if retire_unsubmitted(&mut journal, Some(protected)) => {}
+                    Err(error) => return Err(error),
+                }
             }
         }
         Err(ServiceFailure::Pending)
@@ -461,10 +563,15 @@ impl ServiceSupervisor {
             let (directory, snapshot, mut journal) = self.read_journal()?;
             let index = journal.reservation(request)?;
             mutation(&mut journal, index)?;
-            match self.publish_journal(&directory, &journal, Some(&snapshot)) {
-                Ok(()) => return Ok(()),
-                Err(ServiceFailure::RequestConflict) => continue,
-                Err(error) => return Err(error),
+            let protected = journal.sequence(request)?;
+            loop {
+                match self.publish_journal(&directory, &journal, Some(&snapshot)) {
+                    Ok(()) => return Ok(()),
+                    Err(ServiceFailure::RequestConflict) => break,
+                    Err(ServiceFailure::LimitExceeded)
+                        if retire_unsubmitted(&mut journal, Some(protected)) => {}
+                    Err(error) => return Err(error),
+                }
             }
         }
         Err(ServiceFailure::Pending)
@@ -544,6 +651,29 @@ pub(super) fn decode<T: Serialize + serde::de::DeserializeOwned>(
 pub(super) fn current_account() -> Result<(u32, PathBuf), ServiceFailure> {
     let account = super::TrustedAccountFacts::current()?;
     Ok((account.uid(), account.home().to_owned()))
+}
+
+/// Exact stopped registration and approved code covered by a deliberate Start.
+///
+/// These comparison facts grant no mutation authority. Admission validates them
+/// under the lifecycle lease before binding the original request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoppedServerExpectation {
+    /// Original registered public server identity.
+    pub pin: spaceterm_protocol::authentication::ServerPin,
+    /// Original nonzero registration generation.
+    pub generation: u64,
+    /// Exact approved installation, version and authenticated archive digest.
+    pub approved: InstallationStatus,
+}
+impl StoppedServerExpectation {
+    fn matches(&self, basis: &RegistrationBasis) -> bool {
+        basis.desired == DesiredServerState::Stopped
+            && basis.server == self.pin.identity
+            && basis.public_key == self.pin.public_key
+            && basis.generation == self.generation
+            && basis.approved.as_ref() == Some(&self.approved)
+    }
 }
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -631,11 +761,44 @@ enum RequestBinding {
     Confirmed(AssessmentRecord),
 }
 impl RequestBinding {
+    fn matches_submission(
+        &self,
+        assessment: Option<&AssessmentRecord>,
+        expected: Option<&StoppedServerExpectation>,
+    ) -> bool {
+        match (self, assessment) {
+            (Self::Start(basis), None) => expected.is_none_or(|expected| expected.matches(basis)),
+            (Self::Confirmed(original), Some(assessment)) => {
+                expected.is_none() && original == assessment
+            }
+            _ => false,
+        }
+    }
     fn basis(&self) -> &RegistrationBasis {
         match self {
             Self::Start(basis) => basis,
             Self::Confirmed(assessment) => &assessment.basis,
         }
+    }
+    fn verify_start_registration(
+        &self,
+        registration: &RegisteredServer,
+    ) -> Result<(), ServiceFailure> {
+        let Self::Start(basis) = self else {
+            return Ok(());
+        };
+        let mut expected = basis.clone();
+        if expected.desired != DesiredServerState::Running {
+            expected.desired = DesiredServerState::Running;
+            expected.generation = expected
+                .generation
+                .checked_add(1)
+                .ok_or(ServiceFailure::LimitExceeded)?;
+        }
+        if !expected.matches(registration) {
+            return Err(ServiceFailure::RequestConflict);
+        }
+        Ok(())
     }
     fn retirement(&self) -> Option<NativeRetirementAction> {
         match self {
@@ -1082,6 +1245,7 @@ impl ServiceSupervisor {
                 };
             }
             let lease = self.lifecycle_lease()?;
+            self.reconcile_started_install(&lease).await?;
             self.ensure_no_pending(request)?;
             let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
             if !registration.is_installed() {
@@ -1165,7 +1329,17 @@ impl ServiceSupervisor {
     }
     /// Starts only approved code under an ID retained before submission.
     pub fn start(&self, request: NativeRequestId) -> ServiceFuture<'_, ServiceProgress> {
-        self.observe(request, None)
+        self.observe(request, None, None)
+    }
+    /// Starts only the exact stopped registration and approved code the caller confirmed.
+    /// A changed registration fails with StaleAssessment before any Start binding or effect.
+    /// Replays compare against the immutable original binding, not current registration.
+    pub fn start_stopped(
+        &self,
+        request: NativeRequestId,
+        expected: StoppedServerExpectation,
+    ) -> ServiceFuture<'_, ServiceProgress> {
+        self.observe(request, None, Some(expected))
     }
     /// Durably suspends startup before requesting runtime or manager Stop.
     pub fn stop(&self, action: ConfirmedServiceAction) -> ServiceFuture<'_, ServiceProgress> {
@@ -1195,19 +1369,20 @@ impl ServiceSupervisor {
         if action.0.record.action != expected {
             return Box::pin(async { Err(ServiceFailure::RequestConflict) });
         }
-        self.observe(action.0.request, Some(action.0.record))
+        self.observe(action.0.request, Some(action.0.record), None)
     }
     fn observe(
         &self,
         request: NativeRequestId,
         assessment: Option<AssessmentRecord>,
+        expected: Option<StoppedServerExpectation>,
     ) -> ServiceFuture<'_, ServiceProgress> {
         let supervisor = self.clone();
         Box::pin(async move {
             let handle = tokio::runtime::Handle::try_current()
                 .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
-            let worker =
-                handle.spawn(async move { supervisor.run(request, assessment, false).await });
+            let worker = handle
+                .spawn(async move { supervisor.run(request, assessment, expected, false).await });
             worker.await.map_err(|_| ServiceFailure::Indeterminate)?
         })
     }
@@ -1233,7 +1408,8 @@ impl ServiceSupervisor {
             }
             let handle = tokio::runtime::Handle::try_current()
                 .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
-            let worker = handle.spawn(async move { supervisor.run(request, None, true).await });
+            let worker =
+                handle.spawn(async move { supervisor.run(request, None, None, true).await });
             worker.await.map_err(|_| ServiceFailure::Indeterminate)?
         })
     }
@@ -1278,7 +1454,7 @@ impl ServiceSupervisor {
                     registration.validate(key).map_err(|_| Failure::Unsafe)
                 },
             );
-            if registration_recovery.is_err() && self.reconcile_initial_creation(request).is_err() {
+            if registration_recovery.is_err() {
                 self.reconcile_owner_archive(request)?;
             }
         }
@@ -1289,18 +1465,16 @@ impl ServiceSupervisor {
         &self,
         request: NativeRequestId,
         assessment: Option<AssessmentRecord>,
+        expected: Option<StoppedServerExpectation>,
         resolving: bool,
     ) -> Result<ServiceProgress, ServiceFailure> {
         if let Some(original) = self.original(request)? {
-            if !resolving {
-                let matches = match (&original.binding, &assessment) {
-                    (RequestBinding::Start(_), None) => true,
-                    (RequestBinding::Confirmed(old), Some(new)) => old == new,
-                    _ => false,
-                };
-                if !matches {
-                    return Err(ServiceFailure::RequestConflict);
-                }
+            if !resolving
+                && !original
+                    .binding
+                    .matches_submission(assessment.as_ref(), expected.as_ref())
+            {
+                return Err(ServiceFailure::RequestConflict);
             }
             if original.phase == ServicePhase::Completed {
                 return Ok(original.progress(request));
@@ -1311,22 +1485,46 @@ impl ServiceSupervisor {
         let lease = match self.lifecycle_lease() {
             Ok(lease) => lease,
             Err(ServiceFailure::Pending) => {
-                return self
-                    .original(request)?
-                    .map(|original| original.progress(request))
-                    .ok_or(ServiceFailure::Pending);
+                let original = self.original(request)?.ok_or(ServiceFailure::Pending)?;
+                if !resolving
+                    && !original
+                        .binding
+                        .matches_submission(assessment.as_ref(), expected.as_ref())
+                {
+                    return Err(ServiceFailure::RequestConflict);
+                }
+                return Ok(original.progress(request));
             }
             Err(error) => return Err(error),
         };
+        self.reconcile_started_install(&lease).await?;
         self.ensure_no_pending(request)?;
         let mut record = if let Some(original) = self.original(request)? {
+            if !resolving
+                && !original
+                    .binding
+                    .matches_submission(assessment.as_ref(), expected.as_ref())
+            {
+                return Err(ServiceFailure::RequestConflict);
+            }
             original
         } else {
-            let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
+            let registration = self.discover()?.ok_or(if expected.is_some() {
+                ServiceFailure::StaleAssessment
+            } else {
+                ServiceFailure::Missing
+            })?;
+            let basis = RegistrationBasis::capture(&registration);
+            if expected
+                .as_ref()
+                .is_some_and(|expected| !expected.matches(&basis))
+            {
+                return Err(ServiceFailure::StaleAssessment);
+            }
             if !registration.is_installed() {
                 return Err(ServiceFailure::Missing);
             }
-            let binding = RequestBinding::Start(RegistrationBasis::capture(&registration));
+            let binding = RequestBinding::Start(basis);
             RequestRecord {
                 digest: binding.digest(self.key, request)?,
                 binding,
@@ -1568,6 +1766,7 @@ impl ServiceSupervisor {
                     _ => {}
                 }
             }
+            record.binding.verify_start_registration(&registration)?;
             if registration.desired_state() == DesiredServerState::Running {
                 self.manager()?.verify_installation(&registration)?;
             }
@@ -1581,6 +1780,7 @@ impl ServiceSupervisor {
         }
         if record.phase == ServicePhase::Starting {
             let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
+            record.binding.verify_start_registration(&registration)?;
             if registration.desired_state() != DesiredServerState::Running {
                 return Err(ServiceFailure::RequestConflict);
             }
@@ -1771,6 +1971,12 @@ impl ServiceSupervisor {
         }
         let directory = Directory::open(&self.anchor)?.ok_or(ServiceFailure::Missing)?;
         let lease = directory.lease("instance-lock")?;
+        let recovery = RegisteredServer {
+            directory: Directory::open_for_recovery(&record.data)?
+                .ok_or(ServiceFailure::Missing)?,
+            record,
+        };
+        super::runtime_inventory::recover_publications(&recovery)?;
         let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
         if registration.desired_state() == DesiredServerState::Stopped {
             return Ok(AccountStartupAdmission::Stopped);
@@ -2284,6 +2490,123 @@ pub struct ClientProvisioning {
     lease: crate::private_filesystem::Lease,
 }
 impl ClientProvisioning {
+    fn recover_metadata_publication(path: &std::path::Path) -> Result<(), ServiceFailure> {
+        use crate::private_filesystem::Failure;
+        // Only deliberate provisioning may replay these fixed metadata names.
+        // The shared filesystem owner checks the original phase, name, proposed
+        // content digest and expected inode before republishing those exact bytes.
+        // It serializes recovery on the original mutation descriptor. Lifecycle
+        // work still requires the ordinary provisioning lease after recovery.
+        let names = [
+            Self::owner_attempt_name("enrollment")?,
+            Self::owner_attempt_name("desktop")?,
+            Self::owner_attempt_name("recovery")?,
+            Self::owner_attempt_name("enrollment-preparation")?,
+            Self::owner_attempt_name("desktop-preparation")?,
+            Self::owner_attempt_name("public-claims")?,
+            Self::provisioning_attempt_name("cli")?,
+            Self::provisioning_attempt_name("companion")?,
+            Self::provisioning_attempt_name("management")?,
+        ];
+        for name in names {
+            match Directory::reconcile_publication(path, name, 64 * 1024, |bytes| {
+                // Domain decoding remains with each metadata owner and runs
+                // before issuing work. Recovery cannot choose replacement bytes.
+                if bytes.is_empty()
+                    || serde_json::from_slice::<serde::de::IgnoredAny>(bytes).is_err()
+                {
+                    return Err(Failure::Unsafe);
+                }
+                Ok(())
+            }) {
+                Ok(()) => return Ok(()),
+                Err(Failure::Indeterminate) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(ServiceFailure::Indeterminate)
+    }
+    /// Reads bounded public owner-attempt metadata under deliberate account/build
+    /// provisioning authority. No credential bytes belong in this record.
+    pub fn owner_attempt(&self, consumer: &str) -> Result<Option<Vec<u8>>, ServiceFailure> {
+        let name = Self::owner_attempt_name(consumer)?;
+        self.lease.verify()?;
+        Ok(self
+            .directory
+            .read(name, 64 * 1024)?
+            .map(|snapshot| snapshot.bytes.to_vec()))
+    }
+    /// Publishes the original public claim before requesting bearer delivery.
+    /// The lease and byte comparison prevent another observer replacing it.
+    pub fn retain_owner_attempt(
+        &self,
+        consumer: &str,
+        expected: Option<&[u8]>,
+        bytes: &[u8],
+    ) -> Result<(), ServiceFailure> {
+        let name = Self::owner_attempt_name(consumer)?;
+        if bytes.is_empty() || bytes.len() > 64 * 1024 {
+            return Err(ServiceFailure::LimitExceeded);
+        }
+        self.lease.verify()?;
+        let snapshot = self.directory.read(name, 64 * 1024)?;
+        if snapshot.as_ref().map(|value| value.bytes.as_slice()) != expected {
+            return Err(ServiceFailure::RequestConflict);
+        }
+        self.directory
+            .publish(name, bytes, snapshot.as_ref())
+            .map_err(Into::into)
+    }
+    fn owner_attempt_name(consumer: &str) -> Result<&'static str, ServiceFailure> {
+        match consumer {
+            "enrollment" => Ok("owner-enrollment-attempt"),
+            "desktop" => Ok("desktop-owner-enrollment-attempt"),
+            "recovery" => Ok("owner-account-recovery"),
+            "enrollment-preparation" => Ok("owner-enrollment-preparation"),
+            "desktop-preparation" => Ok("desktop-owner-enrollment-preparation"),
+            "public-claims" => Ok("owner-public-claim-bindings"),
+            _ => Err(ServiceFailure::InvalidRecord),
+        }
+    }
+    /// Reads the original operation and phase for one dedicated Client receiver.
+    /// This bounded public metadata never contains credentials or caller paths.
+    pub fn provisioning_attempt(&self, consumer: &str) -> Result<Option<Vec<u8>>, ServiceFailure> {
+        let name = Self::provisioning_attempt_name(consumer)?;
+        self.lease.verify()?;
+        Ok(self
+            .directory
+            .read(name, 64 * 1024)?
+            .map(|snapshot| snapshot.bytes.to_vec()))
+    }
+    /// Retains receiver ownership before dispatch and compares every phase change
+    /// with the preceding record under the deliberate provisioning lease.
+    pub fn retain_provisioning_attempt(
+        &self,
+        consumer: &str,
+        expected: Option<&[u8]>,
+        bytes: &[u8],
+    ) -> Result<(), ServiceFailure> {
+        let name = Self::provisioning_attempt_name(consumer)?;
+        if bytes.is_empty() || bytes.len() > 64 * 1024 {
+            return Err(ServiceFailure::LimitExceeded);
+        }
+        self.lease.verify()?;
+        let snapshot = self.directory.read(name, 64 * 1024)?;
+        if snapshot.as_ref().map(|value| value.bytes.as_slice()) != expected {
+            return Err(ServiceFailure::RequestConflict);
+        }
+        self.directory
+            .publish(name, bytes, snapshot.as_ref())
+            .map_err(Into::into)
+    }
+    fn provisioning_attempt_name(consumer: &str) -> Result<&'static str, ServiceFailure> {
+        match consumer {
+            "cli" => Ok("cli-provisioning-attempt"),
+            "companion" => Ok("companion-provisioning-attempt"),
+            "management" => Ok("management-provisioning-attempt"),
+            _ => Err(ServiceFailure::InvalidRecord),
+        }
+    }
     /// Opens or explicitly provisions one fixed dedicated consumer directory.
     /// The boolean distinguishes first creation from read-only reopening.
     pub fn journal_directory(&self, consumer: &str) -> Result<(PathBuf, bool), ServiceFailure> {

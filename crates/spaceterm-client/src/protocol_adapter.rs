@@ -88,6 +88,7 @@ impl ProtocolSession {
             CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
             CAPABILITY_CANONICAL_DOMAIN,
             CAPABILITY_ORGANIZATION_COMPARISONS,
+            spaceterm_protocol::negotiation::CAPABILITY_SERVER_MACHINE_FACTS,
         ];
         capabilities.extend_from_slice(additional_capabilities);
         capabilities.sort_unstable();

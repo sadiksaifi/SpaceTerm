@@ -618,6 +618,111 @@ async fn askpass_is_injected_only_for_its_mode_and_the_broker_lease_lasts_throug
     assert!(released.load(Ordering::Acquire));
 }
 
+struct AttemptAskPassFixture {
+    cancellations: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl spaceterm_host::ssh_tunnel::TunnelAskPass for AttemptAskPassFixture {
+    fn handoff(&self) -> Result<spaceterm_host::ssh_tunnel::AskPassHandoff, TransportError> {
+        let cancellations = self.cancellations.clone();
+        Ok(spaceterm_host::ssh_tunnel::AskPassHandoff::new(
+            "/usr/bin/true".into(),
+            "00000123:/tmp/broker".into(),
+            zeroize::Zeroizing::new(vec![b'a'; 64]),
+        )?
+        .with_attempt_lifetime(move || {
+            cancellations.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn askpass_attempt_lifetime_ends_when_forwarding_is_ready() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let (temporary, directory) = fixture();
+    let executable = fake_ssh(
+        temporary.path(),
+        "import socket, sys, time\np = sys.argv[sys.argv.index('-L') + 1].split(':')[0]\ns = socket.socket(socket.AF_UNIX)\ns.bind(p)\ns.listen(1)\ntime.sleep(60)",
+    );
+    let cancellations = Arc::new(AtomicUsize::new(0));
+    let provider: Arc<dyn spaceterm_host::ssh_tunnel::TunnelAskPass> =
+        Arc::new(AttemptAskPassFixture {
+            cancellations: Arc::clone(&cancellations),
+        });
+    let command = SshTunnelCommand::new(
+        executable,
+        "/dev/null".into(),
+        SshDestination::new("host").unwrap(),
+        directory.endpoint("t").unwrap(),
+        RemoteSocketPath::new("/run/spaceterm/s").unwrap(),
+        AuthenticationMode::AskPass,
+    )
+    .unwrap();
+    let tunnel = start_tunnel(
+        command,
+        environment(temporary.path()),
+        Some(provider.clone()),
+        Duration::from_secs(3),
+    )
+    .await
+    .unwrap();
+    // The application still owns its provider and the tunnel remains alive.
+    // Neither may extend interactive authority beyond this authentication attempt.
+    assert_eq!(cancellations.load(Ordering::Acquire), 1);
+    tunnel.cancel().await.unwrap();
+    assert_eq!(cancellations.load(Ordering::Acquire), 1);
+    drop(provider);
+}
+
+#[tokio::test(start_paused = true)]
+async fn askpass_attempt_lifetime_ends_on_dial_timeout_while_provider_is_shared() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let (temporary, directory) = fixture();
+    let executable = temporary.path().join("pending-ssh");
+    fs::write(
+        &executable,
+        "#!/bin/sh\nprintf '%s' \"$$\" >pid.pending\nmv pid.pending pid\nexec /bin/sleep 60\n",
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let cancellations = Arc::new(AtomicUsize::new(0));
+    let provider: Arc<dyn spaceterm_host::ssh_tunnel::TunnelAskPass> =
+        Arc::new(AttemptAskPassFixture {
+            cancellations: Arc::clone(&cancellations),
+        });
+    let command = SshTunnelCommand::new(
+        executable,
+        "/dev/null".into(),
+        SshDestination::new("host").unwrap(),
+        directory.endpoint("t").unwrap(),
+        RemoteSocketPath::new("/run/spaceterm/s").unwrap(),
+        AuthenticationMode::AskPass,
+    )
+    .unwrap();
+    let start = tokio::spawn(start_tunnel(
+        command,
+        environment(temporary.path()),
+        Some(provider.clone()),
+        Duration::from_secs(2),
+    ));
+    wait_for_file(&temporary.path().join("pid")).await;
+    assert_eq!(cancellations.load(Ordering::Acquire), 0);
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(
+        start.await.unwrap().err(),
+        Some(TransportError::HandshakeExpired)
+    );
+    assert_eq!(cancellations.load(Ordering::Acquire), 1);
+    drop(provider);
+    assert_eq!(cancellations.load(Ordering::Acquire), 1);
+}
+
 #[tokio::test(start_paused = true)]
 async fn askpass_mode_has_no_batch_or_mock_credential_fallback() {
     let (temporary, directory) = fixture();
@@ -1041,18 +1146,20 @@ mod socket_provenance {
         })
         .await
         .unwrap();
+        // Linux connects through the pinned foreign inode and never reaches the
+        // substituted listener. macOS rejects the listener's original bound address.
+        // Advancing macOS time here races that rejection on the supervisor thread.
+        #[cfg(target_os = "linux")]
         tokio::time::advance(Duration::from_secs(5)).await;
-        match start.await.unwrap() {
-            Ok(tunnel) => {
-                tunnel.cancel().await.unwrap();
-            }
-            Err(error) => {
-                #[cfg(target_os = "linux")]
-                assert_eq!(error, TransportError::HandshakeExpired);
-                #[cfg(target_os = "macos")]
-                assert_eq!(error, TransportError::UnsafeEndpoint);
-            }
+        let result = fixture_watchdog(start).await.unwrap().unwrap();
+        let error = result.as_ref().err().copied();
+        if let Ok(tunnel) = result {
+            tunnel.cancel().await.unwrap();
         }
+        #[cfg(target_os = "linux")]
+        assert_eq!(error, Some(TransportError::HandshakeExpired));
+        #[cfg(target_os = "macos")]
+        assert_eq!(error, Some(TransportError::UnsafeEndpoint));
         CONNECT_GATE.lock().unwrap().take();
         assert!(
             swapped.load(Ordering::Acquire),

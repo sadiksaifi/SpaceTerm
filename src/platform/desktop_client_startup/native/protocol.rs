@@ -68,6 +68,7 @@ pub(crate) struct NativeProtocol {
     registry: Mutex<Option<ClientRegistry>>,
     channels: Mutex<Option<Arc<PaneChannels>>>,
     infos: Mutex<BTreeMap<ServerId, ConnectedInfo>>,
+    metadata: Mutex<BTreeMap<ServerId, spaceterm_protocol::convert::metadata::MetadataAssembler>>,
     lookups: Mutex<BTreeMap<OperationId, oneshot::Sender<OperationLookup>>>,
     effects: Mutex<BTreeMap<(ServerId, u64), QueuedEffect>>,
     sequence: AtomicU64,
@@ -85,6 +86,7 @@ impl NativeProtocol {
             registry: Mutex::new(None),
             channels: Mutex::new(None),
             infos: Mutex::new(BTreeMap::new()),
+            metadata: Mutex::new(BTreeMap::new()),
             lookups: Mutex::new(BTreeMap::new()),
             effects: Mutex::new(BTreeMap::new()),
             sequence: AtomicU64::new(0),
@@ -156,15 +158,45 @@ impl NativeProtocol {
             .map(|previous| previous + 1)
             .map_err(|_| fail(ClientFailureClass::CounterExhausted))
     }
-    async fn completed(&self, ticket: OperationTicket) -> Result<Outcome, ClientFailure> {
+    async fn completed(
+        &self,
+        ticket: OperationTicket,
+        captured: ConnectedInfo,
+    ) -> Result<Outcome, ClientFailure> {
         let mut state = ticket.status();
+        let mut connection = self.handle(captured.server)?.state();
         let await_outcome = async {
             loop {
-                let current = state.borrow().clone();
-                match current {
-                    OperationStatus::Completed { outcome, .. } => return Ok(outcome),
-                    OperationStatus::Retired => return Err(stale()),
-                    _ => state.changed().await.map_err(|_| stale())?,
+                let current = state.borrow_and_update().clone();
+                let connected = connection.borrow_and_update().clone();
+                match connected {
+                    ConnectionState::Connected { info }
+                        if info.binding == captured.binding
+                            && info.epoch == captured.epoch
+                            && info.attempt == captured.attempt =>
+                    {
+                        // Receipt and organization delivery are separate. The
+                        // pending use must validate against the installed grant.
+                        if let OperationStatus::Completed {
+                            outcome,
+                            publication_revision,
+                        } = current
+                            && info.organization_revision >= publication_revision
+                        {
+                            return Ok(outcome);
+                        }
+                    }
+                    ConnectionState::Connecting {
+                        phase: spaceterm_client::api::ConnectingPhase::Reconciling,
+                    } => {}
+                    _ => return Err(stale()),
+                }
+                if matches!(*state.borrow(), OperationStatus::Retired) {
+                    return Err(stale());
+                }
+                tokio::select! {
+                    changed = state.changed() => changed.map_err(|_| stale())?,
+                    changed = connection.changed() => changed.map_err(|_| stale())?,
                 }
             }
         };
@@ -202,7 +234,7 @@ impl NativeProtocol {
             .map_err(|_| invalid())?
             .insert(info.server, info);
         if let Some(cache) = self.cache.lock().map_err(|_| invalid())?.as_ref() {
-            cache.publish(self.binding(info.server)?, retained.organization.clone())?;
+            cache.publish(self.binding(info.server)?, retained.clone())?;
         }
         self.channels()?.publish(info, retained)
     }
@@ -331,10 +363,26 @@ impl Drop for LookupCleanup<'_> {
     }
 }
 impl ConnectionDelegate for NativeProtocol {
+    fn shutdown(&self) -> ClientFuture<'_, ()> {
+        Box::pin(async move {
+            let cache = self.cache.lock().map_err(|_| invalid())?.clone();
+            if let Some(cache) = cache {
+                cache.flush().await?;
+            }
+            Ok(())
+        })
+    }
     fn invalidate(&self, binding: &PairedServerBinding, reason: ConnectionInvalidation) {
         let server = binding.target().server();
         if let Ok(channels) = self.channels() {
             let _ = channels.invalidate(server, reason);
+            // Resynchronization can retain the authenticated connection. Its
+            // next context must exceed even an acknowledgement discarded by resync.
+            if reason == ConnectionInvalidation::Reconciliation
+                && let Ok(context) = channels.next_connection_context()
+            {
+                let _ = channels.align_connection_context(server, context);
+            }
         }
         if let Ok(mut effects) = self.effects.lock() {
             effects.retain(|(owner, _), _| *owner != server);
@@ -345,7 +393,12 @@ impl ConnectionDelegate for NativeProtocol {
         if let Ok(mut infos) = self.infos.lock() {
             infos.remove(&server);
         }
-        self.terminal.invalidate(server);
+        if reason != ConnectionInvalidation::Publication
+            && let Ok(mut metadata) = self.metadata.lock()
+        {
+            metadata.remove(&server);
+        }
+        self.terminal.invalidate(server, reason);
     }
     fn reconcile<'a>(
         &'a self,
@@ -358,6 +411,10 @@ impl ConnectionDelegate for NativeProtocol {
                 .lock()
                 .map_err(|_| invalid())?
                 .insert(info.server, info);
+            self.metadata
+                .lock()
+                .map_err(|_| invalid())?
+                .insert(info.server, Default::default());
             let binding = self.binding(info.server)?;
             let peer = DirectPeer {
                 owner: self,
@@ -415,7 +472,8 @@ impl ConnectionDelegate for NativeProtocol {
                 $p::message::Kind::NativeCompletion(value) => {
                     let fence = identity::decode_fence(value.fence.as_ref().ok_or_else(invalid)?, None).map_err(ClientFailure::from)?;
                     let effects = self.effects.lock().map_err(|_| invalid())?;
-                    let queued = effects.get(&(info.server, value.request)).ok_or_else(stale)?;
+                    let request = if value.effect_request == 0 { value.request } else { value.effect_request };
+                    let queued = effects.get(&(info.server, request)).ok_or_else(stale)?;
                     if !queued.permit.is_current() || queued.permit.fence() != fence { return Err(stale()); }
                     Ok(OutboundClass::Ordinary)
                 }
@@ -434,6 +492,39 @@ impl ConnectionDelegate for NativeProtocol {
         channel: &'a mut dyn ProtocolChannel,
     ) -> ClientFuture<'a, ()> {
         Box::pin(async move {
+            let fragment = match &message {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::MetadataFragment(value)),
+                }) => Some(
+                    spaceterm_protocol::convert::metadata::v1::decode_fragment(value)
+                        .map_err(ClientFailure::from)?,
+                ),
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::MetadataFragment(value)),
+                }) => Some(
+                    spaceterm_protocol::convert::metadata::v2::decode_fragment(value)
+                        .map_err(ClientFailure::from)?,
+                ),
+                _ => None,
+            };
+            if let Some(fragment) = fragment {
+                let fence = fragment.fence();
+                if fence.connection() != info.binding || fence.session().epoch != info.epoch {
+                    return Err(invalid());
+                }
+                let completed = self
+                    .metadata
+                    .lock()
+                    .map_err(|_| invalid())?
+                    .get_mut(&info.server)
+                    .ok_or_else(stale)?
+                    .receive(fragment)
+                    .map_err(ClientFailure::from)?;
+                if let Some((fence, snapshot)) = completed {
+                    self.channels()?.receive_metadata(fence, snapshot)?;
+                }
+                return Ok(());
+            }
             let metadata = match &message {
                 Payload::Major1(v1::Message {
                     kind: Some(v1::message::Kind::MetadataPublication(value)),
@@ -615,7 +706,7 @@ impl PaneConnectionPort for NativeProtocol {
                             }),
                         )
                         .await?;
-                    match self.completed(ticket).await? {
+                    match self.completed(ticket, request.info).await? {
                         Outcome::ControlGranted(grant) => grant.grant(),
                         Outcome::ControlAcquired(grant) => grant,
                         _ => return Err(stale()),
@@ -648,7 +739,7 @@ impl PaneConnectionPort for NativeProtocol {
                 .tracker
                 .begin_startup(&binding, fence, request.source, request.workspace, self)
                 .await?;
-            match self.completed(ticket).await? {
+            match self.completed(ticket, request.info).await? {
                 Outcome::StartupAwaitingMeasurement { intent: received }
                     if received == intent.id() =>
                 {
@@ -709,8 +800,28 @@ impl PaneConnectionPort for NativeProtocol {
         if !permit.is_current() || permit.fence() != command.fence {
             return Err(stale());
         }
+        let mut command = command;
+        if let spaceterm_client::pane_channel::RuntimeEffect::ResolvePaste(approval, decision) =
+            command.command
+        {
+            command.command = spaceterm_client::pane_channel::RuntimeEffect::CompleteNativeRequest(
+                self.paste_completion(command.fence, approval, decision)?,
+            );
+        }
         let server = command.fence.session().pane.server();
         let (_, info) = self.connected(server)?;
+        let required = match &command.command {
+            spaceterm_client::pane_channel::RuntimeEffect::Copy(_) => {
+                Some(spaceterm_protocol::negotiation::CAPABILITY_ENHANCED_COPY)
+            }
+            spaceterm_client::pane_channel::RuntimeEffect::RequestPaste(_) => {
+                Some(spaceterm_protocol::negotiation::CAPABILITY_NATIVE_PASTE_CORRELATION)
+            }
+            _ => None,
+        };
+        if required.is_some_and(|capability| !info.capabilities.supports(capability)) {
+            return Err(fail(ClientFailureClass::MissingCapability));
+        }
         if matches!(
             &command.command,
             spaceterm_client::pane_channel::RuntimeEffect::Pointer(_)
@@ -730,19 +841,39 @@ impl PaneConnectionPort for NativeProtocol {
             _ => None,
         };
         let order = self.next()?;
-        let request = native.map_or(order, |completion| completion.id().get());
+        let correlated_native =
+            native.is_some_and(|completion| completion.runtime_request().is_some());
+        let request = if correlated_native {
+            order
+        } else {
+            native.map_or(order, |completion| completion.id().get())
+        };
         let payload = match (info.major, native) {
             (1, Some(completion)) => Payload::Major1(v1::Message {
-                kind: Some(v1::message::Kind::NativeCompletion(
-                    spaceterm_protocol::convert::native_requests::v1::encode_completion(completion)
-                        .map_err(ClientFailure::from)?,
-                )),
+                kind: Some(v1::message::Kind::NativeCompletion({
+                    let mut value =
+                        spaceterm_protocol::convert::native_requests::v1::encode_completion(
+                            completion,
+                        )
+                        .map_err(ClientFailure::from)?;
+                    if correlated_native {
+                        value.effect_request = request;
+                    }
+                    value
+                })),
             }),
             (2, Some(completion)) => Payload::Major2(v2::Message {
-                kind: Some(v2::message::Kind::NativeCompletion(
-                    spaceterm_protocol::convert::native_requests::v2::encode_completion(completion)
-                        .map_err(ClientFailure::from)?,
-                )),
+                kind: Some(v2::message::Kind::NativeCompletion({
+                    let mut value =
+                        spaceterm_protocol::convert::native_requests::v2::encode_completion(
+                            completion,
+                        )
+                        .map_err(ClientFailure::from)?;
+                    if correlated_native {
+                        value.effect_request = request;
+                    }
+                    value
+                })),
             }),
             (1, None) => Payload::Major1(v1::Message {
                 kind: Some(v1::message::Kind::RuntimeCommand(
@@ -781,14 +912,31 @@ impl PaneConnectionPort for NativeProtocol {
             },
         );
         drop(effects);
+        if let Some(completion) = native {
+            self.forget_native(completion.fence().session(), completion.id().get())?;
+        }
         self.terminal.effects_changed.notify_one();
-        if native.is_some() {
+        if native.is_some() && !correlated_native {
             return Ok(EffectAdmission::Queued);
         }
         Ok(EffectAdmission::Correlated(EffectCorrelation::new(
             request,
             command.fence,
         )?))
+    }
+    fn try_copy(
+        &self,
+        permit: EffectPermit,
+        modifiers: spaceterm_terminal::InputModifiers,
+    ) -> Result<EffectAdmission, ClientFailure> {
+        let fence = permit.fence();
+        self.try_effect(
+            permit,
+            FencedRuntimeCommand {
+                fence,
+                command: spaceterm_client::pane_channel::RuntimeEffect::Copy(modifiers),
+            },
+        )
     }
     fn read(
         &self,
@@ -825,10 +973,12 @@ impl LocalUseInvalidator for NativeProtocol {
     }
     fn remove_pairing<'a>(&'a self, pairing: &'a LocalPairingKey) -> ClientFuture<'a, ()> {
         Box::pin(async move {
-            self.registry()?
-                .remove_suppressed(pairing)
-                .await
-                .map(|_| ())
+            self.registry()?.remove_suppressed(pairing).await?;
+            let cache = self.cache.lock().map_err(|_| invalid())?.clone();
+            if let Some(cache) = cache {
+                cache.remove_pairing(pairing).await?;
+            }
+            Ok(())
         })
     }
 }

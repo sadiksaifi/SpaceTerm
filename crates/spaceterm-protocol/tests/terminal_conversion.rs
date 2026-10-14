@@ -442,3 +442,32 @@ mouse_inputs!(
     application_mouse_preserves_complete_content_binding_major_2,
     v2
 );
+
+#[test]
+fn enhanced_copy_has_a_distinct_non_key_wire_action_in_both_majors() {
+    use prost::Message;
+    macro_rules! check {
+        ($p:ident) => {{
+            let mut bytes = $p::RuntimeCommand {
+                request: 73,
+                fence: Some(identity::encode_fence(fence(None))),
+                action: None,
+            }
+            .encode_to_vec();
+            // Field 15 is an enhanced-only Copy chord, not an ordinary Key.
+            bytes.extend_from_slice(&[0x78, 6]);
+            let wire = $p::RuntimeCommand::decode(bytes.as_slice()).unwrap();
+            let decoded = runtime::$p::decode_command(&wire)
+                .expect("Copy must retain its final-effect policy");
+            assert_eq!(format!("{:?}", decoded.command), "RuntimeCommand::Copy");
+            assert_eq!(
+                runtime::$p::encode_command(73, &decoded)
+                    .unwrap()
+                    .encode_to_vec(),
+                bytes
+            );
+        }};
+    }
+    check!(v1);
+    check!(v2);
+}

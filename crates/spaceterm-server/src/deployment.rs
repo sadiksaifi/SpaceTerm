@@ -6,6 +6,7 @@ use spaceterm_distribution::{DistributionFailure, StorageCompatibility};
 
 use crate::account_startup::StartupFailure;
 
+pub mod bootstrap;
 pub mod owner;
 pub mod setup;
 mod stdio;
@@ -22,6 +23,7 @@ pub enum ServerInvocation {
     ReserveNativeRequest,
     OwnerEnrollment,
     SetupConfirmed,
+    BootstrapAccount,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InvalidServerArguments;
@@ -48,6 +50,7 @@ impl ServerInvocation {
                         Some("serve") => Self::Serve,
                         Some("reserve-native-request") => Self::ReserveNativeRequest,
                         Some("owner-enrollment") => Self::OwnerEnrollment,
+                        Some("bootstrap-account") => Self::BootstrapAccount,
                         Some("setup")
                             if arguments.next().as_deref()
                                 == Some(std::ffi::OsStr::new("--confirm")) =>
@@ -93,7 +96,8 @@ pub fn query_output(invocation: ServerInvocation) -> Result<Option<Vec<u8>>, Que
         ServerInvocation::Serve
         | ServerInvocation::ReserveNativeRequest
         | ServerInvocation::OwnerEnrollment
-        | ServerInvocation::SetupConfirmed => Ok(None),
+        | ServerInvocation::SetupConfirmed
+        | ServerInvocation::BootstrapAccount => Ok(None),
         ServerInvocation::Status => crate::account_startup::production_status()
             .map(Some)
             .map_err(QueryFailure::Account),

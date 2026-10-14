@@ -234,6 +234,10 @@ impl ConnectionCapabilities {
             CAPABILITY_NATIVE_NOTIFICATIONS,
             CAPABILITY_APPLICATION_MOUSE,
             CAPABILITY_RUNTIME_METADATA,
+            CAPABILITY_RUNTIME_METADATA_FRAGMENTS,
+            CAPABILITY_NATIVE_PASTE_CORRELATION,
+            CAPABILITY_ENHANCED_COPY,
+            CAPABILITY_SERVER_MACHINE_FACTS,
         ]
         .into_iter()
         .enumerate()
@@ -256,6 +260,10 @@ impl ConnectionCapabilities {
             CAPABILITY_NATIVE_NOTIFICATIONS => 6,
             CAPABILITY_APPLICATION_MOUSE => 7,
             CAPABILITY_RUNTIME_METADATA => 8,
+            CAPABILITY_RUNTIME_METADATA_FRAGMENTS => 9,
+            CAPABILITY_NATIVE_PASTE_CORRELATION => 10,
+            CAPABILITY_ENHANCED_COPY => 11,
+            CAPABILITY_SERVER_MACHINE_FACTS => 12,
             _ => return false,
         };
         self.0 & (1 << index) != 0
@@ -306,6 +314,29 @@ pub use crate::connection::queries::{PairedDevicePage, ServerQueries, ServerStat
 #[cfg(test)]
 mod capability_tests {
     use super::*;
+    #[test]
+    fn native_metadata_fragments_copy_and_paste_are_independent_connection_capabilities() {
+        use spaceterm_protocol::negotiation::*;
+        let features = [
+            CAPABILITY_RUNTIME_METADATA_FRAGMENTS,
+            CAPABILITY_NATIVE_PASTE_CORRELATION,
+            CAPABILITY_ENHANCED_COPY,
+            CAPABILITY_SERVER_MACHINE_FACTS,
+        ];
+        for mask in 0u8..16 {
+            let advertised: Vec<u32> = features
+                .iter()
+                .enumerate()
+                .filter_map(|(index, capability)| {
+                    ((mask & (1 << index)) != 0).then_some(*capability)
+                })
+                .collect();
+            let capabilities = ConnectionCapabilities::from_advertisement(&advertised);
+            for (index, feature) in features.iter().enumerate() {
+                assert_eq!(capabilities.supports(*feature), (mask & (1 << index)) != 0);
+            }
+        }
+    }
     #[test]
     fn installed_terminal_capabilities_survive_connection_negotiation() {
         use spaceterm_protocol::negotiation::*;

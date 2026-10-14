@@ -2,6 +2,7 @@
 pub mod arguments;
 pub mod bindings;
 pub mod output;
+pub mod pairing_pipe;
 pub mod runner;
 pub mod tty;
 

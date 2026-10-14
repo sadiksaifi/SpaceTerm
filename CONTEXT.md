@@ -1,51 +1,52 @@
 # SpaceTerm
 
-SpaceTerm organizes terminal work into Workspaces, Tabs, Pane Layouts, and Pane-owned Terminal Sessions.
+SpaceTerm Servers own terminal work in Workspaces, Tabs, and Panes.
+SpaceTerm Clients present that work through their own Workspace Attachments and Pane Layouts.
 
 ## Hierarchy
 
-**SpaceTerm**: The application that owns all Workspaces.
+**SpaceTerm**: The product comprising SpaceTerm Servers and SpaceTerm Clients.
 
-**Workspace**: A named top-level scope containing Tabs and an optional Pinned Directory.
+**Workspace**: A named, server-owned scope containing Tabs and an optional Pinned Directory.
 
-**Local Workspace**: A Workspace whose Terminal Sessions run on this machine.
+**Local Workspace**: A Workspace presented through an authenticated private local connection to the client's account-owned SpaceTerm Server.
 
-**Remote Workspace**: A Workspace whose Terminal Sessions run on the machine identified by an SSH Destination.
+**Remote Workspace**: A Workspace presented through a network or SSH Tunnel connection to a SpaceTerm Server, including a server on the same machine.
 
 **Current Directory**: A Terminal Session's current working directory on its machine.
 
 **Starting Directory**: The directory selected when creating a Terminal Session.
 
-**Pinned Directory**: An explicitly selected directory that sets a Workspace's identity and the directory of its new Terminal Sessions.
+**Pinned Directory**: An explicitly selected directory on the owning server used when choosing Starting Directories for a Workspace's new Terminal Sessions.
 
-**Tab**: An ordered work area belonging to one Workspace and owning one Pane Layout. In a Workspace that lists Worktrees, each Tab also belongs to one Worktree.
+**Tab**: A server-owned work area belonging to one Workspace and containing Panes, with an optional Worktree association.
 _Avoid_: Window, Terminal Session
 
-**Pane Layout**: The recursive arrangement of Panes and Splits in a Tab.
+**Tab Display Order**: One SpaceTerm Client's personal ordering of a Workspace's Tabs.
 
-**Split**: A Pane Layout node dividing its space between two children.
+**Pane Layout**: One SpaceTerm Client's recursive arrangement of a Tab's Panes and Splits.
 
-**Pane**: A leaf of a Tab's Pane Layout that owns one Terminal Session.
+**Split**: A client-owned Pane Layout node dividing its space between two children.
 
-**Root Pane**: The stable Pane that supplies a Tab's automatic directory, independent of focus and layout order.
+**Pane**: A server-owned member of a Tab with a stable identity and at most one live Terminal Session.
 
-**Root Tab**: The stable Tab whose Root Pane supplies a Workspace's unpinned directory and automatic name.
+**Root Pane**: The server-selected Pane that supplies a Tab's automatic directory, independent of client focus and Pane Layout.
+
+**Root Tab**: The server-selected Tab whose Root Pane supplies a Workspace's unpinned directory and automatic name.
 
 **Pane Caption**: The header naming a Pane and carrying its direct controls.
 
-**Pane Origin**: The account and machine where a Pane's Terminal Session runs, which make the Pane Local or Remote.
+**Pane Origin**: The server account and machine where a Pane's Terminal Session runs, with Local or Remote classification from the client's authenticated connection.
 
 **Operating-System Window**: A native window that presents SpaceTerm.
 
 **Window Controls**: The host's close, minimize, and maximize controls for an Operating-System Window.
 
-## Server architecture vocabulary
+## Servers and clients
 
-These terms describe the server architecture being designed in [issue #162](https://github.com/sadiksaifi/SpaceTerm/issues/162).
+**SpaceTerm Server**: The headless application that owns shared Workspace organization, entity identities, Roots, Terminal Session lifecycles, Server Settings, and Git operations on its machine.
 
-**SpaceTerm Server**: The application that owns its Workspaces and their Terminal Sessions independently of the applications presenting them.
-
-**SpaceTerm Client**: An application that presents and controls SpaceTerm Server state.
+**SpaceTerm Client**: An application that connects to SpaceTerm Servers and owns Workspace Attachments, Client View State, terminal presentation, and client-local native effects.
 
 **Workspace Window**: A desktop SpaceTerm Client's single main Operating-System Window presenting its Workspace Attachments.
 
@@ -59,7 +60,7 @@ These terms describe the server architecture being designed in [issue #162](http
 
 **SpaceTerm Protocol**: The versioned, language-neutral exchange of server state, terminal presentation, and client operations between SpaceTerm Clients and SpaceTerm Servers.
 
-**SSH Bootstrap**: The use of an SSH Destination to detect, install, and start a SpaceTerm Server for a client connection.
+**SSH Bootstrap**: Explicit setup through an SSH Destination to discover or install an account-owned SpaceTerm Server and enroll the initiating device. Ordinary reconnect uses the existing pairing.
 
 **Start Server**: The explicit action that starts a SpaceTerm Server.
 
@@ -77,7 +78,7 @@ These terms describe the server architecture being designed in [issue #162](http
 
 **Server Settings**: Preferences owned by one SpaceTerm Server and shared by its authorized clients.
 
-**Client View State**: A SpaceTerm Client's presentation choices for server-owned work, including Tab display order, Pane Layouts and Split ratios, Active Workspace, Active Tab, Focused Pane, Zoomed Pane, Selection, Terminal Find, and scroll position.
+**Client View State**: A SpaceTerm Client's presentation choices for server-owned work, including Tab Display Order, Pane Layouts and Split ratios, Active Workspace, Active Tab, Focused Pane, Zoomed Pane, Selection, Terminal Find, and scroll position.
 
 **Controlling Client**: The SpaceTerm Client with authority to supply terminal input and terminal dimensions to a Pane.
 
@@ -87,9 +88,9 @@ These terms describe the server architecture being designed in [issue #162](http
 
 ## Settings
 
-**Settings**: Application-scoped preferences retained across launches.
+**Settings**: Preferences retained across launches, scoped to the client or a selected server.
 
-**Settings Document**: The retained Settings and installed Terminal Themes.
+**Settings Document**: The retained Client Settings and installed Terminal Themes. Server organization, pairings, Workspace Attachments, and Client View State are retained separately.
 
 **Settings Window**: The Operating-System Window presenting Settings.
 
@@ -142,13 +143,13 @@ _Avoid_: Hotkey, key equivalent
 
 **Active Tab**: The Tab presented within a Workspace.
 
-**Next Tab** / **Previous Tab**: The Commands activating the neighboring Tab in Workspace order, within the Active Worktree.
+**Next Tab** / **Previous Tab**: The Commands activating the neighboring Tab in the client's Tab Display Order, within the Active Worktree.
 
-**Move Tab Right** / **Move Tab Left**: The Commands moving the Active Tab among its Workspace's Tabs, within the Active Worktree.
+**Move Tab Right** / **Move Tab Left**: The Commands moving the Active Tab in the client's Tab Display Order, within the Active Worktree.
 
 **Next Worktree** / **Previous Worktree**: The Commands activating the neighboring Worktree that has Tabs, in sidebar order, wrapping at either end.
 
-**Focused Pane**: The Pane selected by a Tab for Pane actions and focus restoration.
+**Focused Pane**: The Pane selected in a client's Tab view for Pane actions and focus restoration.
 
 **Terminal Input Focus**: A Pane's current eligibility to accept terminal input.
 
@@ -168,25 +169,23 @@ _Avoid_: Hotkey, key equivalent
 
 ## Workspace location and remote identity
 
-**Workspace Location**: Where a Workspace runs: Local or Remote. Pinning is independent of it.
+**Workspace Location**: A Workspace's Local or Remote classification in the client. Pinning is independent of it.
 
-**SSH Destination**: The OpenSSH destination token selected for a Remote Workspace. Distinct aliases are distinct destinations.
+**SSH Destination**: The OpenSSH destination token selected for SSH Bootstrap or an SSH Tunnel. Distinct aliases are distinct destinations, not proof of server identity.
 
-**Remote Directory**: An absolute or home-relative directory value on a remote machine.
+**Remote Directory**: An absolute or home-relative directory value on a remote server's machine.
 
 **Remote Directory Identity**: The physical absolute path of a Remote Directory on its machine.
 
-**Control Connection**: The Workspace-owned OpenSSH transport shared by its Remote Panes.
-_Avoid_: Remote Workspace Session, SSH session
+**Server Connection**: A SpaceTerm Client's authenticated SpaceTerm Protocol connection to a pinned, paired SpaceTerm Server.
 
-**Terminal Session Channel**: The single-use remote shell channel consumed by one Remote Pane through its Control Connection.
-_Avoid_: remote channel, Pane channel
+**SSH Tunnel**: An OpenSSH route carrying a Server Connection to a SpaceTerm Server. SSH access alone grants no SpaceTerm Protocol authority.
 
 **Authentication Prompt**: An OpenSSH confirmation or obscured response request presented by SpaceTerm.
 
 ## Terminal
 
-**Terminal Session**: The Pane-owned runtime joining a Terminal Emulator to a local shell or remote Terminal Session Channel.
+**Terminal Session**: The server-owned live runtime for one Pane, joining a Terminal Emulator to a PTY and shell on the server's machine.
 _Avoid_: session, terminal
 
 **Terminal Emulator**: The state machine interpreting terminal output and owning screen state.
@@ -237,13 +236,13 @@ _Avoid_: git status, VCS status, git info
 **Repository Source Directory**: The directory Repository Status reads for a Pane: its Current Directory as of the last prompt.
 _Avoid_: git directory, prompt directory
 
-**Prompt Owner**: A random value each Local Terminal Session gives its shell, which SpaceTerm's shell integration attaches to the shell's own prompt markers. Once the shell has sent it, only markers that carry it move the Repository Source Directory, so a nested `ssh` or `docker` shell cannot.
+**Prompt Owner**: A random value each Terminal Session gives its owning shell, which SpaceTerm's shell integration attaches to that shell's prompt markers. Once the shell has sent it, only markers that carry it move the Repository Source Directory, so a nested `ssh` or `docker` shell cannot.
 _Avoid_: shell token, session secret
 
-**Pull Request**: The open GitHub pull request whose head is a repository's current branch, found through the local GitHub CLI.
+**Pull Request**: The open GitHub pull request whose head is a repository's current branch, found through the client's GitHub CLI using server-supplied repository facts.
 _Avoid_: PR, merge request
 
-**Worktree**: One of a git repository's working trees, listed under a Local Workspace whose directory is in that repository. Its Tabs start inside it.
+**Worktree**: One of a git repository's working trees on the owning server's machine, listed under a Workspace whose directory is in that repository. Its Tabs start inside it.
 _Avoid_: checkout, working copy
 
 **Main Worktree**: The Worktree git lists first, which holds the repository's own working tree. It cannot be removed.

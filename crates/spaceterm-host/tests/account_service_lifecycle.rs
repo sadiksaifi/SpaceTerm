@@ -45,6 +45,9 @@ struct Manager {
     delay_stop: bool,
     linger: Mutex<Option<LingerState>>,
     rejected_installation: Mutex<Option<spaceterm_host::startup::InstallationId>>,
+    start_failure: Mutex<Option<ServiceFailure>>,
+    status_failure: Mutex<Option<ServiceFailure>>,
+    starting: AtomicBool,
 }
 impl Manager {
     fn new(delay_stop: bool) -> Self {
@@ -55,6 +58,9 @@ impl Manager {
             stop_release: Semaphore::new(0),
             delay_stop,
             rejected_installation: Mutex::new(None),
+            start_failure: Mutex::new(None),
+            status_failure: Mutex::new(None),
+            starting: AtomicBool::new(false),
             linger: Mutex::new(if cfg!(target_os = "linux") {
                 Some(LingerState::Enabled)
             } else {
@@ -65,7 +71,12 @@ impl Manager {
 }
 impl ServiceManager for Manager {
     fn status<'a>(&'a self, _: Option<&'a RegisteredServer>) -> ServiceFuture<'a, SupervisorState> {
-        Box::pin(async { Ok(*self.state.lock().unwrap()) })
+        Box::pin(async {
+            match *self.status_failure.lock().unwrap() {
+                Some(failure) => Err(failure),
+                None => Ok(*self.state.lock().unwrap()),
+            }
+        })
     }
     fn linger(&self) -> ServiceFuture<'_, Option<LingerState>> {
         Box::pin(async { Ok(*self.linger.lock().unwrap()) })
@@ -82,8 +93,15 @@ impl ServiceManager for Manager {
     fn start<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
         Box::pin(async {
             self.effects.lock().unwrap().push("start");
-            *self.state.lock().unwrap() = SupervisorState::Running;
-            Ok(())
+            *self.state.lock().unwrap() = if self.starting.load(Ordering::SeqCst) {
+                SupervisorState::Starting
+            } else {
+                SupervisorState::Running
+            };
+            match *self.start_failure.lock().unwrap() {
+                Some(failure) => Err(failure),
+                None => Ok(()),
+            }
         })
     }
     fn stop<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
@@ -270,6 +288,25 @@ struct Fixture {
     clock: Arc<Clock>,
 }
 impl Fixture {
+    fn for_install() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        // First installation opens real organization storage, so a tmpfs tempdir is unsafe.
+        let home = spaceterm_host::account_service::TrustedAccountFacts::current().unwrap();
+        let root = tempfile::Builder::new()
+            .prefix("spaceterm-lifecycle-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in(home.home())
+            .unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        Self {
+            _root: root,
+            account,
+            manager: Arc::new(Manager::new(false)),
+            processes: Arc::new(Processes::new(false)),
+            clock: Arc::new(Clock(AtomicU64::new(100))),
+        }
+    }
     fn new(delay_stop: bool, absence: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
@@ -1489,53 +1526,18 @@ async fn near_ceiling_journal_reserves_nonempty_scope_and_original_outcome_befor
                 .server_pin()
                 .identity,
         );
-        *fixture.processes.sessions.lock().unwrap() = (1..=64)
+        let sessions: Vec<_> = (1..=64)
             .map(|local| SessionKey {
                 epoch: ServerEpoch::new(1),
                 pane: spaceterm_core::identity::PaneId::new(server, local).unwrap(),
                 generation: spaceterm_core::authority::SessionGeneration::new(1),
             })
             .collect();
-        // Retain exact nonempty scopes until another assessment no longer fits.
-        for _ in 0..32 {
-            let next = match supervisor.allocate_request() {
-                Ok(next) => next,
-                Err(ServiceFailure::LimitExceeded) => break,
-                Err(failure) => panic!("unexpected allocation failure {failure:?}"),
-            };
-            match supervisor.assess(next, ServiceAction::Stop).await {
-                Ok(_) => {}
-                Err(ServiceFailure::LimitExceeded) => break,
-                Err(failure) => panic!("unexpected assessment failure {failure:?}"),
-            }
-        }
-        // Later allocations must not consume capacity already owed to this outcome.
-        // Allocation may retire old unsubmitted IDs rather than fail. Padding
-        // is bounded by the journal's 256 slots, not an unreachable byte target.
-        for _ in 0..256 {
-            if std::fs::metadata(fixture.account.anchor().join("requests"))
-                .unwrap()
-                .len()
-                >= (256 * 1024 - 120)
-            {
-                break;
-            }
-            match supervisor.allocate_request() {
-                Ok(_) => {}
-                Err(ServiceFailure::LimitExceeded) => break,
-                Err(failure) => panic!("unexpected allocation failure {failure:?}"),
-            }
-        }
-        assert!(
-            std::fs::metadata(fixture.account.anchor().join("requests"))
-                .unwrap()
-                .len()
-                > 240 * 1024
-        );
-        // Unsubmitted IDs may be retired under pressure. Capture this original
-        // confirmation after pressure, then test its reserved completion budget.
+        *fixture.processes.sessions.lock().unwrap() = sessions.clone();
+        // Confirm the full original scope before filling the journal. Keep it
+        // unsubmitted until allocation has displaced an expendable bare ID.
         let request = supervisor.allocate_request().unwrap();
-        let action = supervisor
+        let assessment = supervisor
             .assess(
                 request,
                 if activate {
@@ -1545,31 +1547,267 @@ async fn near_ceiling_journal_reserves_nonempty_scope_and_original_outcome_befor
                 },
             )
             .await
-            .unwrap()
-            .confirm()
             .unwrap();
-        let result = if activate {
+        assert_eq!(assessment.affected_sessions(), 64);
+        assert_eq!(assessment.runtime_epoch(), Some(ServerEpoch::new(1)));
+        let token = assessment.token();
+        let action = assessment.confirm().unwrap();
+        let reserved = supervisor.request_progress(request).unwrap();
+        assert!(fixture.manager.effects.lock().unwrap().is_empty());
+        assert!(fixture.processes.calls.lock().unwrap().is_empty());
+
+        // Only accepted results retain capacity under arbitrary pressure. Real
+        // completed Restarts preserve the original Running registration basis.
+        // Leave conservative serialization headroom while constructing each filler,
+        // so setup cannot retire the still-unsubmitted original assessment.
+        let journal_path = fixture.account.anchor().join("requests");
+        let mut completed = Vec::new();
+        for scope_len in [64, 32, 16, 8, 4, 2, 1] {
+            *fixture.processes.sessions.lock().unwrap() = sessions[..scope_len].to_vec();
+            for _ in 0..32 {
+                let bytes = std::fs::metadata(&journal_path).unwrap().len();
+                let filler_headroom = 4096 + 512 * scope_len as u64;
+                if bytes + filler_headroom > 256 * 1024 {
+                    break;
+                }
+                let next = supervisor.allocate_request().unwrap();
+                let filler = supervisor
+                    .assess(next, ServiceAction::Restart)
+                    .await
+                    .unwrap()
+                    .confirm()
+                    .unwrap();
+                let result = supervisor.restart(filler).await.unwrap();
+                assert_eq!(
+                    result.state,
+                    ServiceRequestState::Completed(ServiceOutcome::Restarted)
+                );
+                completed.push(result);
+                assert_eq!(supervisor.request_progress(request).unwrap(), reserved);
+            }
+        }
+        assert!(!completed.is_empty());
+        assert!(std::fs::metadata(&journal_path).unwrap().len() > 240 * 1024);
+        assert_eq!(fixture.clock.0.load(Ordering::SeqCst), 100);
+        let effects = fixture.manager.effects.lock().unwrap().clone();
+        let calls = fixture.processes.calls.lock().unwrap().clone();
+
+        // Bare IDs are evictable, so allocation must recycle one rather than
+        // evicting either the original scope or an unacknowledged completed result.
+        let unsubmitted = supervisor.allocate_request().unwrap();
+        let mut retired = false;
+        for _ in 0..256 {
+            supervisor.allocate_request().unwrap();
+            match supervisor.request_progress(unsubmitted) {
+                Err(ServiceFailure::RequestRetired) => {
+                    retired = true;
+                    break;
+                }
+                Err(ServiceFailure::Pending) => {}
+                result => panic!("unexpected unsubmitted progress {result:?}"),
+            }
+        }
+        assert!(retired, "allocation pressure must retire an unsubmitted ID");
+        let journal: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&journal_path).unwrap()).unwrap();
+        assert!(
+            journal["reservations"].as_array().unwrap().len() < 256,
+            "retirement must be caused by bytes, not the slot ceiling"
+        );
+        assert!(std::fs::metadata(&journal_path).unwrap().len() <= 256 * 1024);
+        let reservations_before_completion = journal["reservations"].as_array().unwrap().len();
+        assert_eq!(supervisor.request_progress(request).unwrap(), reserved);
+        let restored = fixture
+            .supervisor()
+            .restore_assessment(request, token)
+            .await
+            .unwrap();
+        assert_eq!(restored.token(), token);
+        assert_eq!(restored.runtime_epoch(), Some(ServerEpoch::new(1)));
+        assert_eq!(restored.affected_sessions(), 64);
+        assert_eq!(fixture.manager.effects.lock().unwrap().as_slice(), effects);
+        assert_eq!(fixture.processes.calls.lock().unwrap().as_slice(), calls);
+        assert_eq!(
+            fixture.supervisor().start(unsubmitted).await,
+            Err(ServiceFailure::RequestRetired)
+        );
+        assert_eq!(fixture.manager.effects.lock().unwrap().as_slice(), effects);
+        assert_eq!(fixture.processes.calls.lock().unwrap().as_slice(), calls);
+
+        *fixture.processes.sessions.lock().unwrap() = sessions;
+        let original = if activate {
             supervisor.activate(action).await
         } else {
             supervisor.stop(action).await
-        };
+        }
+        .unwrap();
+        assert_eq!(original.request, request);
+        assert_eq!(original.request_digest, reserved.request_digest);
+        assert_eq!(original.phase, ServicePhase::Completed);
         assert_eq!(
-            result.unwrap().state,
+            original.state,
             ServiceRequestState::Completed(if activate {
                 ServiceOutcome::Activated(installation(2))
             } else {
                 ServiceOutcome::Stopped
             })
         );
+
+        let journal: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&journal_path).unwrap()).unwrap();
         assert_eq!(
-            fixture.supervisor().resolve(request).await.unwrap().state,
-            ServiceRequestState::Completed(if activate {
-                ServiceOutcome::Activated(installation(2))
-            } else {
-                ServiceOutcome::Stopped
-            })
+            journal["reservations"].as_array().unwrap().len(),
+            reservations_before_completion,
+            "completion must use its reserved budget without retiring another ID"
         );
+
+        // Prove actual byte admission refusal, not merely a file-size threshold.
+        // The original is completed now, so no quota probe can evict its outcome.
+        let mut exhausted = false;
+        for _ in 0..32 {
+            let next = supervisor.allocate_request().unwrap();
+            let before = std::fs::read(&journal_path).unwrap();
+            let effects = fixture.manager.effects.lock().unwrap().clone();
+            let calls = fixture.processes.calls.lock().unwrap().clone();
+            let registration = supervisor.discover().unwrap().unwrap();
+            match supervisor.assess(next, ServiceAction::Stop).await {
+                Ok(assessment) => {
+                    let result = supervisor
+                        .stop(assessment.confirm().unwrap())
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        result.state,
+                        ServiceRequestState::Completed(ServiceOutcome::Stopped)
+                    );
+                    completed.push(result);
+                }
+                Err(ServiceFailure::LimitExceeded) => {
+                    exhausted = true;
+                    let journal: serde_json::Value = serde_json::from_slice(&before).unwrap();
+                    let reservations = journal["reservations"].as_array().unwrap().len();
+                    assert!(reservations < 256);
+                    assert!(before.len() > 240 * 1024 && before.len() <= 256 * 1024);
+                    eprintln!(
+                        "native_journal_quota_refusal: activate={activate} bytes={} reservations={reservations} original_sessions=64 clock_millis=100",
+                        before.len()
+                    );
+                    assert!(
+                        std::fs::read(&journal_path).unwrap() == before,
+                        "quota refusal changed the native journal"
+                    );
+                    let after = supervisor.discover().unwrap().unwrap();
+                    assert_eq!(after.generation(), registration.generation());
+                    assert_eq!(after.desired_state(), registration.desired_state());
+                    assert_eq!(
+                        after.approved_installation(),
+                        registration.approved_installation()
+                    );
+                    assert_eq!(
+                        after.staged_installation(),
+                        registration.staged_installation()
+                    );
+                    assert_eq!(fixture.manager.effects.lock().unwrap().as_slice(), effects);
+                    assert_eq!(fixture.processes.calls.lock().unwrap().as_slice(), calls);
+                    break;
+                }
+                Err(failure) => panic!("unexpected assessment failure {failure:?}"),
+            }
+        }
+        assert!(exhausted, "admission pressure must reach the byte ceiling");
+        assert_eq!(fixture.clock.0.load(Ordering::SeqCst), 100);
+        let effects = fixture.manager.effects.lock().unwrap().clone();
+        let calls = fixture.processes.calls.lock().unwrap().clone();
+        assert_eq!(
+            fixture.supervisor().resolve(request).await.unwrap(),
+            original
+        );
+        let replay = fixture
+            .supervisor()
+            .restore_assessment(request, token)
+            .await
+            .unwrap()
+            .confirm()
+            .unwrap();
+        assert_eq!(
+            if activate {
+                fixture.supervisor().activate(replay).await
+            } else {
+                fixture.supervisor().stop(replay).await
+            }
+            .unwrap(),
+            original
+        );
+        for result in completed {
+            assert_eq!(
+                fixture.supervisor().resolve(result.request).await.unwrap(),
+                result
+            );
+        }
+        assert_eq!(fixture.manager.effects.lock().unwrap().as_slice(), effects);
+        assert_eq!(fixture.processes.calls.lock().unwrap().as_slice(), calls);
     }
+}
+
+#[tokio::test]
+async fn byte_pressure_retires_unsubmitted_nonempty_scope_without_reexecuting_its_identity() {
+    let fixture = Fixture::new(false, true);
+    let supervisor = fixture.supervisor();
+    let server = ServerId::new(
+        supervisor
+            .discover()
+            .unwrap()
+            .unwrap()
+            .server_pin()
+            .identity,
+    );
+    *fixture.processes.sessions.lock().unwrap() = (1..=64)
+        .map(|local| SessionKey {
+            epoch: ServerEpoch::new(1),
+            pane: spaceterm_core::identity::PaneId::new(server, local).unwrap(),
+            generation: spaceterm_core::authority::SessionGeneration::new(1),
+        })
+        .collect();
+    let request = supervisor.allocate_request().unwrap();
+    let assessment = supervisor
+        .assess(request, ServiceAction::Stop)
+        .await
+        .unwrap();
+    assert_eq!(assessment.affected_sessions(), 64);
+    let token = assessment.token();
+    let action = assessment.confirm().unwrap();
+    let mut retired = false;
+    for _ in 0..32 {
+        let next = supervisor.allocate_request().unwrap();
+        supervisor.assess(next, ServiceAction::Stop).await.unwrap();
+        if supervisor.request_progress(request) == Err(ServiceFailure::RequestRetired) {
+            retired = true;
+            break;
+        }
+    }
+    assert!(retired, "byte pressure must retire an unsubmitted scope");
+    let journal: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixture.account.anchor().join("requests")).unwrap())
+            .unwrap();
+    assert!(journal["reservations"].as_array().unwrap().len() < 256);
+    assert_eq!(fixture.clock.0.load(Ordering::SeqCst), 100);
+    assert_eq!(
+        fixture.supervisor().stop(action).await,
+        Err(ServiceFailure::RequestRetired)
+    );
+    assert!(matches!(
+        fixture
+            .supervisor()
+            .restore_assessment(request, token)
+            .await,
+        Err(ServiceFailure::RequestRetired)
+    ));
+    assert_eq!(
+        fixture.supervisor().resolve(request).await,
+        Err(ServiceFailure::RequestRetired)
+    );
+    assert!(fixture.manager.effects.lock().unwrap().is_empty());
+    assert!(fixture.processes.calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1636,5 +1874,122 @@ async fn native_process_composition_requires_actor_custody_and_validates_actor_a
     assert_eq!(
         native.assess(&registration).await,
         Err(ServiceFailure::InvalidRecord)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn install_reports_completed_when_launch_agent_runs_after_start_acknowledgement_failure() {
+    let fixture = Fixture::for_install();
+    *fixture.manager.start_failure.lock().unwrap() = Some(ServiceFailure::SupervisorUnavailable);
+    let supervisor = fixture.supervisor();
+    let request = supervisor.allocate_request().unwrap();
+    let (_, artifact) =
+        signed_installation::fixture("1.0.0", 7, signed_installation::native_machine());
+    let progress = supervisor
+        .install(request, fixture.account.confirm_install(artifact))
+        .await
+        .unwrap();
+    assert!(matches!(
+        progress.state,
+        ServiceRequestState::Completed(ServiceOutcome::Installed { reused: false, .. })
+    ));
+    assert_eq!(supervisor.resolve(request).await.unwrap(), progress);
+    assert_eq!(
+        *fixture.manager.effects.lock().unwrap(),
+        ["configure", "start"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn assess_completes_original_starting_install_when_launch_agent_is_running_without_restarting()
+ {
+    let fixture = Fixture::for_install();
+    fixture.manager.starting.store(true, Ordering::SeqCst);
+    let supervisor = fixture.supervisor();
+    let install = supervisor.allocate_request().unwrap();
+    let (_, artifact) =
+        signed_installation::fixture("1.0.0", 7, signed_installation::native_machine());
+    let progress = supervisor
+        .install(install, fixture.account.confirm_install(artifact))
+        .await
+        .unwrap();
+    assert_eq!(progress.phase, ServicePhase::Starting);
+    assert_eq!(progress.state, ServiceRequestState::Pending);
+    let blocked = supervisor.allocate_request().unwrap();
+    assert!(matches!(
+        supervisor.assess(blocked, ServiceAction::Stop).await,
+        Err(ServiceFailure::Pending)
+    ));
+    *fixture.manager.state.lock().unwrap() = SupervisorState::Running;
+    let request = supervisor.allocate_request().unwrap();
+    let assessment = supervisor
+        .assess(request, ServiceAction::Stop)
+        .await
+        .unwrap();
+    assert_eq!(assessment.request(), request);
+    assert_ne!(assessment.token(), [0; 32]);
+    assert!(matches!(
+        supervisor.request_progress(install).unwrap().state,
+        ServiceRequestState::Completed(ServiceOutcome::Installed { reused: false, .. })
+    ));
+    assert_eq!(
+        *fixture.manager.effects.lock().unwrap(),
+        ["configure", "start"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn install_waits_for_launch_agent_readiness_within_the_observation_window() {
+    let fixture = Fixture::for_install();
+    fixture.manager.starting.store(true, Ordering::SeqCst);
+    let manager = fixture.manager.clone();
+    let transition = tokio::spawn(async move {
+        loop {
+            if *manager.state.lock().unwrap() == SupervisorState::Starting {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        *manager.state.lock().unwrap() = SupervisorState::Running;
+    });
+    let supervisor = fixture.supervisor();
+    let request = supervisor.allocate_request().unwrap();
+    let (_, artifact) =
+        signed_installation::fixture("1.0.0", 7, signed_installation::native_machine());
+    let progress = supervisor
+        .install(request, fixture.account.confirm_install(artifact))
+        .await
+        .unwrap();
+    assert!(matches!(
+        progress.state,
+        ServiceRequestState::Completed(ServiceOutcome::Installed { reused: false, .. })
+    ));
+    transition.await.unwrap();
+    assert_eq!(
+        *fixture.manager.effects.lock().unwrap(),
+        ["configure", "start"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn install_resolution_preserves_pending_startup_when_manager_observation_is_unavailable() {
+    let fixture = Fixture::for_install();
+    fixture.manager.starting.store(true, Ordering::SeqCst);
+    *fixture.manager.status_failure.lock().unwrap() = Some(ServiceFailure::SupervisorUnavailable);
+    let supervisor = fixture.supervisor();
+    let request = supervisor.allocate_request().unwrap();
+    let (_, artifact) =
+        signed_installation::fixture("1.0.0", 7, signed_installation::native_machine());
+    let original = supervisor
+        .install(request, fixture.account.confirm_install(artifact))
+        .await
+        .unwrap();
+    assert_eq!(original.phase, ServicePhase::Starting);
+    assert_eq!(original.state, ServiceRequestState::Pending);
+    assert_eq!(supervisor.resolve(request).await.unwrap(), original);
+    assert_eq!(
+        *fixture.manager.effects.lock().unwrap(),
+        ["configure", "start"]
     );
 }

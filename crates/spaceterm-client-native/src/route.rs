@@ -9,8 +9,8 @@ use spaceterm_client::{
     limits::DIAL_DEADLINE,
     pairing::credentials::{CredentialUse, CredentialUsePurpose, NativeCredentialAccess},
     ports::{
-        ClientFuture, ConnectedRoute, ConnectionPurpose, MessageReceiver, MessageSender, PeerFacts,
-        RouteConnector, RouteKind,
+        ClientFuture, ConnectedRoute, ConnectionPurpose, ForegroundCancellation, MessageReceiver,
+        MessageSender, PeerFacts, RouteConnector, RouteKind,
     },
 };
 use spaceterm_host::{
@@ -35,6 +35,7 @@ use std::{
 
 /// Local IPC endpoints admitted by explicit native discovery. A remote path,
 /// saved string or server directory record alone cannot create this authority.
+#[derive(Clone)]
 pub struct LocalRouteAuthority {
     route: RouteDescription,
     endpoint: IpcEndpoint,
@@ -135,8 +136,9 @@ impl SshRouteConfiguration {
         remote_socket: &str,
         limit: MessageLimit,
         foreground: Option<&CredentialUse>,
+        cancellation: Option<&ForegroundCancellation>,
     ) -> Result<(Arc<dyn MessageTransport>, Arc<SshTunnel>), ClientFailure> {
-        let askpass = self.foreground_askpass(foreground)?;
+        let askpass = self.foreground_askpass_with_cancellation(foreground, cancellation)?;
         let deadline = tokio::time::Instant::now() + DIAL_DEADLINE;
         let endpoint = self.endpoints.allocate()?;
         let command = SshTunnelCommand::new(
@@ -176,18 +178,36 @@ impl SshRouteConfiguration {
     }
 }
 
-/// Reuses the existing zeroized native broker and revalidates the foreground
-/// lease at the host's final spawn handoff, after asynchronous route capture.
+/// Reuses the existing zeroized native broker. Both the credential generation and
+/// the ordinary connection attempt must remain valid throughout the prompt lifetime.
 struct ForegroundAskPass {
     broker: Arc<dyn TunnelAskPass>,
+    authority: ForegroundPromptAuthority,
+}
+#[derive(Clone)]
+struct ForegroundPromptAuthority {
     authorization: CredentialUse,
+    cancellation: Option<ForegroundCancellation>,
+}
+impl ForegroundPromptAuthority {
+    fn is_valid(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_none_or(|cancellation| !cancellation.is_cancelled())
+            && self
+                .authorization
+                .validate(self.authorization.scope())
+                .is_ok()
+    }
 }
 impl TunnelAskPass for ForegroundAskPass {
     fn handoff(&self) -> Result<spaceterm_host::ssh_tunnel::AskPassHandoff, TransportError> {
-        self.authorization
-            .validate(self.authorization.scope())
-            .map_err(|_| TransportError::PeerAccountRejected)?;
-        self.broker.handoff()
+        if !self.authority.is_valid() {
+            return Err(TransportError::PeerAccountRejected);
+        }
+        let authority = self.authority.clone();
+        self.broker
+            .handoff_authorized(Arc::new(move || authority.is_valid()))
     }
 }
 impl SshRouteConfiguration {
@@ -195,21 +215,34 @@ impl SshRouteConfiguration {
         &self,
         foreground: Option<&CredentialUse>,
     ) -> Result<Option<Arc<dyn TunnelAskPass>>, ClientFailure> {
+        self.foreground_askpass_with_cancellation(foreground, None)
+    }
+    fn foreground_askpass_with_cancellation(
+        &self,
+        foreground: Option<&CredentialUse>,
+        cancellation: Option<&ForegroundCancellation>,
+    ) -> Result<Option<Arc<dyn TunnelAskPass>>, ClientFailure> {
         let Some(authorization) = foreground else {
             return Ok(None);
         };
-        authorization
-            .validate(authorization.scope())
-            .map_err(|_| ClientFailure::new(ClientFailureClass::AuthorizationDenied))?;
-        if authorization.purpose() != CredentialUsePurpose::Enrollment
-            || authorization.native_access() != NativeCredentialAccess::Foreground
+        let authority = ForegroundPromptAuthority {
+            authorization: authorization.clone(),
+            cancellation: cancellation.cloned(),
+        };
+        if !authority.is_valid() {
+            return Err(ClientFailure::new(ClientFailureClass::AuthorizationDenied));
+        }
+        if !matches!(
+            authorization.purpose(),
+            CredentialUsePurpose::Enrollment | CredentialUsePurpose::Ordinary
+        ) || authorization.native_access() != NativeCredentialAccess::Foreground
         {
             return Err(ClientFailure::new(ClientFailureClass::AuthorizationDenied));
         }
         Ok(self.askpass.as_ref().map(|broker| {
             Arc::new(ForegroundAskPass {
                 broker: broker.clone(),
-                authorization: authorization.clone(),
+                authority,
             }) as Arc<dyn TunnelAskPass>
         }))
     }
@@ -217,6 +250,7 @@ impl SshRouteConfiguration {
 
 pub struct NativeRouteConnector {
     local: Vec<LocalRouteAuthority>,
+    restricted_local_discovery: Option<crate::NativeClientProvider>,
     pub(crate) ssh: Option<SshRouteConfiguration>,
 }
 impl NativeRouteConnector {
@@ -227,7 +261,17 @@ impl NativeRouteConnector {
         if local.len() > 64 {
             return Err(ClientFailure::new(ClientFailureClass::ResourceLimit));
         }
-        Ok(Self { local, ssh })
+        Ok(Self {
+            local,
+            restricted_local_discovery: None,
+            ssh,
+        })
+    }
+    /// Reconsult this fixed native account/build registration for each restricted
+    /// IPC attempt. Ordinary and enrollment routes retain their existing admission.
+    pub fn with_restricted_local_discovery(mut self, native: crate::NativeClientProvider) -> Self {
+        self.restricted_local_discovery = Some(native);
+        self
     }
 }
 impl RouteConnector for NativeRouteConnector {
@@ -246,13 +290,57 @@ impl RouteConnector for NativeRouteConnector {
     }
 }
 impl NativeRouteConnector {
+    /// A deliberate ordinary reconnect reuses the saved pairing's revocable lease.
+    /// It cannot enroll or acquire restricted-revocation prompt authority.
+    pub async fn open_foreground_ordinary(
+        &self,
+        target: &ConnectionTarget,
+        authorization: &CredentialUse,
+        cancellation: ForegroundCancellation,
+    ) -> Result<ConnectedRoute, ClientFailure> {
+        use spaceterm_client::pairing::credentials::CredentialPurpose;
+        authorization
+            .validate(authorization.scope())
+            .map_err(|_| ClientFailure::new(ClientFailureClass::AuthorizationDenied))?;
+        if cancellation.is_cancelled()
+            || authorization.purpose() != CredentialUsePurpose::Ordinary
+            || authorization.native_access() != NativeCredentialAccess::Foreground
+            || authorization.scope().parts().purpose
+                != (CredentialPurpose::PairingAuthentication {
+                    server: target.server(),
+                })
+            || authorization.scope().reference() != target.credential()
+            || authorization.ordinary_pairing() != Some(&target.local_pairing()?)
+        {
+            return Err(ClientFailure::new(ClientFailureClass::AuthorizationDenied));
+        }
+        self.open_native_route(
+            target.pin(),
+            target.route(),
+            None,
+            Some(authorization),
+            Some(&cancellation),
+            false,
+        )
+        .await
+    }
     pub(crate) async fn open_pairing_route(
         &self,
         pin: spaceterm_protocol::authentication::ServerPin,
         route: &RouteDescription,
         capture: Option<&spaceterm_client::journal::JournalSshCapture>,
     ) -> Result<ConnectedRoute, ClientFailure> {
-        self.open_native_route(pin, route, capture, None).await
+        self.open_native_route(pin, route, capture, None, None, false)
+            .await
+    }
+    pub(crate) async fn open_restricted_pairing_route(
+        &self,
+        pin: spaceterm_protocol::authentication::ServerPin,
+        route: &RouteDescription,
+        capture: Option<&spaceterm_client::journal::JournalSshCapture>,
+    ) -> Result<ConnectedRoute, ClientFailure> {
+        self.open_native_route(pin, route, capture, None, None, true)
+            .await
     }
     pub(crate) async fn open_foreground_pairing_route(
         &self,
@@ -261,7 +349,7 @@ impl NativeRouteConnector {
         capture: Option<&spaceterm_client::journal::JournalSshCapture>,
         authorization: &CredentialUse,
     ) -> Result<ConnectedRoute, ClientFailure> {
-        self.open_native_route(pin, route, capture, Some(authorization))
+        self.open_native_route(pin, route, capture, Some(authorization), None, false)
             .await
     }
     async fn open_native_route(
@@ -270,67 +358,81 @@ impl NativeRouteConnector {
         route: &RouteDescription,
         capture: Option<&spaceterm_client::journal::JournalSshCapture>,
         foreground: Option<&CredentialUse>,
+        cancellation: Option<&ForegroundCancellation>,
+        restricted: bool,
     ) -> Result<ConnectedRoute, ClientFailure> {
+        // Captured routes belong to pairing, not ordinary foreground attempts.
+        // Never let that path discard an attempt's prompt cancellation fence.
+        if capture.is_some() && cancellation.is_some() {
+            return Err(ClientFailure::new(ClientFailureClass::AuthorizationDenied));
+        }
         let limit =
             MessageLimit::new(spaceterm_protocol::limits::MAX_FRAME_BYTES).map_err(classify)?;
         let mut configuration_lease = None;
-        let (transport, tunnel): (Arc<dyn MessageTransport>, Option<Arc<SshTunnel>>) =
-            match route.parts() {
-                RouteParts::Ipc { .. } => {
-                    let authority = self
-                        .local
-                        .iter()
-                        .find(|a| &a.route == route)
-                        .ok_or_else(invalid_route)?;
-                    (
-                        Arc::new(
-                            tokio::time::timeout(
-                                DIAL_DEADLINE,
-                                IpcTransport::connect(&authority.endpoint, limit),
-                            )
-                            .await
-                            .map_err(|_| unavailable())?
-                            .map_err(classify)?,
-                        ),
-                        None,
-                    )
-                }
-                RouteParts::Wss {
-                    address,
-                    server_name,
-                } => (
+        let (transport, tunnel): (Arc<dyn MessageTransport>, Option<Arc<SshTunnel>>) = match route
+            .parts()
+        {
+            RouteParts::Ipc { .. } => {
+                // A failed renewal never falls back to a startup descriptor.
+                // Remote routes do not enter native filesystem discovery.
+                let renewed = if restricted && let Some(native) = &self.restricted_local_discovery {
+                    Some(renew_restricted_local_authority(native.clone(), pin, route).await?)
+                } else {
+                    None
+                };
+                let authority = renewed
+                    .as_ref()
+                    .or_else(|| self.local.iter().find(|a| &a.route == route))
+                    .ok_or_else(invalid_route)?;
+                (
                     Arc::new(
-                        WssTransport::connect(
-                            *address,
-                            server_name,
-                            EnrolledServerKey(pin.public_key),
-                            limit,
+                        tokio::time::timeout(
                             DIAL_DEADLINE,
+                            IpcTransport::connect(&authority.endpoint, limit),
                         )
                         .await
+                        .map_err(|_| unavailable())?
                         .map_err(classify)?,
                     ),
                     None,
+                )
+            }
+            RouteParts::Wss {
+                address,
+                server_name,
+            } => (
+                Arc::new(
+                    WssTransport::connect(
+                        *address,
+                        server_name,
+                        EnrolledServerKey(pin.public_key),
+                        limit,
+                        DIAL_DEADLINE,
+                    )
+                    .await
+                    .map_err(classify)?,
                 ),
-                RouteParts::Ssh {
-                    destination,
-                    remote_socket,
-                } => {
-                    let configuration = self.ssh.as_ref().ok_or_else(invalid_route)?;
-                    let (transport, tunnel) = if let Some(capture) = capture {
-                        let (transport, tunnel, lease) = configuration
-                            .open_captured(destination, remote_socket, limit, capture, foreground)
-                            .await?;
-                        configuration_lease = Some(lease);
-                        (transport, tunnel)
-                    } else {
-                        configuration
-                            .open(destination, remote_socket, limit, foreground)
-                            .await?
-                    };
-                    (transport, Some(tunnel))
-                }
-            };
+                None,
+            ),
+            RouteParts::Ssh {
+                destination,
+                remote_socket,
+            } => {
+                let configuration = self.ssh.as_ref().ok_or_else(invalid_route)?;
+                let (transport, tunnel) = if let Some(capture) = capture {
+                    let (transport, tunnel, lease) = configuration
+                        .open_captured(destination, remote_socket, limit, capture, foreground)
+                        .await?;
+                    configuration_lease = Some(lease);
+                    (transport, tunnel)
+                } else {
+                    configuration
+                        .open(destination, remote_socket, limit, foreground, cancellation)
+                        .await?
+                };
+                (transport, Some(tunnel))
+            }
+        };
         let facts = transport.peer_facts();
         let peer = PeerFacts {
             route: match facts.route {
@@ -354,6 +456,37 @@ impl NativeRouteConnector {
             peer,
         })
     }
+}
+
+async fn renew_restricted_local_authority(
+    native: crate::NativeClientProvider,
+    pin: spaceterm_protocol::authentication::ServerPin,
+    route: &RouteDescription,
+) -> Result<LocalRouteAuthority, ClientFailure> {
+    let authority = tokio::task::spawn_blocking(move || {
+        let registration = native
+            .management()
+            .supervisor()
+            .discover()
+            .map_err(|_| invalid_route())?
+            .ok_or_else(unavailable)?;
+        if registration.server_pin() != pin {
+            return Err(ClientFailure::new(ClientFailureClass::PinMismatch));
+        }
+        let endpoint = registration.endpoint().map_err(|error| match error {
+            spaceterm_host::account_service::ServiceFailure::Missing => unavailable(),
+            _ => invalid_route(),
+        })?;
+        LocalRouteAuthority::new(endpoint)
+    })
+    .await
+    .map_err(|_| unavailable())??;
+    if authority.description() != route {
+        return Err(ClientFailure::new(ClientFailureClass::StaleAuthority));
+    }
+    // Only this attempt owns the admitted directory identity. Later attempts
+    // rediscover registration and revalidate endpoint provenance from scratch.
+    Ok(authority)
 }
 
 struct RouteOwner {
@@ -452,7 +585,9 @@ fn invalid_route() -> ClientFailure {
     ClientFailure::new(ClientFailureClass::UnsafeEndpoint)
 }
 
+mod bootstrap_ssh;
 mod captured_ssh;
+pub use bootstrap_ssh::NativeBootstrapHostFactory;
 
 #[cfg(test)]
 mod tests;

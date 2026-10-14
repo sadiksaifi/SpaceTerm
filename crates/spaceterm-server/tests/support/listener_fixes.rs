@@ -49,7 +49,7 @@ async fn production_account_advertises_installed_git_and_directory_providers_in_
 
 async fn receive_native(
     transport: &dyn MessageTransport,
-    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    codec: &mut PublicationCodec,
 ) -> spaceterm_core::native_requests::NativeRequest {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -105,7 +105,7 @@ async fn receive_native(
 
 async fn complete_native(
     transport: &dyn MessageTransport,
-    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    codec: &mut PublicationCodec,
     request: &spaceterm_core::native_requests::NativeRequest,
     kind: spaceterm_core::native_requests::NativeCompletionKind,
 ) {
@@ -114,7 +114,7 @@ async fn complete_native(
 
 async fn complete_native_expected(
     transport: &dyn MessageTransport,
-    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    codec: &mut PublicationCodec,
     request: &spaceterm_core::native_requests::NativeRequest,
     kind: spaceterm_core::native_requests::NativeCompletionKind,
     expected_failure: Option<i32>,
@@ -226,6 +226,15 @@ async fn production_account_delivers_unsafe_paste_clipboard_and_notifications_in
             let generation = handle.snapshot().runtime().iter().find(|v| v.pane == pane).unwrap().session_generation;
             let session = start_shell(&seed, &transport, &mut codec, principal.epoch(), generation, connection, grant).await;
             let pid = wait_pid(&seed).await;
+            // The shell's PID marker can precede actor installation of its runtime owner.
+            // Native requests require the matching Running publication, not just a live process.
+            let mut snapshots = handle.subscribe_snapshot();
+            while !snapshots.borrow().runtime().iter().any(|record| {
+                record.pane == session.pane
+                    && matches!(record.phase, SessionPhase::Running { generation } if generation == session.generation)
+            }) {
+                snapshots.changed().await.unwrap();
+            }
             handle.update_client_focus(principal, ClientFocusUpdate { context: ContextGeneration::new(2), focused_pane: Some(pane), terminal_input_focus: true, native_effects_eligible: true }).await.unwrap();
             let effect_fence = fence(handle.runtime_access(principal, session).await.unwrap().authority, None);
             macro_rules! subscription {
@@ -273,9 +282,227 @@ async fn production_account_delivers_unsafe_paste_clipboard_and_notifications_in
     }).await.unwrap();
 }
 
+async fn protocol_shell_line(
+    transport: &dyn MessageTransport,
+    codec: &mut PublicationCodec,
+    effect_fence: EffectFence,
+    request: u64,
+    text: &str,
+) {
+    let mut enter = spaceterm_terminal::KeyInput::text_input("");
+    enter.physical_key = spaceterm_terminal::PhysicalKey::Enter;
+    enter.logical_key = "enter".into();
+    enter.text = None;
+    for (offset, key) in [spaceterm_terminal::KeyInput::text_input(text), enter]
+        .into_iter()
+        .enumerate()
+    {
+        let command = FencedRuntimeCommand {
+            fence: effect_fence,
+            command: RuntimeCommand::Key(key),
+        };
+        let request = request + offset as u64;
+        let payload = match codec.major() {
+            1 => Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::RuntimeCommand(
+                    spaceterm_protocol::convert::runtime::v1::encode_command(request, &command)
+                        .unwrap(),
+                )),
+            }),
+            _ => Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::RuntimeCommand(
+                    spaceterm_protocol::convert::runtime::v2::encode_command(request, &command)
+                        .unwrap(),
+                )),
+            }),
+        };
+        transport
+            .send(&codec.encode(&payload).unwrap())
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn production_account_clipboard_read_expiry_through_production_factory_in_both_majors() {
+    use spaceterm_core::native_requests::{NativeCompletionKind, NativeRequestKind, NativeText};
+
+    tokio::time::timeout(Duration::from_secs(45), async {
+        for major in [1, 2] {
+            let seed = Seed::new().await;
+            let supervisor = seed.supervisor(Arc::new(test_support::StartupAbsence));
+            let startup = AccountStartup::admit(&supervisor).unwrap();
+            let server = RecoveredAccountServer::recover(supervisor, startup, seed.launch())
+                .await
+                .unwrap();
+            let handle = server.handle();
+            let run = tokio::spawn(server.run_until(std::future::pending()));
+            while handle.phase() != ServicePhase::Serving {
+                tokio::task::yield_now().await;
+            }
+            let transport = IpcTransport::connect(
+                &seed.registration.endpoint().unwrap(),
+                MessageLimit::envelope(),
+            )
+            .await
+            .unwrap();
+            let mut codec = handshake(
+                &transport,
+                seed.identity.pin(),
+                seed.principal,
+                seed.key.clone(),
+                major,
+            )
+            .await;
+            let connection =
+                ConnectionGeneration::new(reconcile(&transport, &mut codec, &handle).await);
+            let principal = VerifiedPrincipal::from_authenticated(&codec, connection).unwrap();
+            let (_, pane, grant) = create(&seed, &transport, &mut codec).await;
+            let generation = handle
+                .snapshot()
+                .runtime()
+                .iter()
+                .find(|record| record.pane == pane)
+                .unwrap()
+                .session_generation;
+            let session = start_shell(
+                &seed,
+                &transport,
+                &mut codec,
+                principal.epoch(),
+                generation,
+                connection,
+                grant,
+            )
+            .await;
+            let pid = wait_pid(&seed).await;
+            let mut snapshots = handle.subscribe_snapshot();
+            while !snapshots.borrow().runtime().iter().any(|record| {
+                record.pane == session.pane
+                    && matches!(record.phase, SessionPhase::Running { generation } if generation == session.generation)
+            }) {
+                snapshots.changed().await.unwrap();
+            }
+            handle
+                .update_client_focus(
+                    principal,
+                    ClientFocusUpdate {
+                        context: ContextGeneration::new(2),
+                        focused_pane: Some(pane),
+                        terminal_input_focus: true,
+                        native_effects_eligible: true,
+                    },
+                )
+                .await
+                .unwrap();
+            let effect_fence = fence(
+                handle.runtime_access(principal, session).await.unwrap().authority,
+                None,
+            );
+            let mut events = handle
+                .subscribe_runtime(principal, effect_fence)
+                .await
+                .unwrap();
+            macro_rules! subscription {
+                ($p:ident, $variant:ident) => {
+                    Payload::$variant($p::Message {
+                        kind: Some($p::message::Kind::PaneSubscription($p::PaneSubscription {
+                            request: 9,
+                            request_generation: 1,
+                            fence: Some(spaceterm_protocol::convert::identity::encode_fence(
+                                effect_fence,
+                            )),
+                            cancel: false,
+                            limits: Some($p::PageLimits {
+                                rows: 4,
+                                cells: 1024,
+                                bytes: 16384,
+                            }),
+                        })),
+                    })
+                };
+            }
+            let subscription = if major == 1 {
+                subscription!(v1, Major1)
+            } else {
+                subscription!(v2, Major2)
+            };
+            transport
+                .send(&codec.encode(&subscription).unwrap())
+                .await
+                .unwrap();
+
+            // Input follows the subscription on the authenticated connection.
+            // Observe the PTY's empty OSC 52 response, not just the protocol rejection.
+            protocol_shell_line(
+                &transport,
+                &mut codec,
+                effect_fence,
+                100,
+                r"stty -echo -icanon; printf '\033]52;c;?\033\\'; dd bs=1 count=9 2>/dev/null | od -An -tx1 | tr -d ' \n'; stty echo icanon; printf '\n'",
+            )
+            .await;
+            let expired = receive_native(&transport, &mut codec).await;
+            assert!(matches!(expired.kind(), NativeRequestKind::ClipboardRead));
+            assert!((1..=1000).contains(&expired.deadline().unwrap().get()));
+            tokio::time::sleep(Duration::from_millis(1050)).await;
+            complete_native_expected(
+                &transport,
+                &mut codec,
+                &expired,
+                NativeCompletionKind::ClipboardText(NativeText::new("late-text".into()).unwrap()),
+                Some(spaceterm_protocol::wire::common::FailureClass::Stale as i32),
+            )
+            .await;
+            assert_output(
+                &handle,
+                principal,
+                session,
+                events.as_mut(),
+                "1b5d35323b633b1b5c",
+            )
+            .await;
+
+            // Expiry must not disconnect the client or poison the next clipboard read.
+            protocol_shell_line(
+                &transport,
+                &mut codec,
+                effect_fence,
+                102,
+                r"stty -echo -icanon; printf '\033]52;c;?\033\\'; dd bs=1 count=17 2>/dev/null | od -An -tx1 | tr -d ' \n'; stty echo icanon; printf '\n'",
+            )
+            .await;
+            let fresh = receive_native(&transport, &mut codec).await;
+            assert!(matches!(fresh.kind(), NativeRequestKind::ClipboardRead));
+            assert_ne!(fresh.id(), expired.id());
+            complete_native(
+                &transport,
+                &mut codec,
+                &fresh,
+                NativeCompletionKind::ClipboardText(NativeText::new("secret".into()).unwrap()),
+            )
+            .await;
+            assert_output(
+                &handle,
+                principal,
+                session,
+                events.as_mut(),
+                "1b5d35323b633b6332566a636d56301b5c",
+            )
+            .await;
+
+            transport.close().await.unwrap();
+            stop(&seed, session.epoch, vec![session], Some(pid)).await;
+            run.await.unwrap().unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}
+
 async fn directory_query(
     transport: &dyn MessageTransport,
-    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    codec: &mut PublicationCodec,
     context: spaceterm_core::server_directories::DirectoryContext,
     action: spaceterm_core::server_directories::DirectoryQueryAction,
 ) -> spaceterm_core::server_directories::DirectoryQueryResult {

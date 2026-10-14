@@ -643,6 +643,63 @@ fn desktop_offline_navigation_materializes_never_presented_pane(cx: &mut gpui::T
             .pane_ids()
             .contains(&pane)
     );
-    assert!(cx.update(|cx| runtime.read(cx).pane_channel(pane)).is_err());
+    let channel = cx
+        .update(|cx| runtime.read(cx).pane_channel(pane))
+        .expect("cold offline pane channel");
+    assert_eq!(
+        channel.state().borrow().readiness,
+        spaceterm_client::pane_channel::PaneReadiness::Offline
+    );
+    assert!(channel.state().borrow().connection.is_none());
+    assert!(channel.current_frame().is_none());
+    channel
+        .update_context(spaceterm_client::pane_channel::PaneContextFacts {
+            focused_pane: true,
+            terminal_input_focus: true,
+            presentable: true,
+        })
+        .unwrap();
+    for kind in [
+        spaceterm_client::pane_channel::EffectKind::Key,
+        spaceterm_client::pane_channel::EffectKind::Read,
+    ] {
+        assert!(channel.permit(kind).is_err());
+    }
+    assert!(
+        executor
+            .block_on(
+                channel
+                    .explicit_use(spaceterm_client::pane_channel::ExplicitUseSource::StartSession)
+            )
+            .is_err()
+    );
+    let delivery = cx
+        .update(|cx| runtime.read(cx).pane_presentation(pane, None))
+        .unwrap();
+    let presentation = crate::ui::pane_presentation::PanePresentation::from_portable(
+        delivery.decision.presentation,
+        delivery.device,
+        delivery.cause,
+    );
+    let (terminal, visual) = cx.add_window_view(|window, cx| {
+        crate::ui::pane_lifecycle::PaneConstruction::testing()
+            .create_server(channel.clone(), delivery.token, presentation, window, cx)
+            .unwrap()
+    });
+    terminal.update(visual, |terminal, cx| {
+        terminal.bind_server_client(runtime.clone(), cx)
+    });
+    visual.simulate_resize(gpui::size(gpui::px(800.0), gpui::px(600.0)));
+    visual.run_until_parked();
+    terminal.read_with(visual, |terminal, _| {
+        assert_eq!(terminal.server_pane_id(), Some(pane));
+        assert!(
+            terminal
+                .server_session_handle()
+                .unwrap()
+                .native_permit()
+                .is_none()
+        );
+    });
     assert_eq!(fixture.ports.opens.load(Ordering::SeqCst), 0);
 }

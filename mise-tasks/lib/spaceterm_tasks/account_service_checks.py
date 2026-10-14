@@ -86,7 +86,10 @@ def require_nonempty(output):
 
 def test_gate(name):
     environment = signing_environment(os.environ)
-    environment["CARGO_BUILD_JOBS"] = "4"
+    if name == "startup":
+        environment.setdefault("CARGO_BUILD_JOBS", "4")
+    else:
+        environment["CARGO_BUILD_JOBS"] = "4"
     if name == "startup":
         # Compile the fixture dependency graph before the bounded test runs.
         # A cold build is not evidence that runtime startup exceeded its bound.
@@ -117,7 +120,12 @@ def test_gate(name):
                 command.extend(("--features", "runtime"))
             try:
                 output = native.run_tool(
-                    command, cwd=ROOT, environment=environment, timeout=300, maximum=1024 * 1024
+                    command,
+                    cwd=ROOT,
+                    environment=environment,
+                    timeout=300,
+                    maximum=1024 * 1024,
+                    reject_stderr=False,
                 )
             except TaskError as error:
                 classification = str(error)
@@ -132,7 +140,12 @@ def test_gate(name):
                 raise TaskError(
                     f"package={package} target={target} classification={classification}"
                 ) from None
-            count = require_nonempty(output)
+            try:
+                count = require_nonempty(output)
+            except TaskError:
+                raise TaskError(
+                    f"package={package} target={target} classification=target-incomplete"
+                ) from None
             total += count
             target_count += 1
             print(f"package={package} target={target} tests={count} classification=passed")

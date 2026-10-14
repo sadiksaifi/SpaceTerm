@@ -756,6 +756,31 @@ pub async fn prepare_native_credential(
     Ok((generation, credential))
 }
 
+/// Deliberate foreground work resumes the exact reserved scope. A previously
+/// published public key is never replaced when its native item is absent.
+pub async fn resume_native_credential(
+    store: &dyn LocalPairingStore,
+    native: &dyn NativeDeviceCredentials,
+    scope: CredentialScope,
+) -> Result<(LocalPairingGeneration, PreparedCredential), PairingFailure> {
+    let recovered = store.recover().await?;
+    let Some(preparation) = recovered
+        .credential_preparations
+        .iter()
+        .find(|preparation| preparation.scope == scope)
+    else {
+        return prepare_native_credential(store, native, scope).await;
+    };
+    let generation = preparation.generation;
+    if let Some(credential) = recover_native_credential(store, native, generation).await? {
+        return Ok((generation, credential));
+    }
+    // An absent read cannot prove that an earlier native insertion never
+    // started. Secret Service does not make a repeated insertion idempotent.
+    // Retain this reservation until its original effect can be recovered.
+    Err(PairingFailure::RecoveryRequired)
+}
+
 /// Native journal uncertainty revokes the same process-local pairing fence.
 pub fn seal_journal_pairing(
     fence: &super::credentials::PairingAuthorityFence,

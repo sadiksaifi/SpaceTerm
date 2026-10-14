@@ -97,19 +97,156 @@ fn entry_point_rejects_every_unrecognized_or_extra_operand_before_startup() {
 }
 
 #[test]
+fn startup_failure_diagnostics_include_only_typed_inner_classifications() {
+    use spaceterm_core::storage::StoreFailure;
+    use spaceterm_distribution::DistributionFailure;
+    use spaceterm_host::{
+        account_service::ServiceFailure, server_keys::KeyStoreFailure, storage::StorageFailure,
+    };
+    use spaceterm_server::{
+        StartupFailure,
+        contracts::{ServerFailure, ServerFailureClass},
+    };
+    for (failure, expected) in [
+        (
+            StartupFailure::Account(ServiceFailure::ArtifactRejected),
+            "server account unavailable: ArtifactRejected",
+        ),
+        (
+            StartupFailure::Account(ServiceFailure::PairingRequired),
+            "server account unavailable: PairingRequired",
+        ),
+        (
+            StartupFailure::Key(KeyStoreFailure::StorageLocked),
+            "server key unavailable: StorageLocked",
+        ),
+        (
+            StartupFailure::Storage(StorageFailure::UnknownSchema {
+                found: 12345,
+                supported: 6789,
+            }),
+            "server storage unavailable: UnknownSchema",
+        ),
+        (
+            StartupFailure::Store(StoreFailure::InvalidDurableState),
+            "server storage unavailable: InvalidDurableState",
+        ),
+        (
+            StartupFailure::Runtime(ServerFailure {
+                class: ServerFailureClass::CleanupIncomplete,
+                expected: Some(12345),
+                actual: Some(6789),
+                limit: Some(99999),
+            }),
+            "server runtime unavailable: CleanupIncomplete",
+        ),
+        (
+            StartupFailure::Distribution(DistributionFailure::ManifestRejected),
+            "server distribution metadata unavailable: ManifestRejected",
+        ),
+    ] {
+        assert_eq!(failure.classification(), expected);
+    }
+}
+
+#[test]
 fn fixed_service_serve_operand_reports_only_a_bounded_account_startup_classification() {
     let output = server().arg("serve").output().unwrap();
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     // A real installed registration can change the startup stage, but never expose
     // a native error, path, credential or the removed receiver classification.
-    assert!(matches!(
-        output.stderr.as_slice(),
-        b"server account unavailable\n"
-            | b"server registration missing\n"
-            | b"server deliberately stopped\n"
-            | b"server key unavailable\n"
-            | b"server storage unavailable\n"
-            | b"server runtime composition unavailable\n"
-    ));
+    let diagnostic = std::str::from_utf8(&output.stderr).unwrap();
+    assert!(diagnostic.len() <= 128);
+    if matches!(
+        diagnostic,
+        "server registration missing\n" | "server deliberately stopped\n"
+    ) {
+        return;
+    }
+    let (stage, class) = diagnostic.trim_end_matches('\n').split_once(": ").unwrap();
+    let allowed: &[&str] = match stage {
+        "server account unavailable" => &[
+            "RootAccount",
+            "UnsupportedHost",
+            "Missing",
+            "StorageLocked",
+            "StorageUnavailable",
+            "UnsafeStorage",
+            "InvalidRecord",
+            "UnsupportedSchema",
+            "IdentityMismatch",
+            "ArtifactRejected",
+            "IncompatibleStorage",
+            "UnknownRequest",
+            "RequestConflict",
+            "RequestRetired",
+            "StaleAssessment",
+            "ConfirmationRequired",
+            "AuthorizationDenied",
+            "AuthorizationCancelled",
+            "AuthorizationUnavailable",
+            "SupervisorUnavailable",
+            "LoginSessionUnavailable",
+            "Suppressed",
+            "LimitExceeded",
+            "Pending",
+            "PairingRequired",
+            "CleanupUnresolved",
+            "Indeterminate",
+        ],
+        "server key unavailable" => &[
+            "Missing",
+            "StorageLocked",
+            "StorageUnavailable",
+            "UnsafeStorage",
+            "InvalidRecord",
+            "IdentityMismatch",
+            "AlreadyExists",
+            "Conflict",
+            "LimitExceeded",
+            "Indeterminate",
+        ],
+        "server storage unavailable" => &[
+            "Unavailable",
+            "UnsafeStorage",
+            "UnknownSchema",
+            "InvalidState",
+            "Io",
+            "Locked",
+            "InvalidDurableState",
+            "RevisionConflict",
+            "Exhausted",
+            "InvalidTransaction",
+            "IdentityMismatch",
+            "RecoveryRequired",
+        ],
+        "server runtime unavailable" => &[
+            "Authentication",
+            "ScopeMismatch",
+            "StaleAuthority",
+            "Capacity",
+            "Exhausted",
+            "StorageUnavailable",
+            "RecoveryRequired",
+            "RuntimeUnavailable",
+            "NativeUnavailable",
+            "CleanupIncomplete",
+        ],
+        "server distribution metadata unavailable" => &[
+            "Verification",
+            "InvalidRecord",
+            "UnsupportedSchema",
+            "IdentityMismatch",
+            "LimitExceeded",
+            "ArchiveRejected",
+            "ManifestRejected",
+        ],
+        _ => panic!("unexpected startup stage"),
+    };
+    assert!(
+        allowed.contains(&class),
+        "startup must print only an enum classification"
+    );
+    assert_eq!(diagnostic, format!("{stage}: {class}\n"));
 }

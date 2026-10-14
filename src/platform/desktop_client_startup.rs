@@ -6,9 +6,13 @@
 use std::{rc::Rc, sync::Arc};
 
 mod native;
+#[cfg(test)]
+pub(crate) use native::pending_ipc_startup;
 pub(crate) use native::production;
 #[cfg(test)]
-pub(crate) use native::protocol::{Decoder as AcceptanceDecoder, NativeProtocol as AcceptanceProtocol};
+pub(crate) use native::protocol::{
+    Decoder as AcceptanceDecoder, NativeProtocol as AcceptanceProtocol,
+};
 
 use gpui::{App, Entity, Task};
 use spaceterm_client::{
@@ -22,7 +26,7 @@ use spaceterm_client::{
 };
 use spaceterm_core::identity::ServerId;
 
-pub(crate) const NATIVE_PROTOCOL_CAPABILITIES: [u32; 7] = [
+pub(crate) const NATIVE_PROTOCOL_CAPABILITIES: [u32; 10] = [
     spaceterm_protocol::negotiation::CAPABILITY_SERVER_GIT,
     spaceterm_protocol::negotiation::CAPABILITY_SERVER_DIRECTORIES,
     spaceterm_protocol::negotiation::CAPABILITY_ORGANIZATION_COMPARISONS,
@@ -30,6 +34,9 @@ pub(crate) const NATIVE_PROTOCOL_CAPABILITIES: [u32; 7] = [
     spaceterm_protocol::negotiation::CAPABILITY_NATIVE_NOTIFICATIONS,
     spaceterm_protocol::negotiation::CAPABILITY_APPLICATION_MOUSE,
     spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA,
+    spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA_FRAGMENTS,
+    spaceterm_protocol::negotiation::CAPABILITY_NATIVE_PASTE_CORRELATION,
+    spaceterm_protocol::negotiation::CAPABILITY_ENHANCED_COPY,
 ];
 
 use crate::ui::{

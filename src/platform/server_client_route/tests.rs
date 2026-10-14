@@ -45,13 +45,19 @@ async fn desktop_saved_ssh_route_uses_captured_native_configuration() {
         app_directories::AppDirectoryEnvironment, unix_secure_filesystem::UnixSecureFilesystem,
     };
     use std::{os::unix::fs::PermissionsExt, sync::Arc};
-    let mut suffix = [0; 4];
-    getrandom::fill(&mut suffix).unwrap();
-    let root = std::path::PathBuf::from(format!(
-        "/private/tmp/stsr-{:x}",
-        u32::from_be_bytes(suffix)
-    ));
-    std::fs::create_dir(&root).unwrap();
+    #[cfg(target_os = "macos")]
+    let parent = "/private/tmp";
+    #[cfg(target_os = "linux")]
+    let parent = spaceterm_host::account_service::TrustedAccountFacts::current()
+        .unwrap()
+        .home()
+        .to_owned();
+    let directory = tempfile::Builder::new()
+        .prefix("stsr-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(parent)
+        .unwrap();
+    let root = directory.path().canonicalize().unwrap();
     let executable = root.join("ssh");
     let arguments = root.join("arguments");
     std::fs::write(
@@ -119,5 +125,5 @@ async fn desktop_saved_ssh_route_uses_captured_native_configuration() {
     assert!(captured.contains("BatchMode=yes"));
     drop(routes);
     drop(paths);
-    std::fs::remove_dir_all(root).unwrap();
+    drop(directory);
 }

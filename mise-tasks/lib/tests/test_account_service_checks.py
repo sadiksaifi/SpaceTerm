@@ -1,12 +1,15 @@
 """Account tasks cannot mutate by default or count empty targets as evidence."""
 
+import io
 import json
+import os
 import shlex
 import subprocess
 import sys
 import tempfile
 import tomllib
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -234,6 +237,56 @@ class AccountCheckTests(unittest.TestCase):
                 checks.run(["bootstrap"])
         self.assertEqual(run.call_count, 2)
 
+    def test_gate_uses_exit_status_and_test_summary_not_native_warnings(self):
+        summary = (
+            "running 1 test\n"
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; "
+            "finished in 0.01s\n"
+        )
+        marker = "private-native-warning-marker"
+        with tempfile.TemporaryDirectory() as temporary:
+            cargo = Path(temporary) / "cargo"
+            for status, output, classification in (
+                (0, summary, None),
+                (7, summary, "tool-failed"),
+                (0, "running 1 test\n", "target-incomplete"),
+                (
+                    0,
+                    summary.replace("1 passed; 0 failed", "0 passed; 1 failed"),
+                    "target-incomplete",
+                ),
+            ):
+                with self.subTest(status=status, classification=classification):
+                    cargo.write_text(
+                        "#!/bin/sh\n"
+                        f"printf '%s' {shlex.quote(output)}\n"
+                        f"printf '%s' {shlex.quote(marker)} >&2\n"
+                        f"exit {status}\n"
+                    )
+                    cargo.chmod(0o700)
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    with (
+                        patch.dict(os.environ, {"PATH": f"{temporary}:/usr/bin:/bin"}),
+                        patch.object(
+                            checks,
+                            "GATES",
+                            {"account": {"spaceterm-host": ("server_installation",)}},
+                        ),
+                        redirect_stdout(stdout),
+                        redirect_stderr(stderr),
+                    ):
+                        if classification is None:
+                            self.assertEqual(checks.test_gate("account"), 1)
+                        else:
+                            with self.assertRaises(TaskError) as raised:
+                                checks.test_gate("account")
+                            self.assertEqual(
+                                str(raised.exception),
+                                "package=spaceterm-host target=server_installation "
+                                f"classification={classification}",
+                            )
+                    self.assertNotIn(marker, stdout.getvalue() + stderr.getvalue())
+
     def test_account_gate_classifies_the_failed_target_without_native_output(self):
         nonempty = (
             b"running 1 test\n"
@@ -257,6 +310,22 @@ class AccountCheckTests(unittest.TestCase):
                 f"package=spaceterm-host target=server_installation classification={expected}",
             )
 
+    def test_startup_gate_preserves_the_callers_build_job_limit(self):
+        output = (
+            b"running 1 test\n"
+            b"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; "
+            b"finished in 0.01s\n"
+        )
+        with (
+            patch.dict(os.environ, {"CARGO_BUILD_JOBS": "2"}),
+            patch.object(checks.package_server, "build_executable") as compile_fixture,
+            patch.object(checks.native, "run_tool", return_value=output) as run,
+        ):
+            self.assertEqual(checks.test_gate("startup"), 2)
+        self.assertEqual(compile_fixture.call_args.kwargs["env"]["CARGO_BUILD_JOBS"], "2")
+        for call in run.call_args_list:
+            self.assertEqual(call.kwargs["environment"]["CARGO_BUILD_JOBS"], "2")
+
     def test_startup_gate_requires_real_account_and_binary_composition_tests(self):
         output = (
             b"running 1 test\n"
@@ -279,7 +348,10 @@ class AccountCheckTests(unittest.TestCase):
             ("--locked", "-p", "spaceterm-server", "--features", "test-support"),
         )
         self.assertEqual(compile_fixture.call_args.kwargs["binary"], "spaceterm-server")
-        self.assertEqual(compile_fixture.call_args.kwargs["env"]["CARGO_BUILD_JOBS"], "4")
+        self.assertEqual(
+            compile_fixture.call_args.kwargs["env"]["CARGO_BUILD_JOBS"],
+            os.environ.get("CARGO_BUILD_JOBS", "4"),
+        )
         self.assertEqual(
             [call.args[0] for call in run.call_args_list],
             [

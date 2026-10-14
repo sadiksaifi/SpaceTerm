@@ -17,6 +17,10 @@ use spaceterm_server::{
 use spaceterm_terminal::{metadata::LocalMachine, runtime_contracts::*};
 use std::sync::Mutex;
 
+#[path = "account_publications.rs"]
+mod account_publications;
+use account_publications::{PublicationCodec, handshake, query_status, reconcile, round_trip};
+
 struct Seed {
     root: tempfile::TempDir,
     registration: RegisteredServer,
@@ -290,8 +294,36 @@ async fn retire(
                 panic!("runtime reply");
             };
             match serde_json::from_slice::<AccountRuntimeReply>(&value.body).unwrap() {
-                AccountRuntimeReply::Assessment(original) => break original,
-                AccountRuntimeReply::Failed(ServiceFailure::Pending) => {
+                AccountRuntimeReply::Assessment(original) => {
+                    assert_eq!(original.epoch, Some(epoch));
+                    assert_eq!(original.sessions, sessions);
+                    // Reserve this exact actor scope before slow host-journal I/O.
+                    // Startup metadata may legitimately stale an unreserved scope.
+                    let response = round_trip(
+                        &transport,
+                        &mut codec,
+                        payload(2, AccountRuntimeCall::Reserve(original.clone())),
+                    )
+                    .await;
+                    let Payload::Major2(v2::Message {
+                        kind: Some(v2::message::Kind::AccountRuntimeReply(value)),
+                    }) = response
+                    else {
+                        panic!("runtime reserve reply");
+                    };
+                    match serde_json::from_slice::<AccountRuntimeReply>(&value.body).unwrap() {
+                        AccountRuntimeReply::Reserved => break original,
+                        AccountRuntimeReply::Failed(
+                            ServiceFailure::Pending | ServiceFailure::StaleAssessment,
+                        ) => {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        other => panic!("runtime reservation: {other:?}"),
+                    }
+                }
+                AccountRuntimeReply::Failed(
+                    ServiceFailure::Pending | ServiceFailure::StaleAssessment,
+                ) => {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
                 other => panic!("runtime assessment: {other:?}"),
@@ -352,7 +384,7 @@ async fn retire(
 async fn operation(
     seed: &Seed,
     transport: &dyn MessageTransport,
-    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    codec: &mut PublicationCodec,
     sequence: u64,
     command: Command,
 ) -> Outcome {
@@ -380,7 +412,7 @@ async fn operation(
                 kind:
                     Some(
                         v2::message::Kind::OrganizationSnapshot(_)
-                        | v2::message::Kind::OrganizationResync(_),
+                        | v2::message::Kind::OrganizationDelta(_),
                     ),
             }) => {}
             _ => panic!("operation reply"),
@@ -390,7 +422,7 @@ async fn operation(
 async fn create(
     seed: &Seed,
     transport: &dyn MessageTransport,
-    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    codec: &mut PublicationCodec,
 ) -> (WorkspaceId, PaneId, ControlGrant) {
     let result = operation(
         seed,
@@ -420,7 +452,7 @@ async fn create(
 async fn start_shell(
     seed: &Seed,
     transport: &dyn MessageTransport,
-    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    codec: &mut PublicationCodec,
     epoch: ServerEpoch,
     generation: SessionGeneration,
     connection: ConnectionGeneration,
@@ -749,8 +781,12 @@ impl Binary {
         .unwrap()
     }
     async fn connect(&mut self, seed: &Seed) -> IpcTransport {
+        self.connect_with_deadline(seed, Duration::from_secs(10))
+            .await
+    }
+    async fn connect_with_deadline(&mut self, seed: &Seed, deadline: Duration) -> IpcTransport {
         let endpoint = seed.registration.endpoint().unwrap();
-        tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::time::timeout(deadline, async {
             loop {
                 if let Some(status) = self.0.try_wait().unwrap() {
                     use std::io::Read;
@@ -797,14 +833,16 @@ impl Drop for Binary {
 }
 async fn snapshot(
     transport: &dyn MessageTransport,
-    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    codec: &mut PublicationCodec,
     generation: u64,
 ) -> v2::OrganizationSnapshot {
+    codec.request_snapshot(generation);
     let request = Payload::Major2(v2::Message {
         kind: Some(v2::message::Kind::OrganizationQuery(
             v2::OrganizationQuery {
                 request: generation,
                 request_generation: generation,
+                known_epoch: codec.epoch(),
                 ..Default::default()
             },
         )),
@@ -817,24 +855,29 @@ async fn snapshot(
         let payload = codec
             .decode(&transport.recv().await.unwrap().unwrap())
             .unwrap();
-        let Payload::Major2(v2::Message {
-            kind: Some(v2::message::Kind::OrganizationSnapshot(value)),
-        }) = payload
-        else {
-            panic!("organization snapshot");
-        };
-        let part = value.part.as_ref().unwrap();
-        if part.request != generation || part.request_generation != generation {
-            continue;
+        match payload {
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::OrganizationSnapshot(value)),
+            }) => {
+                let part = value.part.as_ref().unwrap();
+                assert_eq!(
+                    (part.request, part.request_generation),
+                    (generation, generation)
+                );
+                assert_eq!(value.epoch, codec.epoch());
+                assert!(value.complete);
+                return value;
+            }
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::OrganizationDelta(_)),
+            }) => {}
+            _ => panic!("organization snapshot"),
         }
-        assert!(value.complete);
-        spaceterm_protocol::convert::organization::v2::decode_snapshot_part(&value).unwrap();
-        return value;
     }
 }
 async fn reconcile_snapshot(
     transport: &dyn MessageTransport,
-    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    codec: &mut PublicationCodec,
     snapshot: &v2::OrganizationSnapshot,
 ) -> ConnectionGeneration {
     let principal = codec.principal();
@@ -1285,7 +1328,23 @@ async fn real_binary_retains_only_explicit_remote_scope_across_stop_start_and_di
         let status = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let status = query_status(&transport, &mut codec).await;
-                if status.parts().listeners.len() == endpoints.len() {
+                assert!(
+                    status.parts().listeners.iter().all(|fact| matches!(
+                        fact.state,
+                        ListenerState::Binding | ListenerState::Listening
+                    )),
+                    "restored listener failure: {:?}",
+                    status.parts().listeners
+                );
+                // Binding already publishes every retained endpoint. The count
+                // alone does not mean the restarted listeners are ready.
+                if status.parts().listeners.len() == endpoints.len()
+                    && status
+                        .parts()
+                        .listeners
+                        .iter()
+                        .all(|fact| fact.state == ListenerState::Listening)
+                {
                     break status;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1301,7 +1360,9 @@ async fn real_binary_retains_only_explicit_remote_scope_across_stop_start_and_di
                 .parts()
                 .listeners
                 .iter()
-                .all(|fact| fact.state == ListenerState::Listening)
+                .all(|fact| fact.state == ListenerState::Listening),
+            "restored listener states: {:?}",
+            status.parts().listeners
         );
         operation(
             &seed,
@@ -1358,3 +1419,235 @@ async fn real_binary_retains_only_explicit_remote_scope_across_stop_start_and_di
 
 #[path = "listener_fixes.rs"]
 mod listener_fixes;
+
+struct RetiredInstanceObservation {
+    pid: u32,
+    birth: u64,
+    descendant_live: std::sync::atomic::AtomicBool,
+    calls: std::sync::atomic::AtomicUsize,
+}
+impl spaceterm_host::account_service::InstanceProcessObserver for RetiredInstanceObservation {
+    fn verify_absent(&self, pid: u32, birth: u64, _: &[[u64; 2]]) -> Result<(), ServiceFailure> {
+        assert_eq!((pid, birth), (self.pid, self.birth));
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self
+            .descendant_live
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            Err(ServiceFailure::CleanupUnresolved)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[tokio::test]
+async fn killed_account_server_restarts_after_native_observation_confirms_instance_absent() {
+    injected_crash_recovery(false).await;
+}
+
+#[tokio::test]
+async fn killed_account_server_refuses_recovery_while_a_descendant_is_observed_alive() {
+    injected_crash_recovery(true).await;
+}
+
+async fn injected_crash_recovery(descendant_live: bool) {
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let seed = Seed::new().await;
+        let mut binary = Binary::start(&seed);
+        let transport = binary
+            .connect_with_deadline(&seed, Duration::from_secs(30))
+            .await;
+        let mut codec = handshake(
+            &transport,
+            seed.identity.pin(),
+            seed.principal,
+            seed.key.clone(),
+            2,
+        )
+        .await;
+        let before = snapshot(&transport, &mut codec, 1).await;
+        transport.close().await.unwrap();
+        let stale_endpoint = seed.registration.endpoint().unwrap();
+        assert_eq!(
+            unsafe { libc::kill(binary.0.id() as i32, libc::SIGKILL) },
+            0
+        );
+        assert!(!binary.wait().await.success());
+        let record_path = seed.registration.data_directory().join("runtime-custody");
+        let original = fs::read(&record_path).unwrap();
+        let signed: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        let body: Vec<u8> = serde_json::from_value(signed["body"].clone()).unwrap();
+        let state: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(state["clean"], false);
+        assert!(stale_endpoint.path().exists());
+        let observer = Arc::new(RetiredInstanceObservation {
+            pid: binary.0.id(),
+            birth: state["owner"]["birth"].as_u64().unwrap(),
+            descendant_live: std::sync::atomic::AtomicBool::new(descendant_live),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let supervisor =
+            test_support::retained_supervisor_with_observer(seed.root.path(), observer.clone())
+                .unwrap();
+        if descendant_live {
+            let startup = AccountStartup::admit(&supervisor).unwrap();
+            let result =
+                RecoveredAccountServer::recover(supervisor.clone(), startup, seed.launch()).await;
+            assert!(matches!(
+                result,
+                Err(spaceterm_server::StartupFailure::Runtime(
+                    spaceterm_server::contracts::ServerFailure {
+                        class: spaceterm_server::contracts::ServerFailureClass::CleanupIncomplete,
+                        ..
+                    }
+                ))
+            ));
+            assert_eq!(fs::read(&record_path).unwrap(), original);
+            observer
+                .descendant_live
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+        let startup = AccountStartup::admit(&supervisor).unwrap();
+        let server = RecoveredAccountServer::recover(supervisor.clone(), startup, seed.launch())
+            .await
+            .unwrap();
+        assert!(server.handle().snapshot().epoch().get() > before.epoch);
+        assert_eq!(
+            supervisor.discover().unwrap().unwrap().server_pin(),
+            seed.identity.pin()
+        );
+        let report = server.run_until(async {}).await.unwrap();
+        assert!(
+            report.cleanup_confirmed
+                && report.listeners_closed
+                && report.started_writes_finished
+                && !report.recovery_required
+        );
+        assert!(observer.calls.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+        assert!(!seed.registration.endpoint().unwrap().path().exists());
+        assert_eq!(
+            supervisor.discover().unwrap().unwrap().desired_state(),
+            DesiredServerState::Running
+        );
+    })
+    .await
+    .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn native_crash_recovery_does_not_cleanup_a_checkpointed_unrelated_orphan() {
+    use spaceterm_host::pty::macos_pty_host::MacosPtyHost;
+    use std::io::BufRead as _;
+    tokio::time::timeout(Duration::from_secs(45), async {
+        let seed = Seed::new().await;
+        let mut binary = Binary::start(&seed);
+        let transport = binary.connect(&seed).await;
+        let mut codec = handshake(
+            &transport,
+            seed.identity.pin(),
+            seed.principal,
+            seed.key.clone(),
+            2,
+        )
+        .await;
+        let before = snapshot(&transport, &mut codec, 1).await;
+        transport.close().await.unwrap();
+        let mut unrelated = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 12 & echo $!; wait"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(unrelated.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let orphan: u32 = line.trim().parse().unwrap();
+        let (parent_birth, original_parent) = MacosPtyHost
+            .process_lineage(unrelated.id() as i32)
+            .unwrap()
+            .unwrap();
+        let (orphan_birth, orphan_parent) = MacosPtyHost
+            .process_lineage(orphan as i32)
+            .unwrap()
+            .unwrap();
+        assert_eq!(orphan_parent, parent_birth);
+        let ledger_path = seed
+            .registration
+            .data_directory()
+            .join("runtime-history/lineage");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(bytes) = fs::read(&ledger_path) {
+                    let signed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    let body = signed["body"].as_str().unwrap();
+                    let ledger: serde_json::Value = serde_json::from_str(body).unwrap();
+                    let ancestors: Vec<[u64; 2]> =
+                        serde_json::from_value(ledger["ancestors"].clone()).unwrap();
+                    if ancestors.contains(&[parent_birth, original_parent])
+                        && ancestors.contains(&[orphan_birth, parent_birth])
+                    {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
+        assert!(
+            NativeServiceProcessTable::current()
+                .unwrap()
+                .observe(orphan)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            unsafe { libc::kill(binary.0.id() as i32, libc::SIGKILL) },
+            0
+        );
+        assert!(!binary.wait().await.success());
+        let mut restarted = Binary::start(&seed);
+        let transport = restarted.connect(&seed).await;
+        let mut codec = handshake(
+            &transport,
+            seed.identity.pin(),
+            seed.principal,
+            seed.key.clone(),
+            2,
+        )
+        .await;
+        let restored = snapshot(&transport, &mut codec, 1).await;
+        assert!(restored.epoch > before.epoch);
+        assert!(
+            NativeServiceProcessTable::current()
+                .unwrap()
+                .observe(orphan)
+                .unwrap()
+                .is_some(),
+            "server recovery must not kill unrelated processes"
+        );
+        transport.close().await.unwrap();
+        stop(&seed, ServerEpoch::new(restored.epoch), Vec::new(), None).await;
+        assert!(restarted.wait().await.success());
+        // The unrelated fixture exits on its own. The server never gains signal authority over it.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while MacosPtyHost
+                .process_lineage(orphan as i32)
+                .unwrap()
+                .is_some_and(|(birth, _)| birth == orphan_birth)
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+    })
+    .await
+    .unwrap();
+}

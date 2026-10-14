@@ -14,6 +14,125 @@ use std::{
 use support::{peer::*, *};
 
 #[tokio::test(start_paused = true)]
+async fn authenticated_snapshot_publication_keeps_connection_and_installs_only_complete_transfer() {
+    for major in [1, 2] {
+        let binding = binding(1);
+        let plan = Arc::new(PeerPlan::new(vec![major]));
+        let (registry, runtime) = ClientRegistry::recover(services(
+            vec![binding.clone()],
+            Arc::new(Peers::one(&binding, plan.clone())),
+        ))
+        .await
+        .unwrap();
+        let server = registry.server(binding.target().server()).unwrap();
+        server.connect().await.unwrap();
+        settle().await;
+        let original = match *server.state().borrow() {
+            ConnectionState::Connected { info } => info,
+            ref other => panic!("initial authenticated connection unavailable: {other:?}"),
+        };
+        plan.revision.store(2, Ordering::SeqCst);
+        for index in 0..2 {
+            macro_rules! publication {
+                ($p:ident, $variant:ident) => {
+                    Payload::$variant($p::Message {
+                        kind: Some($p::message::Kind::OrganizationSnapshot(
+                            $p::OrganizationSnapshot {
+                                server: Some(spaceterm_protocol::wire::common::Identity {
+                                    value: binding.target().server().bytes().to_vec(),
+                                }),
+                                epoch: 1,
+                                revision: 2,
+                                complete: index == 1,
+                                part: Some($p::PublicationPart {
+                                    request: 1,
+                                    request_generation: 1,
+                                    transfer: 2,
+                                    index,
+                                    total: 2,
+                                    epoch: 1,
+                                    base_revision: 0,
+                                    revision: 2,
+                                }),
+                                ..Default::default()
+                            },
+                        )),
+                    })
+                };
+            }
+            let payload = if major == 1 {
+                publication!(v1, Major1)
+            } else {
+                publication!(v2, Major2)
+            };
+            plan.control(PeerControl::publication(payload)).await;
+            settle().await;
+            assert_eq!(
+                plan.queries.load(Ordering::SeqCst),
+                1,
+                "a valid publication must not allocate a new resynchronization identity"
+            );
+            assert_eq!(
+                server
+                    .replica()
+                    .borrow()
+                    .retained()
+                    .unwrap()
+                    .cursor
+                    .revision
+                    .get(),
+                if index == 0 { 1 } else { 2 }
+            );
+            if index == 0 {
+                assert!(matches!(
+                    *server.state().borrow(),
+                    ConnectionState::Connecting {
+                        phase: ConnectingPhase::Reconciling
+                    }
+                ));
+                let submitted = plan.messages.lock().unwrap().len();
+                let ordinary = if major == 1 {
+                    Payload::Major1(v1::Message {
+                        kind: Some(v1::message::Kind::StatusQuery(v1::StatusQuery {
+                            request: 10,
+                            ..Default::default()
+                        })),
+                    })
+                } else {
+                    Payload::Major2(v2::Message {
+                        kind: Some(v2::message::Kind::StatusQuery(v2::StatusQuery {
+                            request: 10,
+                            ..Default::default()
+                        })),
+                    })
+                };
+                assert_eq!(
+                    server
+                        .dispatch(original, ordinary)
+                        .await
+                        .unwrap_err()
+                        .class(),
+                    spaceterm_client::failure::ClientFailureClass::StaleAuthority,
+                    "retained authenticated correlation cannot authorize ordinary registry dispatch"
+                );
+                settle().await;
+                assert_eq!(plan.messages.lock().unwrap().len(), submitted);
+            }
+        }
+        let mut installed = original;
+        installed.organization_revision = spaceterm_core::authority::OrganizationRevision::new(2);
+        assert_eq!(
+            *server.state().borrow(),
+            ConnectionState::Connected { info: installed },
+            "publication must preserve the exact authenticated identity, binding, epoch and attempt"
+        );
+        assert_eq!(plan.reconcile_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(plan.opens.load(Ordering::SeqCst), 1);
+        runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn connected_requires_authentication_snapshot_and_control_reconciliation() {
     let binding = binding(1);
     let plan = Arc::new(PeerPlan::new(vec![2, 1]));
@@ -1211,4 +1330,53 @@ mod fake_profiles {
             ));
         }
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn uncorrelated_snapshot_does_not_revoke_authenticated_subscription_eligibility() {
+    let binding = binding(1);
+    let plan = Arc::new(PeerPlan::new(vec![2]));
+    let delegate = Arc::new(Delegate::default());
+    let mut injected = services(
+        vec![binding.clone()],
+        Arc::new(Peers::one(&binding, plan.clone())),
+    );
+    injected.delegate = delegate.clone();
+    let (registry, runtime) = ClientRegistry::recover(injected).await.unwrap();
+    let server = registry.server(binding.target().server()).unwrap();
+    server.connect().await.unwrap();
+    settle().await;
+    let invalidations = delegate.invalidations.load(Ordering::SeqCst);
+    plan.control(PeerControl::publication(Payload::Major2(v2::Message {
+        kind: Some(v2::message::Kind::OrganizationSnapshot(
+            v2::OrganizationSnapshot {
+                server: Some(spaceterm_protocol::wire::common::Identity {
+                    value: binding.target().server().bytes().to_vec(),
+                }),
+                epoch: 1,
+                revision: 2,
+                complete: true,
+                part: Some(v2::PublicationPart {
+                    request: 99,
+                    request_generation: 99,
+                    transfer: 2,
+                    index: 0,
+                    total: 1,
+                    epoch: 1,
+                    base_revision: 0,
+                    revision: 2,
+                }),
+                ..Default::default()
+            },
+        )),
+    })))
+    .await;
+    settle().await;
+    assert_eq!(delegate.invalidations.load(Ordering::SeqCst), invalidations);
+    assert_eq!(plan.queries.load(Ordering::SeqCst), 1);
+    assert!(
+        matches!(*server.state().borrow(), ConnectionState::Connected { info } if info.organization_revision.get() == 1)
+    );
+    assert!(server.replica().borrow().is_ready());
+    runtime.shutdown().await.unwrap();
 }

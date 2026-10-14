@@ -12,8 +12,8 @@ use gpui::{App, AppContext as _, Task};
 use spaceterm_client::{
     api::{ConnectionState, PairedServerBinding},
     operations::{OperationPeer, OperationStatus, OperationTicket, OperationTracker},
-    pane_channel::{PaneChannel, PaneChannels, PaneReadiness, WorkspaceLease},
-    pending::PendingTasks,
+    pane_channel::{PaneChannel, PaneChannelState, PaneChannels, PaneReadiness, WorkspaceLease},
+    pending::{PendingRuntime, PendingTasks},
     registry::{ClientRegistry, ClientRuntime, ServerHandle},
     replica::{ReplicaSnapshot, ReplicaState},
     view::{
@@ -146,6 +146,24 @@ pub(crate) fn install_with_enrollment<S: ViewStore + 'static>(
         notifier,
         cx,
     )?);
+    if let Some(services) = &enrollment {
+        // The scheduler belongs to the recovered journal, not to an ordinary connection.
+        // Enter its executor only to spawn the existing worker; installation does no native IO.
+        let pending = {
+            let _entered = provider.inner.executor.enter();
+            services
+                .pairing
+                .start_scheduler()
+                .map_err(DesktopClientError::from)?
+        };
+        provider
+            .inner
+            .runtime
+            .borrow_mut()
+            .as_mut()
+            .ok_or(DesktopClientError::Cancelled)?
+            .pending = Some(pending);
+    }
     let runtime = cx.new(|cx| {
         super::DesktopClientRuntime::new(
             super::DesktopClientDependencies {
@@ -176,6 +194,183 @@ struct Source {
     handle: Option<ServerHandle>,
 }
 
+struct SourceWatch {
+    source: Source,
+    channel: Option<watch::Receiver<PaneChannelState>>,
+}
+
+/// One retryable read of the actor and native publication owners. No watch guard
+/// survives capture, so callers can reconcile the view and touch Pane locks safely.
+struct SourceCapture {
+    binding: PairedServerBinding,
+    connection: ConnectionState,
+    replica: ReplicaState,
+    channel: Option<PaneChannelState>,
+}
+
+impl SourceWatch {
+    fn capture(&mut self) -> SourceCapture {
+        loop {
+            let connection = self.source.state.borrow_and_update().clone();
+            let replica = self.source.replica.borrow_and_update().clone();
+            let channel = self
+                .channel
+                .as_mut()
+                .map(|channel| *channel.borrow_and_update());
+            if self.source.state.has_changed().unwrap_or(false)
+                || self.source.replica.has_changed().unwrap_or(false)
+                || self
+                    .channel
+                    .as_ref()
+                    .is_some_and(|channel| channel.has_changed().unwrap_or(false))
+            {
+                continue;
+            }
+            return SourceCapture {
+                binding: self.source.binding.clone(),
+                connection,
+                replica,
+                channel,
+            };
+        }
+    }
+
+    async fn changed(&mut self) -> Result<(), DesktopClientError> {
+        tokio::select! {
+            result = self.source.state.changed() => result,
+            result = self.source.replica.changed() => result,
+            result = async {
+                match self.channel.as_mut() {
+                    Some(channel) => channel.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => result,
+        }
+        .map_err(|_| DesktopClientError::Cancelled)
+    }
+}
+
+impl SourceCapture {
+    fn snapshot(&self) -> Option<&ReplicaSnapshot> {
+        self.replica.retained().map(Arc::as_ref)
+    }
+
+    fn observation(&self) -> Result<ReplicaObservation<'_>, DesktopClientError> {
+        Source::observation(
+            &self.binding,
+            self.snapshot().ok_or(DesktopClientError::Reconciling)?,
+            &self.connection,
+            self.replica.is_ready(),
+            false,
+        )
+    }
+
+    fn publication_holds_measurement(&self, state: &State) -> bool {
+        let server = self.binding.target().server();
+        let Some(pending) = state.startup.get(&server).and_then(StartupIntents::pending) else {
+            return false;
+        };
+        let (Some(snapshot), Some(channel)) = (self.snapshot(), self.channel) else {
+            return false;
+        };
+        let matches_info = |info: spaceterm_client::api::ConnectedInfo| {
+            info.server == server
+                && info.pairing == self.binding.target().pairing()
+                && info.client == self.binding.target().client()
+                && info.binding == pending.context.connection()
+                && info.epoch == snapshot.cursor.epoch
+        };
+        // Publication preserves native context. Genuine reconciliation raises it
+        // before publishing Reconciling, even if binding and epoch are unchanged.
+        let publication = match &self.connection {
+            ConnectionState::Connecting {
+                phase: spaceterm_client::api::ConnectingPhase::Reconciling,
+            } => true,
+            ConnectionState::Connected { info } => {
+                matches_info(*info)
+                    && info.organization_revision <= snapshot.cursor.revision
+                    && match channel.connection {
+                        None => true,
+                        // A single-part publication installs native authority before
+                        // advancing the actor's Connected watch. This is not Ready.
+                        Some(installed) => {
+                            installed.attempt == info.attempt
+                                && snapshot.cursor.revision > info.organization_revision
+                        }
+                    }
+            }
+            _ => false,
+        };
+        publication
+            && self.replica.is_ready()
+            && pending.state == view::StartupState::AwaitingMeasurement
+            && snapshot.cursor.server == server
+            && snapshot.cursor.epoch == pending.context.session().epoch
+            && channel.context == pending.context.context()
+            && channel.connection.is_none_or(|info| {
+                matches_info(info) && info.organization_revision == snapshot.cursor.revision
+            })
+            && channel.runtime.is_some_and(|runtime| {
+                runtime.pane == pending.context.target().pane
+                    && runtime.session_generation == pending.context.session().generation
+                    && runtime.phase == pending.context.phase()
+                    && snapshot.organization.runtime().contains(&runtime)
+            })
+            && state.owns_selection(&pending.context)
+    }
+}
+
+impl Source {
+    fn watch(&self, channel: Option<watch::Receiver<PaneChannelState>>) -> SourceWatch {
+        SourceWatch {
+            source: self.clone(),
+            channel,
+        }
+    }
+
+    fn observation<'a>(
+        paired: &PairedServerBinding,
+        snapshot: &'a ReplicaSnapshot,
+        connection: &ConnectionState,
+        replica_ready: bool,
+        synchronizing: bool,
+    ) -> Result<ReplicaObservation<'a>, DesktopClientError> {
+        let (status, binding, ready) = match connection {
+            ConnectionState::Connected { info } => (
+                ServerViewStatus::Connected,
+                Some(info.binding),
+                info.server == snapshot.cursor.server
+                    && info.epoch == snapshot.cursor.epoch
+                    && info.organization_revision == snapshot.cursor.revision
+                    && replica_ready,
+            ),
+            ConnectionState::Connecting { .. } => (ServerViewStatus::Connecting, None, false),
+            ConnectionState::Offline { .. } => (ServerViewStatus::Offline, None, false),
+            ConnectionState::Incompatible { .. } => (ServerViewStatus::Incompatible, None, false),
+            ConnectionState::Stopped => (ServerViewStatus::Stopped, None, false),
+        };
+        let readiness = if ready && !synchronizing {
+            ReplicaReadiness::Ready
+        } else if status == ServerViewStatus::Connected {
+            ReplicaReadiness::Synchronizing
+        } else {
+            ReplicaReadiness::Retained
+        };
+        ReplicaObservation::new(
+            &snapshot.organization,
+            snapshot.accepted_creations(),
+            ReplicaFacts {
+                pairing: paired.target().pairing(),
+                client: paired.target().client(),
+                connection: binding,
+                readiness,
+                status,
+            },
+        )
+        .map_err(view_error)
+    }
+}
+
 #[derive(Default)]
 struct State {
     view: ClientViewState,
@@ -187,6 +382,7 @@ struct State {
     executors: HashMap<ServerId, Arc<tokio::sync::Mutex<view::launch::StartupExecutor>>>,
     startup_channels: HashMap<(ServerId, view::UseTicket), PaneChannel>,
     measurements: HashMap<PaneId, PaneMeasurementRequest>,
+    measurement_admissions: HashMap<PaneId, AdmittedMeasurement>,
     presentations: HashMap<PaneId, PresentationState>,
     revalidated: HashMap<PaneId, (PaneViewToken, view::ViewRevision)>,
     outcomes: HashMap<OperationId, (Arc<Outcome>, OrganizationRevision)>,
@@ -194,6 +390,80 @@ struct State {
     repair_admissions: std::collections::HashSet<PaneId>,
     detach_requests: HashMap<UiRequestId, view::WorkspaceAttachment>,
     blocked: HashMap<ServerId, (BlockedLocation, IntendedAction)>,
+}
+
+impl State {
+    fn validate_measurement(
+        &self,
+        measurement: PaneMeasurement,
+        context: ContextGeneration,
+    ) -> Result<PaneMeasurementRequest, DesktopClientError> {
+        let request = PaneMeasurementRequest {
+            token: measurement.token,
+            ticket: measurement.ticket,
+            layout: measurement.layout,
+        };
+        let pending = self
+            .startup
+            .get(&measurement.token.pane.server())
+            .and_then(StartupIntents::pending);
+        // The request map can outlive cancellation while CancelUse awaits its
+        // executor. It is not ownership of the original pending ticket.
+        if measurement.token.context_generation != context
+            || self.measurements.get(&measurement.token.pane) != Some(&request)
+            || pending.is_none_or(|pending| {
+                pending.ticket != measurement.ticket
+                    || pending.context.target().pane != measurement.token.pane
+                    || pending.context.context() != context
+                    || pending.context.attachment().incarnation()
+                        != measurement.token.attachment_generation
+                    || !self.owns_selection(&pending.context)
+            })
+        {
+            return Err(DesktopClientError::StaleContext);
+        }
+        measurement.view_measurement()?;
+        Ok(request)
+    }
+
+    fn owns_selection(&self, context: &view::UseContext) -> bool {
+        let target = context.target();
+        self.view.active_workspace() == Some(target.workspace)
+            && self
+                .view
+                .workspace(target.workspace)
+                .is_some_and(|workspace| {
+                    workspace.attachment() == context.attachment()
+                        && workspace.active_tab() == Some(target.tab)
+                        && workspace
+                            .arrangement(target.tab)
+                            .is_some_and(|arrangement| {
+                                arrangement.contains_pane(target.pane)
+                                    && arrangement.focused_pane() == Some(target.pane)
+                            })
+                })
+    }
+}
+
+/// Both client workers survive an empty server list and drain before application quit.
+struct DesktopClientWorkers {
+    client: ClientRuntime,
+    pending: Option<PendingRuntime>,
+}
+impl DesktopClientWorkers {
+    async fn shutdown(self) -> Result<(), spaceterm_client::failure::ClientFailure> {
+        let Self { client, pending } = self;
+        let pending = async move {
+            if let Some(pending) = pending {
+                pending.shutdown().await
+            } else {
+                Ok(())
+            }
+        };
+        // A failure in one worker must not skip joining the other's owned native effects.
+        let (pending, client) = tokio::join!(pending, client.shutdown());
+        pending.and(client)
+    }
 }
 
 struct Inner {
@@ -205,12 +475,42 @@ struct Inner {
     tracker: OperationTracker,
     operations: Arc<dyn OperationPeer>,
     pending: PendingTasks,
-    runtime: RefCell<Option<ClientRuntime>>,
+    runtime: RefCell<Option<DesktopClientWorkers>>,
     executor: tokio::runtime::Handle,
     notifier: DesktopClientNotifier,
     state: RefCell<State>,
     tasks: RefCell<Vec<Task<()>>>,
     edits: Arc<tokio::sync::Mutex<()>>,
+}
+
+struct AdmittedMeasurement {
+    request: PaneMeasurementRequest,
+    changes: watch::Sender<bool>,
+}
+
+/// Keeps one exact callback owned across view saves and authenticated publication.
+/// Dropping the request releases admission without requesting another redraw.
+struct MeasurementAdmission {
+    request: PaneMeasurementRequest,
+    owner: std::rc::Weak<Inner>,
+}
+
+impl Drop for MeasurementAdmission {
+    fn drop(&mut self) {
+        let Some(inner) = self.owner.upgrade() else {
+            return;
+        };
+        let mut state = inner.state.borrow_mut();
+        if state
+            .measurement_admissions
+            .get(&self.request.token.pane)
+            .is_some_and(|admission| admission.request == self.request)
+        {
+            state
+                .measurement_admissions
+                .remove(&self.request.token.pane);
+        }
+    }
 }
 
 impl<S: ViewStore + 'static> ComposedDesktopClientProvider<S> {
@@ -269,6 +569,11 @@ impl<S: ViewStore + 'static> ComposedDesktopClientProvider<S> {
             {
                 continue;
             }
+            if let Some(snapshot) = handle.replica().borrow().retained().cloned() {
+                channels
+                    .retain(&binding, snapshot)
+                    .map_err(DesktopClientError::from)?;
+            }
             order.push(name.server);
             if sources
                 .insert(
@@ -295,7 +600,10 @@ impl<S: ViewStore + 'static> ComposedDesktopClientProvider<S> {
             tracker,
             operations,
             pending,
-            runtime: RefCell::new(Some(runtime)),
+            runtime: RefCell::new(Some(DesktopClientWorkers {
+                client: runtime,
+                pending: None,
+            })),
             executor,
             notifier,
             state: RefCell::new(State {
@@ -595,52 +903,31 @@ impl Inner {
     ) -> Result<ReplicaObservation<'a>, DesktopClientError> {
         let source = self.source(&server).ok_or(DesktopClientError::TargetGone)?;
         let connection = source.state.borrow().clone();
-        let (status, binding, ready) = match connection {
-            ConnectionState::Connected { info } => (
-                ServerViewStatus::Connected,
-                Some(info.binding),
-                info.server == snapshot.cursor.server
-                    && info.epoch == snapshot.cursor.epoch
-                    && info.organization_revision == snapshot.cursor.revision
-                    && source.replica.borrow().is_ready(),
-            ),
-            ConnectionState::Connecting { .. } => (ServerViewStatus::Connecting, None, false),
-            ConnectionState::Offline { .. } => (ServerViewStatus::Offline, None, false),
-            ConnectionState::Incompatible { .. } => (ServerViewStatus::Incompatible, None, false),
-            ConnectionState::Stopped => (ServerViewStatus::Stopped, None, false),
-        };
-        let readiness = if ready && !synchronizing {
-            ReplicaReadiness::Ready
-        } else if status == ServerViewStatus::Connected {
-            ReplicaReadiness::Synchronizing
-        } else {
-            ReplicaReadiness::Retained
-        };
-        ReplicaObservation::new(
-            &snapshot.organization,
-            snapshot.accepted_creations(),
-            ReplicaFacts {
-                pairing: source.binding.target().pairing(),
-                client: source.binding.target().client(),
-                connection: binding,
-                readiness,
-                status,
-            },
+        let replica_ready = source.replica.borrow().is_ready();
+        Source::observation(
+            &source.binding,
+            snapshot,
+            &connection,
+            replica_ready,
+            synchronizing,
         )
-        .map_err(view_error)
     }
 
     fn refresh(&self, server: ServerId) -> Result<Vec<StartupEffect>, DesktopClientError> {
-        let snapshot = match self.snapshot(server) {
-            Ok(snapshot) => snapshot,
-            Err(DesktopClientError::Reconciling) => {
-                self.notifier.frame_changed(server);
-                return Ok(Vec::new());
-            }
-            Err(error) => return Err(error),
-        };
-        let observation = self.observation(server, &snapshot, false)?;
+        let source = self.source(&server).ok_or(DesktopClientError::TargetGone)?;
         let mut state = self.state.borrow_mut();
+        let channel = state
+            .startup
+            .get(&server)
+            .and_then(StartupIntents::pending)
+            .and_then(|pending| state.channels.get(&pending.context.target().pane))
+            .map(PaneChannel::state);
+        let observed = source.watch(channel).capture();
+        if observed.snapshot().is_none() {
+            self.notifier.frame_changed(server);
+            return Ok(Vec::new());
+        }
+        let observation = observed.observation()?;
         state
             .view
             .filter_suppressed(
@@ -683,25 +970,27 @@ impl Inner {
         state
             .leases
             .retain(|workspace, lease| attachments.get(workspace) == Some(&lease.incarnation()));
-        let context = state
-            .startup
-            .get(&server)
-            .and_then(StartupIntents::pending)
-            .map(|pending| pending.context.target().pane)
-            .and_then(|pane| state.channels.get(&pane))
-            .map(|channel| channel.state().borrow().context)
+        let context = observed
+            .channel
+            .map(|channel| channel.context)
             .unwrap_or(ContextGeneration::new(1));
-        let view = state.view.clone();
-        let effects = state
-            .startup
-            .entry(server)
-            .or_default()
-            .revalidate(UseFacts {
-                view: &view,
-                replica: &observation,
-                context,
-            })
-            .effects;
+        let effects = if observed.publication_holds_measurement(&state) {
+            // Keep the original ticket and authorization, not a Ready observation.
+            // The registry and native channels still deny every effect between parts.
+            Vec::new()
+        } else {
+            let view = state.view.clone();
+            state
+                .startup
+                .entry(server)
+                .or_default()
+                .revalidate(UseFacts {
+                    view: &view,
+                    replica: &observation,
+                    context,
+                })
+                .effects
+        };
         self.publish_frames(&mut state)?;
         Ok(effects)
     }
@@ -746,6 +1035,19 @@ impl Inner {
             self.notifier.frame_changed(server);
         }
         state.revision = revision;
+        // Latch selection and attachment loss. A later edit restoring the same
+        // selection must not revive the original callback if notifications coalesce.
+        for admission in state.measurement_admissions.values() {
+            let request = admission.request;
+            let selected = state
+                .startup
+                .get(&request.token.pane.server())
+                .and_then(StartupIntents::pending)
+                .filter(|pending| pending.ticket == request.ticket)
+                .is_some_and(|pending| state.owns_selection(&pending.context));
+            let revoked = *admission.changes.borrow() || !selected;
+            admission.changes.send_replace(revoked);
+        }
         Ok(())
     }
 
@@ -990,7 +1292,57 @@ impl Inner {
             self.publish_frames(&mut state)?;
             return Ok(Vec::new());
         }
-        let context = channel.state().borrow().context;
+        let target = view::SelectionTarget {
+            workspace,
+            tab,
+            pane,
+        };
+        let current = *channel.state().borrow();
+        let selected =
+            view::UseContext::observe(&state.view, &observation, target, current.context)
+                .map_err(view_error)?;
+        channel
+            .validate_use_context(&selected)
+            .map_err(DesktopClientError::from)?;
+        // Deliberate selection establishes product focus before capturing startup context.
+        // A fresh attachment has no rendered Pane yet; painting must not be its authority source.
+        let presented = self
+            .channels
+            .presentation_channels(pane.server())
+            .map_err(DesktopClientError::from)?;
+        for other in &presented {
+            let facts = other.state().borrow().facts;
+            if other.pane() != pane && facts.focused_pane {
+                other
+                    .update_context(spaceterm_client::pane_channel::PaneContextFacts {
+                        focused_pane: false,
+                        terminal_input_focus: false,
+                        ..facts
+                    })
+                    .map_err(DesktopClientError::from)?;
+            }
+        }
+        let context = channel
+            .update_context(spaceterm_client::pane_channel::PaneContextFacts {
+                focused_pane: true,
+                terminal_input_focus: current.facts.terminal_input_focus,
+                presentable: true,
+            })
+            .map_err(DesktopClientError::from)?;
+        // Align before capturing ownership, but preserve an unchanged pending use.
+        let context = presented
+            .iter()
+            .map(|channel| channel.state().borrow().context)
+            .max()
+            .map_or(context, |maximum| maximum.max(context));
+        self.channels
+            .align_connection_context(pane.server(), context)
+            .map_err(DesktopClientError::from)?;
+        let selected = view::UseContext::observe(&state.view, &observation, target, context)
+            .map_err(view_error)?;
+        channel
+            .validate_use_context(&selected)
+            .map_err(DesktopClientError::from)?;
         let view = state.view.clone();
         let effects = state
             .startup
@@ -1002,11 +1354,7 @@ impl Inner {
                     replica: &observation,
                     context,
                 },
-                view::SelectionTarget {
-                    workspace,
-                    tab,
-                    pane,
-                },
+                target,
                 source,
             )
             .map_err(view_error)?
@@ -1015,34 +1363,122 @@ impl Inner {
         Ok(effects)
     }
 
+    fn validate_measurement(
+        &self,
+        measurement: PaneMeasurement,
+    ) -> Result<PaneMeasurementRequest, DesktopClientError> {
+        let context = self
+            .channel(measurement.token.pane)?
+            .state()
+            .borrow()
+            .context;
+        self.state
+            .borrow()
+            .validate_measurement(measurement, context)
+    }
+
+    async fn complete_measurement(
+        self: &Rc<Self>,
+        measurement: PaneMeasurement,
+        mut changes: watch::Receiver<bool>,
+        cx: &mut gpui::AsyncApp,
+    ) -> Result<Option<OperationId>, DesktopClientError> {
+        let server = measurement.token.pane.server();
+        let source = self.source(&server).ok_or(DesktopClientError::TargetGone)?;
+        let channel = self.channel(measurement.token.pane)?.state();
+        let mut observed_source = source.watch(Some(channel));
+        let mut health = self.tracker.journal().health();
+        loop {
+            // Subscribe before checking authority. A completed transfer or revocation
+            // must wake this original callback even if GPUI coalesces its notifications.
+            let _ = changes.borrow_and_update();
+            let _ = health.borrow_and_update();
+            let edit = self.edits.lock().await;
+            if *changes.borrow() {
+                let effects = {
+                    let mut state = self.state.borrow_mut();
+                    let effects = state
+                        .startup
+                        .get_mut(&server)
+                        .filter(|startup| {
+                            startup
+                                .pending()
+                                .is_some_and(|pending| pending.ticket == measurement.ticket)
+                        })
+                        .map(|startup| {
+                            startup
+                                .cancel(view::IntentCancelReason::LeftSelection)
+                                .effects
+                        })
+                        .unwrap_or_default();
+                    if state
+                        .measurements
+                        .get(&measurement.token.pane)
+                        .is_some_and(|request| request.ticket == measurement.ticket)
+                    {
+                        state.measurements.remove(&measurement.token.pane);
+                    }
+                    self.publish_frames(&mut state)?;
+                    effects
+                };
+                drop(edit);
+                self.execute(effects, cx).await?;
+                return Err(DesktopClientError::StaleContext);
+            }
+            let observed = observed_source.capture();
+            let effects = self.measured(measurement, &observed)?;
+            drop(edit);
+            if let Some(reduction) = effects {
+                let result = self.execute(reduction.effects, cx).await?;
+                return if reduction.canceled.is_some() {
+                    Err(DesktopClientError::StaleContext)
+                } else {
+                    Ok(result)
+                };
+            }
+            // Never hold the edit lock across publication. The server watcher must
+            // remain able to install complete facts and cancel an obsolete use.
+            tokio::select! {
+                result = observed_source.changed() => result?,
+                result = changes.changed() => result.map_err(|_| DesktopClientError::Cancelled)?,
+                result = health.changed() => result.map_err(|_| DesktopClientError::Cancelled)?,
+            }
+        }
+    }
+
     fn measured(
         &self,
         measurement: PaneMeasurement,
-    ) -> Result<Vec<StartupEffect>, DesktopClientError> {
-        if self.token(measurement.token.pane)? != measurement.token {
-            return Err(DesktopClientError::StaleContext);
-        }
-        let server = measurement.token.pane.server();
-        let snapshot = self.snapshot(server)?;
-        let observation = self.observation(server, &snapshot, false)?;
+        observed: &SourceCapture,
+    ) -> Result<Option<view::StartupReduction>, DesktopClientError> {
+        let channel = observed.channel.ok_or(DesktopClientError::StaleContext)?;
         let mut state = self.state.borrow_mut();
+        state.validate_measurement(measurement, channel.context)?;
+        if observed.publication_holds_measurement(&state) {
+            // The same owned facts decide both reduction and callback deferral.
+            // No second read can mix a retained snapshot with installed authority.
+            return Ok(None);
+        }
+        let observation = observed.observation()?;
         let view = state.view.clone();
-        let effects = state
+        let reduction = state
             .startup
-            .entry(server)
+            .entry(measurement.token.pane.server())
             .or_default()
             .measured(
                 UseFacts {
                     view: &view,
                     replica: &observation,
-                    context: measurement.token.context_generation,
+                    context: channel.context,
                 },
                 measurement.view_measurement()?,
             )
-            .map_err(view_error)?
-            .effects;
+            .map_err(view_error)?;
+        state.measurements.remove(&measurement.token.pane);
         self.publish_frames(&mut state)?;
-        Ok(effects)
+        // Complete the reducer's cancellation effects before reporting the callback
+        // stale. Cancellation never counts as acceptance of measured dimensions.
+        Ok(Some(reduction))
     }
 
     async fn execute(
@@ -1415,6 +1851,37 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
         cx: &mut App,
     ) -> Result<Task<Result<Option<OperationId>, DesktopClientError>>, DesktopClientError> {
         let inner = self.inner.clone();
+        if let DesktopRequest::Measured(measurement) = request {
+            let original = inner.validate_measurement(measurement)?;
+            let (wake, changes) = watch::channel(false);
+            {
+                let mut state = inner.state.borrow_mut();
+                if state
+                    .measurement_admissions
+                    .contains_key(&original.token.pane)
+                    || state.measurement_admissions.len() >= super::MAX_PENDING_UI_REQUESTS
+                {
+                    return Err(DesktopClientError::AdmissionFull);
+                }
+                state.measurement_admissions.insert(
+                    original.token.pane,
+                    AdmittedMeasurement {
+                        request: original,
+                        changes: wake,
+                    },
+                );
+            }
+            let reservation = MeasurementAdmission {
+                request: original,
+                owner: Rc::downgrade(&inner),
+            };
+            // Rendering emits once. Retain that callback through saves and partial transfers,
+            // then validate its original tags rather than reconstructing current ones.
+            return Ok(cx.spawn(async move |cx| {
+                let _reservation = reservation;
+                inner.complete_measurement(measurement, changes, cx).await
+            }));
+        }
         // Reserve the personal-state transaction at admission, not at the task's first
         // poll. GPUI may poll later requests first; they must not overwrite an earlier save.
         let admission = self
@@ -1429,10 +1896,6 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
             | DesktopRequest::StartSession { .. }
             | DesktopRequest::Retry { .. }) => {
                 let effects = inner.use_request(&request)?;
-                Ok(cx.spawn(async move |cx| inner.execute(effects, cx).await))
-            }
-            DesktopRequest::Measured(measurement) => {
-                let effects = inner.measured(measurement)?;
                 Ok(cx.spawn(async move |cx| inner.execute(effects, cx).await))
             }
             DesktopRequest::TakeOver { pane, .. } => {
@@ -1474,6 +1937,7 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
                     ReplicaStatus::Resynchronizing => return Err(DesktopClientError::Reconciling),
                     ReplicaStatus::RetainedOffline => return Err(DesktopClientError::Offline),
                 }
+                let workspace = shared_command_workspace(&command, &frame.organization)?;
                 let binding = inner
                     .source(&server)
                     .ok_or(DesktopClientError::TargetGone)?
@@ -1500,7 +1964,9 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
                     let ticket = inner
                         .executor
                         .spawn(async move {
-                            tracker.submit(&binding, command, None, peer.as_ref()).await
+                            tracker
+                                .submit(&binding, command, workspace, peer.as_ref())
+                                .await
                         })
                         .await
                         .map_err(|_| DesktopClientError::Cancelled)?
@@ -1522,21 +1988,31 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
                             apply_edit(&inner, &mut candidate, edit)?
                         }
                         DesktopRequest::AttachWorkspace(workspace) => {
-                            let snapshot = inner.snapshot(workspace.server())?;
-                            let observation =
-                                inner.observation(workspace.server(), &snapshot, false)?;
-                            let facts = ReplicaFacts {
-                                pairing: observation.pairing(),
-                                client: observation.client(),
-                                connection: observation.connection(),
-                                readiness: observation.readiness(),
-                                status: observation.status(),
-                            };
-                            let binding = inner
+                            let source = inner
                                 .source(&workspace.server())
-                                .ok_or(DesktopClientError::TargetGone)?
-                                .binding
-                                .clone();
+                                .ok_or(DesktopClientError::TargetGone)?;
+                            let binding = source.binding;
+                            let (snapshot, info) = inner
+                                .executor
+                                .spawn(ready_attachment_snapshot(source.state, source.replica))
+                                .await
+                                .map_err(|_| DesktopClientError::Cancelled)??;
+                            if info.server != workspace.server()
+                                || info.client != binding.target().client()
+                                || info.pairing != binding.target().pairing()
+                                || inner
+                                    .source(&workspace.server())
+                                    .is_none_or(|current| current.binding != binding)
+                            {
+                                return Err(DesktopClientError::StaleContext);
+                            }
+                            let facts = ReplicaFacts {
+                                pairing: binding.target().pairing(),
+                                client: binding.target().client(),
+                                connection: Some(info.binding),
+                                readiness: ReplicaReadiness::Ready,
+                                status: ServerViewStatus::Connected,
+                            };
                             let journal = inner.tracker.journal().clone();
                             let channels = inner.channels.clone();
                             let attached = inner
@@ -1732,7 +2208,9 @@ impl<S: ViewStore + 'static> DesktopClientProvider for ComposedDesktopClientProv
                     Ok(None)
                 }))
             }
-            DesktopRequest::ServerAction(_) => Err(DesktopClientError::UnsupportedCapability),
+            DesktopRequest::Measured(_) | DesktopRequest::ServerAction(_) => {
+                Err(DesktopClientError::UnsupportedCapability)
+            }
         }
     }
     fn save_view(&self, cx: &mut App) -> Task<Result<(), DesktopClientError>> {
@@ -1789,6 +2267,125 @@ pub(crate) async fn drain_original_detach(
         }
     }
     Ok(false)
+}
+
+/// Snapshot and connection watches publish separately. Attachment waits for the
+/// same authenticated cursor instead of treating that publication interval as offline.
+async fn ready_attachment_snapshot(
+    mut connection: watch::Receiver<ConnectionState>,
+    mut replica: watch::Receiver<ReplicaState>,
+) -> Result<(Arc<ReplicaSnapshot>, spaceterm_client::api::ConnectedInfo), DesktopClientError> {
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let state = connection.borrow_and_update().clone();
+            let observed = replica.borrow_and_update().clone();
+            match state {
+                ConnectionState::Connected { info } => {
+                    if let ReplicaState::Ready { snapshot } = observed
+                        && snapshot.cursor.server == info.server
+                        && snapshot.cursor.epoch == info.epoch
+                        && snapshot.cursor.revision == info.organization_revision
+                    {
+                        return Ok((snapshot, info));
+                    }
+                }
+                ConnectionState::Connecting { .. } => {}
+                ConnectionState::Offline { .. } | ConnectionState::Stopped => {
+                    return Err(DesktopClientError::Offline);
+                }
+                ConnectionState::Incompatible { .. } => {
+                    return Err(DesktopClientError::Incompatible);
+                }
+            }
+            tokio::select! {
+                result = connection.changed() => result.map_err(|_| DesktopClientError::Cancelled)?,
+                result = replica.changed() => result.map_err(|_| DesktopClientError::Cancelled)?,
+            }
+        }
+    })
+    .await
+    .map_err(|_| DesktopClientError::Reconciling)?
+}
+
+/// The durable journal scopes deferred release and grant admission to the owning
+/// Workspace, never to whichever Workspace this client happens to have active.
+pub(crate) fn shared_command_workspace(
+    command: &Command,
+    organization: &spaceterm_core::organization::OrganizationSnapshot,
+) -> Result<Option<WorkspaceId>, DesktopClientError> {
+    use spaceterm_core::operations::CloseTarget;
+    let tab_workspace = |tab: TabId| {
+        organization
+            .state()
+            .tabs
+            .iter()
+            .find(|record| record.id == tab)
+            .map(|record| record.workspace)
+            .ok_or(DesktopClientError::TargetGone)
+    };
+    let pane_workspace = |pane: PaneId| {
+        let tab = organization
+            .state()
+            .panes
+            .iter()
+            .find(|record| record.id == pane)
+            .ok_or(DesktopClientError::TargetGone)?
+            .tab;
+        tab_workspace(tab)
+    };
+    let workspace =
+        match command {
+            Command::CreateTab { workspace, .. }
+            | Command::RenameWorkspace { workspace, .. }
+            | Command::SetPinnedDirectory { workspace, .. }
+            | Command::KillWorkspaceConfirmed { workspace, .. }
+            | Command::AssessKillWorkspace { workspace } => Some(*workspace),
+            Command::CreatePane { tab, .. } => Some(tab_workspace(*tab)?),
+            Command::RepairPaneDirectory { pane, .. }
+            | Command::RetryPaneDirectory { pane, .. } => Some(pane_workspace(*pane)?),
+            Command::AssessClose { target } | Command::CloseConfirmed { target, .. } => {
+                Some(match target {
+                    CloseTarget::Workspace(workspace)
+                    | CloseTarget::WorktreeTabs { workspace, .. } => *workspace,
+                    CloseTarget::Tab(tab) => tab_workspace(*tab)?,
+                    CloseTarget::Pane(pane) => pane_workspace(*pane)?,
+                })
+            }
+            Command::CompareAcquire(request) => Some(pane_workspace(request.pane)?),
+            Command::TakeOver(request) => Some(pane_workspace(request.pane)?),
+            Command::ReleaseControl(request) => Some(pane_workspace(request.grant.pane())?),
+            Command::BeginStartup(intent) => Some(pane_workspace(intent.fence().session().pane)?),
+            Command::CompleteStartup(measurement) => {
+                Some(pane_workspace(measurement.fence.session().pane)?)
+            }
+            Command::CompleteMeasuredStartup(measurement) => {
+                Some(pane_workspace(measurement.fence.session().pane)?)
+            }
+            Command::CreateWorkspace { .. }
+            | Command::SetWorktreeLocation { .. }
+            | Command::AssessEndAllSessions { .. }
+            | Command::EndAllSessions { .. }
+            | Command::CancelStartup { .. }
+            | Command::RevokePairing { .. }
+            | Command::RefreshWorktrees { .. }
+            | Command::CreateWorktree { .. }
+            | Command::AssessRemoveWorktree { .. }
+            | Command::RemoveWorktreeConfirmed { .. }
+            | Command::SetRemoteAccess { .. }
+            | Command::Pairing(_)
+            | Command::Worktree(_) => None,
+        };
+    if workspace.is_some_and(|workspace| {
+        workspace.server() != command.server()
+            || !organization
+                .state()
+                .workspaces
+                .iter()
+                .any(|record| record.id == workspace)
+    }) {
+        return Err(DesktopClientError::TargetGone);
+    }
+    Ok(workspace)
 }
 
 fn apply_edit(

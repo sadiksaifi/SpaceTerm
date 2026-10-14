@@ -6,7 +6,9 @@ use spaceterm_client::{
     api::{ConnectionTarget, RouteParts},
     failure::{ClientFailure, ClientFailureClass},
     journal::JournalController,
-    ports::{ClientFuture, ConnectedRoute, ConnectionPurpose, RouteConnector},
+    ports::{
+        ClientFuture, ConnectedRoute, ConnectionPurpose, ForegroundCancellation, RouteConnector,
+    },
 };
 use spaceterm_client_native::route::{
     LocalRouteAuthority, NativeRouteConnector, SshRouteConfiguration,
@@ -81,12 +83,69 @@ pub(crate) fn retain_runtime(
     })
 }
 impl RouteConnector for RuntimeRoutes {
+    fn open_foreground<'a>(
+        &'a self,
+        target: &'a ConnectionTarget,
+        cancellation: ForegroundCancellation,
+    ) -> ClientFuture<'a, ConnectedRoute> {
+        self.routes.open_foreground(target, cancellation)
+    }
     fn open<'a>(
         &'a self,
         target: &'a ConnectionTarget,
         purpose: ConnectionPurpose,
     ) -> ClientFuture<'a, ConnectedRoute> {
         self.routes.open(target, purpose)
+    }
+}
+
+/// Foreground Retry borrows only the exact active pairing's revocable native lease.
+/// Merely injecting an AskPass broker never makes background restoration interactive.
+pub(crate) fn foreground_connector(
+    routes: Arc<NativeRouteConnector>,
+    journal: Arc<JournalController>,
+) -> Arc<dyn RouteConnector> {
+    Arc::new(ForegroundRoutes { routes, journal })
+}
+struct ForegroundRoutes {
+    routes: Arc<NativeRouteConnector>,
+    journal: Arc<JournalController>,
+}
+impl RouteConnector for ForegroundRoutes {
+    fn open<'a>(
+        &'a self,
+        target: &'a ConnectionTarget,
+        purpose: ConnectionPurpose,
+    ) -> ClientFuture<'a, ConnectedRoute> {
+        self.routes.open(target, purpose)
+    }
+    fn open_foreground<'a>(
+        &'a self,
+        target: &'a ConnectionTarget,
+        cancellation: ForegroundCancellation,
+    ) -> ClientFuture<'a, ConnectedRoute> {
+        Box::pin(async move {
+            use spaceterm_client::pairing::journal::{JournalPairingStore, LocalPairingStore};
+            let denied = || ClientFailure::new(ClientFailureClass::AuthorizationDenied);
+            let binding = self
+                .journal
+                .snapshot()?
+                .bindings()
+                .iter()
+                .filter_map(|saved| saved.binding().ok())
+                .find(|binding| binding.target() == target)
+                .ok_or_else(denied)?;
+            if !self.journal.ordinary_use_allowed(&binding)? {
+                return Err(denied());
+            }
+            let authority = JournalPairingStore::new(self.journal.clone())
+                .ordinary_authority(&target.local_pairing()?)
+                .await
+                .map_err(|_| denied())?;
+            self.routes
+                .open_foreground_ordinary(target, &authority.foreground_lease(), cancellation)
+                .await
+        })
     }
 }
 
@@ -120,6 +179,17 @@ struct RefreshingRoutes {
     remote: Arc<dyn RouteConnector>,
 }
 impl RouteConnector for RefreshingRoutes {
+    fn open_foreground<'a>(
+        &'a self,
+        target: &'a ConnectionTarget,
+        cancellation: ForegroundCancellation,
+    ) -> ClientFuture<'a, ConnectedRoute> {
+        if matches!(target.route().parts(), RouteParts::Ipc { .. }) {
+            self.open(target, ConnectionPurpose::Ordinary)
+        } else {
+            self.remote.open_foreground(target, cancellation)
+        }
+    }
     fn open<'a>(
         &'a self,
         target: &'a ConnectionTarget,

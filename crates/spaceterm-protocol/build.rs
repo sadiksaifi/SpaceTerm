@@ -42,6 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Message.kind.content_read_response",
             "Message.kind.content_publication",
             "Message.kind.metadata_publication",
+            "Message.kind.metadata_fragment",
             "ContentReadResponse.result.page",
             "PairingOutcome.operation",
             "PairingOutcome.reservation",
@@ -232,6 +233,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ("RemoteEndpoint", "port") => u16::MAX as u32,
                         ("CapabilityStatus", "availability") | ("ListenerStatus", "state") => 4,
                         ("ManagementProgress", "state") => 6,
+                        // Render-only machine facts degrade future uint32 values in conversion.
+                        ("ServerMachineFacts", "platform" | "bind_scope_availability") => u32::MAX,
+                        (
+                            "ServerPermissionFacts",
+                            "microphone" | "screen_recording" | "accessibility",
+                        ) => u32::MAX,
+                        ("ServerPermissionFacts", "accessibility_naming")
+                        | ("ServerBindScopeOffer", "scope") => u32::MAX,
                         _ => u32::MAX,
                     };
                     format!("Kind::Varint({maximum})")
@@ -316,7 +325,9 @@ fn repeated_limit(message: &str, field: &str) -> usize {
         }
         ("Tab", "creation_replay_order") => usize::from(u16::MAX),
         ("UnpairAssessment", "clients") => 16,
-        ("RemoteAccessPolicy", "endpoints") | ("ManagementStatus", "listeners" | "progress") => 8,
+        ("ServerMachineFacts", "bind_scopes") => 2,
+        ("RemoteAccessPolicy" | "ServerBindScopeOffer", "endpoints")
+        | ("ManagementStatus", "listeners" | "progress") => 8,
         ("GitInventoryPage" | "GitBranchPage", "records")
         | ("GitAssessmentPage", "tabs" | "panes" | "fallbacks")
         | ("DirectoryPage", "entries") => 128,
@@ -387,6 +398,10 @@ fn required(message: &str, field: &FieldDescriptorProto) -> bool {
                 | "topology_revision"
         ),
         "MetadataPublication" => matches!(field.name(), "fence" | "request" | "snapshot"),
+        "MetadataFragment" => matches!(
+            field.name(),
+            "fence" | "request" | "request_generation" | "sequence" | "total_bytes" | "data"
+        ),
         "RuntimeMetadataSnapshot" => matches!(field.name(), "session" | "sequence" | "origin_kind"),
         "ApplicationPointer" | "ApplicationWheel" => matches!(field.name(), "stamp" | "cell"),
         "RuntimeCommand"

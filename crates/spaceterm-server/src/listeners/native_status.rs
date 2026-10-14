@@ -50,6 +50,15 @@ impl NativeStatusObservation {
 
 /// Constructor-injected native supervision and signed installation observations.
 pub trait NativeStatusObserver: Send + Sync {
+    /// Independent read-only facts for the authenticated owning account/build.
+    /// This method must be nonblocking. Unqueryable permissions must be explicit
+    /// unknown/unavailable values, never cached grants from a failed query.
+    fn machine_facts(
+        &self,
+        _key: spaceterm_host::startup::AccountBuildKey,
+    ) -> Option<ServerMachineFacts> {
+        None
+    }
     fn observe(
         &self,
         server: ServerId,
@@ -63,6 +72,13 @@ impl AccountNativeStatusObserver {
     }
 }
 impl NativeStatusObserver for AccountNativeStatusObserver {
+    fn machine_facts(
+        &self,
+        key: spaceterm_host::startup::AccountBuildKey,
+    ) -> Option<ServerMachineFacts> {
+        (key == self.0.key())
+            .then(|| spaceterm_host::server_machine_facts::observe(key.build_identity))
+    }
     fn observe(
         &self,
         server: ServerId,

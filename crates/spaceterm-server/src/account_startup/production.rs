@@ -223,6 +223,35 @@ impl RecoveredAccountServer {
         startup: AccountStartup,
         launch: AccountLaunchFacts,
     ) -> Result<Self, StartupFailure> {
+        Self::recover_with_adapters(supervisor, startup, launch, None, None).await
+    }
+
+    /// Supplies native process resources and supported protocol profiles while
+    /// retaining the production account store, actor, authentication and listeners.
+    pub async fn recover_with_native_pty(
+        supervisor: Arc<ServiceSupervisor>,
+        startup: AccountStartup,
+        launch: AccountLaunchFacts,
+        pty: Arc<dyn spaceterm_host::pty::NativePtyAdapterFactory>,
+        protocol_majors: Vec<u32>,
+    ) -> Result<Self, StartupFailure> {
+        Self::recover_with_adapters(
+            supervisor,
+            startup,
+            launch,
+            Some(pty),
+            Some(protocol_majors),
+        )
+        .await
+    }
+
+    async fn recover_with_adapters(
+        supervisor: Arc<ServiceSupervisor>,
+        startup: AccountStartup,
+        launch: AccountLaunchFacts,
+        pty: Option<Arc<dyn spaceterm_host::pty::NativePtyAdapterFactory>>,
+        protocol_majors: Option<Vec<u32>>,
+    ) -> Result<Self, StartupFailure> {
         if launch.uid != startup.registration().key().account_uid
             || launch.uid == 0
             || !launch.home.is_absolute()
@@ -285,21 +314,39 @@ impl RecoveredAccountServer {
             GitExternalWork::new(identity, home, clock.clone(), git_host.clone())
                 .map_err(StartupFailure::Runtime)?,
         );
-        let runtime = NativeRuntime::new(
-            server_id,
-            launch.uid,
-            Arc::new(AccountLaunch(launch)),
-            clock.clone(),
-            RuntimeLimits::default(),
-        )
+        let uid = launch.uid;
+        let launch_provider = Arc::new(AccountLaunch(launch));
+        let runtime = match pty {
+            Some(pty) => NativeRuntime::with_pty_factory(
+                server_id,
+                uid,
+                launch_provider,
+                clock.clone(),
+                RuntimeLimits::default(),
+                pty,
+            ),
+            None => NativeRuntime::new(
+                server_id,
+                uid,
+                launch_provider,
+                clock.clone(),
+                RuntimeLimits::default(),
+            ),
+        }
         .map_err(StartupFailure::Runtime)?;
         let management = Arc::new(NativeManagement(
             supervisor.clone(),
             Some(account.credentials.clone()),
         ));
-        let ports = ProductionListenerPorts::with_native_status(
-            crate::listeners::AccountNativeStatusObserver::new(supervisor.clone()),
-        );
+        let native_status = crate::listeners::AccountNativeStatusObserver::new(supervisor.clone());
+        let ports = match protocol_majors {
+            Some(majors) => ProductionListenerPorts::with_native_status_and_protocol_majors(
+                native_status,
+                majors,
+            )
+            .map_err(StartupFailure::Runtime)?,
+            None => ProductionListenerPorts::with_native_status(native_status),
+        };
         let source = Arc::new(ActorPairing::default());
         let lookup = Arc::new(PairingProtocolLookup::new(source.clone()));
         let config = ServerConfig {
@@ -436,8 +483,19 @@ impl RecoveredAccountServer {
         let cleanup = account_runtime.clone();
         let monitor = async move {
             let mut interval = tokio::time::interval(Duration::from_millis(100));
+            #[cfg(target_os = "macos")]
+            let mut checkpoint_ticks = 0_u8;
             loop {
                 interval.tick().await;
+                #[cfg(target_os = "macos")]
+                {
+                    if checkpoint_ticks == 0 {
+                        // Sampling is not absence evidence. A failed or missed sample
+                        // retains conservative refusal rather than fabricating ancestry.
+                        let _ = account_runtime.checkpoint_lineage();
+                    }
+                    checkpoint_ticks = (checkpoint_ticks + 1) % 10;
+                }
                 let snapshot = handle.snapshot();
                 if management
                     .verify_stopped(snapshot.state().server, snapshot.epoch())

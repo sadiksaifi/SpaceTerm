@@ -8,14 +8,11 @@ pub fn fixture(
     seed: u8,
     machine: u32,
 ) -> (UpdateKey, VerifiedAccountServerArtifact) {
-    let build = BuildChannel::Development;
     let platform = if cfg!(target_os = "macos") {
         ServerPlatform::DarwinArm64
     } else {
         ServerPlatform::LinuxX86_64
     };
-    let signer = Ed25519KeyPair::from_seed_unchecked(&[seed; 32]).unwrap();
-    let key = UpdateKey::from_base64(&STANDARD.encode(signer.public_key().as_ref())).unwrap();
     let mut payload = vec![0; 64];
     if platform == ServerPlatform::DarwinArm64 {
         payload[..4].copy_from_slice(&0xfeedfacf_u32.to_le_bytes());
@@ -27,6 +24,33 @@ pub fn fixture(
         payload[18..20].copy_from_slice(&(machine as u16).to_le_bytes());
     }
     payload[63] = version.as_bytes()[version.len() - 1];
+    fixture_with_binary(version, seed, &payload)
+}
+
+/// Signs the supplied executable bytes with the same authenticated archive and
+/// installation manifest used by the custody fixtures.
+pub fn fixture_with_binary(
+    version: &str,
+    seed: u8,
+    payload: &[u8],
+) -> (UpdateKey, VerifiedAccountServerArtifact) {
+    fixture_with_binary_and_commit(version, seed, payload, [1; 20])
+}
+
+pub fn fixture_with_binary_and_commit(
+    version: &str,
+    seed: u8,
+    payload: &[u8],
+    build_commit: [u8; 20],
+) -> (UpdateKey, VerifiedAccountServerArtifact) {
+    let build = BuildChannel::Development;
+    let platform = if cfg!(target_os = "macos") {
+        ServerPlatform::DarwinArm64
+    } else {
+        ServerPlatform::LinuxX86_64
+    };
+    let signer = Ed25519KeyPair::from_seed_unchecked(&[seed; 32]).unwrap();
+    let key = UpdateKey::from_base64(&STANDARD.encode(signer.public_key().as_ref())).unwrap();
     let name = match platform {
         ServerPlatform::LinuxX86_64 => "bin/spaceterm-server".to_owned(),
         ServerPlatform::DarwinArm64 => {
@@ -37,7 +61,7 @@ pub fn fixture(
         ServerPlatform::LinuxX86_64 => "share/spaceterm-server".to_owned(),
         ServerPlatform::DarwinArm64 => format!("{}/Contents/Resources", build.bundle_name()),
     };
-    let mut files = vec![(name.clone(), 0o755, payload.as_slice())];
+    let mut files = vec![(name.clone(), 0o755, payload)];
     for resource in [
         "shell-integration/VERSION",
         "shell-integration/bash/spaceterm.bash",
@@ -60,7 +84,7 @@ pub fn fixture(
         build_identity: build,
         platform,
         version: BuildVersion::parse(version).unwrap(),
-        build_commit: [1; 20],
+        build_commit,
         protocol_majors: vec![1, 2],
         storage: StorageCompatibility {
             read: vec![1],
@@ -109,6 +133,7 @@ pub fn fixture(
         build_identity: build,
         platform,
         version: BuildVersion::parse(version).unwrap(),
+        build_commit,
         published_at: 1,
         protocol_majors: vec![1, 2],
         storage: StorageCompatibility {

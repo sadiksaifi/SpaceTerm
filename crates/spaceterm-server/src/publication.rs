@@ -4,7 +4,9 @@
 use crate::{contracts::*, failure::failure};
 use spaceterm_core::{
     authority::{OrganizationRevision, StoreRevision},
-    organization::{OrganizationDelta, OrganizationSnapshot, OrganizationWrite},
+    organization::*,
+    organization_retained::*,
+    remote_access::RemoteAccessPolicy,
     storage::CommitReceipt,
 };
 use spaceterm_protocol::{
@@ -12,7 +14,7 @@ use spaceterm_protocol::{
     convert::organization::{self, PublicationPart},
 };
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     ops::Range,
     sync::{Arc, Mutex, Weak},
 };
@@ -118,11 +120,17 @@ impl PublicationHub {
         {
             return Err(invalid());
         }
-        let bytes = delta.as_deref().map(delta_bytes).transpose()?;
+        // Resolve unchanged record fields against this commit, before retaining
+        // the delta. Later encoding must not consult a newer snapshot.
+        let retained = delta
+            .as_deref()
+            .map(|delta| complete_delta(delta, &snapshot))
+            .transpose()?
+            .flatten();
         self.store = Some(receipt.store_revision);
         self.snapshot = snapshot;
-        match (delta, bytes) {
-            (Some(delta), Some(bytes)) if bytes <= MAX_JOURNAL_BYTES => {
+        match retained {
+            Some((delta, bytes)) => {
                 while self.journal.len() >= MAX_JOURNAL_DELTAS
                     || self.journal_bytes > MAX_JOURNAL_BYTES - bytes
                 {
@@ -132,10 +140,8 @@ impl PublicationHub {
                         break;
                     }
                 }
-                // Clone only after length admission. The journal does not retain an
-                // upstream Vec or String's excess allocation capacity.
                 self.journal.push_back(JournalEntry {
-                    delta: Arc::new(delta.as_ref().clone()),
+                    delta: Arc::new(delta),
                     bytes,
                 });
                 self.journal_bytes += bytes;
@@ -358,6 +364,586 @@ fn snapshot_payload(
         _ => Err(spaceterm_protocol::ProtocolError::Incompatible),
     }
 }
+enum PublicationRecord<'a> {
+    Workspace(&'a WorkspaceRecord, &'a WorkspaceNameBasis),
+    Tab(&'a TabRecord, &'a TabCreationDefault, TabMembershipVersion),
+    Pane(&'a PaneRecord, PaneGenerationHighWater, PaneRuntimeRecord),
+    Repository(&'a RepositoryRecord, RepositoryInventoryVersion),
+    Worktree(&'a WorktreeRecord, WorktreeInventoryFacts),
+    Settings(&'a ServerSettingsRecord, &'a Versioned<RemoteAccessPolicy>),
+}
+impl PublicationRecord<'_> {
+    fn write_count(&self) -> usize {
+        match self {
+            Self::Tab(..) => 3,
+            _ => 2,
+        }
+    }
+    fn variable_bytes(&self) -> usize {
+        let directory = |v: &Option<ServerDirectory>| v.as_ref().map_or(0, |v| v.bytes().len());
+        match self {
+            Self::Workspace(v, basis) => {
+                v.name.value.display.as_str().len()
+                    + directory(&v.pinned_directory.value)
+                    + basis.automatic_base().as_str().len()
+                    + basis.assigned_automatic().as_str().len()
+            }
+            Self::Tab(_, default, _) => std::mem::size_of_val(default.replay_order()),
+            Self::Pane(v, _, _) => {
+                v.starting_directory.bytes().len()
+                    + directory(&v.confirmed_restoration_directory.value)
+            }
+            Self::Repository(v, _) => v.directory.bytes().len(),
+            Self::Worktree(v, _) => v.directory.bytes().len(),
+            Self::Settings(v, remote) => {
+                v.worktree_location.value.as_str().len()
+                    + std::mem::size_of_val(remote.value.endpoints())
+            }
+        }
+    }
+    fn append(self, writes: &mut Vec<OrganizationWrite>, runtime: &mut Vec<PaneRuntimeRecord>) {
+        use OrganizationWrite as W;
+        use RetainedOrganizationWrite as R;
+        match self {
+            Self::Workspace(v, basis) => {
+                writes.push(W::PutWorkspace(v.clone()));
+                writes.push(W::Retained(R::PutWorkspaceNameBasis(basis.clone())));
+            }
+            Self::Tab(v, default, membership) => {
+                writes.push(W::PutTab(v.clone()));
+                writes.push(W::Retained(R::PutCreationDefault(default.clone())));
+                writes.push(W::Retained(R::SetTabMembershipVersion(membership)));
+            }
+            Self::Pane(v, marks, rt) => {
+                writes.push(W::PutPane(v.clone()));
+                writes.push(W::Retained(R::SetPaneGenerationHighWater(marks)));
+                runtime.push(rt);
+            }
+            Self::Repository(v, version) => {
+                writes.push(W::PutRepository(v.clone()));
+                writes.push(W::Retained(R::SetRepositoryInventoryVersion(version)));
+            }
+            Self::Worktree(v, inventory) => {
+                writes.push(W::PutWorktree(v.clone()));
+                writes.push(W::Retained(R::SetWorktreeInventoryFacts(inventory)));
+            }
+            Self::Settings(v, remote) => {
+                writes.push(W::SetServerSettings(v.clone()));
+                writes.push(W::Retained(R::SetRemoteAccess(remote.clone())));
+            }
+        }
+    }
+}
+fn is_deletion(write: &OrganizationWrite) -> bool {
+    use OrganizationWrite as W;
+    use RetainedOrganizationWrite as R;
+    matches!(
+        write,
+        W::DeleteWorkspace(_)
+            | W::DeleteTab(_)
+            | W::DeletePane(_)
+            | W::DeleteRepository(_)
+            | W::DeleteWorktree(_)
+            | W::Retained(
+                R::DeleteWorkspaceNameBasis(_)
+                    | R::DeleteCreationDefault(_)
+                    | R::DeletePaneGenerationHighWater(_)
+                    | R::DeleteTabMembershipVersion(_)
+                    | R::DeleteRepositoryInventoryVersion(_)
+                    | R::DeleteWorktreeInventoryFacts(_)
+            )
+    )
+}
+fn checked_bytes(total: usize, additional: usize) -> Result<usize, ServerFailure> {
+    total
+        .checked_add(additional)
+        .ok_or_else(|| failure(ServerFailureClass::Capacity))
+}
+fn complete_delta(
+    delta: &OrganizationDelta,
+    snapshot: &OrganizationSnapshot,
+) -> Result<Option<(OrganizationDelta, usize)>, ServerFailure> {
+    use OrganizationWrite as W;
+    use RetainedOrganizationWrite as R;
+    // Reject oversized upstream allocations before building even borrowed indices.
+    if delta_bytes(delta)? > MAX_JOURNAL_BYTES {
+        return Ok(None);
+    }
+    let mut workspaces = BTreeSet::new();
+    let mut tabs = BTreeSet::new();
+    let mut panes = BTreeSet::new();
+    let mut repositories = BTreeSet::new();
+    let mut worktrees = BTreeSet::new();
+    let mut settings = false;
+    for write in delta.writes() {
+        match write {
+            W::PutWorkspace(v) => {
+                workspaces.insert(v.id);
+            }
+            W::Retained(R::PutWorkspaceNameBasis(v)) => {
+                workspaces.insert(v.workspace());
+            }
+            W::PutTab(v) => {
+                tabs.insert(v.id);
+            }
+            W::Retained(R::PutCreationDefault(v)) => {
+                tabs.insert(v.tab());
+            }
+            W::Retained(R::SetTabMembershipVersion(v)) => {
+                tabs.insert(v.id());
+            }
+            W::PutPane(v) => {
+                panes.insert(v.id);
+            }
+            W::Retained(R::SetPaneGenerationHighWater(v)) => {
+                panes.insert(v.pane());
+            }
+            W::PutRepository(v) => {
+                repositories.insert(v.id);
+            }
+            W::Retained(R::SetRepositoryInventoryVersion(v)) => {
+                repositories.insert(v.id());
+            }
+            W::PutWorktree(v) => {
+                worktrees.insert(v.id);
+            }
+            W::Retained(R::SetWorktreeInventoryFacts(v)) => {
+                worktrees.insert(v.worktree());
+            }
+            W::SetServerSettings(_) | W::Retained(R::SetRemoteAccess(_)) => settings = true,
+            _ => {}
+        }
+    }
+    panes.extend(delta.runtime().iter().map(|v| v.pane));
+    let state = snapshot.state();
+    let invalid = || failure(ServerFailureClass::RecoveryRequired);
+    // Legacy, record-free publications remain usable without retained facts.
+    let facts = state.retained.as_ref();
+    let mut records = Vec::new();
+    for id in workspaces {
+        records.push(PublicationRecord::Workspace(
+            state
+                .workspaces
+                .iter()
+                .find(|v| v.id == id)
+                .ok_or_else(invalid)?,
+            facts
+                .ok_or_else(invalid)?
+                .workspace_names()
+                .iter()
+                .find(|v| v.workspace() == id)
+                .ok_or_else(invalid)?,
+        ));
+    }
+    for id in tabs {
+        let facts = facts.ok_or_else(invalid)?;
+        records.push(PublicationRecord::Tab(
+            state.tabs.iter().find(|v| v.id == id).ok_or_else(invalid)?,
+            facts
+                .creation_defaults()
+                .iter()
+                .find(|v| v.tab() == id)
+                .ok_or_else(invalid)?,
+            *facts
+                .tab_membership_versions()
+                .iter()
+                .find(|v| v.id() == id)
+                .ok_or_else(invalid)?,
+        ));
+    }
+    for id in panes {
+        records.push(PublicationRecord::Pane(
+            state
+                .panes
+                .iter()
+                .find(|v| v.id == id)
+                .ok_or_else(invalid)?,
+            *facts
+                .ok_or_else(invalid)?
+                .pane_generations()
+                .iter()
+                .find(|v| v.pane() == id)
+                .ok_or_else(invalid)?,
+            *snapshot
+                .runtime()
+                .iter()
+                .find(|v| v.pane == id)
+                .ok_or_else(invalid)?,
+        ));
+    }
+    for id in repositories {
+        records.push(PublicationRecord::Repository(
+            state
+                .repositories
+                .iter()
+                .find(|v| v.id == id)
+                .ok_or_else(invalid)?,
+            *facts
+                .ok_or_else(invalid)?
+                .repository_inventory_versions()
+                .iter()
+                .find(|v| v.id() == id)
+                .ok_or_else(invalid)?,
+        ));
+    }
+    for id in worktrees {
+        records.push(PublicationRecord::Worktree(
+            state
+                .worktrees
+                .iter()
+                .find(|v| v.id == id)
+                .ok_or_else(invalid)?,
+            *facts
+                .ok_or_else(invalid)?
+                .worktree_inventory()
+                .iter()
+                .find(|v| v.worktree() == id)
+                .ok_or_else(invalid)?,
+        ));
+    }
+    if settings {
+        records.push(PublicationRecord::Settings(
+            &state.settings,
+            facts.ok_or_else(invalid)?.remote_access(),
+        ));
+    }
+    let mut write_count = delta.writes().iter().filter(|v| is_deletion(v)).count();
+    let mut runtime_count = 0usize;
+    let mut bytes = checked_bytes(
+        std::mem::size_of::<OrganizationDelta>() + std::mem::size_of::<JournalEntry>(),
+        std::mem::size_of_val(delta.accepted_creations()),
+    )?;
+    for record in &records {
+        write_count = checked_bytes(write_count, record.write_count())?;
+        if matches!(record, PublicationRecord::Pane(..)) {
+            runtime_count = checked_bytes(runtime_count, 1)?;
+        }
+        bytes = checked_bytes(bytes, record.variable_bytes())?;
+    }
+    for (count, width) in [
+        (write_count, std::mem::size_of::<OrganizationWrite>()),
+        (runtime_count, std::mem::size_of::<PaneRuntimeRecord>()),
+    ] {
+        bytes = checked_bytes(
+            bytes,
+            count
+                .checked_mul(width)
+                .ok_or_else(|| failure(ServerFailureClass::Capacity))?,
+        )?;
+    }
+    if bytes > MAX_JOURNAL_BYTES {
+        return Ok(None);
+    }
+    // Exact capacities and value clones discard all upstream excess capacity.
+    let mut writes = Vec::with_capacity(write_count);
+    let mut runtime = Vec::with_capacity(runtime_count);
+    writes.extend(delta.writes().iter().filter(|v| is_deletion(v)).cloned());
+    for record in records {
+        record.append(&mut writes, &mut runtime);
+    }
+    let complete = OrganizationDelta::new(
+        delta.server(),
+        delta.epoch(),
+        delta.base(),
+        delta.revision(),
+        writes,
+        runtime,
+    )
+    .and_then(|v| v.with_accepted_creations(delta.accepted_creations().to_vec()))
+    .map_err(|_| invalid())?;
+    Ok(Some((complete, bytes)))
+}
+
+/// Encode one complete journal delta without retaining or consulting a snapshot.
+/// The caller reserves `maximum` egress bytes before calling this helper. Capacity
+/// requires an explicit resync followed by a new query, not a replacement snapshot.
+pub(crate) fn delta_payload(
+    major: u32,
+    delta: &OrganizationDelta,
+    query: organization::OrganizationQuery,
+    maximum: usize,
+) -> Result<Payload, ServerFailure> {
+    use OrganizationWrite as W;
+    use RetainedOrganizationWrite as R;
+    use spaceterm_protocol::convert::identity::*;
+    if !matches!(major, 1 | 2)
+        || maximum == 0
+        || maximum > spaceterm_protocol::limits::MAX_MANAGEMENT_BYTES
+    {
+        return Err(failure(ServerFailureClass::ScopeMismatch));
+    }
+    if delta.epoch().get() == 0 || delta.revision() <= delta.base() {
+        return Err(failure(ServerFailureClass::RecoveryRequired));
+    }
+    if delta_bytes(delta)? > MAX_JOURNAL_BYTES || delta_wire_bound(delta)? > maximum {
+        return Err(failure(ServerFailureClass::Capacity));
+    }
+    validate_delta_completeness(delta)?;
+    let part = PublicationPart {
+        request: query.request.get(),
+        generation: query.generation,
+        transfer: delta.revision().get(),
+        index: 0,
+        total: 1,
+        epoch: delta.epoch(),
+        base: delta.base(),
+        revision: delta.revision(),
+    };
+    let invalid = || failure(ServerFailureClass::RecoveryRequired);
+    macro_rules! encode {
+        ($p:ident, $variant:ident) => {{
+            use spaceterm_protocol::{convert::organization::$p as convert, wire::$p as wire};
+            let mut result = wire::OrganizationDelta {
+                server: Some(encode_global(delta.server().bytes())),
+                epoch: delta.epoch().get(),
+                base_revision: delta.base().get(),
+                revision: delta.revision().get(),
+                complete: true,
+                part: Some(convert::encode_part(part)),
+                ..Default::default()
+            };
+            for write in delta.writes() {
+                match write {
+                    W::PutWorkspace(v) => {
+                        let basis = delta
+                            .writes()
+                            .iter()
+                            .find_map(|w| match w {
+                                W::Retained(R::PutWorkspaceNameBasis(b))
+                                    if b.workspace() == v.id =>
+                                {
+                                    Some(b)
+                                }
+                                _ => None,
+                            })
+                            .ok_or_else(invalid)?;
+                        result
+                            .workspaces
+                            .push(convert::encode_workspace_record(v, basis));
+                    }
+                    W::PutTab(v) => {
+                        let default = delta
+                            .writes()
+                            .iter()
+                            .find_map(|w| match w {
+                                W::Retained(R::PutCreationDefault(d)) if d.tab() == v.id => Some(d),
+                                _ => None,
+                            })
+                            .ok_or_else(invalid)?;
+                        let membership = delta
+                            .writes()
+                            .iter()
+                            .find_map(|w| match w {
+                                W::Retained(R::SetTabMembershipVersion(m)) if m.id() == v.id => {
+                                    Some(*m)
+                                }
+                                _ => None,
+                            })
+                            .ok_or_else(invalid)?;
+                        result
+                            .tabs
+                            .push(convert::encode_tab_record(v, default, membership));
+                    }
+                    W::PutPane(v) => {
+                        let runtime = delta
+                            .runtime()
+                            .iter()
+                            .find(|rt| rt.pane == v.id)
+                            .ok_or_else(invalid)?;
+                        let marks = delta
+                            .writes()
+                            .iter()
+                            .find_map(|w| match w {
+                                W::Retained(R::SetPaneGenerationHighWater(m))
+                                    if m.pane() == v.id =>
+                                {
+                                    Some(*m)
+                                }
+                                _ => None,
+                            })
+                            .ok_or_else(invalid)?;
+                        if marks.session() != runtime.session_generation
+                            || marks.control() != runtime.control_generation
+                        {
+                            return Err(invalid());
+                        }
+                        result.panes.push(convert::encode_pane_record(v, *runtime));
+                    }
+                    W::PutRepository(v) => {
+                        let version = delta
+                            .writes()
+                            .iter()
+                            .find_map(|w| match w {
+                                W::Retained(R::SetRepositoryInventoryVersion(m))
+                                    if m.id() == v.id =>
+                                {
+                                    Some(m.version())
+                                }
+                                _ => None,
+                            })
+                            .ok_or_else(invalid)?;
+                        result.repositories.push(wire::RepositoryRecord {
+                            id: Some(encode_repository(v.id)),
+                            directory: Some(convert::encode_directory(&v.directory)),
+                            inventory_version: version.get(),
+                        });
+                    }
+                    W::PutWorktree(v) => {
+                        let inventory = delta
+                            .writes()
+                            .iter()
+                            .find_map(|w| match w {
+                                W::Retained(R::SetWorktreeInventoryFacts(m))
+                                    if m.worktree() == v.id =>
+                                {
+                                    Some(*m)
+                                }
+                                _ => None,
+                            })
+                            .ok_or_else(invalid)?;
+                        result.worktrees.push(wire::Worktree {
+                            id: Some(encode_worktree(v.id)),
+                            repository: Some(encode_repository(v.repository)),
+                            directory_value: Some(convert::encode_directory(&v.directory)),
+                            listed: inventory.listed(),
+                            version: inventory.version().get(),
+                            main: v.main,
+                            missing: v.missing,
+                            ..Default::default()
+                        });
+                    }
+                    W::SetServerSettings(v) => {
+                        let remote = delta
+                            .writes()
+                            .iter()
+                            .find_map(|w| match w {
+                                W::Retained(R::SetRemoteAccess(m)) => Some(m),
+                                _ => None,
+                            })
+                            .ok_or_else(invalid)?;
+                        result.settings = Some(convert::encode_settings(v, remote));
+                    }
+                    W::DeleteWorkspace(v) => result.deleted_workspaces.push(encode_workspace(*v)),
+                    W::DeleteTab(v) => result.deleted_tabs.push(encode_tab(*v)),
+                    W::DeletePane(v) => result.deleted_panes.push(encode_pane(*v)),
+                    W::DeleteRepository(v) => {
+                        result.deleted_repositories.push(encode_repository(*v))
+                    }
+                    W::DeleteWorktree(v) => result.deleted_worktrees.push(encode_worktree(*v)),
+                    W::Retained(_) => {}
+                }
+            }
+            result.accepted_pane_creations = delta
+                .accepted_creations()
+                .iter()
+                .map(|v| wire::AcceptedPaneCreation {
+                    tab: Some(encode_tab(v.tab())),
+                    pane: Some(encode_pane(v.pane())),
+                    source: Some(encode_pane(v.source())),
+                    edge: organization::edge_number(v.axis(), v.edge()),
+                    creation_ordinal: v.ordinal().get(),
+                })
+                .collect();
+            Payload::$variant(wire::Message {
+                kind: Some(wire::message::Kind::OrganizationDelta(result)),
+            })
+        }};
+    }
+    let payload = match major {
+        1 => encode!(v1, Major1),
+        2 => encode!(v2, Major2),
+        _ => return Err(failure(ServerFailureClass::ScopeMismatch)),
+    };
+    if payload.encoded_len() > maximum {
+        return Err(failure(ServerFailureClass::Capacity));
+    }
+    Ok(payload)
+}
+fn validate_delta_completeness(delta: &OrganizationDelta) -> Result<(), ServerFailure> {
+    use OrganizationWrite as W;
+    use RetainedOrganizationWrite as R;
+    for write in delta.writes() {
+        let W::Retained(value) = write else {
+            continue;
+        };
+        let present = delta.writes().iter().any(|owner| match (value, owner) {
+            (R::PutWorkspaceNameBasis(v), W::PutWorkspace(w)) => v.workspace() == w.id,
+            (R::PutCreationDefault(v), W::PutTab(w)) => v.tab() == w.id,
+            (R::SetTabMembershipVersion(v), W::PutTab(w)) => v.id() == w.id,
+            (R::SetPaneGenerationHighWater(v), W::PutPane(w)) => v.pane() == w.id,
+            (R::SetRepositoryInventoryVersion(v), W::PutRepository(w)) => v.id() == w.id,
+            (R::SetWorktreeInventoryFacts(v), W::PutWorktree(w)) => v.worktree() == w.id,
+            (R::SetRemoteAccess(_), W::SetServerSettings(_)) => true,
+            (R::DeleteWorkspaceNameBasis(v), W::DeleteWorkspace(w)) => v == w,
+            (R::DeleteCreationDefault(v), W::DeleteTab(w)) => v == w,
+            (R::DeleteTabMembershipVersion(v), W::DeleteTab(w)) => v == w,
+            (R::DeletePaneGenerationHighWater(v), W::DeletePane(w)) => v == w,
+            (R::DeleteRepositoryInventoryVersion(v), W::DeleteRepository(w)) => v == w,
+            (R::DeleteWorktreeInventoryFacts(v), W::DeleteWorktree(w)) => v == w,
+            _ => false,
+        });
+        if !present {
+            return Err(failure(ServerFailureClass::RecoveryRequired));
+        }
+    }
+    if delta.runtime().iter().any(|rt| {
+        !delta
+            .writes()
+            .iter()
+            .any(|write| matches!(write, W::PutPane(v) if v.id == rt.pane))
+    }) {
+        return Err(failure(ServerFailureClass::RecoveryRequired));
+    }
+    Ok(())
+}
+fn delta_wire_bound(delta: &OrganizationDelta) -> Result<usize, ServerFailure> {
+    use OrganizationWrite as W;
+    use RetainedOrganizationWrite as R;
+    // Borrowed bounds cover either major's protobuf tags, nested length prefixes,
+    // qualified identities and maximum-width varints. No DTO is allocated here.
+    let directory = |v: &ServerDirectory| v.bytes().len() + 64;
+    let mut bytes = 256usize;
+    for write in delta.writes() {
+        let additional = match write {
+            W::PutWorkspace(v) => {
+                256 + v.name.value.display.as_str().len()
+                    + v.pinned_directory.value.as_ref().map_or(0, directory)
+            }
+            W::PutTab(_) => 256,
+            W::PutPane(v) => {
+                512 + directory(&v.starting_directory)
+                    + v.confirmed_restoration_directory
+                        .value
+                        .as_ref()
+                        .map_or(0, directory)
+            }
+            W::PutRepository(v) => 256 + directory(&v.directory),
+            W::PutWorktree(v) => 256 + directory(&v.directory),
+            W::SetServerSettings(v) => 192 + v.worktree_location.value.as_str().len(),
+            W::Retained(R::PutWorkspaceNameBasis(v)) => {
+                v.automatic_base().as_str().len() + v.assigned_automatic().as_str().len()
+            }
+            W::Retained(R::PutCreationDefault(v)) => v
+                .replay_order()
+                .len()
+                .checked_mul(64)
+                .ok_or_else(|| failure(ServerFailureClass::Capacity))?,
+            W::Retained(R::SetRemoteAccess(v)) => 64 + v.value.endpoints().len() * 64,
+            W::Retained(_) => 0,
+            _ => 64,
+        };
+        bytes = checked_bytes(bytes, additional)?;
+    }
+    checked_bytes(
+        bytes,
+        delta
+            .accepted_creations()
+            .len()
+            .checked_mul(192)
+            .ok_or_else(|| failure(ServerFailureClass::Capacity))?,
+    )
+}
+
 fn delta_bytes(delta: &OrganizationDelta) -> Result<usize, ServerFailure> {
     use OrganizationWrite as W;
     use spaceterm_core::organization_retained::RetainedOrganizationWrite as R;
@@ -414,7 +1000,7 @@ mod fixtures;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spaceterm_core::{authority::ServerEpoch, identity::ServerId};
+    use spaceterm_core::{authority::*, identity::*};
 
     use super::fixtures::{large_snapshot, snapshot};
     fn receipt(store: u64, organization: u64) -> CommitReceipt {
@@ -435,6 +1021,403 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+    fn compact_snapshot(revision: u64) -> Arc<OrganizationSnapshot> {
+        let value = fixtures::snapshot_with_workspaces(1);
+        let mut state = value.state().clone();
+        state.revision = OrganizationRevision::new(revision);
+        state.workspaces[0].name.value.display = NameText::new("Shell".into()).unwrap();
+        state.workspaces[0].pinned_directory.value = None;
+        let directory = ServerDirectory::new(state.server, b"server-directory".to_vec()).unwrap();
+        for pane in &mut state.panes {
+            pane.starting_directory = directory.clone();
+            pane.confirmed_restoration_directory.value = None;
+        }
+        let repository = RepositoryId::new(state.server, 1).unwrap();
+        let worktree = WorktreeId::new(state.server, 1).unwrap();
+        state.repositories.push(RepositoryRecord {
+            id: repository,
+            directory: directory.clone(),
+        });
+        state.worktrees.push(WorktreeRecord {
+            id: worktree,
+            repository,
+            directory,
+            main: true,
+            missing: false,
+        });
+        state.tabs[0].worktree = Some(worktree);
+        let mut facts = state.retained.take().unwrap().parts().clone();
+        facts
+            .repository_inventory_versions
+            .push(RepositoryInventoryVersion::new(
+                repository,
+                FieldVersion::new(8),
+            ));
+        facts.worktree_inventory.push(WorktreeInventoryFacts::new(
+            worktree,
+            true,
+            FieldVersion::new(9),
+        ));
+        state.retained = Some(OrganizationRetainedFacts::new(facts).unwrap());
+        Arc::new(OrganizationSnapshot::new(value.epoch(), state, value.runtime().to_vec()).unwrap())
+    }
+    fn publication_query() -> organization::OrganizationQuery {
+        organization::OrganizationQuery {
+            request: std::num::NonZeroU64::new(17).unwrap(),
+            generation: 23,
+            known_epoch: Some(ServerEpoch::new(1)),
+            known_revision: Some(OrganizationRevision::new(7)),
+        }
+    }
+    #[test]
+    fn journal_deltas_encode_complete_commit_records_in_both_majors_without_old_snapshots() {
+        use OrganizationWrite as W;
+        use RetainedOrganizationWrite as R;
+        let initial = compact_snapshot(7);
+        let mut state = initial.state().clone();
+        state.revision = OrganizationRevision::new(8);
+        state.workspaces[0].name.value.display = NameText::new("Renamed".into()).unwrap();
+        state.workspaces[0].name.version = FieldVersion::new(3);
+        let mut facts = state.retained.take().unwrap().parts().clone();
+        facts.tab_membership_versions[0] =
+            TabMembershipVersion::new(state.tabs[0].id, FieldVersion::new(5));
+        facts.repository_inventory_versions[0] =
+            RepositoryInventoryVersion::new(state.repositories[0].id, FieldVersion::new(10));
+        facts.worktree_inventory[0] =
+            WorktreeInventoryFacts::new(state.worktrees[0].id, false, FieldVersion::new(11));
+        facts.remote_access.version = FieldVersion::new(2);
+        let writes = vec![
+            W::PutWorkspace(state.workspaces[0].clone()),
+            W::Retained(R::SetTabMembershipVersion(facts.tab_membership_versions[0])),
+            W::Retained(R::SetRepositoryInventoryVersion(
+                facts.repository_inventory_versions[0],
+            )),
+            W::Retained(R::SetWorktreeInventoryFacts(facts.worktree_inventory[0])),
+            W::Retained(R::SetRemoteAccess(facts.remote_access.clone())),
+        ];
+        state.retained = Some(OrganizationRetainedFacts::new(facts).unwrap());
+        let mut runtime = initial.runtime().to_vec();
+        runtime[0].phase = SessionPhase::Ended {
+            reason: EndReason::Stop,
+        };
+        let changed_runtime = runtime[0];
+        let committed =
+            Arc::new(OrganizationSnapshot::new(initial.epoch(), state, runtime).unwrap());
+        let upstream = Arc::new(
+            OrganizationDelta::new(
+                initial.state().server,
+                initial.epoch(),
+                initial.state().revision,
+                committed.state().revision,
+                writes,
+                vec![changed_runtime],
+            )
+            .unwrap(),
+        );
+        let mut hub = PublicationHub::new(initial).unwrap();
+        hub.committed(&receipt(1, 8), committed.clone(), Some(upstream))
+            .unwrap();
+        let mut newer = committed.state().clone();
+        newer.revision = OrganizationRevision::new(9);
+        newer.workspaces[0].name.value.display = NameText::new("Newer".into()).unwrap();
+        newer.workspaces[0].name.version = FieldVersion::new(4);
+        let next = Arc::new(
+            OrganizationDelta::new(
+                newer.server,
+                committed.epoch(),
+                committed.state().revision,
+                newer.revision,
+                vec![W::PutWorkspace(newer.workspaces[0].clone())],
+                vec![],
+            )
+            .unwrap(),
+        );
+        hub.committed(
+            &receipt(2, 9),
+            Arc::new(
+                OrganizationSnapshot::new(committed.epoch(), newer, committed.runtime().to_vec())
+                    .unwrap(),
+            ),
+            Some(next),
+        )
+        .unwrap();
+        assert_eq!(Arc::strong_count(&committed), 1);
+        let PublicationPlan::Deltas(deltas) = hub.plan_since(Some(OrganizationRevision::new(7)))
+        else {
+            panic!("retained deltas")
+        };
+        let expected = committed.state();
+        let facts = expected.retained.as_ref().unwrap();
+        assert_eq!(
+            hub.journal_bytes(),
+            deltas
+                .iter()
+                .map(|v| delta_bytes(v).unwrap())
+                .sum::<usize>()
+        );
+        macro_rules! check {
+            ($major:literal, $p:ident, $variant:ident) => {{
+                use spaceterm_protocol::{
+                    convert::{identity::*, organization::$p as convert},
+                    wire::$p as wire,
+                };
+                let payload = delta_payload($major, &deltas[0], publication_query(), 4096).unwrap();
+                let bytes = payload.encode().unwrap();
+                assert!(bytes.len() <= 4096);
+                let Payload::$variant(message) = Payload::decode($major, &bytes).unwrap() else {
+                    panic!("major")
+                };
+                let Some(wire::message::Kind::OrganizationDelta(value)) = message.kind else {
+                    panic!("delta")
+                };
+                let part = convert::decode_part(value.part.as_ref().unwrap()).unwrap();
+                assert_eq!(
+                    (
+                        part.request,
+                        part.generation,
+                        part.transfer,
+                        part.index,
+                        part.total
+                    ),
+                    (17, 23, 8, 0, 1)
+                );
+                assert_eq!(
+                    (part.base, part.revision),
+                    (OrganizationRevision::new(7), OrganizationRevision::new(8))
+                );
+                assert!(value.complete);
+                assert_eq!(
+                    convert::decode_workspace_record(&value.workspaces[0]).unwrap(),
+                    (
+                        expected.workspaces[0].clone(),
+                        facts.workspace_names()[0].clone()
+                    )
+                );
+                assert_eq!(
+                    convert::decode_tab_record(&value.tabs[0]).unwrap(),
+                    (
+                        expected.tabs[0].clone(),
+                        facts.creation_defaults()[0].clone(),
+                        facts.tab_membership_versions()[0]
+                    )
+                );
+                assert_eq!(
+                    convert::decode_pane_record(&value.panes[0]).unwrap(),
+                    (expected.panes[0].clone(), changed_runtime)
+                );
+                assert_eq!(
+                    decode_repository(value.repositories[0].id.as_ref().unwrap()).unwrap(),
+                    expected.repositories[0].id
+                );
+                assert_eq!(
+                    convert::decode_directory(value.repositories[0].directory.as_ref().unwrap())
+                        .unwrap(),
+                    expected.repositories[0].directory
+                );
+                assert_eq!(value.repositories[0].inventory_version, 10);
+                assert_eq!(
+                    decode_worktree(value.worktrees[0].id.as_ref().unwrap()).unwrap(),
+                    expected.worktrees[0].id
+                );
+                assert_eq!(
+                    convert::decode_directory(value.worktrees[0].directory_value.as_ref().unwrap())
+                        .unwrap(),
+                    expected.worktrees[0].directory
+                );
+                assert!(!value.worktrees[0].listed);
+                assert_eq!(value.worktrees[0].version, 11);
+                assert_eq!(
+                    convert::decode_settings(value.settings.as_ref().unwrap()).unwrap(),
+                    (expected.settings.clone(), facts.remote_access().clone())
+                );
+            }};
+        }
+        check!(1, v1, Major1);
+        check!(2, v2, Major2);
+    }
+    #[test]
+    fn retained_delta_preserves_original_accepted_split_and_deletions_in_both_majors() {
+        use OrganizationWrite as W;
+        use RetainedOrganizationWrite as R;
+        let initial = compact_snapshot(7);
+        let mut state = initial.state().clone();
+        state.revision = OrganizationRevision::new(8);
+        let source = state.panes[1].id;
+        let mut created = state.panes[1].clone();
+        created.id = PaneId::new(state.server, 5).unwrap();
+        created.creation_ordinal = CreationOrdinal::new(7);
+        created.creation = PaneCreation::SplitOf {
+            source: state.panes[0].id,
+            axis: SplitAxis::Horizontal,
+            edge: SplitEdge::Before,
+        };
+        state.panes.remove(1);
+        state.panes.push(created.clone());
+        let mut facts = state.retained.take().unwrap().parts().clone();
+        facts.pane_generations.remove(1);
+        let marks = PaneGenerationHighWater::new(
+            created.id,
+            SessionGeneration::new(0),
+            ControlGeneration::new(0),
+        );
+        facts.pane_generations.push(marks);
+        facts.creation_defaults[0] =
+            TabCreationDefault::new(created.tab, state.panes.iter().map(|v| v.id).collect())
+                .unwrap();
+        let default = facts.creation_defaults[0].clone();
+        state.retained = Some(OrganizationRetainedFacts::new(facts).unwrap());
+        let mut runtime = initial.runtime().to_vec();
+        runtime.retain(|v| v.pane != source);
+        let created_runtime = PaneRuntimeRecord {
+            pane: created.id,
+            session_generation: marks.session(),
+            control_generation: marks.control(),
+            phase: SessionPhase::NotStarted,
+            control: ControlRecord::Unclaimed,
+        };
+        runtime.push(created_runtime);
+        let committed =
+            Arc::new(OrganizationSnapshot::new(initial.epoch(), state, runtime).unwrap());
+        let upstream = OrganizationDelta::new(
+            initial.state().server,
+            initial.epoch(),
+            initial.state().revision,
+            committed.state().revision,
+            vec![
+                W::DeletePane(source),
+                W::Retained(R::DeletePaneGenerationHighWater(source)),
+                W::PutPane(created.clone()),
+                W::Retained(R::PutCreationDefault(default)),
+            ],
+            vec![created_runtime],
+        )
+        .unwrap();
+        let accepted = AcceptedPaneCreation::new(
+            &upstream,
+            created.tab,
+            created.id,
+            created.creation_ordinal,
+            PaneCreation::SplitOf {
+                source,
+                axis: SplitAxis::Vertical,
+                edge: SplitEdge::After,
+            },
+        )
+        .unwrap();
+        let upstream = upstream.with_accepted_creations(vec![accepted]).unwrap();
+        let mut hub = PublicationHub::new(initial).unwrap();
+        hub.committed(&receipt(1, 8), committed, Some(Arc::new(upstream)))
+            .unwrap();
+        let PublicationPlan::Deltas(deltas) = hub.plan_since(Some(OrganizationRevision::new(7)))
+        else {
+            panic!("delta")
+        };
+        assert_eq!(deltas[0].accepted_creations(), &[accepted]);
+        assert!(deltas[0].writes().contains(&W::DeletePane(source)));
+        assert!(
+            deltas[0]
+                .writes()
+                .contains(&W::Retained(R::DeletePaneGenerationHighWater(source)))
+        );
+        macro_rules! check {
+            ($major:literal, $p:ident, $variant:ident) => {{
+                use spaceterm_protocol::{
+                    convert::{identity::*, organization::$p as convert},
+                    wire::$p as wire,
+                };
+                let payload = delta_payload($major, &deltas[0], publication_query(), 4096).unwrap();
+                let Payload::$variant(message) = payload else {
+                    panic!("major")
+                };
+                let Some(wire::message::Kind::OrganizationDelta(value)) = message.kind else {
+                    panic!("delta")
+                };
+                assert_eq!(value.deleted_panes, vec![encode_pane(source)]);
+                let actual = &value.accepted_pane_creations[0];
+                assert_eq!(
+                    decode_pane(actual.source.as_ref().unwrap()).unwrap(),
+                    source
+                );
+                assert_eq!(
+                    decode_pane(actual.pane.as_ref().unwrap()).unwrap(),
+                    created.id
+                );
+                assert_eq!(
+                    decode_tab(actual.tab.as_ref().unwrap()).unwrap(),
+                    created.tab
+                );
+                assert_eq!(
+                    organization::decode_edge(actual.edge).unwrap(),
+                    (SplitAxis::Vertical, SplitEdge::After)
+                );
+                assert_eq!(actual.creation_ordinal, created.creation_ordinal.get());
+                assert_eq!(
+                    convert::decode_pane_record(&value.panes[0]).unwrap(),
+                    (created.clone(), created_runtime)
+                );
+                let maximum = delta_wire_bound(&deltas[0]).unwrap() - 1;
+                assert_eq!(
+                    delta_payload($major, &deltas[0], publication_query(), maximum)
+                        .unwrap_err()
+                        .class,
+                    ServerFailureClass::Capacity
+                );
+            }};
+        }
+        check!(1, v1, Major1);
+        check!(2, v2, Major2);
+    }
+    #[test]
+    fn enriched_record_bytes_can_exceed_journal_capacity_without_retaining_a_delta() {
+        let initial = fixtures::snapshot_with_workspaces(140);
+        let mut state = initial.state().clone();
+        state.revision = OrganizationRevision::new(8);
+        let committed = Arc::new(
+            OrganizationSnapshot::new(initial.epoch(), state, initial.runtime().to_vec()).unwrap(),
+        );
+        let upstream = Arc::new(
+            OrganizationDelta::new(
+                initial.state().server,
+                initial.epoch(),
+                initial.state().revision,
+                committed.state().revision,
+                vec![],
+                committed.runtime().to_vec(),
+            )
+            .unwrap(),
+        );
+        assert!(delta_bytes(&upstream).unwrap() < MAX_JOURNAL_BYTES);
+        let mut hub = PublicationHub::new(initial).unwrap();
+        hub.committed(&receipt(1, 8), committed.clone(), Some(upstream))
+            .unwrap();
+        assert_eq!((hub.journal_len(), hub.journal_bytes()), (0, 0));
+        assert!(Arc::ptr_eq(&hub.snapshot(), &committed));
+        assert!(matches!(
+            hub.plan_since(Some(OrganizationRevision::new(7))),
+            PublicationPlan::Snapshot(_)
+        ));
+    }
+    #[test]
+    fn delta_encoding_rejects_incomplete_runtime_instead_of_silently_omitting_it() {
+        let initial = compact_snapshot(7);
+        let delta = OrganizationDelta::new(
+            initial.state().server,
+            initial.epoch(),
+            initial.state().revision,
+            OrganizationRevision::new(8),
+            vec![],
+            vec![initial.runtime()[0]],
+        )
+        .unwrap();
+        for major in [1, 2] {
+            assert_eq!(
+                delta_payload(major, &delta, publication_query(), 4096)
+                    .unwrap_err()
+                    .class,
+                ServerFailureClass::RecoveryRequired
+            );
+        }
     }
     #[test]
     fn snapshot_gap_and_missing_base_require_resync() {

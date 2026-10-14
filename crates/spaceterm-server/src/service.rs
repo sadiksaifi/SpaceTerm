@@ -90,6 +90,11 @@ impl OperationReply {
     }
 }
 pub(crate) enum ActorRequest {
+    OrganizationChanges {
+        principal: VerifiedPrincipal,
+        base: OrganizationRevision,
+        reply: Reply<crate::publication::PublicationPlan>,
+    },
     OrganizationSnapshot {
         principal: VerifiedPrincipal,
         major: u32,
@@ -772,18 +777,7 @@ impl Actor {
                 Some(request)=lifecycle.recv()=>self.lifecycle(request),
                 Some(event)=events.recv()=>self.event(event),
                 Some(request)=requests.recv()=>self.request(request),
-                _ = poll.tick() => {
-                    self.capture_observations();
-                    if !self.inspection_inflight && let Some(registry) = &self.registry {
-                        self.inspection_inflight = true;
-                        let task = registry.inspect();
-                        let events = self.events.clone();
-                        tokio::spawn(async move {
-                            let (reply, _) = oneshot::channel();
-                            let _ = events.send(Event::Observed(reply, task.await)).await;
-                        });
-                    }
-                },
+                _ = poll.tick() => self.capture_observations(),
             }
         }
         for request in self.waiting_context.drain(..) {
@@ -971,6 +965,16 @@ impl Actor {
             return;
         }
         match request {
+            ActorRequest::OrganizationChanges {
+                principal,
+                base,
+                reply,
+            } => {
+                let result = self
+                    .check_principal(principal, false)
+                    .map(|_| self.publication.plan_since(Some(base)));
+                let _ = reply.send(result);
+            }
             ActorRequest::OrganizationSnapshot {
                 principal,
                 major,

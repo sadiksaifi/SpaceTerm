@@ -68,6 +68,20 @@ async fn main() -> ExitCode {
             .await,
         );
     }
+    #[cfg(feature = "test-support")]
+    if arguments.len() == 5
+        && arguments[0] == "--test-account-root"
+        && arguments[2] == "--test-shell-home"
+        && arguments[4] == "owner-enrollment"
+    {
+        return exit_native(
+            spaceterm_server::deployment::owner::test_support::run_with_home(
+                std::path::Path::new(&arguments[1]),
+                std::path::Path::new(&arguments[3]),
+            )
+            .await,
+        );
+    }
     let invocation = match ServerInvocation::parse(arguments) {
         Ok(invocation) => invocation,
         Err(_) => {

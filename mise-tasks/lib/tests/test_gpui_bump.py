@@ -468,27 +468,44 @@ class GpuiBumpTests(unittest.TestCase):
         )
 
     def test_cargo_child_is_stopped_after_interruption(self):
-        with patch.object(MODULE.subprocess, "Popen") as popen:
-            process = popen.return_value
-            process.pid = 12345
-            process.poll.side_effect = [None, 0]
-            process.wait.side_effect = [KeyboardInterrupt, 0]
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            start_new_session=os.name == "posix",
+        )
+        consuming_wait = process.wait
+        interrupted = False
 
-            def killpg(pgid, signum):
-                # The group is gone once the leader exits after SIGTERM.
-                if signum == 0:
-                    raise ProcessLookupError
+        def wait(*args, **kwargs):
+            nonlocal interrupted
+            if not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt
+            return consuming_wait(*args, **kwargs)
 
-            with patch.object(os, "killpg", side_effect=killpg, create=True) as signals:
+        try:
+            with (
+                patch.object(MODULE.subprocess, "Popen", return_value=process),
+                patch.object(process, "wait", side_effect=wait),
+                patch.object(
+                    os, "killpg", wraps=getattr(os, "killpg", None), create=True
+                ) as signals,
+                patch.object(process, "terminate", wraps=process.terminate) as terminate,
+            ):
                 with self.assertRaises(KeyboardInterrupt):
                     MODULE.cargo_update(self.root, list(LOCK_NAMES))
-        if os.name == "posix":
-            self.assertEqual(signals.call_args_list[0].args, (12345, signal.SIGTERM))
-            self.assertNotIn(
-                (12345, signal.SIGKILL), [call.args for call in signals.call_args_list]
-            )
-        else:
-            process.terminate.assert_called_once_with()
+            self.assertIsNotNone(process.returncode)
+            self.assertNotEqual(process.returncode, 0)
+            if os.name == "posix":
+                self.assertEqual(signals.call_args_list[0].args, (process.pid, signal.SIGTERM))
+                self.assertNotIn(
+                    (process.pid, signal.SIGKILL), [call.args for call in signals.call_args_list]
+                )
+            else:
+                terminate.assert_called_once_with()
+        finally:
+            if process.returncode is None:
+                process.kill()
+                consuming_wait()
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ use std::sync::Arc;
 pub(crate) fn offer(
     native: NativeClientProvider,
     journal: Arc<JournalController>,
+    legacy: Option<spaceterm_host::organization_store::bootstrap::LegacyWorktreeLocation>,
 ) -> Result<Option<Arc<dyn ForegroundSetup>>, ClientFailure> {
     let local = discover(&native, &journal)?;
     if local.as_ref().is_some_and(|local| local.binding.is_some()) {
@@ -30,24 +31,40 @@ pub(crate) fn offer(
     // A previous pairing or incomplete preparation needs deliberate recovery,
     // never a launch-time replacement identity or another authorization request.
     if expected.is_some_and(|pin| {
-        snapshot
-            .pairing()
-            .slots()
+        snapshot.bindings().iter().any(|saved| {
+            saved
+                .binding()
+                .is_ok_and(|binding| binding.target().pin() == pin)
+        }) || snapshot
+            .tombstones()
             .iter()
-            .any(|slot| slot.server.map(|server| server.bytes()) == Some(pin.identity))
-            || snapshot.bindings().iter().any(|saved| {
-                saved
-                    .binding()
-                    .is_ok_and(|binding| binding.target().pin() == pin)
-            })
+            .any(|suppressed| suppressed.parts().server.bytes() == pin.identity)
     }) {
         return Ok(None);
     }
+    let installs = native
+        .management()
+        .supervisor()
+        .retained_initial_install_requests()
+        .map_err(classify)?;
+    let pending: Vec<_> = installs
+        .iter()
+        .filter(|progress| progress.phase != ServicePhase::Completed)
+        .collect();
+    if pending.len() > 1 {
+        return Err(ClientFailure::new(ClientFailureClass::RecoveryRequired));
+    }
+    let install = pending.first().map(|progress| progress.request);
     Ok(Some(Arc::new(NativeSetup {
         native,
         journal,
         expected,
-        install: tokio::sync::Mutex::new(None),
+        legacy: if expected.is_none() && install.is_none() {
+            legacy
+        } else {
+            None
+        },
+        install: tokio::sync::Mutex::new(install),
         execution: tokio::sync::Mutex::new(()),
     })))
 }
@@ -56,8 +73,21 @@ struct NativeSetup {
     native: NativeClientProvider,
     journal: Arc<JournalController>,
     expected: Option<ServerPin>,
+    legacy: Option<spaceterm_host::organization_store::bootstrap::LegacyWorktreeLocation>,
     install: tokio::sync::Mutex<Option<NativeRequestId>>,
     execution: tokio::sync::Mutex<()>,
+}
+impl NativeSetup {
+    fn seed(
+        &self,
+        assessment: spaceterm_host::account_service::ServiceInstallAssessment,
+    ) -> spaceterm_host::account_service::ServiceInstallAssessment {
+        if self.expected.is_none() {
+            assessment.with_local_desktop_seed(self.legacy.clone())
+        } else {
+            assessment
+        }
+    }
 }
 impl ForegroundSetup for NativeSetup {
     fn kind(&self) -> SetupKind {
@@ -81,19 +111,34 @@ impl ForegroundSetup for NativeSetup {
             {
                 return Err(ClientFailure::new(ClientFailureClass::StaleAuthority));
             }
-            if registration.is_none() {
-                let mut retained = self.install.lock().await;
+            let mut retained = self.install.lock().await;
+            if registration.is_none() || retained.is_some() {
                 let progress = if let Some(request) = *retained {
-                    supervisor
+                    let progress = supervisor
                         .resolve_install(request)
                         .await
-                        .map_err(classify)?
+                        .map_err(classify)?;
+                    if progress.phase != ServicePhase::Completed {
+                        // A crash before archive staging may need the original bytes.
+                        // The host rejects a newer feed rather than replacing this request.
+                        let artifact = management
+                            .download_installation(None)
+                            .await
+                            .map_err(|_| ClientFailure::new(ClientFailureClass::Unavailable))?;
+                        supervisor
+                            .resume_install_artifact(request, artifact)
+                            .await
+                            .map_err(classify)?
+                    } else {
+                        progress
+                    }
                 } else {
                     let artifact = management
                         .download_installation(None)
                         .await
                         .map_err(|_| ClientFailure::new(ClientFailureClass::Unavailable))?;
-                    let assessment = supervisor.assess_install(artifact).map_err(classify)?;
+                    let assessment =
+                        self.seed(supervisor.assess_install(artifact).map_err(classify)?);
                     let request = supervisor.allocate_request().map_err(classify)?;
                     *retained = Some(request);
                     // Only this method is reachable after the foreground affirmative action.
@@ -111,6 +156,7 @@ impl ForegroundSetup for NativeSetup {
                     return Err(ClientFailure::new(ClientFailureClass::RecoveryRequired));
                 }
             }
+            drop(retained);
             enrollment::enroll(&self.native, self.journal.clone()).await
         })
     }
@@ -132,7 +178,7 @@ mod tests {
         let (_runtime, journal) = journal();
         let native = NativeClientProvider::from_supervisor(fixture.reopen());
         assert_eq!(
-            offer(native.clone(), journal.clone())
+            offer(native.clone(), journal.clone(), None)
                 .unwrap()
                 .unwrap()
                 .kind(),
@@ -142,7 +188,7 @@ mod tests {
         assert!(!fixture.data_directory().exists());
         let registration = fixture.initialize(DesiredServerState::Stopped).unwrap();
         assert_eq!(
-            offer(native, journal).unwrap().unwrap().kind(),
+            offer(native, journal, None).unwrap().unwrap().kind(),
             SetupKind::Enroll
         );
         assert_eq!(
@@ -173,6 +219,7 @@ mod tests {
                 identity: [5; 16],
                 public_key: [5; 32],
             }),
+            legacy: None,
             install: tokio::sync::Mutex::new(None),
             execution: tokio::sync::Mutex::new(()),
         };
@@ -197,3 +244,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "setup_tests.rs"]
+mod installation_tests;

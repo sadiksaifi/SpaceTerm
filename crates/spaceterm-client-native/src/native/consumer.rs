@@ -2,7 +2,20 @@
 //! Restoration never creates storage, enrolls or selects another consumer's Client.
 
 mod assessments;
+mod authorization;
 mod enrollment;
+
+pub(super) fn require_account_recovery(
+    supervisor: &spaceterm_host::account_service::ServiceSupervisor,
+) -> Result<(), spaceterm_client::management_cli::ManagementFailure> {
+    enrollment::recovery::require_complete(supervisor)
+}
+mod listing;
+
+pub use authorization::{
+    PublicEnrollmentChannel, PublicEnrollmentClaim, PublicEnrollmentDelivery,
+    PublicEnrollmentDeliveryParts,
+};
 
 use super::{NativeServiceManagement, classify_service};
 use crate::{
@@ -30,7 +43,7 @@ use spaceterm_client::{
         OutboundClass, ProtocolChannel, SigningAccess,
     },
     registry::{ClientRegistry, ClientRuntime, ServerHandle},
-    replica::{OrganizationCursor, PublicationStamp, ReplicaSnapshot, SnapshotPart},
+    replica::ReplicaSnapshot,
 };
 use spaceterm_core::{
     authority::GrantedControl,
@@ -43,9 +56,7 @@ use spaceterm_host::account_service::RegisteredServer;
 use spaceterm_protocol::{
     authentication::{HandshakeConfig, ServerPin},
     codec::Payload,
-    convert::organization,
     pairing_adapter::ReceiptCodec,
-    wire::{v1, v2},
 };
 use std::{
     path::PathBuf,
@@ -86,6 +97,8 @@ pub struct NativeConsumer {
     native: Arc<NativeServiceManagement>,
     credentials: Arc<dyn NativeDeviceCredentials>,
     kind: NativeConsumerKind,
+    owner_channels: Arc<dyn super::owner_channel::OwnerChannelProvider>,
+    owner_handshake: HandshakeConfig,
     mutation: tokio::sync::Mutex<()>,
     owner: OnceCell<PairingOwner>,
     opened: OnceCell<OpenedConsumer>,
@@ -108,6 +121,8 @@ impl NativeConsumer {
     /// read-only; enrollment remains an explicit foreground operation.
     pub fn new(native: Arc<NativeServiceManagement>, kind: NativeConsumerKind) -> Self {
         Self {
+            owner_channels: Arc::new(super::owner_channel::NativeOwnerChannel(native.clone())),
+            owner_handshake: HandshakeConfig::default(),
             native,
             credentials: Arc::new(DeviceCredentials::native()),
             kind,
@@ -123,6 +138,21 @@ impl NativeConsumer {
         self.credentials = credentials;
         self
     }
+    /// Selects the complete protocol profiles advertised by deliberate owner
+    /// enrollment. Invalid advertisements fail in the shared handshake.
+    pub fn with_owner_handshake(mut self, config: HandshakeConfig) -> Self {
+        self.owner_handshake = config;
+        self
+    }
+    /// Supplies an operation-specific owner transport boundary. Production uses
+    /// private account IPC or the retained signed stopped-owner subprocess.
+    pub fn with_owner_channels(
+        mut self,
+        channels: Arc<dyn super::owner_channel::OwnerChannelProvider>,
+    ) -> Self {
+        self.owner_channels = channels;
+        self
+    }
     /// Retains one already recovered consumer journal without ordinary dialing.
     /// Restricted retry remains available when ordinary use has been suppressed.
     pub fn with_recovered_journal(
@@ -133,6 +163,8 @@ impl NativeConsumer {
         routes: NativeRouteConnector,
     ) -> Self {
         Self {
+            owner_channels: Arc::new(super::owner_channel::NativeOwnerChannel(native.clone())),
+            owner_handshake: HandshakeConfig::default(),
             native,
             credentials: credentials.clone(),
             kind,
@@ -185,14 +217,21 @@ impl NativeConsumer {
                         .await
                         .map_err(classify_client)?,
                 );
-                let local = self
-                    .native
-                    .supervisor
-                    .retained_local_endpoint()
-                    .map_err(classify_service)?
-                    .map(LocalRouteAuthority::new)
-                    .transpose()
-                    .map_err(classify_client)?;
+                // Registration can select a runtime outside the authority root.
+                // Restricted retries still reopen their journal when registration
+                // is missing or damaged; ordinary use validates it in opened().
+                let endpoint = match self.native.supervisor.discover() {
+                    Ok(Some(registration)) => registration.endpoint().ok(),
+                    Ok(None) | Err(_) => self
+                        .native
+                        .supervisor
+                        .retained_local_endpoint()
+                        .ok()
+                        .flatten(),
+                };
+                // Unavailable or unsafe runtime storage grants no IPC authority.
+                // It must not hide the verified journal or cause storage repair.
+                let local = endpoint.and_then(|endpoint| LocalRouteAuthority::new(endpoint).ok());
                 let routes = NativeRouteConnector::new(local.into_iter().collect(), None)
                     .map_err(classify_client)?;
                 Ok(pairing_owner(journal, self.credentials.clone(), routes))
@@ -200,6 +239,7 @@ impl NativeConsumer {
             .await
     }
     async fn opened(&self) -> Result<&OpenedConsumer, ManagementFailure> {
+        self.require_account_recovery_complete()?;
         let registration = self
             .native
             .supervisor
@@ -211,6 +251,9 @@ impl NativeConsumer {
         {
             return Err(ManagementFailure::NativeUnavailable);
         }
+        // Ordinary use retains typed native route failures. Journal-only removal
+        // and restricted retry recovery do not require this runtime to be present.
+        registration.endpoint().map_err(classify_service)?;
         let opened = self
             .opened
             .get_or_try_init(|| async {
@@ -325,21 +368,9 @@ impl NativeConsumer {
                 .millis,
         ))
     }
-    async fn assessment_owner(&self) -> Result<(PathBuf, assessments::Scope), ManagementFailure> {
-        let context = self.opened().await?.backend()?.context()?;
-        let registration = self
-            .native
-            .supervisor
-            .discover()
-            .map_err(classify_service)?
-            .ok_or(ManagementFailure::NativeUnavailable)?;
-        let scope = assessments::Scope::new(context, registration.server_pin())?;
-        // The registration, not a remote value, grants this local storage path.
-        let directory = registration.data_directory().join("cli-assessments");
-        Ok((directory, scope))
-    }
-    async fn local_assessment_owner(
+    async fn assessment_owner(
         &self,
+        context: Option<spaceterm_client::management_cli::AuthenticatedManagementContext>,
     ) -> Result<(PathBuf, assessments::Scope), ManagementFailure> {
         let runtime = self.pairing_runtime().await?;
         let inventory = runtime.inventory().await.map_err(classify_pairing)?;
@@ -347,49 +378,58 @@ impl NativeConsumer {
             return Err(ManagementFailure::PairingRequired);
         }
         let saved = &inventory.saved[0];
-        let registration = self
+        let scope = if let Some(context) = context {
+            if context.stream() != saved.client().parts().ordinary
+                || context.device() != saved.device()
+            {
+                return Err(ManagementFailure::AuthorizationDenied);
+            }
+            assessments::Scope::new(context, saved.pin())?
+        } else {
+            assessments::Scope::local(
+                saved.client().parts().ordinary,
+                saved.device(),
+                saved.pin(),
+                spaceterm_client::journal::ClientJournalRevision::new(inventory.revision),
+            )?
+        };
+        // Account/build authority selects storage even if server registration is
+        // absent or unreadable. The verified journal supplies pairing scope only.
+        let directory = self
             .native
             .supervisor
-            .discover()
-            .map_err(classify_service)?
-            .ok_or(ManagementFailure::NativeUnavailable)?;
-        if saved.pin() != registration.server_pin() {
-            return Err(ManagementFailure::AuthorizationDenied);
-        }
-        let scope = assessments::Scope::local(
-            saved.client().parts().ordinary,
-            saved.device(),
-            registration.server_pin(),
-        )?;
-        Ok((registration.data_directory().join("cli-assessments"), scope))
+            .client_connections_directory()
+            .with_file_name("cli-assessments");
+        Ok((directory, scope))
     }
     async fn retained_assessment(
         &self,
         token: &AssessmentToken,
     ) -> Result<ManagementAssessment, ManagementFailure> {
-        let (directory, scope) = self.local_assessment_owner().await?;
-        match assessments::restore(directory, scope, token.clone(), self.now()?).await {
-            Ok(assessment) => return Ok(assessment),
-            Err(ManagementFailure::StaleAssessment) => {}
-            Err(error) => return Err(error),
-        }
-        let (directory, scope) = self.assessment_owner().await?;
-        let assessment = assessments::restore(directory, scope, token.clone(), self.now()?).await?;
-        assessment.validate_at(self.now()?)?;
-        Ok(assessment)
+        let (directory, scope) =
+            self.assessment_owner(None)
+                .await
+                .map_err(|failure| match failure {
+                    // A token names original consent. Missing pairing authority
+                    // invalidates that consent, rather than requesting new pairing.
+                    ManagementFailure::PairingRequired => ManagementFailure::StaleAssessment,
+                    failure => failure,
+                })?;
+        assessments::restore_owned(directory, scope, token.clone(), self.now()?).await
     }
     async fn consume_assessment(
         &self,
         assessment: &ManagementAssessment,
     ) -> Result<(), ManagementFailure> {
-        let (directory, scope) = if matches!(
+        let context = if matches!(
             assessment.evidence(),
             spaceterm_client::management_cli::AssessmentEvidence::LocalSelfUnpair { .. }
         ) {
-            self.local_assessment_owner().await?
+            None
         } else {
-            self.assessment_owner().await?
+            Some(self.opened().await?.backend()?.context()?)
         };
+        let (directory, scope) = self.assessment_owner(context).await?;
         assessments::consume(directory, scope, assessment.clone(), self.now()?).await
     }
     /// Closes only this consumer's connection worker, never the server.
@@ -404,6 +444,34 @@ impl NativeConsumer {
     pub async fn pairing_runtime(&self) -> Result<Arc<NativePairingRuntime>, ManagementFailure> {
         self.mutable()?;
         Ok(self.owner().await?.pairing.clone())
+    }
+}
+impl super::runtime::RuntimeClientIdentity for NativeConsumer {
+    fn access<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+    ) -> spaceterm_host::account_service::ServiceFuture<'a, super::runtime::RuntimeClientAccess>
+    {
+        Box::pin(async move {
+            use spaceterm_host::account_service::ServiceFailure;
+            let owner = self.owner().await.map_err(|failure| match failure {
+                ManagementFailure::PairingRequired => ServiceFailure::PairingRequired,
+                ManagementFailure::StorageLocked => ServiceFailure::StorageLocked,
+                ManagementFailure::UnsafeNativeState => ServiceFailure::UnsafeStorage,
+                ManagementFailure::AuthorizationDenied => ServiceFailure::AuthorizationDenied,
+                ManagementFailure::LimitExceeded => ServiceFailure::LimitExceeded,
+                ManagementFailure::Indeterminate => ServiceFailure::Indeterminate,
+                _ => ServiceFailure::StorageUnavailable,
+            })?;
+            super::runtime::RuntimeClientIdentity::access(
+                &super::runtime::NativeRuntimeIdentity::from_journal(
+                    owner.pairing.journal().clone(),
+                    self.credentials.clone(),
+                ),
+                registration,
+            )
+            .await
+        })
     }
 }
 impl OpenedConsumer {
@@ -532,7 +600,7 @@ impl ProtocolManagement for NativeConsumer {
                 .map_err(|_| ManagementFailure::NativeUnavailable)?;
             let token = AssessmentToken::new(crate::cli::output::hex(&nonce))?;
             let assessment = ManagementAssessment::new(token, action, evidence, issued, expires)?;
-            let (directory, scope) = self.assessment_owner().await?;
+            let (directory, scope) = self.assessment_owner(Some(context)).await?;
             if opened.backend()?.context()? != context {
                 return Err(ManagementFailure::Offline);
             }
@@ -559,7 +627,8 @@ impl ProtocolManagement for NativeConsumer {
             {
                 return Err(ManagementFailure::StaleAssessment);
             }
-            Ok(assessment)
+            let (directory, scope) = self.assessment_owner(Some(context)).await?;
+            assessments::restore(directory, scope, token, self.now()?).await
         })
     }
     fn execute(
@@ -774,17 +843,32 @@ async fn open_pairing(
     let server = registry
         .server(binding.target().server())
         .ok_or(ManagementFailure::PairingRequired)?;
-    server.connect().await.map_err(classify_client)?;
+    if let Err(error) = server.connect().await {
+        let _ = runtime.shutdown().await;
+        return Err(classify_client(error));
+    }
     let mut state = server.state();
     let mut replica = server.replica();
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let ready = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if matches!(
-                *state.borrow_and_update(),
+            let connection = state.borrow_and_update().clone();
+            match connection {
+                // connect() admits the request before the worker leaves its
+                // initial Offline state. Only a failed attempt is terminal here.
+                spaceterm_client::api::ConnectionState::Offline { failure, retry }
+                    if retry.failures > 0 =>
+                {
+                    return Err(classify_client(failure));
+                }
+                spaceterm_client::api::ConnectionState::Incompatible { .. } => {
+                    return Err(ManagementFailure::Incompatible);
+                }
                 spaceterm_client::api::ConnectionState::Connected { .. }
-            ) && replica.borrow_and_update().is_ready()
-            {
-                return Ok(());
+                    if replica.borrow_and_update().is_ready() =>
+                {
+                    return Ok(());
+                }
+                _ => {}
             }
             tokio::select! {
                 result = state.changed() => result.map_err(|_| ManagementFailure::Offline)?,
@@ -793,14 +877,22 @@ async fn open_pairing(
         }
     })
     .await
-    .map_err(|_| ManagementFailure::Offline)??;
+    .map_err(|_| ManagementFailure::Offline)
+    .and_then(|ready| ready);
+    if let Err(error) = ready {
+        let _ = runtime.shutdown().await;
+        return Err(error);
+    }
     if let Some(operations) = &operations {
         let stream = ordinary.binding().streams().parts().ordinary;
-        operations
+        if let Err(error) = operations
             .tracker
             .acknowledge(stream, operations.as_ref())
             .await
-            .map_err(classify_client)?;
+        {
+            let _ = runtime.shutdown().await;
+            return Err(classify_client(error));
+        }
     }
     Ok(OpenedConsumer {
         pairing: pairing.clone(),
@@ -849,38 +941,7 @@ impl ReceiptVerifier for PinnedReceipts {
 struct CanonicalOrganization;
 impl OrganizationDecoder for CanonicalOrganization {
     fn decode(&self, payload: Payload) -> Result<OrganizationPublication, ClientFailure> {
-        macro_rules! snapshot {
-            ($m:expr,$p:ident) => {
-                match $m.kind {
-                    Some($p::message::Kind::OrganizationSnapshot(value)) => {
-                        organization::$p::decode_snapshot_part(&value)
-                    }
-                    _ => return Err(ClientFailure::new(ClientFailureClass::InvalidPeer)),
-                }
-            };
-        }
-        let value = match payload {
-            Payload::Major1(m) => snapshot!(m, v1),
-            Payload::Major2(m) => snapshot!(m, v2),
-        }
-        .map_err(|_| ClientFailure::new(ClientFailureClass::InvalidPeer))?;
-        let part = value.part;
-        Ok(OrganizationPublication::Snapshot(Box::new(SnapshotPart {
-            stamp: PublicationStamp {
-                request: part.request,
-                request_generation: part.generation,
-                transfer: part.transfer,
-                index: part.index,
-                total: part.total,
-                cursor: OrganizationCursor {
-                    server: value.state.server,
-                    epoch: part.epoch,
-                    revision: part.revision,
-                },
-            },
-            state: value.state,
-            runtime: value.runtime,
-        })))
+        spaceterm_client::organization_protocol::decode(payload)
     }
 }
 struct ReadOnlyDelegate;
@@ -954,6 +1015,14 @@ fn classify_pairing(failure: PairingFailure) -> ManagementFailure {
         PairingFailure::CredentialUnavailable => ManagementFailure::CredentialUnavailable,
         PairingFailure::StorageUnavailable => ManagementFailure::StorageUnavailable,
         PairingFailure::StaleAssessment => ManagementFailure::StaleAssessment,
+        PairingFailure::Offline | PairingFailure::TimedOut => ManagementFailure::Offline,
+        PairingFailure::RecoveryRequired => ManagementFailure::OutcomePending,
+        PairingFailure::AuthorizationRequired | PairingFailure::AuthorizationDenied => {
+            ManagementFailure::AuthorizationDenied
+        }
+        PairingFailure::AuthorizationUnavailable => ManagementFailure::AuthorizationUnavailable,
+        PairingFailure::LimitExceeded => ManagementFailure::LimitExceeded,
+        PairingFailure::Incompatible => ManagementFailure::Incompatible,
         _ => ManagementFailure::UnsafeNativeState,
     }
 }
@@ -1020,24 +1089,34 @@ impl crate::cli::bindings::PairingCommandBindings for NativeConsumer {
     }
     fn authorize(
         &self,
-        _: crate::cli::arguments::PublicRequestId,
-        _: crate::cli::arguments::PublicFingerprint,
+        request: crate::cli::arguments::PublicRequestId,
+        expected: crate::cli::arguments::PublicFingerprint,
     ) -> ManagementFuture<'_, spaceterm_core::management::ManagementProgress> {
-        Box::pin(async {
-            self.mutable()?;
-            self.opened().await?;
-            Err(ManagementFailure::AuthorizationUnavailable)
+        Box::pin(async move { self.authorize_registered(request, expected).await })
+    }
+    fn authorize_claim(
+        &self,
+        claim_json: zeroize::Zeroizing<Vec<u8>>,
+        expected: crate::cli::arguments::PublicFingerprint,
+    ) -> crate::cli::bindings::PairingAuthorizationFuture<'_> {
+        Box::pin(async move { self.authorize_public_claim_json(claim_json, expected).await })
+    }
+    fn authorize_claim_admitted(
+        &self,
+        claim_json: zeroize::Zeroizing<Vec<u8>>,
+        expected: crate::cli::arguments::PublicFingerprint,
+        admission: crate::cli::bindings::PairingAuthorizationAdmission,
+    ) -> crate::cli::bindings::PairingAuthorizationFuture<'_> {
+        Box::pin(async move {
+            self.authorize_public_claim_json_admitted(claim_json, expected, admission)
+                .await
         })
     }
     fn list_page(
         &self,
-        _: Option<crate::cli::bindings::InventoryCursor>,
+        cursor: Option<crate::cli::bindings::InventoryCursor>,
     ) -> ManagementFuture<'_, crate::cli::bindings::PairingInventoryPage> {
-        Box::pin(async {
-            self.mutable()?;
-            self.opened().await?;
-            Err(ManagementFailure::NativeUnavailable)
-        })
+        Box::pin(async move { self.list_registered_devices(cursor).await })
     }
     fn assess_unpair(
         &self,
@@ -1046,10 +1125,19 @@ impl crate::cli::bindings::PairingCommandBindings for NativeConsumer {
     ) -> ManagementFuture<'_, ManagementAssessment> {
         Box::pin(async move {
             self.mutable()?;
+            // Restore supplied consent before checking fresh-assessment inventory.
+            // Its original pairing may already have been removed by another token.
+            let retained = if let Some(token) = token {
+                Some(self.retained_assessment(&token).await?)
+            } else {
+                None
+            };
             let runtime = self.pairing_runtime().await?;
             let inventory = runtime.inventory().await.map_err(classify_pairing)?;
             if inventory.saved.len() != 1 {
-                return Err(if inventory.saved.is_empty() {
+                return Err(if retained.is_some() {
+                    ManagementFailure::StaleAssessment
+                } else if inventory.saved.is_empty() {
                     ManagementFailure::PairingRequired
                 } else {
                     ManagementFailure::UnsafeNativeState
@@ -1057,7 +1145,11 @@ impl crate::cli::bindings::PairingCommandBindings for NativeConsumer {
             }
             let saved = &inventory.saved[0];
             if saved.device() != device {
-                return Err(ManagementFailure::NativeUnavailable);
+                return Err(if retained.is_some() {
+                    ManagementFailure::StaleAssessment
+                } else {
+                    ManagementFailure::NativeUnavailable
+                });
             }
             if !matches!(
                 saved.receipt().parts().claims,
@@ -1078,8 +1170,7 @@ impl crate::cli::bindings::PairingCommandBindings for NativeConsumer {
             )
             .map_err(|_| ManagementFailure::UnsafeNativeState)?;
             let action = ManagementAction::Unpair { target };
-            if let Some(token) = token {
-                let assessment = self.retained_assessment(&token).await?;
+            if let Some(assessment) = retained {
                 if assessment.action() != &action
                     || !matches!(assessment.evidence(), spaceterm_client::management_cli::AssessmentEvidence::LocalSelfUnpair { pairing, client }
                         if pairing == local.pairing() && *client == local.client())
@@ -1104,7 +1195,7 @@ impl crate::cli::bindings::PairingCommandBindings for NativeConsumer {
                 client: local.client(),
             };
             let assessment = ManagementAssessment::new(token, action, evidence, issued, expires)?;
-            let (directory, scope) = self.local_assessment_owner().await?;
+            let (directory, scope) = self.assessment_owner(None).await?;
             assessments::retain(directory, scope, assessment.clone(), issued, expires).await?;
             Ok(assessment)
         })

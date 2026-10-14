@@ -261,3 +261,283 @@ extensions!(
     Major2,
     2
 );
+
+#[test]
+fn enhanced_copy_and_native_paste_metadata_require_independent_negotiated_capabilities_both_majors()
+{
+    use spaceterm_core::native_requests::*;
+    use spaceterm_protocol::{convert::native_requests, negotiation::*};
+    macro_rules! check {
+        ($p:ident, $major:ident, $number:literal) => {{
+            let command = FencedRuntimeCommand {
+                fence: fence(None),
+                command: RuntimeCommand::Copy(InputModifiers {
+                    control: true,
+                    shift: true,
+                    ..Default::default()
+                }),
+            };
+            let copy = Payload::$major($p::Message {
+                kind: Some($p::message::Kind::RuntimeCommand(
+                    runtime::$p::encode_command(127, &command).unwrap(),
+                )),
+            });
+            let request = NativeRequest::new(
+                command.fence,
+                NativeRequestId::new(41).unwrap(),
+                MonotonicTick::new(1),
+                MonotonicTick::new(1),
+                Some(MonotonicTick::new(30_001)),
+                NativeRequestKind::UnsafePaste {
+                    approval: PasteApprovalId::new(19).unwrap(),
+                    text: NativeText::new("one\ntwo".into()).unwrap(),
+                },
+            )
+            .unwrap()
+            .with_runtime_request(127)
+            .unwrap();
+            let native = Payload::$major($p::Message {
+                kind: Some($p::message::Kind::NativeRequest(
+                    native_requests::$p::encode_request(&request, MonotonicTick::new(1)).unwrap(),
+                )),
+            });
+            let completion = NativeCompletion::new(
+                &request,
+                NativeCompletionKind::Paste {
+                    approval: PasteApprovalId::new(19).unwrap(),
+                    decision: PasteDecision::Cancel,
+                },
+            )
+            .unwrap();
+            let mut wire = native_requests::$p::encode_completion(&completion).unwrap();
+            wire.effect_request = 999;
+            let completed = Payload::$major($p::Message {
+                kind: Some($p::message::Kind::NativeCompletion(wire)),
+            });
+            let fragment_snapshot = snapshot(2, ProgressMetadata::Normal(37));
+            let fragment_bytes = metadata::snapshot_bytes(&fragment_snapshot).unwrap();
+            let fragment = Payload::$major($p::Message {
+                kind: Some($p::message::Kind::MetadataFragment(Box::new(
+                    metadata::$p::encode_fragment(
+                        command.fence,
+                        3,
+                        4,
+                        &fragment_snapshot,
+                        0,
+                        &fragment_bytes,
+                        fragment_bytes.len() as u32,
+                    )
+                    .unwrap(),
+                ))),
+            });
+            for mask in 0u8..8 {
+                let copy_allowed = mask & 1 != 0;
+                let paste_allowed = mask & 2 != 0;
+                let fragments_allowed = mask & 4 != 0;
+                let mut capabilities =
+                    vec![CAPABILITY_CANONICAL_DOMAIN, CAPABILITY_RUNTIME_METADATA];
+                if fragments_allowed {
+                    capabilities.push(CAPABILITY_RUNTIME_METADATA_FRAGMENTS);
+                }
+                if paste_allowed {
+                    capabilities.push(CAPABILITY_NATIVE_PASTE_CORRELATION);
+                }
+                if copy_allowed {
+                    capabilities.push(CAPABILITY_ENHANCED_COPY);
+                }
+                let (mut client, mut server) = connected($number, capabilities.clone());
+                assert_eq!(client.capabilities(), capabilities);
+                assert_eq!(server.capabilities(), capabilities);
+                for (feature, expected) in [
+                    (CAPABILITY_ENHANCED_COPY, copy_allowed),
+                    (CAPABILITY_NATIVE_PASTE_CORRELATION, paste_allowed),
+                    (CAPABILITY_RUNTIME_METADATA_FRAGMENTS, fragments_allowed),
+                ] {
+                    assert_eq!(client.capabilities().contains(&feature), expected);
+                    assert_eq!(server.capabilities().contains(&feature), expected);
+                }
+                if copy_allowed {
+                    assert_eq!(server.decode(&client.encode(&copy).unwrap()).unwrap(), copy);
+                } else {
+                    assert_eq!(client.encode(&copy), Err(ProtocolError::Negotiation));
+                }
+                if paste_allowed {
+                    assert_eq!(
+                        client.decode(&server.encode(&native).unwrap()).unwrap(),
+                        native
+                    );
+                    assert_eq!(
+                        server.decode(&client.encode(&completed).unwrap()).unwrap(),
+                        completed
+                    );
+                } else {
+                    assert_eq!(server.encode(&native), Err(ProtocolError::Negotiation));
+                    assert_eq!(client.encode(&completed), Err(ProtocolError::Negotiation));
+                }
+                if fragments_allowed {
+                    assert_eq!(
+                        client.decode(&server.encode(&fragment).unwrap()).unwrap(),
+                        fragment
+                    );
+                } else {
+                    assert_eq!(server.encode(&fragment), Err(ProtocolError::Negotiation));
+                }
+            }
+        }};
+    }
+    check!(v1, Major1, 1);
+    check!(v2, Major2, 2);
+}
+
+#[test]
+fn native_metadata_fragments_copy_and_paste_capability_identities_are_distinct() {
+    use spaceterm_protocol::negotiation::*;
+    assert_eq!(CAPABILITY_RUNTIME_METADATA_FRAGMENTS, 520_010);
+    assert_eq!(CAPABILITY_NATIVE_PASTE_CORRELATION, 520_011);
+    assert_eq!(CAPABILITY_ENHANCED_COPY, 520_012);
+    let identities = [
+        CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
+        CAPABILITY_SERVER_GIT,
+        CAPABILITY_SERVER_DIRECTORIES,
+        CAPABILITY_CANONICAL_DOMAIN,
+        CAPABILITY_ORGANIZATION_COMPARISONS,
+        CAPABILITY_TERMINAL_STREAMS,
+        CAPABILITY_NATIVE_NOTIFICATIONS,
+        CAPABILITY_ACCOUNT_RUNTIME,
+        CAPABILITY_APPLICATION_MOUSE,
+        CAPABILITY_RUNTIME_METADATA,
+        CAPABILITY_RUNTIME_METADATA_FRAGMENTS,
+        CAPABILITY_NATIVE_PASTE_CORRELATION,
+        CAPABILITY_ENHANCED_COPY,
+    ];
+    assert!(
+        identities.windows(2).all(|pair| pair[0] < pair[1]),
+        "negotiated features must never alias an existing wire identity"
+    );
+}
+
+macro_rules! metadata_fragments {
+    ($name:ident, $p:ident, $major:ident, $number:literal) => {
+        #[test]
+        fn $name() {
+            use spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA_FRAGMENTS;
+            let retained_fence = fence(None);
+            let mut parts = snapshot(2, ProgressMetadata::Normal(37)).parts().clone();
+            parts.title.value = "\u{10400}".repeat(256).into();
+            let expected = RuntimeMetadataSnapshot::new(parts).unwrap();
+            let bytes = metadata::snapshot_bytes(&expected).unwrap();
+            assert!(bytes.len() > 1024);
+            let fragment = |offset: usize, data: &[u8]| {
+                metadata::$p::encode_fragment(
+                    retained_fence,
+                    3,
+                    4,
+                    &expected,
+                    offset as u32,
+                    data,
+                    bytes.len() as u32,
+                )
+                .unwrap()
+            };
+            let first = fragment(0, &bytes[..127]);
+            let payload = Payload::$major($p::Message {
+                kind: Some($p::message::Kind::MetadataFragment(Box::new(first.clone()))),
+            });
+            let (_, mut old_server) = connected($number, vec![CAPABILITY_RUNTIME_METADATA]);
+            assert_eq!(old_server.encode(&payload), Err(ProtocolError::Negotiation));
+            let (mut client, mut server) =
+                connected($number, vec![CAPABILITY_RUNTIME_METADATA_FRAGMENTS]);
+            assert_eq!(
+                client.encode(&payload),
+                Err(ProtocolError::UnexpectedMessage)
+            );
+            let mut assembler = metadata::MetadataAssembler::default();
+            for (index, chunk) in bytes.chunks(127).enumerate() {
+                let wire = fragment(index * 127, chunk);
+                let payload = Payload::$major($p::Message {
+                    kind: Some($p::message::Kind::MetadataFragment(Box::new(wire))),
+                });
+                let decoded = client.decode(&server.encode(&payload).unwrap()).unwrap();
+                let Payload::$major($p::Message {
+                    kind: Some($p::message::Kind::MetadataFragment(value)),
+                }) = decoded
+                else {
+                    panic!("metadata fragment")
+                };
+                let completed = assembler
+                    .receive(metadata::$p::decode_fragment(&value).unwrap())
+                    .unwrap();
+                if index * 127 + chunk.len() == bytes.len() {
+                    assert_eq!(completed, Some((retained_fence, expected.clone())));
+                } else {
+                    assert!(completed.is_none(), "partial UTF-8 must not become a title");
+                }
+            }
+            let mut invalid = first.clone();
+            invalid.total_bytes = metadata::MAX_SNAPSHOT_BYTES as u32 + 1;
+            assert!(matches!(
+                metadata::$p::decode_fragment(&invalid),
+                Err(ProtocolError::Malformed)
+            ));
+            invalid = first.clone();
+            invalid.data.clear();
+            assert!(matches!(
+                metadata::$p::decode_fragment(&invalid),
+                Err(ProtocolError::Malformed)
+            ));
+            assert!(
+                assembler
+                    .receive(
+                        metadata::$p::decode_fragment(&fragment(127, &bytes[127..254])).unwrap()
+                    )
+                    .is_err()
+            );
+            assert!(
+                assembler
+                    .receive(metadata::$p::decode_fragment(&first).unwrap())
+                    .unwrap()
+                    .is_none()
+            );
+            invalid = fragment(127, &bytes[127..254]);
+            invalid.request_generation += 1;
+            assert!(
+                assembler
+                    .receive(metadata::$p::decode_fragment(&invalid).unwrap())
+                    .is_err()
+            );
+            // A fresh transfer supersedes missing parts, but its sequence must match the snapshot.
+            assert!(
+                assembler
+                    .receive(metadata::$p::decode_fragment(&first).unwrap())
+                    .unwrap()
+                    .is_none()
+            );
+            let complete = fragment(0, &bytes);
+            assert_eq!(
+                assembler
+                    .receive(metadata::$p::decode_fragment(&complete).unwrap())
+                    .unwrap(),
+                Some((retained_fence, expected))
+            );
+            invalid = complete;
+            invalid.sequence += 1;
+            assert!(
+                assembler
+                    .receive(metadata::$p::decode_fragment(&invalid).unwrap())
+                    .is_err()
+            );
+        }
+    };
+}
+metadata_fragments!(
+    metadata_fragments_are_bounded_ordered_and_capability_gated_major_1,
+    v1,
+    Major1,
+    1
+);
+metadata_fragments!(
+    metadata_fragments_are_bounded_ordered_and_capability_gated_major_2,
+    v2,
+    Major2,
+    2
+);

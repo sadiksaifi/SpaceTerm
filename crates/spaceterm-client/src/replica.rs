@@ -252,7 +252,28 @@ impl Replica {
         result
     }
 
+    /// Authenticated subscription publications reuse the last requested generation.
+    /// They replace membership atomically without creating another connection fence.
+    pub(crate) fn stage_publication_snapshot(
+        &mut self,
+        part: SnapshotPart,
+    ) -> Result<ReplicaUpdate, ClientFailure> {
+        if !self.current_snapshot_publication(&part) {
+            return Ok(ReplicaUpdate::Ignored);
+        }
+        self.stage_snapshot(ResyncToken(self.generation), part)
+    }
+
+    pub(crate) fn current_snapshot_publication(&self, part: &SnapshotPart) -> bool {
+        self.current(ResyncToken(self.generation))
+            && part.stamp.request == self.generation
+            && part.stamp.request_generation == self.generation
+    }
+
     fn stage_current(&mut self, part: SnapshotPart) -> Result<ReplicaUpdate, ClientFailure> {
+        if self.delta_staging.is_some() {
+            return Err(invalid_peer());
+        }
         let stamp = part.stamp;
         if stamp.request == 0
             || stamp.transfer == 0
@@ -332,7 +353,7 @@ impl Replica {
         &mut self,
         delta: &OrganizationDelta,
     ) -> Result<ReplicaUpdate, ClientFailure> {
-        if self.delta_staging.is_some() {
+        if self.staging.is_some() || self.delta_staging.is_some() {
             self.invalidate(ResyncReason::InvalidPublication);
             return Err(invalid_peer());
         }

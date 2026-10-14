@@ -18,7 +18,8 @@ mod processes;
 pub mod runtime_inventory;
 pub use installations::NativeServiceInstallations;
 pub use native_processes::{
-    NativeServiceProcessTable, NativeServiceProcesses, ServiceProcessIdentity,
+    InstanceProcessObserver, NativeServiceProcessTable, NativeServiceProcesses,
+    ServiceProcessIdentity,
 };
 mod systemd;
 
@@ -41,7 +42,7 @@ pub use processes::{
 pub use registration::RegisteredServer;
 pub use supervisor::{
     AccountStartup, AccountStartupAdmission, ClientProvisioning, ServiceSupervisor,
-    StoppedOwnerAdmission, StorageWait,
+    StoppedOwnerAdmission, StoppedServerExpectation, StorageWait,
 };
 
 use crate::{
@@ -52,12 +53,26 @@ use serde::{Deserialize, Serialize};
 use spaceterm_core::operations::RequestDigest;
 use std::{future::Future, pin::Pin, sync::Arc};
 
+/// Detaches the deliberate bootstrap helper from its invoking SSH shell's session.
+/// Call before receiving requests so group hangup cannot kill admitted execution
+/// or its fixed manager utilities. A process-group leader refuses to detach.
+/// This fixed native operation accepts no arguments and grants no install authority.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub fn isolate_bootstrap_execution_session() -> Result<(), ServiceFailure> {
+    // SAFETY: setsid changes only this process's session/group membership. It
+    // neither creates a process nor acquires a controlling terminal.
+    if unsafe { libc::setsid() } < 0 {
+        return Err(ServiceFailure::SupervisorUnavailable);
+    }
+    Ok(())
+}
+
 /// A service-owned operation observer. Dropping it does not cancel accepted work.
 pub type ServiceFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, ServiceFailure>> + Send + 'a>>;
 
 /// Independently observed account linger.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum LingerState {
     /// The account user manager survives logout and starts at boot.
     Enabled,
@@ -90,7 +105,7 @@ pub enum SudoMode {
     NonInteractive,
 }
 /// Native supervision observation, separate from deliberate intent and authentication.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum SupervisorState {
     /// This service has no installed configuration.
     NotInstalled,
@@ -303,6 +318,8 @@ pub enum ServiceFailure {
     StaleAssessment,
     /// Explicit foreground confirmation is required.
     ConfirmationRequired,
+    /// A saved paired Client identity is required for live runtime access.
+    PairingRequired,
     /// Linger authorization was denied.
     AuthorizationDenied,
     /// Linger authorization was cancelled.
@@ -401,6 +418,9 @@ pub mod test_support {
                 key: self.key,
                 anchor: self.anchor.clone(),
                 indeterminate: std::sync::Arc::new(AtomicBool::new(false)),
+                install_execution: std::sync::Arc::new(
+                    super::supervisor::InstallExecution::default(),
+                ),
                 authorization: None,
                 manager: None,
                 processes: None,

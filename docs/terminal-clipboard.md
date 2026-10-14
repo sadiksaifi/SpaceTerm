@@ -1,7 +1,8 @@
 # Terminal clipboard integration
 
-OSC 52 connects terminal programs to the clipboard of the machine running SpaceTerm, including
-when the programs run over SSH. Configure each program and intervening multiplexer to forward it.
+OSC 52 connects terminal programs to the clipboard of the SpaceTerm Client's machine, including
+when the programs run on a remote SpaceTerm Server or through nested SSH.
+Configure each program and intervening multiplexer to forward it.
 Clipboard access is controlled in Settings > Privacy; enable reading there only when needed.
 
 ## Neovim over SSH

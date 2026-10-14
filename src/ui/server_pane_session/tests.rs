@@ -291,7 +291,10 @@ impl PaneConnectionPort for EchoContentConnection {
         command: spaceterm_terminal::runtime_contracts::FencedRuntimeCommand,
     ) -> Result<EffectAdmission, spaceterm_client::failure::ClientFailure> {
         let admission = self.inner.try_effect(permit, command.clone())?;
-        self.effects.lock().unwrap().push((admission.correlation().unwrap(), command.command));
+        self.effects
+            .lock()
+            .unwrap()
+            .push((admission.correlation().unwrap(), command.command));
         Ok(admission)
     }
     fn try_copy(

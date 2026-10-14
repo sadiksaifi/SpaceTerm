@@ -14,6 +14,7 @@ use rustix::{
 use spaceterm_host::{
     account_service::{
         LingerAuthorization, ServiceFailure, ServiceSupervisor, SudoLingerAuthorization, SudoMode,
+        isolate_bootstrap_execution_session,
     },
     transport::{MessageTransport, PeerFacts, TransportError, TransportFuture, TransportRoute},
 };
@@ -28,11 +29,13 @@ use zeroize::Zeroizing;
 struct NativeStdio {
     input: Arc<OwnedFd>,
     output: Arc<OwnedFd>,
+    retirement: Arc<OwnedFd>,
+    retirement_sender: OwnedFd,
     deadline: Instant,
     uid: u32,
 }
 impl NativeStdio {
-    fn new(uid: u32) -> Result<Self, OwnerEndpointFailure> {
+    fn new(uid: u32, budget: Duration) -> Result<Self, OwnerEndpointFailure> {
         // Bearer delivery is never printed to a terminal.
         if std::io::stdin().is_terminal() || std::io::stdout().is_terminal() {
             return Err(OwnerEndpointFailure::InvalidRequest);
@@ -46,15 +49,34 @@ impl NativeStdio {
             fcntl_setfl(fd, flags | OFlags::NONBLOCK)
                 .map_err(|_| OwnerEndpointFailure::Transport)?;
         }
+        let (retirement, retirement_sender) = spaceterm_host::process::anonymous_pipe()
+            .map_err(|_| OwnerEndpointFailure::Transport)?;
         Ok(Self {
             input: Arc::new(input),
             output: Arc::new(output),
-            deadline: Instant::now() + Duration::from_secs(60),
+            retirement: Arc::new(retirement),
+            retirement_sender,
+            deadline: Instant::now() + budget,
             uid,
         })
     }
+    fn retire(&self) -> Result<(), OwnerEndpointFailure> {
+        // Wake every pending bounded read/write, including a partial frame or
+        // blocked output. One byte latches this private cancellation pipe. No
+        // reader consumes it, so every later frame also observes retirement.
+        // The sole hangup branch writes once; this empty pipe cannot backpressure.
+        match write(&self.retirement_sender, &[1]) {
+            Ok(1) => Ok(()),
+            _ => Err(OwnerEndpointFailure::Transport),
+        }
+    }
 }
-fn wait(fd: &OwnedFd, flags: PollFlags, deadline: Instant) -> Result<(), TransportError> {
+fn wait(
+    fd: &OwnedFd,
+    flags: PollFlags,
+    deadline: Instant,
+    retirement: Option<&OwnedFd>,
+) -> Result<(), TransportError> {
     loop {
         let remaining = deadline
             .checked_duration_since(Instant::now())
@@ -63,8 +85,22 @@ fn wait(fd: &OwnedFd, flags: PollFlags, deadline: Instant) -> Result<(), Transpo
             tv_sec: remaining.as_secs() as _,
             tv_nsec: remaining.subsec_nanos() as _,
         };
-        match poll(&mut [PollFd::new(fd, flags)], Some(&timeout)) {
+        let mut descriptors = [
+            PollFd::new(fd, flags),
+            PollFd::new(
+                retirement.unwrap_or(fd),
+                if retirement.is_some() {
+                    PollFlags::IN
+                } else {
+                    PollFlags::empty()
+                },
+            ),
+        ];
+        match poll(&mut descriptors, Some(&timeout)) {
             Ok(0) => return Err(TransportError::HandshakeExpired),
+            Ok(_) if retirement.is_some() && !descriptors[1].revents().is_empty() => {
+                return Err(TransportError::Closed);
+            }
             Ok(_) => return Ok(()),
             Err(Errno::INTR) => {}
             Err(_) => return Err(TransportError::Unavailable),
@@ -75,10 +111,11 @@ fn read_exact(
     fd: &OwnedFd,
     mut bytes: &mut [u8],
     deadline: Instant,
+    retirement: &OwnedFd,
 ) -> Result<bool, TransportError> {
     let mut started = false;
     while !bytes.is_empty() {
-        wait(fd, PollFlags::IN, deadline)?;
+        wait(fd, PollFlags::IN, deadline, Some(retirement))?;
         match read(fd, &mut *bytes) {
             Ok(0) if !started => return Ok(false),
             Ok(0) => return Err(TransportError::InvalidFrame),
@@ -92,9 +129,14 @@ fn read_exact(
     }
     Ok(true)
 }
-fn write_all(fd: &OwnedFd, mut bytes: &[u8], deadline: Instant) -> Result<(), TransportError> {
+fn write_all(
+    fd: &OwnedFd,
+    mut bytes: &[u8],
+    deadline: Instant,
+    retirement: &OwnedFd,
+) -> Result<(), TransportError> {
     while !bytes.is_empty() {
-        wait(fd, PollFlags::OUT, deadline)?;
+        wait(fd, PollFlags::OUT, deadline, Some(retirement))?;
         match write(fd, bytes) {
             Ok(0) => return Err(TransportError::Closed),
             Ok(count) => bytes = &bytes[count..],
@@ -120,10 +162,16 @@ impl MessageTransport for NativeStdio {
             }
             let bytes = Zeroizing::new(bytes.to_vec());
             let fd = self.output.clone();
+            let retirement = self.retirement.clone();
             let deadline = self.deadline;
             tokio::task::spawn_blocking(move || {
-                write_all(&fd, &(bytes.len() as u32).to_be_bytes(), deadline)?;
-                write_all(&fd, &bytes, deadline)
+                write_all(
+                    &fd,
+                    &(bytes.len() as u32).to_be_bytes(),
+                    deadline,
+                    &retirement,
+                )?;
+                write_all(&fd, &bytes, deadline, &retirement)
             })
             .await
             .map_err(|_| TransportError::Unavailable)?
@@ -132,10 +180,11 @@ impl MessageTransport for NativeStdio {
     fn recv(&self) -> TransportFuture<'_, Option<Vec<u8>>> {
         Box::pin(async move {
             let fd = self.input.clone();
+            let retirement = self.retirement.clone();
             let deadline = self.deadline;
             tokio::task::spawn_blocking(move || {
                 let mut prefix = [0; 4];
-                if !read_exact(&fd, &mut prefix, deadline)? {
+                if !read_exact(&fd, &mut prefix, deadline, &retirement)? {
                     return Ok(None);
                 }
                 let count = u32::from_be_bytes(prefix) as usize;
@@ -143,7 +192,7 @@ impl MessageTransport for NativeStdio {
                     return Err(TransportError::MessageTooLarge);
                 }
                 let mut bytes = Zeroizing::new(vec![0; count]);
-                if !read_exact(&fd, &mut bytes, deadline)? {
+                if !read_exact(&fd, &mut bytes, deadline, &retirement)? {
                     return Err(TransportError::InvalidFrame);
                 }
                 Ok(Some(std::mem::take(&mut *bytes)))
@@ -165,6 +214,7 @@ pub async fn run_native(invocation: ServerInvocation) -> Option<Result<(), Owner
         ServerInvocation::OwnerEnrollment
             | ServerInvocation::SetupConfirmed
             | ServerInvocation::ReserveNativeRequest
+            | ServerInvocation::BootstrapAccount
     ) {
         return None;
     }
@@ -189,8 +239,37 @@ pub async fn run_native_with_supervisor(
     supervisor: Arc<ServiceSupervisor>,
 ) -> Result<(), OwnerEndpointFailure> {
     match invocation {
+        ServerInvocation::BootstrapAccount => {
+            // OpenSSH runs this fixed helper without a PTY. Its session can still
+            // send SIGHUP when the local SSH process group is retired. Intercept
+            // hangup only for this invocation and retire its foreground transport,
+            // rather than killing the runtime that owns an admitted install.
+            let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+                .map_err(|_| OwnerEndpointFailure::Transport)?;
+            let channel = NativeStdio::new(supervisor.key().account_uid, Duration::from_secs(600))?;
+            // The fixed SSH staging script retains its shell for EXIT/HUP cleanup
+            // and invokes this helper as a child, without exec or a PTY. Leave that
+            // shell's session before admitting installs: its group hangup must not
+            // kill the helper's fixed manager utilities either. setsid is available
+            // on both supported hosts. A group leader cannot detach and refuses
+            // here before receiving any request or publishing native effects.
+            isolate_bootstrap_execution_session().map_err(|_| OwnerEndpointFailure::Transport)?;
+            let execution = super::bootstrap::execute(supervisor, &channel);
+            tokio::pin!(execution);
+            tokio::select! {
+                result = &mut execution => result,
+                _ = hangup.recv() => {
+                    let retired = channel.retire();
+                    // Do not drop owner::execute: it must close Running forwarding
+                    // or await exact Stopped-owner cleanup. The retired channel
+                    // wakes blocked framing and rejects every subsequent frame.
+                    let result = execution.await;
+                    retired.and(result)
+                }
+            }
+        }
         ServerInvocation::OwnerEnrollment => {
-            let channel = NativeStdio::new(supervisor.key().account_uid)?;
+            let channel = NativeStdio::new(supervisor.key().account_uid, Duration::from_secs(60))?;
             super::owner::execute(supervisor, &channel).await
         }
         ServerInvocation::ReserveNativeRequest => {
@@ -238,7 +317,7 @@ fn read_setup_input() -> Result<Vec<u8>, OwnerEndpointFailure> {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut bytes = Vec::new();
     loop {
-        wait(&fd, PollFlags::IN, deadline)?;
+        wait(&fd, PollFlags::IN, deadline, None)?;
         let mut buffer = [0; 4096];
         match read(&fd, &mut buffer) {
             Ok(0) if bytes.is_empty() => return Err(OwnerEndpointFailure::InvalidRequest),

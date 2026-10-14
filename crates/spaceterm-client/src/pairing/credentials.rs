@@ -127,7 +127,7 @@ pub enum CredentialUsePurpose {
 }
 
 /// Native UI is allowed only for a deliberate foreground credential action.
-/// Ordinary reconnect and purpose-restricted retries remain noninteractive.
+/// Automatic reconnect and purpose-restricted retries remain noninteractive.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeCredentialAccess {
     Noninteractive,
@@ -141,6 +141,7 @@ pub struct CredentialUse {
     purpose: CredentialUsePurpose,
     valid: Arc<AtomicBool>,
     access: NativeCredentialAccess,
+    ordinary_pairing: Option<LocalPairingKey>,
 }
 impl CredentialUse {
     pub(crate) fn enrollment(scope: CredentialScope, valid: Arc<AtomicBool>) -> Self {
@@ -149,7 +150,12 @@ impl CredentialUse {
             purpose: CredentialUsePurpose::Enrollment,
             valid,
             access: NativeCredentialAccess::Foreground,
+            ordinary_pairing: None,
         }
+    }
+    /// The exact saved local incarnation for an ordinary lease, not an enrollment scope.
+    pub fn ordinary_pairing(&self) -> Option<&LocalPairingKey> {
+        self.ordinary_pairing.as_ref()
     }
     pub fn scope(&self) -> &CredentialScope {
         &self.scope
@@ -199,6 +205,7 @@ impl CredentialGate {
             purpose,
             valid: self.valid.clone(),
             access: NativeCredentialAccess::Noninteractive,
+            ordinary_pairing: None,
         }
     }
     pub(crate) fn seal(&self) {
@@ -219,9 +226,12 @@ impl OrdinaryCredentialAuthority {
         &self.key
     }
     pub fn lease(&self) -> CredentialUse {
-        self.gate.lease(CredentialUsePurpose::Ordinary)
+        let mut lease = self.gate.lease(CredentialUsePurpose::Ordinary);
+        lease.ordinary_pairing = Some(self.key.clone());
+        lease
     }
-    /// Deliberate additional-Client authorization, never ordinary reconnect.
+    /// A deliberate additional-Client authorization or foreground Retry action.
+    /// Background reconnect and restricted cleanup must use noninteractive leases.
     pub fn foreground_lease(&self) -> CredentialUse {
         let mut lease = self.lease();
         lease.access = NativeCredentialAccess::Foreground;
@@ -241,6 +251,7 @@ impl OrdinaryCredentialAuthority {
             purpose: CredentialUsePurpose::Ordinary,
             valid: self.gate.valid.clone(),
             access: NativeCredentialAccess::Foreground,
+            ordinary_pairing: Some(self.key.clone()),
         };
         lease.validate(&credential.scope)?;
         Ok(lease)

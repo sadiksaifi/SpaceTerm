@@ -10,21 +10,23 @@ use spaceterm_protocol::{authentication::ServerPin, pairing_adapter::enrollment_
 use crate::{
     account_service::{
         ConfirmedServiceInstall, LingerState, ServiceFailure, ServiceFuture,
-        ServiceInstallAssessment, ServiceOutcome, ServiceProgress, ServiceRequestState,
-        ServiceSupervisor, SupervisorState,
+        ServiceInstallAssessment, ServiceOutcome, ServicePhase, ServiceProgress,
+        ServiceRequestState, ServiceSupervisor, SupervisorState,
     },
     native_deployment::contracts::NativeRequestId,
     startup::{AccountBuildKey, DesiredServerState},
 };
 
 /// Public registration observations. Missing is distinct from locked or unreadable storage.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum BootstrapAccountRegistration {
     /// No established registration exists for this actual account and compiled build.
     Missing,
     /// Deliberate Stop forbids automatic start and owner enrollment during Bootstrap.
     Stopped {
         /// Original retained public server identity.
+        #[serde(with = "pin_wire")]
         pin: ServerPin,
         /// Exact registration comparison generation.
         generation: u64,
@@ -32,6 +34,7 @@ pub enum BootstrapAccountRegistration {
     /// Exact approved signed installation and independently observed running service.
     Running {
         /// Original retained public server identity.
+        #[serde(with = "pin_wire")]
         pin: ServerPin,
         /// Exact registration comparison generation.
         generation: u64,
@@ -45,7 +48,8 @@ pub enum BootstrapAccountRegistration {
 }
 
 /// Bounded native observations. There are no executable paths or service labels in this DTO.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BootstrapAccountFacts {
     /// Actual native account and compiled build identity.
     pub key: AccountBuildKey,
@@ -154,6 +158,42 @@ impl AccountBootstrapSetup {
     ) -> ServiceFuture<'_, ServiceProgress> {
         self.supervisor.install(request, confirmation)
     }
+    /// Installs once, then observes the same original within one overall startup deadline.
+    /// The fifteen-second deadline starts before the native install wait. Timeout drops
+    /// only this observer; the admitted native worker and retained request remain owned.
+    pub fn install_and_observe(
+        &self,
+        request: NativeRequestId,
+        confirmation: ConfirmedServiceInstall,
+        artifact_identity: [u8; 32],
+    ) -> ServiceFuture<'_, BootstrapAccountFacts> {
+        Box::pin(async move {
+            if artifact_identity == [0; 32] {
+                return Err(ServiceFailure::InvalidRecord);
+            }
+            let until = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+            tokio::time::timeout_at(until, async {
+                let progress = self.install(request, confirmation).await?;
+                match progress.state {
+                    ServiceRequestState::NotApplied(failure) => return Err(failure),
+                    ServiceRequestState::Indeterminate => {
+                        return Err(ServiceFailure::Indeterminate);
+                    }
+                    _ => {}
+                }
+                loop {
+                    match self.resolve(request, artifact_identity).await {
+                        Err(ServiceFailure::Pending) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                        result => return result,
+                    }
+                }
+            })
+            .await
+            .unwrap_or(Err(ServiceFailure::Pending))
+        })
+    }
     /// Records only this exact owner claim on the previously observed running registration.
     /// The server's pairing owner remains responsible for issuing the single-use reservation.
     pub fn authorize_owner<'a>(
@@ -180,12 +220,13 @@ impl AccountBootstrapSetup {
                 .supervisor
                 .owner_enrollment_digest(request, server, claim)?;
             self.supervisor
-                .record_owner_enrollment(request, digest, server, claim)?;
+                .record_owner_proposal(request, proposal.clone())?;
             Ok(digest)
         })
     }
-    /// Reads an original install or owner request after a lost SSH reply or provider restart.
-    /// Reserved, pending, changed and retired requests never allocate, reinstall or Start.
+    /// Resolves an original install or owner request after a lost SSH reply or provider restart.
+    /// Only an admitted Starting original may record its observed completion. Reserved
+    /// and earlier phases never resume effects. No lookup allocates, reinstalls or Starts.
     pub fn resolve(
         &self,
         request: NativeRequestId,
@@ -195,44 +236,81 @@ impl AccountBootstrapSetup {
             if artifact_identity == [0; 32] {
                 return Err(ServiceFailure::InvalidRecord);
             }
-            let expected_server = match self.supervisor.inspect_install_request(request) {
-                Ok((progress, original_artifact)) => {
-                    if original_artifact != artifact_identity {
-                        return Err(ServiceFailure::RequestConflict);
-                    }
-                    match progress.state {
-                        ServiceRequestState::Completed(ServiceOutcome::Installed {
-                            server,
-                            ..
-                        }) => server.identity,
-                        ServiceRequestState::NotApplied(failure) => return Err(failure),
-                        ServiceRequestState::Pending => return Err(ServiceFailure::Pending),
-                        ServiceRequestState::Indeterminate => {
-                            return Err(ServiceFailure::Indeterminate);
+            let (expected_server, expected_pin) =
+                match self.supervisor.inspect_install_request(request) {
+                    Ok((mut progress, original_artifact)) => {
+                        if original_artifact != artifact_identity {
+                            return Err(ServiceFailure::RequestConflict);
                         }
-                        _ => return Err(ServiceFailure::RequestConflict),
+                        if progress.phase == ServicePhase::Starting
+                            && progress.state == ServiceRequestState::Pending
+                        {
+                            progress = self
+                                .supervisor
+                                .observe_install_start(request, artifact_identity)
+                                .await?;
+                        }
+                        match progress.state {
+                            ServiceRequestState::Completed(ServiceOutcome::Installed {
+                                server,
+                                ..
+                            }) => (server.identity, Some(server)),
+                            ServiceRequestState::NotApplied(failure) => return Err(failure),
+                            ServiceRequestState::Pending => return Err(ServiceFailure::Pending),
+                            ServiceRequestState::Indeterminate => {
+                                return Err(ServiceFailure::Indeterminate);
+                            }
+                            _ => return Err(ServiceFailure::RequestConflict),
+                        }
                     }
-                }
-                Err(ServiceFailure::RequestConflict | ServiceFailure::RequestRetired) => self
-                    .supervisor
-                    .inspect_owner_request(request)?
-                    .ok_or(ServiceFailure::UnknownRequest)?
-                    .0
-                    .bytes(),
-                Err(failure) => return Err(failure),
-            };
+                    Err(ServiceFailure::RequestConflict | ServiceFailure::RequestRetired) => (
+                        self.supervisor
+                            .inspect_owner_request(request)?
+                            .ok_or(ServiceFailure::UnknownRequest)?
+                            .0
+                            .bytes(),
+                        None,
+                    ),
+                    Err(failure) => return Err(failure),
+                };
             let observed = self.inspect().await?;
             match &observed.registration {
                 BootstrapAccountRegistration::Running {
                     pin,
                     artifact_identity: actual,
                     ..
-                } if pin.identity == expected_server && actual == &artifact_identity => (),
+                } if pin.identity == expected_server
+                    && expected_pin.is_none_or(|original| original == *pin)
+                    && actual == &artifact_identity => {}
                 BootstrapAccountRegistration::Stopped { pin, .. }
-                    if pin.identity == expected_server => {}
+                    if pin.identity == expected_server
+                        && expected_pin.is_none_or(|original| original == *pin) => {}
                 _ => return Err(ServiceFailure::IdentityMismatch),
             }
             Ok(observed)
+        })
+    }
+}
+
+mod pin_wire {
+    use serde::{Deserialize, Serialize};
+    use spaceterm_protocol::authentication::ServerPin;
+    pub fn serialize<S: serde::Serializer>(
+        pin: &ServerPin,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        (pin.identity, pin.public_key).serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<ServerPin, D::Error> {
+        let (identity, public_key) = <([u8; 16], [u8; 32])>::deserialize(deserializer)?;
+        if identity == [0; 16] || public_key == [0; 32] {
+            return Err(serde::de::Error::custom("invalid public server pin"));
+        }
+        Ok(ServerPin {
+            identity,
+            public_key,
         })
     }
 }

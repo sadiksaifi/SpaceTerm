@@ -491,10 +491,32 @@ impl RuntimeEngine for SemanticRuntimeEngine {
         let mut bytes = Vec::new();
         match command {
             RuntimeCommand::Key(input) => self.key(input, &mut bytes)?,
+            RuntimeCommand::Copy(modifiers) => {
+                // Read live VT modes here, not a client projection. A peer that
+                // cannot encode enhanced input must never turn Copy into Ctrl+C.
+                if self.emulator.enhanced_keyboard_active() && !self.hidden_input {
+                    let mut key = KeyInput::text_input("c");
+                    key.physical_key = PhysicalKey::C;
+                    key.text = None;
+                    key.unshifted_codepoint = Some('c');
+                    key.modifiers = *modifiers;
+                    self.key(&key, &mut bytes)?;
+                    let press_end = bytes.len();
+                    key.action = KeyAction::Release;
+                    self.key(&key, &mut bytes)?;
+                    let enhanced = |part: &[u8]| part.starts_with(b"\x1b[") && part.ends_with(b"u");
+                    if !enhanced(&bytes[..press_end])
+                        || (!bytes[press_end..].is_empty() && !enhanced(&bytes[press_end..]))
+                    {
+                        bytes.clear();
+                    }
+                }
+            }
             RuntimeCommand::InputMethodCommit(input) => {
                 self.key(&KeyInput::input_method_commit(input.as_str()), &mut bytes)?
             }
-            RuntimeCommand::RequestPaste(text) => {
+            RuntimeCommand::RequestPaste(text)
+            | RuntimeCommand::RequestCorrelatedPaste(_, text) => {
                 // The worker has approved and sanitized this immutable payload.
                 // Its retained input lease covers the text plus 12 framing bytes.
                 // Encode mechanically without legacy selection/viewport changes.

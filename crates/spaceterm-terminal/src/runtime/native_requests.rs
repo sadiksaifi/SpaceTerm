@@ -271,6 +271,18 @@ struct PastePending {
     stamp: AuthorityStamp,
     text: NativeText,
     input: BudgetLease,
+    origin_reply: Option<ReplySender<EffectDisposition>>,
+}
+pub(crate) struct ApprovedPaste {
+    pub text: NativeText,
+    pub input: BudgetLease,
+    pub deadline: MonotonicTick,
+    pub origin_reply: Option<ReplySender<EffectDisposition>>,
+}
+pub(crate) enum PasteResolution {
+    Approved(ApprovedPaste),
+    Cancelled,
+    Stale,
 }
 #[derive(Default)]
 pub(crate) struct NativeRequests {
@@ -407,10 +419,10 @@ impl NativeRequests {
         now: MonotonicTick,
         bracketed: bool,
         shared: &Shared,
-        completion: (BudgetLease, ReplySender<EffectDisposition>),
+        completion: (BudgetLease, ReplySender<EffectDisposition>, Option<u64>),
     ) -> Result<Option<(RuntimeCommand, BudgetLease, ReplySender<EffectDisposition>)>, RuntimeFailure>
     {
-        let (reservation, reply) = completion;
+        let (reservation, reply, runtime_request) = completion;
         if self.paste.is_some() {
             reply.complete(Err(RuntimeFailure::capacity(RuntimeStage::NativeRequest)));
             return Ok(None);
@@ -475,6 +487,12 @@ impl NativeRequests {
             },
         )
         .map_err(|_| RuntimeFailure::internal(RuntimeStage::NativeRequest))?;
+        let request = match runtime_request {
+            Some(origin) => request
+                .with_runtime_request(origin)
+                .map_err(|_| RuntimeFailure::internal(RuntimeStage::NativeRequest))?,
+            None => request,
+        };
         if !shared
             .native_routed
             .load(std::sync::atomic::Ordering::Acquire)
@@ -489,13 +507,21 @@ impl NativeRequests {
             reply.complete(Ok(EffectDisposition::Cancelled));
             return Ok(None);
         }
+        // An unsafe request is not a PTY write. Keep its runtime reply parked
+        // until native resolution or expiry, so wire reordering cannot report Written.
+        let origin_reply = if runtime_request.is_some() {
+            Some(reply)
+        } else {
+            reply.complete(Ok(EffectDisposition::Applied));
+            None
+        };
         self.paste = Some(PastePending {
             request,
             stamp: fence,
             text,
             input: reservation,
+            origin_reply,
         });
-        reply.complete(Ok(EffectDisposition::Applied));
         Ok(None)
     }
     pub fn resolve_paste(
@@ -504,23 +530,40 @@ impl NativeRequests {
         decision: PasteDecision,
         fence: AuthorityStamp,
         now: MonotonicTick,
-    ) -> Option<(NativeText, BudgetLease)> {
-        let pending = self.paste.as_ref()?;
+    ) -> PasteResolution {
+        let Some(pending) = self.paste.as_ref() else {
+            return PasteResolution::Stale;
+        };
         if pending.stamp != fence
             || !matches!(pending.request.kind(), NativeRequestKind::UnsafePaste { approval: expected, .. } if *expected == approval)
         {
-            return None;
+            return PasteResolution::Stale;
         }
-        let pending = self.paste.take()?;
-        if decision != PasteDecision::Confirm
-            || pending
-                .request
-                .deadline()
-                .is_some_and(|deadline| now >= deadline)
-        {
-            return None;
+        let Some(pending) = self.paste.take() else {
+            return PasteResolution::Stale;
+        };
+        let Some(deadline) = pending
+            .request
+            .deadline()
+            .filter(|deadline| now < *deadline)
+        else {
+            if let Some(reply) = pending.origin_reply {
+                reply.complete(Ok(EffectDisposition::Cancelled));
+            }
+            return PasteResolution::Stale;
+        };
+        if decision == PasteDecision::Cancel {
+            if let Some(reply) = pending.origin_reply {
+                reply.complete(Ok(EffectDisposition::Cancelled));
+            }
+            return PasteResolution::Cancelled;
         }
-        Some((pending.text, pending.input))
+        PasteResolution::Approved(ApprovedPaste {
+            text: pending.text,
+            input: pending.input,
+            deadline,
+            origin_reply: pending.origin_reply,
+        })
     }
     pub fn resolve_completion_paste(
         &mut self,
@@ -529,9 +572,15 @@ impl NativeRequests {
         approval: PasteApprovalId,
         decision: PasteDecision,
         now: MonotonicTick,
-    ) -> Option<(NativeText, BudgetLease)> {
-        if self.paste.as_ref()?.request.id() != completion.id() {
-            return None;
+    ) -> PasteResolution {
+        let Some(pending) = self.paste.as_ref() else {
+            return PasteResolution::Stale;
+        };
+        let request = &pending.request;
+        if request.id() != completion.id()
+            || request.runtime_request() != completion.runtime_request()
+        {
+            return PasteResolution::Stale;
         }
         self.resolve_paste(approval, decision, stamp, now)
     }
@@ -705,6 +754,7 @@ impl NativeRequests {
         if self.paste.as_ref().is_some_and(|pending| {
             pending.request.id() == completion.id()
                 && pending.request.fence() == completion.fence()
+                && pending.request.runtime_request() == completion.runtime_request()
                 && matches!(
                     completion.kind(),
                     NativeCompletionKind::Denied
@@ -712,7 +762,11 @@ impl NativeRequests {
                         | NativeCompletionKind::Expired
                 )
         }) {
-            self.paste = None;
+            if let Some(pending) = self.paste.take()
+                && let Some(reply) = pending.origin_reply
+            {
+                reply.complete(Ok(EffectDisposition::Cancelled));
+            }
             reply.complete(Ok(EffectDisposition::Cancelled));
             return Ok(());
         }
@@ -784,8 +838,10 @@ impl NativeRequests {
                     .authority
                     .read()
                     .is_ok_and(|authority| !authority.permits_native(pending.stamp))
-        }) {
-            self.paste = None;
+        }) && let Some(pending) = self.paste.take()
+            && let Some(reply) = pending.origin_reply
+        {
+            reply.complete(Ok(EffectDisposition::Cancelled));
         }
         if self.notification.as_ref().is_some_and(|routed| {
             routed
@@ -811,7 +867,11 @@ impl NativeRequests {
     }
     pub fn clear(&mut self) {
         self.clipboard = None;
-        self.paste = None;
+        if let Some(pending) = self.paste.take()
+            && let Some(reply) = pending.origin_reply
+        {
+            reply.complete(Ok(EffectDisposition::Cancelled));
+        }
         self.permission = None;
         self.notification = None;
     }

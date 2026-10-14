@@ -1,6 +1,7 @@
 //! Foreground enrollment shares the application's native pairing runtime and registry.
 //! Native invitation delivery and SSH effects remain constructor-injected capabilities.
 
+mod bootstrap;
 mod direct;
 
 use std::{rc::Rc, sync::Arc};
@@ -37,6 +38,16 @@ pub(crate) struct DirectPreparation {
 }
 
 pub(crate) trait DirectInvitationPreparation: Send + Sync {
+    fn prepare_claim<'a>(
+        &'a self,
+        _address: String,
+        _descriptor: Zeroizing<String>,
+        _compared_fingerprint: String,
+        _attempt: EnrollmentAttempt,
+        _pairing: &'a NativePairingRuntime,
+    ) -> PairingFuture<'a, Result<String, EnrollmentFailure>> {
+        Box::pin(async { Err(EnrollmentFailure::ProviderUnavailable) })
+    }
     fn prepare<'a>(
         &'a self,
         address: String,
@@ -92,23 +103,29 @@ pub(crate) fn production(
     local: Option<spaceterm_client_native::NativeClientProvider>,
     executor: tokio::runtime::Handle,
 ) -> NativeEnrollmentServices {
-    let connector = Arc::new(
-        spaceterm_client_native::restricted_routes::NativePairingConnector::with_shared_routes(
-            journal.clone(),
-            routes,
-        ),
+    let pairing = Arc::new(NativePairingRuntime::with_shared_routes(
+        journal,
+        routes.clone(),
+        invalidator,
+        spaceterm_protocol::authentication::HandshakeConfig::default(),
+    ));
+    let build = if cfg!(spaceterm_packaged) && cfg!(spaceterm_release) {
+        spaceterm_client::pairing::bootstrap::BuildChannel::Release
+    } else if cfg!(spaceterm_packaged) {
+        spaceterm_client::pairing::bootstrap::BuildChannel::Preflight
+    } else {
+        spaceterm_client::pairing::bootstrap::BuildChannel::Development
+    };
+    let factory =
+        Arc::new(spaceterm_client_native::route::NativeBootstrapHostFactory::new(routes, build));
+    let bootstrap = spaceterm_client_native::bootstrap::production::ProductionSshBootstrap::new(
+        pairing.clone(),
+        factory,
     );
     NativeEnrollmentServices {
-        pairing: Arc::new(NativePairingRuntime::with_adapters(
-            journal,
-            Arc::new(spaceterm_client_native::credentials::adapter::DeviceCredentials::native()),
-            connector.clone(),
-            connector,
-            invalidator,
-            spaceterm_protocol::authentication::HandshakeConfig::default(),
-        )),
+        pairing,
         direct: Arc::new(direct::NativeDirectInvitation),
-        bootstrap: None,
+        bootstrap: Some(Arc::new(bootstrap::NativeForegroundBootstrap(bootstrap))),
         executor,
         local,
     }
@@ -179,6 +196,14 @@ async fn prepare_publication(
     // Retire only the exact suppressed incarnation. A healthy old binding
     // remains an error rather than permission to replace its connection actor.
     let state = services.pairing.journal().snapshot().map_err(classify)?;
+    // Saving the new server binding can replace its old saved row. Durable
+    // tombstones still identify the exact registry actor that must be joined.
+    for old in state.tombstones() {
+        if old.parts().server == binding.target().server() {
+            enrollment.attempt.validate()?;
+            registry.remove_suppressed(old).await.map_err(classify)?;
+        }
+    }
     for old in state.bindings() {
         let old = old.binding().map_err(classify)?;
         if old.target().server() == binding.target().server()
@@ -226,6 +251,31 @@ fn classify(error: spaceterm_client::failure::ClientFailure) -> EnrollmentFailur
 }
 
 impl EnrollmentProvider for NativeEnrollmentProvider {
+    fn prepare_claim(
+        &self,
+        address: String,
+        descriptor: Zeroizing<String>,
+        compared_fingerprint: String,
+        attempt: EnrollmentAttempt,
+        cx: &mut App,
+    ) -> Task<Result<String, EnrollmentFailure>> {
+        let services = self.services.clone();
+        self.task(cx, async move {
+            attempt.validate()?;
+            let claim = services
+                .direct
+                .prepare_claim(
+                    address,
+                    descriptor,
+                    compared_fingerprint,
+                    attempt.clone(),
+                    &services.pairing,
+                )
+                .await?;
+            attempt.validate()?;
+            Ok(claim)
+        })
+    }
     fn inspect(
         &self,
         target: EnrollmentTarget,

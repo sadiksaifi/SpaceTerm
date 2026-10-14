@@ -384,6 +384,26 @@ fn ordinary_field_capabilities(
     payload: &Payload,
     capabilities: &[u32],
 ) -> Result<(), ProtocolError> {
+    macro_rules! machine_facts {
+        ($message:expr, $p:ident) => {{
+            use crate::wire::$p;
+            match &$message.kind {
+                Some($p::message::Kind::ManagementStatus(status)) => status.machine_facts.is_some(),
+                Some($p::message::Kind::StatusPublication(publication)) => publication
+                    .status
+                    .as_ref()
+                    .is_some_and(|status| status.machine_facts.is_some()),
+                _ => false,
+            }
+        }};
+    }
+    let facts = match payload {
+        Payload::Major1(message) => machine_facts!(message, v1),
+        Payload::Major2(message) => machine_facts!(message, v2),
+    };
+    if facts && !capabilities.contains(&crate::negotiation::CAPABILITY_SERVER_MACHINE_FACTS) {
+        return Err(ProtocolError::Negotiation);
+    }
     macro_rules! organization_comparisons {
         ($message:expr, $p:ident) => {{
             use crate::wire::$p;
@@ -462,6 +482,38 @@ fn ordinary_field_capabilities(
         Payload::Major2(message) => application_mouse!(message, v2),
     };
     if mouse && !capabilities.contains(&crate::negotiation::CAPABILITY_APPLICATION_MOUSE) {
+        return Err(ProtocolError::Negotiation);
+    }
+    macro_rules! native_input_fields {
+        ($message:expr, $p:ident) => {{
+            use crate::wire::$p;
+            match &$message.kind {
+                Some($p::message::Kind::RuntimeCommand(command)) => (
+                    matches!(
+                        command.action,
+                        Some($p::runtime_command::Action::EnhancedCopy(_))
+                    ),
+                    false,
+                ),
+                Some($p::message::Kind::NativeRequest(request)) => {
+                    (false, request.originating_runtime_request != 0)
+                }
+                Some($p::message::Kind::NativeCompletion(completion)) => (
+                    false,
+                    completion.originating_runtime_request != 0 || completion.effect_request != 0,
+                ),
+                _ => (false, false),
+            }
+        }};
+    }
+    let (copy, paste) = match payload {
+        Payload::Major1(message) => native_input_fields!(message, v1),
+        Payload::Major2(message) => native_input_fields!(message, v2),
+    };
+    if (copy && !capabilities.contains(&crate::negotiation::CAPABILITY_ENHANCED_COPY))
+        || (paste
+            && !capabilities.contains(&crate::negotiation::CAPABILITY_NATIVE_PASTE_CORRELATION))
+    {
         return Err(ProtocolError::Negotiation);
     }
     macro_rules! canonical {

@@ -169,6 +169,21 @@ mod tests {
         },
         startup::BuildIdentity,
     };
+    use std::os::unix::fs::PermissionsExt;
+    fn private_root() -> tempfile::TempDir {
+        let parent = if cfg!(target_os = "linux") {
+            spaceterm_host::account_service::TrustedAccountFacts::current()
+                .unwrap()
+                .home()
+                .to_owned()
+        } else {
+            std::path::PathBuf::from("/private/tmp")
+        };
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in(parent)
+            .unwrap()
+    }
     fn receipt(number: u64) -> Receipt {
         let mut bytes = [1; 16];
         bytes[8..].copy_from_slice(&number.to_be_bytes());
@@ -182,7 +197,7 @@ mod tests {
     #[test]
     fn receipt_capacity_never_evicts_unsettled_results() {
         for settled in [false, true] {
-            let root = tempfile::tempdir().unwrap();
+            let root = private_root();
             let account =
                 AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
             let supervisor = account.reopen();
@@ -231,7 +246,7 @@ mod tests {
     }
     #[test]
     fn conflicting_receipt_does_not_replace_original_lost_output() {
-        let root = tempfile::tempdir().unwrap();
+        let root = private_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let original = receipt(1);
         retain(&account.reopen(), &original).unwrap();

@@ -59,6 +59,12 @@ impl AccountRuntimeProcesses {
             retirements: Mutex::new(Vec::new()),
         }))
     }
+    /// Best-effort history collection never supplies cleanup authority by itself.
+    /// Missing samples remain unresolved during native crash reconciliation.
+    pub fn checkpoint_lineage(&self) -> Result<(), ServiceFailure> {
+        self.custody.checkpoint_lineage(&self.registration()?)
+    }
+
     fn registration(&self) -> Result<RegisteredServer, ServiceFailure> {
         self.supervisor.discover()?.ok_or(ServiceFailure::Missing)
     }

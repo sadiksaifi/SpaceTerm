@@ -524,3 +524,68 @@ fn interrupted_owner_archiving_keeps_admission_closed_without_erasing_issuance()
         Err(ServiceFailure::Indeterminate)
     );
 }
+
+#[test]
+fn original_public_owner_proposal_survives_restart_and_endpoint_revalidation() {
+    use spaceterm_core::{
+        identity::DeviceId,
+        pairing::{EnrollmentProposal, EnrollmentProposalParts, PairingKeys, PairingKeysParts},
+    };
+    use spaceterm_protocol::pairing_adapter::enrollment_proposal_digest;
+    let root = tempfile::tempdir().unwrap();
+    let fixture = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+    let registration = fixture.initialize(DesiredServerState::Stopped).unwrap();
+    let server = ServerId::new(registration.server_pin().identity);
+    let proposal = EnrollmentProposal::new(EnrollmentProposalParts {
+        server,
+        device: DeviceId::new([4; 16]),
+        keys: PairingKeys::new(PairingKeysParts {
+            device_identity_public_key: [5; 32],
+            pairing_authentication_public_key: [6; 32],
+        })
+        .unwrap(),
+        claim_nonce: [7; 32],
+    })
+    .unwrap();
+    let provider = fixture.reopen();
+    let request = provider.allocate_request().unwrap();
+    provider
+        .record_owner_proposal(request, proposal.clone())
+        .unwrap();
+    let claim = enrollment_proposal_digest(&proposal).unwrap();
+    let digest = provider
+        .owner_enrollment_digest(request, server, claim)
+        .unwrap();
+    drop(provider);
+    let reopened = fixture.reopen();
+    let before = fs::read(fixture.anchor().join("requests")).unwrap();
+    assert_eq!(
+        reopened
+            .retained_owner_proposal(server, &proposal.parts().keys)
+            .unwrap(),
+        Some((request, proposal.clone()))
+    );
+    reopened
+        .validate_owner_enrollment(&request, digest, server, claim)
+        .unwrap();
+    assert_eq!(fs::read(fixture.anchor().join("requests")).unwrap(), before);
+    reopened
+        .record_owner_enrollment(request, digest, server, claim)
+        .unwrap();
+    assert_eq!(
+        reopened
+            .retained_owner_proposal(server, &proposal.parts().keys)
+            .unwrap(),
+        Some((request, proposal.clone()))
+    );
+    let mut changed = proposal.parts().clone();
+    changed.claim_nonce = [8; 32];
+    assert_eq!(
+        reopened.record_owner_proposal(request, EnrollmentProposal::new(changed).unwrap()),
+        Err(ServiceFailure::RequestConflict)
+    );
+    assert_eq!(
+        reopened.discover().unwrap().unwrap().desired_state(),
+        DesiredServerState::Stopped
+    );
+}

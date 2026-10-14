@@ -14,7 +14,9 @@
 //!
 //! File operations use openat/fstatat/unlinkat against retained, no-follow private
 //! directory authority. macOS extended ACLs are rejected even when mode bits are
-//! private. Only the VFS owns database descriptors. Connections share
+//! private. Only the VFS owns live database descriptors. Original creation stages
+//! an empty inode, durably binds it, then publishes its fixed database name before
+//! SQLite opens it. Connections share
 //! an inode descriptor and implement SQLite's POSIX byte-range locking protocol.
 //! Authority checks never open another descriptor for a live database inode.
 //! These checks reject unsafe sampled ownership, links, and replacements. They do
@@ -317,9 +319,14 @@ impl Database {
                 return Err(StorageFailure::Unavailable);
             }
             directory.sync()?;
+            if let Some(initial) = initial {
+                initial.publish_database(&directory)?;
+            }
             let registration = vfs::Registration::new(directory)?;
             let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-            if create {
+            // Original creation publishes its durably object-bound inode before
+            // SQLite can open it. Its VFS must never create an unbound replacement.
+            if create && initial.is_none() {
                 flags |= OpenFlags::SQLITE_OPEN_CREATE;
             }
             let connection = Connection::open_with_flags_and_vfs(

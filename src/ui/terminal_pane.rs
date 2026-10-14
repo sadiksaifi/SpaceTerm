@@ -619,6 +619,7 @@ pub(crate) struct TerminalPane {
     server_client_runtime: Option<Entity<super::server_client_runtime::DesktopClientRuntime>>,
     _server_provider_subscription: Option<gpui::Subscription>,
     server_presentation_observation: Option<spaceterm_client::pane_channel::PaneChannelState>,
+    server_presentation_decision: Option<spaceterm_client::view::PresentationDecision>,
     server_offline_cause: super::pane_presentation::OfflineCause,
     server_takeover_armed: bool,
     _server_takeover_task: Option<Task<()>>,
@@ -632,6 +633,7 @@ pub(crate) struct TerminalPane {
         super::server_desktop_contracts::UseTicket,
         super::server_desktop_contracts::LayoutRevision,
     )>,
+    measurement_emitted: bool,
     _server_task: Option<Task<()>>,
     _server_content_task: Option<Task<()>>,
     _server_copy_task: Option<Task<()>>,
@@ -996,6 +998,7 @@ impl TerminalPane {
             server_presentation: PanePresentation::Live,
             server_repair_status: None,
             server_presentation_observation: None,
+            server_presentation_decision: None,
             server_offline_cause: super::pane_presentation::OfflineCause::Unreachable,
             server_takeover_armed: false,
             _server_takeover_task: None,
@@ -1008,6 +1011,7 @@ impl TerminalPane {
                 cx,
             ),
             measurement_request: None,
+            measurement_emitted: false,
             _server_task: None,
             _server_content_task: None,
             _server_copy_task: None,
@@ -5017,10 +5021,18 @@ impl TerminalPane {
         {
             return Err(DesktopClientError::StaleContext);
         }
-        self.set_presentation(
-            PanePresentation::from_portable(decision.presentation, device, cause),
-            cx,
-        )?;
+        let presentation = PanePresentation::from_portable(decision.presentation, device, cause);
+        // A render can observe the same passive decision again before an
+        // asynchronous startup or publication advances it. Reapplying that
+        // decision must not clear a measurement or schedule another render.
+        if self.server_presentation_observation == Some(observation)
+            && self.server_presentation_decision == Some(decision)
+            && self.server_presentation == presentation
+        {
+            server.set_enabled(decision.eligibility.input);
+            return Ok(());
+        }
+        self.set_presentation(presentation, cx)?;
         if decision.invalidate_native_context {
             self.invalidate_server_native_state(cx);
         }
@@ -5029,6 +5041,7 @@ impl TerminalPane {
         }
         server.set_enabled(decision.eligibility.input);
         self.server_presentation_observation = Some(observation);
+        self.server_presentation_decision = Some(decision);
         cx.notify();
         Ok(())
     }
@@ -5085,9 +5098,13 @@ impl TerminalPane {
             .as_ref()
             .ok_or(DesktopClientError::WrongServer)?
             .set_context(token)?;
+        if self.measurement_request == Some((token, ticket, layout)) {
+            return Ok(());
+        }
         self.set_server_layout_revision(layout, cx)?;
         self.measured_grid()?;
         self.measurement_request = Some((token, ticket, layout));
+        self.measurement_emitted = false;
         self.emit_measurement(cx);
         cx.notify();
         Ok(())
@@ -5108,8 +5125,12 @@ impl TerminalPane {
             self.measurement_request = None;
             return;
         }
-        if let Ok(Some(grid)) = self.measured_grid() {
-            self.measurement_request = None;
+        if !self.measurement_emitted
+            && let Ok(Some(grid)) = self.measured_grid()
+        {
+            // Keep the exact request until its owner replaces or invalidates it.
+            // The next render can precede the asynchronous startup completion.
+            self.measurement_emitted = true;
             cx.emit(TerminalPaneEvent::Measured(PaneMeasurement {
                 token,
                 ticket,
@@ -5208,7 +5229,12 @@ impl TerminalPane {
                         if let Some(server) = &self.server_session {
                             server.set_enabled(false);
                         }
-                        self.invalidate_server_native_state(cx);
+                        let _ = self.set_presentation(
+                            PanePresentation::Failed {
+                                class: super::pane_presentation::PaneFailureClass::Unavailable,
+                            },
+                            cx,
+                        );
                         return;
                     }
                     if let Some(request) = runtime.read(cx).pane_measurement(pane)
@@ -5233,8 +5259,6 @@ impl TerminalPane {
                         },
                         cx,
                     );
-                    self.invalidate_server_native_state(cx);
-                    self.clear_server_screen(cx);
                 }
             }
             return;

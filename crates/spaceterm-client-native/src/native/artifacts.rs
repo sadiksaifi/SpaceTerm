@@ -208,6 +208,16 @@ impl ServerArtifacts {
         version: Option<&StableVersion>,
     ) -> Result<VerifiedAccountServerFeed, ManagementFailure> {
         let platform = platform()?;
+        self.check_target_with_key(key, build, platform, version)
+    }
+
+    fn check_target_with_key(
+        &self,
+        key: &UpdateKey,
+        build: BuildIdentity,
+        platform: ServerPlatform,
+        version: Option<&StableVersion>,
+    ) -> Result<VerifiedAccountServerFeed, ManagementFailure> {
         let channel = channel(build);
         let url = feed_url(platform, channel, version);
         let feed = self.download(&url, MAX_FEED_BYTES)?;
@@ -229,7 +239,19 @@ impl ServerArtifacts {
         build: BuildIdentity,
         version: Option<&StableVersion>,
     ) -> Result<VerifiedAccountServerArtifact, ManagementFailure> {
-        let feed = self.check(build, version)?;
+        self.download_for_target(build, platform()?, version)
+    }
+
+    /// Selects a remote platform established by the retained read-only SSH probe.
+    /// The byte source cannot replace embedded Ed25519 signing authority.
+    pub fn download_for_target(
+        &self,
+        build: BuildIdentity,
+        platform: ServerPlatform,
+        version: Option<&StableVersion>,
+    ) -> Result<VerifiedAccountServerArtifact, ManagementFailure> {
+        let key = UpdateKey::release().ok_or(ManagementFailure::UnsafeNativeState)?;
+        let feed = self.check_target_with_key(&key, build, platform, version)?;
         let document = feed.document();
         let url = format!(
             "{RELEASES}/download/v{}/{}",
@@ -360,7 +382,7 @@ mod tests {
         let target = platform().unwrap();
         let bytes = serde_json::to_vec(&serde_json::json!({
             "schema_version":2,"component":"server","build_identity":"release","platform":target,
-            "version":"1.2.3","published_at":1,"protocol_majors":[1,2],
+            "version":"1.2.3","build_commit":"01".repeat(20),"published_at":1,"protocol_majors":[1,2],
             "storage":{"read":[1],"write":1,"migrate_from":[]},
             "installation":{"manifest_schema":2,"registration_schema":1,"journal_schema":1},
             "archive":{"name":target.account_archive_name(BuildChannel::Release,"1.2.3"),"size":1,"sha256":"11".repeat(32),"signature":STANDARD.encode([1;64]),"manifest_sha256":"22".repeat(32)}

@@ -111,6 +111,110 @@ pub fn decode_snapshot(
     .map_err(|_| ProtocolError::Malformed)
 }
 
+/// The largest valid snapshot contains three 1024-byte display fields plus
+/// bounded session and scalar facts. No transfer reserves more than this cap.
+pub const MAX_SNAPSHOT_BYTES: usize = 4096;
+
+pub fn snapshot_bytes(snapshot: &RuntimeMetadataSnapshot) -> Result<Vec<u8>, ProtocolError> {
+    use prost::Message;
+    let encoded = encode_snapshot(snapshot).encode_to_vec();
+    if encoded.len() > MAX_SNAPSHOT_BYTES {
+        return Err(ProtocolError::LimitExceeded);
+    }
+    Ok(encoded)
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct FragmentIdentity {
+    fence: spaceterm_core::authority::EffectFence,
+    request: u64,
+    generation: u64,
+    sequence: u64,
+    total_bytes: usize,
+}
+
+/// Borrowed, shape-checked fragment. Only the completed snapshot is a display fact.
+pub struct MetadataFragment<'a> {
+    identity: FragmentIdentity,
+    offset: usize,
+    data: &'a [u8],
+}
+impl MetadataFragment<'_> {
+    pub fn fence(&self) -> spaceterm_core::authority::EffectFence {
+        self.identity.fence
+    }
+}
+struct PendingMetadata {
+    identity: FragmentIdentity,
+    bytes: Vec<u8>,
+}
+
+/// One ordered, bounded transfer per authenticated connection. A new first
+/// fragment replaces an interrupted transfer. No partial title is published.
+#[derive(Default)]
+pub struct MetadataAssembler {
+    pending: Option<PendingMetadata>,
+}
+impl MetadataAssembler {
+    pub fn receive(
+        &mut self,
+        fragment: MetadataFragment<'_>,
+    ) -> Result<
+        Option<(
+            spaceterm_core::authority::EffectFence,
+            RuntimeMetadataSnapshot,
+        )>,
+        ProtocolError,
+    > {
+        let result = self.receive_checked(fragment);
+        if result.is_err() {
+            self.pending = None;
+        }
+        result
+    }
+    fn receive_checked(
+        &mut self,
+        fragment: MetadataFragment<'_>,
+    ) -> Result<
+        Option<(
+            spaceterm_core::authority::EffectFence,
+            RuntimeMetadataSnapshot,
+        )>,
+        ProtocolError,
+    > {
+        use prost::Message;
+        if fragment.offset == 0 {
+            self.pending = Some(PendingMetadata {
+                identity: fragment.identity,
+                bytes: Vec::with_capacity(fragment.identity.total_bytes),
+            });
+        }
+        let pending = self.pending.as_mut().ok_or(ProtocolError::Malformed)?;
+        if pending.identity != fragment.identity || pending.bytes.len() != fragment.offset {
+            return Err(ProtocolError::Malformed);
+        }
+        pending.bytes.extend_from_slice(fragment.data);
+        if pending.bytes.len() != pending.identity.total_bytes {
+            return Ok(None);
+        }
+        let pending = self.pending.take().ok_or(ProtocolError::Malformed)?;
+        crate::preflight::check(
+            crate::preflight::SPACETERM_COMMON_RUNTIMEMETADATASNAPSHOT,
+            &pending.bytes,
+            crate::limits::NegotiatedLimits::default(),
+        )?;
+        let snapshot = common::RuntimeMetadataSnapshot::decode(pending.bytes.as_slice())
+            .map_err(|_| ProtocolError::Malformed)?;
+        let snapshot = decode_snapshot(&snapshot)?;
+        if snapshot.session() != pending.identity.fence.session()
+            || snapshot.parts().sequence.get() != pending.identity.sequence
+        {
+            return Err(ProtocolError::Malformed);
+        }
+        Ok(Some((pending.identity.fence, snapshot)))
+    }
+}
+
 macro_rules! profile {
     ($p:ident) => {
         pub mod $p {
@@ -120,6 +224,59 @@ macro_rules! profile {
                 wire::$p as wire,
             };
             use spaceterm_core::authority::EffectFence;
+            pub fn encode_fragment(
+                fence: EffectFence,
+                request: u64,
+                generation: u64,
+                snapshot: &RuntimeMetadataSnapshot,
+                offset: u32,
+                bytes: &[u8],
+                total_bytes: u32,
+            ) -> Result<wire::MetadataFragment, ProtocolError> {
+                if fence.content().is_some() || snapshot.session() != fence.session() {
+                    return Err(ProtocolError::Malformed);
+                }
+                let value = wire::MetadataFragment {
+                    fence: Some(encode_fence(fence)),
+                    request,
+                    request_generation: generation,
+                    sequence: snapshot.parts().sequence.get(),
+                    offset,
+                    total_bytes,
+                    data: bytes.to_vec(),
+                };
+                decode_fragment(&value)?;
+                Ok(value)
+            }
+            pub fn decode_fragment(
+                value: &wire::MetadataFragment,
+            ) -> Result<MetadataFragment<'_>, ProtocolError> {
+                let fence = decode_fence(required(&value.fence)?, None)?;
+                let total_bytes = value.total_bytes as usize;
+                let offset = value.offset as usize;
+                if value.request == 0
+                    || value.request_generation == 0
+                    || value.sequence == 0
+                    || total_bytes == 0
+                    || total_bytes > MAX_SNAPSHOT_BYTES
+                    || value.data.is_empty()
+                    || offset >= total_bytes
+                    || value.data.len() > total_bytes - offset
+                {
+                    return Err(ProtocolError::Malformed);
+                }
+                Ok(MetadataFragment {
+                    identity: FragmentIdentity {
+                        fence,
+                        request: value.request,
+                        generation: value.request_generation,
+                        sequence: value.sequence,
+                        total_bytes,
+                    },
+                    offset,
+                    data: &value.data,
+                })
+            }
             pub fn encode_publication(
                 fence: EffectFence,
                 request: u64,
