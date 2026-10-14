@@ -79,7 +79,9 @@ impl InitialCreation {
             return Ok(());
         }
         if database.is_some() {
-            return Err(StorageFailure::RecoveryRequired);
+            // Without an original creation record, existing storage is not this
+            // request's incomplete creation. Refuse it without initialization.
+            return Err(StorageFailure::InvalidState);
         }
         let record = Record {
             schema: 1,
