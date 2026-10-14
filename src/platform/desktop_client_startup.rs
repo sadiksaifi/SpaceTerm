@@ -84,12 +84,21 @@ impl Clone for NativeDesktopOwners {
 }
 
 pub(crate) trait NativeRegistryBinding: Send + Sync {
+    fn retained_organization(
+        &self,
+    ) -> spaceterm_client::ports::ClientFuture<
+        '_,
+        Vec<spaceterm_core::organization::OrganizationSnapshot>,
+    > {
+        Box::pin(async { Ok(vec![]) })
+    }
     fn bind(
         &self,
         registry: ClientRegistry,
     ) -> Result<(), spaceterm_client::failure::ClientFailure>;
 }
 trait NativeOwnerFactory: Send + Sync {
+    fn bind_window(&self, _: &gpui::Window, _: &mut App) {}
     fn foreground_setup(
         &self,
     ) -> spaceterm_client::ports::ClientFuture<
@@ -179,6 +188,7 @@ impl<S: ViewStore + 'static> RecoveredDesktopClient for RecoveredWithEnrollment<
 
 /// Application-scoped native recovery. The host constructs this once, never per window or Pane.
 pub(crate) trait DesktopClientStartup {
+    fn bind_window(&self, _: &gpui::Window, _: &mut App) {}
     fn recover(
         &self,
         cx: &mut App,
@@ -281,6 +291,11 @@ impl<S: ViewStore + 'static> NativeDesktopStartup<S> {
 }
 
 impl<S: ViewStore + 'static> DesktopClientStartup for NativeDesktopStartup<S> {
+    fn bind_window(&self, window: &gpui::Window, cx: &mut App) {
+        if let Some(factory) = &self.factory {
+            factory.bind_window(window, cx);
+        }
+    }
     fn recover(
         &self,
         cx: &mut App,
@@ -426,7 +441,7 @@ pub(crate) async fn recover<S: ViewStore + 'static>(
     } = owners;
     journal.ensure_healthy().map_err(DesktopClientError::from)?;
     let view_journal = journal.clone();
-    let (persistence, view) = tokio::task::spawn_blocking(move || {
+    let (persistence, _view) = tokio::task::spawn_blocking(move || {
         let mut persistence = ViewPersistence::new(store);
         // The portable launch hook rereads suppression after storage IO and preserves every
         // malformed, locked or unavailable document instead of replacing it with defaults.
@@ -439,9 +454,27 @@ pub(crate) async fn recover<S: ViewStore + 'static>(
     .map_err(|_| DesktopClientError::LocalStorageUnavailable)??;
     // No connection-specific or pairing-specific second journal may admit a suppressed binding.
     services.journal = journal.clone();
-    let (registry, runtime) = ClientRegistry::recover(services)
+    let snapshots = match &registry_binding {
+        Some(binding) => binding
+            .retained_organization()
+            .await
+            .map_err(DesktopClientError::from)?,
+        None => vec![],
+    };
+    let (registry, runtime) = ClientRegistry::recover_with_retained(services, snapshots)
         .await
         .map_err(DesktopClientError::from)?;
+    let recovered_registry = registry.clone();
+    let recovered_journal = journal.clone();
+    let (persistence, view) = tokio::task::spawn_blocking(move || {
+        let mut persistence = persistence;
+        let (view, _) = recovered_registry
+            .restore_view(&mut persistence, &recovered_journal)
+            .map_err(|_| DesktopClientError::LocalStorageUnavailable)?;
+        Ok::<_, DesktopClientError>((persistence, view))
+    })
+    .await
+    .map_err(|_| DesktopClientError::LocalStorageUnavailable)??;
     if let Some(binding) = registry_binding {
         binding
             .bind(registry.clone())

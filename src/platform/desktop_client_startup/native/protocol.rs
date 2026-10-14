@@ -64,6 +64,7 @@ struct QueuedEffect {
 pub(crate) struct NativeProtocol {
     journal: Arc<JournalController>,
     tracker: OperationTracker,
+    cache: Mutex<Option<Arc<super::organization_cache::OrganizationCache>>>,
     registry: Mutex<Option<ClientRegistry>>,
     channels: Mutex<Option<Arc<PaneChannels>>>,
     infos: Mutex<BTreeMap<ServerId, ConnectedInfo>>,
@@ -80,6 +81,7 @@ impl NativeProtocol {
         Self {
             journal,
             tracker,
+            cache: Mutex::new(None),
             registry: Mutex::new(None),
             channels: Mutex::new(None),
             infos: Mutex::new(BTreeMap::new()),
@@ -91,6 +93,13 @@ impl NativeProtocol {
             executor: tokio::runtime::Handle::current(),
             owner: std::sync::OnceLock::new(),
         }
+    }
+    pub(super) fn set_cache(
+        &self,
+        cache: Arc<super::organization_cache::OrganizationCache>,
+    ) -> Result<(), ClientFailure> {
+        *self.cache.lock().map_err(|_| invalid())? = Some(cache);
+        Ok(())
     }
     pub(crate) fn set_channels(
         self: &Arc<Self>,
@@ -192,10 +201,27 @@ impl NativeProtocol {
             .lock()
             .map_err(|_| invalid())?
             .insert(info.server, info);
+        if let Some(cache) = self.cache.lock().map_err(|_| invalid())?.as_ref() {
+            cache.publish(self.binding(info.server)?, retained.organization.clone())?;
+        }
         self.channels()?.publish(info, retained)
     }
 }
 impl NativeRegistryBinding for NativeProtocol {
+    fn retained_organization(
+        &self,
+    ) -> ClientFuture<'_, Vec<spaceterm_core::organization::OrganizationSnapshot>> {
+        Box::pin(async move {
+            let cache = self.cache.lock().map_err(|_| invalid())?.clone();
+            let journal = self.journal.clone();
+            match cache {
+                Some(cache) => tokio::task::spawn_blocking(move || cache.load(&journal))
+                    .await
+                    .map_err(|_| fail(ClientFailureClass::StorageUnavailable))?,
+                None => Ok(vec![]),
+            }
+        })
+    }
     fn bind(&self, registry: ClientRegistry) -> Result<(), ClientFailure> {
         let mut retained = self.registry.lock().map_err(|_| invalid())?;
         if retained.is_some() {

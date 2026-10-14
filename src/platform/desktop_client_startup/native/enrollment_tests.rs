@@ -49,11 +49,18 @@ async fn desktop_production_factory_installs_foreground_enrollment_with_empty_re
         owners: Arc::new(tokio::sync::Mutex::new(None)),
         factory: Some(Arc::new(Factory {
             paths: paths.clone(),
+            ssh: crate::platform::server_client_route::SshStartup {
+                executable: "/usr/bin/ssh".into(), home: root.0.clone(), environment: vec![],
+            },
+            askpass: crate::platform::server_client_route::askpass::DesktopTunnelAskPass::new(
+                paths.clone(), Arc::new(crate::platform::unix_askpass_transport::AskPassWindowFactory::new(None)),
+            ),
             // Journal storage and native account discovery are external boundaries.
             // The real Factory, route connector, pairing runtime and installer remain.
             context: tokio::sync::Mutex::new(Some(Arc::new(Context {
                 journal: journal.clone(),
                 native: None,
+                native_failure: None,
             }))),
             enrollment: Arc::clone(&enrollment),
         })),
