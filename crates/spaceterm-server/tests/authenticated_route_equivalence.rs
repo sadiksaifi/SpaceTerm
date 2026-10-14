@@ -70,7 +70,7 @@ mod native;
 mod transport;
 
 // Bounds test coordination only, not protocol admission or product deadlines.
-const HARNESS_TIMEOUT: Duration = Duration::from_secs(60);
+const HARNESS_TIMEOUT: Duration = Duration::from_secs(180);
 
 use spaceterm_terminal::{runtime::budget::RuntimeLimits, runtime_contracts::*};
 
@@ -419,7 +419,7 @@ impl Routes<'_> {
                         "localhost",
                         spaceterm_host::transport::EnrolledServerKey(self.fixture.pin.public_key),
                         MessageLimit::envelope(),
-                        HARNESS_TIMEOUT,
+                        Duration::from_secs(10),
                     )
                     .await
                     .unwrap(),
@@ -515,6 +515,7 @@ struct Client {
     runtime_request: u64,
     rows: BTreeMap<spaceterm_core::content::RowId, String>,
     text: String,
+    content_stamp: Option<QueryStamp>,
 }
 impl Client {
     async fn connect(routes: &mut Routes<'_>, index: usize, major: u32) -> Self {
@@ -545,6 +546,7 @@ impl Client {
             runtime_request: 0,
             rows: BTreeMap::new(),
             text: String::new(),
+            content_stamp: None,
         }
     }
     fn request(&mut self, command: Command) -> CanonicalOperationRequest {
@@ -579,6 +581,7 @@ impl Client {
                         self.rows.clear();
                     }
                     let stamp = content::$p::decode_stamp(page.stamp.as_ref().unwrap()).unwrap();
+                    self.content_stamp = Some(stamp);
                     let request = ContentPageRequest::new(
                         stamp,
                         ContentRange::ActiveGrid,
@@ -795,6 +798,392 @@ impl Client {
             payload!(v2, Major2)
         })
         .await;
+    }
+    async fn read_query(&mut self, query: &content::reads::ReadQuery) {
+        self.send(if self.codec.major() == 1 {
+            Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::ContentQuery(
+                    content::reads::v1::encode_query(query),
+                )),
+            })
+        } else {
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::ContentQuery(
+                    content::reads::v2::encode_query(query),
+                )),
+            })
+        })
+        .await;
+    }
+    async fn authenticated_content_reads(&mut self) {
+        use spaceterm_core::content::CellRef;
+        let old = self.content_stamp.expect("content publication");
+        let input_fence = EffectFence::new(
+            old.fence().session(),
+            old.fence().grant(),
+            old.fence().connection(),
+            old.fence().context(),
+            None,
+        )
+        .unwrap();
+        self.line(input_fence, "stty -echo; i=0; while [ $i -lt 10000 ]; do printf 'full-history-%05d-abcdefghijklmnopqrstuvwxyz0123456789\\n' \"$i\"; i=$((i + 1)); done; printf 'history-complete\\n'").await;
+        self.output("history-complete").await;
+        let old = self.content_stamp.unwrap();
+        let mut stamp = QueryStamp::new(
+            old.fence(),
+            old.base(),
+            ContentRequestId::new(101).unwrap(),
+            RequestGeneration::new(1),
+        )
+        .unwrap();
+        let limits = PageLimits::new(256, 16384, 128 * 1024).unwrap();
+        let mut rows = Vec::new();
+        let mut after = None;
+        let mut retries = 0;
+        loop {
+            let request = TopologyPageRequest::new(stamp, after, limits).unwrap();
+            self.read_query(&content::reads::ReadQuery::Topology(request))
+                .await;
+            let response = self.response().await;
+            macro_rules! topology {
+                ($value:expr, $p:ident) => {{
+                    match $value.result.unwrap() {
+                        $p::content_read_response::Result::Topology(page) => {
+                            assert_eq!(
+                                content::$p::decode_stamp(page.stamp.as_ref().unwrap()).unwrap(),
+                                stamp
+                            );
+                            rows.extend(
+                                page.rows.iter().map(|row| {
+                                    content::reads::$p::decode_topology_row(row).unwrap()
+                                }),
+                            );
+                            after = page.after.as_ref().map(|row| {
+                                TopologyContinuation::new(
+                                    stamp,
+                                    content::reads::$p::decode_topology_row(row).unwrap(),
+                                )
+                                .unwrap()
+                            });
+                            if after.is_none() {
+                                break;
+                            }
+                        }
+                        $p::content_read_response::Result::ResyncRequired(value) => {
+                            assert_eq!(
+                                content::$p::decode_stamp(value.stamp.as_ref().unwrap()).unwrap(),
+                                stamp
+                            );
+                            let base =
+                                content::$p::decode_base(value.current.as_ref().unwrap()).unwrap();
+                            let fence = EffectFence::new(
+                                stamp.fence().session(),
+                                stamp.fence().grant(),
+                                stamp.fence().connection(),
+                                stamp.fence().context(),
+                                Some(base.revision),
+                            )
+                            .unwrap();
+                            stamp = QueryStamp::new(
+                                fence,
+                                base,
+                                stamp.request(),
+                                stamp.generation().checked_successor().unwrap(),
+                            )
+                            .unwrap();
+                            after = None;
+                            rows.clear();
+                            retries += 1;
+                            assert!(retries < 20);
+                        }
+                        $p::content_read_response::Result::Rejected(value) if value.reason == 1 => {
+                            let old = self.content_stamp.unwrap();
+                            stamp = QueryStamp::new(
+                                old.fence(),
+                                old.base(),
+                                stamp.request(),
+                                stamp.generation().checked_successor().unwrap(),
+                            )
+                            .unwrap();
+                            after = None;
+                            rows.clear();
+                            retries += 1;
+                            assert!(retries < 20);
+                        }
+                        other => panic!("topology response: {other:?}"),
+                    }
+                }};
+            }
+            match response {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::ContentReadResponse(value)),
+                }) => topology!(value, v1),
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::ContentReadResponse(value)),
+                }) => topology!(value, v2),
+                other => panic!("topology response: {other:?}"),
+            }
+        }
+        assert!(
+            rows.len() >= 10000,
+            "full supported Scrollback plus active grid"
+        );
+        let endpoint = |row: TopologyRow, column| CellRef {
+            session: stamp.base().session,
+            row: row.row(),
+            row_revision: row.revision(),
+            column,
+        };
+        let first = rows[0];
+        let last = *rows.last().unwrap();
+        let copy = CopyRequest::new(
+            stamp,
+            ContentSelection::new(
+                stamp,
+                endpoint(first, 0),
+                endpoint(last, last.columns() - 1),
+                false,
+            )
+            .unwrap(),
+            CopyOptions {
+                unwrap_soft_wraps: true,
+                trim_trailing_spaces: true,
+                include_html: false,
+            },
+        )
+        .unwrap();
+        let (plain, html, copy_chunks) = self.copy_bytes(copy).await;
+        assert!(html.is_empty());
+        assert!(plain.len() > MAX_RESOURCE_CHUNK_BYTES);
+        assert!(copy_chunks > 2);
+        let plain = String::from_utf8(plain).unwrap();
+        let history_lines = plain
+            .lines()
+            .filter(|line| line.starts_with("full-history-"))
+            .count();
+        let expected_matches = plain.matches("full-history-").count();
+        assert!(
+            history_lines >= 9990,
+            "copy covers retained history, not just the active grid"
+        );
+        assert!(plain.contains("full-history-09999-abcdefghijklmnopqrstuvwxyz0123456789"));
+        let find = FindRequest::new(
+            stamp,
+            BoundedFindQuery::new("full-history-".into()).unwrap(),
+            None,
+        )
+        .unwrap();
+        self.read_query(&content::reads::ReadQuery::Find(find))
+            .await;
+        let mut found = 0;
+        let mut chunks = 0;
+        loop {
+            macro_rules! find_event {
+                ($value:expr, $p:ident) => {{
+                    match $value.item.unwrap() {
+                        $p::find_event::Item::Chunk(chunk) => {
+                            assert_eq!(
+                                content::$p::decode_stamp(chunk.stamp.as_ref().unwrap()).unwrap(),
+                                stamp
+                            );
+                            assert_eq!(chunk.index, chunks);
+                            chunks += 1;
+                            assert!(chunk.matches.len() <= MAX_FIND_CHUNK_MATCHES);
+                            for value in &chunk.matches {
+                                assert_eq!(
+                                    content::reads::$p::decode_cell(value.start.as_ref().unwrap())
+                                        .unwrap()
+                                        .session,
+                                    stamp.base().session
+                                );
+                            }
+                            found += chunk.matches.len();
+                        }
+                        $p::find_event::Item::Complete(value) => {
+                            assert_eq!(value.chunks, chunks);
+                            break;
+                        }
+                        other => panic!("find response: {other:?}"),
+                    }
+                }};
+            }
+            match self.response().await {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::FindEvent(value)),
+                }) => find_event!(value, v1),
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::FindEvent(value)),
+                }) => find_event!(value, v2),
+                other => panic!("find response: {other:?}"),
+            }
+        }
+        assert_eq!(found, expected_matches);
+        assert!(chunks > 1);
+
+        // Rich output uses the same authenticated stream and digest contract.
+        // The producer's full rich-expansion bounds are covered by terminal tests.
+        let rich_stamp = QueryStamp::new(
+            stamp.fence(),
+            stamp.base(),
+            ContentRequestId::new(103).unwrap(),
+            stamp.generation(),
+        )
+        .unwrap();
+        let rich_end = rows[3];
+        let rich = CopyRequest::new(
+            rich_stamp,
+            ContentSelection::new(
+                rich_stamp,
+                endpoint(first, 0),
+                endpoint(rich_end, rich_end.columns() - 1),
+                false,
+            )
+            .unwrap(),
+            CopyOptions {
+                include_html: true,
+                ..copy.options()
+            },
+        )
+        .unwrap();
+        let (rich_plain, rich_html, _) = self.copy_bytes(rich).await;
+        assert!(!rich_plain.is_empty());
+        assert!(String::from_utf8(rich_html).unwrap().contains("<div"));
+
+        let cancelled = QueryStamp::new(
+            stamp.fence(),
+            stamp.base(),
+            stamp.request(),
+            stamp.generation().checked_successor().unwrap(),
+        )
+        .unwrap();
+        let cancelled_copy = CopyRequest::new(cancelled, copy.selection(), copy.options()).unwrap();
+        self.read_query(&content::reads::ReadQuery::Copy(cancelled_copy))
+            .await;
+        self.read_query(&content::reads::ReadQuery::Cancel {
+            stamp: cancelled,
+            kind: 5,
+        })
+        .await;
+        self.copy_failure(cancelled, 2).await;
+        // Cancellation leaves the same authenticated connection and Session usable.
+        assert_eq!(
+            self.status().await.parts().epoch,
+            stamp.base().session.epoch
+        );
+
+        let mut wrong_base = stamp.base();
+        wrong_base.revision = wrong_base.revision.checked_successor().unwrap();
+        let fence = EffectFence::new(
+            stamp.fence().session(),
+            stamp.fence().grant(),
+            stamp.fence().connection(),
+            stamp.fence().context(),
+            Some(wrong_base.revision),
+        )
+        .unwrap();
+        let stale = QueryStamp::new(
+            fence,
+            wrong_base,
+            ContentRequestId::new(102).unwrap(),
+            stamp.generation(),
+        )
+        .unwrap();
+        self.read_query(&content::reads::ReadQuery::Copy(
+            CopyRequest::new(stale, copy.selection(), copy.options()).unwrap(),
+        ))
+        .await;
+        self.copy_failure(stale, 1).await;
+        assert_eq!(
+            self.status().await.parts().epoch,
+            stamp.base().session.epoch
+        );
+    }
+    async fn copy_bytes(&mut self, copy: CopyRequest) -> (Vec<u8>, Vec<u8>, usize) {
+        use sha2::{Digest, Sha256};
+        let stamp = copy.stamp();
+        self.read_query(&content::reads::ReadQuery::Copy(copy))
+            .await;
+        let mut plain = Vec::new();
+        let mut html = Vec::new();
+        let mut copy_chunks = 0;
+        loop {
+            macro_rules! copy_event {
+                ($value:expr, $p:ident) => {{
+                    match $value.item.unwrap() {
+                        $p::copy_event::Item::Chunk(chunk) => {
+                            assert_eq!(
+                                content::$p::decode_stamp(chunk.stamp.as_ref().unwrap()).unwrap(),
+                                stamp
+                            );
+                            let bytes = if chunk.part == 1 {
+                                &mut plain
+                            } else {
+                                assert_eq!(chunk.part, 2);
+                                &mut html
+                            };
+                            assert_eq!(chunk.offset, bytes.len() as u64);
+                            assert!(chunk.data.len() <= MAX_RESOURCE_CHUNK_BYTES);
+                            bytes.extend(chunk.data);
+                            copy_chunks += 1;
+                        }
+                        $p::copy_event::Item::Complete(value) => {
+                            assert_eq!(
+                                content::$p::decode_stamp(value.stamp.as_ref().unwrap()).unwrap(),
+                                stamp
+                            );
+                            assert_eq!(value.plain_bytes, plain.len() as u64);
+                            assert_eq!(value.plain_digest, Sha256::digest(&plain).to_vec());
+                            assert_eq!(
+                                value.html_bytes,
+                                copy.options().include_html.then_some(html.len() as u64)
+                            );
+                            assert_eq!(
+                                value.html_digest,
+                                copy.options()
+                                    .include_html
+                                    .then(|| Sha256::digest(&html).to_vec())
+                            );
+                            break;
+                        }
+                        other => panic!("copy response: {other:?}"),
+                    }
+                }};
+            }
+            match self.response().await {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::CopyEvent(value)),
+                }) => copy_event!(value, v1),
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::CopyEvent(value)),
+                }) => copy_event!(value, v2),
+                other => panic!("copy response: {other:?}"),
+            }
+        }
+        (plain, html, copy_chunks)
+    }
+    async fn copy_failure(&mut self, stamp: QueryStamp, reason: i32) {
+        let response = self.response().await;
+        macro_rules! check {
+            ($value:expr, $p:ident) => {{
+                let $p::copy_event::Item::ContentFailure(value) = $value.item.unwrap() else {
+                    panic!("copy must not complete after cancellation or stale content")
+                };
+                assert_eq!(
+                    content::$p::decode_stamp(value.stamp.as_ref().unwrap()).unwrap(),
+                    stamp
+                );
+                assert_eq!(value.reason, reason);
+            }};
+        }
+        match response {
+            Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::CopyEvent(value)),
+            }) => check!(value, v1),
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::CopyEvent(value)),
+            }) => check!(value, v2),
+            other => panic!("copy failure: {other:?}"),
+        }
     }
     async fn effect(&mut self, fence: EffectFence, command: RuntimeCommand) -> Option<i32> {
         self.runtime_request += 1;
@@ -1151,7 +1540,7 @@ fn keygen(path: &Path) {
     );
 }
 
-async fn exercise(route: Route, major: u32) {
+async fn exercise(route: Route, major: u32, reads: bool) {
     let fixture = Fixture::new(major).await;
     let mut routes = Routes {
         fixture: &fixture,
@@ -1336,6 +1725,14 @@ async fn exercise(route: Route, major: u32) {
         !b.text.contains("route-A:1"),
         "client B must not receive client A's content"
     );
+    if reads {
+        a.authenticated_content_reads().await;
+        a.route.close().await;
+        b.route.close().await;
+        drop(routes);
+        fixture.shutdown().await;
+        return;
+    }
     let original_frame = a.last_frame.clone();
     assert!(
         a.effect(
@@ -1487,7 +1884,7 @@ macro_rules! route_test {
     ($name:ident, $route:ident, $major:literal) => {
         #[tokio::test]
         async fn $name() {
-            exercise(Route::$route, $major).await;
+            exercise(Route::$route, $major, false).await;
         }
     };
 }
@@ -1507,3 +1904,20 @@ route_test!(
     Jump,
     2
 );
+
+#[tokio::test]
+async fn authenticated_ipc_major_1_copy_find_topology() {
+    exercise(Route::Ipc, 1, true).await;
+}
+#[tokio::test]
+async fn authenticated_ipc_major_2_copy_find_topology() {
+    exercise(Route::Ipc, 2, true).await;
+}
+#[tokio::test]
+async fn authenticated_wss_major_1_full_scrollback_copy_find_topology() {
+    exercise(Route::Wss, 1, true).await;
+}
+#[tokio::test]
+async fn authenticated_wss_major_2_full_scrollback_copy_find_topology() {
+    exercise(Route::Wss, 2, true).await;
+}

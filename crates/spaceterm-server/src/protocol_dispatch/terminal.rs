@@ -1,6 +1,7 @@
 //! Connection-owned presentation demand. Dropping demand never retires a Session.
 
 mod graphics;
+mod reads;
 
 use super::*;
 use crate::egress::EgressFailure;
@@ -38,9 +39,11 @@ pub(super) enum Wake {
     Presentation(Box<Event>),
     Effect(Box<EffectReply>),
     Graphics(Box<graphics::GraphicsEvent>),
+    Read(Box<reads::ReadEvent>),
 }
 pub(super) struct TerminalConnection {
     graphics: graphics::GraphicsConnection,
+    reads: reads::ReadConnection,
     subscriptions: BTreeMap<PaneId, Subscription>,
     native: BTreeMap<(SessionKey, u64), spaceterm_core::native_requests::NativeRequest>,
     sender: mpsc::Sender<Event>,
@@ -69,6 +72,7 @@ impl TerminalConnection {
         let (effect_sender, effect_receiver) = mpsc::channel(4);
         Self {
             graphics: graphics::GraphicsConnection::new(limits),
+            reads: reads::ReadConnection::new(limits),
             effect_sender,
             effect_receiver,
             effect_sequence: 0,
@@ -86,6 +90,7 @@ impl TerminalConnection {
     }
     pub(super) fn reset(&mut self) {
         self.graphics.reset();
+        self.reads.reset();
         for (_, subscription) in std::mem::take(&mut self.subscriptions) {
             subscription.task.abort();
         }
@@ -93,6 +98,7 @@ impl TerminalConnection {
     }
     pub(super) async fn next(&mut self) -> Option<Wake> {
         tokio::select! {
+            event = self.reads.next() => event.map(|event| Wake::Read(Box::new(event))),
             event = self.graphics.next() => event.map(|event| Wake::Graphics(Box::new(event))),
             event = self.receiver.recv() => event.map(|event| Wake::Presentation(Box::new(event))),
             reply = self.effect_receiver.recv() => reply.map(|reply| { self.effects.remove(&reply.id); Wake::Effect(Box::new(reply)) }),
@@ -236,6 +242,27 @@ impl TerminalConnection {
         }
         self.native.retain(|(session, _), _| session.pane != pane);
         Ok(true)
+    }
+    pub(super) async fn read_request(
+        &mut self,
+        payload: &Payload,
+        principal: VerifiedPrincipal,
+        handle: &ServerHandle,
+    ) -> Result<bool, ServerFailure> {
+        self.reads.admit(payload, principal, handle).await
+    }
+    pub(super) async fn publish_read(
+        &mut self,
+        event: reads::ReadEvent,
+        dispatcher: &ProtocolDispatcher,
+        session: &mut AuthenticatedSession,
+        transport: &Arc<dyn spaceterm_host::transport::MessageTransport>,
+        handle: &ServerHandle,
+        egress: &mut ConnectionEgress,
+    ) -> Result<(), ServerFailure> {
+        self.reads
+            .publish(event, dispatcher, session, transport, handle, egress)
+            .await
     }
     pub(super) async fn graphics_request(
         &mut self,
@@ -655,6 +682,7 @@ impl TerminalConnection {
     }
     fn remove(&mut self, pane: PaneId) {
         self.graphics.remove_pane(pane);
+        self.reads.remove_pane(pane);
         if let Some(subscription) = self.subscriptions.remove(&pane) {
             subscription.task.abort();
         }

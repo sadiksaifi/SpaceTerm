@@ -333,7 +333,8 @@ impl ConnectionEgress {
     ) -> Result<(), EgressFailure> {
         if reservation.owned_native
             || !Arc::ptr_eq(&reservation.charge.budget, &self.budget)
-            || reservation.charge.reliable != reply_policy(payload)?
+            || (reservation.charge.reliable != reply_policy(payload)?
+                && !(reservation.charge.reliable && content_failure_reply(payload)))
             || reservation.maximum < reply_bytes(payload)?
         {
             return Err(EgressFailure::ReservationMismatch);
@@ -491,6 +492,32 @@ fn reply_bytes(payload: &spaceterm_protocol::codec::Payload) -> Result<usize, Eg
         .checked_add(AUTHENTICATED_FRAMING_BYTES)
         .ok_or(EgressFailure::Capacity)
 }
+// Only closed, content-free failure metadata may use the lifecycle reserve.
+// Copy text and Find matches remain normal traffic even under saturation.
+fn content_failure_reply(payload: &spaceterm_protocol::codec::Payload) -> bool {
+    macro_rules! profile {
+        ($message:expr, $p:ident) => {{
+            use spaceterm_protocol::wire::$p::{self as wire, message::Kind};
+            match &$message.kind {
+                Some(Kind::CopyEvent(value)) => {
+                    matches!(value.item, Some(wire::copy_event::Item::ContentFailure(_)))
+                }
+                Some(Kind::FindEvent(value)) => {
+                    matches!(value.item, Some(wire::find_event::Item::ContentFailure(_)))
+                }
+                Some(Kind::ContentReadResponse(value)) => matches!(
+                    value.result,
+                    Some(wire::content_read_response::Result::Rejected(_))
+                ),
+                _ => false,
+            }
+        }};
+    }
+    match payload {
+        spaceterm_protocol::codec::Payload::Major1(value) => profile!(value, v1),
+        spaceterm_protocol::codec::Payload::Major2(value) => profile!(value, v2),
+    }
+}
 fn reply_policy(payload: &spaceterm_protocol::codec::Payload) -> Result<bool, EgressFailure> {
     macro_rules! profile {
         ($message:expr, $p:ident) => {{
@@ -515,6 +542,8 @@ fn reply_policy(payload: &spaceterm_protocol::codec::Payload) -> Result<bool, Eg
                     | Kind::StatusPublication(_)
                     | Kind::GitQueryResult(_)
                     | Kind::ServerDirectoryResult(_)
+                    | Kind::CopyEvent(_)
+                    | Kind::FindEvent(_)
                     | Kind::ContentReadResponse(_)
                     | Kind::ContentPublication(_)
                     | Kind::ContentInvalidation(_)

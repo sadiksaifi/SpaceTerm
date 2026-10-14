@@ -1,5 +1,7 @@
 //! Checked semantic paging shared by both authenticated protocol majors.
 
+pub mod reads;
+
 use super::{
     identity::*,
     runtime::{rgb, rgb_bits},
@@ -305,6 +307,8 @@ macro_rules! profile {
                     || !value.query.is_empty()
                     || value.case_sensitive
                     || value.regex
+                    || value.topology_after.is_some()
+                    || value.cancel
                     || value.copy_options.is_some()
                     || value.find_continuation.is_some()
                     || value
