@@ -1063,7 +1063,8 @@ async fn owner_consumption_revalidates_stopped_registration_inside_actor() {
     use spaceterm_protocol::pairing_adapter::EnrollmentClient;
     let (_root, fixture, home) = initialized_account(DesiredServerState::Stopped);
     let supervisor = Arc::new(fixture.reopen());
-    let pin = supervisor.discover().unwrap().unwrap().server_pin();
+    let retained_registration = supervisor.discover().unwrap().unwrap();
+    let pin = retained_registration.server_pin();
     let request = supervisor.allocate_request().unwrap();
     let (providers, _, _) = stopped_providers();
     let executor = AccountOwnerRequestExecutor::stopped(
@@ -1118,11 +1119,10 @@ async fn owner_consumption_revalidates_stopped_registration_inside_actor() {
         spaceterm_server::contracts::ServerFailureClass::RecoveryRequired
     );
     use spaceterm_host::account_service::ServiceProcesses;
-    let registration = supervisor.discover().unwrap().unwrap();
     assert!(
         spaceterm_host::account_service::runtime_inventory::RetainedRuntimeProcesses
             .previous_instance_cleanup(
-                &registration,
+                &retained_registration,
                 spaceterm_core::authority::ServerEpoch::new(1),
                 &[]
             )
