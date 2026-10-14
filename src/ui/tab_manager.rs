@@ -5380,13 +5380,24 @@ mod tests {
         });
         cx.run_until_parked();
         let split_title = tab_title(cx);
-        cx.simulate_keystrokes("cmd-w");
+        cx.simulate_keystrokes("cmd-alt-left");
+        cx.run_until_parked();
+        let first_pane_title = tab_title(cx);
+        cx.simulate_keystrokes("cmd-alt-right");
+        cx.run_until_parked();
+        assert_eq!(tab_title(cx), split_title);
+
+        cx.dispatch_action(crate::ui::ClosePane);
         cx.run_until_parked();
         let restored_title = tab_title(cx);
 
         assert_eq!(
-            (split_title.as_ref(), restored_title.as_ref()),
-            ("Terminal · second", "editor")
+            (
+                split_title.as_ref(),
+                first_pane_title.as_ref(),
+                restored_title.as_ref(),
+            ),
+            ("Terminal · second", "editor", "editor")
         );
         assert!(cx.debug_bounds("tab-pane-count-1").is_none());
     }
@@ -7201,12 +7212,23 @@ mod tests {
     }
 
     #[gpui::test]
-    fn command_w_should_close_only_the_focused_pane_when_the_tab_is_split(cx: &mut TestAppContext) {
+    fn close_pane_should_close_only_the_focused_pane_when_the_tab_is_split(
+        cx: &mut TestAppContext,
+    ) {
         let (manager, records, cx) = tab_manager(cx);
         cx.simulate_keystrokes("cmd-d");
         cx.run_until_parked();
 
+        // Cmd+W belongs to the enclosing Workspace Manager, not this Tab Manager.
         cx.simulate_keystrokes("cmd-w");
+        cx.run_until_parked();
+        assert_eq!(
+            manager.read_with(cx, |manager, cx| manager.aggregate_counts(cx)),
+            (1, 2)
+        );
+        assert!(records.dropped_session_ids().is_empty());
+
+        cx.dispatch_action(crate::ui::ClosePane);
         cx.run_until_parked();
 
         let state = manager.read_with(cx, |manager, cx| {
@@ -7220,11 +7242,24 @@ mod tests {
     }
 
     #[gpui::test]
-    fn command_w_should_close_the_active_tab_when_its_last_pane_closes(cx: &mut TestAppContext) {
+    fn close_pane_should_close_the_active_tab_when_its_last_pane_closes(cx: &mut TestAppContext) {
         let (manager, records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
 
         cx.simulate_keystrokes("cmd-w");
+        cx.run_until_parked();
+        assert_eq!(
+            manager.read_with(cx, |manager, _| {
+                (
+                    manager.local_tabs().len(),
+                    manager.local_tabs().active_tab_id(),
+                )
+            }),
+            (2, TabId::new(2))
+        );
+        assert!(records.dropped_session_ids().is_empty());
+
+        cx.dispatch_action(crate::ui::ClosePane);
         cx.run_until_parked();
 
         let state = manager.read_with(cx, |manager, _| {
