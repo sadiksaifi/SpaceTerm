@@ -17,6 +17,10 @@ use spaceterm_server::{
 use spaceterm_terminal::{metadata::LocalMachine, runtime_contracts::*};
 use std::sync::Mutex;
 
+#[path = "account_publications.rs"]
+mod account_publications;
+use account_publications::{PublicationCodec, handshake, query_status, reconcile, round_trip};
+
 struct Seed {
     root: tempfile::TempDir,
     registration: RegisteredServer,
@@ -380,7 +384,7 @@ async fn retire(
 async fn operation(
     seed: &Seed,
     transport: &dyn MessageTransport,
-    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    codec: &mut PublicationCodec,
     sequence: u64,
     command: Command,
 ) -> Outcome {
@@ -408,7 +412,7 @@ async fn operation(
                 kind:
                     Some(
                         v2::message::Kind::OrganizationSnapshot(_)
-                        | v2::message::Kind::OrganizationResync(_),
+                        | v2::message::Kind::OrganizationDelta(_),
                     ),
             }) => {}
             _ => panic!("operation reply"),
@@ -418,7 +422,7 @@ async fn operation(
 async fn create(
     seed: &Seed,
     transport: &dyn MessageTransport,
-    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    codec: &mut PublicationCodec,
 ) -> (WorkspaceId, PaneId, ControlGrant) {
     let result = operation(
         seed,
@@ -448,7 +452,7 @@ async fn create(
 async fn start_shell(
     seed: &Seed,
     transport: &dyn MessageTransport,
-    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    codec: &mut PublicationCodec,
     epoch: ServerEpoch,
     generation: SessionGeneration,
     connection: ConnectionGeneration,
@@ -829,14 +833,16 @@ impl Drop for Binary {
 }
 async fn snapshot(
     transport: &dyn MessageTransport,
-    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    codec: &mut PublicationCodec,
     generation: u64,
 ) -> v2::OrganizationSnapshot {
+    codec.request_snapshot(generation);
     let request = Payload::Major2(v2::Message {
         kind: Some(v2::message::Kind::OrganizationQuery(
             v2::OrganizationQuery {
                 request: generation,
                 request_generation: generation,
+                known_epoch: codec.epoch(),
                 ..Default::default()
             },
         )),
@@ -849,24 +855,29 @@ async fn snapshot(
         let payload = codec
             .decode(&transport.recv().await.unwrap().unwrap())
             .unwrap();
-        let Payload::Major2(v2::Message {
-            kind: Some(v2::message::Kind::OrganizationSnapshot(value)),
-        }) = payload
-        else {
-            panic!("organization snapshot");
-        };
-        let part = value.part.as_ref().unwrap();
-        if part.request != generation || part.request_generation != generation {
-            continue;
+        match payload {
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::OrganizationSnapshot(value)),
+            }) => {
+                let part = value.part.as_ref().unwrap();
+                assert_eq!(
+                    (part.request, part.request_generation),
+                    (generation, generation)
+                );
+                assert_eq!(value.epoch, codec.epoch());
+                assert!(value.complete);
+                return value;
+            }
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::OrganizationDelta(_)),
+            }) => {}
+            _ => panic!("organization snapshot"),
         }
-        assert!(value.complete);
-        spaceterm_protocol::convert::organization::v2::decode_snapshot_part(&value).unwrap();
-        return value;
     }
 }
 async fn reconcile_snapshot(
     transport: &dyn MessageTransport,
-    codec: &mut spaceterm_protocol::connection::AuthenticatedConnection,
+    codec: &mut PublicationCodec,
     snapshot: &v2::OrganizationSnapshot,
 ) -> ConnectionGeneration {
     let principal = codec.principal();
