@@ -256,3 +256,56 @@ fn desktop_local_missing_endpoint_keeps_registered_identity_and_saved_binding() 
         ClientFailureClass::Unavailable
     );
 }
+
+#[test]
+fn desktop_native_start_retries_original_local_route_after_stopped_launch() {
+    use spaceterm_client::ports::ConnectionPurpose;
+    use spaceterm_host::{
+        ipc::IpcListener,
+        transport::{AdmissionLimits, MessageLimit},
+    };
+    let root = Root::new();
+    let fixture = AccountServiceFixture::new(&root.0, BuildIdentity::Development).unwrap();
+    let registration = fixture.initialize(DesiredServerState::Stopped).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let journal = runtime.block_on(paired_journal(&root, &registration));
+    let provider = NativeClientProvider::from_supervisor(fixture.reopen());
+    let target = journal.snapshot().unwrap().bindings()[0].binding().unwrap();
+    let connector = crate::platform::server_client_route::refreshing_connector(
+        Some(provider),
+        journal.clone(),
+        crate::platform::server_client_route::connector(vec![], None).unwrap(),
+    );
+    assert!(
+        runtime
+            .block_on(connector.open(target.target(), ConnectionPurpose::Ordinary))
+            .is_err()
+    );
+    // Inject the authorized service-manager boundary publishing explicit Start, not saved-path authority.
+    let path = fixture.anchor().join("registration");
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    record["desired"] = serde_json::to_value(DesiredServerState::Running).unwrap();
+    record.sort_all_objects();
+    std::fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
+    let _entered = runtime.enter();
+    let listener = IpcListener::bind(
+        registration.endpoint().unwrap(),
+        MessageLimit::new(4096).unwrap(),
+        AdmissionLimits::new(8, std::time::Duration::from_secs(5)).unwrap(),
+    )
+    .unwrap();
+    let route = runtime
+        .block_on(connector.open(target.target(), ConnectionPurpose::Ordinary))
+        .unwrap();
+    assert!(route.peer.local_account_verified);
+    assert_eq!(
+        journal.snapshot().unwrap().bindings()[0].binding().unwrap(),
+        target
+    );
+    runtime.block_on(route.sender.close()).unwrap();
+    listener.close().unwrap();
+}

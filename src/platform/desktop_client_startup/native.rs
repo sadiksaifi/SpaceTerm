@@ -1,7 +1,10 @@
 //! Production native desktop owners. All routes use the pinned authenticated actor.
 //! Recovery reads retained bindings. Only the explicit foreground setup offer may install or enroll.
 
+mod organization_cache;
 mod protocol;
+#[cfg(test)]
+pub(super) use organization_cache::OrganizationCache;
 
 use super::*;
 use crate::platform::{app_paths::AppPaths, client_view_store::NativeViewStore};
@@ -23,6 +26,8 @@ use std::sync::atomic::AtomicBool;
 
 pub(crate) fn production(
     paths: Arc<AppPaths>,
+    ssh: crate::platform::server_client_route::SshStartup,
+    askpass: Arc<dyn crate::ssh::askpass::AskPassWindowFactory>,
 ) -> Result<Rc<dyn DesktopClientStartup>, crate::desktop_profile::DesktopProfileError> {
     let executor = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -34,6 +39,11 @@ pub(crate) fn production(
         factory: Some(Arc::new(Factory {
             paths: paths.clone(),
             context: tokio::sync::Mutex::new(None),
+            ssh,
+            askpass: crate::platform::server_client_route::askpass::DesktopTunnelAskPass::new(
+                paths.clone(),
+                askpass,
+            ),
         })),
         store: SharedViewStore(Arc::new(std::sync::Mutex::new(NativeViewStore::new(paths)))),
         consumed: Arc::new(AtomicBool::new(false)),
@@ -44,11 +54,14 @@ pub(crate) fn production(
 
 struct Factory {
     paths: Arc<AppPaths>,
+    ssh: crate::platform::server_client_route::SshStartup,
+    askpass: Arc<crate::platform::server_client_route::askpass::DesktopTunnelAskPass>,
     context: tokio::sync::Mutex<Option<Arc<Context>>>,
 }
 struct Context {
     journal: Arc<JournalController>,
     native: Option<NativeClientProvider>,
+    native_failure: Option<ClientFailure>,
 }
 impl Factory {
     async fn context(&self) -> Result<Arc<Context>, ClientFailure> {
@@ -100,14 +113,41 @@ impl Factory {
             NativeClientProvider::with_authorization(authorization)
         })
         .await
-        .map_err(|_| fail(ClientFailureClass::Unavailable))?
-        .ok();
-        let context = Arc::new(Context { journal, native });
+        .map_err(|_| fail(ClientFailureClass::Unavailable))?;
+        let native_failure = native.as_ref().err().copied().map(|failure| {
+            use spaceterm_client::management_cli::ManagementFailure;
+            fail(match failure {
+                ManagementFailure::StorageLocked
+                | ManagementFailure::StorageUnavailable
+                | ManagementFailure::CredentialUnavailable => {
+                    ClientFailureClass::StorageUnavailable
+                }
+                ManagementFailure::UnsafeNativeState => ClientFailureClass::UnsafeStorage,
+                ManagementFailure::AuthorizationDenied | ManagementFailure::Revoked => {
+                    ClientFailureClass::AuthorizationDenied
+                }
+                ManagementFailure::Incompatible => ClientFailureClass::Incompatible,
+                ManagementFailure::Indeterminate | ManagementFailure::OutcomePending => {
+                    ClientFailureClass::RecoveryRequired
+                }
+                ManagementFailure::LimitExceeded => ClientFailureClass::ResourceLimit,
+                _ => ClientFailureClass::Unavailable,
+            })
+        });
+        let native = native.ok();
+        let context = Arc::new(Context {
+            journal,
+            native,
+            native_failure,
+        });
         *retained = Some(context.clone());
         Ok(context)
     }
 }
 impl NativeOwnerFactory for Factory {
+    fn bind_window(&self, window: &gpui::Window, cx: &mut App) {
+        self.askpass.bind_window(window, cx);
+    }
     fn foreground_setup(
         &self,
     ) -> ClientFuture<
@@ -146,20 +186,59 @@ impl NativeOwnerFactory for Factory {
             } else {
                 None
             };
-            let local_server = local.as_ref().map(|local| {
-                spaceterm_core::identity::ServerId::new(local.registration.server_pin().identity)
-            });
+            let local_server = local
+                .as_ref()
+                .map(|local| {
+                    spaceterm_core::identity::ServerId::new(
+                        local.registration.server_pin().identity,
+                    )
+                })
+                .or_else(|| {
+                    journal
+                        .snapshot()
+                        .ok()?
+                        .bindings()
+                        .iter()
+                        .find_map(|saved| {
+                            let binding = saved.binding().ok()?;
+                            matches!(
+                                binding.target().route().parts(),
+                                spaceterm_client::api::RouteParts::Ipc { .. }
+                            )
+                            .then(|| binding.target().server())
+                        })
+                });
             let mut settings =
                 crate::ui::settings_window::server_runtime::SettingsServices::default();
             if let (Some(native), Some(local)) = (&native, &local)
                 && let Some(binding) = &local.binding
             {
-                settings.admit_native(native, &local.registration, binding)?;
+                // Endpoint admission failure disables only this computer's native Settings
+                // capability. Its connection actor retains the classified local failure.
+                let _ = settings.admit_native(native, &local.registration, binding);
             }
-            let routes = crate::platform::server_client_route::connector(
-                local.and_then(|local| local.route).into_iter().collect(),
-                None,
-            )?;
+            let paths = self.paths.clone();
+            let ssh = self.ssh.clone();
+            let askpass = self.askpass.clone();
+            let configuration = tokio::task::spawn_blocking(move || {
+                crate::platform::server_client_route::ssh_configuration(&paths, &ssh, Some(askpass))
+            })
+            .await
+            .map_err(|_| fail(ClientFailureClass::Unavailable))?;
+            // Failure to admit local SSH configuration cannot retire healthy WSS servers.
+            let remote = match configuration {
+                Ok((configuration, owner)) => crate::platform::server_client_route::retain_runtime(
+                    crate::platform::server_client_route::connector(vec![], Some(configuration))?,
+                    owner,
+                ),
+                Err(_) => crate::platform::server_client_route::connector(vec![], None)?,
+            };
+            let routes = crate::platform::server_client_route::refreshing_connector_with_failure(
+                native.clone(),
+                context.native_failure,
+                journal.clone(),
+                remote,
+            );
             let tracker = OperationTracker::new(journal.clone());
             let protocol = Arc::new(protocol::NativeProtocol::new(
                 journal.clone(),
@@ -170,6 +249,9 @@ impl NativeOwnerFactory for Factory {
                 ProjectionBudgets::supported()?,
             )?);
             protocol.set_channels(channels.clone())?;
+            protocol.set_cache(organization_cache::OrganizationCache::new(
+                self.paths.clone(),
+            ))?;
             Ok(NativeDesktopOwners {
                 services: ClientServices {
                     routes,
@@ -180,7 +262,13 @@ impl NativeOwnerFactory for Factory {
                     journal: journal.clone(),
                     organization: Arc::new(protocol::Decoder),
                     delegate: protocol.clone(),
-                    discovery: native.map(crate::platform::local_server_client::trusted_discovery),
+                    discovery: native
+                        .map(crate::platform::local_server_client::trusted_discovery)
+                        .or_else(|| {
+                            context
+                                .native_failure
+                                .map(crate::platform::server_client_route::failed_local_discovery)
+                        }),
                     limits: spaceterm_client::limits::ClientLimits::default(),
                     additional_capabilities: vec![
                         spaceterm_protocol::negotiation::CAPABILITY_SERVER_GIT,

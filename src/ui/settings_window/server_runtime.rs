@@ -156,11 +156,10 @@ impl SettingsServices {
         native: Option<&spaceterm_client_native::NativeClientProvider>,
     ) -> Result<Self, ClientFailure> {
         let mut result = Self::default();
+        // Local discovery may be unavailable while unrelated remote inventories are usable.
+        // Failed discovery supplies no native authority to any saved binding.
         let registration = native
-            .map(|provider| provider.management().supervisor().discover())
-            .transpose()
-            .map_err(|_| ClientFailure::new(ClientFailureClass::Unavailable))?
-            .flatten();
+            .and_then(|provider| provider.management().supervisor().discover().ok().flatten());
         for saved in journal.snapshot()?.bindings() {
             let binding = saved.binding()?;
             if !journal.ordinary_use_allowed(&binding)? {
@@ -174,7 +173,8 @@ impl SettingsServices {
                 ));
             }
             if let (Some(provider), Some(registration)) = (native, registration.as_ref()) {
-                result.admit_native(provider, registration, &binding)?;
+                // Never let one refused local endpoint remove other servers' inventory.
+                let _ = result.admit_native(provider, registration, &binding);
             }
         }
         Ok(result)

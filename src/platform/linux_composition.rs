@@ -199,7 +199,15 @@ fn compose(
     let appearance = Rc::new(super::linux_appearance::LinuxAppearancePlatform::new(
         bus.clone(),
     ));
-    let desktop_client_startup = super::desktop_client_startup::production(startup.paths())?;
+    let askpass: Arc<dyn crate::ssh::askpass::AskPassWindowFactory> =
+        Arc::new(super::unix_askpass_transport::AskPassWindowFactory::new(
+            super::launch_host::running_executable(),
+        ));
+    let desktop_client_startup = super::desktop_client_startup::production(
+        startup.paths(),
+        startup.server_ssh_startup(),
+        askpass.clone(),
+    )?;
     let settings_storage = startup.settings_storage();
     let settings_file = startup.settings_file();
     let activity: Rc<dyn crate::platform::application_activity::ApplicationActivity> =
@@ -244,11 +252,7 @@ fn compose(
             startup.home_directory.to_str(),
         ),
     ));
-    let remote_workspace = startup.remote_backend_factory(Arc::new(
-        super::unix_askpass_transport::AskPassWindowFactory::new(
-            super::launch_host::running_executable(),
-        ),
-    ));
+    let remote_workspace = startup.remote_backend_factory(askpass);
     // Repository Status reads run on threads that the deterministic test executor rejects.
     let repository_status = (!cfg!(test)).then(|| {
         super::repository_status_host::repository_status_adapters(

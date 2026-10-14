@@ -97,7 +97,25 @@ pub struct ClientRuntime {
 
 impl ClientRegistry {
     pub async fn recover(services: ClientServices) -> Result<(Self, ClientRuntime), ClientFailure> {
+        Self::recover_with_retained(services, vec![]).await
+    }
+
+    /// Seed bounded metadata before actors or presentation consume a recovered personal view.
+    /// These snapshots are stale presentation only, never connection or control authority.
+    pub async fn recover_with_retained(
+        services: ClientServices,
+        snapshots: Vec<spaceterm_core::organization::OrganizationSnapshot>,
+    ) -> Result<(Self, ClientRuntime), ClientFailure> {
         let limits = services.limits.validate()?;
+        if snapshots.len() > limits.saved_servers {
+            return Err(resource_limit());
+        }
+        let mut retained = BTreeMap::new();
+        for snapshot in snapshots {
+            if retained.insert(snapshot.state().server, snapshot).is_some() {
+                return Err(ClientFailure::new(ClientFailureClass::InvalidStorage));
+            }
+        }
         if services.additional_capabilities.len() > 3
             || services.additional_capabilities.iter().any(|capability| {
                 !matches!(
@@ -133,7 +151,8 @@ impl ClientRegistry {
         };
         let runtime = ClientRuntime { shared };
         for binding in bindings {
-            registry.register(binding).await?;
+            let snapshot = retained.remove(&binding.target().server());
+            registry.register_retained(binding, snapshot).await?;
         }
         Ok((registry, runtime))
     }
@@ -141,6 +160,13 @@ impl ClientRegistry {
     pub async fn register(
         &self,
         binding: PairedServerBinding,
+    ) -> Result<ServerHandle, ClientFailure> {
+        self.register_retained(binding, None).await
+    }
+    async fn register_retained(
+        &self,
+        binding: PairedServerBinding,
+        snapshot: Option<spaceterm_core::organization::OrganizationSnapshot>,
     ) -> Result<ServerHandle, ClientFailure> {
         if self.shared.stopped.load(Ordering::Acquire) {
             return Err(cancelled());
@@ -176,7 +202,12 @@ impl ClientRegistry {
                 delay: None,
             },
         });
-        let replica = Replica::new(server, Arc::clone(&self.shared.residency));
+        let mut replica = Replica::new(server, Arc::clone(&self.shared.residency));
+        if let Some(snapshot) = snapshot {
+            let token = replica.begin_resync(snapshot.epoch())?;
+            replica.install_snapshot(token, snapshot)?;
+            replica.invalidate(crate::replica::ResyncReason::ConnectionLost);
+        }
         let receive_replica = replica.subscribe();
         let (connect, requests) = mpsc::channel(8);
         let (shutdown, receive_shutdown) = watch::channel(false);
