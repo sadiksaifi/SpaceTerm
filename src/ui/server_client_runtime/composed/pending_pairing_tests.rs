@@ -361,7 +361,7 @@ impl DirectInvitationPreparation for NoEnrollment {
     }
 }
 #[derive(Default)]
-struct OrdinaryCredentialProbe(AtomicUsize);
+struct OrdinaryCredentialProbe(AtomicUsize, Mutex<Vec<ConnectionTarget>>);
 impl CredentialSource for OrdinaryCredentialProbe {
     fn signing_access<'a>(
         &'a self,
@@ -369,6 +369,7 @@ impl CredentialSource for OrdinaryCredentialProbe {
         purpose: ConnectionPurpose,
     ) -> spaceterm_client::ports::ClientFuture<'a, SigningAccess> {
         self.0.fetch_add(1, Ordering::SeqCst);
+        self.1.lock().unwrap().push(target.clone());
         Box::pin(async move { wire::Credentials.signing_access(target, purpose).await })
     }
 }
@@ -983,6 +984,42 @@ fn desktop_recovered_journal_scheduler_quit_drains_in_progress_exact_cleanup(
 }
 
 impl Harness {
+    fn retain_newer_pairing(
+        &self,
+        newer: &Pairing,
+        journal: &JournalController,
+    ) -> (PreparedCredential, WorkspaceAttachment) {
+        self.executor.block_on(newer.seed(journal));
+        let device = PreparedCredential {
+            scope: CredentialScope::new(CredentialScopeParts {
+                namespace: self.old.credential.scope.parts().namespace.clone(),
+                purpose: CredentialPurpose::DeviceIdentity,
+                reference: CredentialReference::new([33; 16]),
+            })
+            .unwrap(),
+            public_key: wire::TestKey::new(100).public_key(),
+        };
+        self.credentials
+            .items
+            .lock()
+            .unwrap()
+            .extend([newer.credential.clone(), device.clone()]);
+        let attachment = WorkspaceAttachment::new(
+            WorkspaceId::new(newer.binding.target().server(), 1).unwrap(),
+            newer.binding.target().pairing(),
+            newer.binding.target().client(),
+            AttachmentIncarnation::new(1).unwrap(),
+        )
+        .unwrap();
+        self.executor
+            .block_on(
+                journal
+                    .record_attachment(newer.binding.target().local_pairing().unwrap(), attachment),
+            )
+            .unwrap();
+        (device, attachment)
+    }
+
     fn install_native_ipc(
         &self,
         paths: Arc<crate::platform::app_paths::AppPaths>,
@@ -1083,7 +1120,17 @@ fn serve_pending_ipc(
     (stop, service)
 }
 
-fn production_pending_only_ipc_restart(major: u32, cx: &mut TestAppContext) {
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum NativeIpcRestart {
+    PendingOnly,
+    NewerWssPairing,
+}
+
+fn production_pending_only_ipc_restart(
+    major: u32,
+    restart: NativeIpcRestart,
+    cx: &mut TestAppContext,
+) {
     use crate::platform::{
         app_directories::{AppDirectories, AppDirectoryEnvironment},
         app_paths::AppPaths,
@@ -1191,7 +1238,87 @@ fn production_pending_only_ipc_restart(major: u32, cx: &mut TestAppContext) {
     let mut restarted = cx.new_app();
     let journal = h.reopen();
     assert!(journal.snapshot().unwrap().bindings().is_empty());
+    // Reserve an isolated loopback destination for the newer WSS binding. Close
+    // ordinary dials before authentication; only the old private IPC peer below
+    // may authenticate restricted work. No real service or account is contacted.
+    let (newer_route, wss_service) = if restart == NativeIpcRestart::NewerWssPairing {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        let service = {
+            let _entered = h.executor.enter();
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            h.executor.spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = &mut stopped => break,
+                        accepted = listener.accept() => drop(accepted.unwrap()),
+                    }
+                }
+            })
+        };
+        (
+            spaceterm_client::api::RouteDescription::new(spaceterm_client::api::RouteParts::Wss {
+                address,
+                server_name: "localhost".into(),
+            })
+            .unwrap(),
+            Some((stop, service)),
+        )
+    } else {
+        (route.description().clone(), None)
+    };
+    let newer = Pairing::at_native_route(
+        2,
+        registration.server_pin(),
+        h.old.binding.target().device(),
+        newer_route,
+        identity.as_ref(),
+    );
+    let retained = if restart == NativeIpcRestart::NewerWssPairing {
+        let retained = h.retain_newer_pairing(&newer, &journal);
+        assert_eq!(
+            journal.snapshot().unwrap().bindings(),
+            std::slice::from_ref(&newer.saved)
+        );
+        assert!(matches!(
+            crate::platform::local_server_client::discover(
+                &NativeClientProvider::from_supervisor(fixture.reopen()),
+                &journal,
+            ),
+            Err(failure) if failure.class() == ClientFailureClass::StaleAuthority
+        ));
+        Some(retained)
+    } else {
+        None
+    };
+    let start_ipc = || {
+        let _entered = h.executor.enter();
+        let listener = IpcListener::bind(
+            registration.endpoint().unwrap(),
+            MessageLimit::new(spaceterm_protocol::limits::MAX_FRAME_BYTES).unwrap(),
+            AdmissionLimits::new(8, Duration::from_secs(5)).unwrap(),
+        )
+        .unwrap();
+        serve_pending_ipc(
+            &h.executor,
+            listener,
+            h.endpoint.clone(),
+            original.task.clone(),
+        )
+    };
+    let recovered_ipc = if restart == NativeIpcRestart::NewerWssPairing {
+        Some(start_ipc())
+    } else {
+        None
+    };
+    assert_eq!(
+        journal.snapshot().unwrap().revocations()[0].task,
+        original.task
+    );
     let ordinary_reads = h.ordinary_credentials.0.load(Ordering::SeqCst);
+    let ordinary_targets = h.ordinary_credentials.1.lock().unwrap().len();
     let attempts = journal.snapshot().unwrap().revocations()[0].attempts;
     let (runtime, startup) = h.install_native_ipc(
         paths,
@@ -1199,11 +1326,21 @@ fn production_pending_only_ipc_restart(major: u32, cx: &mut TestAppContext) {
         journal.clone(),
         &mut restarted,
     );
-    assert!(h.snapshot(&mut restarted).servers.is_empty());
+    match restart {
+        NativeIpcRestart::PendingOnly => assert!(h.snapshot(&mut restarted).servers.is_empty()),
+        NativeIpcRestart::NewerWssPairing => {
+            assert_eq!(h.snapshot(&mut restarted).servers.len(), 1);
+            assert_eq!(
+                journal.snapshot().unwrap().bindings(),
+                std::slice::from_ref(&newer.saved)
+            );
+            assert!(journal.ordinary_use_allowed(&newer.binding).unwrap());
+        }
+    }
     assert!(h.snapshot(&mut restarted).pending_unpairs.is_empty());
     h.drive_until(
         &mut restarted,
-        "pending-only native restart lost its scheduler",
+        "native restart lost its retained revocation scheduler",
         || journal.snapshot().unwrap().revocations()[0].attempts > attempts,
     );
     assert!(!journal.ordinary_use_allowed(&h.old.binding).unwrap());
@@ -1220,62 +1357,18 @@ fn production_pending_only_ipc_restart(major: u32, cx: &mut TestAppContext) {
         h.executor.block_on(ordinary_routes.open(h.old.binding.target(), ConnectionPurpose::Ordinary)),
         Err(failure) if failure.class() == ClientFailureClass::StaleAuthority
     ));
-    assert_eq!(
-        h.ordinary_credentials.0.load(Ordering::SeqCst),
-        ordinary_reads
-    );
+    if restart == NativeIpcRestart::PendingOnly {
+        assert_eq!(
+            h.ordinary_credentials.0.load(Ordering::SeqCst),
+            ordinary_reads
+        );
+    }
 
-    // A deliberate later pairing is durable before availability returns. It must
-    // not redirect the old route, credential, pin or operation, or be cleaned up.
-    let newer = Pairing::at_native_route(
-        2,
-        registration.server_pin(),
-        h.old.binding.target().device(),
-        route.description().clone(),
-        identity.as_ref(),
-    );
-    h.executor.block_on(newer.seed(&journal));
-    let device = PreparedCredential {
-        scope: CredentialScope::new(CredentialScopeParts {
-            namespace: h.old.credential.scope.parts().namespace.clone(),
-            purpose: CredentialPurpose::DeviceIdentity,
-            reference: CredentialReference::new([33; 16]),
-        })
-        .unwrap(),
-        public_key: wire::TestKey::new(100).public_key(),
-    };
-    h.credentials
-        .items
-        .lock()
-        .unwrap()
-        .extend([newer.credential.clone(), device.clone()]);
-    let attachment = WorkspaceAttachment::new(
-        WorkspaceId::new(newer.binding.target().server(), 1).unwrap(),
-        newer.binding.target().pairing(),
-        newer.binding.target().client(),
-        AttachmentIncarnation::new(1).unwrap(),
-    )
-    .unwrap();
-    h.executor
-        .block_on(
-            journal.record_attachment(newer.binding.target().local_pairing().unwrap(), attachment),
-        )
-        .unwrap();
-    let (stop, service) = {
-        let _entered = h.executor.enter();
-        let listener = IpcListener::bind(
-            registration.endpoint().unwrap(),
-            MessageLimit::new(spaceterm_protocol::limits::MAX_FRAME_BYTES).unwrap(),
-            AdmissionLimits::new(8, Duration::from_secs(5)).unwrap(),
-        )
-        .unwrap();
-        serve_pending_ipc(
-            &h.executor,
-            listener,
-            h.endpoint.clone(),
-            original.task.clone(),
-        )
-    };
+    // The original empty restart retains its later same-route pairing. The new
+    // scenario already recovered with a durable different-route pairing. Neither
+    // may redirect the old route, credential, pin or operation, or be cleaned up.
+    let (device, attachment) = retained.unwrap_or_else(|| h.retain_newer_pairing(&newer, &journal));
+    let (stop, service) = recovered_ipc.unwrap_or_else(start_ipc);
     h.drive_until(
         &mut restarted,
         "production native route never authenticated retained IPC revocation",
@@ -1314,16 +1407,31 @@ fn production_pending_only_ipc_restart(major: u32, cx: &mut TestAppContext) {
     let saved = journal.snapshot().unwrap();
     assert!(saved.bindings().contains(&newer.saved));
     assert!(!saved.suppresses(&attachment));
+    assert_eq!(saved.incarnation_floor(), Some(attachment.incarnation()));
     assert!(journal.ordinary_use_allowed(&newer.binding).unwrap());
-    assert!(
-        runtime
-            .read_with(&mut restarted, |runtime, _| runtime.servers())
-            .is_empty()
-    );
-    assert_eq!(
-        h.ordinary_credentials.0.load(Ordering::SeqCst),
-        ordinary_reads
-    );
+    match restart {
+        NativeIpcRestart::PendingOnly => {
+            assert!(
+                runtime
+                    .read_with(&mut restarted, |runtime, _| runtime.servers())
+                    .is_empty()
+            );
+            assert_eq!(
+                h.ordinary_credentials.0.load(Ordering::SeqCst),
+                ordinary_reads
+            );
+        }
+        NativeIpcRestart::NewerWssPairing => {
+            let servers = runtime.read_with(&mut restarted, |runtime, _| runtime.servers());
+            assert_eq!(servers.len(), 1);
+            assert_eq!(servers[0].server, newer.binding.target().server());
+            assert!(
+                h.ordinary_credentials.1.lock().unwrap()[ordinary_targets..]
+                    .iter()
+                    .all(|target| target == newer.binding.target())
+            );
+        }
+    }
     assert!(
         h.endpoint
             .tasks
@@ -1345,6 +1453,13 @@ fn production_pending_only_ipc_restart(major: u32, cx: &mut TestAppContext) {
             .await
             .unwrap()
             .unwrap();
+        if let Some((stop, service)) = wss_service {
+            stop.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), service)
+                .await
+                .unwrap()
+                .unwrap();
+        }
     });
     restarted.quit();
 }
@@ -1353,12 +1468,26 @@ fn production_pending_only_ipc_restart(major: u32, cx: &mut TestAppContext) {
 fn desktop_production_pending_only_ipc_restart_completes_exact_revocation_major1(
     cx: &mut TestAppContext,
 ) {
-    production_pending_only_ipc_restart(1, cx);
+    production_pending_only_ipc_restart(1, NativeIpcRestart::PendingOnly, cx);
 }
 
 #[gpui::test]
 fn desktop_production_pending_only_ipc_restart_completes_exact_revocation_major2(
     cx: &mut TestAppContext,
 ) {
-    production_pending_only_ipc_restart(2, cx);
+    production_pending_only_ipc_restart(2, NativeIpcRestart::PendingOnly, cx);
+}
+
+#[gpui::test]
+fn desktop_production_pending_ipc_restart_preserves_preexisting_wss_pairing_major1(
+    cx: &mut TestAppContext,
+) {
+    production_pending_only_ipc_restart(1, NativeIpcRestart::NewerWssPairing, cx);
+}
+
+#[gpui::test]
+fn desktop_production_pending_ipc_restart_preserves_preexisting_wss_pairing_major2(
+    cx: &mut TestAppContext,
+) {
+    production_pending_only_ipc_restart(2, NativeIpcRestart::NewerWssPairing, cx);
 }

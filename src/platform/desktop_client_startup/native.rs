@@ -232,17 +232,40 @@ impl Factory {
                     )
                     .await?;
             }
-            let local = if let Some(provider) = native.clone() {
+            let (local, local_routes) = if let Some(provider) = native.clone() {
                 let discovery_journal = journal.clone();
                 tokio::task::spawn_blocking(move || {
-                    crate::platform::local_server_client::discover(&provider, &discovery_journal)
+                    // Restricted IPC authority comes only from trusted account/build
+                    // registration, independently of ordinary-binding admission. A
+                    // later WSS binding or self-unpair must not retire this authority.
+                    // The native endpoint checks still admit the exact private route;
+                    // a retained route string grants no local filesystem authority.
+                    let local_routes = provider
+                        .management()
+                        .supervisor()
+                        .discover()
+                        .ok()
+                        .flatten()
+                        .and_then(|registration| {
+                            spaceterm_client_native::route::LocalRouteAuthority::new(
+                                registration.endpoint().ok()?,
+                            )
+                            .ok()
+                        })
+                        .into_iter()
+                        .collect();
+                    let local = crate::platform::local_server_client::discover(
+                        &provider,
+                        &discovery_journal,
+                    )
+                    .ok()
+                    .flatten();
+                    (local, local_routes)
                 })
                 .await
                 .map_err(|_| fail(ClientFailureClass::Unavailable))?
-                .ok()
-                .flatten()
             } else {
-                None
+                (None, Vec::new())
             };
             let local_server = local
                 .as_ref()
@@ -283,21 +306,8 @@ impl Factory {
             })
             .await
             .map_err(|_| fail(ClientFailureClass::Unavailable))?;
-            // Restricted IPC authority comes from trusted account/build registration,
-            // even after self-unpair removes the ordinary binding. A pending route
-            // string grants no endpoint authority. Ordinary IPC still refreshes
-            // registration and requires an unsuppressed binding on every attempt.
-            let local_routes = local
-                .and_then(|local| {
-                    local.route.or_else(|| {
-                        spaceterm_client_native::route::LocalRouteAuthority::new(
-                            local.registration.endpoint().ok()?,
-                        )
-                        .ok()
-                    })
-                })
-                .into_iter()
-                .collect();
+            // Ordinary IPC still refreshes registration and requires an
+            // unsuppressed binding on every attempt through RefreshingRoutes.
             let (remote, pairing_routes): (Arc<dyn spaceterm_client::ports::RouteConnector>, _) =
                 match configuration {
                     Ok((configuration, owner)) => {
