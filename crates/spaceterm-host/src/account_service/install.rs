@@ -1,3 +1,5 @@
+mod retained_artifact;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use spaceterm_core::operations::RequestDigest;
@@ -329,20 +331,66 @@ impl ServiceSupervisor {
             let handle = tokio::runtime::Handle::try_current()
                 .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
             handle
-                .spawn(async move { supervisor.run_install(request, Some(confirmation)).await })
+                .spawn(async move {
+                    let progress = supervisor.run_install(request, Some(confirmation)).await?;
+                    if progress.phase == ServicePhase::Completed {
+                        retained_artifact::clear(&supervisor, request)?;
+                    }
+                    Ok(progress)
+                })
                 .await
                 .map_err(|_| ServiceFailure::Indeterminate)?
         })
     }
-    /// Resumes an already accepted install. If archive staging never completed,
-    /// resubmit the same verified artifact with install; no replacement ID is allocated.
+    /// Resumes an already accepted install. Accepted stages retain exact signed
+    /// bytes and reverify them before same-ID redelivery. Initial installs that
+    /// lack a retained archive still require the same verified artifact.
     pub fn resolve_install(&self, request: NativeRequestId) -> ServiceFuture<'_, ServiceProgress> {
         let supervisor = self.clone();
         Box::pin(async move {
             let handle = tokio::runtime::Handle::try_current()
                 .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
             handle
-                .spawn(async move { supervisor.run_install(request, None).await })
+                .spawn(async move {
+                    let progress = supervisor.run_install(request, None).await?;
+                    if progress.phase == ServicePhase::Completed {
+                        retained_artifact::clear(&supervisor, request)?;
+                        return Ok(progress);
+                    }
+                    let _redelivery = retained_artifact::RECOVERY.lock().await;
+                    // Another resolver may complete this request while archive
+                    // residency is occupied. Read its current original outcome.
+                    let original = supervisor
+                        .original_install(request)?
+                        .ok_or(ServiceFailure::UnknownRequest)?;
+                    if original.phase == ServicePhase::Completed {
+                        retained_artifact::clear(&supervisor, request)?;
+                        return Ok(original.progress(request));
+                    }
+                    if original.stage_basis.is_none() {
+                        return Ok(original.progress(request));
+                    }
+                    let Some(artifact) = retained_artifact::load(&supervisor, request)? else {
+                        // Older accepted requests have no cache. Preserve their
+                        // original pending state and manual same-ID redelivery.
+                        return Ok(progress);
+                    };
+                    if artifact.artifact_sha256() != original.artifact_sha256
+                        || artifact.manifest().version != original.version
+                    {
+                        return Err(ServiceFailure::RequestConflict);
+                    }
+                    let confirmation = ConfirmedServiceInstall {
+                        artifact,
+                        roots: original.roots.unwrap_or_else(|| InstallRoots {
+                            data: supervisor.anchor.join("data"),
+                            runtime: supervisor.anchor.join("runtime"),
+                        }),
+                        desktop_seed: None,
+                        stage_basis: original.stage_basis,
+                    };
+                    supervisor.stage_installation(request, confirmation).await
+                })
                 .await
                 .map_err(|_| ServiceFailure::Indeterminate)?
         })
@@ -652,6 +700,11 @@ impl ServiceSupervisor {
                     installation: None,
                     roots: proposed_roots.cloned(),
                 };
+                if proposed_stage.is_some() {
+                    // Durable signed bytes precede acceptance. A crash after the
+                    // request is accepted cannot lose its only archive source.
+                    retained_artifact::retain(self, request, artifact)?;
+                }
                 self.write_install(request, &record)?;
                 record
             }
