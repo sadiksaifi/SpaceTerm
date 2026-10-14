@@ -1034,12 +1034,11 @@ async fn listener_owner_shutdown_joins_actor_and_removes_endpoint() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        result.unwrap_err().class,
-        ServerFailureClass::RecoveryRequired
-    );
+    let report = result.unwrap();
+    assert!(report.cleanup_confirmed && report.listeners_closed && report.started_writes_finished);
+    assert!(!report.recovery_required);
     assert!(!endpoint.path().exists());
-    assert_eq!(handle.phase(), ServicePhase::RecoveryRequired);
+    assert_eq!(handle.phase(), ServicePhase::Stopped);
     assert_eq!(handle.runtime_status().intent, ServerRunIntent::Running);
     assert_eq!(handle.runtime_status().storage, StorageStatus::Ready);
 }

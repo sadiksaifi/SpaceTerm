@@ -216,3 +216,11 @@ mod tests {
         );
     }
 }
+
+pub(super) fn instance_birth(pid: u32) -> Result<Option<u64>, ServiceFailure> {
+    match read(&PathBuf::from(format!("/proc/{pid}/stat"))) {
+        Ok(bytes) => start(&bytes, pid).map(Some),
+        Err(ServiceFailure::Missing) => Ok(None),
+        Err(error) => Err(error),
+    }
+}

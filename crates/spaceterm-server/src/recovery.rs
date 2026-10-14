@@ -46,11 +46,20 @@ pub(crate) async fn recover(
     // The provider verifies all previous-instance ownership even with an empty
     // expected list. A new registry's emptiness is never process-cleanup evidence.
     let expected = expected_cleanup(&recovered)?;
-    let sessions: Vec<_> = expected.keys().copied().collect();
+    let sessions = expected
+        .iter()
+        .map(|(session, reason)| {
+            RetiredSession::new(*session, *reason, RetirementCleanupState::AwaitingEvidence)
+                .map_err(|_| failure(ServerFailureClass::RecoveryRequired))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let cleanup = host_management
-        .previous_instance_cleanup(expected_server, recovered.last_epoch, &sessions)
+        .reconcile_previous_instance(expected_server, recovered.last_epoch, &sessions)
         .await?;
     validate_cleanup(&expected, &cleanup)?;
+    host_management
+        .prepare_next_instance(expected_server, next_epoch)
+        .await?;
 
     let edits = external_work.reconcile(&recovered).await?;
     if edits.transactions.len() > 64 {

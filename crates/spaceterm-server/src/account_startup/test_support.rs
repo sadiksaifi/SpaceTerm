@@ -32,6 +32,9 @@ impl ServiceManager for Manager {
                 .map_err(|_| ServiceFailure::SupervisorUnavailable)?)
         })
     }
+    fn scoped_processes<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, Vec<u32>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
     fn linger(&self) -> ServiceFuture<'_, Option<LingerState>> {
         Box::pin(async { Ok(Some(LingerState::Enabled)) })
     }
@@ -84,6 +87,52 @@ pub fn supervisor(
     Ok(Arc::new(fixture.with_providers(
         Arc::new(Manager(Mutex::new(SupervisorState::Running))),
         processes,
+        Arc::new(Clock),
+        None,
+    )))
+}
+
+struct FixtureInstallations;
+impl spaceterm_host::account_service::ServiceInstallations for FixtureInstallations {
+    fn approved_executable(
+        &self,
+        _: &RegisteredServer,
+    ) -> Result<std::path::PathBuf, ServiceFailure> {
+        std::env::current_exe().map_err(|_| ServiceFailure::StorageUnavailable)
+    }
+    fn uninstall(&self, _: &RegisteredServer) -> Result<(), ServiceFailure> {
+        Ok(())
+    }
+}
+
+/// Uses the production signed custody and native process provider. Only the
+/// service-manager scope and executable selection are supplied by the fixture.
+pub fn retained_supervisor(root: &Path) -> Result<Arc<ServiceSupervisor>, StartupFailure> {
+    retained_supervisor_with_clock(root, None)
+}
+
+/// Injects only the native boot-clock observation for reboot acceptance.
+pub fn retained_supervisor_with_clock(
+    root: &Path,
+    clock: Option<Arc<dyn ServiceClock>>,
+) -> Result<Arc<ServiceSupervisor>, StartupFailure> {
+    use spaceterm_host::account_service::{
+        NativeServiceProcesses, runtime_inventory::RetainedRuntimeProcesses,
+    };
+    let fixture = AccountServiceFixture::new(root, BuildIdentity::Development)
+        .map_err(StartupFailure::Account)?;
+    let manager: Arc<dyn ServiceManager> = Arc::new(Manager(Mutex::new(SupervisorState::Running)));
+    let processes = NativeServiceProcesses::current(Arc::new(FixtureInstallations))
+        .map_err(StartupFailure::Account)?
+        .with_manager(manager.clone())
+        .with_runtime(Arc::new(RetainedRuntimeProcesses));
+    let processes = match clock {
+        Some(clock) => processes.with_clock(clock),
+        None => processes,
+    };
+    Ok(Arc::new(fixture.with_providers(
+        manager,
+        Arc::new(processes),
         Arc::new(Clock),
         None,
     )))
@@ -157,7 +206,7 @@ pub async fn run(root: &Path) -> Result<crate::shutdown::ShutdownReport, Startup
         .canonicalize()
         .map_err(|_| StartupFailure::Account(ServiceFailure::StorageUnavailable))?;
     let facts = TrustedAccountFacts::current().map_err(StartupFailure::Account)?;
-    let supervisor = supervisor(&root, Arc::new(StartupAbsence))?;
+    let supervisor = retained_supervisor(&root)?;
     let startup = AccountStartup::admit(&supervisor)?;
     let launch = AccountLaunchFacts {
         uid: facts.uid(),

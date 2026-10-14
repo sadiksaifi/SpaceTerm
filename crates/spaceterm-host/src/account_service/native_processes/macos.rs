@@ -83,3 +83,95 @@ pub(super) fn observe(
         executable,
     }))
 }
+
+/// Uses the same immutable XNU birth used by PTY retirement, not a coarse timestamp.
+pub(super) fn instance_birth(pid: u32) -> Result<Option<u64>, ServiceFailure> {
+    use crate::pty::{macos_pty_host::MacosPtyHost, unix_pty::UnixPtyHost as _};
+    MacosPtyHost
+        .process_birth(pid as i32)
+        .map_err(|_| ServiceFailure::CleanupUnresolved)
+}
+
+/// Proves descendant absence using immutable original-parent births. A missing
+/// intermediate parent newer than the old instance is unresolved, not clean.
+/// The fence excludes fork races and unpublished children; no sampled PID is killed.
+pub(super) fn previous_instance_absent(root_birth: u64) -> Result<(), ServiceFailure> {
+    use crate::pty::{macos_pty_host::MacosPtyHost, unix_pty::UnixPtyHost as _};
+    let host = MacosPtyHost;
+    for _ in 0..64 {
+        let result = (|| {
+            let before = host
+                .process_creation_epoch()
+                .map_err(|_| ServiceFailure::CleanupUnresolved)?;
+            let pids = host
+                .settlement_process_ids()
+                .map_err(|_| ServiceFailure::CleanupUnresolved)?;
+            if pids.len() > 65536 {
+                return Err(ServiceFailure::LimitExceeded);
+            }
+            let mut lineage = std::collections::BTreeMap::new();
+            for pid in pids.into_iter().filter(|pid| *pid > 0) {
+                if let Some((birth, parent)) = host
+                    .process_lineage(pid)
+                    .map_err(|_| ServiceFailure::CleanupUnresolved)?
+                    && lineage.insert(birth, parent).is_some()
+                {
+                    return Err(ServiceFailure::CleanupUnresolved);
+                }
+            }
+            let after = host
+                .process_creation_epoch()
+                .map_err(|_| ServiceFailure::CleanupUnresolved)?;
+            if !before.no_intervening_fork(after) {
+                return Err(ServiceFailure::CleanupUnresolved);
+            }
+            lineage_absent(root_birth, &lineage)
+        })();
+        if result.is_ok() || matches!(result, Err(ServiceFailure::LimitExceeded)) {
+            return result;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    Err(ServiceFailure::CleanupUnresolved)
+}
+
+fn lineage_absent(
+    root: u64,
+    lineage: &std::collections::BTreeMap<u64, u64>,
+) -> Result<(), ServiceFailure> {
+    if lineage.contains_key(&root) {
+        return Err(ServiceFailure::CleanupUnresolved);
+    }
+    let mut unrelated = std::collections::BTreeSet::new();
+    // Births are ordered, so every retained parent has already been classified.
+    // Missing parents newer than the root remain ambiguous. Never guess their
+    // ancestry from a reusable PID or a current launchd parent.
+    for (&birth, &parent) in lineage.range(root..) {
+        if parent >= birth || parent == root || (parent > root && !unrelated.contains(&parent)) {
+            return Err(ServiceFailure::CleanupUnresolved);
+        }
+        unrelated.insert(birth);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod lineage_tests {
+    use super::*;
+    #[test]
+    fn dead_root_does_not_discharge_live_or_ambiguous_descendants() {
+        assert_eq!(
+            lineage_absent(100, &[(101, 100)].into()),
+            Err(ServiceFailure::CleanupUnresolved)
+        );
+        assert_eq!(
+            lineage_absent(100, &[(103, 102)].into()),
+            Err(ServiceFailure::CleanupUnresolved)
+        );
+        assert_eq!(lineage_absent(100, &[(103, 102), (102, 99)].into()), Ok(()));
+        assert_eq!(
+            lineage_absent(100, &[(103, 102), (102, 100)].into()),
+            Err(ServiceFailure::CleanupUnresolved)
+        );
+    }
+}

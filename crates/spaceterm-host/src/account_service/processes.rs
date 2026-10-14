@@ -116,6 +116,42 @@ pub trait ServiceProcesses: Send + Sync {
     ) -> ServiceFuture<'a, Vec<SessionCleanupObservation>>;
     /// Proves manager scope, descendant processes and the registered endpoint are absent.
     fn verify_absent<'a>(&'a self, registration: &'a RegisteredServer) -> ServiceFuture<'a, ()>;
+    /// Reconciles only the exact old-epoch Sessions and first retirement reasons
+    /// recovered from the validated durable store. Default adapters preserve the
+    /// original cleanup interface and must return those exact reasons.
+    fn reconcile_previous_instance<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+        epoch: ServerEpoch,
+        expected: &'a [spaceterm_core::retirement::RetiredSession],
+    ) -> ServiceFuture<'a, Vec<SessionCleanupObservation>> {
+        Box::pin(async move {
+            let sessions: Vec<_> = expected.iter().map(|value| value.session()).collect();
+            let observations = self
+                .previous_instance_cleanup(registration, epoch, &sessions)
+                .await?;
+            cleanup_matches(&sessions, &observations)?;
+            if !expected
+                .iter()
+                .zip(&observations)
+                .all(|(expected, observed)| expected.first_reason() == observed.first_reason())
+            {
+                return Err(ServiceFailure::CleanupUnresolved);
+            }
+            Ok(observations)
+        })
+    }
+    /// Uses an opaque scope proof issued only after native-manager and endpoint
+    /// absence have been observed. Ordinary requests cannot construct this proof.
+    fn reconcile_previous_instance_with_absence<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+        epoch: ServerEpoch,
+        expected: &'a [spaceterm_core::retirement::RetiredSession],
+        _absence: &'a super::runtime_inventory::NativeInstanceAbsence,
+    ) -> ServiceFuture<'a, Vec<SessionCleanupObservation>> {
+        self.reconcile_previous_instance(registration, epoch, expected)
+    }
     /// Establishes exact previous-instance ownership before startup recovery.
     fn previous_instance_cleanup<'a>(
         &'a self,
