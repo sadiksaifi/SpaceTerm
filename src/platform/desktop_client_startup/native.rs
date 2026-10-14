@@ -125,6 +125,8 @@ impl NativeOwnerFactory for Factory {
                     additional_capabilities: vec![
                         spaceterm_protocol::negotiation::CAPABILITY_SERVER_GIT,
                         spaceterm_protocol::negotiation::CAPABILITY_SERVER_DIRECTORIES,
+                        spaceterm_protocol::negotiation::CAPABILITY_APPLICATION_MOUSE,
+                        spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA,
                     ],
                 },
                 journal,

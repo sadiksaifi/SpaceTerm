@@ -377,8 +377,6 @@ pub(crate) fn validate_command_fence(
         stamp.fence() != fence
             || cell.session != fence.session()
             || !stamp.base().contains(cell.row)
-            || cell.row.node_serial == 0
-            || cell.row.screen_generation == 0
     }) {
         return Err(RuntimeFailure::new(
             spaceterm_core::organization::FailureClass::InvalidRequest,

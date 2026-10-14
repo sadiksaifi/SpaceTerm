@@ -517,6 +517,7 @@ fn reply_policy(payload: &spaceterm_protocol::codec::Payload) -> Result<bool, Eg
                     | Kind::ServerDirectoryResult(_)
                     | Kind::ContentReadResponse(_)
                     | Kind::ContentPublication(_)
+                    | Kind::MetadataPublication(_)
                     | Kind::ContentInvalidation(_)
                     | Kind::NativeRequest(_)
                     | Kind::ResourceChunk(_),

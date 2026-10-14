@@ -229,6 +229,8 @@ impl ConnectionCapabilities {
             CAPABILITY_CANONICAL_DOMAIN,
             CAPABILITY_SERVER_GIT,
             CAPABILITY_SERVER_DIRECTORIES,
+            CAPABILITY_APPLICATION_MOUSE,
+            CAPABILITY_RUNTIME_METADATA,
         ]
         .into_iter()
         .enumerate()
@@ -246,6 +248,8 @@ impl ConnectionCapabilities {
             CAPABILITY_CANONICAL_DOMAIN => 1,
             CAPABILITY_SERVER_GIT => 2,
             CAPABILITY_SERVER_DIRECTORIES => 3,
+            CAPABILITY_APPLICATION_MOUSE => 4,
+            CAPABILITY_RUNTIME_METADATA => 5,
             _ => return false,
         };
         self.0 & (1 << index) != 0

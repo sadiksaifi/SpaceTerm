@@ -338,6 +338,31 @@ impl PaneChannels {
         }
         Ok(())
     }
+    /// Routes display metadata only to existing live attachments. A remote
+    /// publication cannot create a channel, attachment or local authority.
+    /// Delayed publications for retired fences or source sequences are ignored.
+    pub fn receive_metadata(
+        &self,
+        fence: EffectFence,
+        snapshot: RuntimeMetadataSnapshot,
+    ) -> Result<bool, ClientFailure> {
+        let mut delivered = false;
+        for inner in self.channels(fence.session().pane.server())? {
+            if inner.pane != fence.session().pane {
+                continue;
+            }
+            let Some(lease) = inner.lease.upgrade() else {
+                continue;
+            };
+            let channel = PaneChannel { inner, lease };
+            match channel.publish_metadata(fence, snapshot.clone()) {
+                Ok(()) => delivered = true,
+                Err(error) if error.class() == ClientFailureClass::StaleAuthority => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(delivered)
+    }
     /// The attachment owner invalidates and captures grants under the exact
     /// incarnation. A delayed task cannot touch a later live attachment.
     pub fn invalidate_attachment(

@@ -389,6 +389,28 @@ impl ConnectionDelegate for NativeProtocol {
         channel: &'a mut dyn ProtocolChannel,
     ) -> ClientFuture<'a, ()> {
         Box::pin(async move {
+            let metadata = match &message {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::MetadataPublication(value)),
+                }) => Some(
+                    spaceterm_protocol::convert::metadata::v1::decode_publication(value)
+                        .map_err(ClientFailure::from)?,
+                ),
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::MetadataPublication(value)),
+                }) => Some(
+                    spaceterm_protocol::convert::metadata::v2::decode_publication(value)
+                        .map_err(ClientFailure::from)?,
+                ),
+                _ => None,
+            };
+            if let Some((fence, snapshot)) = metadata {
+                if fence.connection() != info.binding || fence.session().epoch != info.epoch {
+                    return Err(invalid());
+                }
+                self.channels()?.receive_metadata(fence, snapshot)?;
+                return Ok(());
+            }
             let direct = DirectPeer {
                 owner: self,
                 info,
@@ -418,7 +440,10 @@ impl ConnectionDelegate for NativeProtocol {
                         .lock()
                         .map_err(|_| invalid())?
                         .remove(&(info.server, request))
-                        && permit.permit.fence() != fence
+                        // RuntimeOutcome's frozen wire fence omits content. Its
+                        // request identifies the original captured permit; compare
+                        // every transmitted field without rebinding its content.
+                        && !fence.is_current(&permit.permit.fence())
                     {
                         return Err(invalid());
                     }
@@ -617,6 +642,16 @@ impl PaneConnectionPort for NativeProtocol {
         }
         let server = command.fence.session().pane.server();
         let (handle, info) = self.connected(server)?;
+        if matches!(
+            &command.command,
+            spaceterm_terminal::runtime_contracts::RuntimeCommand::Pointer(_)
+                | spaceterm_terminal::runtime_contracts::RuntimeCommand::Wheel(_)
+        ) && !info
+            .capabilities
+            .supports(spaceterm_protocol::negotiation::CAPABILITY_APPLICATION_MOUSE)
+        {
+            return Err(fail(ClientFailureClass::MissingCapability));
+        }
         let request = self.next()?;
         let payload = match info.major {
             1 => Payload::Major1(v1::Message {

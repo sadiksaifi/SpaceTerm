@@ -249,3 +249,106 @@ inputs!(
     v2,
     Major2
 );
+
+macro_rules! mouse_inputs {
+    ($name:ident, $p:ident) => {
+        #[test]
+        fn $name() {
+            use spaceterm_terminal::{
+                InputModifiers,
+                pointer_input::{PointerButton, PointerPhase},
+            };
+            let captured = fence(Some(ContentRevision::new(7)));
+            let base = ContentBase {
+                session: captured.session(),
+                revision: ContentRevision::new(7),
+                topology_revision: 8,
+                screen_generation: 9,
+                screen: Screen::Alternate,
+            };
+            let stamp = QueryStamp::new(
+                captured,
+                base,
+                ContentRequestId::new(11).unwrap(),
+                RequestGeneration::new(12),
+            )
+            .unwrap();
+            let cell = CellRef {
+                session: base.session,
+                row: RowId {
+                    screen: base.screen,
+                    screen_generation: 9,
+                    node_serial: 0,
+                    page_row: 13,
+                },
+                row_revision: 14,
+                column: 15,
+            };
+            let modifiers = InputModifiers {
+                shift: true,
+                control: true,
+                alt_right: true,
+                ..Default::default()
+            };
+            for command in [
+                RuntimeCommand::Pointer(ApplicationPointerInput {
+                    stamp,
+                    cell,
+                    phase: PointerPhase::Press,
+                    button: Some(PointerButton::Left),
+                    modifiers,
+                }),
+                RuntimeCommand::Pointer(ApplicationPointerInput {
+                    stamp,
+                    cell,
+                    phase: PointerPhase::Motion,
+                    button: Some(PointerButton::Right),
+                    modifiers,
+                }),
+                RuntimeCommand::Pointer(ApplicationPointerInput {
+                    stamp,
+                    cell,
+                    phase: PointerPhase::Release,
+                    button: Some(PointerButton::Middle),
+                    modifiers,
+                }),
+                RuntimeCommand::Pointer(ApplicationPointerInput {
+                    stamp,
+                    cell,
+                    phase: PointerPhase::Motion,
+                    button: None,
+                    modifiers,
+                }),
+                RuntimeCommand::Wheel(ApplicationWheelInput {
+                    stamp,
+                    cell,
+                    horizontal_steps: -3,
+                    vertical_steps: 4,
+                    modifiers,
+                }),
+            ] {
+                let expected = FencedRuntimeCommand {
+                    fence: captured,
+                    command,
+                };
+                let encoded = runtime::$p::encode_command(21, &expected)
+                    .expect("application mouse input must encode");
+                assert_eq!(runtime::$p::decode_command(&encoded).unwrap(), expected);
+                let mut wrong = expected.clone();
+                wrong.fence = fence(Some(ContentRevision::new(6)));
+                assert_eq!(
+                    runtime::$p::encode_command(21, &wrong),
+                    Err(ProtocolError::Malformed)
+                );
+            }
+        }
+    };
+}
+mouse_inputs!(
+    application_mouse_preserves_complete_content_binding_major_1,
+    v1
+);
+mouse_inputs!(
+    application_mouse_preserves_complete_content_binding_major_2,
+    v2
+);

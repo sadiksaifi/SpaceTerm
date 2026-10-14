@@ -62,6 +62,7 @@ message Message {
     ContentPublication content_publication = 50;
     spaceterm.common.AccountRuntimeMessage account_runtime_request = 51;
     spaceterm.common.AccountRuntimeMessage account_runtime_reply = 52;
+    MetadataPublication metadata_publication = 53;
   }
 }
 message OrganizationQuery { uint64 known_revision = 1; bytes continuation = 2; uint64 known_epoch = 3; uint64 request = 4; uint64 request_generation = 5; PublicationPart part = 6; }
@@ -216,7 +217,7 @@ message Paste { bytes text = 1; bytes approval = 2; }
 message Appearance { uint64 generation = 1; uint32 foreground = 2; uint32 background = 3; repeated uint32 palette = 4; bool bold_as_bright = 5; bool dark = 6; }
 message RuntimeCommand {
   spaceterm.common.EffectFence fence = 1; uint64 request = 2;
-  oneof action { Key key = 3; string input_method_text = 4; Paste paste = 5; Pointer pointer = 6; Geometry resize = 7; Appearance appearance = 8; bool focus_report = 9; MeasuredGrid measured_resize = 10; ClearScreenAndScrollback clear_screen_and_scrollback = 11; CellPixelMetrics cell_pixel_metrics = 12; }
+  oneof action { Key key = 3; string input_method_text = 4; Paste paste = 5; Pointer pointer = 6; Geometry resize = 7; Appearance appearance = 8; bool focus_report = 9; MeasuredGrid measured_resize = 10; ClearScreenAndScrollback clear_screen_and_scrollback = 11; CellPixelMetrics cell_pixel_metrics = 12; ApplicationPointer application_pointer = 13; ApplicationWheel application_wheel = 14; }
 }
 message RuntimeOutcome { uint64 request = 1; spaceterm.common.EffectFence fence = 2; spaceterm.common.Failure failure = 3; }
 message CellRef { spaceterm.common.Session session = 1; uint64 screen_generation = 2; uint64 row_id = 3; uint64 row_revision = 4; uint32 column = 5; PhysicalRowId physical_row = 6; }
@@ -462,3 +463,10 @@ message PaneSubscription { spaceterm.common.EffectFence fence = 1; uint64 reques
 // Each transfer replaces the active grid atomically, including a shorter suffix.
 // Complete settles its cursor and suffix. A resync response discards staged parts.
 message ContentPublication { uint64 request = 1; uint64 request_generation = 2; uint64 transfer = 3; uint32 index = 4; uint64 base_revision = 5; ContentReadResponse response = 6; bool complete = 7; }
+
+// APPLICATION_MOUSE carries revision-exact cells, never native coordinates.
+message ApplicationPointer { QueryStamp stamp = 1; CellRef cell = 2; uint32 phase = 3; uint32 button = 4; uint32 modifiers = 5; }
+message ApplicationWheel { QueryStamp stamp = 1; CellRef cell = 2; sint32 horizontal_steps = 3; sint32 vertical_steps = 4; uint32 modifiers = 5; }
+
+// Metadata advances independently of the active grid revision.
+message MetadataPublication { spaceterm.common.EffectFence fence = 1; uint64 request = 2; uint64 request_generation = 3; spaceterm.common.RuntimeMetadataSnapshot snapshot = 4; }
