@@ -449,6 +449,9 @@ impl RecoveredAccountServer {
                     }
                     checkpoint_ticks = (checkpoint_ticks + 1) % 10;
                 }
+                // Original non-admission retires only its exact reserved token.
+                // No client key, fresh pairing, retirement or Start is authorized.
+                let _ = account_runtime.resolve_original_non_admission().await;
                 let snapshot = handle.snapshot();
                 if management
                     .verify_stopped(snapshot.state().server, snapshot.epoch())

@@ -414,6 +414,14 @@ impl Directory {
         Ok(())
     }
 
+    pub(super) fn check_frozen(&self) -> Result<(), StorageFailure> {
+        self.check_all()?;
+        if self.check(Kind::Journal)?.is_some() {
+            return Err(StorageFailure::RecoveryRequired);
+        }
+        Ok(())
+    }
+
     pub(super) fn sync(&self) -> Result<(), StorageFailure> {
         self.verify()?;
         // SAFETY: fd remains a retained directory descriptor.
@@ -438,6 +446,21 @@ impl Directory {
         kind: Kind,
         create: bool,
     ) -> Result<(Arc<Entry>, bool), StorageFailure> {
+        self.open_entry_with_access(kind, create, false)
+    }
+
+    pub(super) fn open_read_only_entry(self: &Arc<Self>) -> Result<Arc<Entry>, StorageFailure> {
+        self.check_frozen()?;
+        self.open_entry_with_access(Kind::Database, false, true)
+            .map(|(entry, _)| entry)
+    }
+
+    fn open_entry_with_access(
+        self: &Arc<Self>,
+        kind: Kind,
+        create: bool,
+        read_only: bool,
+    ) -> Result<(Arc<Entry>, bool), StorageFailure> {
         if !matches!(kind, Kind::Database | Kind::Journal) {
             return Err(StorageFailure::InvalidState);
         }
@@ -454,10 +477,21 @@ impl Directory {
             if entry.kind != kind {
                 return Err(StorageFailure::UnsafeStorage);
             }
+            // Opening a second descriptor can release this inode's POSIX locks
+            // on close. Never reopen or upgrade a live read-only descriptor, and
+            // never lend writable native authority to a frozen connection.
+            if entry.read_only != read_only {
+                return Err(StorageFailure::Unavailable);
+            }
             entry.verify(self)?;
             return Ok((entry, false));
         }
-        let flags = libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
+        let access = if read_only {
+            libc::O_RDONLY
+        } else {
+            libc::O_RDWR
+        };
+        let flags = access | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
         let flags = if before.is_none() && create {
             flags | libc::O_CREAT | libc::O_EXCL
         } else {
@@ -501,6 +535,7 @@ impl Directory {
             file: Some(file),
             identity,
             kind,
+            read_only,
             locks: Mutex::default(),
             duplicates: Mutex::default(),
         });
@@ -536,6 +571,7 @@ pub(super) struct Entry {
     file: Option<File>,
     identity: Identity,
     pub(super) kind: Kind,
+    read_only: bool,
     pub(super) locks: Mutex<Locks>,
     duplicates: Mutex<Vec<File>>,
 }

@@ -265,6 +265,7 @@ impl<S: PairingSnapshotPort + 'static> AuthenticationFactoryPort for ProductionA
         ];
         if self.account_runtime {
             capabilities.push(spaceterm_protocol::negotiation::CAPABILITY_ACCOUNT_RUNTIME);
+            capabilities.push(spaceterm_protocol::negotiation::CAPABILITY_REMOTE_NATIVE_LIFECYCLE);
         }
         capabilities.extend([
             spaceterm_protocol::negotiation::CAPABILITY_APPLICATION_MOUSE,

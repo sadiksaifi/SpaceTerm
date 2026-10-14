@@ -16,11 +16,12 @@ use spaceterm_host::account_service::{
 use spaceterm_protocol::{
     authentication::SigningKey,
     codec::Payload,
+    negotiation::{CAPABILITY_ACCOUNT_RUNTIME, CAPABILITY_REMOTE_NATIVE_LIFECYCLE},
     wire::{common, v1, v2},
 };
 
 use crate::{
-    api::ServerHandle,
+    api::{AuthenticatedSession, ServerHandle, VerifiedPrincipal},
     contracts::{ServerFailure, ServerFailureClass},
     failure::failure,
     shutdown::{StoppedAuthorizationPort, TrustedShutdownRequest},
@@ -82,17 +83,18 @@ impl AccountRuntimeProcesses {
         self: &Arc<Self>,
         payload: &Payload,
         local_uid: Option<u32>,
+        session: &AuthenticatedSession,
     ) -> Result<Option<Payload>, ServerFailure> {
-        let (request, body) = match payload {
+        let (request, request_generation, body) = match payload {
             Payload::Major1(message) => match &message.kind {
                 Some(v1::message::Kind::AccountRuntimeRequest(value)) => {
-                    (value.request, &value.body)
+                    (value.request, value.request_generation, &value.body)
                 }
                 _ => return Ok(None),
             },
             Payload::Major2(message) => match &message.kind {
                 Some(v2::message::Kind::AccountRuntimeRequest(value)) => {
-                    (value.request, &value.body)
+                    (value.request, value.request_generation, &value.body)
                 }
                 _ => return Ok(None),
             },
@@ -100,12 +102,50 @@ impl AccountRuntimeProcesses {
         if local_uid != Some(self.supervisor.key().account_uid) {
             return Err(failure(ServerFailureClass::Authentication));
         }
+        if body.len() > spaceterm_host::account_service::runtime_inventory::RUNTIME_MESSAGE_LIMIT {
+            return Err(failure(ServerFailureClass::Capacity));
+        }
         let call: AccountRuntimeCall =
             serde_json::from_slice(body).map_err(|_| failure(ServerFailureClass::ScopeMismatch))?;
-        let result = self.call(call).await;
+        let principal = session.principal;
+        if matches!(
+            &call,
+            AccountRuntimeCall::AssessNativeLifecycle(_)
+                | AccountRuntimeCall::AdmitNativeLifecycle(_)
+                | AccountRuntimeCall::AssessNativeStage(_)
+                | AccountRuntimeCall::AdmitNativeStage(_)
+        ) {
+            let capabilities = session.codec.capabilities();
+            if payload.major() != session.codec.major()
+                || !capabilities.contains(&CAPABILITY_ACCOUNT_RUNTIME)
+                || !capabilities.contains(&CAPABILITY_REMOTE_NATIVE_LIFECYCLE)
+            {
+                return Err(failure(ServerFailureClass::ScopeMismatch));
+            }
+            if VerifiedPrincipal::from_authenticated(
+                &session.codec,
+                principal.binding().generation,
+            )? != principal
+            {
+                return Err(failure(ServerFailureClass::Authentication));
+            }
+        }
+        // Admission owns its worker after the request is received. Disconnect can
+        // lose the reply, but cannot cancel or replace the original durable decision.
+        let processes = Arc::clone(self);
+        let result = tokio::spawn(async move { processes.call(call, principal).await })
+            .await
+            .map_err(|_| failure(ServerFailureClass::RecoveryRequired))?;
         let reply = result.unwrap_or_else(AccountRuntimeReply::Failed);
         let body = serde_json::to_vec(&reply).map_err(|_| failure(ServerFailureClass::Capacity))?;
-        let message = common::AccountRuntimeMessage { request, body };
+        if body.len() > spaceterm_host::account_service::runtime_inventory::RUNTIME_MESSAGE_LIMIT {
+            return Err(failure(ServerFailureClass::Capacity));
+        }
+        let message = common::AccountRuntimeMessage {
+            request,
+            request_generation,
+            body,
+        };
         Ok(Some(match payload {
             Payload::Major1(_) => Payload::Major1(v1::Message {
                 kind: Some(v1::message::Kind::AccountRuntimeReply(message)),
@@ -118,9 +158,80 @@ impl AccountRuntimeProcesses {
     async fn call(
         self: &Arc<Self>,
         call: AccountRuntimeCall,
+        principal: VerifiedPrincipal,
     ) -> Result<AccountRuntimeReply, ServiceFailure> {
         let registration = self.registration()?;
         match call {
+            AccountRuntimeCall::AssessNativeLifecycle(capture) => {
+                let (authorized, version) = self
+                    .handle
+                    .authorize_account_lifecycle(principal)
+                    .await
+                    .map_err(classify)?;
+                let authority = self
+                    .custody
+                    .native_lifecycle_authority(authorized, version)?;
+                let runtime = PairedLifecycleProcesses {
+                    processes: Arc::clone(self),
+                    principal,
+                    authorization_version: version,
+                };
+                self.supervisor
+                    .assess_runtime_lifecycle(capture, &authority, &runtime)
+                    .await
+                    .map(AccountRuntimeReply::NativeLifecycleAssessment)
+            }
+            AccountRuntimeCall::AdmitNativeLifecycle(reference) => {
+                let (authorized, version) = self
+                    .handle
+                    .authorize_account_lifecycle(principal)
+                    .await
+                    .map_err(classify)?;
+                let authority = self
+                    .custody
+                    .native_lifecycle_authority(authorized, version)?;
+                let runtime = PairedLifecycleProcesses {
+                    processes: Arc::clone(self),
+                    principal,
+                    authorization_version: version,
+                };
+                self.supervisor
+                    .admit_runtime_lifecycle(reference, &authority, &runtime)
+                    .await
+                    .map(AccountRuntimeReply::NativeLifecycleAccepted)
+            }
+            AccountRuntimeCall::AssessNativeStage(capture) => {
+                let (authorized, version) = self
+                    .handle
+                    .authorize_account_lifecycle(principal)
+                    .await
+                    .map_err(classify)?;
+                let authority = self
+                    .custody
+                    .native_lifecycle_authority(authorized, version)?;
+                self.supervisor
+                    .assess_runtime_stage(capture, &authority, principal.binding().generation)
+                    .map(AccountRuntimeReply::NativeStageAssessment)
+            }
+            AccountRuntimeCall::AdmitNativeStage(reference) => {
+                let (authorized, version) = self
+                    .handle
+                    .authorize_account_lifecycle(principal)
+                    .await
+                    .map_err(classify)?;
+                let authority = self
+                    .custody
+                    .native_lifecycle_authority(authorized, version)?;
+                let admission = self.supervisor.prepare_runtime_stage_admission(
+                    reference,
+                    authority,
+                    principal.binding().generation,
+                )?;
+                self.handle
+                    .admit_account_stage(principal, admission)
+                    .await
+                    .map(AccountRuntimeReply::NativeStageAccepted)
+            }
             AccountRuntimeCall::Assess => self
                 .assess(&registration)
                 .await
@@ -198,6 +309,19 @@ impl AccountRuntimeProcesses {
         self.start_retirement(registration, request, action, assessment)
             .await
     }
+    /// Resolves only journal-proved non-admission of an exact original signed
+    /// runtime-origin request. It never accepts a request or retires Sessions.
+    pub async fn resolve_original_non_admission(&self) -> Result<(), ServiceFailure> {
+        let snapshot = self.handle.snapshot();
+        let Some((request, assessment)) = self
+            .supervisor
+            .runtime_origin_abort_request(snapshot.state().server, snapshot.epoch())?
+        else {
+            return Ok(());
+        };
+        self.abort_native_origin(&self.registration()?, request, &assessment)
+            .await
+    }
     /// Production composition joins signed custody publication before releasing
     /// the native instance lease or exiting the server process.
     pub async fn finish_retirements(&self) -> Result<(), ServiceFailure> {
@@ -242,6 +366,10 @@ impl AccountRuntimeProcesses {
                 .supervisor
                 .verify_retirement_request(assessment.server, epoch)?
                 != (request, action)
+            || self
+                .supervisor
+                .retirement_runtime_assessment(assessment.server, epoch)?
+                != *assessment
         {
             return Err(ServiceFailure::RequestConflict);
         }
@@ -283,6 +411,30 @@ impl ServiceProcesses for AccountRuntimeProcesses {
                 .abort_account_runtime(assessment.clone())
                 .await
                 .map_err(classify)
+        })
+    }
+    fn abort_native_origin<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+        request: NativeManagementRequestRef,
+        assessment: &'a RuntimeAssessment,
+    ) -> ServiceFuture<'a, ()> {
+        Box::pin(async move {
+            self.check(registration)?;
+            let epoch = assessment.epoch.ok_or(ServiceFailure::IdentityMismatch)?;
+            if self
+                .supervisor
+                .runtime_origin_abort_request(assessment.server, epoch)?
+                != Some((request, assessment.clone()))
+            {
+                return Err(ServiceFailure::RequestConflict);
+            }
+            self.handle
+                .abort_account_runtime(assessment.clone())
+                .await
+                .map_err(classify)?;
+            self.custody
+                .reservation_aborted(registration, request, assessment)
         })
     }
     fn quiesce<'a>(
@@ -341,6 +493,86 @@ impl ServiceProcesses for AccountRuntimeProcesses {
         _registration: &'a RegisteredServer,
         _epoch: ServerEpoch,
         _sessions: &'a [SessionKey],
+    ) -> ServiceFuture<'a, Vec<SessionCleanupObservation>> {
+        Box::pin(async { Err(ServiceFailure::CleanupUnresolved) })
+    }
+}
+// This adapter adds the actual connection and current durable authorization to
+// the final actor reservation. It cannot execute service-manager effects.
+struct PairedLifecycleProcesses {
+    processes: Arc<AccountRuntimeProcesses>,
+    principal: VerifiedPrincipal,
+    authorization_version: spaceterm_core::authority::FieldVersion,
+}
+impl ServiceProcesses for PairedLifecycleProcesses {
+    fn assess<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+    ) -> ServiceFuture<'a, RuntimeAssessment> {
+        Box::pin(async move {
+            let (_, version) = self
+                .processes
+                .handle
+                .authorize_account_lifecycle(self.principal)
+                .await
+                .map_err(classify)?;
+            if version != self.authorization_version {
+                return Err(ServiceFailure::PairingRequired);
+            }
+            self.processes.assess(registration).await
+        })
+    }
+    fn revalidate<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+        assessment: &'a RuntimeAssessment,
+    ) -> ServiceFuture<'a, ()> {
+        Box::pin(async move {
+            self.processes.check(registration)?;
+            self.processes
+                .handle
+                .reserve_paired_account_runtime(
+                    self.principal,
+                    self.authorization_version,
+                    assessment.clone(),
+                )
+                .await
+                .map_err(classify)
+        })
+    }
+    fn abort_reservation<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+        assessment: &'a RuntimeAssessment,
+    ) -> ServiceFuture<'a, ()> {
+        self.processes.abort_reservation(registration, assessment)
+    }
+    fn abort_native_origin<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+        request: NativeManagementRequestRef,
+        assessment: &'a RuntimeAssessment,
+    ) -> ServiceFuture<'a, ()> {
+        self.processes
+            .abort_native_origin(registration, request, assessment)
+    }
+    fn quiesce<'a>(
+        &'a self,
+        _: &'a RegisteredServer,
+        _: NativeManagementRequestRef,
+        _: NativeRetirementAction,
+        _: &'a RuntimeAssessment,
+    ) -> ServiceFuture<'a, Vec<SessionCleanupObservation>> {
+        Box::pin(async { Err(ServiceFailure::PairingRequired) })
+    }
+    fn verify_absent<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
+        Box::pin(async { Err(ServiceFailure::CleanupUnresolved) })
+    }
+    fn previous_instance_cleanup<'a>(
+        &'a self,
+        _: &'a RegisteredServer,
+        _: ServerEpoch,
+        _: &'a [SessionKey],
     ) -> ServiceFuture<'a, Vec<SessionCleanupObservation>> {
         Box::pin(async { Err(ServiceFailure::CleanupUnresolved) })
     }

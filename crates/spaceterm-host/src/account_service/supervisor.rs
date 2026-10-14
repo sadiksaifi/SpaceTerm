@@ -60,6 +60,12 @@ pub(super) struct Reservation {
     pub(super) service: Option<RequestRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) install: Option<super::install::InstallRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) runtime_intent: Option<super::paired_lifecycle::RuntimeIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) stopped_native: Option<super::stopped_native::StoppedNativeRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) running_stage: Option<super::paired_stage::RunningStageRecord>,
 }
 
 impl Journal {
@@ -93,7 +99,24 @@ impl Journal {
             || self.reservations.iter().any(|r| {
                 r.sequence == 0
                     || r.sequence > self.high_water
-                    || (r.acknowledged && r.owner.is_none())
+                    || (r.acknowledged
+                        && r.owner.is_none()
+                        && !r.service.as_ref().is_some_and(|record| {
+                            record.runtime_origin.is_some()
+                                && record.phase == ServicePhase::Completed
+                        })
+                        && !(r.stopped_native.is_some()
+                            && (r
+                                .service
+                                .as_ref()
+                                .is_some_and(|record| record.phase == ServicePhase::Completed)
+                                || r.install.as_ref().is_some_and(|record| {
+                                    record.phase == ServicePhase::Completed
+                                })))
+                        && !(r.running_stage.is_some()
+                            && r.install
+                                .as_ref()
+                                .is_some_and(|record| record.phase == ServicePhase::Completed)))
             })
         {
             return Err(ServiceFailure::InvalidRecord);
@@ -118,11 +141,65 @@ impl Journal {
             {
                 return Err(ServiceFailure::InvalidRecord);
             }
+            if let Some(intent) = &reservation.runtime_intent {
+                intent.validate()?;
+                if reservation.owner.is_some() || reservation.install.is_some() {
+                    return Err(ServiceFailure::InvalidRecord);
+                }
+            }
             if let Some(install) = &reservation.install {
                 install.validate(key, self.request(reservation.sequence)?)?;
             }
             if let Some(service) = &reservation.service {
-                service.validate(key, self.request(reservation.sequence)?)?;
+                let request = self.request(reservation.sequence)?;
+                service.validate(key, request)?;
+                match (&service.runtime_origin, &reservation.runtime_intent) {
+                    (Some(origin), Some(intent)) => {
+                        origin.validate(key, request, service, intent)?
+                    }
+                    (None, None) => {}
+                    _ => return Err(ServiceFailure::InvalidRecord),
+                }
+            }
+            if let Some(stopped) = &reservation.stopped_native {
+                if reservation.owner.is_some()
+                    || reservation.runtime_intent.is_some()
+                    || reservation.running_stage.is_some()
+                {
+                    return Err(ServiceFailure::InvalidRecord);
+                }
+                let request = self.request(reservation.sequence)?;
+                stopped.validate(
+                    key,
+                    request,
+                    reservation.service.as_ref(),
+                    reservation.install.as_ref(),
+                )?;
+                if reservation.acknowledged
+                    && !stopped.acknowledgeable(
+                        request,
+                        reservation.service.as_ref(),
+                        reservation.install.as_ref(),
+                    )
+                {
+                    return Err(ServiceFailure::InvalidRecord);
+                }
+            }
+            if let Some(stage) = &reservation.running_stage {
+                if reservation.owner.is_some()
+                    || reservation.service.is_some()
+                    || reservation.runtime_intent.is_some()
+                    || reservation.stopped_native.is_some()
+                {
+                    return Err(ServiceFailure::InvalidRecord);
+                }
+                let request = self.request(reservation.sequence)?;
+                stage.validate(key, request, reservation.install.as_ref())?;
+                if reservation.acknowledged
+                    && !stage.acknowledgeable(request, reservation.install.as_ref())
+                {
+                    return Err(ServiceFailure::InvalidRecord);
+                }
             }
             if let Some(owner) = &reservation.owner {
                 owner.validate(key, self.request(reservation.sequence)?)?;
@@ -158,14 +235,30 @@ impl Journal {
     }
 }
 
-/// Byte pressure and slot pressure retire only never-admitted requests. The permanent
-/// high-water mark prevents a displaced assessment from becoming fresh authority.
+/// Pressure retires acknowledged paired receipts or never-admitted requests,
+/// never pending effects or unacknowledged outcomes. The permanent high-water
+/// mark prevents a displaced request from becoming fresh authority.
 fn retire_unsubmitted(journal: &mut Journal, protected: Option<u64>) -> bool {
     let eligible = |reservation: &&Reservation| {
         Some(reservation.sequence) != protected
             && reservation.owner.is_none()
             && reservation.install.is_none()
     };
+    // An acknowledged paired result retains its exact signed receipt only while
+    // the bounded journal has room. Eviction never turns it into fresh authority.
+    if let Some(index) = journal
+        .reservations
+        .iter()
+        .enumerate()
+        .filter(|(_, reservation)| {
+            Some(reservation.sequence) != protected && reservation.owner.is_none()
+        })
+        .find(|(_, reservation)| reservation.acknowledged)
+        .map(|(index, _)| index)
+    {
+        journal.reservations.remove(index);
+        return true;
+    }
     // Prefer IDs that have no assessment before displacing a retained scope.
     let unbound = journal
         .reservations
@@ -403,6 +496,9 @@ impl ServiceSupervisor {
                 acknowledged: false,
                 service: None,
                 install: None,
+                runtime_intent: None,
+                stopped_native: None,
+                running_stage: None,
             });
             let protected = journal.sequence(request)?;
             loop {
@@ -433,6 +529,9 @@ impl ServiceSupervisor {
             .reservations
             .iter()
             .filter_map(|reservation| {
+                if reservation.acknowledged {
+                    return None;
+                }
                 let record = reservation.service.as_ref()?;
                 let basis = record.binding.basis();
                 if basis.server != pin.identity || basis.public_key != pin.public_key {
@@ -464,6 +563,15 @@ impl ServiceSupervisor {
         }
         self.mutate_request(request, |journal, index| {
             let reservation = &journal.reservations[index];
+            if reservation.stopped_native.is_some()
+                || reservation.running_stage.is_some()
+                || reservation
+                    .service
+                    .as_ref()
+                    .is_some_and(|record| record.runtime_origin.is_some())
+            {
+                return Err(ServiceFailure::PairingRequired);
+            }
             if !reservation
                 .service
                 .as_ref()
@@ -591,13 +699,13 @@ pub(super) fn current_account() -> Result<(u32, PathBuf), ServiceFailure> {
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RegistrationBasis {
-    generation: u64,
-    server: [u8; 16],
-    public_key: [u8; 32],
-    desired: DesiredServerState,
-    approved: Option<super::InstallationStatus>,
-    staged: Option<super::InstallationStatus>,
-    installed: bool,
+    pub(super) generation: u64,
+    pub(super) server: [u8; 16],
+    pub(super) public_key: [u8; 32],
+    pub(super) desired: DesiredServerState,
+    pub(super) approved: Option<super::InstallationStatus>,
+    pub(super) staged: Option<super::InstallationStatus>,
+    pub(super) installed: bool,
 }
 impl RegistrationBasis {
     pub(super) fn capture(registration: &RegisteredServer) -> Self {
@@ -650,9 +758,9 @@ impl RegistrationBasis {
 #[serde(deny_unknown_fields)]
 pub(super) struct AssessmentRecord {
     pub(super) action: ServiceAction,
-    basis: RegistrationBasis,
+    pub(super) basis: RegistrationBasis,
     pub(super) runtime: RuntimeAssessment,
-    issued: ServiceTime,
+    pub(super) issued: ServiceTime,
     pub(super) token: [u8; 32],
 }
 impl AssessmentRecord {
@@ -668,12 +776,12 @@ impl AssessmentRecord {
 }
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
-enum RequestBinding {
+pub(super) enum RequestBinding {
     Start(RegistrationBasis),
     Confirmed(AssessmentRecord),
 }
 impl RequestBinding {
-    fn basis(&self) -> &RegistrationBasis {
+    pub(super) fn basis(&self) -> &RegistrationBasis {
         match self {
             Self::Start(basis) => basis,
             Self::Confirmed(assessment) => &assessment.basis,
@@ -689,7 +797,7 @@ impl RequestBinding {
             }),
         }
     }
-    fn digest(
+    pub(super) fn digest(
         &self,
         key: AccountBuildKey,
         request: NativeRequestId,
@@ -706,23 +814,25 @@ impl RequestBinding {
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RequestRecord {
-    binding: RequestBinding,
-    digest: RequestDigest,
-    phase: ServicePhase,
-    state: ServiceRequestState,
+    pub(super) binding: RequestBinding,
+    pub(super) digest: RequestDigest,
+    pub(super) phase: ServicePhase,
+    pub(super) state: ServiceRequestState,
     // Durable ownership before runtime reservation, including pre-acceptance crashes.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    reserving: bool,
+    pub(super) reserving: bool,
     // Native-only durable non-admission. An ordinary wire token cannot issue it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    aborting: bool,
+    pub(super) aborting: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) runtime_origin: Option<super::paired_lifecycle::RuntimeOriginProof>,
 }
 impl RequestRecord {
     fn pending(&self) -> bool {
         self.reserving
             || (self.phase != ServicePhase::Reserved && self.phase != ServicePhase::Completed)
     }
-    fn progress(&self, request: NativeRequestId) -> ServiceProgress {
+    pub(super) fn progress(&self, request: NativeRequestId) -> ServiceProgress {
         ServiceProgress {
             request,
             request_digest: self.digest,
@@ -747,7 +857,7 @@ impl RequestRecord {
         let not_applied = encode(&largest, JOURNAL_LIMIT)?.len();
         Ok(completed.max(not_applied).saturating_sub(current))
     }
-    fn validate(
+    pub(super) fn validate(
         &self,
         key: AccountBuildKey,
         request: NativeRequestId,
@@ -825,7 +935,7 @@ impl ServiceSupervisor {
             .as_deref()
             .ok_or(ServiceFailure::SupervisorUnavailable)
     }
-    fn processes(&self) -> Result<&dyn ServiceProcesses, ServiceFailure> {
+    pub(super) fn processes(&self) -> Result<&dyn ServiceProcesses, ServiceFailure> {
         self.processes
             .as_deref()
             .ok_or(ServiceFailure::CleanupUnresolved)
@@ -836,9 +946,15 @@ impl ServiceSupervisor {
             .lease("service-lock")
             .map_err(Into::into)
     }
-    fn original(&self, request: NativeRequestId) -> Result<Option<RequestRecord>, ServiceFailure> {
+    pub(super) fn original(
+        &self,
+        request: NativeRequestId,
+    ) -> Result<Option<RequestRecord>, ServiceFailure> {
         let (_, _, journal) = self.read_journal()?;
         let index = journal.reservation(request)?;
+        if journal.reservations[index].acknowledged {
+            return Err(ServiceFailure::RequestRetired);
+        }
         if journal.reservations[index].owner.is_some()
             || journal.reservations[index].install.is_some()
         {
@@ -863,19 +979,25 @@ impl ServiceSupervisor {
         }
         Ok(())
     }
-    fn write_request(
+    pub(super) fn write_request(
         &self,
         request: NativeRequestId,
         record: &RequestRecord,
     ) -> Result<(), ServiceFailure> {
         self.mutate_request(request, |journal, index| {
+            if journal.reservations[index].acknowledged {
+                return Err(ServiceFailure::RequestRetired);
+            }
             if journal.reservations[index].owner.is_some()
                 || journal.reservations[index].install.is_some()
             {
                 return Err(ServiceFailure::RequestConflict);
             }
             if let Some(original) = &journal.reservations[index].service {
-                if original.binding != record.binding || original.digest != record.digest {
+                if original.binding != record.binding
+                    || original.digest != record.digest
+                    || original.runtime_origin != record.runtime_origin
+                {
                     return Err(ServiceFailure::RequestConflict);
                 }
                 if original.phase == ServicePhase::Completed && original != record {
@@ -989,6 +1111,9 @@ impl ServiceSupervisor {
     ) -> Result<ServiceProgress, ServiceFailure> {
         let (_, _, journal) = self.read_journal()?;
         let record = &journal.reservations[journal.reservation(request)?];
+        if record.acknowledged {
+            return Err(ServiceFailure::RequestRetired);
+        }
         if let Some(install) = &record.install {
             return Ok(install.progress(request));
         }
@@ -1117,36 +1242,27 @@ impl ServiceSupervisor {
         Box::pin(async move {
             if let Some(original) = self.original(request)? {
                 return match original.binding {
-                    RequestBinding::Confirmed(record) if record.action == action => {
+                    RequestBinding::Confirmed(record)
+                        if record.action == action && original.runtime_origin.is_none() =>
+                    {
                         self.assessment(request, record)
                     }
                     _ => Err(ServiceFailure::RequestConflict),
                 };
             }
+            let (_, _, journal) = self.read_journal()?;
+            let reservation = &journal.reservations[journal.reservation(request)?];
+            if reservation.runtime_intent.is_some()
+                || reservation.stopped_native.is_some()
+                || reservation.running_stage.is_some()
+            {
+                return Err(ServiceFailure::PairingRequired);
+            }
             let lease = self.lifecycle_lease()?;
             self.reconcile_started_install(&lease).await?;
             self.ensure_no_pending(request)?;
             let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
-            if !registration.is_installed() {
-                return Err(ServiceFailure::Missing);
-            }
-            match action {
-                ServiceAction::Restart
-                    if registration.desired_state() != DesiredServerState::Running =>
-                {
-                    return Err(ServiceFailure::StaleAssessment);
-                }
-                ServiceAction::Activate(id)
-                    if registration
-                        .record
-                        .staged
-                        .as_ref()
-                        .is_none_or(|s| s.installation != id) =>
-                {
-                    return Err(ServiceFailure::StaleAssessment);
-                }
-                _ => {}
-            }
+            self.validate_lifecycle_action(&registration, action)?;
             let issued = self.clock.now()?;
             let runtime = self.processes()?.assess(&registration).await?;
             runtime.validate(&registration)?;
@@ -1171,6 +1287,7 @@ impl ServiceSupervisor {
                 state: ServiceRequestState::Pending,
                 reserving: false,
                 aborting: false,
+                runtime_origin: None,
             };
             lease.verify()?;
             self.write_request(request, &record)?;
@@ -1197,6 +1314,9 @@ impl ServiceSupervisor {
     ) -> ServiceFuture<'_, ServiceAssessment> {
         Box::pin(async move {
             let original = self.original(request)?.ok_or(ServiceFailure::Missing)?;
+            if original.runtime_origin.is_some() {
+                return Err(ServiceFailure::PairingRequired);
+            }
             let RequestBinding::Confirmed(record) = original.binding else {
                 return Err(ServiceFailure::RequestConflict);
             };
@@ -1296,6 +1416,7 @@ impl ServiceSupervisor {
                     journal.sequence(request)?;
                     self.indeterminate.store(false, Ordering::Release);
                 }
+                self.reconcile_runtime_publications()?;
                 return Ok(());
             }
             Ok(None) => return Err(ServiceFailure::Missing),
@@ -1326,7 +1447,19 @@ impl ServiceSupervisor {
             }
         }
         self.indeterminate.store(false, Ordering::Release);
+        self.reconcile_runtime_publications()?;
         Ok(())
+    }
+    fn reconcile_runtime_publications(&self) -> Result<(), ServiceFailure> {
+        let Some((_, _, record)) = self.read_registration()? else {
+            return Ok(());
+        };
+        let Some(directory) = Directory::open_for_recovery(&record.data)? else {
+            return Err(ServiceFailure::Missing);
+        };
+        // Replay only the validated original signed custody/marker publication.
+        // Missing or unknown native records are never reset into clean evidence.
+        super::runtime_inventory::recover_publications(&RegisteredServer { record, directory })
     }
     async fn run(
         &self,
@@ -1334,6 +1467,15 @@ impl ServiceSupervisor {
         assessment: Option<AssessmentRecord>,
         resolving: bool,
     ) -> Result<ServiceProgress, ServiceFailure> {
+        let (_, _, journal) = self.read_journal()?;
+        let reservation = &journal.reservations[journal.reservation(request)?];
+        if !resolving
+            && (reservation.runtime_intent.is_some()
+                || reservation.stopped_native.is_some()
+                || reservation.running_stage.is_some())
+        {
+            return Err(ServiceFailure::PairingRequired);
+        }
         if let Some(original) = self.original(request)? {
             if !resolving {
                 let matches = match (&original.binding, &assessment) {
@@ -1378,6 +1520,7 @@ impl ServiceSupervisor {
                 state: ServiceRequestState::Pending,
                 reserving: false,
                 aborting: false,
+                runtime_origin: None,
             }
         };
         if record.phase == ServicePhase::Completed {
@@ -1394,56 +1537,114 @@ impl ServiceSupervisor {
             if resolving {
                 return Ok(record.progress(request));
             }
-            let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
-            if !record.binding.basis().matches(&registration) {
-                return Err(ServiceFailure::StaleAssessment);
-            }
-            self.verify_execution_selection(&record.binding, &registration)?;
-            if let RequestBinding::Confirmed(original) = &record.binding {
-                if assessment.as_ref() != Some(original) {
-                    return Err(ServiceFailure::RequestConflict);
-                }
-                original.check_time(self.clock.now()?)?;
-                record.reserving = true;
-                self.write_request(request, &record)?;
-            }
-            let admission = async {
-                if let RequestBinding::Confirmed(original) = &record.binding {
-                    self.processes()?
-                        .revalidate(&registration, &original.runtime)
-                        .await?;
-                    original.check_time(self.clock.now()?)?;
-                }
-                lease.verify()?;
-                record.reserving = false;
-                record.aborting = false;
-                self.phase(request, &mut record, ServicePhase::Accepted)
-            }
-            .await;
-            if let Err(error) = admission {
-                // Publication uncertainty keeps the runtime barrier. A readable original
-                // Reserved record proves non-admission; no old fsync result is inferred.
-                if lease.verify().is_ok()
-                    && let Ok(Some(mut original)) = self.original(request)
-                    && original.phase == ServicePhase::Reserved
-                    && original.reserving
-                {
-                    self.abort_unaccepted_reservation(request, &original, &lease)
-                        .await?;
-                    original.reserving = false;
-                    original.aborting = false;
-                    self.write_request(request, &original)?;
-                }
-                return Err(error);
-            }
+            self.admit_record(request, &mut record, &lease, self.processes.as_deref())
+                .await?;
         }
         self.advance(request, &mut record, &lease).await
+    }
+    pub(super) fn validate_lifecycle_action(
+        &self,
+        registration: &RegisteredServer,
+        action: ServiceAction,
+    ) -> Result<(), ServiceFailure> {
+        if !registration.is_installed() {
+            return Err(ServiceFailure::Missing);
+        }
+        match action {
+            ServiceAction::Restart
+                if registration.desired_state() != DesiredServerState::Running =>
+            {
+                Err(ServiceFailure::StaleAssessment)
+            }
+            ServiceAction::Activate(id)
+                if registration
+                    .staged_installation()
+                    .is_none_or(|status| status.installation != id) =>
+            {
+                Err(ServiceFailure::StaleAssessment)
+            }
+            _ => Ok(()),
+        }
+    }
+    pub(super) async fn admit_record(
+        &self,
+        request: NativeRequestId,
+        record: &mut RequestRecord,
+        lease: &Lease,
+        runtime: Option<&dyn ServiceProcesses>,
+    ) -> Result<(), ServiceFailure> {
+        let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
+        if !record.binding.basis().matches(&registration) {
+            return Err(ServiceFailure::StaleAssessment);
+        }
+        self.verify_execution_selection(&record.binding, &registration)?;
+        if let RequestBinding::Confirmed(original) = &record.binding {
+            original.check_time(self.clock.now()?)?;
+            record.reserving = true;
+            self.write_request(request, record)?;
+        }
+        let admission = async {
+            if let RequestBinding::Confirmed(original) = &record.binding {
+                runtime
+                    .ok_or(ServiceFailure::CleanupUnresolved)?
+                    .revalidate(&registration, &original.runtime)
+                    .await?;
+                original.check_time(self.clock.now()?)?;
+            }
+            if !record
+                .binding
+                .basis()
+                .matches(&self.discover()?.ok_or(ServiceFailure::Missing)?)
+            {
+                return Err(ServiceFailure::StaleAssessment);
+            }
+            lease.verify()?;
+            if let RequestBinding::Confirmed(original) = &record.binding {
+                original.check_time(self.clock.now()?)?;
+            }
+            record.reserving = false;
+            record.aborting = false;
+            self.phase(request, record, ServicePhase::Accepted)
+        }
+        .await;
+        if let Err(error) = admission {
+            // Publication uncertainty keeps the runtime barrier. A readable original
+            // Reserved record proves non-admission; no old fsync result is inferred.
+            if lease.verify().is_ok()
+                && let Ok(Some(mut original)) = self.original(request)
+                && original.phase == ServicePhase::Reserved
+                && original.reserving
+            {
+                self.abort_unaccepted_reservation_with(
+                    request,
+                    &original,
+                    lease,
+                    runtime.ok_or(ServiceFailure::CleanupUnresolved)?,
+                )
+                .await?;
+                original.reserving = false;
+                original.aborting = false;
+                self.write_request(request, &original)?;
+            }
+            return Err(error);
+        }
+        Ok(())
     }
     async fn abort_unaccepted_reservation(
         &self,
         request: NativeRequestId,
         record: &RequestRecord,
         lease: &Lease,
+    ) -> Result<(), ServiceFailure> {
+        self.abort_unaccepted_reservation_with(request, record, lease, self.processes()?)
+            .await
+    }
+    async fn abort_unaccepted_reservation_with(
+        &self,
+        request: NativeRequestId,
+        record: &RequestRecord,
+        lease: &Lease,
+        runtime: &dyn ServiceProcesses,
     ) -> Result<(), ServiceFailure> {
         lease.verify()?;
         let mut original = self
@@ -1458,12 +1659,24 @@ impl ServiceSupervisor {
         original.aborting = true;
         self.write_request(request, &original)?;
         let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
-        self.processes()?
-            .abort_reservation(&registration, &assessment.runtime)
-            .await?;
+        if original.runtime_origin.is_some() {
+            let reference = NativeManagementRequestRef::new(
+                assessment.runtime.server,
+                *request.as_bytes(),
+                original.digest,
+            )
+            .map_err(|_| ServiceFailure::InvalidRecord)?;
+            runtime
+                .abort_native_origin(&registration, reference, &assessment.runtime)
+                .await?;
+        } else {
+            runtime
+                .abort_reservation(&registration, &assessment.runtime)
+                .await?;
+        }
         lease.verify().map_err(Into::into)
     }
-    fn verify_execution_selection(
+    pub(super) fn verify_execution_selection(
         &self,
         binding: &RequestBinding,
         registration: &RegisteredServer,
@@ -1597,7 +1810,13 @@ impl ServiceSupervisor {
                             let (directory, snapshot, mut next) =
                                 self.read_registration()?.ok_or(ServiceFailure::Missing)?;
                             next.installed = false;
-                            next.desired = assessment.basis.desired;
+                            // Paired retirement preserves its durable Stopped intent.
+                            // Local Uninstall retains the preexisting deliberate state.
+                            next.desired = if record.runtime_origin.is_some() {
+                                DesiredServerState::Stopped
+                            } else {
+                                assessment.basis.desired
+                            };
                             next.approved = None;
                             next.staged = None;
                             next.generation = next
@@ -1843,7 +2062,10 @@ impl ServiceSupervisor {
         startup.revalidate()?;
         Ok(AccountStartupAdmission::Ready(startup))
     }
-    fn check_startup_barrier(&self, registration: &Registration) -> Result<(), ServiceFailure> {
+    pub(super) fn check_startup_barrier(
+        &self,
+        registration: &Registration,
+    ) -> Result<(), ServiceFailure> {
         let journal = match self.read_journal() {
             Ok((_, _, journal)) => journal,
             Err(ServiceFailure::Missing | ServiceFailure::UnknownRequest) => return Ok(()),
@@ -1947,6 +2169,43 @@ impl ServiceSupervisor {
             record.phase == ServicePhase::Reserved && record.reserving && record.aborting
                 && matches!(&record.binding, RequestBinding::Confirmed(original) if original.runtime == *assessment)
         })) { Ok(()) } else { Err(ServiceFailure::RequestConflict) }
+    }
+    /// Reads only the durable non-admission of an exact signed runtime-origin
+    /// request. This authorizes barrier cleanup, never effects or Reserved promotion.
+    pub fn runtime_origin_abort_request(
+        &self,
+        server: ServerId,
+        epoch: ServerEpoch,
+    ) -> Result<Option<(NativeManagementRequestRef, RuntimeAssessment)>, ServiceFailure> {
+        let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
+        if registration.server_pin().identity != server.bytes() || epoch.get() == 0 {
+            return Err(ServiceFailure::IdentityMismatch);
+        }
+        let (_, _, journal) = self.read_journal()?;
+        let Some(reservation) = journal.reservations.iter().find(|reservation| {
+            reservation.service.as_ref().is_some_and(|record| {
+                record.phase == ServicePhase::Reserved
+                    && record.reserving
+                    && record.aborting
+                    && record.runtime_origin.is_some()
+            })
+        }) else {
+            return Ok(None);
+        };
+        let record = reservation
+            .service
+            .as_ref()
+            .ok_or(ServiceFailure::InvalidRecord)?;
+        let RequestBinding::Confirmed(original) = &record.binding else {
+            return Err(ServiceFailure::InvalidRecord);
+        };
+        if original.runtime.server != server || original.runtime.epoch != Some(epoch) {
+            return Err(ServiceFailure::IdentityMismatch);
+        }
+        let request = journal.request(reservation.sequence)?;
+        let reference = NativeManagementRequestRef::new(server, *request.as_bytes(), record.digest)
+            .map_err(|_| ServiceFailure::InvalidRecord)?;
+        Ok(Some((reference, original.runtime.clone())))
     }
     /// Reads the original all-client scope for an already authorized retirement.
     pub fn retirement_runtime_assessment(

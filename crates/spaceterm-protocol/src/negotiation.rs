@@ -71,6 +71,10 @@ pub const CAPABILITY_RUNTIME_METADATA: u32 = 520_009;
 /// Bounded fragmented metadata snapshots for small negotiated frames.
 pub const CAPABILITY_RUNTIME_METADATA_FRAGMENTS: u32 = 520_010;
 
+/// Exact paired admission of native lifecycle requests through the owning account.
+/// Older account-runtime implementations cannot authorize this operation.
+pub const CAPABILITY_REMOTE_NATIVE_LIFECYCLE: u32 = 520_014;
+
 /// Additive envelope registration: tag, authenticated capability, permitted directions.
 pub const EXTENSION_ENVELOPES: &[(u32, u32, bool, bool)] = &[
     (32, CAPABILITY_SERVER_GIT, true, false),

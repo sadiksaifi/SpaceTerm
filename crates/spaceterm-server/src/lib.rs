@@ -7,6 +7,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod account_native_lifecycle;
+pub mod account_native_maintenance;
+pub mod account_native_stage;
 pub mod account_owner_enrollment;
 pub mod account_runtime;
 pub mod account_startup;

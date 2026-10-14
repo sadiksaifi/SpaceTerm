@@ -26,6 +26,25 @@ pub(super) fn counter(row: &Row<'_>, index: usize) -> rusqlite::Result<u64> {
     let value = row.get_ref(index)?.as_blob()?;
     codec::decode_u64(value).map_err(|_| rusqlite::Error::InvalidQuery)
 }
+fn boolean(row: &Row<'_>, index: usize) -> rusqlite::Result<bool> {
+    // Read-only SQLite does not load CHECK expressions. Reject raw values before
+    // rusqlite's bool conversion can normalize any nonzero integer to true.
+    match row.get::<_, i64>(index)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+pub(super) fn require_nulls(row: &Row<'_>, indices: &[usize]) -> rusqlite::Result<()> {
+    // Variant decoders must not discard retained fields that their schema
+    // requires to be NULL. Later domain validation cannot inspect lost values.
+    for &index in indices {
+        if !matches!(row.get_ref(index)?, ValueRef::Null) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+    }
+    Ok(())
+}
 fn fixed<const N: usize>(row: &Row<'_>, index: usize) -> rusqlite::Result<[u8; N]> {
     row.get_ref(index)?
         .as_blob()?
@@ -512,8 +531,8 @@ pub(super) fn load(
                 id: checked(WorktreeId::new(server, counter(row, 0)?))?,
                 repository: checked(RepositoryId::new(server, counter(row, 1)?))?,
                 directory: directory(row, 2, server)?,
-                main: row.get(3)?,
-                missing: row.get(4)?,
+                main: boolean(row, 3)?,
+                missing: boolean(row, 4)?,
             })
         },
     )?;
@@ -570,7 +589,7 @@ pub(super) fn load(
         |row| {
             Ok(WorktreeInventoryFacts::new(
                 checked(WorktreeId::new(server, counter(row, 0)?))?,
-                row.get(1)?,
+                boolean(row, 1)?,
                 FieldVersion::new(counter(row, 2)?),
             ))
         },

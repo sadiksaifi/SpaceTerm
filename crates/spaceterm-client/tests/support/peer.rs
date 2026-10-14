@@ -15,6 +15,7 @@ pub struct PeerPlan {
     pub query_handler: Option<QueryHandler>,
     pub majors: Vec<u32>,
     pub capabilities: Vec<u32>,
+    pub next_capabilities: Mutex<Option<Vec<u32>>>,
     pub snapshot_gate: Arc<Semaphore>,
     pub client_send_gate: Arc<Semaphore>,
     pub reconciliation_gate: Arc<Semaphore>,
@@ -39,6 +40,7 @@ impl PeerPlan {
                 CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
                 CAPABILITY_CANONICAL_DOMAIN,
             ],
+            next_capabilities: Mutex::new(None),
             snapshot_gate: Arc::new(Semaphore::new(100)),
             client_send_gate: Arc::new(Semaphore::new(4096)),
             reconciliation_gate: Arc::new(Semaphore::new(100)),
@@ -216,7 +218,12 @@ async fn peer(
     };
     let config = HandshakeConfig {
         majors: plan.majors.clone(),
-        capabilities: plan.capabilities.clone(),
+        capabilities: plan
+            .next_capabilities
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_else(|| plan.capabilities.clone()),
         ..HandshakeConfig::default()
     };
     let (handshake, reply) =

@@ -84,6 +84,10 @@ pub(super) fn validate(
         permanent.checked_mul(256).ok_or_else(resource_limit)?,
         state.pairing.validate(state, verifier, limits)?,
     )?;
+    resident = charge(
+        resident,
+        super::remote_native::validate_retained(state, limits)?,
+    )?;
     for saved in &state.bindings {
         saved.validate(verifier)?;
         let binding = saved.binding()?;
@@ -479,6 +483,7 @@ pub(super) fn apply(
     if state.revision != tx.expected_revision || tx.changes.is_empty() || tx.changes.len() > 256 {
         return Err(invalid());
     }
+    super::remote_native::validate_retirements(state, &tx.changes)?;
     let mut next = state.clone();
     for change in &tx.changes {
         apply_change(&mut next, change, codec, verifier)?;
@@ -507,7 +512,16 @@ fn apply_change(
         }
         return Ok(());
     }
+    if super::remote_native::apply(state, change)? {
+        return Ok(());
+    }
     match change {
+        ClientJournalChange::RetainRemoteNativeRequest(_)
+        | ClientJournalChange::RetainRemoteNativeIntent { .. }
+        | ClientJournalChange::RetainRemoteNativeAssessment { .. }
+        | ClientJournalChange::SubmitRemoteNativeRequest { .. }
+        | ClientJournalChange::CompleteRemoteNativeRequest { .. }
+        | ClientJournalChange::RetireRemoteNativeRequest { .. } => return Err(invalid()),
         ClientJournalChange::RecordAttachment(marker) => {
             marker.validate()?;
             if marker.incarnation <= state.attachment_incarnation_high_water

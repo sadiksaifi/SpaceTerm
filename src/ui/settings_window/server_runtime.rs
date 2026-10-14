@@ -18,7 +18,8 @@ use spaceterm_client::{
     replica::ReplicaState,
 };
 use spaceterm_client_native::native::{
-    NativeActionPrompt, NativeServiceManagement, classify_service as classify_native,
+    classify_service as classify_native,
+    host_services::{HostServiceManagement, LocalHostServices},
 };
 use spaceterm_core::{
     authority::FieldVersion,
@@ -62,7 +63,7 @@ pub(crate) struct SettingsConnection {
     pub(crate) replica: watch::Receiver<ReplicaState>,
     pub(crate) queries: Option<ServerQueries>,
     /// Explicit native composition only. An IPC pathname or an SSH route grants none.
-    pub(crate) native: Option<Arc<NativeServiceManagement>>,
+    pub(crate) native: Option<Arc<dyn HostServiceManagement>>,
     pub(crate) lifecycle: Option<ServerServiceLifecycle>,
     pub(crate) inventory: Option<Arc<dyn SettingsInventory>>,
     pub(crate) machine: Option<SettingsMachineFacts>,
@@ -103,7 +104,7 @@ pub(crate) struct SettingsServices {
     )>,
     pub(crate) hosts: Vec<(
         spaceterm_core::pairing::LocalPairingKey,
-        Arc<NativeServiceManagement>,
+        Arc<dyn HostServiceManagement>,
     )>,
     pub(crate) machines: Vec<(
         spaceterm_core::pairing::LocalPairingKey,
@@ -227,7 +228,11 @@ impl SettingsServices {
             return Err(ClientFailure::new(ClientFailureClass::StaleAuthority));
         }
         let key = binding.target().local_pairing()?;
-        self.hosts.push((key.clone(), provider.management()));
+        let host = Arc::new(
+            LocalHostServices::new(provider.management(), binding.clone())
+                .map_err(|_| ClientFailure::new(ClientFailureClass::StaleAuthority))?,
+        );
+        self.admit_host(binding, host)?;
         self.lifecycles.push((
             key.clone(),
             crate::platform::server_settings_services::lifecycle(),
@@ -236,6 +241,29 @@ impl SettingsServices {
             key,
             crate::platform::server_settings_services::machine_facts(provider.key().build_identity),
         ));
+        Ok(())
+    }
+
+    /// Installs an already composed host capability for its exact saved Client binding.
+    /// This method does not discover a host, open SSH, enroll, or run a native effect.
+    pub(crate) fn admit_host(
+        &mut self,
+        binding: &PairedServerBinding,
+        host: Arc<dyn HostServiceManagement>,
+    ) -> Result<(), ClientFailure> {
+        if host.binding() != binding {
+            return Err(ClientFailure::new(ClientFailureClass::StaleAuthority));
+        }
+        let key = binding.target().local_pairing()?;
+        if let Some((_, retained)) = self
+            .hosts
+            .iter_mut()
+            .find(|(pairing, provider)| pairing == &key && provider.binding() == binding)
+        {
+            *retained = host;
+        } else {
+            self.hosts.push((key, host));
+        }
         Ok(())
     }
 
@@ -249,7 +277,7 @@ impl SettingsServices {
         source.native = self
             .hosts
             .iter()
-            .find(|(pairing, _)| pairing == &key)
+            .find(|(pairing, provider)| pairing == &key && provider.binding() == &source.binding)
             .map(|(_, provider)| provider.clone());
         source.inventory = self
             .inventories
@@ -1254,7 +1282,7 @@ async fn execute(
     tracker: OperationTracker,
     peer: Arc<dyn OperationPeer>,
     pending: PendingTasks,
-    native: Option<Arc<NativeServiceManagement>>,
+    native: Option<Arc<dyn HostServiceManagement>>,
     inventory: Option<Arc<dyn SettingsInventory>>,
     issued: u64,
 ) -> Result<ResultPublication, ManagementFailure> {
@@ -1352,8 +1380,9 @@ async fn execute(
             if let Some(request) = native_status.status.pending {
                 return Ok(native_result(request, native.resolve(request).await));
             }
-            let assessment = native.assess(action).await.map_err(classify_native)?;
-            let prompt = NativeActionPrompt::from_assessment(&assessment)?;
+            let request = native.reserve_request().await?;
+            let assessment = native.assess(request, action).await?;
+            let prompt = assessment.prompt;
             return Ok(ResultPublication::NativeAssessment(HostAssessment {
                 reference: prompt.token,
                 request: prompt.request,
@@ -1371,10 +1400,7 @@ async fn execute(
             if let Some(request) = native_status.status.pending {
                 return Ok(native_result(request, native.resolve(request).await));
             }
-            let request = native
-                .supervisor()
-                .allocate_request()
-                .map_err(classify_native)?;
+            let request = native.reserve_request().await?;
             return Ok(native_result(request, native.start(request).await));
         }
         ServerRequest::Stop(_) | ServerRequest::Restart(_) => {
@@ -1409,16 +1435,11 @@ async fn execute(
                 return Err(ManagementFailure::StaleAssessment);
             }
             let original = native.restore_assessment(action, reference.clone()).await?;
-            if original.request() != prompt.request {
+            if original.prompt.request != prompt.request {
                 return Err(ManagementFailure::StaleAssessment);
             }
             check_ordinary(&tracker, &binding)?;
-            let confirmed = original.confirm().map_err(classify_native)?;
-            let progress = if action == ServiceAction::Stop {
-                native.stop(confirmed).await
-            } else {
-                native.restart(confirmed).await
-            };
+            let progress = native.submit(original).await;
             return Ok(native_result(prompt.request, progress));
         }
         ServerRequest::AssessInstallUpdate(_) => {
@@ -1455,14 +1476,11 @@ async fn execute(
             let original = native
                 .restore_assessment(action, assessment.reference)
                 .await?;
-            if original.request() != assessment.native_request {
+            if original.prompt.request != assessment.native_request {
                 return Err(ManagementFailure::StaleAssessment);
             }
             check_ordinary(&tracker, &binding)?;
-            let progress = native
-                .supervisor()
-                .activate(original.confirm().map_err(classify_native)?)
-                .await;
+            let progress = native.submit(original).await;
             return Ok(native_result(assessment.native_request, progress));
         }
         ServerRequest::DisableRemoteAccess(_) | ServerRequest::EnableRemoteAccess { .. } => {
@@ -1574,46 +1592,33 @@ fn check_ordinary(
 }
 
 async fn check_native(
-    native: &NativeServiceManagement,
+    native: &Arc<dyn HostServiceManagement>,
     binding: &PairedServerBinding,
 ) -> Result<NativeRead, ManagementFailure> {
-    let status = native.status().await.map_err(classify_native)?;
-    let registration = native
-        .supervisor()
-        .discover()
-        .map_err(classify_native)?
-        .ok_or(ManagementFailure::AuthorizationDenied)?;
-    if status.key != native.key()
-        || status.server != Some(binding.target().server())
-        || registration.server_pin() != binding.target().pin()
-    {
+    if native.binding() != binding {
         return Err(ManagementFailure::AuthorizationDenied);
     }
-    if status.desired != Some(registration.desired_state())
-        || status.approved.as_ref() != registration.approved_installation()
-        || status.staged.as_ref() != registration.staged_installation()
-    {
-        return Err(ManagementFailure::StaleAssessment);
+    let read = native.inspect().await?;
+    if read.status.server != Some(binding.target().server()) {
+        return Err(ManagementFailure::AuthorizationDenied);
     }
-    let generation = std::num::NonZeroU64::new(registration.generation())
-        .ok_or(ManagementFailure::UnsafeNativeState)?;
     Ok(NativeRead {
-        desired: registration.desired_state(),
-        status,
-        generation,
+        desired: read
+            .status
+            .desired
+            .ok_or(ManagementFailure::UnsafeNativeState)?,
+        status: read.status,
+        generation: read.generation,
         recovered: None,
     })
 }
 
 async fn recover_native(
-    native: &NativeServiceManagement,
+    native: &Arc<dyn HostServiceManagement>,
     binding: &PairedServerBinding,
 ) -> Result<NativeRead, ManagementFailure> {
     let mut read = check_native(native, binding).await?;
-    let originals = native
-        .supervisor()
-        .retained_service_requests()
-        .map_err(classify_native)?;
+    let originals = native.retained_requests().await?;
     let request = read
         .status
         .pending
@@ -1672,7 +1677,7 @@ fn apply_native_read(state: &mut ServerState, read: NativeRead) {
 }
 
 async fn assess_update(
-    native: &NativeServiceManagement,
+    native: &Arc<dyn HostServiceManagement>,
     binding: &PairedServerBinding,
     summary: &ServerSummary,
 ) -> Result<(UpdateAssessment, NativeRead), ManagementFailure> {
@@ -1691,10 +1696,10 @@ async fn assess_update(
     {
         return Err(ManagementFailure::StaleAssessment);
     }
+    let request = native.reserve_request().await?;
     let original = native
-        .assess(ServiceAction::Activate(candidate.installation))
-        .await
-        .map_err(classify_native)?;
+        .assess(request, ServiceAction::Activate(candidate.installation))
+        .await?;
     let read = check_native(native, binding).await?;
     if read.generation != before.generation
         || read.desired != before.desired
@@ -1702,11 +1707,11 @@ async fn assess_update(
         || read.status.staged != before.status.staged
         || summary
             .runtime_epoch
-            .is_some_and(|epoch| Some(epoch) != original.runtime_epoch())
+            .is_some_and(|epoch| Some(epoch) != original.runtime_epoch)
     {
         return Err(ManagementFailure::StaleAssessment);
     }
-    let prompt = NativeActionPrompt::from_assessment(&original)?;
+    let prompt = original.prompt;
     let assessment = UpdateAssessment {
         reference: prompt.token,
         native_request: prompt.request,
@@ -1717,14 +1722,14 @@ async fn assess_update(
             .approved
             .as_ref()
             .map(|value| value.installation),
-        running: original.runtime_epoch().and_then(|_| {
+        running: original.runtime_epoch.and_then(|_| {
             read.status
                 .approved
                 .as_ref()
                 .map(|value| value.installation)
         }),
         candidate,
-        runtime_epoch: original.runtime_epoch(),
+        runtime_epoch: original.runtime_epoch,
         desired: read.desired,
     };
     Ok((assessment, read))
@@ -1816,10 +1821,7 @@ fn assessment_value(
 
 fn native_result(
     request: spaceterm_host::native_deployment::contracts::NativeRequestId,
-    progress: Result<
-        spaceterm_host::account_service::ServiceProgress,
-        spaceterm_host::account_service::ServiceFailure,
-    >,
+    progress: Result<spaceterm_host::account_service::ServiceProgress, ManagementFailure>,
 ) -> ResultPublication {
     match progress {
         Ok(progress) if progress.request == request => ResultPublication::Native {
@@ -1843,7 +1845,7 @@ fn native_result(
         Err(failure) => ResultPublication::Native {
             request,
             unresolved: true,
-            failure: Some(classify_native(failure)),
+            failure: Some(failure),
         },
     }
 }

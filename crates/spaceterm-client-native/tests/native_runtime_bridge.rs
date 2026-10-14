@@ -291,10 +291,17 @@ async fn production_cli_native_lifecycle_preserves_exact_assessment_and_request_
                         break;
                     }
                     AccountRuntimeCall::Abort(_) => panic!("successful admission must not abort"),
+                    AccountRuntimeCall::AssessNativeLifecycle(_)
+                    | AccountRuntimeCall::AdmitNativeLifecycle(_)
+                    | AccountRuntimeCall::AssessNativeStage(_)
+                    | AccountRuntimeCall::AdmitNativeStage(_) => {
+                        panic!("local runtime bridge must retain its own native admission")
+                    }
                 };
                 let message = common::AccountRuntimeMessage {
                     request: request.request,
                     body: serde_json::to_vec(&reply).unwrap(),
+                    request_generation: request.request_generation,
                 };
                 let payload = match major {
                     1 => Payload::Major1(v1::Message {

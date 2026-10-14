@@ -3,7 +3,9 @@
 
 pub mod artifacts;
 pub mod consumer;
+pub mod host_services;
 mod receipts;
+pub mod remote_host_services;
 pub mod runtime;
 mod tracked;
 

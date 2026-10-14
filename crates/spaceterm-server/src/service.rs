@@ -185,6 +185,29 @@ pub(crate) enum ActorRequest {
     },
 }
 pub(crate) enum LifecycleRequest {
+    NativeAuthorize {
+        principal: VerifiedPrincipal,
+        reply: Reply<(
+            spaceterm_core::pairing::policy::PairingPrincipal,
+            FieldVersion,
+        )>,
+    },
+    NativePairedReserve {
+        principal: VerifiedPrincipal,
+        authorization_version: FieldVersion,
+        assessment: spaceterm_host::account_service::RuntimeAssessment,
+        reply: Reply<()>,
+    },
+    NativeStageAdmission {
+        principal: VerifiedPrincipal,
+        admission: Box<spaceterm_host::account_service::RuntimeStageAdmission>,
+        reply: oneshot::Sender<
+            Result<
+                spaceterm_host::account_service::ServiceProgress,
+                spaceterm_host::account_service::ServiceFailure,
+            >,
+        >,
+    },
     NativeAssess(Reply<spaceterm_host::account_service::RuntimeAssessment>),
     NativeReserve(
         spaceterm_host::account_service::RuntimeAssessment,
@@ -3574,8 +3597,102 @@ impl Actor {
         }
         Ok(())
     }
+    fn native_pairing_authority(
+        &self,
+        principal: VerifiedPrincipal,
+    ) -> Result<
+        (
+            spaceterm_core::pairing::policy::PairingPrincipal,
+            FieldVersion,
+        ),
+        ServerFailure,
+    > {
+        self.check_principal(principal, false)?;
+        let state = self.pairing_state.borrow();
+        let state = state
+            .as_ref()
+            .ok_or_else(|| failure(ServerFailureClass::Authentication))?;
+        let authorized = spaceterm_core::pairing::policy::PairingPolicy::default()
+            .authorize_client(state, principal.pairing(), principal.client())
+            .map_err(|_| failure(ServerFailureClass::Authentication))?;
+        if authorized.server() != principal.server() || authorized.device() != principal.device() {
+            return Err(failure(ServerFailureClass::Authentication));
+        }
+        let version = state
+            .authorization(principal.pairing())
+            .map_err(|_| failure(ServerFailureClass::Authentication))?
+            .parts()
+            .authorization_version;
+        Ok((authorized, version))
+    }
+    fn native_reserve(
+        &mut self,
+        assessment: spaceterm_host::account_service::RuntimeAssessment,
+    ) -> Result<(), ServerFailure> {
+        if self.native_reservation.as_ref() == Some(&assessment) {
+            return Ok(());
+        }
+        if self.native_reservation.is_some() {
+            return Err(failure(ServerFailureClass::StaleAuthority));
+        }
+        self.native_matches(&assessment)?;
+        self.native_reservation = Some(assessment);
+        self.terminal_barrier = true;
+        Ok(())
+    }
     fn lifecycle(&mut self, request: LifecycleRequest) {
         match request {
+            LifecycleRequest::NativeAuthorize { principal, reply } => {
+                let _ = reply.send(self.native_pairing_authority(principal));
+            }
+            LifecycleRequest::NativeStageAdmission {
+                principal,
+                admission,
+                reply,
+            } => {
+                // No await, reservation, callback or terminal barrier separates
+                // current actor authorization from durable native Accepted.
+                let result = (|| {
+                    // A pending durable pairing write has not reached the actor
+                    // view yet. Stage must wait instead of trusting that old view.
+                    self.available()
+                        .map_err(|_| spaceterm_host::account_service::ServiceFailure::Pending)?;
+                    if !matches!(
+                        *self.phase.borrow(),
+                        ServicePhase::Ready | ServicePhase::Serving
+                    ) || self.shutdown.is_some()
+                    {
+                        return Err(spaceterm_host::account_service::ServiceFailure::Pending);
+                    }
+                    let (authorized, version) =
+                        self.native_pairing_authority(principal).map_err(|_| {
+                            spaceterm_host::account_service::ServiceFailure::PairingRequired
+                        })?;
+                    (*admission).publish(
+                        authorized,
+                        version,
+                        principal.binding().generation,
+                        principal.epoch(),
+                    )
+                })();
+                let _ = reply.send(result);
+            }
+            LifecycleRequest::NativePairedReserve {
+                principal,
+                authorization_version,
+                assessment,
+                reply,
+            } => {
+                let result = self
+                    .native_pairing_authority(principal)
+                    .and_then(|(_, current)| {
+                        if current != authorization_version {
+                            return Err(failure(ServerFailureClass::Authentication));
+                        }
+                        self.native_reserve(assessment)
+                    });
+                let _ = reply.send(result);
+            }
             LifecycleRequest::NativeAssess(reply) => {
                 let result = (|| {
                     if self.native_reservation.is_some() {
@@ -3600,16 +3717,7 @@ impl Actor {
                 let _ = reply.send(result);
             }
             LifecycleRequest::NativeReserve(assessment, reply) => {
-                let result = if self.native_reservation.as_ref() == Some(&assessment) {
-                    Ok(())
-                } else if self.native_reservation.is_some() {
-                    Err(failure(ServerFailureClass::StaleAuthority))
-                } else {
-                    self.native_matches(&assessment).map(|()| {
-                        self.native_reservation = Some(assessment);
-                        self.terminal_barrier = true;
-                    })
-                };
+                let result = self.native_reserve(assessment);
                 let _ = reply.send(result);
             }
             LifecycleRequest::NativeAbort(assessment, reply) => {
@@ -3641,6 +3749,9 @@ impl Actor {
             }
             LifecycleRequest::RevokeClients { clients, reply } => {
                 let result = (|| {
+                    if self.native_reservation.is_some() {
+                        return Err(failure(ServerFailureClass::StaleAuthority));
+                    }
                     if clients.len() > 4096
                         || clients.iter().any(|v| {
                             v.server() != self.cursor.server

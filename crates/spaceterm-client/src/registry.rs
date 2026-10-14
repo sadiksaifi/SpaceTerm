@@ -116,20 +116,12 @@ impl ClientRegistry {
                 return Err(ClientFailure::new(ClientFailureClass::InvalidStorage));
             }
         }
-        if services.additional_capabilities.len() > 8
-            || services.additional_capabilities.iter().any(|capability| {
-                !matches!(
-                    *capability,
-                    spaceterm_protocol::negotiation::CAPABILITY_SERVER_GIT
-                        | spaceterm_protocol::negotiation::CAPABILITY_SERVER_DIRECTORIES
-                        | spaceterm_protocol::negotiation::CAPABILITY_ORGANIZATION_COMPARISONS
-                        | spaceterm_protocol::negotiation::CAPABILITY_TERMINAL_STREAMS
-                        | spaceterm_protocol::negotiation::CAPABILITY_NATIVE_NOTIFICATIONS
-                        | spaceterm_protocol::negotiation::CAPABILITY_APPLICATION_MOUSE
-                        | spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA
-                        | spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA_FRAGMENTS
-                )
-            })
+        let optional = crate::api::ConnectionCapabilities::optional_advertisement();
+        if services.additional_capabilities.len() > optional.len()
+            || services
+                .additional_capabilities
+                .iter()
+                .any(|capability| !optional.contains(capability))
         {
             return Err(resource_limit());
         }

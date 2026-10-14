@@ -5,12 +5,19 @@ mod support;
 use spaceterm_client::{
     api::ConnectionTarget,
     directories::DirectoryClient,
+    failure::ClientFailureClass,
     journal::{ClientJournalChange, JournalController, JournalLimits},
     registry::ClientRegistry,
 };
 use spaceterm_core::authority::ServerEpoch;
 use spaceterm_core::server_directories::{DirectoryQueryAction, DirectoryQueryResult};
-use spaceterm_protocol::{codec::Payload, convert::directories};
+use spaceterm_protocol::{
+    codec::Payload,
+    convert::directories,
+    limits::MAX_ACCOUNT_RUNTIME_BYTES,
+    negotiation::{CAPABILITY_ACCOUNT_RUNTIME, CAPABILITY_REMOTE_NATIVE_LIFECYCLE},
+    wire::common,
+};
 use std::sync::Arc;
 use support::{peer::*, *};
 
@@ -55,6 +62,28 @@ async fn setup(
     Arc<JournalController>,
     Arc<PeerPlan>,
 ) {
+    setup_with_capabilities(
+        major,
+        reply,
+        &[
+            spaceterm_protocol::negotiation::CAPABILITY_SERVER_DIRECTORIES,
+            spaceterm_protocol::negotiation::CAPABILITY_SERVER_GIT,
+            spaceterm_protocol::negotiation::CAPABILITY_ACCOUNT_RUNTIME,
+        ],
+    )
+    .await
+}
+
+async fn setup_with_capabilities(
+    major: u32,
+    reply: Option<QueryHandler>,
+    capabilities: &[u32],
+) -> (
+    spaceterm_client::registry::ServerHandle,
+    spaceterm_client::registry::ClientRuntime,
+    Arc<JournalController>,
+    Arc<PeerPlan>,
+) {
     let binding = binding(1);
     let codec = Arc::new(spaceterm_core::operation_ledger::canonical::CanonicalCodec);
     let storage = Arc::new(durable::MemoryJournal::new(codec.clone()));
@@ -75,10 +104,7 @@ async fn setup(
         .await
         .unwrap();
     let mut plan = PeerPlan::new(vec![major]);
-    plan.capabilities.extend([
-        spaceterm_protocol::negotiation::CAPABILITY_SERVER_DIRECTORIES,
-        spaceterm_protocol::negotiation::CAPABILITY_SERVER_GIT,
-    ]);
+    plan.capabilities.extend_from_slice(capabilities);
     plan.capabilities.sort_unstable();
     plan.query_handler = reply;
     let plan = Arc::new(plan);
@@ -87,10 +113,7 @@ async fn setup(
         Arc::new(Peers::one(&binding, plan.clone())),
     );
     services.journal = journal.clone();
-    services.additional_capabilities = vec![
-        spaceterm_protocol::negotiation::CAPABILITY_SERVER_DIRECTORIES,
-        spaceterm_protocol::negotiation::CAPABILITY_SERVER_GIT,
-    ];
+    services.additional_capabilities = capabilities.to_vec();
     let (registry, runtime) = ClientRegistry::recover(services).await.unwrap();
     let server = registry.server(binding.target().server()).unwrap();
     server.connect().await.unwrap();
@@ -566,7 +589,41 @@ async fn server_query_ports_reject_a_second_journal_with_the_same_saved_binding(
         ))])
         .await
         .unwrap();
-    assert!(server.queries(journal).is_ok());
+    let queries = server.queries(journal.clone()).unwrap();
+    assert!(queries.validate_owner(&binding(1), &journal).is_ok());
+    assert!(
+        queries
+            .validate_recovery_owner(&binding(1), &journal)
+            .is_ok()
+    );
+    assert_eq!(
+        queries
+            .validate_recovery_owner(&binding(1), &other)
+            .unwrap_err()
+            .class(),
+        ClientFailureClass::InvalidStorage
+    );
+    assert_eq!(
+        queries
+            .validate_recovery_owner(&binding(2), &journal)
+            .unwrap_err()
+            .class(),
+        ClientFailureClass::StaleAuthority
+    );
+    assert_eq!(
+        queries
+            .validate_owner(&binding(1), &other)
+            .unwrap_err()
+            .class(),
+        ClientFailureClass::InvalidStorage
+    );
+    assert_eq!(
+        queries
+            .validate_owner(&binding(2), &journal)
+            .unwrap_err()
+            .class(),
+        ClientFailureClass::StaleAuthority
+    );
     assert!(server.queries(other).is_err());
     runtime.shutdown().await.unwrap();
 }
@@ -1030,6 +1087,580 @@ async fn companion_status_decodes_other_client_and_compacted_operation_progress_
             settle().await;
             runtime.shutdown().await.unwrap();
         }
+    }
+}
+
+fn account_runtime_request(payload: &Payload) -> Option<&common::AccountRuntimeMessage> {
+    match payload {
+        Payload::Major1(v1::Message {
+            kind: Some(v1::message::Kind::AccountRuntimeRequest(message)),
+        })
+        | Payload::Major2(v2::Message {
+            kind: Some(v2::message::Kind::AccountRuntimeRequest(message)),
+        }) => Some(message),
+        _ => None,
+    }
+}
+
+fn account_runtime_reply(major: u32, request: u64, generation: u64, body: &[u8]) -> Payload {
+    let message = common::AccountRuntimeMessage {
+        request,
+        request_generation: generation,
+        body: body.to_vec(),
+    };
+    match major {
+        1 => Payload::Major1(v1::Message {
+            kind: Some(v1::message::Kind::AccountRuntimeReply(message)),
+        }),
+        2 => Payload::Major2(v2::Message {
+            kind: Some(v2::message::Kind::AccountRuntimeReply(message)),
+        }),
+        _ => unreachable!(),
+    }
+}
+
+fn echo_account_runtime(payload: &Payload, _: &ConnectionTarget) -> Option<Payload> {
+    let message = account_runtime_request(payload)?;
+    Some(account_runtime_reply(
+        payload.major(),
+        message.request,
+        message.request_generation,
+        &message.body,
+    ))
+}
+
+fn poll_pending(future: std::pin::Pin<&mut impl std::future::Future>) {
+    assert!(
+        future
+            .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+            .is_pending()
+    );
+}
+
+fn runtime_requests(plan: &PeerPlan) -> Vec<common::AccountRuntimeMessage> {
+    plan.messages
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(account_runtime_request)
+        .cloned()
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn account_runtime_uses_the_existing_worker_and_canonical_journal_in_both_majors() {
+    for major in [1, 2] {
+        let (server, runtime, journal, plan) = setup(major, Some(echo_account_runtime)).await;
+        let queries = server.queries(journal.clone()).unwrap();
+        let info = match *server.state().borrow() {
+            spaceterm_client::api::ConnectionState::Connected { info } => info,
+            _ => panic!("not connected"),
+        };
+        assert_eq!(queries.server_epoch().unwrap(), info.epoch);
+        assert!(info.capabilities.supports(CAPABILITY_ACCOUNT_RUNTIME));
+        assert!(
+            queries
+                .capabilities()
+                .unwrap()
+                .supports(CAPABILITY_ACCOUNT_RUNTIME)
+        );
+        let revision = journal.snapshot().unwrap().revision();
+        for body in [vec![1], vec![7; MAX_ACCOUNT_RUNTIME_BYTES]] {
+            assert_eq!(queries.account_runtime(&body).await.unwrap(), body);
+        }
+        let requests = runtime_requests(&plan);
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests.iter().all(|request| {
+                request.request != 0 && request.request_generation == info.attempt
+            })
+        );
+        assert_ne!(requests[0].request, requests[1].request);
+        assert_eq!(journal.snapshot().unwrap().revision(), revision);
+        assert!(journal.snapshot().unwrap().operations().is_empty());
+        assert_eq!(plan.opens.load(Ordering::SeqCst), 1);
+        runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn account_runtime_isolates_callers_and_requires_exact_request_and_generation() {
+    for major in [1, 2] {
+        let (server, runtime, journal, plan) = setup(major, None).await;
+        let queries = server.queries(journal).unwrap();
+        let mut first = Box::pin(queries.account_runtime(b"first"));
+        let mut second = Box::pin(queries.account_runtime(b"second"));
+        poll_pending(first.as_mut());
+        poll_pending(second.as_mut());
+        settle().await;
+        let requests = runtime_requests(&plan);
+        let first_request = requests
+            .iter()
+            .find(|value| value.body == b"first")
+            .unwrap();
+        let second_request = requests
+            .iter()
+            .find(|value| value.body == b"second")
+            .unwrap();
+        assert_ne!(first_request.request, second_request.request);
+        for (request, generation) in [
+            (
+                first_request.request + 100,
+                first_request.request_generation,
+            ),
+            (first_request.request, 0),
+            (first_request.request, first_request.request_generation + 1),
+        ] {
+            plan.control(PeerControl::publication(account_runtime_reply(
+                major, request, generation, b"wrong",
+            )))
+            .await;
+        }
+        settle().await;
+        poll_pending(first.as_mut());
+        poll_pending(second.as_mut());
+        plan.control(PeerControl::publication(account_runtime_reply(
+            major,
+            second_request.request,
+            second_request.request_generation,
+            b"second result",
+        )))
+        .await;
+        settle().await;
+        assert_eq!(second.await.unwrap(), b"second result");
+        poll_pending(first.as_mut());
+        plan.control(PeerControl::publication(account_runtime_reply(
+            major,
+            first_request.request,
+            first_request.request_generation,
+            b"first result",
+        )))
+        .await;
+        assert_eq!(first.await.unwrap(), b"first result");
+        runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn account_runtime_bounds_precede_shared_read_admission_and_cancellation_reclaims_capacity() {
+    for major in [1, 2] {
+        let (server, runtime, journal, plan) = setup(major, None).await;
+        let queries = server.queries(journal).unwrap();
+        let mut calls = Vec::new();
+        for _ in 0..3 {
+            let mut call = Box::pin(queries.account_runtime(b"pending"));
+            poll_pending(call.as_mut());
+            calls.push(call);
+        }
+        let client = DirectoryClient::new(server.identity(), Arc::new(queries.clone())).unwrap();
+        let mut directory = Box::pin(client.home());
+        poll_pending(directory.as_mut());
+        settle().await;
+        assert_eq!(
+            queries.account_runtime(b"").await.unwrap_err().class(),
+            ClientFailureClass::InvalidPeer
+        );
+        assert_eq!(
+            queries
+                .account_runtime(&vec![0; MAX_ACCOUNT_RUNTIME_BYTES + 1])
+                .await
+                .unwrap_err()
+                .class(),
+            ClientFailureClass::ResourceLimit
+        );
+        assert_eq!(
+            queries.account_runtime(b"fifth").await.unwrap_err().class(),
+            ClientFailureClass::ResourceLimit
+        );
+        let old = runtime_requests(&plan);
+        assert_eq!(old.len(), 3);
+        drop(calls);
+        drop(directory);
+        let mut replacement = Box::pin(queries.account_runtime(b"replacement"));
+        poll_pending(replacement.as_mut());
+        settle().await;
+        for request in old {
+            plan.control(PeerControl::publication(account_runtime_reply(
+                major,
+                request.request,
+                request.request_generation,
+                b"cancelled",
+            )))
+            .await;
+        }
+        settle().await;
+        poll_pending(replacement.as_mut());
+        let requests = runtime_requests(&plan);
+        assert_eq!(requests.len(), 4);
+        let current = requests.last().unwrap();
+        plan.control(PeerControl::publication(account_runtime_reply(
+            major,
+            current.request,
+            current.request_generation,
+            b"current",
+        )))
+        .await;
+        assert_eq!(replacement.await.unwrap(), b"current");
+        runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn account_runtime_requires_the_negotiated_capability_without_sending() {
+    for major in [1, 2] {
+        let (server, runtime, journal, plan) = setup_with_capabilities(major, None, &[]).await;
+        let queries = server.queries(journal).unwrap();
+        assert_eq!(
+            queries
+                .account_runtime(b"request")
+                .await
+                .unwrap_err()
+                .class(),
+            ClientFailureClass::MissingCapability
+        );
+        assert!(runtime_requests(&plan).is_empty());
+        assert_eq!(plan.opens.load(Ordering::SeqCst), 1);
+        runtime.shutdown().await.unwrap();
+    }
+}
+
+async fn block_runtime_writer(
+    server: &spaceterm_client::registry::ServerHandle,
+    plan: &PeerPlan,
+) -> tokio::task::JoinHandle<Result<(), spaceterm_client::failure::ClientFailure>> {
+    let info = match *server.state().borrow() {
+        spaceterm_client::api::ConnectionState::Connected { info } => info,
+        _ => panic!("not connected"),
+    };
+    plan.client_send_gate
+        .forget_permits(plan.client_send_gate.available_permits());
+    let before = plan.sends_started.load(Ordering::SeqCst);
+    let message = match info.major {
+        1 => Payload::Major1(v1::Message {
+            kind: Some(v1::message::Kind::StatusQuery(v1::StatusQuery {
+                request: 9000,
+                ..Default::default()
+            })),
+        }),
+        2 => Payload::Major2(v2::Message {
+            kind: Some(v2::message::Kind::StatusQuery(v2::StatusQuery {
+                request: 9000,
+                ..Default::default()
+            })),
+        }),
+        _ => unreachable!(),
+    };
+    let server = server.clone();
+    let blocker = tokio::spawn(async move { server.dispatch(info, message).await });
+    settle().await;
+    assert_eq!(plan.sends_started.load(Ordering::SeqCst), before + 1);
+    blocker
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelled_account_runtime_calls_never_reach_transmission() {
+    for major in [1, 2] {
+        let (server, runtime, journal, plan) = setup(major, None).await;
+        let queries = server.queries(journal).unwrap();
+        drop(queries.account_runtime(b"cancelled before admission"));
+        let blocker = block_runtime_writer(&server, &plan).await;
+        let mut queued = Box::pin(queries.account_runtime(b"cancelled while queued"));
+        poll_pending(queued.as_mut());
+        settle().await;
+        drop(queued);
+        plan.client_send_gate.add_permits(10);
+        blocker.await.unwrap().unwrap();
+        settle().await;
+        assert!(runtime_requests(&plan).is_empty());
+        assert_eq!(plan.opens.load(Ordering::SeqCst), 1);
+        runtime.shutdown().await.unwrap();
+    }
+}
+
+async fn revoke_runtime_pairing(journal: &JournalController) {
+    use spaceterm_client::journal::{JournalRevocation, RevocationPhase, SavedTarget};
+    use spaceterm_core::{operations::*, pairing::*};
+    let binding = binding(1);
+    let state = journal.snapshot().unwrap();
+    let saved = &state.bindings()[0];
+    let original = PendingSelfRevocation::new(PendingParts {
+        original_server: binding.target().server(),
+        original_pairing: binding.target().pairing(),
+        device: binding.target().device(),
+        client: binding.target().client(),
+        operation: OperationId::new(
+            saved.streams().parts().self_revocation,
+            OperationSequence::new(1).unwrap(),
+        ),
+        route: RevocationRouteReference::new([9; 16]),
+        credential: binding.target().credential(),
+        notice_dismissed: false,
+    })
+    .unwrap();
+    let request = spaceterm_core::operation_ledger_contracts::CanonicalOperationRequest::new(
+        original.operation(),
+        Command::Pairing(PairingCommand::SelfRevoke {
+            target: PairingTarget::new(PairingTargetParts {
+                server: original.server(),
+                pairing: original.pairing(),
+                device: original.device(),
+            })
+            .unwrap(),
+        }),
+        &spaceterm_core::operation_ledger::canonical::CanonicalCodec,
+    )
+    .unwrap();
+    let task = PendingRevocationTask::new(PendingRevocationTaskParts {
+        original,
+        local_pairing: binding.target().local_pairing().unwrap(),
+        pinned_server_public_key: binding.target().pin().public_key,
+        request_digest: request.binding().digest,
+    })
+    .unwrap();
+    journal
+        .transact(vec![ClientJournalChange::BeginRevocation(Box::new(
+            JournalRevocation {
+                task,
+                target: SavedTarget::from_target(binding.target()),
+                phase: RevocationPhase::AwaitingConfirmation,
+                notice_dismissed: false,
+                attempts: 0,
+            },
+        ))])
+        .await
+        .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn account_runtime_rechecks_revocation_at_final_transmission_and_result_release() {
+    for major in [1, 2] {
+        for queued in [false, true] {
+            let (server, runtime, journal, plan) = setup(major, None).await;
+            let queries = server.queries(journal.clone()).unwrap();
+            let blocker = if queued {
+                Some(block_runtime_writer(&server, &plan).await)
+            } else {
+                None
+            };
+            let mut call = Box::pin(queries.account_runtime(b"request"));
+            poll_pending(call.as_mut());
+            settle().await;
+            if !queued {
+                let requests = runtime_requests(&plan);
+                let request = &requests[0];
+                plan.control(PeerControl::publication(account_runtime_reply(
+                    major,
+                    request.request,
+                    request.request_generation,
+                    b"withheld result",
+                )))
+                .await;
+                settle().await;
+            }
+            revoke_runtime_pairing(&journal).await;
+            assert!(
+                queries
+                    .validate_recovery_owner(&binding(1), &journal)
+                    .is_ok()
+            );
+            assert_eq!(
+                queries
+                    .validate_owner(&binding(1), &journal)
+                    .unwrap_err()
+                    .class(),
+                ClientFailureClass::AuthorizationDenied
+            );
+            assert_eq!(
+                queries
+                    .account_runtime(b"new after revocation")
+                    .await
+                    .unwrap_err()
+                    .class(),
+                ClientFailureClass::AuthorizationDenied
+            );
+            if let Some(blocker) = blocker {
+                plan.client_send_gate.add_permits(10);
+                blocker.await.unwrap().unwrap();
+            }
+            assert!(matches!(
+                call.await.unwrap_err().class(),
+                ClientFailureClass::StaleAuthority | ClientFailureClass::AuthorizationDenied
+            ));
+            assert_eq!(runtime_requests(&plan).len(), usize::from(!queued));
+            assert_eq!(plan.opens.load(Ordering::SeqCst), 1);
+            runtime.shutdown().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn account_runtime_reconnect_cannot_complete_an_old_call_or_accept_its_reply() {
+    for major in [1, 2] {
+        for received_before_reconnect in [false, true] {
+            let (server, runtime, journal, plan) = setup(major, None).await;
+            let queries = server.queries(journal).unwrap();
+            let mut old_call = Box::pin(queries.account_runtime(b"old"));
+            poll_pending(old_call.as_mut());
+            settle().await;
+            let old = runtime_requests(&plan).pop().unwrap();
+            if received_before_reconnect {
+                plan.control(PeerControl::publication(account_runtime_reply(
+                    major,
+                    old.request,
+                    old.request_generation,
+                    b"old result",
+                )))
+                .await;
+                settle().await;
+            }
+            plan.control(PeerControl::Disconnect).await;
+            settle().await;
+            tokio::time::advance(Duration::from_secs(1)).await;
+            settle().await;
+            assert_eq!(plan.opens.load(Ordering::SeqCst), 2);
+            assert_eq!(
+                old_call.await.unwrap_err().class(),
+                ClientFailureClass::StaleAuthority
+            );
+            let mut current_call = Box::pin(queries.account_runtime(b"current"));
+            poll_pending(current_call.as_mut());
+            settle().await;
+            let current = runtime_requests(&plan).pop().unwrap();
+            assert_ne!(current.request_generation, old.request_generation);
+            assert_ne!(current.request, old.request);
+            for (request, generation) in [
+                (old.request, old.request_generation),
+                (old.request, current.request_generation),
+                (current.request, old.request_generation),
+            ] {
+                plan.control(PeerControl::publication(account_runtime_reply(
+                    major, request, generation, b"stale",
+                )))
+                .await;
+            }
+            settle().await;
+            poll_pending(current_call.as_mut());
+            plan.control(PeerControl::publication(account_runtime_reply(
+                major,
+                current.request,
+                current.request_generation,
+                b"current result",
+            )))
+            .await;
+            assert_eq!(current_call.await.unwrap(), b"current result");
+            runtime.shutdown().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn native_account_runtime_fences_queued_calls_and_rechecks_capabilities_after_reconnect() {
+    for major in [1, 2] {
+        for queued_before_reconnect in [false, true] {
+            let (server, runtime, journal, plan) = setup_with_capabilities(
+                major,
+                Some(echo_account_runtime),
+                &[
+                    CAPABILITY_ACCOUNT_RUNTIME,
+                    CAPABILITY_REMOTE_NATIVE_LIFECYCLE,
+                ],
+            )
+            .await;
+            let queries = server.queries(journal).unwrap();
+            let epoch = queries.server_epoch().unwrap();
+            assert!(
+                queries
+                    .capabilities()
+                    .unwrap()
+                    .supports(CAPABILITY_REMOTE_NATIVE_LIFECYCLE)
+            );
+            assert_eq!(
+                queries.native_account_runtime(b"supported").await.unwrap(),
+                b"supported"
+            );
+            let before = runtime_requests(&plan).len();
+            let blocker = if queued_before_reconnect {
+                Some(block_runtime_writer(&server, &plan).await)
+            } else {
+                None
+            };
+            let mut queued = Box::pin(queries.native_account_runtime(b"old queued request"));
+            if queued_before_reconnect {
+                poll_pending(queued.as_mut());
+                settle().await;
+            }
+            *plan.next_capabilities.lock().unwrap() = Some(
+                plan.capabilities
+                    .iter()
+                    .copied()
+                    .filter(|capability| *capability != CAPABILITY_REMOTE_NATIVE_LIFECYCLE)
+                    .collect(),
+            );
+            plan.control(PeerControl::Disconnect).await;
+            settle().await;
+            plan.client_send_gate.add_permits(100);
+            tokio::time::advance(Duration::from_secs(1)).await;
+            settle().await;
+            if queued_before_reconnect {
+                assert!(matches!(
+                    queued.await.unwrap_err().class(),
+                    ClientFailureClass::StaleAuthority | ClientFailureClass::Cancelled
+                ));
+            } else {
+                drop(queued);
+            }
+            if let Some(blocker) = blocker {
+                assert!(blocker.await.unwrap().is_err());
+            }
+            assert_eq!(plan.opens.load(Ordering::SeqCst), 2);
+            assert_eq!(queries.server_epoch().unwrap(), epoch);
+            assert!(
+                !queries
+                    .capabilities()
+                    .unwrap()
+                    .supports(CAPABILITY_REMOTE_NATIVE_LIFECYCLE)
+            );
+            assert_eq!(
+                queries
+                    .native_account_runtime(b"refused after capability loss")
+                    .await
+                    .unwrap_err()
+                    .class(),
+                ClientFailureClass::MissingCapability
+            );
+            assert_eq!(runtime_requests(&plan).len(), before);
+            assert_eq!(
+                queries
+                    .account_runtime(b"legacy still supported")
+                    .await
+                    .unwrap(),
+                b"legacy still supported"
+            );
+            assert_eq!(runtime_requests(&plan).len(), before + 1);
+            runtime.shutdown().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn account_runtime_deadline_removes_the_request_without_retrying() {
+    for major in [1, 2] {
+        let (server, runtime, journal, plan) = setup(major, None).await;
+        let queries = server.queries(journal).unwrap();
+        // More than the four simultaneous slots proves each deadline frees its entry.
+        for expected in 1..=5 {
+            let mut call = Box::pin(queries.account_runtime(b"expired"));
+            poll_pending(call.as_mut());
+            settle().await;
+            tokio::time::advance(Duration::from_secs(6)).await;
+            assert_eq!(
+                call.await.unwrap_err().class(),
+                ClientFailureClass::Unavailable
+            );
+            assert_eq!(runtime_requests(&plan).len(), expected);
+            assert_eq!(plan.opens.load(Ordering::SeqCst), 1);
+        }
+        runtime.shutdown().await.unwrap();
     }
 }
 

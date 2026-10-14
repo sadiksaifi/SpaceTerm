@@ -185,6 +185,109 @@ impl Database {
         Self::open_inner(directory, migrations, false, Some(application_id), None)
     }
 
+    /// Opens an existing application database with read-only native authority.
+    ///
+    /// The retained version must exactly equal the migration count. Older storage
+    /// requires ordinary owner recovery; newer storage remains unsupported. This
+    /// opener never creates, migrates, recovers a journal, changes journal policy,
+    /// or synchronizes storage. Any retained rollback journal fails closed, even
+    /// if SQLite might consider it cold. WAL and SHM remain unsupported.
+    ///
+    /// Application binding, integrity and foreign keys are validated in one read
+    /// snapshot. SQLite omits CHECK expressions when loading read-only databases.
+    /// The schema adapter must still perform its canonical inventory and domain
+    /// recovery validation before exposing retained state. The returned handle
+    /// supports read transactions but permanently rejects write callbacks.
+    ///
+    /// # Errors
+    /// Returns bounded storage failures. Missing storage is `Unavailable`; an
+    /// older version or retained rollback journal is `RecoveryRequired`. Handles
+    /// with different native access modes cannot share a live inode descriptor.
+    pub fn open_frozen_for_application(
+        directory: &Path,
+        migrations: &[Migration<'_>],
+        application_id: u32,
+    ) -> Result<Self, StorageFailure> {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            use rusqlite::{OpenFlags, config::DbConfig};
+            let supported =
+                u32::try_from(migrations.len()).map_err(|_| StorageFailure::InvalidState)?;
+            if supported > i32::MAX as u32
+                || application_id == 0
+                || application_id > i32::MAX as u32
+            {
+                return Err(StorageFailure::InvalidState);
+            }
+            let directory = directory::Directory::open(directory)?;
+            directory.check_frozen()?;
+            if directory.check(directory::Kind::Database)?.is_none() {
+                return Err(StorageFailure::Unavailable);
+            }
+            let registration = vfs::Registration::new(directory, true)?;
+            let mut connection = Connection::open_with_flags_and_vfs(
+                DATABASE_FILE_NAME,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                registration.name()?,
+            )
+            .map_err(|error| registration.context.classify(error))?;
+            connection
+                .busy_timeout(std::time::Duration::ZERO)
+                .map_err(classify_sqlite)?;
+            connection
+                .set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)
+                .map_err(classify_sqlite)?;
+            // These pragmas configure only this connection, never the retained
+            // journal mode or schema. Native descriptors and VFS callbacks also
+            // deny writes independently of SQLite's query-only setting.
+            connection
+                .execute_batch(
+                    "PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; \
+                 PRAGMA temp_store=MEMORY; PRAGMA mmap_size=0; PRAGMA query_only=ON;",
+                )
+                .map_err(|error| registration.context.classify(error))?;
+            let snapshot = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
+                .map_err(|error| registration.context.classify(error))?;
+            let found =
+                version(&snapshot).map_err(|error| registration.context.failure_or(error))?;
+            check_version(found, supported)?;
+            if found < supported || found == 0 {
+                return Err(StorageFailure::RecoveryRequired);
+            }
+            if self::application_id(&snapshot)
+                .map_err(|error| registration.context.failure_or(error))?
+                != application_id
+            {
+                return Err(StorageFailure::InvalidState);
+            }
+            validate(&snapshot).map_err(|error| registration.context.classify(error))?;
+            let mode: String = snapshot
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .map_err(|error| registration.context.classify(error))?;
+            if mode != "delete" {
+                return Err(StorageFailure::InvalidState);
+            }
+            snapshot
+                .rollback()
+                .map_err(|error| registration.context.classify(error))?;
+            let database = Self {
+                connection,
+                registration,
+                recovery_required: false,
+                pre_migration_application_id: Some(application_id),
+                owned_application_id: Some(application_id),
+            };
+            database.admit()?;
+            Ok(database)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            let _ = (directory, migrations, application_id);
+            Err(StorageFailure::Unavailable)
+        }
+    }
+
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub(crate) fn open_initial_for_application(
         directory: &Path,
@@ -317,7 +420,7 @@ impl Database {
                 return Err(StorageFailure::Unavailable);
             }
             directory.sync()?;
-            let registration = vfs::Registration::new(directory)?;
+            let registration = vfs::Registration::new(directory, false)?;
             let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
             if create {
                 flags |= OpenFlags::SQLITE_OPEN_CREATE;
@@ -460,7 +563,11 @@ impl Database {
     pub fn verify_authority(&self) -> Result<(), StorageFailure> {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
-            self.registration.context.directory.check_all()
+            if self.registration.context.read_only {
+                self.registration.context.directory.check_frozen()
+            } else {
+                self.registration.context.directory.check_all()
+            }
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
@@ -579,6 +686,9 @@ impl Database {
                 return CommitDisposition::NotApplied(error);
             }
             let context = &self.registration.context;
+            if context.read_only {
+                return CommitDisposition::NotApplied(StorageFailure::Unavailable);
+            }
             context.reset();
             // Keep the handle fenced if the callback unwinds before cleanup can
             // establish a disposition. Known outcomes below clear this fence.

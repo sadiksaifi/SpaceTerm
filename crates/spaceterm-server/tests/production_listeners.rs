@@ -391,6 +391,7 @@ async fn handshake(
             spaceterm_protocol::negotiation::CAPABILITY_TERMINAL_STREAMS,
             spaceterm_protocol::negotiation::CAPABILITY_NATIVE_NOTIFICATIONS,
             spaceterm_protocol::negotiation::CAPABILITY_ACCOUNT_RUNTIME,
+            spaceterm_protocol::negotiation::CAPABILITY_REMOTE_NATIVE_LIFECYCLE,
         ],
         ..Default::default()
     };

@@ -14,7 +14,18 @@ mod launchd;
 mod linger;
 mod native_processes;
 mod owner_enrollment;
+mod paired_lifecycle;
+mod paired_stage;
+pub use paired_lifecycle::{
+    ConfirmedNativeLifecycleAction, NativeLifecycleAssessmentRef, NativeLifecycleHandoff,
+    NativeLifecycleOwnerToken, NativeLifecycleRequest, RuntimeLifecycleAuthority,
+};
+pub use paired_stage::{
+    NativeStageAccountReply, NativeStageAccountRequest, NativeStageAssessmentRef,
+    NativeStageHandoff, NativeStageOwnerToken, NativeStageRequest, RuntimeStageAdmission,
+};
 mod processes;
+pub mod remote_wire;
 pub mod runtime_inventory;
 pub use installations::NativeServiceInstallations;
 pub use native_processes::{
@@ -34,6 +45,13 @@ pub use linger::{
 };
 pub use systemd::SystemdServiceManager;
 mod registration;
+mod stopped_native;
+pub use stopped_native::{
+    STOPPED_NATIVE_WIRE_LIMIT, StoppedNativeAccountReply, StoppedNativeAccountRequest,
+    StoppedNativeAction, StoppedNativeAdmission, StoppedNativeArtifactTransfer,
+    StoppedNativeAssessmentRef, StoppedNativeCall, StoppedNativeChannelRequest, StoppedNativeReply,
+    StoppedNativeRequest,
+};
 mod supervisor;
 
 pub use processes::{
@@ -58,7 +76,7 @@ pub type ServiceFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, ServiceFailure>> + Send + 'a>>;
 
 /// Independently observed account linger.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum LingerState {
     /// The account user manager survives logout and starts at boot.
     Enabled,
@@ -91,7 +109,7 @@ pub enum SudoMode {
     NonInteractive,
 }
 /// Native supervision observation, separate from deliberate intent and authentication.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum SupervisorState {
     /// This service has no installed configuration.
     NotInstalled,
@@ -129,6 +147,8 @@ pub struct VerifiedInstallationSelection {
 }
 
 /// Current native facts, not the historical result of a lifecycle request.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServiceStatus {
     /// Actual account and compiled identity.
     pub key: AccountBuildKey,
@@ -179,6 +199,7 @@ pub enum ServicePhase {
 }
 /// Immutable historical service outcome.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ServiceOutcome {
     /// Explicit installation, possibly reuse without a Start.
     Installed {
@@ -205,6 +226,7 @@ pub enum ServiceOutcome {
 }
 /// Resolution of the original retained request.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum ServiceRequestState {
     /// Accepted work has not finished.
     Pending,
@@ -217,6 +239,7 @@ pub enum ServiceRequestState {
 }
 /// Bounded content-free progress retaining caller identity.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServiceProgress {
     /// The ID retained before submission.
     pub request: NativeRequestId,

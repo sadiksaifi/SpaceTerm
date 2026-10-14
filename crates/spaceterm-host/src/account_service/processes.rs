@@ -104,6 +104,26 @@ pub trait ServiceProcesses: Send + Sync {
         registration: &'a RegisteredServer,
         assessment: &'a RuntimeAssessment,
     ) -> ServiceFuture<'a, ()>;
+    /// Releases only the exact original paired-origin request. The production
+    /// native adapter requires signed non-admission or exact old-instance absence.
+    fn abort_native_origin<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+        _request: NativeManagementRequestRef,
+        assessment: &'a RuntimeAssessment,
+    ) -> ServiceFuture<'a, ()> {
+        self.abort_reservation(registration, assessment)
+    }
+    /// Releases an old unaccepted reservation only after exact native-instance
+    /// absence. This cannot claim retirement or grant startup authority.
+    fn abort_reservation_with_absence<'a>(
+        &'a self,
+        _registration: &'a RegisteredServer,
+        _assessment: &'a RuntimeAssessment,
+        _absence: &'a super::runtime_inventory::NativeInstanceAbsence,
+    ) -> ServiceFuture<'a, ()> {
+        Box::pin(async { Err(ServiceFailure::CleanupUnresolved) })
+    }
     /// Atomically revalidates the original assessment and closes runtime admissions.
     /// Replays resolve this request's accepted retirement, never a replacement batch.
     /// Started writes settle before exact Sessions are retired and reaped.
@@ -163,6 +183,7 @@ pub trait ServiceProcesses: Send + Sync {
 
 /// Cross-process assessment time tied to the current OS boot, not observer receipt time.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServiceTime {
     /// A content-free digest distinguishing OS boots.
     pub boot: [u8; 32],

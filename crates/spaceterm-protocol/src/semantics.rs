@@ -15,7 +15,10 @@ pub(crate) fn validate(value: &Payload) -> Result<(), ProtocolError> {
             use $profile::message::Kind;
             match &$message.kind {
                 Some(Kind::AccountRuntimeRequest(value) | Kind::AccountRuntimeReply(value)) => {
-                    if value.request == 0 || value.body.is_empty() || value.body.len() > 32768 {
+                    if value.request == 0
+                        || value.body.is_empty()
+                        || value.body.len() > limits::MAX_ACCOUNT_RUNTIME_BYTES
+                    {
                         return Err(ProtocolError::Malformed);
                     }
                 }
