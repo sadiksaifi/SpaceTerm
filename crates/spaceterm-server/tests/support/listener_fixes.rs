@@ -226,6 +226,15 @@ async fn production_account_delivers_unsafe_paste_clipboard_and_notifications_in
             let generation = handle.snapshot().runtime().iter().find(|v| v.pane == pane).unwrap().session_generation;
             let session = start_shell(&seed, &transport, &mut codec, principal.epoch(), generation, connection, grant).await;
             let pid = wait_pid(&seed).await;
+            // The shell's PID marker can precede actor installation of its runtime owner.
+            // Native requests require the matching Running publication, not just a live process.
+            let mut snapshots = handle.subscribe_snapshot();
+            while !snapshots.borrow().runtime().iter().any(|record| {
+                record.pane == session.pane
+                    && matches!(record.phase, SessionPhase::Running { generation } if generation == session.generation)
+            }) {
+                snapshots.changed().await.unwrap();
+            }
             handle.update_client_focus(principal, ClientFocusUpdate { context: ContextGeneration::new(2), focused_pane: Some(pane), terminal_input_focus: true, native_effects_eligible: true }).await.unwrap();
             let effect_fence = fence(handle.runtime_access(principal, session).await.unwrap().authority, None);
             macro_rules! subscription {
@@ -367,6 +376,13 @@ async fn production_account_clipboard_read_expiry_through_production_factory_in_
             )
             .await;
             let pid = wait_pid(&seed).await;
+            let mut snapshots = handle.subscribe_snapshot();
+            while !snapshots.borrow().runtime().iter().any(|record| {
+                record.pane == session.pane
+                    && matches!(record.phase, SessionPhase::Running { generation } if generation == session.generation)
+            }) {
+                snapshots.changed().await.unwrap();
+            }
             handle
                 .update_client_focus(
                     principal,
