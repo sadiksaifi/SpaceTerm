@@ -78,15 +78,16 @@ impl SettingsConnection {
         if name.server != binding.target().server() || handle.identity() != name.server {
             return Err(ClientFailure::new(ClientFailureClass::StaleAuthority));
         }
+        let queries = handle.queries(tracker.journal().clone())?;
         Ok(Self {
             binding,
             name,
             state: handle.state(),
             replica: handle.replica(),
-            queries: Some(handle.queries(tracker.journal().clone())?),
+            queries: Some(queries.clone()),
             native: None,
             lifecycle: None,
-            inventory: None,
+            inventory: Some(Arc::new(AuthenticatedInventory(queries))),
             machine: None,
         })
     }
@@ -179,6 +180,32 @@ impl SettingsServices {
         }
         Ok(result)
     }
+    /// Foreground enrollment refreshes only the newly admitted binding. A remote
+    /// server never depends on discovery of this computer's account registration.
+    pub(crate) fn for_enrollment(
+        binding: &PairedServerBinding,
+        handle: &ServerHandle,
+        journal: &Arc<spaceterm_client::journal::JournalController>,
+        native: Option<&spaceterm_client_native::NativeClientProvider>,
+    ) -> Result<Self, ClientFailure> {
+        let mut result = Self::default();
+        result.inventories.push((
+            binding.target().local_pairing()?,
+            Arc::new(AuthenticatedInventory(handle.queries(journal.clone())?)),
+        ));
+        if matches!(binding.target().route().parts(), RouteParts::Ipc { .. })
+            && let Some(provider) = native
+            && let Some(registration) = provider
+                .management()
+                .supervisor()
+                .discover()
+                .map_err(|_| ClientFailure::new(ClientFailureClass::Unavailable))?
+        {
+            result.admit_native(provider, &registration, binding)?;
+        }
+        Ok(result)
+    }
+
     pub(crate) fn admit_native(
         &mut self,
         provider: &spaceterm_client_native::NativeClientProvider,
@@ -228,7 +255,8 @@ impl SettingsServices {
             .inventories
             .iter()
             .find(|(pairing, _)| pairing == &key)
-            .map(|(_, provider)| provider.clone());
+            .map(|(_, provider)| provider.clone())
+            .or_else(|| source.inventory.clone());
         source.machine = self
             .machines
             .iter()

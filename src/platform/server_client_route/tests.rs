@@ -2,7 +2,7 @@ use super::connector;
 use spaceterm_client::{
     api::{ConnectionTarget, RouteDescription, RouteParts},
     failure::ClientFailureClass,
-    ports::ConnectionPurpose,
+    ports::{ConnectionPurpose, RouteConnector},
 };
 use spaceterm_core::{
     identity::{ClientId, DeviceId, PairingId, ServerId},

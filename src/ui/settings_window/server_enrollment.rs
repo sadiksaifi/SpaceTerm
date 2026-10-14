@@ -63,7 +63,7 @@ pub(crate) struct EnrollmentAttempt {
     valid: Arc<AtomicBool>,
 }
 impl EnrollmentAttempt {
-    fn new(generation: u64) -> Self {
+    pub(crate) fn new(generation: u64) -> Self {
         Self {
             generation,
             valid: Arc::new(AtomicBool::new(true)),
@@ -274,6 +274,7 @@ pub(crate) struct DurableEnrollment {
     prepared: PreparedEnrollment,
     saved: SavedPairing,
     handle: Option<spaceterm_client::registry::ServerHandle>,
+    pub(crate) settings: Option<super::server_runtime::SettingsServices>,
 }
 impl DurableEnrollment {
     pub(crate) async fn verify(
@@ -301,6 +302,7 @@ impl DurableEnrollment {
             prepared,
             saved,
             handle: None,
+            settings: None,
         })
     }
     /// The server and route are the verified BootstrapCoordinator result, not UI-discovered claims.
@@ -472,7 +474,7 @@ pub(crate) trait EnrollmentProvider {
     -> Result<(), EnrollmentFailure>;
 }
 
-struct InstalledEnrollment(Rc<dyn EnrollmentProvider>);
+pub(crate) struct InstalledEnrollment(pub(crate) Rc<dyn EnrollmentProvider>);
 impl Global for InstalledEnrollment {}
 /// Called once by desktop composition with native credentials, the canonical journal and routes.
 pub(crate) fn install(provider: Rc<dyn EnrollmentProvider>, cx: &mut App) {

@@ -407,13 +407,19 @@ impl<S: ViewStore + 'static>
                 spaceterm_client::api::RouteParts::Ipc { .. }
             ),
         };
-        let settings = crate::ui::settings_window::server_runtime::SettingsConnection::from_handle(
-            binding.clone(),
-            name.clone(),
-            &handle,
-            &self.inner.tracker,
-        )
-        .map_err(|_| PairingFailure::InvalidDurableState)?;
+        let mut settings =
+            crate::ui::settings_window::server_runtime::SettingsConnection::from_handle(
+                binding.clone(),
+                name.clone(),
+                &handle,
+                &self.inner.tracker,
+            )
+            .map_err(|_| PairingFailure::InvalidDurableState)?;
+        if let Some(services) = &enrollment.settings {
+            services
+                .bind(&mut settings)
+                .map_err(|_| PairingFailure::InvalidDurableState)?;
+        }
         crate::ui::settings_window::server_runtime::add_connection(settings, cx)
             .map_err(|_| PairingFailure::InvalidDurableState)?;
         self.inner.sources.borrow_mut().insert(

@@ -29,22 +29,29 @@ pub(crate) fn production(
         .enable_all()
         .build()
         .map_err(|_| crate::desktop_profile::DesktopProfileError::InvalidCombination)?;
+    let enrollment = Arc::default();
     Ok(Rc::new(NativeDesktopStartup {
         owners: Arc::new(tokio::sync::Mutex::new(None)),
         factory: Some(Arc::new(Factory {
             paths: paths.clone(),
             context: tokio::sync::Mutex::new(None),
+            enrollment: Arc::clone(&enrollment),
         })),
         store: SharedViewStore(Arc::new(std::sync::Mutex::new(NativeViewStore::new(paths)))),
         consumed: Arc::new(AtomicBool::new(false)),
         executor: Arc::new(executor),
-        enrollment: Arc::default(),
+        enrollment,
     }))
 }
 
 struct Factory {
     paths: Arc<AppPaths>,
     context: tokio::sync::Mutex<Option<Arc<Context>>>,
+    enrollment: Arc<
+        std::sync::Mutex<
+            Option<crate::ui::settings_window::server_enrollment::native::NativeEnrollmentServices>,
+        >,
+    >,
 }
 struct Context {
     journal: Arc<JournalController>,
@@ -156,8 +163,19 @@ impl NativeOwnerFactory for Factory {
             {
                 settings.admit_native(native, &local.registration, binding)?;
             }
+            // A stopped server still needs its native endpoint authority retained
+            // for a later explicit Start. Trusted discovery prevents dialing it now.
+            let local_route = local.and_then(|local| {
+                local.route.or_else(|| {
+                    local.binding.as_ref()?;
+                    spaceterm_client_native::route::LocalRouteAuthority::new(
+                        local.registration.endpoint().ok()?,
+                    )
+                    .ok()
+                })
+            });
             let routes = crate::platform::server_client_route::connector(
-                local.and_then(|local| local.route).into_iter().collect(),
+                local_route.into_iter().collect(),
                 None,
             )?;
             let tracker = OperationTracker::new(journal.clone());
@@ -170,6 +188,17 @@ impl NativeOwnerFactory for Factory {
                 ProjectionBudgets::supported()?,
             )?);
             protocol.set_channels(channels.clone())?;
+            let enrollment = crate::ui::settings_window::server_enrollment::native::production(
+                journal.clone(),
+                routes.clone(),
+                protocol.clone(),
+                native.clone(),
+                tokio::runtime::Handle::current(),
+            );
+            *self
+                .enrollment
+                .lock()
+                .map_err(|_| fail(ClientFailureClass::Unavailable))? = Some(enrollment);
             Ok(NativeDesktopOwners {
                 services: ClientServices {
                     routes,
@@ -260,3 +289,6 @@ fn pairing_failure(failure: PairingFailure) -> ClientFailure {
         _ => ClientFailureClass::InvalidStorage,
     })
 }
+
+#[cfg(test)]
+mod enrollment_tests;

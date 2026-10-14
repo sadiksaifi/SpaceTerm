@@ -208,6 +208,7 @@ impl Harness {
                 direct: Arc::new(Preparation(Mutex::new(Some(preparation)))),
                 bootstrap: None,
                 executor: fixture.storage.runtime.handle().clone(),
+                local: None,
             },
             registry,
             publication.clone(),
@@ -354,7 +355,7 @@ impl spaceterm_client::view::ViewStore for EmptyView {
 }
 
 #[gpui::test]
-async fn native_enrollment_publishes_into_existing_desktop_and_settings(cx: &mut TestAppContext) {
+async fn desktop_add_server_publishes_enrolled_handle_into_runtime(cx: &mut TestAppContext) {
     use crate::platform::desktop_client_startup::{
         DesktopClientStartup, NativeDesktopOwners, NativeDesktopStartup,
     };
@@ -425,6 +426,25 @@ async fn native_enrollment_publishes_into_existing_desktop_and_settings(cx: &mut
         .await
         .unwrap();
     assert_eq!(h.ports.opens.load(Ordering::SeqCst), 0);
+    let binding = h.fixture.storage.journal.snapshot().unwrap().bindings()[0]
+        .binding()
+        .unwrap();
+    let handle = enrollment.handle.as_ref().unwrap();
+    let connection = crate::ui::settings_window::server_runtime::SettingsConnection::from_handle(
+        binding.clone(),
+        crate::ui::server_desktop_contracts::DesktopServerInfo {
+            server: binding.target().server(),
+            name: crate::ui::server_desktop_contracts::DisplayName::unnamed(),
+            local: false,
+        },
+        handle,
+        &spaceterm_client::operations::OperationTracker::new(h.fixture.storage.journal.clone()),
+    )
+    .unwrap();
+    assert!(
+        connection.inventory.is_some(),
+        "new enrollment must retain authenticated device inventory"
+    );
     cx.update(|cx| provider.publish(enrollment, cx)).unwrap();
     assert_eq!(
         cx.update(|cx| runtime.read(cx).servers()[0].server),
@@ -575,4 +595,87 @@ async fn native_bootstrap_rejects_another_confirmation_with_the_same_counter(
     ));
     assert_eq!(h.fixture.endpoint.submissions.load(Ordering::SeqCst), 0);
     assert_eq!(h.ports.opens.load(Ordering::SeqCst), 0);
+}
+
+#[gpui::test]
+async fn desktop_native_direct_invitation_uses_owned_credentials_and_canonical_journal(
+    cx: &mut TestAppContext,
+) {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    cx.executor().allow_parking();
+    let route = RouteDescription::new(spaceterm_client::api::RouteParts::Wss {
+        address: "127.0.0.1:443".parse().unwrap(),
+        server_name: "127.0.0.1".into(),
+    })
+    .unwrap();
+    let fixture = Fixture::new_with_route(2, false, route);
+    let delivery = fixture
+        .authorization
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .delivery_message(&fixture.endpoint.reservation.lock().unwrap())
+        .unwrap();
+    let invitation = Zeroizing::new(
+        serde_json::json!({
+            "schema": 1, "server_identity": fixture.prepared.pin.identity,
+            "server_public_key": fixture.prepared.pin.public_key,
+            "authorization_delivery": STANDARD.encode(delivery.as_slice()),
+        })
+        .to_string(),
+    );
+    let pairing = NativePairingRuntime::with_adapters(
+        fixture.storage.journal.clone(),
+        Arc::new(fixture.credentials.clone()),
+        Arc::new(fixture.endpoint.clone()),
+        Arc::new(fixture.endpoint.clone()),
+        Arc::new(Invalidator),
+        HandshakeConfig::default(),
+    );
+    let preparation = fixture
+        .storage
+        .runtime
+        .block_on(direct::NativeDirectInvitation.prepare(
+            "wss://127.0.0.1:443".into(),
+            invitation,
+            EnrollmentAttempt::new(1),
+            &pairing,
+        ))
+        .unwrap();
+    assert_eq!(fixture.endpoint.submissions.load(Ordering::SeqCst), 0);
+    assert_eq!(preparation.prepared, fixture.prepared);
+    let attempt = EnrollmentAttempt::new(1);
+    let mut candidate = DirectCandidate::new(
+        attempt,
+        preparation.prepared,
+        preparation.device,
+        fixture.reservation.clone(),
+        preparation.authorization,
+        preparation.majors,
+    )
+    .unwrap();
+    let verifier = candidate.verifier().unwrap();
+    let approval = candidate
+        .approve(&verifier, &verifier.fingerprint())
+        .unwrap();
+    let saved = fixture
+        .storage
+        .runtime
+        .block_on(pairing.enroll(
+            EnrollmentAttemptRequest {
+                verified: &approval.verified,
+                prepared: &approval.prepared,
+                reservation: approval.reservation.clone(),
+                device: &approval.device,
+                authorization: approval.authorization.as_ref(),
+                majors: approval.majors.clone(),
+            },
+            preparation.route,
+        ))
+        .unwrap();
+    assert_eq!(saved, fixture.saved);
+    assert_eq!(
+        fixture.storage.journal.snapshot().unwrap().bindings().len(),
+        1
+    );
 }

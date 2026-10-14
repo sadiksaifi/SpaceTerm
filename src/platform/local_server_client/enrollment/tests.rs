@@ -234,3 +234,148 @@ async fn desktop_foreground_owner_pairing_publishes_verified_binding_from_runnin
         pin
     );
 }
+
+struct TestChannel {
+    send: tokio::sync::Mutex<Option<tokio::sync::mpsc::Sender<Vec<u8>>>>,
+    completion: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    receive: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Vec<u8>>>,
+    uid: u32,
+}
+impl MessageTransport for TestChannel {
+    fn peer_facts(&self) -> spaceterm_host::transport::PeerFacts {
+        spaceterm_host::transport::PeerFacts {
+            route: spaceterm_host::transport::TransportRoute::PrivateIpc,
+            local_uid: Some(self.uid),
+            local_pid: None,
+            pinned_server_key: None,
+        }
+    }
+    fn send<'a>(&'a self, bytes: &'a [u8]) -> spaceterm_host::transport::TransportFuture<'a, ()> {
+        Box::pin(async move {
+            self.send
+                .lock()
+                .await
+                .as_ref()
+                .ok_or(spaceterm_host::transport::TransportError::Closed)?
+                .send(bytes.to_vec())
+                .await
+                .map_err(|_| spaceterm_host::transport::TransportError::Closed)
+        })
+    }
+    fn recv(&self) -> spaceterm_host::transport::TransportFuture<'_, Option<Vec<u8>>> {
+        Box::pin(async { Ok(self.receive.lock().await.recv().await) })
+    }
+    fn close(&self) -> spaceterm_host::transport::TransportFuture<'_, ()> {
+        Box::pin(async {
+            self.send.lock().await.take();
+            if let Some(task) = self.completion.lock().await.take() {
+                task.await
+                    .map_err(|_| spaceterm_host::transport::TransportError::Unavailable)?;
+            }
+            Ok(())
+        })
+    }
+}
+struct InProcessOwner(Arc<spaceterm_host::account_service::ServiceSupervisor>);
+impl OwnerChannelProvider for InProcessOwner {
+    fn open<'a>(
+        &'a self,
+        registration: &'a spaceterm_host::account_service::RegisteredServer,
+    ) -> spaceterm_client::ports::ClientFuture<'a, Arc<dyn MessageTransport>> {
+        Box::pin(async move {
+            let (first, first_receiver) = tokio::sync::mpsc::channel(1);
+            let (second, second_receiver) = tokio::sync::mpsc::channel(1);
+            let uid = registration.key().account_uid;
+            let server = TestChannel {
+                send: tokio::sync::Mutex::new(Some(first)),
+                completion: tokio::sync::Mutex::new(None),
+                receive: tokio::sync::Mutex::new(second_receiver),
+                uid,
+            };
+            let supervisor = self.0.clone();
+            let task = tokio::spawn(async move {
+                spaceterm_server::deployment::owner::execute(supervisor, &server)
+                    .await
+                    .unwrap();
+            });
+            Ok(Arc::new(TestChannel {
+                send: tokio::sync::Mutex::new(Some(second)),
+                completion: tokio::sync::Mutex::new(Some(task)),
+                receive: tokio::sync::Mutex::new(first_receiver),
+                uid,
+            }) as Arc<dyn MessageTransport>)
+        })
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_foreground_owner_pairing_preserves_stopped_server() {
+    let root = Root::new();
+    let fixture = AccountServiceFixture::new(&root.0, BuildIdentity::Development).unwrap();
+    let registration = fixture
+        .initialize_with_installation(
+            DesiredServerState::Stopped,
+            Some(InstallationStatus {
+                installation: InstallationId(std::num::NonZeroU64::new(9).unwrap()),
+                version: spaceterm_distribution::BuildVersion::parse("9.0.0").unwrap(),
+                artifact_sha256: [8; 32],
+            }),
+        )
+        .unwrap();
+    let pin = registration.server_pin();
+    let identity = StoreIdentity {
+        server: ServerId::new(pin.identity),
+        account: registration.key(),
+        server_public_key: pin.public_key,
+    };
+    let home = spaceterm_core::organization::ServerDirectory::new(
+        identity.server,
+        root.0.as_os_str().as_encoded_bytes().to_vec(),
+    )
+    .unwrap();
+    let database = Database::open_for_application(
+        registration.organization_directory(),
+        migrations(),
+        schema::APPLICATION_ID,
+    )
+    .unwrap();
+    assert!(matches!(
+        SqliteOrganizationStore::initialize_new(
+            database,
+            NewStoreSeed {
+                identity,
+                origin: NewServerOrigin::LocalHeadless
+            },
+            StoreLimits::production(),
+            production_services(identity, home).unwrap(),
+        ),
+        InitializationDisposition::Durable { .. }
+    ));
+    let supervisor = supervisor(&root.0, Arc::new(StartupAbsence)).unwrap();
+    let journal = journal(&root).await;
+    let credentials = Credentials::default();
+    let native = NativeClientProvider::from_supervisor((*supervisor).clone());
+    let channels = InProcessOwner(supervisor.clone());
+    enroll_using(&native, journal.clone(), credentials.clone(), &channels)
+        .await
+        .unwrap();
+    let snapshot = journal.snapshot().unwrap();
+    assert_eq!(snapshot.bindings().len(), 1);
+    let binding = snapshot.bindings()[0].binding().unwrap();
+    assert_eq!(binding.target().pin(), pin);
+    assert!(journal.ordinary_use_allowed(&binding).unwrap());
+    assert!(snapshot.pairing().acknowledgements().is_empty());
+    assert_eq!(credentials.0.lock().unwrap().len(), 2);
+    assert_eq!(
+        fixture
+            .reopen()
+            .discover()
+            .unwrap()
+            .unwrap()
+            .desired_state(),
+        DesiredServerState::Stopped
+    );
+    assert_eq!(
+        fixture.reopen().discover().unwrap().unwrap().server_pin(),
+        pin
+    );
+}
