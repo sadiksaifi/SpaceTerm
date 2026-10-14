@@ -3,6 +3,7 @@
 
 pub mod artifacts;
 pub mod consumer;
+pub mod owner_channel;
 mod receipts;
 pub mod runtime;
 mod tracked;

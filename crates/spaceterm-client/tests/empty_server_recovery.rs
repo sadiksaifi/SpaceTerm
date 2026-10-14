@@ -39,6 +39,114 @@ async fn authenticated_empty_server_recovery_accepts_revision_zero_and_reopens()
 }
 
 #[tokio::test]
+async fn empty_server_pairing_assessment_completion_is_durable_at_revision_zero() {
+    use spaceterm_core::{
+        authority::FieldVersion,
+        operations::{AssessmentRef, Command, OperationLookup, Outcome},
+        pairing::{
+            PairingCommand, PairingOutcome, PairingTarget, PairingTargetParts, UnpairAssessment,
+            UnpairAssessmentParts,
+        },
+    };
+    let fixture = durable::Fixture::new().await;
+    let target = fixture.binding.target();
+    let pairing = PairingTarget::new(PairingTargetParts {
+        server: target.server(),
+        pairing: target.pairing(),
+        device: target.device(),
+    })
+    .unwrap();
+    let tracker = OperationTracker::new(fixture.journal.clone());
+    let ticket = tracker
+        .submit(
+            &fixture.binding,
+            Command::Pairing(PairingCommand::AssessUnpair {
+                target: pairing.clone(),
+            }),
+            None,
+            &fixture.peer,
+        )
+        .await
+        .unwrap();
+    let outcome = Outcome::Pairing(Box::new(PairingOutcome::UnpairAssessed(
+        UnpairAssessment::new(UnpairAssessmentParts {
+            reference: AssessmentRef {
+                operation: ticket.id(),
+                digest: ticket.binding().digest,
+            },
+            target: pairing,
+            authorization_version: FieldVersion::new(1),
+            clients: vec![spaceterm_core::pairing::ClientRecord {
+                id: target.client(),
+                pairing: target.pairing(),
+            }],
+        })
+        .unwrap(),
+    )));
+    tracker
+        .resolve_bound(
+            ticket.binding(),
+            OperationLookup::Completed {
+                result: outcome.clone(),
+                publication_revision: OrganizationRevision::new(0),
+            },
+            &fixture.peer,
+        )
+        .await
+        .unwrap();
+    let reopened = fixture.reopen().await;
+    let record = reopened
+        .snapshot()
+        .unwrap()
+        .operation(ticket.id())
+        .unwrap()
+        .clone();
+    let spaceterm_client::journal::RetainedOperationState::Completed {
+        outcome: retained,
+        publication_revision,
+        ..
+    } = record.state
+    else {
+        panic!("pairing completion must survive journal recovery");
+    };
+    assert_eq!(retained.outcome(fixture.codec.as_ref()).unwrap(), outcome);
+    assert_eq!(publication_revision, OrganizationRevision::new(0));
+}
+
+#[tokio::test]
+async fn organization_mutation_completion_still_requires_nonzero_revision() {
+    use spaceterm_core::operations::{OperationLookup, Outcome};
+    let fixture = durable::Fixture::new().await;
+    let tracker = OperationTracker::new(fixture.journal.clone());
+    let ticket = tracker
+        .submit(
+            &fixture.binding,
+            durable::rename(1),
+            Some(durable::workspace()),
+            &fixture.peer,
+        )
+        .await
+        .unwrap();
+    let revision = fixture.journal.snapshot().unwrap().revision();
+    let error = tracker
+        .resolve_bound(
+            ticket.binding(),
+            OperationLookup::Completed {
+                result: Outcome::Applied,
+                publication_revision: OrganizationRevision::new(0),
+            },
+            &fixture.peer,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.class(),
+        spaceterm_client::failure::ClientFailureClass::InvalidStorage
+    );
+    assert_eq!(fixture.journal.snapshot().unwrap().revision(), revision);
+}
+
+#[tokio::test]
 async fn revision_zero_recovery_cannot_publish_a_control_grant() {
     let fixture = durable::Fixture::new().await;
     let grant = GrantedControl::new(

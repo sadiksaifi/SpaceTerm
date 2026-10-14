@@ -35,6 +35,7 @@ use std::{
 
 /// Local IPC endpoints admitted by explicit native discovery. A remote path,
 /// saved string or server directory record alone cannot create this authority.
+#[derive(Clone)]
 pub struct LocalRouteAuthority {
     route: RouteDescription,
     endpoint: IpcEndpoint,

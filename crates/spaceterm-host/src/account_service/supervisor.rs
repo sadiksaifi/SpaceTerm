@@ -2284,6 +2284,44 @@ pub struct ClientProvisioning {
     lease: crate::private_filesystem::Lease,
 }
 impl ClientProvisioning {
+    /// Reads bounded public owner-attempt metadata under deliberate account/build
+    /// provisioning authority. No credential bytes belong in this record.
+    pub fn owner_attempt(&self, consumer: &str) -> Result<Option<Vec<u8>>, ServiceFailure> {
+        let name = Self::owner_attempt_name(consumer)?;
+        self.lease.verify()?;
+        Ok(self
+            .directory
+            .read(name, 64 * 1024)?
+            .map(|snapshot| snapshot.bytes.to_vec()))
+    }
+    /// Publishes the original public claim before requesting bearer delivery.
+    /// The lease and byte comparison prevent another observer replacing it.
+    pub fn retain_owner_attempt(
+        &self,
+        consumer: &str,
+        expected: Option<&[u8]>,
+        bytes: &[u8],
+    ) -> Result<(), ServiceFailure> {
+        let name = Self::owner_attempt_name(consumer)?;
+        if bytes.is_empty() || bytes.len() > 64 * 1024 {
+            return Err(ServiceFailure::LimitExceeded);
+        }
+        self.lease.verify()?;
+        let snapshot = self.directory.read(name, 64 * 1024)?;
+        if snapshot.as_ref().map(|value| value.bytes.as_slice()) != expected {
+            return Err(ServiceFailure::RequestConflict);
+        }
+        self.directory
+            .publish(name, bytes, snapshot.as_ref())
+            .map_err(Into::into)
+    }
+    fn owner_attempt_name(consumer: &str) -> Result<&'static str, ServiceFailure> {
+        match consumer {
+            "enrollment" => Ok("owner-enrollment-attempt"),
+            "desktop" => Ok("desktop-owner-enrollment-attempt"),
+            _ => Err(ServiceFailure::InvalidRecord),
+        }
+    }
     /// Opens or explicitly provisions one fixed dedicated consumer directory.
     /// The boolean distinguishes first creation from read-only reopening.
     pub fn journal_directory(&self, consumer: &str) -> Result<(PathBuf, bool), ServiceFailure> {

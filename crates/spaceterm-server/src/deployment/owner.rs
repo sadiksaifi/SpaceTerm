@@ -149,10 +149,12 @@ pub async fn execute(
         let closed = transport.close().await;
         return result.and(closed.map_err(Into::into));
     }
-    let home = spaceterm_host::account_service::TrustedAccountFacts::current()
-        .map_err(OwnerEndpointFailure::Account)?
-        .home()
-        .to_owned();
+    let facts = spaceterm_host::account_service::TrustedAccountFacts::current()
+        .map_err(OwnerEndpointFailure::Account)?;
+    #[cfg(feature = "test-support")]
+    let home = test_support::fixture_home().unwrap_or_else(|| facts.home().to_owned());
+    #[cfg(not(feature = "test-support"))]
+    let home = facts.home().to_owned();
     let executor =
         crate::account_startup::production_stopped_owner(supervisor, home, request.request, &claim)
             .await?;
@@ -170,6 +172,112 @@ pub async fn execute(
         return Err(OwnerEndpointFailure::Cleanup);
     }
     result
+}
+
+/// Explicit-root subprocess composition. No service-manager operation, including
+/// observation, is allowed. Native account UID validation remains in production
+/// stopped-owner recovery; only the home directory is supplied by the fixture.
+#[cfg(feature = "test-support")]
+pub mod test_support {
+    use super::*;
+    use spaceterm_host::account_service::{
+        LingerState, RegisteredServer, ServiceClock, ServiceFuture, ServiceManager, ServiceTime,
+        SupervisorState, test_support::AccountServiceFixture,
+    };
+    use std::path::{Path, PathBuf};
+
+    // The scope belongs to this explicit invocation, not an environment variable
+    // or process-wide selector. It preserves the production stdio dispatcher.
+    tokio::task_local! {
+        static FIXTURE_HOME: PathBuf;
+    }
+
+    pub(super) fn fixture_home() -> Option<PathBuf> {
+        FIXTURE_HOME.try_with(Clone::clone).ok()
+    }
+
+    struct ForbiddenManager;
+    impl ServiceManager for ForbiddenManager {
+        fn status<'a>(
+            &'a self,
+            _: Option<&'a RegisteredServer>,
+        ) -> ServiceFuture<'a, SupervisorState> {
+            panic!("stopped owner must not observe the service manager")
+        }
+        fn scoped_processes<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, Vec<u32>> {
+            panic!("stopped owner must not observe service processes")
+        }
+        fn linger(&self) -> ServiceFuture<'_, Option<LingerState>> {
+            panic!("stopped owner must not observe linger")
+        }
+        fn configure<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
+            panic!("stopped owner must not configure the service")
+        }
+        fn start<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
+            panic!("stopped owner must not start the service")
+        }
+        fn stop<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
+            panic!("stopped owner must not stop the service")
+        }
+        fn uninstall<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
+            panic!("stopped owner must not uninstall the service")
+        }
+        fn verify_installation(&self, _: &RegisteredServer) -> Result<(), ServiceFailure> {
+            panic!("stopped owner must not use service-manager installation verification")
+        }
+    }
+    struct Clock;
+    impl ServiceClock for Clock {
+        fn now(&self) -> Result<ServiceTime, ServiceFailure> {
+            Ok(ServiceTime {
+                boot: [1; 32],
+                millis: 1,
+            })
+        }
+    }
+
+    /// Reconstructs only the isolated account root and refuses every native
+    /// service-manager call. It never initializes or starts a server.
+    pub fn supervisor(root: &Path) -> Result<Arc<ServiceSupervisor>, OwnerEndpointFailure> {
+        let fixture =
+            AccountServiceFixture::new(root, spaceterm_host::startup::BuildIdentity::Development)
+                .map_err(OwnerEndpointFailure::Account)?;
+        Ok(Arc::new(fixture.with_providers(
+            Arc::new(ForbiddenManager),
+            Arc::new(crate::account_startup::test_support::StartupAbsence),
+            Arc::new(Clock),
+            None,
+        )))
+    }
+
+    pub async fn run_with_home(root: &Path, home: &Path) -> Result<(), OwnerEndpointFailure> {
+        let root = root
+            .canonicalize()
+            .map_err(|_| OwnerEndpointFailure::InvalidRequest)?;
+        let home = home
+            .canonicalize()
+            .map_err(|_| OwnerEndpointFailure::InvalidRequest)?;
+        if !home.starts_with(&root) {
+            return Err(OwnerEndpointFailure::InvalidRequest);
+        }
+        let supervisor = supervisor(&root)?;
+        let facts = spaceterm_host::account_service::TrustedAccountFacts::current()
+            .map_err(OwnerEndpointFailure::Account)?;
+        if facts.uid() != supervisor.key().account_uid {
+            return Err(OwnerEndpointFailure::Account(
+                ServiceFailure::IdentityMismatch,
+            ));
+        }
+        FIXTURE_HOME
+            .scope(
+                home,
+                super::super::run_native_with_supervisor(
+                    super::super::ServerInvocation::OwnerEnrollment,
+                    supervisor,
+                ),
+            )
+            .await
+    }
 }
 
 async fn receive(

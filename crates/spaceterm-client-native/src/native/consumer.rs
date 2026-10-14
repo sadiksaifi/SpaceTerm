@@ -30,7 +30,7 @@ use spaceterm_client::{
         OutboundClass, ProtocolChannel, SigningAccess,
     },
     registry::{ClientRegistry, ClientRuntime, ServerHandle},
-    replica::{OrganizationCursor, PublicationStamp, ReplicaSnapshot, SnapshotPart},
+    replica::ReplicaSnapshot,
 };
 use spaceterm_core::{
     authority::GrantedControl,
@@ -43,9 +43,7 @@ use spaceterm_host::account_service::RegisteredServer;
 use spaceterm_protocol::{
     authentication::{HandshakeConfig, ServerPin},
     codec::Payload,
-    convert::organization,
     pairing_adapter::ReceiptCodec,
-    wire::{v1, v2},
 };
 use std::{
     path::PathBuf,
@@ -86,6 +84,8 @@ pub struct NativeConsumer {
     native: Arc<NativeServiceManagement>,
     credentials: Arc<dyn NativeDeviceCredentials>,
     kind: NativeConsumerKind,
+    owner_channels: Arc<dyn super::owner_channel::OwnerChannelProvider>,
+    owner_handshake: HandshakeConfig,
     mutation: tokio::sync::Mutex<()>,
     owner: OnceCell<PairingOwner>,
     opened: OnceCell<OpenedConsumer>,
@@ -108,6 +108,8 @@ impl NativeConsumer {
     /// read-only; enrollment remains an explicit foreground operation.
     pub fn new(native: Arc<NativeServiceManagement>, kind: NativeConsumerKind) -> Self {
         Self {
+            owner_channels: Arc::new(super::owner_channel::NativeOwnerChannel(native.clone())),
+            owner_handshake: HandshakeConfig::default(),
             native,
             credentials: Arc::new(DeviceCredentials::native()),
             kind,
@@ -123,6 +125,21 @@ impl NativeConsumer {
         self.credentials = credentials;
         self
     }
+    /// Selects the complete protocol profiles advertised by deliberate owner
+    /// enrollment. Invalid advertisements fail in the shared handshake.
+    pub fn with_owner_handshake(mut self, config: HandshakeConfig) -> Self {
+        self.owner_handshake = config;
+        self
+    }
+    /// Supplies an operation-specific owner transport boundary. Production uses
+    /// private account IPC or the retained signed stopped-owner subprocess.
+    pub fn with_owner_channels(
+        mut self,
+        channels: Arc<dyn super::owner_channel::OwnerChannelProvider>,
+    ) -> Self {
+        self.owner_channels = channels;
+        self
+    }
     /// Retains one already recovered consumer journal without ordinary dialing.
     /// Restricted retry remains available when ordinary use has been suppressed.
     pub fn with_recovered_journal(
@@ -133,6 +150,8 @@ impl NativeConsumer {
         routes: NativeRouteConnector,
     ) -> Self {
         Self {
+            owner_channels: Arc::new(super::owner_channel::NativeOwnerChannel(native.clone())),
+            owner_handshake: HandshakeConfig::default(),
             native,
             credentials: credentials.clone(),
             kind,
@@ -185,11 +204,20 @@ impl NativeConsumer {
                         .await
                         .map_err(classify_client)?,
                 );
-                let local = self
-                    .native
-                    .supervisor
-                    .retained_local_endpoint()
-                    .map_err(classify_service)?
+                // Registration can select a runtime outside the authority root.
+                // Restricted retries still reopen their journal when registration
+                // is missing or damaged; ordinary use validates it in opened().
+                let endpoint = match self.native.supervisor.discover() {
+                    // A damaged runtime grants no route authority, but cannot
+                    // hide independently retained restricted journal work.
+                    Ok(Some(registration)) => registration.endpoint().ok(),
+                    Ok(None) | Err(_) => self
+                        .native
+                        .supervisor
+                        .retained_local_endpoint()
+                        .map_err(classify_service)?,
+                };
+                let local = endpoint
                     .map(LocalRouteAuthority::new)
                     .transpose()
                     .map_err(classify_client)?;
@@ -772,17 +800,32 @@ async fn open_pairing(
     let server = registry
         .server(binding.target().server())
         .ok_or(ManagementFailure::PairingRequired)?;
-    server.connect().await.map_err(classify_client)?;
+    if let Err(error) = server.connect().await {
+        let _ = runtime.shutdown().await;
+        return Err(classify_client(error));
+    }
     let mut state = server.state();
     let mut replica = server.replica();
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let ready = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if matches!(
-                *state.borrow_and_update(),
+            let connection = state.borrow_and_update().clone();
+            match connection {
+                // connect() admits the request before the worker leaves its
+                // initial Offline state. Only a failed attempt is terminal here.
+                spaceterm_client::api::ConnectionState::Offline { failure, retry }
+                    if retry.failures > 0 =>
+                {
+                    return Err(classify_client(failure));
+                }
+                spaceterm_client::api::ConnectionState::Incompatible { .. } => {
+                    return Err(ManagementFailure::Incompatible);
+                }
                 spaceterm_client::api::ConnectionState::Connected { .. }
-            ) && replica.borrow_and_update().is_ready()
-            {
-                return Ok(());
+                    if replica.borrow_and_update().is_ready() =>
+                {
+                    return Ok(());
+                }
+                _ => {}
             }
             tokio::select! {
                 result = state.changed() => result.map_err(|_| ManagementFailure::Offline)?,
@@ -791,14 +834,22 @@ async fn open_pairing(
         }
     })
     .await
-    .map_err(|_| ManagementFailure::Offline)??;
+    .map_err(|_| ManagementFailure::Offline)
+    .and_then(|ready| ready);
+    if let Err(error) = ready {
+        let _ = runtime.shutdown().await;
+        return Err(error);
+    }
     if let Some(operations) = &operations {
         let stream = ordinary.binding().streams().parts().ordinary;
-        operations
+        if let Err(error) = operations
             .tracker
             .acknowledge(stream, operations.as_ref())
             .await
-            .map_err(classify_client)?;
+        {
+            let _ = runtime.shutdown().await;
+            return Err(classify_client(error));
+        }
     }
     Ok(OpenedConsumer {
         pairing: pairing.clone(),
@@ -847,38 +898,7 @@ impl ReceiptVerifier for PinnedReceipts {
 struct CanonicalOrganization;
 impl OrganizationDecoder for CanonicalOrganization {
     fn decode(&self, payload: Payload) -> Result<OrganizationPublication, ClientFailure> {
-        macro_rules! snapshot {
-            ($m:expr,$p:ident) => {
-                match $m.kind {
-                    Some($p::message::Kind::OrganizationSnapshot(value)) => {
-                        organization::$p::decode_snapshot_part(&value)
-                    }
-                    _ => return Err(ClientFailure::new(ClientFailureClass::InvalidPeer)),
-                }
-            };
-        }
-        let value = match payload {
-            Payload::Major1(m) => snapshot!(m, v1),
-            Payload::Major2(m) => snapshot!(m, v2),
-        }
-        .map_err(|_| ClientFailure::new(ClientFailureClass::InvalidPeer))?;
-        let part = value.part;
-        Ok(OrganizationPublication::Snapshot(Box::new(SnapshotPart {
-            stamp: PublicationStamp {
-                request: part.request,
-                request_generation: part.generation,
-                transfer: part.transfer,
-                index: part.index,
-                total: part.total,
-                cursor: OrganizationCursor {
-                    server: value.state.server,
-                    epoch: part.epoch,
-                    revision: part.revision,
-                },
-            },
-            state: value.state,
-            runtime: value.runtime,
-        })))
+        spaceterm_client::organization_protocol::decode(payload)
     }
 }
 struct ReadOnlyDelegate;
@@ -952,6 +972,14 @@ fn classify_pairing(failure: PairingFailure) -> ManagementFailure {
         PairingFailure::CredentialUnavailable => ManagementFailure::CredentialUnavailable,
         PairingFailure::StorageUnavailable => ManagementFailure::StorageUnavailable,
         PairingFailure::StaleAssessment => ManagementFailure::StaleAssessment,
+        PairingFailure::Offline | PairingFailure::TimedOut => ManagementFailure::Offline,
+        PairingFailure::RecoveryRequired => ManagementFailure::OutcomePending,
+        PairingFailure::AuthorizationRequired | PairingFailure::AuthorizationDenied => {
+            ManagementFailure::AuthorizationDenied
+        }
+        PairingFailure::AuthorizationUnavailable => ManagementFailure::AuthorizationUnavailable,
+        PairingFailure::LimitExceeded => ManagementFailure::LimitExceeded,
+        PairingFailure::Incompatible => ManagementFailure::Incompatible,
         _ => ManagementFailure::UnsafeNativeState,
     }
 }

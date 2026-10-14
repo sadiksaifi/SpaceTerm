@@ -511,20 +511,26 @@ mod tests {
         )
         .await
         .unwrap();
-        let (first, second) = tokio::join!(
-            consume(
-                directory.clone(),
-                scope.clone(),
-                assessment.clone(),
-                MonotonicTick::new(200)
-            ),
-            consume(
-                directory.clone(),
-                scope.clone(),
-                assessment.clone(),
-                MonotonicTick::new(200)
-            ),
-        );
+        // SQLite admission uses a zero busy timeout. Overlapping openers can both
+        // be refused before either consumes; retry only that known-no-effect result.
+        let take = || async {
+            let mut retries = 0;
+            loop {
+                let result = consume(
+                    directory.clone(),
+                    scope.clone(),
+                    assessment.clone(),
+                    MonotonicTick::new(200),
+                )
+                .await;
+                if result != Err(ManagementFailure::StorageUnavailable) || retries == 7 {
+                    return result;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10 << retries)).await;
+                retries += 1;
+            }
+        };
+        let (first, second) = tokio::join!(take(), take());
         assert_eq!(
             usize::from(first.is_ok()) + usize::from(second.is_ok()),
             1,

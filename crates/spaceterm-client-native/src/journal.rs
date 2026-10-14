@@ -98,7 +98,7 @@ impl NativeClientJournal {
         verifier: Arc<dyn ReceiptVerifier>,
         limits: JournalLimits,
     ) -> Result<Self, ClientFailure> {
-        Self::open(directory, codec, verifier, limits, true).await
+        Self::open(directory, codec, verifier, limits, true, false).await
     }
     /// Missing, locked, malformed and unsupported state never grant creation.
     pub async fn open_existing(
@@ -107,7 +107,18 @@ impl NativeClientJournal {
         verifier: Arc<dyn ReceiptVerifier>,
         limits: JournalLimits,
     ) -> Result<Self, ClientFailure> {
-        Self::open(directory, codec, verifier, limits, false).await
+        Self::open(directory, codec, verifier, limits, false, false).await
+    }
+    /// Deliberate provisioning may resume an empty directory or an interrupted
+    /// schema initialization. An existing singleton is retained and validated,
+    /// never replaced. Ordinary restoration still uses open_existing.
+    pub async fn provision(
+        directory: PathBuf,
+        codec: Arc<dyn LedgerCodec>,
+        verifier: Arc<dyn ReceiptVerifier>,
+        limits: JournalLimits,
+    ) -> Result<Self, ClientFailure> {
+        Self::open(directory, codec, verifier, limits, true, true).await
     }
     async fn open(
         directory: PathBuf,
@@ -115,6 +126,7 @@ impl NativeClientJournal {
         verifier: Arc<dyn ReceiptVerifier>,
         limits: JournalLimits,
         create: bool,
+        resume: bool,
     ) -> Result<Self, ClientFailure> {
         let limits = limits.validate()?;
         tokio::task::spawn_blocking(move || {
@@ -124,7 +136,12 @@ impl NativeClientJournal {
                 let payload = encode(&empty, limits)?;
                 let revision = empty.revision().get().to_be_bytes();
                 let result = database.transaction(|tx| {
-                    tx.execute("INSERT INTO client_journal(singleton,purpose,revision,payload) VALUES(1,'client-journal-v1',?1,?2)", (revision.as_slice(), payload.as_slice()))?;
+                    let sql = if resume {
+                        "INSERT INTO client_journal(singleton,purpose,revision,payload) VALUES(1,'client-journal-v1',?1,?2) ON CONFLICT(singleton) DO NOTHING"
+                    } else {
+                        "INSERT INTO client_journal(singleton,purpose,revision,payload) VALUES(1,'client-journal-v1',?1,?2)"
+                    };
+                    tx.execute(sql, (revision.as_slice(), payload.as_slice()))?;
                     Ok(())
                 });
                 match result { CommitDisposition::Durable(()) => {}, CommitDisposition::NotApplied(error) => return Err(classify(error)), CommitDisposition::Indeterminate => return Err(ClientFailure::new(ClientFailureClass::RecoveryRequired)) }
@@ -843,6 +860,57 @@ mod tests {
             state.stream(original.operation().stream()).unwrap().purpose,
             StreamPurpose::SelfRevocation
         );
+    }
+
+    #[tokio::test]
+    async fn deliberate_provisioning_recovers_partial_creation_and_retains_existing_binding() {
+        use spaceterm_client::journal::*;
+        for schema_committed in [false, true] {
+            let directory = Directory::new();
+            if schema_committed {
+                drop(Database::open(&directory.0, MIGRATIONS).unwrap());
+            }
+            assert!(
+                NativeClientJournal::open_existing(
+                    directory.0.clone(),
+                    Arc::new(Codec),
+                    Arc::new(Verifier),
+                    JournalLimits::default()
+                )
+                .await
+                .is_err()
+            );
+            let journal = NativeClientJournal::provision(
+                directory.0.clone(),
+                Arc::new(Codec),
+                Arc::new(Verifier),
+                JournalLimits::default(),
+            )
+            .await
+            .unwrap();
+            let binding = saved();
+            assert!(matches!(
+                journal
+                    .commit(&ClientJournalTransaction {
+                        expected_revision: ClientJournalRevision::new(0),
+                        changes: vec![ClientJournalChange::SaveBinding(Box::new(binding.clone()))],
+                    })
+                    .await
+                    .unwrap(),
+                JournalCommitDisposition::Durable(_)
+            ));
+            let retained = journal.recover().await.unwrap();
+            drop(journal);
+            let resumed = NativeClientJournal::provision(
+                directory.0.clone(),
+                Arc::new(Codec),
+                Arc::new(Verifier),
+                JournalLimits::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(resumed.recover().await.unwrap(), retained);
+        }
     }
 
     #[tokio::test]

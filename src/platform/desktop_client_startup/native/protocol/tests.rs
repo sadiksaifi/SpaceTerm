@@ -613,7 +613,23 @@ async fn terminal_acceptance(
                 .unwrap(),
         )
         .unwrap();
-    let pane = lease.pane(snapshot.state().panes[0].id).unwrap();
+    // Registry readiness and the channel owner's publication are separate
+    // notifications. Wait for the real channel publication before attaching.
+    let pane = executor.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                match lease.pane(snapshot.state().panes[0].id) {
+                    Ok(pane) => break pane,
+                    Err(error) if error.class() == ClientFailureClass::StaleAuthority => {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(error) => panic!("terminal attachment failed: {error:?}"),
+                }
+            }
+        })
+        .await
+        .expect("channel owner must publish the authenticated pane")
+    });
     pane.update_context(PaneContextFacts {
         focused_pane: true,
         terminal_input_focus: true,
@@ -825,6 +841,12 @@ async fn terminal_acceptance(
 
 #[gpui::test]
 async fn desktop_native_terminal_stream_publishes_owned_active_grid(cx: &mut TestAppContext) {
-    authenticated_case(1, cx, true).await;
     authenticated_case(2, cx, true).await;
+}
+
+#[gpui::test]
+async fn desktop_native_terminal_stream_publishes_owned_active_grid_previous_major(
+    cx: &mut TestAppContext,
+) {
+    authenticated_case(1, cx, true).await;
 }

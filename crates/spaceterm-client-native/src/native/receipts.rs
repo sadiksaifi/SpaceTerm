@@ -179,10 +179,17 @@ mod tests {
             state: ServiceRequestState::Completed(ServiceOutcome::Started),
         })
     }
+    fn directory() -> tempfile::TempDir {
+        // Keep durable SQLite fixtures out of a potentially volatile /tmp.
+        tempfile::Builder::new()
+            .prefix("st-cli-receipts-")
+            .tempdir_in("/var/tmp")
+            .unwrap()
+    }
     #[test]
     fn receipt_capacity_never_evicts_unsettled_results() {
         for settled in [false, true] {
-            let root = tempfile::tempdir().unwrap();
+            let root = directory();
             let account =
                 AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
             let supervisor = account.reopen();
@@ -231,7 +238,7 @@ mod tests {
     }
     #[test]
     fn conflicting_receipt_does_not_replace_original_lost_output() {
-        let root = tempfile::tempdir().unwrap();
+        let root = directory();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let original = receipt(1);
         retain(&account.reopen(), &original).unwrap();

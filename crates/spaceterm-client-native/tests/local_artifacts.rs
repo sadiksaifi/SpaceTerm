@@ -39,6 +39,7 @@ fn platform() -> ServerPlatform {
     }
 }
 fn private_root() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt as _;
     let parent = if cfg!(target_os = "macos") {
         PathBuf::from("/private/tmp")
     } else {
@@ -47,7 +48,11 @@ fn private_root() -> tempfile::TempDir {
             .home()
             .to_owned()
     };
-    tempfile::tempdir_in(parent).unwrap()
+    // Native service configuration must not inherit group-write access from umask.
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(parent)
+        .unwrap()
 }
 struct LocalFixture {
     root: tempfile::TempDir,

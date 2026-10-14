@@ -313,10 +313,21 @@ pub(super) fn validate(
             ..
         } = &entry.state
         {
-            if publication_revision.get() == 0 || outcome.encoded_len() > outcome_charge {
+            if outcome.encoded_len() > outcome_charge {
                 return Err(invalid());
             }
             let decoded = outcome.outcome(codec).map_err(|_| invalid())?;
+            // Pairing changes the authorization store, not the organization.
+            // Its outcomes may precede the first organization publication.
+            // Organization mutations and control grants still require a revision.
+            if publication_revision.get() == 0
+                && !matches!(
+                    (request.command(), &decoded),
+                    (Command::Pairing(_), Outcome::Pairing(_))
+                )
+            {
+                return Err(invalid());
+            }
             decoded
                 .validate_scope(entry.binding.id.stream())
                 .map_err(|_| invalid())?;

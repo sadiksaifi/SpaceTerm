@@ -165,7 +165,13 @@ struct Fixture {
 }
 impl Fixture {
     fn new(desired: Option<DesiredServerState>) -> Self {
-        let root = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        // Native CLI receipts require durable storage, which /tmp may not provide.
+        let root = tempfile::Builder::new()
+            .prefix("st-native-management-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in("/var/tmp")
+            .unwrap();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         if let Some(desired) = desired {
             let installation: InstallationStatus = serde_json::from_value(serde_json::json!({
