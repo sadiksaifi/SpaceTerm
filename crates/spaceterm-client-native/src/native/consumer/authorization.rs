@@ -4,6 +4,7 @@
 //! retained-local-request path consumes its delivery without exposing it as output.
 
 mod public_claim;
+pub use public_claim::PublicDeviceClaimFacts;
 
 use super::*;
 use crate::{

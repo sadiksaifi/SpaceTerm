@@ -13,8 +13,8 @@ pub(super) fn require_account_recovery(
 mod listing;
 
 pub use authorization::{
-    PublicEnrollmentChannel, PublicEnrollmentClaim, PublicEnrollmentDelivery,
-    PublicEnrollmentDeliveryParts,
+    PublicDeviceClaimFacts, PublicEnrollmentChannel, PublicEnrollmentClaim,
+    PublicEnrollmentDelivery, PublicEnrollmentDeliveryParts,
 };
 
 use super::{NativeServiceManagement, classify_service};

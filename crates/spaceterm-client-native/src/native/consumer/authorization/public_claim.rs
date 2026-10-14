@@ -92,6 +92,42 @@ pub(super) fn decode(bytes: &[u8]) -> Result<ClaimInput, ManagementFailure> {
     }
 }
 
+/// Public facts of one exported device claim, read after both key proofs verify.
+/// An owner compares `device_fingerprint` with the fingerprint the claimant shows
+/// before authorizing. Reading grants no authority and touches no native state.
+pub struct PublicDeviceClaimFacts {
+    server: ServerPin,
+    device: PublicFingerprint,
+}
+impl PublicDeviceClaimFacts {
+    /// Accepts only the schema 1 PublicDeviceClaim document, not the legacy
+    /// owner-request record, because only it names the server's full pin.
+    pub fn inspect(bytes: &[u8]) -> Result<Self, ManagementFailure> {
+        match decode(bytes)? {
+            ClaimInput::Device(claim) => Ok(Self {
+                server: claim.pin,
+                device: PublicFingerprint::from_public_key(
+                    claim
+                        .verified
+                        .proposal()
+                        .parts()
+                        .keys
+                        .parts()
+                        .device_identity_public_key,
+                ),
+            }),
+            ClaimInput::Legacy(_) => Err(ManagementFailure::AuthorizationDenied),
+        }
+    }
+    pub fn server(&self) -> ServerPin {
+        self.server
+    }
+    /// The claimant's device identity public key, the authorization's expected fingerprint.
+    pub fn device_fingerprint(&self) -> PublicFingerprint {
+        self.device
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ClaimBindings {

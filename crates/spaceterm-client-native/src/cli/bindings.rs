@@ -214,6 +214,53 @@ impl PairingAuthorizationDelivery {
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+    /// Consumes the delivery as the single-use invitation document a desktop
+    /// Add Server sheet imports: schema 1, the server pin, and the delivery in
+    /// standard base64. `pin` must be the pin the claim was authorized for; a
+    /// pin naming another server is refused. The result is a bearer. Callers
+    /// hand it to the clipboard and never render, log or retain it.
+    pub fn into_invitation(
+        self,
+        pin: spaceterm_protocol::authentication::ServerPin,
+    ) -> Result<Zeroizing<String>, PairingAuthorizationFailure> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use spaceterm_protocol::pairing_adapter::EnrollmentAuthorization;
+
+        let refused = |failure| PairingAuthorizationFailure::new(failure, Some(self.request));
+        let (reservation, _authorization) =
+            EnrollmentAuthorization::from_delivery(Zeroizing::new(self.bytes.to_vec()))
+                .map_err(|_| refused(ManagementFailure::UnsafeNativeState))?;
+        if pin.identity == [0; 16]
+            || pin.public_key == [0; 32]
+            || reservation.parts().target.parts().server.bytes() != pin.identity
+        {
+            return Err(refused(ManagementFailure::AuthorizationDenied));
+        }
+        #[derive(Serialize)]
+        struct Invitation<'a> {
+            schema: u16,
+            server_identity: [u8; 16],
+            server_public_key: [u8; 32],
+            authorization_delivery: &'a str,
+        }
+        let encoded = Zeroizing::new(STANDARD.encode(self.bytes.as_slice()));
+        // Reserve once so serialization never reallocates and leaves an unzeroized copy.
+        let mut document = Zeroizing::new(Vec::with_capacity(encoded.len() + 512));
+        serde_json::to_writer(
+            &mut *document,
+            &Invitation {
+                schema: 1,
+                server_identity: pin.identity,
+                server_public_key: pin.public_key,
+                authorization_delivery: &encoded,
+            },
+        )
+        .map_err(|_| refused(ManagementFailure::UnsafeNativeState))?;
+        let document = std::mem::take(&mut *document);
+        String::from_utf8(document)
+            .map(Zeroizing::new)
+            .map_err(|_| refused(ManagementFailure::UnsafeNativeState))
+    }
 }
 
 /// A content-free failure retains admitted work's original lookup reference.
