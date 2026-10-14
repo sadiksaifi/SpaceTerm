@@ -1074,9 +1074,22 @@ fn apply_change(
             }) {
                 return Err(invalid());
             }
+            let record = &state.revocations[index];
+            // The native owner has already deleted this pairing key, or observed
+            // it missing. Preserve only existing comparison provenance until
+            // every exact submitted native original has a separately durable
+            // result and guest ACK retirement. This grants no signing authority.
+            // An idempotent cleanup retry releases these facts after retirement;
+            // native retirement itself cannot assume key deletion has run.
+            if state.remote_native_requests.iter().any(|original| {
+                original.submitted()
+                    && original.local_pairing() == &record.task.parts().local_pairing
+                    && original.client() == record.task.parts().original.client()
+            }) {
+                return Ok(());
+            }
             // Release only the original credential slot's public route capture.
             // The reference and generation cannot identify a later pairing.
-            let record = &state.revocations[index];
             if let Some(slot) = state.pairing.slots.iter_mut().find(|slot| {
                 slot.reference == record.task.parts().original.credential()
                     && slot.generation == record.task.parts().local_pairing.parts().generation

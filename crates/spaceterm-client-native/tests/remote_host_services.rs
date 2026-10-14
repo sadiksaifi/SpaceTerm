@@ -20,8 +20,8 @@ use spaceterm_client::{
     api::{ConnectionTarget, PairedServerBinding, RouteDescription, RouteParts},
     failure::{ClientFailure, ClientFailureClass},
     journal::{
-        ClientJournalChange, JournalController, JournalCredentialSlot, JournalLimits,
-        ReceiptVerifier, SavedBinding,
+        ClientJournalChange, HistoricalRemoteNativePort, JournalController, JournalCredentialSlot,
+        JournalLimits, ReceiptVerifier, SavedBinding,
     },
     limits::ClientLimits,
     management_cli::{ManagementFailure, ManagementFuture},
@@ -35,7 +35,10 @@ use spaceterm_client_native::{
     native::{
         classify_service,
         host_services::HostServiceManagement,
-        remote_host_services::{RemoteHostServices, RemoteNativeTransport, RemoteStoppedRequest},
+        remote_host_services::{
+            RemoteHostOriginalRecovery, RemoteHostServices, RemoteNativeOriginalTransport,
+            RemoteNativeTransport, RemoteStoppedRequest,
+        },
     },
     pairing_runtime::NativePairingRuntime,
 };
@@ -107,9 +110,42 @@ impl ServiceClock for Clock {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ManagerEffect {
+    Configure(DesiredServerState),
+    Start(DesiredServerState),
+    Stop(DesiredServerState),
+    Uninstall(DesiredServerState),
+}
+
 struct Manager {
     running: Arc<AtomicBool>,
     effects: AtomicUsize,
+    effect_log: Mutex<Vec<ManagerEffect>>,
+}
+impl Manager {
+    fn record_effect(&self, effect: ManagerEffect) {
+        self.effect_log.lock().unwrap().push(effect);
+        self.effects.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn assert_no_effects(&self) {
+        assert!(self.effect_log.lock().unwrap().is_empty());
+        assert_eq!(self.effects.load(Ordering::SeqCst), 0);
+    }
+
+    fn assert_original_stop_effects(&self) {
+        // One accepted Stop suppresses restart in IntentCommitted, stops in
+        // Quiescing, then publishes the Stopped configuration in Publishing.
+        let expected = [
+            ManagerEffect::Configure(DesiredServerState::Stopped),
+            ManagerEffect::Stop(DesiredServerState::Stopped),
+            ManagerEffect::Configure(DesiredServerState::Stopped),
+        ];
+        assert_eq!(self.effect_log.lock().unwrap().as_slice(), expected);
+        assert_eq!(self.effects.load(Ordering::SeqCst), expected.len());
+        assert!(!self.running.load(Ordering::SeqCst));
+    }
 }
 impl ServiceManager for Manager {
     fn status<'a>(&'a self, _: Option<&'a RegisteredServer>) -> ServiceFuture<'a, SupervisorState> {
@@ -124,29 +160,29 @@ impl ServiceManager for Manager {
     fn linger(&self) -> ServiceFuture<'_, Option<LingerState>> {
         Box::pin(async { Ok(cfg!(target_os = "linux").then_some(LingerState::Enabled)) })
     }
-    fn configure<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
-        Box::pin(async {
-            self.effects.fetch_add(1, Ordering::SeqCst);
+    fn configure<'a>(&'a self, registration: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
+        Box::pin(async move {
+            self.record_effect(ManagerEffect::Configure(registration.desired_state()));
             Ok(())
         })
     }
-    fn start<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
-        Box::pin(async {
-            self.effects.fetch_add(1, Ordering::SeqCst);
+    fn start<'a>(&'a self, registration: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
+        Box::pin(async move {
+            self.record_effect(ManagerEffect::Start(registration.desired_state()));
             self.running.store(true, Ordering::SeqCst);
             Ok(())
         })
     }
-    fn stop<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
-        Box::pin(async {
-            self.effects.fetch_add(1, Ordering::SeqCst);
+    fn stop<'a>(&'a self, registration: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
+        Box::pin(async move {
+            self.record_effect(ManagerEffect::Stop(registration.desired_state()));
             self.running.store(false, Ordering::SeqCst);
             Ok(())
         })
     }
-    fn uninstall<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
-        Box::pin(async {
-            self.effects.fetch_add(1, Ordering::SeqCst);
+    fn uninstall<'a>(&'a self, registration: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
+        Box::pin(async move {
+            self.record_effect(ManagerEffect::Uninstall(registration.desired_state()));
             Ok(())
         })
     }
@@ -247,7 +283,19 @@ impl ServiceProcesses for Processes {
     }
 }
 
-struct Credentials(Arc<TestKey>);
+#[derive(Default)]
+struct CredentialState {
+    allow_cleanup: AtomicBool,
+    deleted: AtomicBool,
+    signing_calls: AtomicUsize,
+    deletion_calls: AtomicUsize,
+    already_missing_calls: AtomicUsize,
+}
+struct Credentials {
+    signer: Arc<TestKey>,
+    server: ServerId,
+    state: Arc<CredentialState>,
+}
 impl NativeDeviceCredentials for Credentials {
     fn create(
         &self,
@@ -268,14 +316,43 @@ impl NativeDeviceCredentials for Credentials {
     ) -> PairingFuture<'a, Result<Arc<dyn SigningKey>, PairingFailure>> {
         Box::pin(async move {
             authorization.validate(&credential.scope)?;
-            Ok(self.0.clone() as Arc<dyn SigningKey>)
+            self.state.signing_calls.fetch_add(1, Ordering::SeqCst);
+            if self.state.deleted.load(Ordering::SeqCst) {
+                return Err(PairingFailure::CredentialUnavailable);
+            }
+            Ok(self.signer.clone() as Arc<dyn SigningKey>)
         })
     }
     fn delete_pairing_key<'a>(
         &'a self,
-        _: &'a PreparedCredential,
+        credential: &'a PreparedCredential,
     ) -> PairingFuture<'a, Result<CredentialDeletion, PairingFailure>> {
-        Box::pin(async { panic!("management must not delete credentials") })
+        Box::pin(async move {
+            assert!(
+                self.state.allow_cleanup.load(Ordering::SeqCst),
+                "management must not delete credentials"
+            );
+            assert_eq!(
+                credential.scope.parts().purpose,
+                CredentialPurpose::PairingAuthentication {
+                    server: self.server
+                }
+            );
+            assert_eq!(
+                credential.scope.reference(),
+                CredentialReference::new([9; 16])
+            );
+            assert_eq!(credential.public_key, self.signer.public_key());
+            self.state.deletion_calls.fetch_add(1, Ordering::SeqCst);
+            if self.state.deleted.swap(true, Ordering::SeqCst) {
+                self.state
+                    .already_missing_calls
+                    .fetch_add(1, Ordering::SeqCst);
+                Ok(CredentialDeletion::AlreadyMissing)
+            } else {
+                Ok(CredentialDeletion::Deleted)
+            }
+        })
     }
 }
 struct NoEnrollment;
@@ -333,6 +410,7 @@ struct Ssh {
     wrong_owner: AtomicBool,
     peer: Arc<Peer>,
     stopped_opens: Arc<AtomicUsize>,
+    drop_stopped_artifact: AtomicBool,
     capture_race: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     revalidation_hook: Mutex<Option<RevalidationHook>>,
     stopped_completions: StoppedWorkers,
@@ -558,6 +636,8 @@ impl RemoteNativeTransport for Ssh {
             let (to_mac, from_guest) = mpsc::channel(4);
             let peer = self.peer.clone();
             let completions = self.stopped_completions.clone();
+            let drop_artifact_after_admit =
+                self.drop_stopped_artifact.swap(false, Ordering::SeqCst);
             self.stopped_opens.fetch_add(1, Ordering::SeqCst);
             tokio::spawn(async move {
                 stopped_peer(
@@ -569,6 +649,7 @@ impl RemoteNativeTransport for Ssh {
                     from_mac,
                     to_mac,
                     completions,
+                    drop_artifact_after_admit,
                 )
                 .await
             });
@@ -1104,6 +1185,7 @@ async fn stopped_peer(
     mut input: mpsc::Receiver<Vec<u8>>,
     output: mpsc::Sender<Vec<u8>>,
     completions: StoppedWorkers,
+    drop_artifact_after_admit: bool,
 ) {
     let auth = Auth {
         principal,
@@ -1185,7 +1267,9 @@ async fn stopped_peer(
                     Ok(progress) => {
                         drop(admission.take());
                         let supervisor = peer.supervisor.clone();
-                        let artifact = artifact.take();
+                        // Assessment and admission used the genuine verified package.
+                        // This external transfer fault loses it only after Accepted.
+                        let artifact = artifact.take().filter(|_| !drop_artifact_after_admit);
                         let worker = tokio::spawn(async move {
                             supervisor
                                 .execute_stopped_native(original, artifact.as_ref())
@@ -1230,6 +1314,7 @@ struct Fixture {
     _mac_root: tempfile::TempDir,
     key: AccountBuildKey,
     journal: Arc<JournalController>,
+    credential_state: Arc<CredentialState>,
     pairing: Arc<NativePairingRuntime>,
     binding: PairedServerBinding,
     ssh: Arc<Ssh>,
@@ -1305,6 +1390,39 @@ impl Fixture {
         desired: DesiredServerState,
         baseline: bool,
     ) -> Self {
+        Self::with_native_route(major, native_capability, desired, baseline, None).await
+    }
+    async fn with_native_route(
+        major: u32,
+        native_capability: bool,
+        desired: DesiredServerState,
+        baseline: bool,
+        native_route: Option<(
+            RouteDescription,
+            Arc<spaceterm_client_native::route::NativeRouteConnector>,
+        )>,
+    ) -> Self {
+        Self::with_original_route(
+            major,
+            native_capability,
+            desired,
+            baseline,
+            native_route,
+            true,
+        )
+        .await
+    }
+    async fn with_original_route(
+        major: u32,
+        native_capability: bool,
+        desired: DesiredServerState,
+        baseline: bool,
+        native_route: Option<(
+            RouteDescription,
+            Arc<spaceterm_client_native::route::NativeRouteConnector>,
+        )>,
+        capture_original: bool,
+    ) -> Self {
         let guest_root = tempfile::tempdir().unwrap();
         let guest = Arc::new(
             AccountServiceFixture::new(guest_root.path(), BuildIdentity::Development).unwrap(),
@@ -1337,6 +1455,7 @@ impl Fixture {
         let manager = Arc::new(Manager {
             running: running.clone(),
             effects: AtomicUsize::new(0),
+            effect_log: Mutex::new(Vec::new()),
         });
         let processes = Arc::new(Processes { running });
         let clock = Arc::new(Clock(AtomicU64::new(100)));
@@ -1358,11 +1477,16 @@ impl Fixture {
                 DeviceId::new([99; 16]),
                 PairingId::new(id, 1).unwrap(),
                 ClientId::new(id, 1).unwrap(),
-                RouteDescription::new(RouteParts::Wss {
-                    address: "192.0.2.10:443".parse().unwrap(),
-                    server_name: "original.example.test".into(),
-                })
-                .unwrap(),
+                native_route
+                    .as_ref()
+                    .map(|(route, _)| route.clone())
+                    .unwrap_or_else(|| {
+                        RouteDescription::new(RouteParts::Wss {
+                            address: "192.0.2.10:443".parse().unwrap(),
+                            server_name: "original.example.test".into(),
+                        })
+                        .unwrap()
+                    }),
                 CredentialReference::new([9; 16]),
                 LocalPairingGeneration::new(1).unwrap(),
             )
@@ -1484,34 +1608,50 @@ impl Fixture {
             .await
             .unwrap(),
         );
-        journal
-            .transact(vec![
-                ClientJournalChange::ReserveCredential(JournalCredentialSlot {
-                    namespace: "dev.spaceterm.remote-host-services-test".into(),
-                    server: Some(id),
-                    reference: binding.target().credential(),
-                    public_key: None,
-                    route_reference: None,
-                    route: None,
-                    ssh_capture: None,
-                    generation: binding.target().incarnation(),
-                }),
-                ClientJournalChange::RecordCredentialPublicKey {
-                    reference: binding.target().credential(),
-                    public_key: client_signer.public_key(),
-                },
-                ClientJournalChange::BindCredentialRoute {
-                    reference: binding.target().credential(),
-                    route_reference: RevocationRouteReference::new([9; 16]),
-                    route: binding.target().route().clone(),
-                },
-                ClientJournalChange::SaveBinding(Box::new(saved)),
-            ])
-            .await
-            .unwrap();
+        let mut preparation = vec![
+            ClientJournalChange::ReserveCredential(JournalCredentialSlot {
+                namespace: "dev.spaceterm.remote-host-services-test".into(),
+                server: Some(id),
+                reference: binding.target().credential(),
+                public_key: None,
+                route_reference: None,
+                route: None,
+                ssh_capture: None,
+                generation: binding.target().incarnation(),
+            }),
+            ClientJournalChange::RecordCredentialPublicKey {
+                reference: binding.target().credential(),
+                public_key: client_signer.public_key(),
+            },
+            ClientJournalChange::BindCredentialRoute {
+                reference: binding.target().credential(),
+                route_reference: RevocationRouteReference::new([9; 16]),
+                route: binding.target().route().clone(),
+            },
+        ];
+        if native_route.is_none() {
+            preparation.push(ClientJournalChange::SaveBinding(Box::new(saved.clone())));
+        }
+        journal.transact(preparation).await.unwrap();
+        if let Some((_, routes)) = native_route {
+            if capture_original {
+                spaceterm_client_native::restricted_routes::NativePairingConnector::with_shared_routes(
+                    journal.clone(), routes,
+                ).capture_route(binding.target().credential()).await.unwrap();
+            }
+            journal
+                .transact(vec![ClientJournalChange::SaveBinding(Box::new(saved))])
+                .await
+                .unwrap();
+        }
+        let credential_state = Arc::new(CredentialState::default());
         let pairing = Arc::new(NativePairingRuntime::with_adapters(
             journal.clone(),
-            Arc::new(Credentials(client_signer.clone())),
+            Arc::new(Credentials {
+                signer: client_signer.clone(),
+                server: id,
+                state: credential_state.clone(),
+            }),
             Arc::new(NoEnrollment),
             Arc::new(NoEnrollment),
             Arc::new(NoLocalEffects),
@@ -1585,6 +1725,7 @@ impl Fixture {
             wrong_owner: AtomicBool::new(false),
             peer: peer.clone(),
             stopped_opens: Arc::new(AtomicUsize::new(0)),
+            drop_stopped_artifact: AtomicBool::new(false),
             capture_race: Mutex::new(None),
             revalidation_hook: Mutex::new(None),
             stopped_completions: Arc::new(AsyncMutex::new(vec![])),
@@ -1595,6 +1736,7 @@ impl Fixture {
             _mac_root: mac_root,
             key,
             journal,
+            credential_state,
             pairing,
             binding,
             ssh,
@@ -1626,6 +1768,441 @@ impl Fixture {
             )
             .unwrap()
     }
+}
+
+// The only executable is this test-created capture-only OpenSSH port. It cannot
+// dial, ask for credentials, run a helper or mutate a native service.
+async fn historical_fixture(
+    major: u32,
+    desired: DesiredServerState,
+) -> (Fixture, tempfile::TempDir) {
+    historical_fixture_with_capture(major, desired, true).await
+}
+async fn historical_fixture_with_capture(
+    major: u32,
+    desired: DesiredServerState,
+    capture_original: bool,
+) -> (Fixture, tempfile::TempDir) {
+    use spaceterm_client_native::route::{
+        NativeRouteConnector, SshRouteConfiguration, TunnelEndpoints,
+    };
+    use spaceterm_host::ipc::PrivateIpcDirectory;
+    let root = tempfile::Builder::new()
+        .prefix("original-ssh-capture-")
+        .tempdir_in(std::fs::canonicalize("/var/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let executable = root.path().join("capture-only-ssh");
+    std::fs::write(&executable, "#!/bin/sh\ncase \" $* \" in\n*' -G '*) printf 'host original\\nhostname original.example.test\\nuser original-owner\\nport 22\\nbatchmode yes\\n';;\n*) exit 91;;\nesac\n").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = root.path().join("config");
+    std::fs::write(
+        &config,
+        "Host original\n HostName original.example.test\n User original-owner\n Port 22\n",
+    )
+    .unwrap();
+    let routes = Arc::new(
+        NativeRouteConnector::new(
+            vec![],
+            Some(
+                SshRouteConfiguration::new(
+                    executable,
+                    config,
+                    root.path().to_owned(),
+                    vec![("PATH".into(), "/usr/bin:/bin".into())],
+                    TunnelEndpoints::new(PrivateIpcDirectory::open(root.path()).unwrap()).unwrap(),
+                    None,
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap(),
+    );
+    let fixture = Fixture::with_original_route(
+        major,
+        true,
+        desired,
+        true,
+        Some((
+            RouteDescription::new(RouteParts::Ssh {
+                destination: "original".into(),
+                remote_socket: "/original-server".into(),
+            })
+            .unwrap(),
+            routes,
+        )),
+        capture_original,
+    )
+    .await;
+    (fixture, root)
+}
+
+struct RelaunchedOriginal {
+    _guest_root: tempfile::TempDir,
+    _mac_root: tempfile::TempDir,
+    journal: Arc<JournalController>,
+    credential_state: Arc<CredentialState>,
+    binding: PairedServerBinding,
+    ssh: Arc<Ssh>,
+    peer: Arc<Peer>,
+    manager: Arc<Manager>,
+}
+impl Fixture {
+    async fn relaunch_original(self) -> RelaunchedOriginal {
+        let Self {
+            _guest_root,
+            _mac_root,
+            account,
+            key: _,
+            journal,
+            credential_state,
+            pairing,
+            binding,
+            ssh,
+            peer,
+            manager,
+            clock,
+            server,
+            worker,
+        } = self;
+        worker.shutdown().await.unwrap();
+        drop(server);
+        drop(pairing);
+        drop(journal);
+        drop(account);
+        drop(clock);
+        let native = NativeClientJournal::open_existing(
+            _mac_root.path().to_owned(),
+            Arc::new(CanonicalCodec),
+            Arc::new(Verifier),
+            JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        let journal = Arc::new(
+            JournalController::recover(
+                Arc::new(native),
+                Arc::new(CanonicalCodec),
+                Arc::new(Verifier),
+                JournalLimits::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        RelaunchedOriginal {
+            _guest_root,
+            _mac_root,
+            journal,
+            credential_state,
+            binding,
+            ssh,
+            peer,
+            manager,
+        }
+    }
+}
+impl RelaunchedOriginal {
+    // This is the existing restricted cleanup owner, separate from original
+    // recovery. Its deleted-key test port refuses signing and reports AlreadyMissing.
+    fn cleanup_runtime(&self) -> Arc<NativePairingRuntime> {
+        Arc::new(NativePairingRuntime::with_adapters(
+            self.journal.clone(),
+            Arc::new(Credentials {
+                signer: self.peer.client_signer.clone(),
+                server: self.binding.target().server(),
+                state: self.credential_state.clone(),
+            }),
+            Arc::new(NoEnrollment),
+            Arc::new(NoEnrollment),
+            Arc::new(NoLocalEffects),
+            HandshakeConfig::default(),
+        ))
+    }
+    async fn reopen(self) -> Self {
+        let Self {
+            _guest_root,
+            _mac_root,
+            journal,
+            credential_state,
+            binding,
+            ssh,
+            peer,
+            manager,
+        } = self;
+        drop(journal);
+        let native = NativeClientJournal::open_existing(
+            _mac_root.path().to_owned(),
+            Arc::new(CanonicalCodec),
+            Arc::new(Verifier),
+            JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        let journal = Arc::new(
+            JournalController::recover(
+                Arc::new(native),
+                Arc::new(CanonicalCodec),
+                Arc::new(Verifier),
+                JournalLimits::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        Self {
+            _guest_root,
+            _mac_root,
+            journal,
+            credential_state,
+            binding,
+            ssh,
+            peer,
+            manager,
+        }
+    }
+    fn port(&self, request: NativeRequestId) -> Option<HistoricalRemoteNativePort> {
+        self.journal
+            .recover_remote_native_original(
+                &self.binding.target().local_pairing().unwrap(),
+                self.binding.target().client(),
+                *request.as_bytes(),
+            )
+            .unwrap()
+    }
+    fn records(&self) -> Vec<spaceterm_client::journal::RemoteNativeRequest> {
+        self.journal
+            .recover_remote_native_requests(
+                &self.binding.target().local_pairing().unwrap(),
+                self.binding.target().client(),
+            )
+            .unwrap()
+    }
+}
+
+struct OriginalSsh {
+    ssh: Arc<Ssh>,
+    original: HistoricalRemoteNativePort,
+    resolves: AtomicUsize,
+    acknowledgements: AtomicUsize,
+    alter_progress: AtomicBool,
+    alter_ack: AtomicBool,
+    after_resolve: Mutex<Option<RevalidationHook>>,
+}
+impl OriginalSsh {
+    fn new(ssh: Arc<Ssh>, original: HistoricalRemoteNativePort) -> Arc<Self> {
+        Arc::new(Self {
+            ssh,
+            original,
+            resolves: AtomicUsize::new(0),
+            acknowledgements: AtomicUsize::new(0),
+            alter_progress: AtomicBool::new(false),
+            alter_ack: AtomicBool::new(false),
+            after_resolve: Mutex::new(None),
+        })
+    }
+    async fn progress(
+        &self,
+        mut progress: ServiceProgress,
+    ) -> Result<ServiceProgress, ManagementFailure> {
+        let hook = self.after_resolve.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook().await?;
+        }
+        if self.alter_progress.swap(false, Ordering::SeqCst) {
+            progress.request_digest = RequestDigest::from_bytes([19; 32]);
+        }
+        Ok(progress)
+    }
+    fn ack(&self, mut progress: ServiceProgress) -> ServiceProgress {
+        if self.alter_ack.swap(false, Ordering::SeqCst) {
+            progress.request_digest = RequestDigest::from_bytes([23; 32]);
+        }
+        progress
+    }
+}
+impl RemoteNativeOriginalTransport for OriginalSsh {
+    fn revalidate(&self, key: AccountBuildKey, pin: ServerPin) -> ManagementFuture<'_, ()> {
+        Box::pin(async move {
+            self.original
+                .validate()
+                .map_err(|_| ManagementFailure::StaleAssessment)?;
+            RemoteNativeTransport::revalidate(self.ssh.as_ref(), key, pin).await
+        })
+    }
+    fn resolve_lifecycle(
+        &self,
+        key: AccountBuildKey,
+        pin: ServerPin,
+        request: NativeRequestId,
+    ) -> ManagementFuture<'_, ServiceProgress> {
+        Box::pin(async move {
+            assert_eq!(*request.as_bytes(), self.original.request());
+            self.resolves.fetch_add(1, Ordering::SeqCst);
+            let NativeLifecycleAccountReply::Progress(progress) = self
+                .ssh
+                .account_call(NativeLifecycleAccountRequest::Resolve {
+                    expected_key: key,
+                    expected_pin: pin,
+                    request,
+                })
+                .await?
+            else {
+                panic!("exact original resolution reply required")
+            };
+            self.progress(progress).await
+        })
+    }
+    fn acknowledge_lifecycle(
+        &self,
+        key: AccountBuildKey,
+        pin: ServerPin,
+        progress: ServiceProgress,
+    ) -> ManagementFuture<'_, ServiceProgress> {
+        Box::pin(async move {
+            assert_eq!(*progress.request.as_bytes(), self.original.request());
+            self.acknowledgements.fetch_add(1, Ordering::SeqCst);
+            let NativeLifecycleAccountReply::Acknowledged { progress } = self
+                .ssh
+                .account_call(NativeLifecycleAccountRequest::Acknowledge {
+                    expected_key: key,
+                    expected_pin: pin,
+                    progress,
+                })
+                .await?
+            else {
+                panic!("exact original acknowledgement required")
+            };
+            Ok(self.ack(progress))
+        })
+    }
+    fn resolve_stage<'a>(
+        &'a self,
+        key: AccountBuildKey,
+        pin: ServerPin,
+        request: NativeRequestId,
+        artifact: Option<&'a VerifiedAccountServerArtifact>,
+    ) -> ManagementFuture<'a, ServiceProgress> {
+        Box::pin(async move {
+            assert_eq!(*request.as_bytes(), self.original.request());
+            self.resolves.fetch_add(1, Ordering::SeqCst);
+            let NativeStageAccountReply::Progress(progress) = self
+                .ssh
+                .stage_call(
+                    NativeStageAccountRequest::Resolve {
+                        expected_key: key,
+                        expected_pin: pin,
+                        request,
+                    },
+                    artifact,
+                )
+                .await?
+            else {
+                panic!("exact original Stage resolution required")
+            };
+            self.progress(progress).await
+        })
+    }
+    fn acknowledge_stage(
+        &self,
+        key: AccountBuildKey,
+        pin: ServerPin,
+        progress: ServiceProgress,
+    ) -> ManagementFuture<'_, ServiceProgress> {
+        Box::pin(async move {
+            assert_eq!(*progress.request.as_bytes(), self.original.request());
+            self.acknowledgements.fetch_add(1, Ordering::SeqCst);
+            let NativeStageAccountReply::Acknowledged { progress } = self
+                .ssh
+                .stage_call(
+                    NativeStageAccountRequest::Acknowledge {
+                        expected_key: key,
+                        expected_pin: pin,
+                        progress,
+                    },
+                    None,
+                )
+                .await?
+            else {
+                panic!("exact original Stage acknowledgement required")
+            };
+            Ok(self.ack(progress))
+        })
+    }
+    fn resolve_stopped<'a>(
+        &'a self,
+        key: AccountBuildKey,
+        pin: ServerPin,
+        request: NativeRequestId,
+        artifact: Option<&'a VerifiedAccountServerArtifact>,
+    ) -> ManagementFuture<'a, ServiceProgress> {
+        Box::pin(async move {
+            assert_eq!(*request.as_bytes(), self.original.request());
+            self.resolves.fetch_add(1, Ordering::SeqCst);
+            self.progress(
+                RemoteNativeTransport::resolve_stopped(
+                    self.ssh.as_ref(),
+                    key,
+                    pin,
+                    request,
+                    artifact,
+                )
+                .await?,
+            )
+            .await
+        })
+    }
+    fn acknowledge_stopped(
+        &self,
+        key: AccountBuildKey,
+        pin: ServerPin,
+        progress: ServiceProgress,
+    ) -> ManagementFuture<'_, ServiceProgress> {
+        Box::pin(async move {
+            assert_eq!(*progress.request.as_bytes(), self.original.request());
+            self.acknowledgements.fetch_add(1, Ordering::SeqCst);
+            Ok(self.ack(
+                RemoteNativeTransport::acknowledge_stopped(self.ssh.as_ref(), key, pin, progress)
+                    .await?,
+            ))
+        })
+    }
+}
+
+async fn acknowledge_original_revocation(journal: &JournalController, peer: &Peer) -> OperationId {
+    let task = journal.snapshot().unwrap().revocations()[0].task.clone();
+    let original = task.parts().original;
+    let receipt = ReceiptCodec::new(peer.binding.target().pin())
+        .sign(
+            PairingReceiptBody::Revocation {
+                receipt: RevocationReceipt {
+                    server: original.server(),
+                    pairing: original.pairing(),
+                    device: original.device(),
+                    operation: original.operation(),
+                    revision: StoreRevision::new(2),
+                    receipt_digest: RequestDigest::from_bytes([0; 32]),
+                },
+                authentication_key_digest: RequestDigest::from_bytes(
+                    ring::digest::digest(&ring::digest::SHA256, &peer.client_signer.public_key())
+                        .as_ref()
+                        .try_into()
+                        .unwrap(),
+                ),
+                revocation_event: [3; 16],
+            },
+            peer.signer.as_ref(),
+        )
+        .unwrap();
+    journal
+        .transact(vec![
+            ClientJournalChange::ConfirmRevocation {
+                operation: original.operation(),
+                receipt: Box::new(receipt),
+            },
+            ClientJournalChange::ConfirmRevocationAcknowledgement(original.operation()),
+        ])
+        .await
+        .unwrap();
+    original.operation()
 }
 
 async fn seal_pairing(fixture: &Fixture) {
@@ -2760,4 +3337,705 @@ async fn changed_ssh_owner_refuses_original_request_before_any_native_or_runtime
     assert_eq!(fixture.peer.assess_calls.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.manager.effects.load(Ordering::SeqCst), 0);
     fixture.worker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn historical_original_survives_physical_relaunch_and_seal_and_retires_only_after_exact_ack()
+{
+    for major in [1, 2] {
+        let (fixture, _capture_root) = historical_fixture(major, DesiredServerState::Running).await;
+        let provider = fixture.provider().await;
+        fixture.manager.assert_no_effects();
+        let request = provider.reserve_request().await.unwrap();
+        let assessment = provider.assess(request, ServiceAction::Stop).await.unwrap();
+        let reference = fixture.records()[0].assessment().unwrap().to_vec();
+        fixture
+            .peer
+            .ordinary_route_available
+            .store(false, Ordering::SeqCst);
+        fixture.peer.lose_admit.store(true, Ordering::SeqCst);
+        assert!(provider.submit(assessment).await.is_err());
+        fixture.manager.assert_no_effects();
+        seal_pairing(&fixture).await;
+        assert!(fixture.journal.snapshot().unwrap().bindings().is_empty());
+        drop(provider);
+        let relaunched = fixture.relaunch_original().await;
+        relaunched.manager.assert_no_effects();
+        let port = relaunched.port(request).unwrap();
+        let context = RemoteHostOriginalRecovery::context(&port).unwrap();
+        assert_eq!(context.request(), request);
+        assert_eq!(context.pin(), relaunched.binding.target().pin());
+        assert_eq!(
+            port.snapshot().unwrap().assessment(),
+            Some(reference.as_slice())
+        );
+        let transport = OriginalSsh::new(relaunched.ssh.clone(), port.clone());
+        let recovery = RemoteHostOriginalRecovery::new(port, transport.clone()).unwrap();
+        assert_eq!(transport.resolves.load(Ordering::SeqCst), 0);
+        assert_eq!(transport.acknowledgements.load(Ordering::SeqCst), 0);
+        relaunched.manager.assert_no_effects();
+        relaunched.ssh.lose_ack.store(true, Ordering::SeqCst);
+        assert_eq!(
+            recovery.resolve().await.unwrap_err(),
+            ManagementFailure::IoUnavailable
+        );
+        relaunched.manager.assert_original_stop_effects();
+        let retained: ServiceProgress =
+            serde_json::from_slice(relaunched.records()[0].result().unwrap()).unwrap();
+        assert_eq!(retained.request, request);
+        assert_eq!(
+            retained.state,
+            ServiceRequestState::Completed(ServiceOutcome::Stopped)
+        );
+        assert_eq!(
+            relaunched.records()[0].assessment(),
+            Some(reference.as_slice())
+        );
+        drop(recovery);
+        drop(transport);
+        let relaunched = relaunched.reopen().await;
+        relaunched.manager.assert_original_stop_effects();
+        let port = relaunched.port(request).unwrap();
+        let transport = OriginalSsh::new(relaunched.ssh.clone(), port.clone());
+        let recovery = RemoteHostOriginalRecovery::new(port, transport.clone()).unwrap();
+        relaunched.manager.assert_original_stop_effects();
+        assert_eq!(recovery.resolve().await.unwrap(), retained);
+        assert_eq!(transport.resolves.load(Ordering::SeqCst), 0);
+        assert_eq!(transport.acknowledgements.load(Ordering::SeqCst), 1);
+        assert!(relaunched.records().is_empty());
+        assert_eq!(relaunched.peer.opens.load(Ordering::SeqCst), 1);
+        assert_eq!(relaunched.peer.handshakes.load(Ordering::SeqCst), 1);
+        assert_eq!(relaunched.peer.assess_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(relaunched.peer.admit_calls.load(Ordering::SeqCst), 1);
+        relaunched.manager.assert_original_stop_effects();
+    }
+}
+
+#[tokio::test]
+async fn historical_submitted_nonadmission_stays_reserved_after_physical_relaunch_without_replay() {
+    let (fixture, _capture_root) = historical_fixture(2, DesiredServerState::Running).await;
+    let provider = fixture.provider().await;
+    let request = provider.reserve_request().await.unwrap();
+    let assessment = provider.assess(request, ServiceAction::Stop).await.unwrap();
+    let reference = fixture.records()[0].assessment().unwrap().to_vec();
+    fixture
+        .peer
+        .ordinary_route_available
+        .store(false, Ordering::SeqCst);
+    fixture.peer.lose_before_admit.store(true, Ordering::SeqCst);
+    assert!(provider.submit(assessment).await.is_err());
+    seal_pairing(&fixture).await;
+    drop(provider);
+    let relaunched = fixture.relaunch_original().await;
+    let port = relaunched.port(request).unwrap();
+    let transport = OriginalSsh::new(relaunched.ssh.clone(), port.clone());
+    let recovery = RemoteHostOriginalRecovery::new(port, transport.clone()).unwrap();
+    for _ in 0..2 {
+        let progress = recovery.resolve().await.unwrap();
+        assert_eq!(progress.request, request);
+        assert_eq!(
+            progress.phase,
+            spaceterm_host::account_service::ServicePhase::Reserved
+        );
+        assert_eq!(progress.state, ServiceRequestState::Pending);
+    }
+    let (_, artifact) =
+        signed_installation::fixture("1.2.4", 7, signed_installation::native_machine());
+    assert_eq!(
+        recovery.resolve_with_artifact(&artifact).await.unwrap_err(),
+        ManagementFailure::StaleAssessment
+    );
+    assert_eq!(transport.resolves.load(Ordering::SeqCst), 2);
+    assert_eq!(transport.acknowledgements.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        relaunched.records()[0].assessment(),
+        Some(reference.as_slice())
+    );
+    assert!(relaunched.records()[0].result().is_none());
+    assert_eq!(relaunched.peer.assess_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(relaunched.peer.admit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(relaunched.peer.handshakes.load(Ordering::SeqCst), 1);
+    assert_eq!(relaunched.manager.effects.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn historical_original_without_submission_cannot_gain_recovery_authority_after_relaunch() {
+    for assessed in [false, true] {
+        let (fixture, _capture_root) = historical_fixture(2, DesiredServerState::Running).await;
+        let provider = fixture.provider().await;
+        let request = provider.reserve_request().await.unwrap();
+        if assessed {
+            provider.assess(request, ServiceAction::Stop).await.unwrap();
+        }
+        seal_pairing(&fixture).await;
+        drop(provider);
+        let relaunched = fixture.relaunch_original().await;
+        assert!(relaunched.port(request).is_none());
+        assert!(!relaunched.records()[0].submitted());
+        assert_eq!(relaunched.peer.admit_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(relaunched.peer.handshakes.load(Ordering::SeqCst), 1);
+        assert_eq!(relaunched.manager.effects.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn historical_original_after_deleted_key_cleanup_relaunch_acks_before_normal_retry_releases_metadata()
+ {
+    use spaceterm_client::{journal::RemoteNativeOriginalState, pending::PendingTasks};
+    let (fixture, _capture_root) = historical_fixture(2, DesiredServerState::Running).await;
+    let provider = fixture.provider().await;
+    fixture.manager.assert_no_effects();
+    let request = provider.reserve_request().await.unwrap();
+    let assessment = provider.assess(request, ServiceAction::Stop).await.unwrap();
+    fixture
+        .peer
+        .ordinary_route_available
+        .store(false, Ordering::SeqCst);
+    fixture.peer.lose_admit.store(true, Ordering::SeqCst);
+    assert!(provider.submit(assessment).await.is_err());
+    fixture.manager.assert_no_effects();
+    seal_pairing(&fixture).await;
+    let operation = acknowledge_original_revocation(&fixture.journal, &fixture.peer).await;
+    fixture
+        .credential_state
+        .allow_cleanup
+        .store(true, Ordering::SeqCst);
+    fixture
+        .pairing
+        .retry_revocation_once(operation)
+        .await
+        .unwrap();
+    assert!(fixture.credential_state.deleted.load(Ordering::SeqCst));
+    assert_eq!(
+        fixture
+            .credential_state
+            .deletion_calls
+            .load(Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        fixture
+            .credential_state
+            .already_missing_calls
+            .load(Ordering::SeqCst),
+        0
+    );
+    assert_eq!(fixture.journal.snapshot().unwrap().revocations().len(), 1);
+    assert!(
+        !fixture
+            .journal
+            .ordinary_use_allowed(&fixture.binding)
+            .unwrap()
+    );
+    let signing_calls = fixture
+        .credential_state
+        .signing_calls
+        .load(Ordering::SeqCst);
+    fixture.manager.assert_no_effects();
+    drop(provider);
+    let relaunched = fixture.relaunch_original().await;
+    relaunched.manager.assert_no_effects();
+    assert!(relaunched.credential_state.deleted.load(Ordering::SeqCst));
+    let pending = PendingTasks::new(relaunched.journal.clone(), Arc::new(NoLocalEffects));
+    let originals = pending.remote_native_originals().unwrap();
+    assert_eq!(originals.len(), 1);
+    assert_eq!(originals[0].request(), *request.as_bytes());
+    assert_eq!(originals[0].state(), RemoteNativeOriginalState::Available);
+    let port = relaunched.port(request).unwrap();
+    let transport = OriginalSsh::new(relaunched.ssh.clone(), port.clone());
+    let recovery = RemoteHostOriginalRecovery::new(port, transport.clone()).unwrap();
+    relaunched.manager.assert_no_effects();
+    let progress = recovery.resolve().await.unwrap();
+    relaunched.manager.assert_original_stop_effects();
+    assert_eq!(progress.request, request);
+    assert_eq!(
+        progress.state,
+        ServiceRequestState::Completed(ServiceOutcome::Stopped)
+    );
+    assert!(relaunched.records().is_empty());
+    // Native ACK retires only its record. It cannot skip or assume key cleanup.
+    assert_eq!(
+        relaunched.journal.snapshot().unwrap().revocations().len(),
+        1
+    );
+    assert!(
+        relaunched
+            .journal
+            .snapshot()
+            .unwrap()
+            .pairing()
+            .slot(relaunched.binding.target().credential())
+            .unwrap()
+            .ssh_capture
+            .is_some()
+    );
+    assert_eq!(
+        relaunched
+            .credential_state
+            .signing_calls
+            .load(Ordering::SeqCst),
+        signing_calls
+    );
+    assert_eq!(
+        relaunched
+            .credential_state
+            .deletion_calls
+            .load(Ordering::SeqCst),
+        1
+    );
+    let cleanup = relaunched.cleanup_runtime();
+    cleanup.retry_revocation_once(operation).await.unwrap();
+    assert_eq!(
+        relaunched
+            .credential_state
+            .deletion_calls
+            .load(Ordering::SeqCst),
+        2
+    );
+    assert_eq!(
+        relaunched
+            .credential_state
+            .already_missing_calls
+            .load(Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        relaunched
+            .credential_state
+            .signing_calls
+            .load(Ordering::SeqCst),
+        signing_calls
+    );
+    assert!(
+        relaunched
+            .journal
+            .snapshot()
+            .unwrap()
+            .revocations()
+            .is_empty()
+    );
+    assert!(
+        relaunched
+            .journal
+            .snapshot()
+            .unwrap()
+            .pairing()
+            .slot(relaunched.binding.target().credential())
+            .unwrap()
+            .ssh_capture
+            .is_none()
+    );
+    assert!(relaunched.port(request).is_none());
+    assert_eq!(transport.acknowledgements.load(Ordering::SeqCst), 1);
+    assert_eq!(relaunched.peer.admit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(relaunched.peer.handshakes.load(Ordering::SeqCst), 1);
+    relaunched.manager.assert_original_stop_effects();
+}
+
+#[tokio::test]
+async fn historical_original_checks_canonical_custody_after_competing_exact_ack_before_stale_persistence()
+ {
+    let (fixture, _capture_root) = historical_fixture(2, DesiredServerState::Running).await;
+    let provider = fixture.provider().await;
+    fixture.manager.assert_no_effects();
+    let request = provider.reserve_request().await.unwrap();
+    let assessment = provider.assess(request, ServiceAction::Stop).await.unwrap();
+    fixture
+        .peer
+        .ordinary_route_available
+        .store(false, Ordering::SeqCst);
+    fixture.peer.lose_admit.store(true, Ordering::SeqCst);
+    assert!(provider.submit(assessment).await.is_err());
+    fixture.manager.assert_no_effects();
+    seal_pairing(&fixture).await;
+    let operation = acknowledge_original_revocation(&fixture.journal, &fixture.peer).await;
+    fixture
+        .credential_state
+        .allow_cleanup
+        .store(true, Ordering::SeqCst);
+    fixture
+        .pairing
+        .retry_revocation_once(operation)
+        .await
+        .unwrap();
+    fixture.manager.assert_no_effects();
+    drop(provider);
+    let relaunched = fixture.relaunch_original().await;
+    relaunched.manager.assert_no_effects();
+    let port = relaunched.port(request).unwrap();
+    let transport = OriginalSsh::new(relaunched.ssh.clone(), port.clone());
+    let competing_transport = OriginalSsh::new(relaunched.ssh.clone(), port.clone());
+    let competing = Arc::new(
+        RemoteHostOriginalRecovery::new(port.clone(), competing_transport.clone()).unwrap(),
+    );
+    let cleanup = relaunched.cleanup_runtime();
+    let manager = relaunched.manager.clone();
+    *transport.after_resolve.lock().unwrap() = Some(Arc::new(move || {
+        let competing = competing.clone();
+        let cleanup = cleanup.clone();
+        let manager = manager.clone();
+        Box::pin(async move {
+            manager.assert_original_stop_effects();
+            let progress = competing.resolve().await?;
+            manager.assert_original_stop_effects();
+            assert_eq!(progress.request, request);
+            assert_eq!(
+                progress.state,
+                ServiceRequestState::Completed(ServiceOutcome::Stopped)
+            );
+            cleanup.retry_revocation_once(operation).await.unwrap();
+            manager.assert_original_stop_effects();
+            Ok(())
+        })
+    }));
+    let recovery = RemoteHostOriginalRecovery::new(port, transport.clone()).unwrap();
+    relaunched.manager.assert_no_effects();
+    assert_eq!(
+        recovery.resolve().await.unwrap_err(),
+        ManagementFailure::StaleAssessment
+    );
+    assert!(relaunched.port(request).is_none());
+    assert!(relaunched.records().is_empty());
+    assert!(
+        relaunched
+            .journal
+            .snapshot()
+            .unwrap()
+            .revocations()
+            .is_empty()
+    );
+    assert_eq!(transport.acknowledgements.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        competing_transport.acknowledgements.load(Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        relaunched
+            .credential_state
+            .deletion_calls
+            .load(Ordering::SeqCst),
+        2
+    );
+    assert_eq!(
+        relaunched
+            .credential_state
+            .already_missing_calls
+            .load(Ordering::SeqCst),
+        1
+    );
+    relaunched.manager.assert_original_stop_effects();
+    assert_eq!(relaunched.peer.admit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(relaunched.peer.handshakes.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn historical_original_rejects_foreign_client_and_imported_public_scope_without_ssh_effects()
+{
+    let (fixture, _capture_root) = historical_fixture(2, DesiredServerState::Running).await;
+    let (foreign, _foreign_capture_root) = historical_fixture(2, DesiredServerState::Running).await;
+    let provider = foreign.provider().await;
+    let request = provider.reserve_request().await.unwrap();
+    let assessment = provider.assess(request, ServiceAction::Stop).await.unwrap();
+    foreign
+        .peer
+        .ordinary_route_available
+        .store(false, Ordering::SeqCst);
+    foreign.peer.lose_before_admit.store(true, Ordering::SeqCst);
+    assert!(provider.submit(assessment).await.is_err());
+    let imported = foreign.records()[0].clone();
+    assert_ne!(
+        fixture.binding.target().pin(),
+        foreign.binding.target().pin()
+    );
+    let pairing = fixture.binding.target().local_pairing().unwrap();
+    let client = fixture.binding.target().client();
+    fixture
+        .journal
+        .retain_remote_native_request(
+            spaceterm_client::journal::RemoteNativeRequest::new(
+                pairing.clone(),
+                client,
+                *request.as_bytes(),
+                imported.original_scope().to_vec(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    fixture
+        .journal
+        .retain_remote_native_intent(
+            pairing.clone(),
+            client,
+            *request.as_bytes(),
+            imported.original_scope().to_vec(),
+            imported.intent().unwrap().to_vec(),
+        )
+        .await
+        .unwrap();
+    fixture
+        .journal
+        .retain_remote_native_assessment(
+            pairing.clone(),
+            client,
+            *request.as_bytes(),
+            imported.original_scope().to_vec(),
+            imported.assessment().unwrap().to_vec(),
+        )
+        .await
+        .unwrap();
+    fixture
+        .journal
+        .mark_remote_native_submitted(
+            pairing,
+            client,
+            *request.as_bytes(),
+            imported.original_scope().to_vec(),
+            imported.assessment().map(<[u8]>::to_vec),
+        )
+        .await
+        .unwrap();
+    seal_pairing(&fixture).await;
+    let relaunched = fixture.relaunch_original().await;
+    let port = relaunched.port(request).unwrap();
+    assert_eq!(
+        RemoteHostOriginalRecovery::context(&port).err(),
+        Some(ManagementFailure::UnsafeNativeState)
+    );
+    let transport = OriginalSsh::new(relaunched.ssh.clone(), port.clone());
+    assert!(RemoteHostOriginalRecovery::new(port, transport.clone()).is_err());
+    assert!(
+        relaunched
+            .journal
+            .recover_remote_native_original(
+                &relaunched.binding.target().local_pairing().unwrap(),
+                ClientId::new(relaunched.binding.target().server(), 2).unwrap(),
+                *request.as_bytes()
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(transport.resolves.load(Ordering::SeqCst), 0);
+    assert_eq!(transport.acknowledgements.load(Ordering::SeqCst), 0);
+    assert_eq!(relaunched.manager.effects.load(Ordering::SeqCst), 0);
+    assert_eq!(relaunched.peer.admit_calls.load(Ordering::SeqCst), 0);
+    drop(provider);
+    foreign.worker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn historical_original_rejects_changed_ssh_owner_and_mismatched_progress_or_ack() {
+    let (fixture, _capture_root) = historical_fixture(2, DesiredServerState::Running).await;
+    let provider = fixture.provider().await;
+    fixture.manager.assert_no_effects();
+    let request = provider.reserve_request().await.unwrap();
+    let assessment = provider.assess(request, ServiceAction::Stop).await.unwrap();
+    fixture
+        .peer
+        .ordinary_route_available
+        .store(false, Ordering::SeqCst);
+    fixture.peer.lose_admit.store(true, Ordering::SeqCst);
+    assert!(provider.submit(assessment).await.is_err());
+    fixture.manager.assert_no_effects();
+    seal_pairing(&fixture).await;
+    drop(provider);
+    let relaunched = fixture.relaunch_original().await;
+    relaunched.manager.assert_no_effects();
+    let port = relaunched.port(request).unwrap();
+    let transport = OriginalSsh::new(relaunched.ssh.clone(), port.clone());
+    let recovery = RemoteHostOriginalRecovery::new(port, transport.clone()).unwrap();
+    relaunched.ssh.wrong_owner.store(true, Ordering::SeqCst);
+    assert_eq!(
+        recovery.resolve().await.unwrap_err(),
+        ManagementFailure::AuthorizationDenied
+    );
+    assert_eq!(transport.resolves.load(Ordering::SeqCst), 0);
+    relaunched.manager.assert_no_effects();
+    relaunched.ssh.wrong_owner.store(false, Ordering::SeqCst);
+    transport.alter_progress.store(true, Ordering::SeqCst);
+    assert_eq!(
+        recovery.resolve().await.unwrap_err(),
+        ManagementFailure::StaleAssessment
+    );
+    relaunched.manager.assert_original_stop_effects();
+    assert!(relaunched.records()[0].result().is_none());
+    assert_eq!(transport.acknowledgements.load(Ordering::SeqCst), 0);
+    transport.alter_ack.store(true, Ordering::SeqCst);
+    assert_eq!(
+        recovery.resolve().await.unwrap_err(),
+        ManagementFailure::StaleAssessment
+    );
+    assert!(relaunched.records()[0].result().is_some());
+    relaunched.manager.assert_original_stop_effects();
+    let progress = recovery.resolve().await.unwrap();
+    assert_eq!(progress.request, request);
+    assert_eq!(
+        progress.state,
+        ServiceRequestState::Completed(ServiceOutcome::Stopped)
+    );
+    assert!(relaunched.records().is_empty());
+    assert_eq!(relaunched.peer.admit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(relaunched.peer.handshakes.load(Ordering::SeqCst), 1);
+    relaunched.manager.assert_original_stop_effects();
+}
+
+#[tokio::test]
+async fn historical_accepted_stage_waits_for_exact_explicit_archive_after_relaunch_without_fresh_stage()
+ {
+    for desired in [DesiredServerState::Running, DesiredServerState::Stopped] {
+        let (fixture, _capture_root) = historical_fixture(2, desired).await;
+        let provider = fixture.provider().await;
+        let before = provider.inspect().await.unwrap();
+        let request = provider.reserve_request().await.unwrap();
+        let (_, artifact) =
+            signed_installation::fixture("1.2.4", 7, signed_installation::native_machine());
+        let digest = artifact.artifact_sha256();
+        if desired == DesiredServerState::Running {
+            fixture.ssh.lose_stage_resolve.store(true, Ordering::SeqCst);
+            assert_eq!(
+                provider.stage(request, artifact).await.unwrap_err(),
+                ManagementFailure::IoUnavailable
+            );
+        } else {
+            fixture
+                .ssh
+                .drop_stopped_artifact
+                .store(true, Ordering::SeqCst);
+            assert_eq!(
+                provider.stage(request, artifact).await.unwrap().state,
+                ServiceRequestState::Pending
+            );
+        }
+        let reference = fixture.records()[0].assessment().unwrap().to_vec();
+        seal_pairing(&fixture).await;
+        drop(provider);
+        let relaunched = fixture.relaunch_original().await;
+        let port = relaunched.port(request).unwrap();
+        let transport = OriginalSsh::new(relaunched.ssh.clone(), port.clone());
+        let recovery = RemoteHostOriginalRecovery::new(port, transport.clone()).unwrap();
+        let pending = recovery.resolve().await.unwrap();
+        assert_eq!(pending.request, request);
+        assert_eq!(
+            pending.phase,
+            spaceterm_host::account_service::ServicePhase::Accepted
+        );
+        assert_eq!(pending.state, ServiceRequestState::Pending);
+        assert_eq!(
+            relaunched.records()[0].assessment(),
+            Some(reference.as_slice())
+        );
+        let (_, substitute) =
+            signed_installation::fixture("1.2.5", 7, signed_installation::native_machine());
+        let resolves = transport.resolves.load(Ordering::SeqCst);
+        assert_eq!(
+            recovery
+                .resolve_with_artifact(&substitute)
+                .await
+                .unwrap_err(),
+            ManagementFailure::StaleAssessment
+        );
+        assert_eq!(transport.resolves.load(Ordering::SeqCst), resolves);
+        let (_, original) =
+            signed_installation::fixture("1.2.4", 7, signed_installation::native_machine());
+        assert_eq!(original.artifact_sha256(), digest);
+        let progress = recovery.resolve_with_artifact(&original).await.unwrap();
+        let ServiceRequestState::Completed(ServiceOutcome::Staged(status)) = progress.state else {
+            panic!("original accepted Stage must complete")
+        };
+        assert_eq!(status.artifact_sha256, digest);
+        let after = relaunched.ssh.supervisor.status().await.unwrap();
+        assert_eq!(after.desired, Some(desired));
+        assert_eq!(after.approved, before.status.approved);
+        assert!(relaunched.records().is_empty());
+        assert_eq!(relaunched.manager.effects.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            relaunched.peer.opens.load(Ordering::SeqCst),
+            usize::from(desired == DesiredServerState::Running)
+        );
+        assert_eq!(
+            relaunched.ssh.stopped_opens.load(Ordering::SeqCst),
+            usize::from(desired == DesiredServerState::Stopped)
+        );
+        assert_eq!(
+            relaunched.peer.assess_calls.load(Ordering::SeqCst),
+            usize::from(desired == DesiredServerState::Running)
+        );
+        assert_eq!(
+            relaunched.peer.admit_calls.load(Ordering::SeqCst),
+            usize::from(desired == DesiredServerState::Running)
+        );
+    }
+}
+
+#[tokio::test]
+async fn historical_uncaptured_ssh_binding_stays_blocked_after_deleted_key_and_physical_relaunch() {
+    use spaceterm_client::{journal::RemoteNativeOriginalState, pending::PendingTasks};
+    // The maintained canonical model permits an old saved SSH binding without a
+    // capture. Only the external ordinary authentication port is injected here.
+    // Recovery must not turn that historical absence into a fresh alias capture.
+    let (fixture, _capture_root) =
+        historical_fixture_with_capture(2, DesiredServerState::Running, false).await;
+    let provider = fixture.provider().await;
+    let request = provider.reserve_request().await.unwrap();
+    let assessment = provider.assess(request, ServiceAction::Stop).await.unwrap();
+    fixture
+        .peer
+        .ordinary_route_available
+        .store(false, Ordering::SeqCst);
+    fixture.peer.lose_admit.store(true, Ordering::SeqCst);
+    assert!(provider.submit(assessment).await.is_err());
+    seal_pairing(&fixture).await;
+    let operation = acknowledge_original_revocation(&fixture.journal, &fixture.peer).await;
+    fixture
+        .credential_state
+        .allow_cleanup
+        .store(true, Ordering::SeqCst);
+    fixture
+        .pairing
+        .retry_revocation_once(operation)
+        .await
+        .unwrap();
+    assert!(fixture.credential_state.deleted.load(Ordering::SeqCst));
+    assert_eq!(
+        fixture
+            .credential_state
+            .deletion_calls
+            .load(Ordering::SeqCst),
+        1
+    );
+    drop(provider);
+    let relaunched = fixture.relaunch_original().await;
+    assert!(relaunched.port(request).is_none());
+    let pending = PendingTasks::new(relaunched.journal.clone(), Arc::new(NoLocalEffects));
+    let originals = pending.remote_native_originals().unwrap();
+    assert_eq!(originals.len(), 1);
+    assert_eq!(originals[0].request(), *request.as_bytes());
+    assert!(matches!(
+        originals[0].state(),
+        RemoteNativeOriginalState::Blocked(_)
+    ));
+    assert!(relaunched.records()[0].submitted());
+    assert!(relaunched.records()[0].result().is_none());
+    assert!(
+        relaunched
+            .journal
+            .snapshot()
+            .unwrap()
+            .pairing()
+            .slot(relaunched.binding.target().credential())
+            .unwrap()
+            .ssh_capture
+            .is_none()
+    );
+    assert_eq!(
+        relaunched
+            .credential_state
+            .signing_calls
+            .load(Ordering::SeqCst),
+        0
+    );
+    assert_eq!(relaunched.peer.assess_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(relaunched.peer.admit_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(relaunched.peer.handshakes.load(Ordering::SeqCst), 1);
+    assert_eq!(relaunched.manager.effects.load(Ordering::SeqCst), 0);
 }

@@ -9,7 +9,7 @@ use crate::{
     failure::{ClientFailure, ClientFailureClass, invalid_peer},
     journal::{
         ClientJournalChange, DetachTask, JournalController, JournalReceipt, JournalRevocation,
-        RevocationPhase, SavedTarget,
+        RemoteNativeOriginalPending, RevocationPhase, SavedTarget,
     },
     operations::{OperationPeer, OperationTracker},
     ports::ClientFuture,
@@ -100,6 +100,16 @@ impl PendingTasks {
     }
     pub fn journal(&self) -> &Arc<JournalController> {
         &self.journal
+    }
+    /// Lists at most MAX_REMOTE_NATIVE_REQUESTS exact submitted originals from
+    /// the canonical journal, independent of ordinary settings/registry entries.
+    /// Blocked originals remain visible after original target/capture cleanup.
+    /// Available means references are present, not native validation or authority.
+    /// This lookup never starts a scheduler, connects, allocates or submits work.
+    pub fn remote_native_originals(
+        &self,
+    ) -> Result<Vec<RemoteNativeOriginalPending>, ClientFailure> {
+        self.journal.pending_remote_native_originals()
     }
     pub async fn detach_workspace(
         &self,
@@ -409,7 +419,14 @@ impl PendingTasks {
                 self.journal
                     .transact(vec![ClientJournalChange::FinishCredentialCleanup(id)])
                     .await?;
-                Ok(true)
+                // Submitted native originals retain comparison provenance, not
+                // the deleted key. Keep this task on the existing retry backoff.
+                Ok(!self
+                    .journal
+                    .snapshot()?
+                    .revocations()
+                    .iter()
+                    .any(|record| record.task.parts().original.operation() == id))
             }
         }
     }
@@ -492,7 +509,14 @@ impl PendingTasks {
                         &tasks.journal,
                     ));
                     driver.run_once(&store, id).await.map_err(pairing_failure)?;
-                    Ok(true)
+                    // Successful key deletion can leave only historical native
+                    // comparison provenance. That debt must retain its backoff.
+                    Ok(!tasks
+                        .journal
+                        .snapshot()?
+                        .revocations()
+                        .iter()
+                        .any(|record| record.task.parts().original.operation() == id))
                 })
             },
             enrollment,

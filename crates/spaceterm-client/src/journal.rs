@@ -15,7 +15,11 @@ pub use pairing_projection::{
     JournalCredentialSlot, JournalEnrollment, JournalEnrollmentAcknowledgement,
     JournalEnrollmentReservation, JournalSshCapture, PairingJournalProjection,
 };
-pub use remote_native::{MAX_REMOTE_NATIVE_BYTES, MAX_REMOTE_NATIVE_REQUESTS, RemoteNativeRequest};
+pub use remote_native::{
+    HistoricalRemoteNativePort, MAX_REMOTE_NATIVE_BYTES, MAX_REMOTE_NATIVE_REQUESTS,
+    RemoteNativeOriginalBlocker, RemoteNativeOriginalPending, RemoteNativeOriginalState,
+    RemoteNativeRequest,
+};
 
 use crate::pairing::{
     credentials::{PairingAuthorityFence, PairingFuture},

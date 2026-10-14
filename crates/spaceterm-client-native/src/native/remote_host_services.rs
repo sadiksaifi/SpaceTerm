@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use spaceterm_client::{
     api::{PairedServerBinding, ServerQueries},
     failure::{ClientFailure, ClientFailureClass},
-    journal::{JournalController, MAX_REMOTE_NATIVE_BYTES, RemoteNativeRequest},
+    journal::{
+        HistoricalRemoteNativePort, JournalController, MAX_REMOTE_NATIVE_BYTES, RemoteNativeRequest,
+    },
     management_cli::{AssessmentToken, ManagementFailure, ManagementFuture},
 };
 use spaceterm_core::{
@@ -105,6 +107,368 @@ pub trait RemoteNativeTransport: Send + Sync {
         pin: ServerPin,
         progress: ServiceProgress,
     ) -> ManagementFuture<'_, ServiceProgress>;
+}
+
+/// SSH completion of one canonical submitted original, without ordinary pairing authority.
+/// Implementations retain the port's original credential references and SSH capture,
+/// reject missing or changed custody, and never fall back to a current SSH alias.
+/// Every method uses the existing native signed-original resolver or exact ACK.
+/// No method allocates, captures, assesses, admits, enrolls or starts fresh work.
+pub trait RemoteNativeOriginalTransport: Send + Sync {
+    /// Revalidates the captured original host, account and route without signing access.
+    fn revalidate(&self, key: AccountBuildKey, pin: ServerPin) -> ManagementFuture<'_, ()>;
+    /// Resolves the original lifecycle request, including signed nonadmission cleanup.
+    fn resolve_lifecycle(
+        &self,
+        key: AccountBuildKey,
+        pin: ServerPin,
+        request: NativeRequestId,
+    ) -> ManagementFuture<'_, ServiceProgress>;
+    /// Acknowledges only the original's exact retained terminal result.
+    fn acknowledge_lifecycle(
+        &self,
+        key: AccountBuildKey,
+        pin: ServerPin,
+        progress: ServiceProgress,
+    ) -> ManagementFuture<'_, ServiceProgress>;
+    /// Resolves the original Stage. A package is only for exact accepted-work re-supply.
+    fn resolve_stage<'a>(
+        &'a self,
+        key: AccountBuildKey,
+        pin: ServerPin,
+        request: NativeRequestId,
+        artifact: Option<&'a VerifiedAccountServerArtifact>,
+    ) -> ManagementFuture<'a, ServiceProgress>;
+    /// Acknowledges the exact original Stage terminal result.
+    fn acknowledge_stage(
+        &self,
+        key: AccountBuildKey,
+        pin: ServerPin,
+        progress: ServiceProgress,
+    ) -> ManagementFuture<'_, ServiceProgress>;
+    /// Resolves the original stopped request without another channel or confirmation.
+    fn resolve_stopped<'a>(
+        &'a self,
+        key: AccountBuildKey,
+        pin: ServerPin,
+        request: NativeRequestId,
+        artifact: Option<&'a VerifiedAccountServerArtifact>,
+    ) -> ManagementFuture<'a, ServiceProgress>;
+    /// Acknowledges the exact original stopped terminal result.
+    fn acknowledge_stopped(
+        &self,
+        key: AccountBuildKey,
+        pin: ServerPin,
+        progress: ServiceProgress,
+    ) -> ManagementFuture<'_, ServiceProgress>;
+}
+
+/// Native-validated comparison metadata. It grants no transport or admission authority.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct RemoteNativeOriginalContext {
+    key: AccountBuildKey,
+    pin: ServerPin,
+    request: NativeRequestId,
+}
+impl RemoteNativeOriginalContext {
+    /// Original account/build, never inferred from a current guest observation.
+    pub fn key(&self) -> AccountBuildKey {
+        self.key
+    }
+    /// Original pinned Server identity and public key.
+    pub fn pin(&self) -> ServerPin {
+        self.pin
+    }
+    /// Original native identifier, independent of any self-revocation operation.
+    pub fn request(&self) -> NativeRequestId {
+        self.request
+    }
+}
+
+/// Recovery of one canonical submitted original after physical relaunch or unpair.
+/// This type has no ordinary worker, signer, current-pairing authority or fresh-action API.
+/// Missing historical target/capture custody remains blocked, never reconstructed.
+///
+/// It cannot be supplied as an ordinary host management capability.
+/// ```compile_fail
+/// use spaceterm_client_native::native::{
+///     host_services::HostServiceManagement,
+///     remote_host_services::RemoteHostOriginalRecovery,
+/// };
+/// fn no_ordinary_authority(original: &RemoteHostOriginalRecovery) {
+///     let _: &dyn HostServiceManagement = original;
+/// }
+/// ```
+pub struct RemoteHostOriginalRecovery {
+    original: HistoricalRemoteNativePort,
+    context: RemoteNativeOriginalContext,
+    transport: Arc<dyn RemoteNativeOriginalTransport>,
+}
+
+#[derive(Clone, Copy)]
+enum OriginalRecoveryKind {
+    Lifecycle,
+    Stage,
+    Stopped,
+}
+struct OriginalRecoverySnapshot {
+    record: RemoteNativeRequest,
+    intent: RequestIntent,
+    digest: RequestDigest,
+    kind: OriginalRecoveryKind,
+}
+
+impl RemoteHostOriginalRecovery {
+    /// Reads validated comparison metadata from the canonical historical port only.
+    /// This function performs no SSH, credential access or native effect.
+    pub fn context(
+        original: &HistoricalRemoteNativePort,
+    ) -> Result<RemoteNativeOriginalContext, ManagementFailure> {
+        let record = original.snapshot().map_err(client_failure)?;
+        let request = NativeRequestId::new(original.request())
+            .map_err(|_| ManagementFailure::UnsafeNativeState)?;
+        let target = original.target();
+        let scope: OriginalScope = decode(record.original_scope())?;
+        if !record.submitted()
+            || record.intent().is_none()
+            || record.assessment().is_none()
+            || record.local_pairing() != original.local_pairing()
+            || record.client() != original.client()
+            || record.request_id() != original.request()
+            || target.local_pairing().as_ref() != Ok(original.local_pairing())
+            || target.client() != original.client()
+            || scope.request != request
+            || scope.server != target.pin().identity
+            || scope.public_key != target.pin().public_key
+            || scope.key.account_uid == 0
+        {
+            return Err(ManagementFailure::UnsafeNativeState);
+        }
+        RemoteHostServices::validate_record(&record, request)?;
+        Ok(RemoteNativeOriginalContext {
+            key: scope.key,
+            pin: target.pin(),
+            request,
+        })
+    }
+
+    /// Constructs a recovery-only facade from canonical provenance and an explicit transport.
+    /// Construction cannot connect, obtain keys, allocate or admit an operation.
+    pub fn new(
+        original: HistoricalRemoteNativePort,
+        transport: Arc<dyn RemoteNativeOriginalTransport>,
+    ) -> Result<Self, ManagementFailure> {
+        let context = Self::context(&original)?;
+        Ok(Self {
+            original,
+            context,
+            transport,
+        })
+    }
+
+    fn snapshot(&self) -> Result<OriginalRecoverySnapshot, ManagementFailure> {
+        if Self::context(&self.original)? != self.context {
+            return Err(ManagementFailure::StaleAssessment);
+        }
+        let record = self.original.snapshot().map_err(client_failure)?;
+        RemoteHostServices::validate_record(&record, self.context.request)?;
+        let intent: RequestIntent = decode(
+            record
+                .intent()
+                .ok_or(ManagementFailure::UnsafeNativeState)?,
+        )?;
+        let reference: RetainedAssessment = decode(
+            record
+                .assessment()
+                .ok_or(ManagementFailure::UnsafeNativeState)?,
+        )?;
+        let (kind, digest) = match reference {
+            RetainedAssessment::Live(reference) => {
+                (OriginalRecoveryKind::Lifecycle, reference.request_digest)
+            }
+            RetainedAssessment::Stage(reference) => {
+                (OriginalRecoveryKind::Stage, reference.request_digest)
+            }
+            RetainedAssessment::Stopped(reference) => {
+                (OriginalRecoveryKind::Stopped, reference.request_digest)
+            }
+        };
+        Ok(OriginalRecoverySnapshot {
+            record,
+            intent,
+            digest,
+            kind,
+        })
+    }
+
+    async fn revalidate(&self) -> Result<(), ManagementFailure> {
+        self.snapshot()?;
+        self.transport
+            .revalidate(self.context.key, self.context.pin)
+            .await?;
+        self.snapshot()?;
+        Ok(())
+    }
+
+    async fn read_progress(
+        &self,
+        artifact: Option<&VerifiedAccountServerArtifact>,
+    ) -> Result<ServiceProgress, ManagementFailure> {
+        self.revalidate().await?;
+        let snapshot = self.snapshot()?;
+        let context = self.context;
+        let progress = match snapshot.kind {
+            OriginalRecoveryKind::Lifecycle => {
+                self.transport
+                    .resolve_lifecycle(context.key, context.pin, context.request)
+                    .await?
+            }
+            OriginalRecoveryKind::Stage => {
+                self.transport
+                    .resolve_stage(context.key, context.pin, context.request, artifact)
+                    .await?
+            }
+            OriginalRecoveryKind::Stopped => {
+                self.transport
+                    .resolve_stopped(context.key, context.pin, context.request, artifact)
+                    .await?
+            }
+        };
+        self.revalidate().await?;
+        let snapshot = self.snapshot()?;
+        validate_progress(context.request, Some(snapshot.digest), &progress)?;
+        validate_outcome(Some(&snapshot.intent), &progress)?;
+        Ok(progress)
+    }
+
+    async fn acknowledge(&self, progress: &ServiceProgress) -> Result<(), ManagementFailure> {
+        self.revalidate().await?;
+        let snapshot = self.snapshot()?;
+        let retained: ServiceProgress = decode(
+            snapshot
+                .record
+                .result()
+                .ok_or(ManagementFailure::StaleAssessment)?,
+        )?;
+        if retained != *progress || !terminal(progress) {
+            return Err(ManagementFailure::StaleAssessment);
+        }
+        let context = self.context;
+        let acknowledged = match snapshot.kind {
+            OriginalRecoveryKind::Lifecycle => {
+                self.transport
+                    .acknowledge_lifecycle(context.key, context.pin, progress.clone())
+                    .await?
+            }
+            OriginalRecoveryKind::Stage => {
+                self.transport
+                    .acknowledge_stage(context.key, context.pin, progress.clone())
+                    .await?
+            }
+            OriginalRecoveryKind::Stopped => {
+                self.transport
+                    .acknowledge_stopped(context.key, context.pin, progress.clone())
+                    .await?
+            }
+        };
+        self.revalidate().await?;
+        let snapshot = self.snapshot()?;
+        if acknowledged != *progress
+            || snapshot
+                .record
+                .result()
+                .map(decode::<ServiceProgress>)
+                .transpose()?
+                .as_ref()
+                != Some(progress)
+        {
+            return Err(ManagementFailure::StaleAssessment);
+        }
+        Ok(())
+    }
+
+    /// Resolves only this original and retains a terminal result before exact guest ACK.
+    /// Reserved originals remain Reserved; submission is never replayed.
+    pub fn resolve(&self) -> ManagementFuture<'_, ServiceProgress> {
+        Box::pin(self.resolve_original(None))
+    }
+
+    /// Explicitly re-supplies the exact verified package for the same accepted Stage.
+    /// It never selects a package, allocates, captures, assesses or admits another request.
+    pub fn resolve_with_artifact<'a>(
+        &'a self,
+        artifact: &'a VerifiedAccountServerArtifact,
+    ) -> ManagementFuture<'a, ServiceProgress> {
+        Box::pin(self.resolve_original(Some(artifact)))
+    }
+
+    async fn resolve_original(
+        &self,
+        artifact: Option<&VerifiedAccountServerArtifact>,
+    ) -> Result<ServiceProgress, ManagementFailure> {
+        let snapshot = self.snapshot()?;
+        if let Some(artifact) = artifact {
+            let matches = match &snapshot.intent {
+                RequestIntent::Stage {
+                    artifact_sha256,
+                    version,
+                } => {
+                    *artifact_sha256 == artifact.artifact_sha256()
+                        && version == &artifact.manifest().version
+                }
+                RequestIntent::Stopped {
+                    action: StoppedNativeAction::Stage { artifact_sha256 },
+                    stage_version,
+                    ..
+                } => {
+                    *artifact_sha256 == artifact.artifact_sha256()
+                        && stage_version.as_ref() == Some(&artifact.manifest().version)
+                }
+                _ => false,
+            };
+            if !matches {
+                return Err(ManagementFailure::StaleAssessment);
+            }
+        }
+        let progress = if let Some(bytes) = snapshot.record.result() {
+            decode(bytes)?
+        } else {
+            // First resolve without a package. A submitted marker alone cannot
+            // authorize package transfer or promote signed Reserved nonadmission.
+            let observed = self.read_progress(None).await?;
+            let progress = if artifact.is_some() && !terminal(&observed) {
+                if observed.phase != ServicePhase::Accepted
+                    || observed.state != ServiceRequestState::Pending
+                {
+                    return Err(ManagementFailure::OutcomePending);
+                }
+                self.read_progress(artifact).await?
+            } else {
+                observed
+            };
+            if terminal(&progress) {
+                let result = encode(&progress)?;
+                self.snapshot()?;
+                self.original
+                    .retain_result(&result)
+                    .await
+                    .map_err(client_failure)?;
+            }
+            progress
+        };
+        let snapshot = self.snapshot()?;
+        validate_progress(self.context.request, Some(snapshot.digest), &progress)?;
+        validate_outcome(Some(&snapshot.intent), &progress)?;
+        if terminal(&progress) {
+            self.acknowledge(&progress).await?;
+            let result = encode(&progress)?;
+            self.original
+                .retire_after_acknowledgement(&result)
+                .await
+                .map_err(client_failure)?;
+        }
+        Ok(progress)
+    }
 }
 
 /// Closed native stopped-capture comparisons. None grants admission authority.
@@ -441,9 +805,20 @@ impl RemoteHostServices {
     }
 
     fn check_start_compatibility(&self) -> Result<(), ManagementFailure> {
-        self.check_owner()?;
-        self.queries.check_compatible().map_err(client_failure)?;
-        match self.queries.capabilities() {
+        Self::preflight_start(&self.queries, &self.binding, &self.journal)
+    }
+
+    /// Gates lazy Start before SSH initialization or native observation.
+    pub(crate) fn preflight_start(
+        queries: &ServerQueries,
+        binding: &PairedServerBinding,
+        journal: &Arc<JournalController>,
+    ) -> Result<(), ManagementFailure> {
+        queries
+            .validate_owner(binding, journal)
+            .map_err(client_failure)?;
+        queries.check_compatible().map_err(client_failure)?;
+        match queries.capabilities() {
             Ok(capabilities)
                 if !capabilities.supports(CAPABILITY_ACCOUNT_RUNTIME)
                     || !capabilities.supports(CAPABILITY_REMOTE_NATIVE_LIFECYCLE) =>

@@ -108,6 +108,284 @@ impl RemoteNativeRequest {
     }
 }
 
+/// Why a submitted original has no usable canonical recovery references.
+/// These classifications do not authorize reconstruction or another pairing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemoteNativeOriginalBlocker {
+    MissingIntent,
+    MissingAssessment,
+    MissingOriginalTarget,
+    ConflictingOriginalTarget,
+    MissingOriginalCredential,
+    OriginalCredentialMismatch,
+    MissingOriginalSshCapture,
+    UnsupportedOriginalRoute,
+}
+
+/// Presence of canonical references only, not native DTO, proof, SSH configuration,
+/// credential availability, connection readiness or admission validation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemoteNativeOriginalState {
+    Available,
+    Blocked(RemoteNativeOriginalBlocker),
+}
+
+/// A submitted original remains visible even after cleanup removes its recovery
+/// references. Unsubmitted captures are not submitted-original pending work.
+#[derive(Clone, Eq, PartialEq)]
+pub struct RemoteNativeOriginalPending {
+    local_pairing: LocalPairingKey,
+    client: ClientId,
+    request: [u8; 16],
+    state: RemoteNativeOriginalState,
+    result_retained: bool,
+}
+impl RemoteNativeOriginalPending {
+    pub fn local_pairing(&self) -> &LocalPairingKey {
+        &self.local_pairing
+    }
+    pub fn client(&self) -> ClientId {
+        self.client
+    }
+    pub fn request(&self) -> [u8; 16] {
+        self.request
+    }
+    pub fn state(&self) -> RemoteNativeOriginalState {
+        self.state
+    }
+    /// Encoded result presence only. The native consumer validates terminality.
+    pub fn result_retained(&self) -> bool {
+        self.result_retained
+    }
+}
+impl std::fmt::Debug for RemoteNativeOriginalPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RemoteNativeOriginalPending(..)")
+    }
+}
+
+/// Comparison-only custody of one submitted original in one canonical journal.
+///
+/// Construction is journal-owned. No actor, ordinary pairing authority, signer,
+/// connection, request allocator, Capture, Assess or Admit is exposed. The native
+/// consumer validates the closed original scope, intent, assessment and result
+/// grammar and their account/build/pin/digest comparisons before using a transport
+/// or persisting a result. This port never validates or sends a native effect.
+///
+/// Accessors describe the historical original, not a current paired connection.
+/// Call validate/snapshot before and after each external recovery operation.
+/// Clones share canonical custody; missing or changed facts invalidate every clone.
+#[derive(Clone)]
+pub struct HistoricalRemoteNativePort {
+    journal: std::sync::Arc<JournalController>,
+    target: crate::api::ConnectionTarget,
+    credential: JournalCredentialSlot,
+    original: RemoteNativeRequest,
+}
+impl std::fmt::Debug for HistoricalRemoteNativePort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HistoricalRemoteNativePort(..)")
+    }
+}
+impl HistoricalRemoteNativePort {
+    pub fn target(&self) -> &crate::api::ConnectionTarget {
+        &self.target
+    }
+    pub fn credential(&self) -> &JournalCredentialSlot {
+        &self.credential
+    }
+    pub fn ssh_capture(&self) -> &JournalSshCapture {
+        self.credential
+            .ssh_capture
+            .as_ref()
+            .expect("historical port construction requires its original SSH capture")
+    }
+    pub fn local_pairing(&self) -> &LocalPairingKey {
+        self.original.local_pairing()
+    }
+    pub fn client(&self) -> ClientId {
+        self.original.client()
+    }
+    pub fn request(&self) -> [u8; 16] {
+        self.original.request_id()
+    }
+
+    /// Proves exact canonical owner identity without exposing a journal mutation port.
+    pub fn validate_journal(
+        &self,
+        expected: &std::sync::Arc<JournalController>,
+    ) -> Result<(), ClientFailure> {
+        if !std::sync::Arc::ptr_eq(&self.journal, expected) {
+            return Err(ClientFailure::new(ClientFailureClass::InvalidStorage));
+        }
+        self.validate()
+    }
+    pub fn validate(&self) -> Result<(), ClientFailure> {
+        self.snapshot().map(|_| ())
+    }
+    /// Rechecks a fresh healthy snapshot. Only a previously absent exact result
+    /// may appear; the original scope, intent, assessment and provenance cannot change.
+    pub fn snapshot(&self) -> Result<RemoteNativeRequest, ClientFailure> {
+        let state = self.journal.snapshot()?;
+        self.validate_in(&state).cloned()
+    }
+    fn validate_in<'a>(
+        &self,
+        state: &'a RecoveredClientState,
+    ) -> Result<&'a RemoteNativeRequest, ClientFailure> {
+        let stale = || ClientFailure::new(ClientFailureClass::StaleAuthority);
+        let record = state
+            .remote_native_requests
+            .iter()
+            .find(|record| record.matches(self.local_pairing(), self.client(), self.request()))
+            .ok_or_else(stale)?;
+        let (target, credential) = historical_material(state, record).map_err(|_| stale())?;
+        if target != self.target
+            || credential != self.credential
+            || record.original_scope != self.original.original_scope
+            || record.intent != self.original.intent
+            || record.assessment != self.original.assessment
+            || record.submitted != self.original.submitted
+            || self
+                .original
+                .result
+                .as_ref()
+                .is_some_and(|original| record.result.as_ref() != Some(original))
+        {
+            return Err(stale());
+        }
+        Ok(record)
+    }
+    /// Retains only the native-validated exact terminal result. This grants no
+    /// network/ACK permission. Provenance is checked inside the serialized write.
+    pub async fn retain_result(&self, result: &[u8]) -> Result<JournalReceipt, ClientFailure> {
+        validate_bytes(result)?;
+        let result = result.to_vec();
+        let original = self.clone();
+        self.journal
+            .update(move |state| {
+                let record = original.validate_in(state)?;
+                Ok((
+                    vec![ClientJournalChange::CompleteRemoteNativeRequest {
+                        pairing: record.local_pairing.clone(),
+                        client: record.client,
+                        request: record.request,
+                        original_scope: record.original_scope.clone(),
+                        result,
+                    }],
+                    (),
+                ))
+            })
+            .await
+            .map(|(receipt, ())| receipt)
+    }
+    /// The native consumer calls this only after exact guest acknowledgement of
+    /// a separately durable result. Never marks submission, admits or resends work.
+    pub async fn retire_after_acknowledgement(
+        &self,
+        result: &[u8],
+    ) -> Result<JournalReceipt, ClientFailure> {
+        validate_bytes(result)?;
+        let result = result.to_vec();
+        let original = self.clone();
+        self.journal
+            .update(move |state| {
+                let record = original.validate_in(state)?;
+                if record.result.as_deref() != Some(result.as_slice()) {
+                    return Err(ClientFailure::new(ClientFailureClass::StaleAuthority));
+                }
+                Ok((
+                    vec![ClientJournalChange::RetireRemoteNativeRequest {
+                        pairing: record.local_pairing.clone(),
+                        client: record.client,
+                        request: record.request,
+                        original_scope: record.original_scope.clone(),
+                        result,
+                    }],
+                    (),
+                ))
+            })
+            .await
+            .map(|(receipt, ())| receipt)
+    }
+}
+
+// Uses only one already-validated canonical snapshot. In particular, never select
+// a newer binding/slot by server alone after the original binding was removed.
+fn historical_material(
+    state: &RecoveredClientState,
+    record: &RemoteNativeRequest,
+) -> Result<(crate::api::ConnectionTarget, JournalCredentialSlot), RemoteNativeOriginalBlocker> {
+    use RemoteNativeOriginalBlocker::*;
+    if record.intent.is_none() {
+        return Err(MissingIntent);
+    }
+    if record.assessment.is_none() || !record.submitted {
+        return Err(MissingAssessment);
+    }
+    let mut target = None;
+    let mut original_route = None;
+    for saved in &state.bindings {
+        let candidate = saved.target.target().map_err(|_| MissingOriginalTarget)?;
+        if candidate.client() != record.client
+            || candidate.local_pairing().as_ref() != Ok(&record.local_pairing)
+        {
+            continue;
+        }
+        if target.replace(candidate).is_some() {
+            return Err(ConflictingOriginalTarget);
+        }
+    }
+    for revocation in &state.revocations {
+        let task = revocation.task.parts();
+        if task.local_pairing != record.local_pairing || task.original.client() != record.client {
+            continue;
+        }
+        let candidate = revocation
+            .target
+            .target()
+            .map_err(|_| MissingOriginalTarget)?;
+        if candidate.local_pairing().as_ref() != Ok(&record.local_pairing)
+            || candidate.client() != record.client
+            || candidate.server() != task.original.server()
+            || candidate.pairing() != task.original.pairing()
+            || candidate.device() != task.original.device()
+            || candidate.credential() != task.original.credential()
+            || candidate.pin().public_key != task.pinned_server_public_key
+        {
+            return Err(ConflictingOriginalTarget);
+        }
+        if target.replace(candidate).is_some() {
+            return Err(ConflictingOriginalTarget);
+        }
+        original_route = Some(task.original.route());
+    }
+    let target = target.ok_or(MissingOriginalTarget)?;
+    if !matches!(target.route().parts(), crate::api::RouteParts::Ssh { .. }) {
+        return Err(UnsupportedOriginalRoute);
+    }
+    let credential = state
+        .pairing
+        .slot(target.credential())
+        .ok_or(MissingOriginalCredential)?;
+    if credential.server != Some(target.server())
+        || credential.generation != record.local_pairing.parts().generation
+        || credential.public_key.is_none_or(|key| key == [0; 32])
+        || credential.route_reference.is_none()
+        || original_route.is_some_and(|route| credential.route_reference != Some(route))
+        || credential
+            .route
+            .as_ref()
+            .is_some_and(|route| route != target.route())
+    {
+        return Err(OriginalCredentialMismatch);
+    }
+    if credential.ssh_capture.is_none() {
+        return Err(MissingOriginalSshCapture);
+    }
+    Ok((target, credential.clone()))
+}
+
 impl RecoveredClientState {
     pub fn remote_native_requests(&self) -> &[RemoteNativeRequest] {
         &self.remote_native_requests
@@ -115,6 +393,62 @@ impl RecoveredClientState {
 }
 
 impl JournalController {
+    /// Recovers only comparison custody for this exact submitted original.
+    /// All target/slot/capture facts come from one healthy canonical snapshot;
+    /// callers cannot supply a binding, scope, pin, route or replacement capture.
+    /// None means no usable port, including a blocked submitted original. The
+    /// PendingTasks enumeration preserves blocked originals for presentation.
+    /// Native consumers still validate every closed DTO and original digest.
+    pub fn recover_remote_native_original(
+        self: &std::sync::Arc<Self>,
+        pairing: &LocalPairingKey,
+        client: ClientId,
+        request: [u8; 16],
+    ) -> Result<Option<HistoricalRemoteNativePort>, ClientFailure> {
+        validate_identity(pairing, client, request)?;
+        let state = self.snapshot()?;
+        let Some(original) = state
+            .remote_native_requests
+            .iter()
+            .find(|record| record.matches(pairing, client, request) && record.submitted)
+        else {
+            return Ok(None);
+        };
+        let Ok((target, credential)) = historical_material(&state, original) else {
+            return Ok(None);
+        };
+        Ok(Some(HistoricalRemoteNativePort {
+            journal: self.clone(),
+            target,
+            credential,
+            original: original.clone(),
+        }))
+    }
+
+    pub(crate) fn pending_remote_native_originals(
+        &self,
+    ) -> Result<Vec<RemoteNativeOriginalPending>, ClientFailure> {
+        let snapshot = self.snapshot()?;
+        Ok(snapshot
+            .remote_native_requests
+            .iter()
+            .filter(|record| record.submitted)
+            .map(|record| {
+                let state = match historical_material(&snapshot, record) {
+                    Ok(_) => RemoteNativeOriginalState::Available,
+                    Err(reason) => RemoteNativeOriginalState::Blocked(reason),
+                };
+                RemoteNativeOriginalPending {
+                    local_pairing: record.local_pairing.clone(),
+                    client: record.client,
+                    request: record.request,
+                    state,
+                    result_retained: record.result.is_some(),
+                }
+            })
+            .collect())
+    }
+
     /// Retains the original guest ID and scope before any network/native effect.
     /// Existing IDs accept only their original scope and preserve later facts.
     pub async fn retain_remote_native_request(
