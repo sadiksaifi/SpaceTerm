@@ -4,12 +4,10 @@ use super::owner::OwnerEndpointFailure;
 use spaceterm_core::identity::ServerId;
 use spaceterm_distribution::{BuildChannel, ServerPlatform, server_feed::MAX_ARCHIVE_BYTES};
 use spaceterm_host::{
-    account_service::{
-        ServiceFailure, ServiceRequestState, ServiceSupervisor, StoppedServerExpectation,
-    },
+    account_service::{ServiceFailure, ServiceSupervisor, StoppedServerExpectation},
     bootstrap::{
         artifact::receive_artifact,
-        setup::{AccountBootstrapSetup, BootstrapAccountRegistration},
+        setup::{AccountBootstrapSetup, BootstrapAccountFacts, BootstrapAccountRegistration},
         wire::*,
     },
     startup::{BuildIdentity, DesiredServerState},
@@ -24,7 +22,19 @@ pub async fn execute(
     supervisor: Arc<ServiceSupervisor>,
     channel: &dyn MessageTransport,
 ) -> Result<(), OwnerEndpointFailure> {
-    let setup = AccountBootstrapSetup::new((*supervisor).clone());
+    let result = execute_foreground(&supervisor, channel).await;
+    // EOF, malformed input and broken borrowed output all retire admission. Keep
+    // this helper's runtime alive until its already spawned native workers finish.
+    // This is outside the reply deadline and never resumes a retained request.
+    supervisor.finish_install_execution().await;
+    result
+}
+
+async fn execute_foreground(
+    supervisor: &Arc<ServiceSupervisor>,
+    channel: &dyn MessageTransport,
+) -> Result<(), OwnerEndpointFailure> {
+    let setup = AccountBootstrapSetup::new((**supervisor).clone());
     // The SSH owner closes stdin to retire this endpoint. No ordinary server starts here.
     for _ in 0..4096 {
         let Some(bytes) = channel.recv().await? else {
@@ -33,9 +43,11 @@ pub async fn execute(
         let request: AccountRequest =
             serde_json::from_slice(&bytes).map_err(|_| OwnerEndpointFailure::InvalidRequest)?;
         if matches!(request, AccountRequest::OwnerChannel) {
-            return super::owner::execute(supervisor, channel).await;
+            // Keep owner::execute awaited so its Running IPC close and Stopped
+            // executor cleanup finish even when the native channel retires.
+            return super::owner::execute(Arc::clone(supervisor), channel).await;
         }
-        let reply = match handle(&setup, &supervisor, channel, request).await {
+        let reply = match handle(&setup, supervisor, channel, request).await {
             Ok(reply) => reply,
             Err(failure) => AccountReply::Failure(failure),
         };
@@ -49,9 +61,44 @@ async fn observation(
     setup: &AccountBootstrapSetup,
     supervisor: &ServiceSupervisor,
 ) -> Result<AccountObservation, ServiceFailure> {
-    let facts = setup.inspect().await?;
-    let remote_socket = supervisor
-        .discover()?
+    observation_from_facts(supervisor, setup.inspect().await?)
+}
+
+fn observation_from_facts(
+    supervisor: &ServiceSupervisor,
+    facts: BootstrapAccountFacts,
+) -> Result<AccountObservation, ServiceFailure> {
+    let registration = supervisor.discover()?;
+    let matches = match (&facts.registration, registration.as_ref()) {
+        (BootstrapAccountRegistration::Missing, None) => true,
+        (BootstrapAccountRegistration::Stopped { pin, generation }, Some(registered)) => {
+            registered.server_pin() == *pin
+                && registered.generation() == *generation
+                && registered.desired_state() == DesiredServerState::Stopped
+        }
+        (
+            BootstrapAccountRegistration::Running {
+                pin,
+                generation,
+                artifact_identity,
+                version,
+                ..
+            },
+            Some(registered),
+        ) => {
+            registered.server_pin() == *pin
+                && registered.generation() == *generation
+                && registered.desired_state() == DesiredServerState::Running
+                && registered.approved_installation().is_some_and(|approved| {
+                    approved.artifact_sha256 == *artifact_identity && approved.version == *version
+                })
+        }
+        _ => false,
+    };
+    if facts.key != supervisor.key() || !matches {
+        return Err(ServiceFailure::StaleAssessment);
+    }
+    let remote_socket = registration
         .map(|registration| {
             registration
                 .endpoint()?
@@ -144,21 +191,12 @@ async fn handle(
                 .as_secs();
             let artifact = receive_artifact(&mut bytes.as_slice(), build, platform, artifact, now)
                 .map_err(|_| ServiceFailure::ArtifactRejected)?;
+            let artifact_identity = artifact.artifact_sha256();
             let confirmation = setup.assess_install(artifact)?.confirm();
-            let progress = setup.install(request, confirmation).await?;
-            if !matches!(progress.state, ServiceRequestState::Completed(_)) {
-                return Err(ServiceFailure::Pending);
-            }
-            // A started service may need one read-only observation retry. Never Start again.
-            let until = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
-            loop {
-                match observation(setup, supervisor).await {
-                    Err(ServiceFailure::Pending) if tokio::time::Instant::now() < until => {
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await
-                    }
-                    result => return result.map(AccountReply::Observation),
-                }
-            }
+            let facts = setup
+                .install_and_observe(request, confirmation, artifact_identity)
+                .await?;
+            observation_from_facts(supervisor, facts).map(AccountReply::Observation)
         }
         AccountRequest::AuthorizeOwner {
             request,
@@ -183,10 +221,8 @@ async fn handle(
             })
         }
         AccountRequest::Resolve { request, artifact } => {
-            setup.resolve(request, artifact).await?;
-            Ok(AccountReply::Observation(
-                observation(setup, supervisor).await?,
-            ))
+            let facts = setup.resolve(request, artifact).await?;
+            observation_from_facts(supervisor, facts).map(AccountReply::Observation)
         }
         AccountRequest::RetainedOwner { keys } => {
             let facts = setup.inspect().await?;

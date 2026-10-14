@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -158,6 +158,45 @@ impl Journal {
     }
 }
 
+// Process-local execution custody, shared only by clones of this provider. It
+// carries no request contents or authority and never reopens durable work.
+#[derive(Default)]
+pub(super) struct InstallExecution {
+    active: AtomicUsize,
+    finished: tokio::sync::Notify,
+}
+impl InstallExecution {
+    pub(super) fn admit(self: &Arc<Self>) -> Result<InstallExecutionGuard, ServiceFailure> {
+        self.active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                active.checked_add(1)
+            })
+            .map_err(|_| ServiceFailure::LimitExceeded)?;
+        Ok(InstallExecutionGuard(Arc::clone(self)))
+    }
+    async fn finish(&self) {
+        loop {
+            let finished = self.finished.notified();
+            tokio::pin!(finished);
+            // Register before inspecting the counter so the last worker cannot
+            // finish between the inspection and this wait's first poll.
+            finished.as_mut().enable();
+            if self.active.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            finished.await;
+        }
+    }
+}
+pub(super) struct InstallExecutionGuard(Arc<InstallExecution>);
+impl Drop for InstallExecutionGuard {
+    fn drop(&mut self) {
+        if self.0.active.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.0.finished.notify_waiters();
+        }
+    }
+}
+
 /// Current-account discovery and durable request authority for the compiled identity.
 ///
 /// This retained provider has no public account, directory or identity override.
@@ -166,6 +205,7 @@ pub struct ServiceSupervisor {
     pub(super) key: AccountBuildKey,
     pub(super) anchor: PathBuf,
     pub(super) indeterminate: Arc<AtomicBool>,
+    pub(super) install_execution: Arc<InstallExecution>,
     pub(super) authorization: Option<Arc<dyn LingerAuthorization>>,
     pub(super) manager: Option<Arc<dyn ServiceManager>>,
     pub(super) processes: Option<Arc<dyn ServiceProcesses>>,
@@ -220,6 +260,7 @@ impl ServiceSupervisor {
             },
             anchor: home.join(".spaceterm-services").join(name),
             indeterminate: Arc::new(AtomicBool::new(false)),
+            install_execution: Arc::new(InstallExecution::default()),
             authorization,
             manager: Some(manager),
             processes: Some(processes),
@@ -248,6 +289,12 @@ impl ServiceSupervisor {
                 .with_runtime(runtime),
         ));
         Ok(self)
+    }
+    /// Waits for install execution already spawned by this provider or its clones.
+    /// Call only after retiring request admission, before dropping the owning runtime.
+    /// This wait allocates no request, resumes no durable work and submits no effects.
+    pub async fn finish_install_execution(&self) {
+        self.install_execution.finish().await;
     }
     /// Returns the current account and compiled identity.
     pub fn key(&self) -> AccountBuildKey {

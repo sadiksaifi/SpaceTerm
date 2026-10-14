@@ -237,6 +237,7 @@ struct Remote {
     root: PathBuf,
     requests: Mutex<Vec<&'static str>>,
     lost_reply: AtomicBool,
+    install_reply_latency: Mutex<Option<std::time::Duration>>,
     lost_owner_reply: AtomicBool,
     lost_ack_channels: AtomicUsize,
     fail_owner_binding: AtomicBool,
@@ -424,8 +425,14 @@ impl BootstrapRemoteConnection for Remote {
                         {
                             assessment = assessment.with_roots(data, runtime)?;
                         }
-                        setup.install(request, assessment.confirm()).await?;
-                        Ok(AccountReply::Observation(self.observed().await?))
+                        let facts = setup
+                            .install_and_observe(request, assessment.confirm(), expected)
+                            .await?;
+                        let observation = self.observed().await?;
+                        if observation.facts != facts {
+                            return Err(ServiceFailure::StaleAssessment);
+                        }
+                        Ok(AccountReply::Observation(observation))
                     }
                     AccountRequest::AuthorizeOwner {
                         request,
@@ -512,6 +519,12 @@ impl BootstrapRemoteConnection for Remote {
                 }
             }
             .await;
+            if is_install {
+                let latency = self.install_reply_latency.lock().unwrap().take();
+                if let Some(latency) = latency {
+                    tokio::time::sleep(latency).await;
+                }
+            }
             if is_install && self.lost_reply.swap(false, Ordering::SeqCst) {
                 return Err(BootstrapFailure::new(
                     PairingFailure::Offline,
@@ -867,6 +880,7 @@ impl Harness {
             root: root.path().to_owned(),
             requests: Mutex::new(Vec::new()),
             lost_reply: AtomicBool::new(false),
+            install_reply_latency: Mutex::new(None),
             lost_owner_reply: AtomicBool::new(false),
             lost_ack_channels: AtomicUsize::new(0),
             fail_owner_binding: AtomicBool::new(false),
@@ -1864,9 +1878,159 @@ async fn desktop_ssh_bootstrap_stopped_disabled_linger_denial_preserves_stopped_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desktop_ssh_bootstrap_initial_starting_completes_original_request_without_second_start() {
+    assert_initial_starting_completion(false).await;
+}
+
+#[tokio::test]
+async fn desktop_ssh_bootstrap_native_five_second_pending_completes_original_at_six_seconds() {
+    assert_initial_starting_completion(true).await;
+}
+
+#[tokio::test]
+async fn desktop_ssh_bootstrap_expired_initial_deadline_defers_original_recovery_without_enrolling()
+{
+    use spaceterm_host::account_service::{ServicePhase, ServiceRequestState};
+
+    let h = Harness::new().await;
+    h.remote.manager.delayed_start.store(true, Ordering::SeqCst);
+    *h.remote.install_reply_latency.lock().unwrap() = Some(std::time::Duration::from_secs(1));
+    let candidate = h.candidate(1).await;
+    tokio::time::pause();
+    let original = Mutex::new(None);
+    let transition = async {
+        h.remote.manager.start_requested.notified().await;
+        h.remote.manager.starting_observed.notified().await;
+        // Admission is the startup boundary, not the earlier credential preflight.
+        let started = tokio::time::Instant::now();
+        let requests = h
+            .remote
+            .supervisor
+            .retained_initial_install_requests()
+            .unwrap();
+        assert_eq!(requests.len(), 1);
+        let request = requests[0].clone();
+        let (_, artifact) = h
+            .remote
+            .supervisor
+            .inspect_install_request(request.request)
+            .unwrap();
+        tokio::time::sleep_until(started + std::time::Duration::from_secs(5)).await;
+        let at_native_bound = h
+            .remote
+            .supervisor
+            .inspect_install_request(request.request)
+            .unwrap()
+            .0;
+        assert_eq!(at_native_bound.request_digest, request.request_digest);
+        assert_eq!(at_native_bound.phase, ServicePhase::Starting);
+        assert_eq!(at_native_bound.state, ServiceRequestState::Pending);
+        // Compare against the same fifteen-second timer edge, including Tokio's
+        // timer quantization, rather than permitting an arbitrary extra duration.
+        tokio::time::sleep_until(started + std::time::Duration::from_secs(15)).await;
+        *original.lock().unwrap() = Some((request, artifact, tokio::time::Instant::now()));
+        tokio::time::sleep_until(started + std::time::Duration::from_secs(16)).await;
+        h.remote.manager.running.store(true, Ordering::SeqCst);
+        h.remote.manager.starting.store(false, Ordering::SeqCst);
+        // The Pending reply crosses the fifteen-second deadline. Let its detached
+        // receiver finish so a post-deadline automatic Resolve cannot escape this test.
+        tokio::time::sleep_until(started + std::time::Duration::from_secs(17)).await;
+    };
+    let observe = async {
+        let result = h
+            .provider
+            .0
+            .bootstrap(candidate.confirm().unwrap(), candidate.facts())
+            .await;
+        (result, tokio::time::Instant::now())
+    };
+    let ((result, returned), ()) =
+        tokio::time::timeout(std::time::Duration::from_secs(300), async {
+            tokio::join!(observe, transition)
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        result,
+        Err(BootstrapFailure {
+            class: BootstrapFailureClass::Pairing(PairingFailure::RecoveryRequired),
+            phase: BootstrapPhase::Applied,
+        })
+    ));
+    let (original, artifact, expired) = original.into_inner().unwrap().unwrap();
+    assert_eq!(returned, expired);
+    let (pending, retained_artifact) = h
+        .remote
+        .supervisor
+        .inspect_install_request(original.request)
+        .unwrap();
+    assert_eq!(pending.request, original.request);
+    assert_eq!(pending.request_digest, original.request_digest);
+    assert_eq!(pending.phase, ServicePhase::Starting);
+    assert_eq!(pending.state, ServiceRequestState::Pending);
+    assert_eq!(retained_artifact, artifact);
+    let requests = h.remote.requests.lock().unwrap().clone();
+    assert_eq!(requests.iter().filter(|r| **r == "reserve").count(), 1);
+    assert_eq!(requests.iter().filter(|r| **r == "install").count(), 1);
+    assert!(!requests.contains(&"resolve"));
+    assert!(!requests.contains(&"reserve-owner"));
+    assert!(!requests.contains(&"authorize-owner"));
+    assert_eq!(h.remote.owner_authorizations.load(Ordering::SeqCst), 0);
+    assert_eq!(h.remote.owners.load(Ordering::SeqCst), 0);
+    assert_eq!(h.credentials.0.lock().unwrap().len(), 1);
+    let inventory = h.pairing.inventory().await.unwrap();
+    assert!(inventory.prepared.is_empty());
+    assert!(inventory.saved.is_empty());
+    assert!(inventory.enrollment_acknowledgements.is_empty());
+    assert!(h.journal.snapshot().unwrap().bindings().is_empty());
+    tokio::time::resume();
+
+    // Native install recovery is an explicit observation of this same original.
+    // ProductionSshBootstrap.resolve retains its narrower owner-enrollment authority.
+    let recovered = AccountBootstrapSetup::new((*h.remote.supervisor).clone())
+        .resolve(original.request, artifact)
+        .await
+        .unwrap();
+    assert!(matches!(
+        recovered.registration,
+        spaceterm_host::bootstrap::setup::BootstrapAccountRegistration::Running {
+            artifact_identity,
+            ..
+        } if artifact_identity == artifact
+    ));
+    let (finished, retained_artifact) = h
+        .remote
+        .supervisor
+        .inspect_install_request(original.request)
+        .unwrap();
+    assert_eq!(finished.request, original.request);
+    assert_eq!(finished.request_digest, original.request_digest);
+    assert_eq!(finished.phase, ServicePhase::Completed);
+    assert!(matches!(finished.state, ServiceRequestState::Completed(_)));
+    assert_eq!(retained_artifact, artifact);
+    assert_eq!(
+        h.remote
+            .supervisor
+            .retained_initial_install_requests()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        h.remote.manager.effects.lock().unwrap().as_slice(),
+        &["configure", "start"]
+    );
+    assert_eq!(h.remote.owner_authorizations.load(Ordering::SeqCst), 0);
+    assert_eq!(h.credentials.0.lock().unwrap().len(), 1);
+    assert!(h.journal.snapshot().unwrap().bindings().is_empty());
+}
+
+async fn assert_initial_starting_completion(after_native_bound: bool) {
     let h = Harness::new().await;
     h.remote.manager.delayed_start.store(true, Ordering::SeqCst);
     let candidate = h.candidate(1).await;
+    if after_native_bound {
+        tokio::time::pause();
+    }
     let original = Mutex::new(None);
     let transition = async {
         h.remote.manager.start_requested.notified().await;
@@ -1890,13 +2054,41 @@ async fn desktop_ssh_bootstrap_initial_starting_completes_original_request_witho
             h.remote.manager.effects.lock().unwrap().as_slice(),
             &["configure", "start"]
         );
-        // The manager reports Starting for at least one owned observation. The
-        // accepted native worker must keep observing and complete this request.
+        if after_native_bound {
+            let started = tokio::time::Instant::now();
+            tokio::time::sleep_until(started + std::time::Duration::from_secs(5)).await;
+            let at_native_bound = h
+                .remote
+                .supervisor
+                .inspect_install_request(requests[0].request)
+                .unwrap()
+                .0;
+            assert_eq!(at_native_bound.request, requests[0].request);
+            assert_eq!(at_native_bound.request_digest, requests[0].request_digest);
+            assert_eq!(
+                at_native_bound.phase,
+                spaceterm_host::account_service::ServicePhase::Starting
+            );
+            assert_eq!(
+                at_native_bound.state,
+                spaceterm_host::account_service::ServiceRequestState::Pending
+            );
+            assert_eq!(
+                h.remote.manager.effects.lock().unwrap().as_slice(),
+                &["configure", "start"]
+            );
+            tokio::time::sleep_until(started + std::time::Duration::from_secs(6)).await;
+        }
+        // The same accepted request becomes Running without another native Start.
         h.remote.manager.running.store(true, Ordering::SeqCst);
         h.remote.manager.starting.store(false, Ordering::SeqCst);
+        if after_native_bound {
+            // Real owner IPC/enrollment follows the controlled startup schedule.
+            tokio::time::resume();
+        }
     };
     // This watchdog covers durable installation and enrollment as well as
-    // startup. The native worker's separate 15-second observation stays unchanged.
+    // startup. Native observation is bounded at five seconds; Bootstrap keeps one fifteen-second deadline.
     let (completion, ()) = tokio::time::timeout(std::time::Duration::from_secs(300), async {
         tokio::join!(
             h.provider

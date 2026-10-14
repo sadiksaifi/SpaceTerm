@@ -871,6 +871,12 @@ impl<H: NativeServerSetup, E: BootstrapEnrollment, P: ScopedAuthenticationPrompt
             ));
         }
         let request = authorized.request_identity();
+        // Initial installation and automatic original-request recovery share one deadline.
+        // The admitted apply worker retains ownership even after foreground observation expires.
+        let startup_deadline =
+            (!reused).then(|| tokio::time::Instant::now() + std::time::Duration::from_secs(15));
+        let unresolved =
+            BootstrapFailure::new(PairingFailure::RecoveryRequired, BootstrapPhase::Applied);
         // apply transfers ownership to the native journal. Dropping observation never cancels it.
         let apply = self
             .setup
@@ -882,16 +888,30 @@ impl<H: NativeServerSetup, E: BootstrapEnrollment, P: ScopedAuthenticationPrompt
         })?;
         tokio::spawn(async move {
             let result = match apply.await {
-                Err(failure) if outcome_unresolved(failure) => {
-                    setup.resolve(request, expected_artifact).await
-                }
+                Err(failure) if outcome_unresolved(failure) => match startup_deadline {
+                    Some(deadline) if tokio::time::Instant::now() >= deadline => Err(unresolved),
+                    Some(deadline) => {
+                        tokio::time::timeout_at(deadline, setup.resolve(request, expected_artifact))
+                            .await
+                            .unwrap_or(Err(unresolved))
+                    }
+                    None => setup.resolve(request, expected_artifact).await,
+                },
                 result => result,
             };
             let _ = send.send((result, ssh, permit));
         });
-        let (server, ssh, permit) = receive.await.map_err(|_| {
-            BootstrapFailure::new(PairingFailure::RecoveryRequired, BootstrapPhase::Applied)
-        })?;
+        let received = match startup_deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, receive)
+                .await
+                .map_err(|_| unresolved)?,
+            None => receive.await,
+        };
+        let (server, ssh, permit) = received.map_err(|_| unresolved)?;
+        // A ready channel can win timeout_at's poll after scheduling or reply latency.
+        if startup_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            return Err(unresolved);
+        }
         let server = server?;
         ssh.revalidate()?;
         intent.attempt.validate(BootstrapPhase::Applied)?;

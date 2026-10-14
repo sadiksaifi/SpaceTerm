@@ -118,6 +118,10 @@ pub(super) struct InstallRecord {
     new_organization: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     stage_basis: Option<RegistrationBasis>,
+    // An observation checkpoint from the original publication owner, not new authority.
+    // It is excluded from the immutable accepted-request digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    start_basis: Option<RegistrationBasis>,
 }
 impl InstallRecord {
     pub(super) fn pending(&self) -> bool {
@@ -140,6 +144,16 @@ impl InstallRecord {
                 || self.new_organization
                 || self.desktop_seed.is_some()
                 || self.phase == ServicePhase::Starting
+            {
+                return Err(ServiceFailure::InvalidRecord);
+            }
+        }
+        if let Some(basis) = &self.start_basis {
+            basis.validate()?;
+            if self.stage_basis.is_some()
+                || self.reused
+                || self.installation.is_none()
+                || !matches!(self.phase, ServicePhase::Starting | ServicePhase::Completed)
             {
                 return Err(ServiceFailure::InvalidRecord);
             }
@@ -300,8 +314,12 @@ impl ServiceSupervisor {
         Box::pin(async move {
             let handle = tokio::runtime::Handle::try_current()
                 .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
+            let execution = supervisor.install_execution.admit()?;
             handle
-                .spawn(async move { supervisor.run_install(request, Some(confirmation)).await })
+                .spawn(async move {
+                    let _execution = execution;
+                    supervisor.run_install(request, Some(confirmation)).await
+                })
                 .await
                 .map_err(|_| ServiceFailure::Indeterminate)?
         })
@@ -328,8 +346,12 @@ impl ServiceSupervisor {
             });
             let handle = tokio::runtime::Handle::try_current()
                 .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
+            let execution = supervisor.install_execution.admit()?;
             handle
-                .spawn(async move { supervisor.run_install(request, Some(confirmation)).await })
+                .spawn(async move {
+                    let _execution = execution;
+                    supervisor.run_install(request, Some(confirmation)).await
+                })
                 .await
                 .map_err(|_| ServiceFailure::Indeterminate)?
         })
@@ -341,8 +363,12 @@ impl ServiceSupervisor {
         Box::pin(async move {
             let handle = tokio::runtime::Handle::try_current()
                 .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
+            let execution = supervisor.install_execution.admit()?;
             handle
-                .spawn(async move { supervisor.run_install(request, None).await })
+                .spawn(async move {
+                    let _execution = execution;
+                    supervisor.run_install(request, None).await
+                })
                 .await
                 .map_err(|_| ServiceFailure::Indeterminate)?
         })
@@ -438,6 +464,12 @@ impl ServiceSupervisor {
             }
             if let Some(original) = &slot.install
                 && (original.digest != record.digest
+                    || (original.start_basis.is_some()
+                        && original.start_basis != record.start_basis)
+                    || (original.start_basis.is_none()
+                        && record.start_basis.is_some()
+                        && (original.phase != ServicePhase::Publishing
+                            || record.phase != ServicePhase::Starting))
                     || (original.phase == ServicePhase::Completed && original != record))
             {
                 return Err(ServiceFailure::RequestConflict);
@@ -704,6 +736,7 @@ impl ServiceSupervisor {
                             .discover()?
                             .is_some_and(|registered| registered.is_installed()),
                     stage_basis: proposed_stage.cloned(),
+                    start_basis: None,
                     installation: None,
                     roots: proposed_roots.cloned(),
                 };
@@ -713,6 +746,11 @@ impl ServiceSupervisor {
         };
         if record.phase == ServicePhase::Completed {
             return Ok(record.progress(request));
+        }
+        if record.phase == ServicePhase::Starting {
+            return self
+                .observe_install_start_with_lease(request, &record, &lease)
+                .await;
         }
         if record.stage_basis.is_some() {
             return self.run_stage_install(request, record, artifact, &lease);
@@ -869,34 +907,141 @@ impl ServiceSupervisor {
                 lease.verify()?;
                 self.publish_registration(&next, &snapshot, &directory)?;
             }
+            let registered = self.discover()?.ok_or(ServiceFailure::Missing)?;
+            if registered.approved_installation() != record.installation.as_ref() {
+                return Err(ServiceFailure::RequestConflict);
+            }
+            lease.verify()?;
+            record.start_basis = Some(RegistrationBasis::capture(&registered));
             self.install_phase(request, &mut record, ServicePhase::Starting)?;
         }
         let registered = self.discover()?.ok_or(ServiceFailure::Missing)?;
+        if !record
+            .start_basis
+            .as_ref()
+            .is_some_and(|basis| basis.matches(&registered))
+        {
+            return Err(ServiceFailure::RequestConflict);
+        }
         lease.verify()?;
         self.manager()?.verify_installation(&registered)?;
         self.manager()?.configure(&registered).await?;
+        lease.verify()?;
         if registered.desired_state() == DesiredServerState::Running {
             self.manager()?.start(&registered).await?;
-            // User-service Start is asynchronous. The accepted worker retains
-            // observation and durable completion without configuring or starting again.
-            let observation = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            // Native callers observe for five seconds. Bootstrap may continue
+            // observing this same admitted original without configuring or starting again.
+            let observation = tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 loop {
-                    lease.verify()?;
-                    if self.manager()?.status(Some(&registered)).await? == SupervisorState::Running
-                    {
-                        return Ok::<(), ServiceFailure>(());
+                    let progress = self
+                        .observe_install_start_with_lease(request, &record, &lease)
+                        .await?;
+                    if progress.phase == ServicePhase::Completed {
+                        return Ok::<ServiceProgress, ServiceFailure>(progress);
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
             })
             .await;
-            match observation {
-                Ok(result) => result?,
-                Err(_) => return Ok(record.progress(request)),
-            }
+            return match observation {
+                Ok(result) => result,
+                Err(_) => Ok(record.progress(request)),
+            };
         }
         lease.verify()?;
         self.finish_install(request, record, &registered)
+    }
+
+    /// Observes only an already admitted install's original Starting registration.
+    /// It never publishes an installation, configures a service or submits Start.
+    pub(crate) fn observe_install_start(
+        &self,
+        request: NativeRequestId,
+        artifact_identity: [u8; 32],
+    ) -> ServiceFuture<'_, ServiceProgress> {
+        let supervisor = self.clone();
+        Box::pin(async move {
+            let handle = tokio::runtime::Handle::try_current()
+                .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
+            let execution = supervisor.install_execution.admit()?;
+            handle
+                .spawn(async move {
+                    let _execution = execution;
+                    let original = supervisor
+                        .original_install(request)?
+                        .ok_or(ServiceFailure::UnknownRequest)?;
+                    if original.artifact_sha256 != artifact_identity {
+                        return Err(ServiceFailure::RequestConflict);
+                    }
+                    if original.phase != ServicePhase::Starting {
+                        return Ok(original.progress(request));
+                    }
+                    let lease = match supervisor.lifecycle_lease() {
+                        Ok(lease) => lease,
+                        Err(ServiceFailure::Pending) => return Ok(original.progress(request)),
+                        Err(failure) => return Err(failure),
+                    };
+                    let current = supervisor
+                        .original_install(request)?
+                        .ok_or(ServiceFailure::UnknownRequest)?;
+                    if current.digest != original.digest
+                        || current.artifact_sha256 != artifact_identity
+                    {
+                        return Err(ServiceFailure::RequestConflict);
+                    }
+                    if current.phase != ServicePhase::Starting {
+                        return Ok(current.progress(request));
+                    }
+                    supervisor.ensure_no_pending(request)?;
+                    supervisor
+                        .observe_install_start_with_lease(request, &current, &lease)
+                        .await
+                })
+                .await
+                .map_err(|_| ServiceFailure::Indeterminate)?
+        })
+    }
+
+    async fn observe_install_start_with_lease(
+        &self,
+        request: NativeRequestId,
+        record: &InstallRecord,
+        lease: &Lease,
+    ) -> Result<ServiceProgress, ServiceFailure> {
+        // Older originals cannot acquire a new registration binding from observation.
+        let Some(basis) = &record.start_basis else {
+            return Ok(record.progress(request));
+        };
+        lease.verify()?;
+        if record.phase != ServicePhase::Starting
+            || record.state != ServiceRequestState::Pending
+            || self.original_install(request)?.as_ref() != Some(record)
+        {
+            return Err(ServiceFailure::RequestConflict);
+        }
+        let registered = self.discover()?.ok_or(ServiceFailure::Missing)?;
+        let matches = |registered: &RegisteredServer| {
+            basis.matches(registered)
+                && registered.desired_state() == DesiredServerState::Running
+                && registered.is_installed()
+                && registered.approved_installation() == record.installation.as_ref()
+                && record.roots.as_ref().is_none_or(|roots| {
+                    registered.record.data == roots.data
+                        && registered.record.runtime == roots.runtime
+                })
+        };
+        if !matches(&registered) {
+            return Err(ServiceFailure::RequestConflict);
+        }
+        if self.manager()?.status(Some(&registered)).await? != SupervisorState::Running {
+            return Ok(record.progress(request));
+        }
+        self.manager()?.verify_installation(&registered)?;
+        lease.verify()?;
+        if !matches(&self.discover()?.ok_or(ServiceFailure::Missing)?) {
+            return Err(ServiceFailure::RequestConflict);
+        }
+        self.finish_install(request, record.clone(), &registered)
     }
     fn run_stage_install(
         &self,

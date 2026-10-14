@@ -119,6 +119,7 @@ objc2-user-notifications = { version = "=0.3.2", default-features = false, featu
 raw-window-handle = "=0.6.2"
 
 [dev-dependencies]
+tokio = { version = "=1.53.1", default-features = false, features = ["test-util"] }
 spaceterm-server = { path = "crates/spaceterm-server", default-features = false, features = ["test-support"] }
 tempfile = "=3.27.0"
 rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std"] }

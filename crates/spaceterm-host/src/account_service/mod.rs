@@ -52,6 +52,20 @@ use serde::{Deserialize, Serialize};
 use spaceterm_core::operations::RequestDigest;
 use std::{future::Future, pin::Pin, sync::Arc};
 
+/// Detaches the deliberate bootstrap helper from its invoking SSH shell's session.
+/// Call before receiving requests so group hangup cannot kill admitted execution
+/// or its fixed manager utilities. A process-group leader refuses to detach.
+/// This fixed native operation accepts no arguments and grants no install authority.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub fn isolate_bootstrap_execution_session() -> Result<(), ServiceFailure> {
+    // SAFETY: setsid changes only this process's session/group membership. It
+    // neither creates a process nor acquires a controlling terminal.
+    if unsafe { libc::setsid() } < 0 {
+        return Err(ServiceFailure::SupervisorUnavailable);
+    }
+    Ok(())
+}
+
 /// A service-owned operation observer. Dropping it does not cancel accepted work.
 pub type ServiceFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, ServiceFailure>> + Send + 'a>>;
@@ -401,6 +415,9 @@ pub mod test_support {
                 key: self.key,
                 anchor: self.anchor.clone(),
                 indeterminate: std::sync::Arc::new(AtomicBool::new(false)),
+                install_execution: std::sync::Arc::new(
+                    super::supervisor::InstallExecution::default(),
+                ),
                 authorization: None,
                 manager: None,
                 processes: None,
