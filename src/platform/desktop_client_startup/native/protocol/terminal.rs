@@ -42,6 +42,11 @@ struct CancelledRead {
     stamp: QueryStamp,
     resource: Option<ResourceTransferId>,
 }
+struct PasteCompletion {
+    confirm: spaceterm_core::native_requests::NativeCompletion,
+    cancel: spaceterm_core::native_requests::NativeCompletion,
+    expires: tokio::time::Instant,
+}
 #[derive(Default)]
 struct State {
     synchronizers: BTreeMap<ServerId, Arc<tokio::sync::Mutex<()>>>,
@@ -50,6 +55,7 @@ struct State {
     subscriptions: BTreeMap<PaneId, Subscription>,
     reads: BTreeMap<(ServerId, u64), PendingRead>,
     cancellations: BTreeMap<(ServerId, u64), CancelledRead>,
+    native_requests: BTreeMap<(SessionKey, u64), PasteCompletion>,
 }
 #[derive(Default)]
 pub(super) struct TerminalTransport {
@@ -70,10 +76,99 @@ impl TerminalTransport {
                 .retain(|pane, _| pane.server() != server);
             state.reads.retain(|(owner, _), _| *owner != server);
             state.cancellations.retain(|(owner, _), _| *owner != server);
+            state
+                .native_requests
+                .retain(|(session, _), _| session.pane.server() != server);
         }
     }
 }
 impl NativeProtocol {
+    pub(super) fn paste_completion(
+        &self,
+        fence: EffectFence,
+        approval: spaceterm_core::native_requests::PasteApprovalId,
+        decision: spaceterm_core::native_requests::PasteDecision,
+    ) -> Result<spaceterm_core::native_requests::NativeCompletion, ClientFailure> {
+        let mut state = self.terminal.state.lock().map_err(|_| invalid())?;
+        state
+            .native_requests
+            .retain(|_, pending| tokio::time::Instant::now() < pending.expires);
+        let pending = state.native_requests.values().find(|pending| {
+            pending.confirm.fence() == fence && matches!(pending.confirm.kind(),
+                spaceterm_core::native_requests::NativeCompletionKind::Paste { approval: expected, .. } if *expected == approval)
+        }).ok_or_else(stale)?;
+        Ok(match decision {
+            spaceterm_core::native_requests::PasteDecision::Confirm => pending.confirm.clone(),
+            spaceterm_core::native_requests::PasteDecision::Cancel => pending.cancel.clone(),
+        })
+    }
+    fn remember_paste(
+        &self,
+        request: &spaceterm_core::native_requests::NativeRequest,
+        timing: NativeTiming,
+    ) -> Result<(), ClientFailure> {
+        use spaceterm_core::native_requests::{
+            NativeCompletion, NativeCompletionKind, NativeRequestKind, PasteDecision,
+        };
+        let mut state = self.terminal.state.lock().map_err(|_| invalid())?;
+        state
+            .native_requests
+            .retain(|_, pending| tokio::time::Instant::now() < pending.expires);
+        if state
+            .native_requests
+            .contains_key(&(request.fence().session(), request.id().get()))
+        {
+            return Err(stale());
+        }
+        if state.native_requests.len() >= 64 {
+            return Err(fail(ClientFailureClass::ResourceLimit));
+        }
+        let NativeRequestKind::UnsafePaste { approval, .. } = request.kind() else {
+            return Err(invalid());
+        };
+        let completion = |decision| {
+            NativeCompletion::new(
+                request,
+                NativeCompletionKind::Paste {
+                    approval: *approval,
+                    decision,
+                },
+            )
+            .map_err(|_| invalid())
+        };
+        let expires = tokio::time::Instant::now()
+            .checked_add(
+                timing
+                    .expires_after
+                    .unwrap_or_default()
+                    .min(Duration::from_secs(30)),
+            )
+            .ok_or_else(invalid)?;
+        // Publish correlation metadata before exposing the permission to a subscriber.
+        // A fast resolution cannot race the registration, and this map holds no paste text.
+        state.native_requests.insert(
+            (request.fence().session(), request.id().get()),
+            PasteCompletion {
+                confirm: completion(PasteDecision::Confirm)?,
+                cancel: completion(PasteDecision::Cancel)?,
+                expires,
+            },
+        );
+        Ok(())
+    }
+    pub(super) fn forget_native(
+        &self,
+        session: SessionKey,
+        request: u64,
+    ) -> Result<(), ClientFailure> {
+        self.terminal
+            .state
+            .lock()
+            .map_err(|_| invalid())?
+            .native_requests
+            .remove(&(session, request));
+        Ok(())
+    }
     pub(super) fn start_presentation(self: &Arc<Self>) {
         self.start_effect_dispatch();
         let owner = Arc::downgrade(self);
@@ -90,7 +185,12 @@ impl NativeProtocol {
                     if let Err(error) = owner.synchronize_presentation(info).await {
                         // Stale demand is disposable. A connection failure is published
                         // by the registry, which revokes its subscriptions and reads.
-                        if error.class() != ClientFailureClass::StaleAuthority {
+                        if error.class() == ClientFailureClass::ResourceLimit {
+                            // A busy account listener has not acknowledged this demand.
+                            // Retry without discarding the last acknowledged context.
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                            changed.notify_one();
+                        } else if error.class() != ClientFailureClass::StaleAuthority {
                             owner.terminal.invalidate(info.server);
                         } else if owner.handle(info.server).is_ok_and(|handle| {
                             !matches!(*handle.state().borrow(), ConnectionState::Connected { .. })
@@ -447,7 +547,7 @@ impl NativeProtocol {
                             .remove(&(info.server, value.request))
                             .ok_or_else(stale)?;
                         let context = pending.context;
-                        if !value.acknowledged
+                        if value.acknowledged != value.failure.is_none()
                             || value.epoch != info.epoch.get()
                             || value.connection_generation != context.binding.generation.get()
                             || value.context_generation != context.generation.get()
@@ -457,11 +557,21 @@ impl NativeProtocol {
                         {
                             return Err(invalid());
                         }
-                        let _ = pending.reply.send(if value.failure.is_some() {
-                            Err(stale())
-                        } else {
-                            Ok(())
-                        });
+                        let result = match value.failure.as_ref() {
+                            None => Ok(()),
+                            Some(failure)
+                                if failure.classification == spaceterm_protocol::wire::common::FailureClass::Busy as i32 =>
+                            {
+                                Err(fail(ClientFailureClass::ResourceLimit))
+                            }
+                            Some(failure)
+                                if failure.classification == spaceterm_protocol::wire::common::FailureClass::Stale as i32 =>
+                            {
+                                Err(stale())
+                            }
+                            Some(_) => return Err(invalid()),
+                        };
+                        let _ = pending.reply.send(result);
                         Ok(true)
                     }
                     $p::message::Kind::ContentPublication(value) => {
@@ -731,11 +841,31 @@ impl NativeProtocol {
                                 .remaining_ms
                                 .map(|value| Duration::from_millis(u64::from(value))),
                         };
-                        match pane.receive_native(request, timing) {
-                            Ok(()) => Ok(true),
-                            Err(error) if error.class() == ClientFailureClass::StaleAuthority => {
-                                Ok(true)
+                        let correlation = if matches!(request.kind(), spaceterm_core::native_requests::NativeRequestKind::UnsafePaste { .. }) {
+                            let Some(origin) = request.runtime_request() else {
+                                // An older provider cannot prove which paste requested this permission.
+                                // Suppress it instead of guessing from the native request number.
+                                return Ok(true);
+                            };
+                            Some(EffectCorrelation::new(origin.get(), request.fence())?)
+                        } else { None };
+                        if correlation.is_some() {
+                            match self.remember_paste(&request, timing) {
+                                Ok(()) => {},
+                                Err(error) if error.class() == ClientFailureClass::StaleAuthority => return Ok(true),
+                                Err(error) => return Err(error),
                             }
+                        }
+                        let received = match correlation {
+                            Some(correlation) => pane.receive_paste_approval(correlation, request.clone(), timing),
+                            None => pane.receive_native(request.clone(), timing),
+                        };
+                        if received.is_err() && correlation.is_some() {
+                            self.forget_native(request.fence().session(), request.id().get())?;
+                        }
+                        match received {
+                            Ok(()) => Ok(true),
+                            Err(error) if error.class() == ClientFailureClass::StaleAuthority => Ok(true),
                             Err(error) => Err(error),
                         }
                     }

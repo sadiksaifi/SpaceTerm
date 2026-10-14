@@ -261,3 +261,91 @@ extensions!(
     Major2,
     2
 );
+
+#[test]
+fn enhanced_copy_and_native_paste_metadata_require_independent_negotiated_capabilities_both_majors()
+{
+    use spaceterm_core::native_requests::*;
+    use spaceterm_protocol::{convert::native_requests, negotiation::*};
+    macro_rules! check {
+        ($p:ident, $major:ident, $number:literal) => {{
+            let command = FencedRuntimeCommand {
+                fence: fence(None),
+                command: RuntimeCommand::Copy(InputModifiers {
+                    control: true,
+                    shift: true,
+                    ..Default::default()
+                }),
+            };
+            let copy = Payload::$major($p::Message {
+                kind: Some($p::message::Kind::RuntimeCommand(
+                    runtime::$p::encode_command(127, &command).unwrap(),
+                )),
+            });
+            let request = NativeRequest::new(
+                command.fence,
+                NativeRequestId::new(41).unwrap(),
+                MonotonicTick::new(1),
+                MonotonicTick::new(1),
+                Some(MonotonicTick::new(30_001)),
+                NativeRequestKind::UnsafePaste {
+                    approval: PasteApprovalId::new(19).unwrap(),
+                    text: NativeText::new("one\ntwo".into()).unwrap(),
+                },
+            )
+            .unwrap()
+            .with_runtime_request(127)
+            .unwrap();
+            let native = Payload::$major($p::Message {
+                kind: Some($p::message::Kind::NativeRequest(
+                    native_requests::$p::encode_request(&request, MonotonicTick::new(1)).unwrap(),
+                )),
+            });
+            let completion = NativeCompletion::new(
+                &request,
+                NativeCompletionKind::Paste {
+                    approval: PasteApprovalId::new(19).unwrap(),
+                    decision: PasteDecision::Cancel,
+                },
+            )
+            .unwrap();
+            let mut wire = native_requests::$p::encode_completion(&completion).unwrap();
+            wire.effect_request = 999;
+            let completed = Payload::$major($p::Message {
+                kind: Some($p::message::Kind::NativeCompletion(wire)),
+            });
+            for (copy_allowed, paste_allowed) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let mut capabilities = vec![CAPABILITY_CANONICAL_DOMAIN];
+                if copy_allowed {
+                    capabilities.push(CAPABILITY_ENHANCED_COPY);
+                }
+                if paste_allowed {
+                    capabilities.push(CAPABILITY_NATIVE_PASTE_CORRELATION);
+                }
+                let (mut client, mut server) = connected($number, capabilities);
+                if copy_allowed {
+                    assert_eq!(server.decode(&client.encode(&copy).unwrap()).unwrap(), copy);
+                } else {
+                    assert_eq!(client.encode(&copy), Err(ProtocolError::Negotiation));
+                }
+                if paste_allowed {
+                    assert_eq!(
+                        client.decode(&server.encode(&native).unwrap()).unwrap(),
+                        native
+                    );
+                    assert_eq!(
+                        server.decode(&client.encode(&completed).unwrap()).unwrap(),
+                        completed
+                    );
+                } else {
+                    assert_eq!(server.encode(&native), Err(ProtocolError::Negotiation));
+                    assert_eq!(client.encode(&completed), Err(ProtocolError::Negotiation));
+                }
+            }
+        }};
+    }
+    check!(v1, Major1, 1);
+    check!(v2, Major2, 2);
+}

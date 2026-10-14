@@ -145,6 +145,7 @@ pub struct NativeRequest {
     not_before: MonotonicTick,
     deadline: Option<MonotonicTick>,
     kind: NativeRequestKind,
+    runtime_request: Option<NonZeroU64>,
 }
 impl NativeRequest {
     pub fn new(
@@ -193,6 +194,7 @@ impl NativeRequest {
             not_before,
             deadline,
             kind,
+            runtime_request: None,
         })
     }
     pub const fn fence(&self) -> EffectFence {
@@ -209,6 +211,18 @@ impl NativeRequest {
     }
     pub const fn deadline(&self) -> Option<MonotonicTick> {
         self.deadline
+    }
+    /// Captured identity of the runtime paste command, distinct from this native request.
+    pub fn with_runtime_request(mut self, request: u64) -> Result<Self, NativeRequestError> {
+        if !matches!(self.kind, NativeRequestKind::UnsafePaste { .. }) {
+            return Err(NativeRequestError::InvalidBinding);
+        }
+        self.runtime_request =
+            Some(NonZeroU64::new(request).ok_or(NativeRequestError::InvalidBinding)?);
+        Ok(self)
+    }
+    pub const fn runtime_request(&self) -> Option<NonZeroU64> {
+        self.runtime_request
     }
     pub fn kind(&self) -> &NativeRequestKind {
         &self.kind
@@ -246,6 +260,7 @@ pub struct NativeCompletion {
     fence: EffectFence,
     id: NativeRequestId,
     kind: NativeCompletionKind,
+    runtime_request: Option<NonZeroU64>,
 }
 impl NativeCompletion {
     pub fn new(
@@ -283,6 +298,7 @@ impl NativeCompletion {
             fence: request.fence(),
             id: request.id(),
             kind,
+            runtime_request: request.runtime_request(),
         })
     }
     pub const fn fence(&self) -> EffectFence {
@@ -290,6 +306,9 @@ impl NativeCompletion {
     }
     pub const fn id(&self) -> NativeRequestId {
         self.id
+    }
+    pub const fn runtime_request(&self) -> Option<NonZeroU64> {
+        self.runtime_request
     }
     pub fn kind(&self) -> &NativeCompletionKind {
         &self.kind

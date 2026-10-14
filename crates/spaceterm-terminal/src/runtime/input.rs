@@ -25,6 +25,8 @@ pub(crate) enum InputOrigin {
     Session,
     Client(AuthorityStamp, Eligibility),
     Native(AuthorityStamp, MonotonicTick),
+    EnhancedCopy(AuthorityStamp),
+    ApprovedPaste(AuthorityStamp, MonotonicTick),
 }
 impl InputOrigin {
     fn current(self, shared: &Shared, authority: &super::authority::Authority) -> bool {
@@ -36,6 +38,15 @@ impl InputOrigin {
             Self::Native(fence, deadline) => {
                 authority.permits_native(fence)
                     && shared.clock.now().is_ok_and(|now| now < deadline)
+            }
+            Self::ApprovedPaste(stamp, deadline) => {
+                authority.permits_stamp(stamp, None, Some(shared.revision()))
+                    && authority.current.parts().terminal_input_focus
+                    && shared.clock.now().is_ok_and(|now| now < deadline)
+            }
+            Self::EnhancedCopy(stamp) => {
+                authority.permits_stamp(stamp, None, Some(shared.revision()))
+                    && authority.current.parts().terminal_input_focus
             }
             Self::Client(stamp, eligibility) => {
                 let parts = authority.current.parts();
@@ -52,18 +63,46 @@ impl InputOrigin {
 }
 pub(crate) enum InputCompletion {
     Effect(ReplySender<EffectDisposition>),
+    Paste {
+        origin: Option<ReplySender<EffectDisposition>>,
+        resolution: ReplySender<EffectDisposition>,
+    },
     Authority(
         ReplySender<AuthorityApplied>,
         Box<RuntimeAuthorityTransition>,
     ),
 }
 impl InputCompletion {
-    fn cancelled(&self) -> bool {
-        matches!(self, Self::Effect(reply) if reply.cancelled())
+    pub(super) fn cancelled(&self) -> bool {
+        match self {
+            Self::Effect(reply) => reply.cancelled(),
+            Self::Paste { origin, resolution } => {
+                resolution.cancelled() || origin.as_ref().is_some_and(ReplySender::cancelled)
+            }
+            Self::Authority(..) => false,
+        }
+    }
+    pub fn fail(self, error: RuntimeFailure) {
+        match self {
+            Self::Effect(reply) => reply.complete(Err(error)),
+            Self::Paste { origin, resolution } => {
+                if let Some(reply) = origin {
+                    reply.complete(Err(error));
+                }
+                resolution.complete(Err(error));
+            }
+            Self::Authority(reply, _) => reply.complete(Err(error)),
+        }
     }
     pub fn complete(self, disposition: EffectDisposition) {
         match self {
             Self::Effect(reply) => reply.complete(Ok(disposition)),
+            Self::Paste { origin, resolution } => {
+                if let Some(reply) = origin {
+                    reply.complete(Ok(disposition));
+                }
+                resolution.complete(Ok(disposition));
+            }
             Self::Authority(reply, transition) => {
                 reply.complete(if disposition == EffectDisposition::Applied {
                     Ok(AuthorityApplied::new(*transition))
@@ -235,8 +274,10 @@ impl PtyInput {
                 .completion
                 .as_ref()
                 .is_some_and(InputCompletion::cancelled);
-            let hidden_native =
-                matches!(chunk.origin, InputOrigin::Native(..)) && process.hidden_input()?;
+            let hidden_native = matches!(
+                chunk.origin,
+                InputOrigin::Native(..) | InputOrigin::EnhancedCopy(_)
+            ) && process.hidden_input()?;
             if !chunk.origin.current(shared, &authority) || cancelled || hidden_native {
                 let disposition = if authority.sealed {
                     EffectDisposition::Retired
@@ -307,7 +348,9 @@ pub(crate) fn eligibility(command: &RuntimeCommand) -> Eligibility {
     match command {
         RuntimeCommand::InputMethodCommit(_) => Eligibility::Ime,
         RuntimeCommand::Key(_)
+        | RuntimeCommand::Copy(_)
         | RuntimeCommand::RequestPaste(_)
+        | RuntimeCommand::RequestCorrelatedPaste(..)
         | RuntimeCommand::ResolvePaste(..)
         | RuntimeCommand::Pointer(_)
         | RuntimeCommand::Wheel(_) => Eligibility::Input,
@@ -336,10 +379,13 @@ pub(crate) fn command_cost(command: &RuntimeCommand) -> Result<(usize, usize), R
                     .ok_or(RuntimeFailure::capacity(RuntimeStage::Input))?,
             )
         }
+        RuntimeCommand::Copy(_) => (0, 256),
         RuntimeCommand::InputMethodCommit(text) => {
             (text.as_str().len(), text.as_str().len() * 8 + 128)
         }
-        RuntimeCommand::RequestPaste(text) => (text.as_str().len(), text.as_str().len() + 12),
+        RuntimeCommand::RequestPaste(text) | RuntimeCommand::RequestCorrelatedPaste(_, text) => {
+            (text.as_str().len(), text.as_str().len() + 12)
+        }
         RuntimeCommand::CompleteNativeRequest(completion) => match completion.kind() {
             spaceterm_core::native_requests::NativeCompletionKind::ClipboardText(text) => {
                 (text.as_str().len(), 0)

@@ -94,6 +94,7 @@ pub struct NativeRuntime {
     uid: u32,
     account: Arc<dyn AccountLaunchProvider>,
     factory: RuntimeFactory,
+    pty: Arc<dyn NativePtyAdapterFactory>,
     this: Weak<Self>,
     handles: Mutex<BTreeMap<SessionKey, Weak<NativeHandle>>>,
 }
@@ -105,12 +106,37 @@ impl NativeRuntime {
         clock: Arc<dyn RuntimeClock>,
         limits: RuntimeLimits,
     ) -> Result<Arc<Self>, ServerFailure> {
+        #[cfg(target_os = "macos")]
+        let host = spaceterm_host::pty::macos_pty_host::MacosPtyHost;
+        #[cfg(target_os = "linux")]
+        let host = spaceterm_host::pty::linux_pty_host::LinuxPtyHost;
+        Self::with_pty_factory(
+            server,
+            uid,
+            account,
+            clock,
+            limits,
+            Arc::new(UnixNativePtyAdapterFactory::new(Arc::new(host))),
+        )
+    }
+
+    /// Replaces only native process resources. Launch preparation, admission,
+    /// the terminal engine and retained runtime ownership remain unchanged.
+    pub fn with_pty_factory(
+        server: ServerId,
+        uid: u32,
+        account: Arc<dyn AccountLaunchProvider>,
+        clock: Arc<dyn RuntimeClock>,
+        limits: RuntimeLimits,
+        pty: Arc<dyn NativePtyAdapterFactory>,
+    ) -> Result<Arc<Self>, ServerFailure> {
         let factory = RuntimeFactory::new(limits, clock).map_err(runtime_failure)?;
         Ok(Arc::new_cyclic(|this| Self {
             server,
             uid,
             account,
             factory,
+            pty,
             this: this.clone(),
             handles: Mutex::default(),
         }))
@@ -180,7 +206,7 @@ impl NativeRuntime {
             .factory
             .start(
                 prepared.request,
-                prepared.launch.runtime_launch(gate),
+                prepared.launch.runtime_launch(gate, self.pty.clone()),
                 prepared.engine,
             )
             .map_err(runtime_failure)?;
@@ -314,7 +340,11 @@ impl RuntimeCleanupPort for NativeRuntime {
 }
 
 impl AccountShellLaunch {
-    fn runtime_launch(self, gate: Arc<LaunchGate>) -> PreparedRuntimeLaunch {
+    fn runtime_launch(
+        self,
+        gate: Arc<LaunchGate>,
+        pty: Arc<dyn NativePtyAdapterFactory>,
+    ) -> PreparedRuntimeLaunch {
         Box::new(move |size| {
             if native_size(size) != self.size {
                 return Err(RuntimeFailure::new(
@@ -328,11 +358,7 @@ impl AccountShellLaunch {
             gate.admit_process().map_err(|_| {
                 RuntimeFailure::new(FailureClass::StaleAuthority, RuntimeStage::Launch)
             })?;
-            #[cfg(target_os = "macos")]
-            let host = spaceterm_host::pty::macos_pty_host::MacosPtyHost;
-            #[cfg(target_os = "linux")]
-            let host = spaceterm_host::pty::linux_pty_host::LinuxPtyHost;
-            let parts = UnixNativePtyAdapterFactory::new(Arc::new(host))
+            let parts = pty
                 .create(self.launch, native_size(size))
                 .map_err(|error| {
                     RuntimeFailure::new(

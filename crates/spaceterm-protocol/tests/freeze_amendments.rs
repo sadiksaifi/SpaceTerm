@@ -1101,6 +1101,7 @@ fn runtime_command_conversion_inventory_has_a_declared_route_for_every_variant()
     // ResolvePaste and CompleteNativeRequest use the existing NativeCompletion envelope.
     let route = |command: &RuntimeCommand| match command {
         RuntimeCommand::Key(_) => (11, 3),
+        RuntimeCommand::Copy(_) => (11, 15),
         RuntimeCommand::InputMethodCommit(_) => (11, 4),
         RuntimeCommand::Pointer(_) | RuntimeCommand::Wheel(_) => (11, 6),
         RuntimeCommand::Resize(_) => (11, 10),
@@ -1108,7 +1109,7 @@ fn runtime_command_conversion_inventory_has_a_declared_route_for_every_variant()
         RuntimeCommand::FocusReport(_) => (11, 9),
         RuntimeCommand::CellPixelMetrics(_) => (11, 12),
         RuntimeCommand::ClearScreenAndScrollback => (11, 11),
-        RuntimeCommand::RequestPaste(_) => (11, 5),
+        RuntimeCommand::RequestPaste(_) | RuntimeCommand::RequestCorrelatedPaste(..) => (11, 5),
         RuntimeCommand::ResolvePaste(_, _) => (19, 7),
         RuntimeCommand::CompleteNativeRequest(_) => (19, 6),
     };

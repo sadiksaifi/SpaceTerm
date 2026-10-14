@@ -415,7 +415,8 @@ impl ConnectionDelegate for NativeProtocol {
                 $p::message::Kind::NativeCompletion(value) => {
                     let fence = identity::decode_fence(value.fence.as_ref().ok_or_else(invalid)?, None).map_err(ClientFailure::from)?;
                     let effects = self.effects.lock().map_err(|_| invalid())?;
-                    let queued = effects.get(&(info.server, value.request)).ok_or_else(stale)?;
+                    let request = if value.effect_request == 0 { value.request } else { value.effect_request };
+                    let queued = effects.get(&(info.server, request)).ok_or_else(stale)?;
                     if !queued.permit.is_current() || queued.permit.fence() != fence { return Err(stale()); }
                     Ok(OutboundClass::Ordinary)
                 }
@@ -709,8 +710,28 @@ impl PaneConnectionPort for NativeProtocol {
         if !permit.is_current() || permit.fence() != command.fence {
             return Err(stale());
         }
+        let mut command = command;
+        if let spaceterm_client::pane_channel::RuntimeEffect::ResolvePaste(approval, decision) =
+            command.command
+        {
+            command.command = spaceterm_client::pane_channel::RuntimeEffect::CompleteNativeRequest(
+                self.paste_completion(command.fence, approval, decision)?,
+            );
+        }
         let server = command.fence.session().pane.server();
         let (_, info) = self.connected(server)?;
+        let required = match &command.command {
+            spaceterm_client::pane_channel::RuntimeEffect::Copy(_) => {
+                Some(spaceterm_protocol::negotiation::CAPABILITY_ENHANCED_COPY)
+            }
+            spaceterm_client::pane_channel::RuntimeEffect::RequestPaste(_) => {
+                Some(spaceterm_protocol::negotiation::CAPABILITY_NATIVE_PASTE_CORRELATION)
+            }
+            _ => None,
+        };
+        if required.is_some_and(|capability| !info.capabilities.supports(capability)) {
+            return Err(fail(ClientFailureClass::MissingCapability));
+        }
         if matches!(
             &command.command,
             spaceterm_client::pane_channel::RuntimeEffect::Pointer(_)
@@ -730,19 +751,39 @@ impl PaneConnectionPort for NativeProtocol {
             _ => None,
         };
         let order = self.next()?;
-        let request = native.map_or(order, |completion| completion.id().get());
+        let correlated_native =
+            native.is_some_and(|completion| completion.runtime_request().is_some());
+        let request = if correlated_native {
+            order
+        } else {
+            native.map_or(order, |completion| completion.id().get())
+        };
         let payload = match (info.major, native) {
             (1, Some(completion)) => Payload::Major1(v1::Message {
-                kind: Some(v1::message::Kind::NativeCompletion(
-                    spaceterm_protocol::convert::native_requests::v1::encode_completion(completion)
-                        .map_err(ClientFailure::from)?,
-                )),
+                kind: Some(v1::message::Kind::NativeCompletion({
+                    let mut value =
+                        spaceterm_protocol::convert::native_requests::v1::encode_completion(
+                            completion,
+                        )
+                        .map_err(ClientFailure::from)?;
+                    if correlated_native {
+                        value.effect_request = request;
+                    }
+                    value
+                })),
             }),
             (2, Some(completion)) => Payload::Major2(v2::Message {
-                kind: Some(v2::message::Kind::NativeCompletion(
-                    spaceterm_protocol::convert::native_requests::v2::encode_completion(completion)
-                        .map_err(ClientFailure::from)?,
-                )),
+                kind: Some(v2::message::Kind::NativeCompletion({
+                    let mut value =
+                        spaceterm_protocol::convert::native_requests::v2::encode_completion(
+                            completion,
+                        )
+                        .map_err(ClientFailure::from)?;
+                    if correlated_native {
+                        value.effect_request = request;
+                    }
+                    value
+                })),
             }),
             (1, None) => Payload::Major1(v1::Message {
                 kind: Some(v1::message::Kind::RuntimeCommand(
@@ -781,14 +822,31 @@ impl PaneConnectionPort for NativeProtocol {
             },
         );
         drop(effects);
+        if let Some(completion) = native {
+            self.forget_native(completion.fence().session(), completion.id().get())?;
+        }
         self.terminal.effects_changed.notify_one();
-        if native.is_some() {
+        if native.is_some() && !correlated_native {
             return Ok(EffectAdmission::Queued);
         }
         Ok(EffectAdmission::Correlated(EffectCorrelation::new(
             request,
             command.fence,
         )?))
+    }
+    fn try_copy(
+        &self,
+        permit: EffectPermit,
+        modifiers: spaceterm_terminal::InputModifiers,
+    ) -> Result<EffectAdmission, ClientFailure> {
+        let fence = permit.fence();
+        self.try_effect(
+            permit,
+            FencedRuntimeCommand {
+                fence,
+                command: spaceterm_client::pane_channel::RuntimeEffect::Copy(modifiers),
+            },
+        )
     }
     fn read(
         &self,

@@ -217,7 +217,7 @@ message Paste { bytes text = 1; bytes approval = 2; }
 message Appearance { uint64 generation = 1; uint32 foreground = 2; uint32 background = 3; repeated uint32 palette = 4; bool bold_as_bright = 5; bool dark = 6; }
 message RuntimeCommand {
   spaceterm.common.EffectFence fence = 1; uint64 request = 2;
-  oneof action { Key key = 3; string input_method_text = 4; Paste paste = 5; Pointer pointer = 6; Geometry resize = 7; Appearance appearance = 8; bool focus_report = 9; MeasuredGrid measured_resize = 10; ClearScreenAndScrollback clear_screen_and_scrollback = 11; CellPixelMetrics cell_pixel_metrics = 12; ApplicationPointer application_pointer = 13; ApplicationWheel application_wheel = 14; }
+  oneof action { Key key = 3; string input_method_text = 4; Paste paste = 5; Pointer pointer = 6; Geometry resize = 7; Appearance appearance = 8; bool focus_report = 9; MeasuredGrid measured_resize = 10; ClearScreenAndScrollback clear_screen_and_scrollback = 11; CellPixelMetrics cell_pixel_metrics = 12; ApplicationPointer application_pointer = 13; ApplicationWheel application_wheel = 14; uint32 enhanced_copy = 15; }
 }
 message RuntimeOutcome { uint64 request = 1; spaceterm.common.EffectFence fence = 2; spaceterm.common.Failure failure = 3; }
 message CellRef { spaceterm.common.Session session = 1; uint64 screen_generation = 2; uint64 row_id = 3; uint64 row_revision = 4; uint32 column = 5; PhysicalRowId physical_row = 6; }
@@ -310,9 +310,11 @@ message NativeRequest {
   oneof action { ClipboardRequest clipboard = 3; UnsafePasteRequest unsafe_paste = 4; PermissionRequest permission = 5; NotificationRequest notification = 8; }
 
   uint32 not_before_delay_ms = 6; optional uint32 remaining_ms = 7;
+  uint64 originating_runtime_request = 9;
 }
 message NativeCompletion { spaceterm.common.EffectFence fence = 1; uint64 request = 2; bool allowed = 3; bytes clipboard_text = 4; spaceterm.common.Failure failure = 5;
   uint32 disposition = 6; uint64 paste_approval = 7; uint32 paste_decision = 8;
+  uint64 effect_request = 9; uint64 originating_runtime_request = 10;
 }
 message PairedDevice { spaceterm.common.Identity device = 1; spaceterm.common.Identity pairing = 2; string name = 3; bytes public_key = 4; repeated spaceterm.common.Identity clients = 5; }
 message Enrollment { bytes single_use_authorization = 1; bytes verified_fingerprint = 2; PairedDevice device = 3; }

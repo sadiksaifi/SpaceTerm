@@ -55,6 +55,7 @@ pub(super) struct TerminalConnection {
     receiver: mpsc::Receiver<Event>,
     clock: Option<Arc<dyn crate::contracts::ServerClock>>,
     last_effect_request: u64,
+    native_paste_correlations: bool,
     effect_sequence: u64,
     effects: BTreeMap<u64, AbortHandle>,
     effect_sender: mpsc::Sender<EffectReply>,
@@ -72,6 +73,7 @@ impl TerminalConnection {
     pub(super) fn new(
         clock: Option<Arc<dyn crate::contracts::ServerClock>>,
         limits: spaceterm_protocol::limits::NegotiatedLimits,
+        native_paste_correlations: bool,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(16);
         let (effect_sender, effect_receiver) = mpsc::channel(4);
@@ -89,6 +91,7 @@ impl TerminalConnection {
             receiver,
             clock,
             last_effect_request: 0,
+            native_paste_correlations,
         }
     }
     pub(super) fn bound_page_query(&self, payload: &mut Payload) -> Result<(), ServerFailure> {
@@ -325,11 +328,12 @@ impl TerminalConnection {
         macro_rules! decode {
             ($value:expr, $p:ident) => {{
                 let value = $value;
-                (
-                    value.request,
-                    spaceterm_protocol::convert::runtime::$p::decode_command(value)
-                        .map_err(protocol_failure)?,
-                )
+                let mut command = spaceterm_protocol::convert::runtime::$p::decode_command(value)
+                    .map_err(protocol_failure)?;
+                if self.native_paste_correlations && let spaceterm_terminal::runtime_contracts::RuntimeCommand::RequestPaste(text) = command.command {
+                    command.command = spaceterm_terminal::runtime_contracts::RuntimeCommand::RequestCorrelatedPaste(value.request, text);
+                }
+                (value.request, command)
             }};
         }
         macro_rules! complete {
@@ -339,11 +343,18 @@ impl TerminalConnection {
                 if value.request == 0 || fence.session().pane.server() != principal.server() || fence.connection().client != principal.client() {
                     return Err(failure(ServerFailureClass::ScopeMismatch));
                 }
+                let effect_request = if value.effect_request == 0 { value.request } else { value.effect_request };
+                if value.effect_request != 0 {
+                    if value.effect_request <= self.last_effect_request {
+                        return self.stale_completion(effect_request, fence, payload.major(), egress);
+                    }
+                    self.last_effect_request = value.effect_request;
+                }
                 let Some(request) = self.native.get(&(fence.session(), value.request)) else {
-                    return self.stale_completion(value.request, fence, payload.major(), egress);
+                    return self.stale_completion(effect_request, fence, payload.major(), egress);
                 };
                 let completion = native_requests::$p::decode_completion(value, request).map_err(protocol_failure)?;
-                (value.request, spaceterm_terminal::runtime_contracts::FencedRuntimeCommand { fence, command: spaceterm_terminal::runtime_contracts::RuntimeCommand::CompleteNativeRequest(completion) })
+                (effect_request, spaceterm_terminal::runtime_contracts::FencedRuntimeCommand { fence, command: spaceterm_terminal::runtime_contracts::RuntimeCommand::CompleteNativeRequest(completion) })
             }};
         }
         self.effect_request(payload)?;
@@ -367,13 +378,15 @@ impl TerminalConnection {
         }
         let reservation = egress.reserve_operation_reply().map_err(egress_failure)?;
         let fence = command.fence;
-        let native_completion = matches!(
-            command.command,
-            spaceterm_terminal::runtime_contracts::RuntimeCommand::CompleteNativeRequest(_)
-        );
+        let native_completion = match &command.command {
+            spaceterm_terminal::runtime_contracts::RuntimeCommand::CompleteNativeRequest(
+                completion,
+            ) => Some(completion.id()),
+            _ => None,
+        };
         let result = handle.try_runtime_command(principal, command)?;
-        if native_completion {
-            self.native.remove(&(fence.session(), request));
+        if let Some(native_request) = native_completion {
+            self.native.remove(&(fence.session(), native_request.get()));
         }
         let major = payload.major();
         self.effect_sequence = self
@@ -829,7 +842,7 @@ fn native_completion_binding(
         },
         kind => kind.clone(),
     };
-    NativeRequest::new(
+    let binding = NativeRequest::new(
         request.fence(),
         request.id(),
         request.issued_at(),
@@ -837,7 +850,13 @@ fn native_completion_binding(
         request.deadline(),
         kind,
     )
-    .map_err(|_| failure(ServerFailureClass::ScopeMismatch))
+    .map_err(|_| failure(ServerFailureClass::ScopeMismatch))?;
+    match request.runtime_request() {
+        Some(origin) => binding
+            .with_runtime_request(origin.get())
+            .map_err(|_| failure(ServerFailureClass::ScopeMismatch)),
+        None => Ok(binding),
+    }
 }
 
 async fn native_current(
@@ -923,4 +942,78 @@ fn bounded_limits(
         limits.bytes().min(bytes),
     )
     .map_err(|_| failure(ServerFailureClass::Capacity))
+}
+
+#[cfg(test)]
+mod paste_binding_tests {
+    use super::native_completion_binding;
+    use spaceterm_core::{
+        authority::*, identity::*, native_requests::*, observations::MonotonicTick,
+    };
+
+    #[test]
+    fn native_paste_completion_binding_strips_text_but_preserves_origin_and_exact_fence() {
+        let server = ServerId::new([7; 16]);
+        let pane = PaneId::new(server, 3).unwrap();
+        let client = ClientId::new(server, 4).unwrap();
+        let fence = EffectFence::new(
+            SessionKey {
+                pane,
+                epoch: ServerEpoch::new(5),
+                generation: SessionGeneration::new(6),
+            },
+            ControlGrant::new(pane, client, ControlGeneration::new(7)).unwrap(),
+            ConnectionBinding::new(client, ConnectionGeneration::new(8)),
+            ContextGeneration::new(9),
+            None,
+        )
+        .unwrap();
+        let request = NativeRequest::new(
+            fence,
+            NativeRequestId::new(41).unwrap(),
+            MonotonicTick::new(1),
+            MonotonicTick::new(1),
+            Some(MonotonicTick::new(30_001)),
+            NativeRequestKind::UnsafePaste {
+                approval: PasteApprovalId::new(19).unwrap(),
+                text: NativeText::new("one\ntwo".into()).unwrap(),
+            },
+        )
+        .unwrap()
+        .with_runtime_request(127)
+        .unwrap();
+        let binding = native_completion_binding(&request).unwrap();
+        assert_eq!(binding.runtime_request(), request.runtime_request());
+        assert_eq!(binding.fence(), request.fence());
+        assert_eq!(binding.id(), request.id());
+        assert_eq!(binding.deadline(), request.deadline());
+        assert!(
+            matches!(binding.kind(), NativeRequestKind::UnsafePaste { text, .. } if text.as_str().is_empty())
+        );
+        let completion = NativeCompletion::new(
+            &request,
+            NativeCompletionKind::Paste {
+                approval: PasteApprovalId::new(19).unwrap(),
+                decision: PasteDecision::Confirm,
+            },
+        )
+        .unwrap();
+        macro_rules! check {
+            ($p:ident) => {{
+                let wire = spaceterm_protocol::convert::native_requests::$p::encode_completion(
+                    &completion,
+                )
+                .unwrap();
+                assert_eq!(
+                    spaceterm_protocol::convert::native_requests::$p::decode_completion(
+                        &wire, &binding
+                    )
+                    .unwrap(),
+                    completion
+                );
+            }};
+        }
+        check!(v1);
+        check!(v2);
+    }
 }

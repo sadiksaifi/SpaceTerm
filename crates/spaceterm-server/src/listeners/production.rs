@@ -56,6 +56,7 @@ pub struct ProductionListenerPorts {
     status: Mutex<Option<watch::Receiver<ServerStatus>>>,
     account_runtime: Mutex<Option<Arc<crate::account_runtime::AccountRuntimeProcesses>>>,
     native: Option<Arc<dyn NativeStatusObserver>>,
+    protocol_majors: Option<Vec<u32>>,
 }
 impl ProductionListenerPorts {
     pub fn new() -> Arc<Self> {
@@ -81,6 +82,29 @@ impl ProductionListenerPorts {
             native: Some(native),
             ..Self::default()
         })
+    }
+    /// Restricts negotiation to supported profiles for a rolling-version host.
+    pub fn with_native_status_and_protocol_majors(
+        native: Arc<dyn NativeStatusObserver>,
+        protocol_majors: Vec<u32>,
+    ) -> Result<Arc<Self>, ServerFailure> {
+        let supported = HandshakeConfig::default().majors;
+        if protocol_majors.is_empty()
+            || protocol_majors
+                .iter()
+                .any(|major| !supported.contains(major))
+            || protocol_majors
+                .iter()
+                .enumerate()
+                .any(|(index, major)| protocol_majors[..index].contains(major))
+        {
+            return Err(failure(ServerFailureClass::ScopeMismatch));
+        }
+        Ok(Arc::new(Self {
+            native: Some(native),
+            protocol_majors: Some(protocol_majors),
+            ..Self::default()
+        }))
     }
     /// The same bounded feed used by authenticated clients, retained after close.
     /// Status is comparison data and grants no native-management authority.
@@ -178,6 +202,7 @@ pub fn production_listener_factories_with_dispatch<S: PairingSnapshotPort + 'sta
         uid: config.registration.key().account_uid,
         account_runtime: account_runtime.is_some(),
         extensions: ordinary.capabilities(),
+        protocol_majors: config.ports.protocol_majors.clone(),
         identity: config.identity.clone(),
         lookup,
         server: snapshot.state().server,
@@ -237,6 +262,7 @@ pub fn production_listener_factories_with_dispatch<S: PairingSnapshotPort + 'sta
 
 struct ProductionAuthentication<S> {
     extensions: Vec<u32>,
+    protocol_majors: Option<Vec<u32>>,
     account_runtime: bool,
     uid: u32,
     identity: Arc<ServerIdentity>,
@@ -269,6 +295,8 @@ impl<S: PairingSnapshotPort + 'static> AuthenticationFactoryPort for ProductionA
         capabilities.extend([
             spaceterm_protocol::negotiation::CAPABILITY_APPLICATION_MOUSE,
             spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA,
+            spaceterm_protocol::negotiation::CAPABILITY_ENHANCED_COPY,
+            spaceterm_protocol::negotiation::CAPABILITY_NATIVE_PASTE_CORRELATION,
         ]);
         capabilities.extend_from_slice(&self.extensions);
         capabilities.sort_unstable();
@@ -278,6 +306,10 @@ impl<S: PairingSnapshotPort + 'static> AuthenticationFactoryPort for ProductionA
             epoch: self.epoch,
             owning_uid: self.uid,
             handshake: HandshakeConfig {
+                majors: self
+                    .protocol_majors
+                    .clone()
+                    .unwrap_or_else(|| HandshakeConfig::default().majors),
                 capabilities,
                 ..HandshakeConfig::default()
             },

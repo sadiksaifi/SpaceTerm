@@ -234,6 +234,8 @@ impl ConnectionCapabilities {
             CAPABILITY_NATIVE_NOTIFICATIONS,
             CAPABILITY_APPLICATION_MOUSE,
             CAPABILITY_RUNTIME_METADATA,
+            CAPABILITY_ENHANCED_COPY,
+            CAPABILITY_NATIVE_PASTE_CORRELATION,
         ]
         .into_iter()
         .enumerate()
@@ -256,6 +258,8 @@ impl ConnectionCapabilities {
             CAPABILITY_NATIVE_NOTIFICATIONS => 6,
             CAPABILITY_APPLICATION_MOUSE => 7,
             CAPABILITY_RUNTIME_METADATA => 8,
+            CAPABILITY_ENHANCED_COPY => 9,
+            CAPABILITY_NATIVE_PASTE_CORRELATION => 10,
             _ => return false,
         };
         self.0 & (1 << index) != 0
