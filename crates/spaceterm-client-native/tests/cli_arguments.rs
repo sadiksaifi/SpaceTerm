@@ -240,3 +240,32 @@ fn install_accepts_only_a_complete_explicit_local_artifact_source() {
         assert_eq!(invocation(&args), Err(CliFailure::Usage));
     }
 }
+
+#[test]
+fn update_stage_accepts_the_same_complete_explicit_local_artifact_source_as_install() {
+    assert!(
+        invocation(&[
+            "update",
+            "stage",
+            "--feed",
+            "/local/candidate.json",
+            "--archive",
+            "/local/candidate.tar.gz"
+        ])
+        .is_ok()
+    );
+    for args in [
+        vec!["update", "stage", "--feed", "/local/candidate.json"],
+        vec!["update", "stage", "--archive", "/local/candidate.tar.gz"],
+        vec![
+            "update",
+            "stage",
+            "--feed",
+            "https://example.com/feed.json",
+            "--archive",
+            "/local/archive",
+        ],
+    ] {
+        assert_eq!(invocation(&args), Err(CliFailure::Usage));
+    }
+}

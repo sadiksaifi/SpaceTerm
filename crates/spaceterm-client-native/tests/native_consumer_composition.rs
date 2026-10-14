@@ -190,13 +190,29 @@ async fn controller(directory: &std::path::Path, create: bool) -> Arc<JournalCon
         )
         .await
     } else {
-        NativeClientJournal::open_existing(
-            directory.to_owned(),
-            codec.clone(),
-            verifier.clone(),
-            JournalLimits::default(),
-        )
+        // A cancelled worker may leave its already-started blocking commit
+        // draining. A process restart releases that handle; this in-process
+        // fixture waits for the same release without treating locked as missing.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match NativeClientJournal::open_existing(
+                    directory.to_owned(),
+                    codec.clone(),
+                    verifier.clone(),
+                    JournalLimits::default(),
+                )
+                .await
+                {
+                    Ok(storage) => break Ok(storage),
+                    Err(failure) if failure.class() == ClientFailureClass::StorageUnavailable => {
+                        tokio::time::sleep(Duration::from_millis(10)).await
+                    }
+                    Err(failure) => break Err(failure),
+                }
+            }
+        })
         .await
+        .unwrap()
     }
     .unwrap();
     Arc::new(
@@ -206,14 +222,22 @@ async fn controller(directory: &std::path::Path, create: bool) -> Arc<JournalCon
     )
 }
 
-async fn exercise(kind: NativeConsumerKind, major: u32, self_remove: bool) {
+async fn exercise(
+    kind: NativeConsumerKind,
+    major: u32,
+    self_remove: bool,
+    offline: Option<DesiredServerState>,
+    operation_count: usize,
+) {
     use std::os::unix::fs::DirBuilderExt;
     let root = tempfile::Builder::new()
         .prefix("st-consumer-")
         .tempdir_in("/var/tmp")
         .unwrap();
     let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
-    let registration = account.initialize(DesiredServerState::Running).unwrap();
+    let registration = account
+        .initialize(offline.unwrap_or(DesiredServerState::Running))
+        .unwrap();
     let server = ServerId::new(registration.server_pin().identity);
     let signer = ServerKeyStore::open(&registration)
         .unwrap()
@@ -351,6 +375,39 @@ async fn exercise(kind: NativeConsumerKind, major: u32, self_remove: bool) {
     // The connection uses a physically reopened canonical journal, not a fixture
     // identity or an already authenticated desktop connection.
     let journal = controller(&directory, false).await;
+    if offline.is_some() {
+        use spaceterm_client_native::cli::bindings::{PairingCommandBindings, RevocationState};
+        let provider = NativeClientProvider::from_supervisor(account.reopen());
+        let consumer = NativeConsumer::with_recovered_journal(
+            provider.management(),
+            kind,
+            journal.clone(),
+            Arc::new(Credentials(device)),
+            NativeRouteConnector::new(vec![route], None).unwrap(),
+        );
+        let assessment = consumer
+            .assess_unpair(DeviceId::new([6; 16]), None)
+            .await
+            .unwrap();
+        let token = assessment.token().clone();
+        let confirmed = spaceterm_client::management_cli::confirm_exact(
+            assessment,
+            spaceterm_client::management_cli::ConfirmationReply::new(token),
+        )
+        .unwrap();
+        let report = consumer.unpair(confirmed).await.unwrap();
+        assert!(report.local_connection_removed);
+        assert_eq!(report.revocation, RevocationState::Pending);
+        let runtime = consumer.pairing_runtime().await.unwrap();
+        assert!(runtime.inventory().await.unwrap().saved.is_empty());
+        assert_eq!(runtime.inventory().await.unwrap().revocations.len(), 1);
+        consumer.shutdown().await.unwrap();
+        drop(runtime);
+        drop(journal);
+        let reopened = controller(&directory, false).await;
+        assert!(reopened.snapshot().unwrap().bindings().is_empty());
+        return;
+    }
     let lookup = Lookup(PairingRecord {
         principal: Principal {
             server: server.bytes(),
@@ -368,39 +425,40 @@ async fn exercise(kind: NativeConsumerKind, major: u32, self_remove: bool) {
     )
     .unwrap();
     let served = tokio::spawn(async move {
-        let pending = listener.accept().await.unwrap();
-        let hello = pending.recv().await.unwrap().unwrap();
-        let (handshake, reply) = ServerHandshake::accept(
-            server.bytes(),
-            1,
-            HandshakeConfig {
-                majors: vec![major],
-                capabilities: vec![
-                    CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
-                    CAPABILITY_CANONICAL_DOMAIN,
-                    CAPABILITY_ORGANIZATION_COMPARISONS,
-                ],
-                ..HandshakeConfig::default()
-            },
-            signer,
-            &lookup,
-            &hello,
-        )
-        .unwrap();
-        pending.send(&reply).await.unwrap();
-        let proof = pending.recv().await.unwrap().unwrap();
-        let (Established::Ordinary(mut codec), ready) =
-            handshake.receive_device(&lookup, &proof).unwrap()
-        else {
-            panic!("ordinary connection required")
-        };
-        pending.send(&ready).await.unwrap();
-        let transport = pending.finish_authentication().unwrap();
         let mut queries = 0;
         let mut writes = 0;
-        while let Some(bytes) = transport.recv().await.unwrap() {
-            let payload = codec.decode(&bytes).unwrap();
-            macro_rules! respond {($m:expr,$p:ident,$v:ident)=>{match $m.kind{
+        for _ in 0..if operation_count > 128 { 2 } else { 1 } {
+            let pending = listener.accept().await.unwrap();
+            let hello = pending.recv().await.unwrap().unwrap();
+            let (handshake, reply) = ServerHandshake::accept(
+                server.bytes(),
+                1,
+                HandshakeConfig {
+                    majors: vec![major],
+                    capabilities: vec![
+                        CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
+                        CAPABILITY_CANONICAL_DOMAIN,
+                        CAPABILITY_ORGANIZATION_COMPARISONS,
+                    ],
+                    ..HandshakeConfig::default()
+                },
+                signer.clone(),
+                &lookup,
+                &hello,
+            )
+            .unwrap();
+            pending.send(&reply).await.unwrap();
+            let proof = pending.recv().await.unwrap().unwrap();
+            let (Established::Ordinary(mut codec), ready) =
+                handshake.receive_device(&lookup, &proof).unwrap()
+            else {
+                panic!("ordinary connection required")
+            };
+            pending.send(&ready).await.unwrap();
+            let transport = pending.finish_authentication().unwrap();
+            while let Some(bytes) = transport.recv().await.unwrap() {
+                let payload = codec.decode(&bytes).unwrap();
+                macro_rules! respond {($m:expr,$p:ident,$v:ident)=>{match $m.kind{
                 Some($p::message::Kind::OrganizationQuery(query))=>organization::$p::snapshot_payload(&snapshot(server),0..0,organization::PublicationPart{request:query.request,generation:query.request_generation,transfer:query.request,index:0,total:1,epoch:ServerEpoch::new(1),base:OrganizationRevision::new(0),revision:OrganizationRevision::new(1)}).unwrap(),
                 Some($p::message::Kind::Reconciliation(mut query))=>{query.acknowledged=true;query.connection_generation=1;Payload::$v($p::Message{kind:Some($p::message::Kind::Reconciliation(query))})},
                 Some($p::message::Kind::StatusQuery(query))=>{queries+=1;let query=management::$p::decode_query(&query,ConnectionBinding{client,generation:ConnectionGeneration::new(1)}).unwrap();Payload::$v($p::Message{kind:Some($p::message::Kind::StatusPublication(management::$p::encode_publication(&StatusPublication::Snapshot{request:query.request,generation:query.generation,status:status(server,queries)})))})},
@@ -408,28 +466,34 @@ async fn exercise(kind: NativeConsumerKind, major: u32, self_remove: bool) {
                 Some($p::message::Kind::Acknowledgement(value))=>{let(stream,through)=spaceterm_protocol::convert::operations::$p::decode_acknowledgement(&value,pairing,client).unwrap();Payload::$v($p::Message{kind:Some($p::message::Kind::AcknowledgementConfirmation($p::AcknowledgementConfirmation{stream:Some(spaceterm_protocol::convert::identity::encode_stream(stream)),acknowledged_through:through.get()}))})},
                 _=>panic!("unexpected consumer request"),
             }};}
-            let response = match payload {
-                Payload::Major1(m) => respond!(m, v1, Major1),
-                Payload::Major2(m) => respond!(m, v2, Major2),
-            };
-            transport
-                .send(&codec.encode(&response).unwrap())
-                .await
-                .unwrap();
+                let response = match payload {
+                    Payload::Major1(m) => respond!(m, v1, Major1),
+                    Payload::Major2(m) => respond!(m, v2, Major2),
+                };
+                transport
+                    .send(&codec.encode(&response).unwrap())
+                    .await
+                    .unwrap();
+            }
         }
         listener.close().unwrap();
         (queries, writes)
     });
     let provider = NativeClientProvider::from_supervisor(account.reopen());
-    let consumer = NativeConsumer::restore(
+    let mut consumer = NativeConsumer::restore(
         provider.management(),
         kind,
         journal,
-        Arc::new(Credentials(device)),
-        NativeRouteConnector::new(vec![route], None).unwrap(),
+        Arc::new(Credentials(device.clone())),
+        NativeRouteConnector::new(
+            vec![LocalRouteAuthority::new(registration.endpoint().unwrap()).unwrap()],
+            None,
+        )
+        .unwrap(),
     )
     .await
     .unwrap();
+    let mut original_result = None;
     if kind == NativeConsumerKind::Cli {
         assert_eq!(
             ProtocolManagement::status(&consumer)
@@ -461,6 +525,7 @@ async fn exercise(kind: NativeConsumerKind, major: u32, self_remove: bool) {
         .unwrap();
         let progress = consumer.execute(confirmed).await.unwrap();
         assert_eq!(progress.state, ManagementProgressState::Completed);
+        original_result = Some(progress);
         let repeated = spaceterm_client::management_cli::confirm_exact(
             duplicate.clone(),
             spaceterm_client::management_cli::ConfirmationReply::new(duplicate.token().clone()),
@@ -474,21 +539,58 @@ async fn exercise(kind: NativeConsumerKind, major: u32, self_remove: bool) {
             progress.request.operation_id().unwrap().stream().client(),
             client
         );
+        for completed in 1..operation_count {
+            if operation_count > 128 && completed == 64 {
+                consumer.shutdown().await.unwrap();
+                consumer = NativeConsumer::restore(
+                    provider.management(),
+                    kind,
+                    controller(&directory, false).await,
+                    Arc::new(Credentials(device.clone())),
+                    NativeRouteConnector::new(
+                        vec![LocalRouteAuthority::new(registration.endpoint().unwrap()).unwrap()],
+                        None,
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            }
+            let assessment = consumer
+                .assess(
+                    spaceterm_client::management_cli::ManagementAction::RemoteAccess {
+                        policy: RemoteAccessPolicy::enabled(
+                            server,
+                            vec!["127.0.0.1:443".parse().unwrap()],
+                        )
+                        .unwrap(),
+                    },
+                )
+                .await
+                .unwrap();
+            let token = assessment.token().clone();
+            let confirmed = spaceterm_client::management_cli::confirm_exact(
+                assessment,
+                spaceterm_client::management_cli::ConfirmationReply::new(token),
+            )
+            .unwrap();
+            assert_eq!(
+                consumer.execute(confirmed).await.unwrap().state,
+                ManagementProgressState::Completed
+            );
+        }
+        if operation_count > 128 {
+            let runtime = consumer.pairing_runtime().await.unwrap();
+            let state = runtime.journal().snapshot().unwrap();
+            assert!(state.operations().len() < 128);
+        }
         if self_remove {
-            use spaceterm_client_native::cli::bindings::{PairingCommandBindings, RevocationState};
-            let result = consumer.assess_unpair(DeviceId::new([6; 16]), None).await;
-            let assessment = result.unwrap();
             let runtime = consumer.pairing_runtime().await.unwrap();
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
                     let state = runtime.journal().snapshot().unwrap();
                     let header = state
-                        .stream(match assessment.evidence() {
-                            spaceterm_client::management_cli::AssessmentEvidence::Unpair(value) => {
-                                value.parts().reference.operation.stream()
-                            }
-                            _ => panic!("unpair evidence required"),
-                        })
+                        .stream(progress.request.operation_id().unwrap().stream())
                         .unwrap();
                     if header.confirmed_prefix == header.durable_prefix {
                         break;
@@ -498,6 +600,10 @@ async fn exercise(kind: NativeConsumerKind, major: u32, self_remove: bool) {
             })
             .await
             .unwrap();
+            use spaceterm_client_native::cli::bindings::{PairingCommandBindings, RevocationState};
+            let result = consumer.assess_unpair(DeviceId::new([6; 16]), None).await;
+            let assessment = result.unwrap();
+            let runtime = consumer.pairing_runtime().await.unwrap();
             let token = assessment.token().clone();
             let confirmed = spaceterm_client::management_cli::confirm_exact(
                 assessment,
@@ -569,24 +675,44 @@ async fn exercise(kind: NativeConsumerKind, major: u32, self_remove: bool) {
     assert_eq!(
         served.await.unwrap(),
         if kind == NativeConsumerKind::Cli {
-            (2, 1)
+            ((operation_count + 1) as u64, operation_count as u64)
         } else {
             (2, 0)
         }
     );
+    if operation_count > 128 {
+        // Lost stdout is recoverable after dropping both the worker and SQLite
+        // handles. There is no listener, so this also forbids a new network request.
+        let recovered = NativeConsumer::with_recovered_journal(
+            provider.management(),
+            kind,
+            controller(&directory, false).await,
+            Arc::new(Credentials(device)),
+            NativeRouteConnector::new(vec![route], None).unwrap(),
+        );
+        let original = original_result.unwrap();
+        assert_eq!(
+            recovered
+                .resolve(original.request.operation_id().unwrap())
+                .await
+                .unwrap(),
+            original
+        );
+        recovered.shutdown().await.unwrap();
+    }
 }
 #[tokio::test]
 async fn production_cli_reopens_saved_additional_client_and_executes_authenticated_management_in_both_majors()
  {
     for major in [1, 2] {
-        exercise(NativeConsumerKind::Cli, major, false).await;
+        exercise(NativeConsumerKind::Cli, major, false, None, 1).await;
     }
 }
 #[tokio::test]
 async fn production_companion_reopens_saved_additional_client_and_subscribes_over_authenticated_ipc()
  {
     for major in [1, 2] {
-        exercise(NativeConsumerKind::StatusCompanion, major, false).await;
+        exercise(NativeConsumerKind::StatusCompanion, major, false, None, 1).await;
     }
 }
 
@@ -594,6 +720,17 @@ async fn production_companion_reopens_saved_additional_client_and_subscribes_ove
 async fn production_cli_self_unpair_closes_ordinary_worker_before_restricted_retry_in_both_majors()
 {
     for major in [1, 2] {
-        exercise(NativeConsumerKind::Cli, major, true).await;
+        exercise(NativeConsumerKind::Cli, major, true, None, 1).await;
     }
+}
+
+#[tokio::test]
+async fn offline_cli_self_unpair_removes_stopped_and_unreachable_pairings() {
+    for desired in [DesiredServerState::Stopped, DesiredServerState::Running] {
+        exercise(NativeConsumerKind::Cli, 2, true, Some(desired), 1).await;
+    }
+}
+#[tokio::test]
+async fn cli_protocol_results_release_capacity_after_more_than_128_operations() {
+    exercise(NativeConsumerKind::Cli, 2, false, None, 130).await;
 }

@@ -70,6 +70,7 @@ pub enum CliCommand {
     UpdateCheck,
     UpdateStage {
         version: Option<StableVersion>,
+        source: Option<crate::native::artifacts::LocalArtifactSource>,
     },
     UpdateActivate {
         installation: InstallationId,
@@ -178,16 +179,7 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInvocat
                     ("--archive", Flag::Value),
                 ],
             )?;
-            let source = match (options.value("--feed"), options.value("--archive")) {
-                (None, None) => None,
-                (Some(feed), Some(archive)) => {
-                    Some(crate::native::artifacts::LocalArtifactSource::new(
-                        feed.into(),
-                        archive.into(),
-                    )?)
-                }
-                _ => return Err(CliFailure::Usage),
-            };
+            let source = options.artifact_source()?;
             CliCommand::Install {
                 version: options.value("--version").map(parse_version).transpose()?,
                 source,
@@ -301,9 +293,19 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<CliInvocat
         }
         ["update", "check"] => CliCommand::UpdateCheck,
         ["update", "stage", rest @ ..] => {
-            let options = Options::new(rest, &[("--version", Flag::Value)])?;
+            let options = Options::new(
+                rest,
+                &[
+                    ("--version", Flag::Value),
+                    ("--feed", Flag::Value),
+                    ("--archive", Flag::Value),
+                ],
+            )?;
             let version = options.value("--version").map(parse_version).transpose()?;
-            CliCommand::UpdateStage { version }
+            CliCommand::UpdateStage {
+                version,
+                source: options.artifact_source()?,
+            }
         }
         ["update", "activate", rest @ ..] => {
             let options = Options::new(
@@ -372,6 +374,17 @@ impl<'a> Options<'a> {
     }
     fn required(&self, key: &str) -> Result<&'a str, CliFailure> {
         self.value(key).ok_or(CliFailure::Usage)
+    }
+    fn artifact_source(
+        &self,
+    ) -> Result<Option<crate::native::artifacts::LocalArtifactSource>, CliFailure> {
+        match (self.value("--feed"), self.value("--archive")) {
+            (None, None) => Ok(None),
+            (Some(feed), Some(archive)) => Ok(Some(
+                crate::native::artifacts::LocalArtifactSource::new(feed.into(), archive.into())?,
+            )),
+            _ => Err(CliFailure::Usage),
+        }
     }
     fn confirmation(&self, non_interactive: bool) -> Result<ConfirmationMode, CliFailure> {
         match (self.present("--assess"), self.value("--confirm")) {

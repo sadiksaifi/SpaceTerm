@@ -213,7 +213,7 @@ pub enum ServiceRequestState {
     Indeterminate,
 }
 /// Bounded content-free progress retaining caller identity.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ServiceProgress {
     /// The ID retained before submission.
     pub request: NativeRequestId,

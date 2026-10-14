@@ -33,6 +33,9 @@ pub struct SavedPairing {
     pub(crate) receipt: SignedPairingReceipt,
 }
 impl SavedPairing {
+    pub fn device(&self) -> DeviceId {
+        self.device
+    }
     pub fn key(&self) -> &LocalPairingKey {
         &self.key
     }

@@ -3,6 +3,7 @@ use sha2::{Digest as _, Sha256};
 use spaceterm_core::operations::RequestDigest;
 use std::path::PathBuf;
 
+use super::supervisor::RegistrationBasis;
 use super::{
     InstallationStatus, RegisteredServer, ServiceFailure, ServiceFuture, ServiceOutcome,
     ServicePhase, ServiceProgress, ServiceRequestState, ServiceSupervisor, SupervisorState,
@@ -23,6 +24,7 @@ pub struct ServiceInstallAssessment {
     artifact: VerifiedServerArtifact,
     roots: InstallRoots,
     desktop_seed: Option<DesktopSeed>,
+    stage_basis: Option<RegistrationBasis>,
 }
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -86,6 +88,7 @@ impl ServiceInstallAssessment {
             artifact: self.artifact,
             roots: self.roots,
             desktop_seed: self.desktop_seed,
+            stage_basis: self.stage_basis,
         }
     }
 }
@@ -94,6 +97,7 @@ pub struct ConfirmedServiceInstall {
     artifact: VerifiedServerArtifact,
     roots: InstallRoots,
     desktop_seed: Option<DesktopSeed>,
+    stage_basis: Option<RegistrationBasis>,
 }
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -112,6 +116,8 @@ pub(super) struct InstallRecord {
     desktop_seed: Option<DesktopSeed>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     new_organization: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stage_basis: Option<RegistrationBasis>,
 }
 impl InstallRecord {
     pub(super) fn pending(&self) -> bool {
@@ -128,16 +134,29 @@ impl InstallRecord {
         if let Some(seed) = &self.desktop_seed {
             seed.origin()?;
         }
+        if let Some(basis) = &self.stage_basis {
+            basis.validate()?;
+            if self.reused
+                || self.new_organization
+                || self.desktop_seed.is_some()
+                || self.phase == ServicePhase::Starting
+            {
+                return Err(ServiceFailure::InvalidRecord);
+            }
+        }
         if self.artifact_sha256 == [0; 32]
             || self.digest
-                != install_digest(
-                    key,
-                    request,
-                    self.artifact_sha256,
-                    &self.version,
-                    self.roots.as_ref(),
-                    self.desktop_seed.as_ref(),
-                    self.new_organization,
+                != stage_digest(
+                    install_digest(
+                        key,
+                        request,
+                        self.artifact_sha256,
+                        &self.version,
+                        self.roots.as_ref(),
+                        self.desktop_seed.as_ref(),
+                        self.new_organization,
+                    )?,
+                    self.stage_basis.as_ref(),
                 )?
             || !matches!(
                 self.phase,
@@ -170,7 +189,16 @@ impl InstallRecord {
             ..
         }) = &self.state
         {
-            if self.installation.as_ref() != Some(installation) || *reused != self.reused {
+            if self.stage_basis.is_some()
+                || self.installation.as_ref() != Some(installation)
+                || *reused != self.reused
+            {
+                return Err(ServiceFailure::InvalidRecord);
+            }
+        } else if let ServiceRequestState::Completed(ServiceOutcome::Staged(installation)) =
+            &self.state
+        {
+            if self.stage_basis.is_none() || self.installation.as_ref() != Some(installation) {
                 return Err(ServiceFailure::InvalidRecord);
             }
         } else if matches!(self.state, ServiceRequestState::Completed(_)) {
@@ -215,6 +243,19 @@ fn install_digest(
     }
     Ok(RequestDigest::from_bytes(hash.finalize().into()))
 }
+fn stage_digest(
+    original: RequestDigest,
+    basis: Option<&RegistrationBasis>,
+) -> Result<RequestDigest, ServiceFailure> {
+    let Some(basis) = basis else {
+        return Ok(original);
+    };
+    let mut hash = Sha256::new();
+    hash.update(b"spaceterm-account-stage-v1\0");
+    hash.update(original.bytes());
+    hash.update(serde_json::to_vec(basis).map_err(|_| ServiceFailure::InvalidRecord)?);
+    Ok(RequestDigest::from_bytes(hash.finalize().into()))
+}
 impl ServiceSupervisor {
     /// Authenticates an account server artifact against the compiled production trust root.
     /// Explicit confirmation and a separately retained NativeRequestId are still required.
@@ -245,6 +286,7 @@ impl ServiceSupervisor {
             artifact,
             roots,
             desktop_seed: None,
+            stage_basis: None,
         })
     }
     /// Installs the original confirmed artifact, or reuses an established service without starting it.
@@ -256,6 +298,34 @@ impl ServiceSupervisor {
     ) -> ServiceFuture<'_, ServiceProgress> {
         let supervisor = self.clone();
         Box::pin(async move {
+            let handle = tokio::runtime::Handle::try_current()
+                .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
+            handle
+                .spawn(async move { supervisor.run_install(request, Some(confirmation)).await })
+                .await
+                .map_err(|_| ServiceFailure::Indeterminate)?
+        })
+    }
+    /// Retains one signed candidate without approval, configuration or startup.
+    /// The original request binds the exact registered identity and desired intent.
+    pub fn stage_installation(
+        &self,
+        request: NativeRequestId,
+        mut confirmation: ConfirmedServiceInstall,
+    ) -> ServiceFuture<'_, ServiceProgress> {
+        let supervisor = self.clone();
+        Box::pin(async move {
+            let registration = supervisor.discover()?.ok_or(ServiceFailure::Missing)?;
+            if !registration.is_installed() {
+                return Err(ServiceFailure::Missing);
+            }
+            confirmation.desktop_seed = None;
+            confirmation.stage_basis = Some(match supervisor.original_install(request)? {
+                Some(original) => original
+                    .stage_basis
+                    .ok_or(ServiceFailure::RequestConflict)?,
+                None => RegistrationBasis::capture(&registration),
+            });
             let handle = tokio::runtime::Handle::try_current()
                 .map_err(|_| ServiceFailure::SupervisorUnavailable)?;
             handle
@@ -430,6 +500,9 @@ impl ServiceSupervisor {
     ) -> Result<ServiceProgress, ServiceFailure> {
         let artifact = confirmation.as_ref().map(|value| &value.artifact);
         let proposed_roots = confirmation.as_ref().map(|value| &value.roots);
+        let proposed_stage = confirmation
+            .as_ref()
+            .and_then(|value| value.stage_basis.as_ref());
         let proposed_seed = confirmation
             .as_ref()
             .and_then(|value| value.desktop_seed.as_ref());
@@ -441,6 +514,7 @@ impl ServiceSupervisor {
                 && (original.artifact_sha256 != artifact.artifact_sha256()
                     || original.version != artifact.manifest().version
                     || original.desktop_seed.as_ref() != proposed_seed
+                    || original.stage_basis.as_ref() != proposed_stage
                     || original
                         .roots
                         .as_ref()
@@ -458,6 +532,7 @@ impl ServiceSupervisor {
                     && (record.artifact_sha256 != artifact.artifact_sha256()
                         || record.version != artifact.manifest().version
                         || record.desktop_seed.as_ref() != proposed_seed
+                        || record.stage_basis.as_ref() != proposed_stage
                         || record
                             .roots
                             .as_ref()
@@ -469,26 +544,44 @@ impl ServiceSupervisor {
             }
             None => {
                 let artifact = artifact.ok_or(ServiceFailure::UnknownRequest)?;
-                let new_organization = self.discover()?.is_none();
+                if let Some(basis) = proposed_stage {
+                    let registered = self.discover()?.ok_or(ServiceFailure::Missing)?;
+                    if !basis.matches(&registered)
+                        || registered.staged_installation().is_some_and(|staged| {
+                            staged.artifact_sha256 != artifact.artifact_sha256()
+                        })
+                    {
+                        // This request has admitted no artifact effect. Leave its
+                        // allocation unsubmitted rather than blocking lifecycle
+                        // recovery behind an impossible staging request.
+                        return Err(ServiceFailure::RequestConflict);
+                    }
+                }
+                let new_organization = proposed_stage.is_none() && self.discover()?.is_none();
                 let record = InstallRecord {
                     desktop_seed: proposed_seed.cloned(),
                     new_organization,
                     artifact_sha256: artifact.artifact_sha256(),
                     version: artifact.manifest().version.clone(),
-                    digest: install_digest(
-                        self.key,
-                        request,
-                        artifact.artifact_sha256(),
-                        &artifact.manifest().version,
-                        proposed_roots,
-                        proposed_seed,
-                        new_organization,
+                    digest: stage_digest(
+                        install_digest(
+                            self.key,
+                            request,
+                            artifact.artifact_sha256(),
+                            &artifact.manifest().version,
+                            proposed_roots,
+                            proposed_seed,
+                            new_organization,
+                        )?,
+                        proposed_stage,
                     )?,
                     phase: ServicePhase::Accepted,
                     state: ServiceRequestState::Pending,
-                    reused: self
-                        .discover()?
-                        .is_some_and(|registered| registered.is_installed()),
+                    reused: proposed_stage.is_none()
+                        && self
+                            .discover()?
+                            .is_some_and(|registered| registered.is_installed()),
+                    stage_basis: proposed_stage.cloned(),
                     installation: None,
                     roots: proposed_roots.cloned(),
                 };
@@ -498,6 +591,9 @@ impl ServiceSupervisor {
         };
         if record.phase == ServicePhase::Completed {
             return Ok(record.progress(request));
+        }
+        if record.stage_basis.is_some() {
+            return self.run_stage_install(request, record, artifact, &lease);
         }
         if record.reused {
             let registered = self.discover()?.ok_or(ServiceFailure::Missing)?;
@@ -665,6 +761,114 @@ impl ServiceSupervisor {
         }
         self.finish_install(request, record, &registered)
     }
+    fn run_stage_install(
+        &self,
+        request: NativeRequestId,
+        mut record: InstallRecord,
+        artifact: Option<&VerifiedServerArtifact>,
+        lease: &Lease,
+    ) -> Result<ServiceProgress, ServiceFailure> {
+        let basis = record
+            .stage_basis
+            .clone()
+            .ok_or(ServiceFailure::InvalidRecord)?;
+        let registered = self.discover()?.ok_or(ServiceFailure::Missing)?;
+        let already_published = record
+            .installation
+            .as_ref()
+            .is_some_and(|status| basis.matches_stage_publication(&registered, status));
+        if !basis.matches(&registered) && !already_published {
+            return Err(ServiceFailure::RequestConflict);
+        }
+        lease.verify()?;
+        if !already_published {
+            let admission = InstallAdmission {
+                supervisor: self,
+                request,
+                lease,
+                digest: record.digest,
+            };
+            let scope = InstallationScope::new(&registered, &admission)?;
+            let store = self.install_store(&scope)?;
+            // Recover only preparation owned by this exact signed artifact.
+            if let Some(preparing) = store.preparing_status()? {
+                if preparing.artifact_sha256 != record.artifact_sha256 {
+                    return Err(ServiceFailure::RequestConflict);
+                }
+                record.installation = Some(InstallationStatus {
+                    installation: preparing.installation,
+                    version: record.version.clone(),
+                    artifact_sha256: record.artifact_sha256,
+                });
+                self.write_install(request, &record)?;
+                store.discard_preparing(
+                    &scope,
+                    preparing.installation,
+                    store.snapshot()?.generation,
+                )?;
+            }
+            if let Some(cleanup) = store.cleanup_status()? {
+                if cleanup.artifact_sha256 != record.artifact_sha256 {
+                    return Err(ServiceFailure::CleanupUnresolved);
+                }
+                record.installation = Some(InstallationStatus {
+                    installation: cleanup.installation,
+                    version: record.version.clone(),
+                    artifact_sha256: cleanup.artifact_sha256,
+                });
+                self.write_install(request, &record)?;
+                store.cleanup(&scope)?;
+                record.installation = None;
+                self.write_install(request, &record)?;
+            }
+            let status = if let Some(status) = store.staged_status()? {
+                if status.artifact_sha256 != record.artifact_sha256
+                    || status.version != record.version
+                {
+                    return Err(ServiceFailure::RequestConflict);
+                }
+                status
+            } else {
+                let Some(artifact) = artifact else {
+                    return Ok(record.progress(request));
+                };
+                let installation = store.stage(&scope, artifact)?;
+                crate::server_installation::InstallationStatus {
+                    installation,
+                    version: record.version.clone(),
+                    artifact_sha256: record.artifact_sha256,
+                }
+            };
+            record.installation = Some(InstallationStatus {
+                installation: status.installation,
+                version: status.version,
+                artifact_sha256: status.artifact_sha256,
+            });
+            self.install_phase(request, &mut record, ServicePhase::Publishing)?;
+            let (directory, snapshot, mut next) =
+                self.read_registration()?.ok_or(ServiceFailure::Missing)?;
+            let current = self.discover()?.ok_or(ServiceFailure::Missing)?;
+            if !basis.matches(&current) {
+                return Err(ServiceFailure::RequestConflict);
+            }
+            next.staged = record.installation.clone();
+            next.generation = next
+                .generation
+                .checked_add(1)
+                .ok_or(ServiceFailure::LimitExceeded)?;
+            lease.verify()?;
+            self.publish_registration(&next, &snapshot, &directory)?;
+        }
+        record.phase = ServicePhase::Completed;
+        record.state = ServiceRequestState::Completed(ServiceOutcome::Staged(
+            record
+                .installation
+                .clone()
+                .ok_or(ServiceFailure::InvalidRecord)?,
+        ));
+        self.write_install(request, &record)?;
+        Ok(record.progress(request))
+    }
     fn finish_install(
         &self,
         request: NativeRequestId,
@@ -739,6 +943,7 @@ impl InstallationAdmission for InstallAdmission<'_> {
                 .installation
                 .as_ref()
                 .is_some_and(|status| status.installation == installation)
+                && original.stage_basis.is_none()
                 && storage_schema == crate::organization_store::schema::SCHEMA_VERSION =>
             {
                 Ok(())
@@ -757,6 +962,7 @@ pub(super) fn test_assessment(
         artifact,
         roots: InstallRoots { data, runtime },
         desktop_seed: None,
+        stage_basis: None,
     }
 }
 

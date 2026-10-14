@@ -269,6 +269,19 @@ impl ServiceSupervisor {
         directory.verify_established()?;
         Ok(Some(RegisteredServer { record, directory }))
     }
+    /// Account/build-isolated local CLI receipt storage. The path is compiled local
+    /// authority, never a route or a server-supplied value. Creation is explicit.
+    pub fn cli_result_directory(&self, create: bool) -> Result<Option<PathBuf>, ServiceFailure> {
+        self.available()?;
+        let path = self.anchor.join("cli-results");
+        if create {
+            Directory::create(&self.anchor)?;
+            Directory::create(&path)?;
+            Ok(Some(path))
+        } else {
+            Ok(Directory::open(&path)?.map(|_| path))
+        }
+    }
     /// Reserves a durable, provider-issued non-reused ID before submission.
     /// Reservation creates no identity, artifact, service or authorization effect.
     /// At capacity, the oldest never-submitted reservation can be retired. A caller
@@ -503,7 +516,7 @@ pub(super) fn current_account() -> Result<(u32, PathBuf), ServiceFailure> {
 
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RegistrationBasis {
+pub(super) struct RegistrationBasis {
     generation: u64,
     server: [u8; 16],
     public_key: [u8; 32],
@@ -513,7 +526,7 @@ struct RegistrationBasis {
     installed: bool,
 }
 impl RegistrationBasis {
-    fn capture(registration: &RegisteredServer) -> Self {
+    pub(super) fn capture(registration: &RegisteredServer) -> Self {
         Self::capture_record(&registration.record)
     }
     fn capture_record(record: &Registration) -> Self {
@@ -527,10 +540,23 @@ impl RegistrationBasis {
             installed: record.installed,
         }
     }
-    fn matches(&self, registration: &RegisteredServer) -> bool {
+    pub(super) fn matches(&self, registration: &RegisteredServer) -> bool {
         *self == Self::capture(registration)
     }
-    fn validate(&self) -> Result<(), ServiceFailure> {
+    pub(super) fn matches_stage_publication(
+        &self,
+        registration: &RegisteredServer,
+        status: &super::InstallationStatus,
+    ) -> bool {
+        let Some(generation) = self.generation.checked_add(1) else {
+            return false;
+        };
+        let mut expected = self.clone();
+        expected.generation = generation;
+        expected.staged = Some(status.clone());
+        expected.matches(registration)
+    }
+    pub(super) fn validate(&self) -> Result<(), ServiceFailure> {
         if self.generation == 0
             || self.server == [0; 16]
             || self.public_key == [0; 32]

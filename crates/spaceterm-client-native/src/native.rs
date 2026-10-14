@@ -3,6 +3,7 @@
 
 pub mod artifacts;
 pub mod consumer;
+mod receipts;
 pub mod runtime;
 mod tracked;
 
@@ -378,7 +379,70 @@ impl NativeServiceManagement {
     }
 
     pub fn resolve(&self, request: NativeRequestId) -> ServiceFuture<'_, ServiceProgress> {
-        self.supervisor.resolve(request)
+        Box::pin(async move {
+            let retained = receipts::load(&self.supervisor, &receipts::native_key(request))
+                .map_err(|_| ServiceFailure::StorageUnavailable)?;
+            if let Some(receipts::Receipt::Native(progress)) = retained {
+                self.settle_native_receipt(&progress)
+                    .map_err(|_| ServiceFailure::StorageUnavailable)?;
+                return Ok(progress);
+            }
+            self.supervisor.resolve(request).await
+        })
+    }
+    fn settle_native_receipt(&self, progress: &ServiceProgress) -> Result<(), ManagementFailure> {
+        if progress.phase != spaceterm_host::account_service::ServicePhase::Completed {
+            return Err(ManagementFailure::UnsafeNativeState);
+        }
+        match self.acknowledge_request(progress.request) {
+            Ok(()) | Err(ServiceFailure::RequestRetired) => {}
+            Err(failure) => return Err(classify_service(failure)),
+        }
+        receipts::settle(
+            &self.supervisor,
+            &receipts::Receipt::Native(progress.clone()),
+        )
+    }
+    fn recover_native_receipts(&self) -> Result<(), ManagementFailure> {
+        for receipt in receipts::unsettled(&self.supervisor)? {
+            if let receipts::Receipt::Native(progress) = receipt {
+                self.settle_native_receipt(&progress)?;
+            }
+        }
+        Ok(())
+    }
+    /// Records the host's exact completed result before any host acknowledgement.
+    /// Recovery can finish settlement and reproduce CLI output after interruption.
+    pub fn retain_cli_completion(
+        &self,
+        request: NativeRequestId,
+    ) -> Result<ServiceProgress, ManagementFailure> {
+        let progress = self
+            .supervisor
+            .request_progress(request)
+            .map_err(classify_service)?;
+        if progress.phase != spaceterm_host::account_service::ServicePhase::Completed {
+            return Err(ManagementFailure::OutcomePending);
+        }
+        receipts::retain(
+            &self.supervisor,
+            &receipts::Receipt::Native(progress.clone()),
+        )?;
+        Ok(progress)
+    }
+    fn cli_service_result(
+        &self,
+        progress: ServiceProgress,
+    ) -> Result<CliOutput, ManagementFailure> {
+        if progress.phase == spaceterm_host::account_service::ServicePhase::Completed {
+            match receipts::load(&self.supervisor, &receipts::native_key(progress.request))? {
+                Some(receipts::Receipt::Native(retained)) if retained == progress => {}
+                None if self.retain_cli_completion(progress.request)? == progress => {}
+                _ => return Err(ManagementFailure::UnsafeNativeState),
+            }
+            self.settle_native_receipt(&progress)?;
+        }
+        Ok(CliOutput::ServiceProgress(progress))
     }
 
     /// The caller must durably retain the original result before releasing its
@@ -497,12 +561,13 @@ impl NativeCommandBindings for NativeServiceManagement {
     ) -> ManagementFuture<'a, CliOutput> {
         Box::pin(async move {
             self.check_key(key)?;
+            self.recover_native_receipts()?;
             if let NativeCliCommand::Resolve { request } = command {
                 return self
                     .resolve(request)
                     .await
-                    .map(CliOutput::ServiceProgress)
-                    .map_err(classify_service);
+                    .map_err(classify_service)
+                    .and_then(|progress| self.cli_service_result(progress));
             }
             if let NativeCliCommand::Install { version, source } = command {
                 // The command itself is deliberate installation consent. Signed
@@ -522,8 +587,26 @@ impl NativeCommandBindings for NativeServiceManagement {
                     .supervisor
                     .install(request, assessment.confirm())
                     .await
-                    .map(CliOutput::ServiceProgress)
-                    .map_err(classify_service);
+                    .map_err(classify_service)
+                    .and_then(|progress| self.cli_service_result(progress));
+            }
+            if let NativeCliCommand::UpdateStage { version, source } = command {
+                let artifact = self.download_installation_from(version, source).await?;
+                let assessment = self
+                    .supervisor
+                    .assess_install(artifact)
+                    .map_err(classify_service)?;
+                let request = self
+                    .supervisor
+                    .allocate_request()
+                    .map_err(classify_service)?;
+                crate::cli::output::emit_native_request(request, io)?;
+                let progress = self
+                    .supervisor
+                    .stage_installation(request, assessment.confirm())
+                    .await
+                    .map_err(classify_service)?;
+                return self.cli_service_result(progress);
             }
             if command == NativeCliCommand::UpdateCheck {
                 return Ok(CliOutput::Update {
@@ -542,8 +625,8 @@ impl NativeCommandBindings for NativeServiceManagement {
                 return self
                     .start(request)
                     .await
-                    .map(CliOutput::ServiceProgress)
-                    .map_err(classify_service);
+                    .map_err(classify_service)
+                    .and_then(|progress| self.cli_service_result(progress));
             }
             let action = match command {
                 NativeCliCommand::Stop => ServiceAction::Stop,
@@ -587,7 +670,7 @@ impl NativeCommandBindings for NativeServiceManagement {
                 ServiceAction::Activate(_) => self.supervisor.activate(confirmed).await,
             }
             .map_err(classify_service)?;
-            Ok(CliOutput::ServiceProgress(progress))
+            self.cli_service_result(progress)
         })
     }
 }
