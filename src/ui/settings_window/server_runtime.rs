@@ -533,6 +533,15 @@ impl SettingsRuntime {
                 }
                 _ => false,
             };
+            let allow_legacy_machine = match &connection {
+                ConnectionState::Connected { info } => {
+                    ready
+                        && !info.capabilities.supports(
+                            spaceterm_protocol::negotiation::CAPABILITY_SERVER_MACHINE_FACTS,
+                        )
+                }
+                _ => false,
+            };
             let (status, runtime_epoch, compatibility) = match connection {
                 ConnectionState::Connected { info } if ready => (
                     ServerStatus::Running,
@@ -585,9 +594,11 @@ impl SettingsRuntime {
             let reported_machine = verified_status
                 .and_then(|status| status.machine_facts())
                 .map(SettingsMachineFacts::from_server);
-            // Legacy local facts require the exact registered IPC authority. Remote connections
-            // get no fallback offers or permissions from this client's machine.
-            let machine = reported_machine.as_ref().or(source.machine.as_ref());
+            // A facts-capable peer needs current authenticated facts, including during resync.
+            // Only a ready legacy peer can use the exact registered IPC provider's local facts.
+            let machine = reported_machine
+                .as_ref()
+                .or_else(|| source.machine.as_ref().filter(|_| allow_legacy_machine));
             // Both status and organization frames arrive through the authenticated worker.
             // Retained policy is display data while disconnected, never mutation authority.
             let retained_remote = replica

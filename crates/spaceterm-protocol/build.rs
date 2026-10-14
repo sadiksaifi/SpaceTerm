@@ -233,13 +233,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ("RemoteEndpoint", "port") => u16::MAX as u32,
                         ("CapabilityStatus", "availability") | ("ListenerStatus", "state") => 4,
                         ("ManagementProgress", "state") => 6,
-                        ("ServerMachineFacts", "platform" | "bind_scope_availability") => 2,
+                        // Render-only machine facts degrade future uint32 values in conversion.
+                        ("ServerMachineFacts", "platform" | "bind_scope_availability") => u32::MAX,
                         (
                             "ServerPermissionFacts",
                             "microphone" | "screen_recording" | "accessibility",
-                        ) => 4,
+                        ) => u32::MAX,
                         ("ServerPermissionFacts", "accessibility_naming")
-                        | ("ServerBindScopeOffer", "scope") => 2,
+                        | ("ServerBindScopeOffer", "scope") => u32::MAX,
                         _ => u32::MAX,
                     };
                     format!("Kind::Varint({maximum})")

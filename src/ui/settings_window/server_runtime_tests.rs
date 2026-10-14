@@ -58,6 +58,50 @@ impl Fixture {
     fn build_machine_servers(cx: &mut TestAppContext, multiple: bool) -> Self {
         Self::build_sources(cx, false, multiple, true)
     }
+    fn build_ipc_machine_server(cx: &mut TestAppContext) -> Self {
+        use spaceterm_protocol::negotiation::CAPABILITY_SERVER_MACHINE_FACTS;
+        let fixture = Self::build_servers(cx, false, false);
+        let ConnectionState::Connected { info } = fixture.connection.borrow().clone() else {
+            panic!("connected fixture")
+        };
+        let negotiated = fixture
+            .server
+            .connected_info_with_capabilities(
+                1,
+                info.binding.generation.get(),
+                info.attempt,
+                info.major,
+                &[CAPABILITY_SERVER_MACHINE_FACTS],
+            )
+            .unwrap();
+        assert_eq!(negotiated.binding, info.binding);
+        assert!(
+            negotiated
+                .capabilities
+                .supports(CAPABILITY_SERVER_MACHINE_FACTS)
+        );
+        fixture
+            .connection
+            .send_replace(ConnectionState::Connected { info: negotiated });
+        let runtime = cx.update(|cx| cx.global::<InstalledSettingsRuntime>().0.clone());
+        {
+            let mut sources = runtime.connections.borrow_mut();
+            let source = &mut sources[0];
+            assert!(matches!(
+                source.binding.target().route().parts(),
+                RouteParts::Ipc { .. }
+            ));
+            source.machine = Some(SettingsMachineFacts::from_server(&offered_machine(
+                spaceterm_core::management::ServerPlatform::Linux,
+                spaceterm_core::management::ServerPermissionState::NotNeeded,
+                60606,
+            )));
+            assert!(source.machine.as_ref().unwrap().permissions.is_some());
+            assert_eq!(source.machine.as_ref().unwrap().scopes.len(), 2);
+        }
+        fixture.drain(cx);
+        fixture
+    }
     fn build_sources(
         cx: &mut TestAppContext,
         lose_reply: bool,
@@ -1452,7 +1496,28 @@ fn servers_settings_authenticated_machine_facts_require_current_server_epoch_con
             ServerPermissionState as PermissionState, ServerPlatform, ServerStatus as Status,
         },
     };
-    let fixture = Fixture::build_machine_servers(cx, false);
+    let fixture = Fixture::build_ipc_machine_server(cx);
+    let missing = fixture.snapshot(cx);
+    assert!(missing.servers[0].permissions.is_none());
+    assert!(
+        missing.servers[0]
+            .remote_access
+            .as_ref()
+            .unwrap()
+            .scopes
+            .is_empty()
+    );
+    fixture.machine_status(&fixture.server, None, cx);
+    let unattached = fixture.snapshot(cx);
+    assert!(unattached.servers[0].permissions.is_none());
+    assert!(
+        unattached.servers[0]
+            .remote_access
+            .as_ref()
+            .unwrap()
+            .scopes
+            .is_empty()
+    );
     let status = fixture.machine_status(
         &fixture.server,
         Some(offered_machine(
@@ -1661,6 +1726,17 @@ fn servers_settings_unknown_unavailable_and_legacy_machine_facts_keep_disable_in
 fn servers_settings_authenticated_machine_facts_disappear_during_status_resync_until_replacement(
     cx: &mut TestAppContext,
 ) {
+    verify_ipc_machine_facts_resync(false, cx);
+}
+
+#[gpui::test]
+fn servers_settings_authenticated_ipc_machine_facts_disappear_during_status_base_gap_until_replacement(
+    cx: &mut TestAppContext,
+) {
+    verify_ipc_machine_facts_resync(true, cx);
+}
+
+fn verify_ipc_machine_facts_resync(delta_gap: bool, cx: &mut TestAppContext) {
     use spaceterm_client::management_cli::status::{
         StatusResync, StatusSubscription, StatusUpdate,
     };
@@ -1672,7 +1748,7 @@ fn servers_settings_authenticated_machine_facts_disappear_during_status_resync_u
     impl StatusResync for Resync {
         fn request_resync(&self) {}
     }
-    let fixture = Fixture::build_machine_servers(cx, false);
+    let fixture = Fixture::build_ipc_machine_server(cx);
     let runtime = cx.update(|cx| cx.global::<InstalledSettingsRuntime>().0.clone());
     let ConnectionState::Connected { info } = fixture.connection.borrow().clone() else {
         panic!("connected fixture")
@@ -1703,104 +1779,102 @@ fn servers_settings_authenticated_machine_facts_disappear_during_status_resync_u
             .observe_status(subscription);
         cx.update(|cx| runtime.publish(cx));
     };
-    for delta_gap in [false, true] {
-        let subscription =
-            StatusSubscription::new(fixture.server.server(), query, Arc::new(Resync)).unwrap();
-        assert_eq!(
-            subscription
-                .apply(StatusPublication::Snapshot {
-                    request: query.request,
-                    generation: query.generation,
-                    status: original.clone()
-                })
-                .unwrap(),
-            StatusUpdate::Replaced
-        );
-        observe(&subscription, cx);
-        assert!(
-            fixture.snapshot(cx).servers[0]
-                .permissions
-                .as_ref()
-                .unwrap()
-                .entries
-                .iter()
-                .all(|entry| entry.state == ServerPermissionState::Allowed)
-        );
-        let mut parts = original.parts().clone();
-        parts.revision = std::num::NonZeroU64::new(3).unwrap();
-        let replacement = Status::new(parts)
+    let subscription =
+        StatusSubscription::new(fixture.server.server(), query, Arc::new(Resync)).unwrap();
+    assert_eq!(
+        subscription
+            .apply(StatusPublication::Snapshot {
+                request: query.request,
+                generation: query.generation,
+                status: original.clone()
+            })
+            .unwrap(),
+        StatusUpdate::Replaced
+    );
+    observe(&subscription, cx);
+    assert!(
+        fixture.snapshot(cx).servers[0]
+            .permissions
+            .as_ref()
             .unwrap()
-            .with_machine_facts(offered_machine(
-                ServerPlatform::MacOs,
-                PermissionState::Unavailable,
-                59595,
-            ))
-            .unwrap();
-        let gap = if delta_gap {
-            StatusPublication::Changed {
+            .entries
+            .iter()
+            .all(|entry| entry.state == ServerPermissionState::Allowed)
+    );
+    let mut parts = original.parts().clone();
+    parts.revision = std::num::NonZeroU64::new(3).unwrap();
+    let replacement = Status::new(parts)
+        .unwrap()
+        .with_machine_facts(offered_machine(
+            ServerPlatform::MacOs,
+            PermissionState::Unavailable,
+            59595,
+        ))
+        .unwrap();
+    let gap = if delta_gap {
+        StatusPublication::Changed {
+            request: query.request,
+            generation: query.generation,
+            base: std::num::NonZeroU64::new(2).unwrap(),
+            status: replacement.clone(),
+        }
+    } else {
+        StatusPublication::ResyncRequired {
+            request: query.request,
+            generation: query.generation,
+        }
+    };
+    assert_eq!(
+        subscription.apply(gap).unwrap(),
+        StatusUpdate::ResyncRequired
+    );
+    assert_eq!(
+        subscription.latest().unwrap(),
+        Some(original.clone()),
+        "the subscription deliberately retains historical evidence"
+    );
+    assert!(subscription.current().unwrap().is_none());
+    observe(&subscription, cx);
+    assert!(matches!(
+        *fixture.connection.borrow(),
+        ConnectionState::Connected { .. }
+    ));
+    assert!(fixture.replica.borrow().is_ready());
+    let stale = fixture.snapshot(cx);
+    assert!(stale.servers[0].permissions.is_none());
+    assert!(
+        stale.servers[0]
+            .remote_access
+            .as_ref()
+            .unwrap()
+            .scopes
+            .is_empty()
+    );
+    assert_eq!(
+        subscription
+            .apply(StatusPublication::Snapshot {
                 request: query.request,
                 generation: query.generation,
-                base: std::num::NonZeroU64::new(2).unwrap(),
-                status: replacement.clone(),
-            }
-        } else {
-            StatusPublication::ResyncRequired {
-                request: query.request,
-                generation: query.generation,
-            }
-        };
-        assert_eq!(
-            subscription.apply(gap).unwrap(),
-            StatusUpdate::ResyncRequired
-        );
-        assert_eq!(
-            subscription.latest().unwrap(),
-            Some(original.clone()),
-            "the subscription deliberately retains historical evidence"
-        );
-        assert!(subscription.current().unwrap().is_none());
-        observe(&subscription, cx);
-        assert!(matches!(
-            *fixture.connection.borrow(),
-            ConnectionState::Connected { .. }
-        ));
-        assert!(fixture.replica.borrow().is_ready());
-        let stale = fixture.snapshot(cx);
-        assert!(stale.servers[0].permissions.is_none());
-        assert!(
-            stale.servers[0]
-                .remote_access
-                .as_ref()
-                .unwrap()
-                .scopes
-                .is_empty()
-        );
-        assert_eq!(
-            subscription
-                .apply(StatusPublication::Snapshot {
-                    request: query.request,
-                    generation: query.generation,
-                    status: replacement
-                })
-                .unwrap(),
-            StatusUpdate::Replaced
-        );
-        observe(&subscription, cx);
-        let current = fixture.snapshot(cx);
-        assert!(
-            current.servers[0]
-                .permissions
-                .as_ref()
-                .unwrap()
-                .entries
-                .iter()
-                .all(|entry| entry.state == ServerPermissionState::Unavailable)
-        );
-        assert!(
-            current.servers[0].remote_access.as_ref().unwrap().scopes[0]
-                .endpoints
-                .iter()
-                .all(|endpoint| endpoint.port() == 59595)
-        );
-    }
+                status: replacement
+            })
+            .unwrap(),
+        StatusUpdate::Replaced
+    );
+    observe(&subscription, cx);
+    let current = fixture.snapshot(cx);
+    assert!(
+        current.servers[0]
+            .permissions
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .all(|entry| entry.state == ServerPermissionState::Unavailable)
+    );
+    assert!(
+        current.servers[0].remote_access.as_ref().unwrap().scopes[0]
+            .endpoints
+            .iter()
+            .all(|endpoint| endpoint.port() == 59595)
+    );
 }

@@ -131,15 +131,14 @@ macro_rules! profile {
                     ServerPermissionState::Unavailable => 4,
                 }
             }
-            fn decode_permission(value: u32) -> Result<ServerPermissionState, ProtocolError> {
-                Ok(match value {
-                    0 => ServerPermissionState::Unknown,
+            fn decode_permission(value: u32) -> ServerPermissionState {
+                match value {
                     1 => ServerPermissionState::Granted,
                     2 => ServerPermissionState::NotGranted,
                     3 => ServerPermissionState::NotNeeded,
                     4 => ServerPermissionState::Unavailable,
-                    _ => return Err(ProtocolError::Malformed),
-                })
+                    _ => ServerPermissionState::Unknown,
+                }
             }
             fn encode_machine_facts(value: &ServerMachineFacts) -> wire::ServerMachineFacts {
                 wire::ServerMachineFacts {
@@ -184,56 +183,71 @@ macro_rules! profile {
             fn decode_machine_facts(
                 value: &wire::ServerMachineFacts,
             ) -> Result<ServerMachineFacts, ProtocolError> {
+                if value.bind_scopes.len() > MAX_SERVER_BIND_SCOPES
+                    || (matches!(value.bind_scope_availability, 0 | 2)
+                        && !value.bind_scopes.is_empty())
+                {
+                    return Err(ProtocolError::Malformed);
+                }
                 let permissions = value
                     .permissions
                     .as_ref()
-                    .map(|p| {
-                        Ok(ServerPermissionFacts {
-                            microphone: decode_permission(p.microphone)?,
-                            screen_recording: decode_permission(p.screen_recording)?,
-                            accessibility: decode_permission(p.accessibility)?,
-                            accessibility_naming: match p.accessibility_naming {
-                                0 => ServerAccessibilityNaming::Unknown,
-                                1 => ServerAccessibilityNaming::Accessibility,
-                                2 => ServerAccessibilityNaming::DeviceControl,
-                                _ => return Err(ProtocolError::Malformed),
-                            },
-                        })
+                    .map(|p| ServerPermissionFacts {
+                        microphone: decode_permission(p.microphone),
+                        screen_recording: decode_permission(p.screen_recording),
+                        accessibility: decode_permission(p.accessibility),
+                        accessibility_naming: match p.accessibility_naming {
+                            1 => ServerAccessibilityNaming::Accessibility,
+                            2 => ServerAccessibilityNaming::DeviceControl,
+                            _ => ServerAccessibilityNaming::Unknown,
+                        },
                     })
-                    .transpose()?
                     .unwrap_or_default();
+                let mut bind_scopes = Vec::new();
+                for offer in &value.bind_scopes {
+                    if offer.endpoints.is_empty()
+                        || offer.endpoints.len()
+                            > spaceterm_core::remote_access::MAX_REMOTE_BIND_ENDPOINTS
+                    {
+                        return Err(ProtocolError::Malformed);
+                    }
+                    // Unsupported scopes still carry bounded, valid endpoint encodings.
+                    let endpoints = offer
+                        .endpoints
+                        .iter()
+                        .map(decode_endpoint)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if endpoints.iter().any(|endpoint| endpoint.port() == 0) {
+                        return Err(ProtocolError::Malformed);
+                    }
+                    let scope = match offer.scope {
+                        1 => ServerBindScope::Loopback,
+                        2 => ServerBindScope::AllInterfaces,
+                        _ => continue,
+                    };
+                    bind_scopes.push(ServerBindScopeOffer { scope, endpoints });
+                }
+                let bind_scope_availability = match value.bind_scope_availability {
+                    0 => MachineFactsAvailability::Unknown,
+                    1 if bind_scopes.is_empty() && !value.bind_scopes.is_empty() => {
+                        MachineFactsAvailability::Unavailable
+                    }
+                    1 => MachineFactsAvailability::Available,
+                    2 => MachineFactsAvailability::Unavailable,
+                    // Validate known offers before decode_status discards them for
+                    // an unsupported availability. No intermediate status escapes.
+                    _ if !bind_scopes.is_empty() => MachineFactsAvailability::Available,
+                    _ => MachineFactsAvailability::Unknown,
+                };
                 Ok(ServerMachineFacts {
                     platform: match value.platform {
-                        0 => ServerPlatform::Unknown,
                         1 => ServerPlatform::MacOs,
                         2 => ServerPlatform::Linux,
-                        _ => return Err(ProtocolError::Malformed),
+                        _ => ServerPlatform::Unknown,
                     },
                     permissions,
-                    bind_scope_availability: match value.bind_scope_availability {
-                        0 => MachineFactsAvailability::Unknown,
-                        1 => MachineFactsAvailability::Available,
-                        2 => MachineFactsAvailability::Unavailable,
-                        _ => return Err(ProtocolError::Malformed),
-                    },
-                    bind_scopes: value
-                        .bind_scopes
-                        .iter()
-                        .map(|offer| {
-                            Ok(ServerBindScopeOffer {
-                                scope: match offer.scope {
-                                    1 => ServerBindScope::Loopback,
-                                    2 => ServerBindScope::AllInterfaces,
-                                    _ => return Err(ProtocolError::Malformed),
-                                },
-                                endpoints: offer
-                                    .endpoints
-                                    .iter()
-                                    .map(decode_endpoint)
-                                    .collect::<Result<Vec<_>, _>>()?,
-                            })
-                        })
-                        .collect::<Result<Vec<_>, ProtocolError>>()?,
+                    bind_scope_availability,
+                    bind_scopes,
                 })
             }
             /// Omit nested additions unknown to older authenticated peers.
@@ -468,9 +482,26 @@ macro_rules! profile {
                 })
                 .map_err(|_| ProtocolError::Malformed)
                 .and_then(|status| match &value.machine_facts {
-                    Some(facts) => status
-                        .with_machine_facts(decode_machine_facts(facts)?)
-                        .map_err(|_| ProtocolError::Malformed),
+                    Some(facts) => {
+                        let decoded = decode_machine_facts(facts)?;
+                        let platform = decoded.platform;
+                        let permissions = decoded.permissions;
+                        let status = status
+                            .with_machine_facts(decoded)
+                            .map_err(|_| ProtocolError::Malformed)?;
+                        if facts.bind_scope_availability > 2 {
+                            status
+                                .with_machine_facts(ServerMachineFacts {
+                                    platform,
+                                    permissions,
+                                    bind_scope_availability: MachineFactsAvailability::Unknown,
+                                    bind_scopes: Vec::new(),
+                                })
+                                .map_err(|_| ProtocolError::Malformed)
+                        } else {
+                            Ok(status)
+                        }
+                    }
                     None => Ok(status),
                 })
             }
@@ -728,10 +759,17 @@ mod tests {
                 let mut wire =
                     $p::encode_status(&status().with_machine_facts(machine_facts()).unwrap());
                 wire.machine_facts.as_mut().unwrap().bind_scopes[0].scope = 99;
-                assert_eq!(
-                    $p::decode_status(&wire, &|_| Err(ProtocolError::UnexpectedMessage)),
-                    Err(ProtocolError::Malformed)
-                );
+                let decoded = $p::decode_status(&wire, &|_| Err(ProtocolError::UnexpectedMessage))
+                    .expect("a future scope must be omitted without discarding known facts");
+                let facts = decoded.machine_facts().unwrap();
+                assert!(matches!(
+                    facts.bind_scope_availability,
+                    MachineFactsAvailability::Unknown | MachineFactsAvailability::Unavailable
+                ));
+                let mut expected = machine_facts();
+                expected.bind_scope_availability = facts.bind_scope_availability;
+                expected.bind_scopes.clear();
+                assert_eq!(facts, &expected);
                 wire.machine_facts.as_mut().unwrap().bind_scopes[0].scope = 2;
                 assert_eq!(
                     $p::decode_status(&wire, &|_| Err(ProtocolError::UnexpectedMessage)),

@@ -252,6 +252,19 @@ impl FakeServer {
             attempt,
         })
     }
+    /// Supplies optional negotiated features to an otherwise unchanged fixture connection.
+    pub fn connected_info_with_capabilities(
+        &self,
+        client: u64,
+        generation: u64,
+        attempt: u64,
+        major: u32,
+        capabilities: &[u32],
+    ) -> Result<ConnectedInfo, ClientFailure> {
+        let mut info = self.connected_info(client, generation, attempt, major)?;
+        info.capabilities = ConnectionCapabilities::from_advertisement(capabilities);
+        Ok(info)
+    }
     pub fn command(
         &self,
         id: OperationId,
