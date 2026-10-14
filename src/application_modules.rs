@@ -23,5 +23,9 @@ mod desktop_profile;
 #[cfg(test)]
 mod architecture_tests;
 
+#[cfg(test)]
+#[path = "../crates/spaceterm-host/tests/support/signed_installation.rs"]
+mod signed_installation_fixture;
+
 mod directory_selection;
 mod local_path;

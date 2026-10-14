@@ -1,6 +1,5 @@
 use super::*;
-#[path = "../../../crates/spaceterm-host/tests/support/signed_installation.rs"]
-mod signed_installation;
+use crate::signed_installation_fixture as signed_installation;
 use spaceterm_distribution::UpdateKey;
 use spaceterm_host::{
     account_service::{

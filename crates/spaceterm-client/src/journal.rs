@@ -366,6 +366,33 @@ impl std::fmt::Debug for JournalOperation {
     }
 }
 
+/// Fixed native Client receivers. These names grant no filesystem authority.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub enum ProvisioningReceiver {
+    Cli,
+    Companion,
+    Management,
+}
+
+/// Comparison-only ownership, committed atomically with the binding request.
+/// The assessment result authorizes this exact reservation, not a later command
+/// with identical bytes that happens to occupy a failed reservation's slot.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct JournalReceiverBinding {
+    pub receiver: ProvisioningReceiver,
+    pub operation: OperationBinding,
+    pub server_public_key: [u8; 32],
+    pub target: spaceterm_core::pairing::PairingTarget,
+    pub assessment: OperationId,
+    pub version: spaceterm_core::authority::FieldVersion,
+}
+impl std::fmt::Debug for JournalReceiverBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("JournalReceiverBinding(..)")
+    }
+}
+
 /// A cleanup reservation survives outcome acknowledgement and UI consumption.
 /// This historical comparison record is never live control authority.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -431,6 +458,8 @@ pub struct RecoveredClientState {
     streams: Vec<JournalStream>,
     #[serde(deserialize_with = "bounded::operations")]
     operations: Vec<JournalOperation>,
+    #[serde(default, deserialize_with = "bounded::headers")]
+    receiver_bindings: Vec<JournalReceiverBinding>,
     #[serde(deserialize_with = "bounded::headers")]
     grants: Vec<JournalGrant>,
     #[serde(deserialize_with = "bounded::headers")]
@@ -463,6 +492,7 @@ impl RecoveredClientState {
             generations: vec![],
             streams: vec![],
             operations: vec![],
+            receiver_bindings: vec![],
             grants: vec![],
             suppressed_workspaces: vec![],
             detaches: vec![],
@@ -484,6 +514,9 @@ impl RecoveredClientState {
     }
     pub fn operations(&self) -> &[JournalOperation] {
         &self.operations
+    }
+    pub fn receiver_bindings(&self) -> &[JournalReceiverBinding] {
+        &self.receiver_bindings
     }
     pub fn grants(&self) -> &[JournalGrant] {
         &self.grants
@@ -625,6 +658,11 @@ pub enum ClientJournalChange {
         operation: OperationBinding,
     },
     Prepare(JournalOperation),
+    /// Reserves receiver ownership in the same transaction as the actual request.
+    PrepareReceiverBinding {
+        operation: JournalOperation,
+        receiver: Box<JournalReceiverBinding>,
+    },
     Complete {
         binding: OperationBinding,
         outcome: CompactOutcome,

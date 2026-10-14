@@ -275,9 +275,9 @@ fn jump_destination(value: &str) -> Result<(&str, Option<&str>), ClientFailure> 
     }
 }
 
-struct ChildOwner(Option<Child>);
+pub(super) struct ChildOwner(pub(super) Option<Child>);
 impl ChildOwner {
-    fn exited(&self) -> Result<bool, ClientFailure> {
+    pub(super) fn exited(&self) -> Result<bool, ClientFailure> {
         let mut status = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
         // SAFETY: this unreaped child is still owned. WNOWAIT preserves its PID
         // reservation until the whole private process group has been retired.
@@ -299,7 +299,7 @@ impl ChildOwner {
         // SAFETY: successful waitid initialized status and its child PID field.
         Ok(unsafe { status.assume_init().si_pid() } != 0)
     }
-    fn retire(&mut self) {
+    pub(super) fn retire(&mut self) {
         let Some(child) = self.0.as_ref() else {
             return;
         };
@@ -318,7 +318,10 @@ impl Drop for ChildOwner {
         }
     }
 }
-fn bounded_output(command: &mut Command, deadline: Instant) -> Result<Vec<u8>, ClientFailure> {
+pub(super) fn bounded_output(
+    command: &mut Command,
+    deadline: Instant,
+) -> Result<Vec<u8>, ClientFailure> {
     let mut child = ChildOwner(Some(
         spaceterm_host::process::spawn(command).map_err(|_| unavailable())?,
     ));
@@ -335,10 +338,10 @@ fn bounded_output(command: &mut Command, deadline: Instant) -> Result<Vec<u8>, C
     if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
         return Err(unavailable());
     }
-    let mut output = Vec::new();
-    let mut buffer = [0; 1024];
+    let mut output = zeroize::Zeroizing::new(Vec::new());
+    let mut buffer = zeroize::Zeroizing::new([0; 1024]);
     loop {
-        match stdout.read(&mut buffer) {
+        match stdout.read(&mut *buffer) {
             Ok(0) => {
                 if child.exited()? {
                     child.retire();
@@ -350,7 +353,7 @@ fn bounded_output(command: &mut Command, deadline: Instant) -> Result<Vec<u8>, C
                         .map_err(|_| unavailable())?;
                     child.0.take();
                     return if status.success() {
-                        Ok(output)
+                        Ok(std::mem::take(&mut *output))
                     } else {
                         Err(changed())
                     };

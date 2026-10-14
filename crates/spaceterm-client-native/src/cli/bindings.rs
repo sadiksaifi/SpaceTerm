@@ -1,6 +1,12 @@
 //! Bind the CLI to the native/client/pairing owners, never to another journal.
 
-use std::sync::Arc;
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{Arc, OnceLock},
+};
+
+use zeroize::Zeroizing;
 
 use serde::Serialize;
 use spaceterm_client::management_cli::{
@@ -142,6 +148,104 @@ pub struct UnpairReport {
     pub local_connection_removed: bool,
     pub revocation: RevocationState,
 }
+/// Shares one authorization's original admitted lookup reference with the CLI.
+/// This bounded observer retains no claim, delivery, credentials or authority.
+#[derive(Clone, Default)]
+pub struct PairingAuthorizationAdmission {
+    request: Arc<OnceLock<spaceterm_core::management::ManagementRequestReference>>,
+}
+impl PairingAuthorizationAdmission {
+    /// The producer records the genuine request at admission, before effects.
+    /// Later records cannot replace the first request, including through a clone.
+    pub fn record(&self, request: spaceterm_core::management::ManagementRequestReference) {
+        let _ = self.request.set(request);
+    }
+
+    pub fn request(&self) -> Option<spaceterm_core::management::ManagementRequestReference> {
+        self.request.get().copied()
+    }
+}
+
+/// An existing protocol authorization delivery, never a printable CLI result.
+/// No Debug, Clone or Serialize implementation can expose its bearer.
+pub struct PairingAuthorizationDelivery {
+    request: spaceterm_core::management::ManagementRequestReference,
+    bytes: Zeroizing<Vec<u8>>,
+}
+impl PairingAuthorizationDelivery {
+    /// The producer supplies the original admitted request and actual frozen
+    /// delivery bytes. Decoding checks shape without retaining another bearer.
+    pub fn new(
+        request: spaceterm_core::management::ManagementRequestReference,
+        bytes: Zeroizing<Vec<u8>>,
+    ) -> Result<Self, PairingAuthorizationFailure> {
+        use spaceterm_protocol::{ProtocolError, pairing_adapter::EnrollmentAuthorization};
+        if bytes.len() > spaceterm_core::pairing::MAX_PAIRING_MANAGEMENT_BYTES {
+            return Err(PairingAuthorizationFailure::new(
+                ManagementFailure::LimitExceeded,
+                Some(request),
+            ));
+        }
+        if let spaceterm_core::management::ManagementRequestReference::Native(id) = request
+            && id == [0; 16]
+        {
+            return Err(PairingAuthorizationFailure::new(
+                ManagementFailure::UnsafeNativeState,
+                None,
+            ));
+        }
+        EnrollmentAuthorization::from_delivery(Zeroizing::new(bytes.to_vec())).map_err(
+            |error| {
+                PairingAuthorizationFailure::new(
+                    if matches!(error, ProtocolError::LimitExceeded) {
+                        ManagementFailure::LimitExceeded
+                    } else {
+                        ManagementFailure::UnsafeNativeState
+                    },
+                    Some(request),
+                )
+            },
+        )?;
+        Ok(Self { request, bytes })
+    }
+    pub fn request(&self) -> spaceterm_core::management::ManagementRequestReference {
+        self.request
+    }
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+/// A content-free failure retains admitted work's original lookup reference.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PairingAuthorizationFailure {
+    pub failure: ManagementFailure,
+    pub request: Option<Box<spaceterm_core::management::ManagementRequestReference>>,
+}
+impl PairingAuthorizationFailure {
+    pub fn new(
+        failure: ManagementFailure,
+        request: Option<spaceterm_core::management::ManagementRequestReference>,
+    ) -> Self {
+        Self {
+            failure,
+            request: request.map(Box::new),
+        }
+    }
+}
+impl From<ManagementFailure> for PairingAuthorizationFailure {
+    fn from(failure: ManagementFailure) -> Self {
+        Self::new(failure, None)
+    }
+}
+pub type PairingAuthorizationFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<PairingAuthorizationDelivery, PairingAuthorizationFailure>>
+            + Send
+            + 'a,
+    >,
+>;
+
 /// Pairing owns fingerprint verification, additional Client binding, native
 /// credentials, owner enrollment, marker-first self-removal and restricted retries.
 /// CLI, desktop and companion never borrow each other's ClientId. Owner recovery
@@ -161,6 +265,40 @@ pub trait PairingCommandBindings: Send + Sync {
         request: PublicRequestId,
         expected: PublicFingerprint,
     ) -> ManagementFuture<'_, ManagementProgress>;
+    /// Authorize exactly the existing public claim JSON, after checking its
+    /// server pin, both key proofs and the supplied device fingerprint. The
+    /// producer owns serde decoding into pairing_runtime::PublicDeviceClaim and
+    /// authenticated admission. It returns the genuine existing protocol delivery
+    /// without enrolling the claimant, borrowing its journal, or recovering an
+    /// account. A post-admission failure must retain the original request.
+    fn authorize_claim(
+        &self,
+        _claim_json: Zeroizing<Vec<u8>>,
+        _expected: PublicFingerprint,
+    ) -> PairingAuthorizationFuture<'_> {
+        Box::pin(async { Err(ManagementFailure::AuthorizationUnavailable.into()) })
+    }
+    /// Observe admission without changing the existing authorization interface.
+    /// Producers override this to record before effects or any post-admission
+    /// await. The compatibility default can observe only a completed result.
+    fn authorize_claim_admitted(
+        &self,
+        claim_json: Zeroizing<Vec<u8>>,
+        expected: PublicFingerprint,
+        admission: PairingAuthorizationAdmission,
+    ) -> PairingAuthorizationFuture<'_> {
+        Box::pin(async move {
+            let result = self.authorize_claim(claim_json, expected).await;
+            let request = match &result {
+                Ok(delivery) => Some(delivery.request()),
+                Err(failure) => failure.request.as_deref().copied(),
+            };
+            if let Some(request) = request {
+                admission.record(request);
+            }
+            result
+        })
+    }
     fn list_page(
         &self,
         cursor: Option<InventoryCursor>,

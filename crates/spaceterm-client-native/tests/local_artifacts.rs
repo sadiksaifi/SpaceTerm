@@ -47,6 +47,7 @@ fn private_root() -> tempfile::TempDir {
             .home()
             .to_owned()
     };
+    // Native service configuration must not inherit group-write access from umask.
     tempfile::Builder::new()
         .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir_in(parent)

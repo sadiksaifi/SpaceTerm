@@ -7,6 +7,7 @@ edition = "2024"
 default = []
 cli = []
 native-tests = []
+test-support = ["spaceterm-host/test-support"]
 
 [[bin]]
 name = "spaceterm-cli"
@@ -35,13 +36,14 @@ libc = "=0.2.189"
 glob = "=0.3.4"
 shlex = "=2.0.1"
 tempfile = "=3.27.0"
-tokio = { version = "=1.53.1", default-features = false, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "=1.53.1", default-features = false, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]
 flate2 = "=1.1.10"
 sha2 = "=0.10.9"
 tar = { version = "=0.4.46", default-features = false }
 spaceterm-host = { path = "../spaceterm-host", features = ["test-support"] }
+spaceterm-server = { path = "../spaceterm-server", default-features = false, features = ["test-support"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "=5.19.0", default-features = false, features = ["async-io"] }

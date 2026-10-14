@@ -169,6 +169,11 @@ pub(crate) fn classify(failure: ServiceFailure) -> ClientFailure {
     ClientFailure::new(class)
 }
 
+// The reply-loss fixture needs the real desktop setup offer, not the headless enrollment shim.
+#[cfg(test)]
+#[path = "local_server_client/enrollment/recovery_tests.rs"]
+mod enrollment_recovery_tests;
+
 #[cfg(test)]
 mod paired_tests;
 #[cfg(test)]

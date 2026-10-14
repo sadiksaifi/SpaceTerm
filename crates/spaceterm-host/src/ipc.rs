@@ -636,7 +636,9 @@ struct Reader {
     stream: OwnedReadHalf,
     prefix: [u8; 4],
     prefix_read: usize,
-    body: Vec<u8>,
+    // A private owner frame can contain a single-use authorization. In-progress
+    // bytes remain zeroizing across cancellation and transport close/drop.
+    body: zeroize::Zeroizing<Vec<u8>>,
     body_read: usize,
 }
 
@@ -678,7 +680,33 @@ impl Reader {
         }
         self.prefix_read = 0;
         self.body_read = 0;
-        Ok(Some(std::mem::take(&mut self.body)))
+        Ok(Some(std::mem::take(&mut *self.body)))
+    }
+}
+
+// Cancelling a dispatched write closes the connection. A cancelled receive
+// leaves its partial frame in the unlocked reader, so dispose it on that path.
+struct PrivateFrameGuard<'a> {
+    send: Option<SendGuard<'a>>,
+    transport: &'a IpcTransport,
+}
+impl PrivateFrameGuard<'_> {
+    fn complete(&mut self) {
+        if let Some(send) = &mut self.send {
+            send.complete();
+        }
+    }
+}
+impl Drop for PrivateFrameGuard<'_> {
+    fn drop(&mut self) {
+        drop(self.send.take());
+        if self.transport.state.error().is_some()
+            && let Ok(mut reader) = self.transport.reader.try_lock()
+        {
+            reader.take();
+        }
+        // An active receive owns the lock. Its frame guard discards the
+        // reader on terminal completion or cancellation after this abort.
     }
 }
 
@@ -709,7 +737,7 @@ impl IpcTransport {
                 stream: reader,
                 prefix: [0; 4],
                 prefix_read: 0,
-                body: Vec::new(),
+                body: zeroize::Zeroizing::new(Vec::new()),
                 body_read: 0,
             })),
             writer: Mutex::new(Some(writer)),
@@ -747,13 +775,23 @@ impl MessageTransport for IpcTransport {
 
     fn send<'a>(&'a self, message: &'a [u8]) -> TransportFuture<'a, ()> {
         Box::pin(async move {
+            let _frame_guard = PrivateFrameGuard {
+                send: None,
+                transport: self,
+            };
             self.limit.check(message.len())?;
-            let mut writer = self
-                .state
-                .run(async { Ok(self.writer.lock().await) })
-                .await?;
+            let mut writer = match self.state.run(async { Ok(self.writer.lock().await) }).await {
+                Ok(writer) => writer,
+                Err(error) => {
+                    self.reader.lock().await.take();
+                    return Err(error);
+                }
+            };
             let writer = writer.as_mut().ok_or(TransportError::Closed)?;
-            let mut guard = SendGuard::new(&self.state);
+            let mut guard = PrivateFrameGuard {
+                send: Some(SendGuard::new(&self.state)),
+                transport: self,
+            };
             let result = self
                 .state
                 .run(async {
@@ -771,6 +809,7 @@ impl MessageTransport for IpcTransport {
             guard.complete();
             if let Err(error) = result {
                 self.state.abort(error);
+                self.reader.lock().await.take();
             }
             result
         })
@@ -778,7 +817,12 @@ impl MessageTransport for IpcTransport {
 
     fn recv(&self) -> TransportFuture<'_, Option<Vec<u8>>> {
         Box::pin(async move {
+            let _frame_guard = PrivateFrameGuard {
+                send: None,
+                transport: self,
+            };
             if let Some(error) = self.state.error() {
+                self.reader.lock().await.take();
                 return if error == TransportError::Closed {
                     Ok(None)
                 } else {
@@ -803,6 +847,11 @@ impl MessageTransport for IpcTransport {
                 Err(error) => self.state.abort(*error),
                 _ => {}
             }
+            if result.is_err() || matches!(&result, Ok(None)) {
+                // The terminal read no longer owns a resumable frame. Drop the
+                // zeroizing partial body before exposing its classification.
+                self.reader.lock().await.take();
+            }
             if result == Err(TransportError::Closed) {
                 Ok(None)
             } else {
@@ -813,6 +862,10 @@ impl MessageTransport for IpcTransport {
 
     fn close(&self) -> TransportFuture<'_, ()> {
         Box::pin(async move {
+            let _frame_guard = PrivateFrameGuard {
+                send: None,
+                transport: self,
+            };
             self.state.close(TransportError::Closed);
             let writer = self.writer.lock().await.take();
             self.reader.lock().await.take();
@@ -831,11 +884,143 @@ impl MessageTransport for IpcTransport {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
     use std::os::unix::fs::PermissionsExt;
 
+    #[tokio::test]
+    async fn cancelled_partial_private_frame_remains_zeroizing_until_close() {
+        let (left, mut right) = UnixStream::pair().unwrap();
+        let facts = same_account_peer(&left).unwrap();
+        let transport = IpcTransport::new(left, MessageLimit::new(64).unwrap(), facts).unwrap();
+        right.write_all(&64_u32.to_be_bytes()).await.unwrap();
+        right.write_all(b"public").await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), transport.recv())
+                .await
+                .is_err()
+        );
+        {
+            let reader = transport.reader.lock().await;
+            let reader = reader.as_ref().unwrap();
+            let _: &zeroize::Zeroizing<Vec<u8>> = &reader.body;
+            assert_eq!(reader.body_read, 6);
+        }
+        transport.close().await.unwrap();
+        assert!(transport.reader.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn truncated_private_frame_drops_partial_reader_before_returning_failure() {
+        let (left, mut right) = UnixStream::pair().unwrap();
+        let facts = same_account_peer(&left).unwrap();
+        let transport = IpcTransport::new(left, MessageLimit::new(64).unwrap(), facts).unwrap();
+        right.write_all(&64_u32.to_be_bytes()).await.unwrap();
+        right.write_all(b"public").await.unwrap();
+        right.shutdown().await.unwrap();
+        assert!(matches!(
+            transport.recv().await,
+            Err(TransportError::InvalidFrame)
+        ));
+        assert!(transport.reader.lock().await.is_none());
+    }
+
+    async fn partial_frame_transport() -> (IpcTransport, UnixStream) {
+        let (left, mut right) = UnixStream::pair().unwrap();
+        socket2::SockRef::from(&left)
+            .set_send_buffer_size(8192)
+            .unwrap();
+        let facts = same_account_peer(&left).unwrap();
+        let transport =
+            IpcTransport::new(left, MessageLimit::new(1024 * 1024).unwrap(), facts).unwrap();
+        right.write_all(&64_u32.to_be_bytes()).await.unwrap();
+        right.write_all(b"public").await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), transport.recv())
+                .await
+                .is_err()
+        );
+        assert_eq!(transport.reader.lock().await.as_ref().unwrap().body_read, 6);
+        (transport, right)
+    }
+
+    #[tokio::test]
+    async fn failed_send_drops_partial_private_frame() {
+        let (transport, peer) = partial_frame_transport().await;
+        drop(peer);
+        assert!(transport.send(b"public reply").await.is_err());
+        assert!(transport.reader.lock().await.is_none());
+        assert!(transport.recv().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelled_send_drops_partial_private_frame() {
+        let (transport, _peer) = partial_frame_transport().await;
+        let public = vec![0; 1024 * 1024];
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                transport.send(&public)
+            )
+            .await
+            .is_err()
+        );
+        assert!(transport.reader.lock().await.is_none());
+        assert!(transport.recv().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn terminal_receive_drops_partial_private_frame() {
+        let (transport, _peer) = partial_frame_transport().await;
+        transport.state.abort(TransportError::Unavailable);
+        assert!(matches!(
+            transport.recv().await,
+            Err(TransportError::Unavailable)
+        ));
+        assert!(transport.reader.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_terminal_receive_drops_partial_private_frame() {
+        let (transport, _peer) = partial_frame_transport().await;
+        let mut receiving = transport.recv();
+        std::future::poll_fn(|cx| {
+            assert!(receiving.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(transport.reader.try_lock().is_err());
+        transport.state.abort(TransportError::Unavailable);
+        drop(receiving);
+        assert!(transport.reader.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_close_drops_partial_private_frame_while_writer_is_suspended() {
+        let (transport, _peer) = partial_frame_transport().await;
+        let public = vec![0; 1024 * 1024];
+        let mut sending = transport.send(&public);
+        std::future::poll_fn(|cx| {
+            assert!(sending.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(transport.writer.try_lock().is_err());
+        let mut closing = transport.close();
+        std::future::poll_fn(|cx| {
+            assert!(closing.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(closing);
+        assert!(transport.reader.lock().await.is_none());
+        drop(sending);
+        transport.close().await.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn linux_socket_pin_cannot_register_a_replaced_inode() {
         let temporary = tempfile::tempdir().unwrap();

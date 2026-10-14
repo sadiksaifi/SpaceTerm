@@ -1,15 +1,22 @@
-use super::*;
-use spaceterm_client::pairing::credentials::{
-    CredentialCreationReservation, CredentialDeletion, CredentialScope, CredentialUse,
-    PreparedCredential,
+use super::enrollment::{enroll_for_recovery_test as enroll_using, journal_for_recovery_test};
+use spaceterm_client::{
+    failure::ClientFailureClass,
+    pairing::credentials::{
+        CredentialCreationReservation, CredentialDeletion, CredentialPurpose, CredentialScope,
+        CredentialUse, NativeDeviceCredentials, PairingFuture, PreparedCredential,
+    },
+    ports::ClientFuture,
+    testing::DeterministicKey,
 };
-use spaceterm_client::{ports::ClientFuture, testing::DeterministicKey};
+use spaceterm_client_native::{NativeClientProvider, native::owner_channel::OwnerChannelProvider};
+use spaceterm_core::{identity::ServerId, pairing::PairingFailure};
 use spaceterm_host::{
     account_service::{RegisteredServer, test_support::AccountServiceFixture},
-    transport::{PeerFacts, TransportError, TransportFuture, TransportRoute},
+    startup::{BuildIdentity, DesiredServerState},
+    transport::{MessageTransport, PeerFacts, TransportError, TransportFuture, TransportRoute},
 };
 use spaceterm_protocol::authentication::SigningKey;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Default)]
 struct Keys(Arc<Mutex<Vec<PreparedCredential>>>);
@@ -72,9 +79,10 @@ impl NativeDeviceCredentials for Keys {
 }
 #[derive(Default)]
 struct LostReply(Mutex<Vec<Vec<u8>>>);
-impl OwnerChannelProvider for Arc<LostReply> {
+struct LostReplyChannel(Arc<LostReply>);
+impl OwnerChannelProvider for LostReplyChannel {
     fn open<'a>(&'a self, _: &'a RegisteredServer) -> ClientFuture<'a, Arc<dyn MessageTransport>> {
-        Box::pin(async { Ok(self.clone() as Arc<dyn MessageTransport>) })
+        Box::pin(async { Ok(self.0.clone() as Arc<dyn MessageTransport>) })
     }
 }
 impl MessageTransport for LostReply {
@@ -109,7 +117,7 @@ fn desktop_owner_enrollment_retries_original_native_request_after_reply_loss() {
         .enable_all()
         .build()
         .unwrap();
-    let journal = runtime.block_on(super::tests::journal(&root));
+    let journal = runtime.block_on(journal_for_recovery_test(&root));
     let keys = Keys::default();
     let channel = Arc::new(LostReply::default());
     let native = NativeClientProvider::from_supervisor(account.reopen());
@@ -117,7 +125,7 @@ fn desktop_owner_enrollment_retries_original_native_request_after_reply_loss() {
         &native,
         journal.clone(),
         keys.clone(),
-        &channel,
+        Arc::new(LostReplyChannel(channel.clone())),
     ));
     assert_eq!(first.unwrap_err().class(), ClientFailureClass::Unavailable);
     let route_before = journal
@@ -139,7 +147,7 @@ fn desktop_owner_enrollment_retries_original_native_request_after_reply_loss() {
         &native,
         journal.clone(),
         keys.clone(),
-        &channel,
+        Arc::new(LostReplyChannel(channel.clone())),
     ));
     assert_eq!(second.unwrap_err().class(), ClientFailureClass::Unavailable);
     let attempts = channel.0.lock().unwrap();

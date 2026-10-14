@@ -27,7 +27,13 @@ zeroize = "=1.9.0"
 rustix = { version = "=1.1.5", features = ["event", "fs"] }
 thiserror = "=2.0.19"
 
+[[test]]
+name = "signed_stopped_owner_composition"
+path = "tests/signed_stopped_owner_composition.rs"
+required-features = ["test-support"]
+
 [dev-dependencies]
+spaceterm-client-native = { path = "../spaceterm-client-native", default-features = false, features = ["test-support"] }
 base64 = "=0.22.1"
 flate2 = "=1.1.10"
 tar = { version = "=0.4.46", default-features = false }

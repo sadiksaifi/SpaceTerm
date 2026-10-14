@@ -33,9 +33,8 @@ impl Directory {
         let parent = if cfg!(target_os = "linux") {
             PathBuf::from("/var/tmp")
         } else {
-            std::env::var_os("CARGO_TARGET_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+            // Native runtime fixtures must also fit Darwin's Unix socket limit.
+            PathBuf::from("/private/tmp")
         };
         std::fs::create_dir_all(&parent).unwrap();
         let path = parent.canonicalize().unwrap().join(format!(
@@ -2534,4 +2533,228 @@ async fn cli_reopens_suppressed_pairing_for_restricted_retry_without_native_regi
             .unwrap()
             .is_suppressed(&key)
     );
+}
+
+#[tokio::test]
+async fn cli_retains_restricted_inventory_when_registered_runtime_is_missing_or_unsafe() {
+    use spaceterm_client_native::{NativeClientProvider, cli::bindings::PairingCommandBindings};
+    use spaceterm_host::{
+        account_service::test_support::AccountServiceFixture,
+        startup::{BuildIdentity, DesiredServerState},
+    };
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    for missing in [true, false] {
+        let account_root = Directory::new();
+        let account =
+            AccountServiceFixture::new(&account_root.0, BuildIdentity::Development).unwrap();
+        let registration = account.initialize(DesiredServerState::Stopped).unwrap();
+        let path = account.reopen().client_connections_directory().join("cli");
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&path)
+            .unwrap();
+        let directory = Directory(path);
+        let native = Arc::new(directory.create().await);
+        let fixture = Fixture::new(1);
+        fixture.seed(native.as_ref()).await;
+        let key = fixture.binding.target().local_pairing().unwrap();
+        let composition = runtime(controller(native).await);
+        let assessment = composition
+            .assess_unpair(&key, fixture.binding.target().client())
+            .await
+            .unwrap();
+        let removal = composition.self_unpair(assessment).await.unwrap();
+        drop(composition);
+        let endpoint = registration.endpoint().unwrap();
+        let runtime = endpoint.path().parent().unwrap();
+        if missing {
+            std::fs::remove_dir_all(runtime).unwrap();
+        } else {
+            std::fs::set_permissions(runtime, std::fs::Permissions::from_mode(0o777)).unwrap();
+        }
+        assert!(account.reopen().discover().is_ok());
+        assert!(registration.endpoint().is_err());
+        let consumer = NativeClientProvider::from_supervisor(account.reopen()).cli_consumer();
+        let inventory = consumer
+            .pairing_runtime()
+            .await
+            .unwrap()
+            .inventory()
+            .await
+            .unwrap();
+        assert!(inventory.is_suppressed(&key));
+        assert!(inventory.task(removal.operation).is_some());
+        let reports = consumer.retry_pending().await.unwrap();
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].local_connection_removed);
+    }
+}
+
+#[tokio::test]
+async fn authenticated_ssh_capture_is_bound_atomically_and_never_replaced() {
+    use spaceterm_client::journal::JournalSshCapture;
+
+    let directory = Directory::new();
+    let journal = controller(Arc::new(directory.create().await)).await;
+    let composition = runtime(journal.clone());
+    let fixture = EnrollmentFixture::prepare(&composition, 2).await;
+    let route = RouteDescription::new(RouteParts::Ssh {
+        destination: "original".into(),
+        remote_socket: "/remote-account/server.sock".into(),
+    })
+    .unwrap();
+    let capture = JournalSshCapture::new(
+        "Host st-route-0\n hostname original.example\n user original-account\n".into(),
+    )
+    .unwrap();
+    let revision = journal.snapshot().unwrap().revision();
+    composition
+        .prepare_route_with_capture(&fixture.prepared, route.clone(), capture.clone())
+        .await
+        .unwrap();
+    let state = journal.snapshot().unwrap();
+    assert_eq!(state.revision(), revision.checked_successor().unwrap());
+    let slot = state
+        .pairing()
+        .slot(fixture.prepared.credential.scope.reference())
+        .unwrap();
+    assert_eq!(slot.route.as_ref(), Some(&route));
+    assert_eq!(slot.route_reference, Some(fixture.prepared.route));
+    assert_eq!(slot.ssh_capture.as_ref(), Some(&capture));
+    let revision = state.revision();
+    composition
+        .prepare_route_with_capture(&fixture.prepared, route.clone(), capture.clone())
+        .await
+        .unwrap();
+    assert_eq!(journal.snapshot().unwrap().revision(), revision);
+
+    let alternate = JournalSshCapture::new(
+        "Host st-route-0\n hostname alternate.example\n user alternate-account\n".into(),
+    )
+    .unwrap();
+    assert_eq!(
+        composition
+            .prepare_route_with_capture(&fixture.prepared, route, alternate)
+            .await,
+        Err(PairingFailure::RouteChanged)
+    );
+    let state = journal.snapshot().unwrap();
+    assert_eq!(state.revision(), revision);
+    assert_eq!(
+        state
+            .pairing()
+            .slot(fixture.prepared.credential.scope.reference())
+            .unwrap()
+            .ssh_capture
+            .as_ref(),
+        Some(&capture)
+    );
+    assert!(state.pairing().prepared().is_empty());
+    assert!(state.pairing().acknowledgements().is_empty());
+    assert!(state.bindings().is_empty());
+}
+
+#[tokio::test]
+async fn authenticated_ssh_capture_rejects_a_non_ssh_route_without_journal_mutation() {
+    use spaceterm_client::journal::JournalSshCapture;
+
+    let directory = Directory::new();
+    let journal = controller(Arc::new(directory.create().await)).await;
+    let composition = runtime(journal.clone());
+    let fixture = EnrollmentFixture::prepare(&composition, 2).await;
+    let revision = journal.snapshot().unwrap().revision();
+    let capture =
+        JournalSshCapture::new("Host st-route-0\n hostname original.example\n".into()).unwrap();
+    assert_eq!(
+        composition
+            .prepare_route_with_capture(
+                &fixture.prepared,
+                fixture.fixture.binding.target().route().clone(),
+                capture,
+            )
+            .await,
+        Err(PairingFailure::RouteChanged)
+    );
+    assert_eq!(journal.snapshot().unwrap().revision(), revision);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authenticated_ssh_capture_concurrent_conflict_is_route_changed_without_replacement() {
+    use spaceterm_client::journal::{ClientJournalChange, JournalSshCapture};
+
+    let directory = Directory::new();
+    let journal = controller(Arc::new(directory.create().await)).await;
+    let composition = runtime(journal.clone());
+    let fixture = EnrollmentFixture::prepare(&composition, 2).await;
+    let reference = fixture.prepared.credential.scope.reference();
+    let public_key = fixture.prepared.credential.public_key;
+    let started = Arc::new(tokio::sync::Notify::new());
+    let (release, held) = std::sync::mpsc::sync_channel(1);
+    let serial = journal.clone();
+    let admitted = started.clone();
+    let blocker = tokio::spawn(async move {
+        serial
+            .update(move |_| {
+                admitted.notify_one();
+                held.recv().unwrap();
+                Ok((
+                    vec![ClientJournalChange::RecordCredentialPublicKey {
+                        reference,
+                        public_key,
+                    }],
+                    (),
+                ))
+            })
+            .await
+    });
+    started.notified().await;
+    let route = RouteDescription::new(RouteParts::Ssh {
+        destination: "original".into(),
+        remote_socket: "/remote-account/server.sock".into(),
+    })
+    .unwrap();
+    let original = JournalSshCapture::new(
+        "Host st-route-0\n hostname original.example\n user original-account\n".into(),
+    )
+    .unwrap();
+    let alternate = JournalSshCapture::new(
+        "Host st-route-0\n hostname alternate.example\n user alternate-account\n".into(),
+    )
+    .unwrap();
+    let first =
+        composition.prepare_route_with_capture(&fixture.prepared, route.clone(), original.clone());
+    let second =
+        composition.prepare_route_with_capture(&fixture.prepared, route.clone(), alternate.clone());
+    tokio::pin!(first, second);
+    // Both calls read the uncaptured slot while another admitted journal
+    // operation owns serialization. Neither can commit before release.
+    std::future::poll_fn(|context| {
+        assert!(std::future::Future::poll(first.as_mut(), context).is_pending());
+        assert!(std::future::Future::poll(second.as_mut(), context).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    let revision = journal.snapshot().unwrap().revision();
+    release.send(()).unwrap();
+    blocker.await.unwrap().unwrap();
+    let winner = match tokio::join!(first, second) {
+        (Ok(()), Err(PairingFailure::RouteChanged)) => original,
+        (Err(PairingFailure::RouteChanged), Ok(())) => alternate,
+        outcomes => panic!("unexpected capture admission outcomes: {outcomes:?}"),
+    };
+    let state = journal.snapshot().unwrap();
+    assert_eq!(state.revision().get(), revision.get() + 2);
+    let slot = state.pairing().slot(reference).unwrap();
+    assert_eq!(slot.ssh_capture.as_ref(), Some(&winner));
+    assert_eq!(slot.route.as_ref(), Some(&route));
+    assert_eq!(
+        slot.generation,
+        fixture.prepared.local_pairing.parts().generation
+    );
+    assert_eq!(state.pairing().slots().len(), 2);
+    assert!(state.pairing().prepared().is_empty());
+    assert!(state.pairing().acknowledgements().is_empty());
+    assert!(state.bindings().is_empty());
+    journal.ensure_healthy().unwrap();
 }

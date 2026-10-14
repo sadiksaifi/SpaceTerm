@@ -1,7 +1,40 @@
 //! The deliberate stopped-owner command reuses the installed, signed server.
 //! It has no service-manager Start capability and owns only its one child.
 
-use super::*;
+use super::NativeServiceManagement;
+use spaceterm_client::failure::{ClientFailure, ClientFailureClass};
+use spaceterm_host::{
+    ipc::{IpcTransport, PrivateIpcDirectory},
+    startup::DesiredServerState,
+    transport::{MessageLimit, MessageTransport},
+};
+use std::{sync::Arc, time::Duration};
+use zeroize::Zeroizing;
+
+const FRAME_LIMIT: usize = 64 * 1024;
+const DEADLINE: Duration = Duration::from_secs(15);
+fn failure(class: ClientFailureClass) -> ClientFailure {
+    ClientFailure::new(class)
+}
+fn classify(error: spaceterm_host::account_service::ServiceFailure) -> ClientFailure {
+    use spaceterm_host::account_service::ServiceFailure;
+    failure(match error {
+        ServiceFailure::StorageLocked
+        | ServiceFailure::StorageUnavailable
+        | ServiceFailure::Missing => ClientFailureClass::StorageUnavailable,
+        ServiceFailure::UnsupportedSchema => ClientFailureClass::UnknownSchema,
+        ServiceFailure::IncompatibleStorage => ClientFailureClass::Incompatible,
+        ServiceFailure::UnsafeStorage => ClientFailureClass::UnsafeStorage,
+        ServiceFailure::InvalidRecord => ClientFailureClass::InvalidStorage,
+        ServiceFailure::IdentityMismatch => ClientFailureClass::PinMismatch,
+        ServiceFailure::LimitExceeded => ClientFailureClass::ResourceLimit,
+        ServiceFailure::Indeterminate => ClientFailureClass::RecoveryRequired,
+        ServiceFailure::RootAccount | ServiceFailure::AuthorizationDenied => {
+            ClientFailureClass::AuthorizationDenied
+        }
+        _ => ClientFailureClass::Unavailable,
+    })
+}
 use spaceterm_client::ports::ClientFuture;
 use spaceterm_host::{
     account_service::RegisteredServer,
@@ -10,18 +43,92 @@ use spaceterm_host::{
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-pub(super) trait OwnerChannelProvider: Send + Sync {
+pub trait OwnerChannelProvider: Send + Sync {
     fn open<'a>(
         &'a self,
         registration: &'a RegisteredServer,
     ) -> ClientFuture<'a, Arc<dyn MessageTransport>>;
 }
 
-pub(super) struct NativeOwnerChannel(pub(super) NativeClientProvider);
+/// Account/build-selected owner channel. Stopped intent uses only the retained
+/// signed executable, without calling a service-manager Start operation.
+pub struct NativeOwnerChannel(pub Arc<NativeServiceManagement>);
 impl OwnerChannelProvider for NativeOwnerChannel {
     fn open<'a>(
         &'a self,
         registration: &'a RegisteredServer,
+    ) -> ClientFuture<'a, Arc<dyn MessageTransport>> {
+        self.open_installed(registration, InstalledCommand::Production)
+    }
+}
+
+#[derive(Clone)]
+enum InstalledCommand {
+    Production,
+    #[cfg(feature = "test-support")]
+    Fixture {
+        root: std::path::PathBuf,
+        home: std::path::PathBuf,
+        key: spaceterm_distribution::UpdateKey,
+    },
+}
+impl InstalledCommand {
+    fn retain(
+        &self,
+        registration: &RegisteredServer,
+    ) -> Result<(InstalledServerExecutable, Vec<std::ffi::OsString>), ClientFailure> {
+        let (store, arguments) = match self {
+            Self::Production => (
+                ServerInstallationStore::open_existing(registration),
+                vec![std::ffi::OsString::from("owner-enrollment")],
+            ),
+            #[cfg(feature = "test-support")]
+            Self::Fixture { root, home, key } => {
+                if !registration.data_directory().starts_with(root) {
+                    return Err(failure(ClientFailureClass::UnsafeStorage));
+                }
+                (
+                    spaceterm_host::server_installation::test_support::existing_store(
+                        registration,
+                        key.clone(),
+                    ),
+                    vec![
+                        "--test-account-root".into(),
+                        root.as_os_str().to_owned(),
+                        "--test-shell-home".into(),
+                        home.as_os_str().to_owned(),
+                        "owner-enrollment".into(),
+                    ],
+                )
+            }
+        };
+        let executable = store
+            .and_then(|store| {
+                store.retain_compatible_approved(
+                    spaceterm_host::organization_store::schema::SCHEMA_VERSION,
+                )
+            })
+            .map_err(classify)?;
+        let approved = registration
+            .approved_installation()
+            .ok_or_else(|| failure(ClientFailureClass::StaleAuthority))?;
+        let selected = executable.status();
+        if !registration.is_installed()
+            || selected.installation != approved.installation
+            || selected.version != approved.version
+            || selected.artifact_sha256 != approved.artifact_sha256
+        {
+            return Err(failure(ClientFailureClass::StaleAuthority));
+        }
+        Ok((executable, arguments))
+    }
+}
+
+impl NativeOwnerChannel {
+    fn open_installed<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+        installed: InstalledCommand,
     ) -> ClientFuture<'a, Arc<dyn MessageTransport>> {
         Box::pin(async move {
             if registration.desired_state() == DesiredServerState::Stopped {
@@ -30,7 +137,6 @@ impl OwnerChannelProvider for NativeOwnerChannel {
                 let generation = registration.generation();
                 return tokio::task::spawn_blocking(move || {
                     let registration = native
-                        .management()
                         .supervisor()
                         .discover()
                         .map_err(classify)?
@@ -41,16 +147,10 @@ impl OwnerChannelProvider for NativeOwnerChannel {
                     {
                         return Err(failure(ClientFailureClass::StaleAuthority));
                     }
-                    let executable = ServerInstallationStore::open_existing(&registration)
-                        .and_then(|store| {
-                            store.retain_compatible_approved(
-                                spaceterm_host::organization_store::schema::SCHEMA_VERSION,
-                            )
-                        })
-                        .map_err(classify)?;
+                    let (executable, arguments) = installed.retain(&registration)?;
                     let mut command = tokio::process::Command::new(executable.path());
                     command
-                        .arg("owner-enrollment")
+                        .args(arguments)
                         .env_clear()
                         .current_dir(registration.data_directory())
                         .stdin(std::process::Stdio::piped())
@@ -86,13 +186,12 @@ impl OwnerChannelProvider for NativeOwnerChannel {
                 .ok_or_else(|| failure(ClientFailureClass::UnsafeEndpoint))?;
             let owner = PrivateIpcDirectory::open(directory)
                 .and_then(|directory| directory.endpoint("owner"))
-                .map_err(spaceterm_client_native::route::classify)?;
+                .map_err(crate::route::classify)?;
             let until = tokio::time::Instant::now() + DEADLINE;
             loop {
                 match IpcTransport::connect(
                     &owner,
-                    MessageLimit::new(FRAME_LIMIT)
-                        .map_err(spaceterm_client_native::route::classify)?,
+                    MessageLimit::new(FRAME_LIMIT).map_err(crate::route::classify)?,
                 )
                 .await
                 {
@@ -100,10 +199,53 @@ impl OwnerChannelProvider for NativeOwnerChannel {
                     Err(TransportError::Unavailable) if tokio::time::Instant::now() < until => {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
-                    Err(error) => return Err(spaceterm_client_native::route::classify(error)),
+                    Err(error) => return Err(crate::route::classify(error)),
                 }
             }
         })
+    }
+}
+
+/// Isolated installed-command composition. Release trust and entry points remain
+/// unchanged when this feature is absent. The executable still comes exclusively
+/// from the authenticated approved installation, never a caller-supplied path.
+#[cfg(feature = "test-support")]
+pub mod test_support {
+    use super::*;
+
+    struct FixtureOwnerChannel {
+        native: NativeOwnerChannel,
+        installed: InstalledCommand,
+    }
+    impl OwnerChannelProvider for FixtureOwnerChannel {
+        fn open<'a>(
+            &'a self,
+            registration: &'a RegisteredServer,
+        ) -> ClientFuture<'a, Arc<dyn MessageTransport>> {
+            self.native
+                .open_installed(registration, self.installed.clone())
+        }
+    }
+
+    pub fn installed_owner_channel(
+        native: Arc<NativeServiceManagement>,
+        root: &std::path::Path,
+        home: &std::path::Path,
+        key: spaceterm_distribution::UpdateKey,
+    ) -> Result<Arc<dyn OwnerChannelProvider>, ClientFailure> {
+        let root = root
+            .canonicalize()
+            .map_err(|_| failure(ClientFailureClass::UnsafeStorage))?;
+        let home = home
+            .canonicalize()
+            .map_err(|_| failure(ClientFailureClass::UnsafeStorage))?;
+        if !home.starts_with(&root) {
+            return Err(failure(ClientFailureClass::UnsafeStorage));
+        }
+        Ok(Arc::new(FixtureOwnerChannel {
+            native: NativeOwnerChannel(native),
+            installed: InstalledCommand::Fixture { root, home, key },
+        }))
     }
 }
 

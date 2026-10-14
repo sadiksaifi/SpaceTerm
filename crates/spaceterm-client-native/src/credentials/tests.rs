@@ -620,6 +620,7 @@ struct DeferredInsertion {
     started: Arc<tokio::sync::Notify>,
     proceed: Arc<tokio::sync::Notify>,
     finished: Arc<tokio::sync::Notify>,
+    insertions: Arc<std::sync::atomic::AtomicUsize>,
 }
 impl NativeKeyStore for DeferredInsertion {
     fn read<'a>(
@@ -635,6 +636,8 @@ impl NativeKeyStore for DeferredInsertion {
         secret: &'a [u8],
     ) -> PairingFuture<'a, Result<(), PairingFailure>> {
         Box::pin(async move {
+            self.insertions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let memory = self.memory.clone();
             let scope = scope.clone();
             let secret = Zeroizing::new(secret.to_vec());
@@ -673,7 +676,9 @@ async fn cancelled_creation_recovers_the_original_slot_after_native_insertion_fi
     let started = Arc::new(tokio::sync::Notify::new());
     let proceed = Arc::new(tokio::sync::Notify::new());
     let finished = Arc::new(tokio::sync::Notify::new());
+    let insertions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let native = DeviceCredentials::with_store(Arc::new(DeferredInsertion {
+        insertions: insertions.clone(),
         memory: memory.clone(),
         started: started.clone(),
         proceed: proceed.clone(),
@@ -701,12 +706,41 @@ async fn cancelled_creation_recovers_the_original_slot_after_native_insertion_fi
         journal.state.lock().unwrap().credential_preparations.len(),
         1
     );
+    let retry = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        spaceterm_client::pairing::journal::resume_native_credential(
+            &store,
+            &native,
+            scope.clone(),
+        ),
+    )
+    .await;
+    assert!(
+        matches!(retry, Ok(Err(PairingFailure::RecoveryRequired))),
+        "an absent read must not reissue an insertion that can still finish"
+    );
+    assert_eq!(insertions.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        journal.state.lock().unwrap().credential_preparations[0].generation,
+        generation
+    );
     proceed.notify_one();
     finished.notified().await;
+    let (resumed_generation, resumed) =
+        spaceterm_client::pairing::journal::resume_native_credential(
+            &store,
+            &native,
+            scope.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resumed_generation, generation);
+    assert_eq!(insertions.load(std::sync::atomic::Ordering::SeqCst), 1);
     let recovered = recover_native_credential(&store, &native, generation)
         .await
         .unwrap()
         .unwrap();
+    assert!(resumed == recovered);
     assert_eq!(recovered.scope, scope);
     assert_eq!(memory.items.lock().unwrap().len(), 1);
     assert_eq!(

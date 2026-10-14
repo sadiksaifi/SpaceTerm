@@ -137,3 +137,53 @@ fn lost_unpair_assessment_lookup_recovers_original_id_in_both_majors() {
     check!(v1);
     check!(v2);
 }
+
+#[test]
+fn pairing_rejection_and_lookup_keep_original_operation_in_both_majors() {
+    let server = ServerId::new([1; 16]);
+    let pin = spaceterm_protocol::authentication::ServerPin {
+        identity: server.bytes(),
+        public_key: [8; 32],
+    };
+    let pairing_id = PairingId::new(server, 2).unwrap();
+    let client = ClientId::new(server, 3).unwrap();
+    let stream = OperationStreamId::new(
+        OperationStreamKey::new(server, 4).unwrap(),
+        pairing_id,
+        client,
+    )
+    .unwrap();
+    let operation = OperationId::new(stream, OperationSequence::new(1).unwrap());
+    let target = PairingTarget::new(PairingTargetParts {
+        server,
+        device: DeviceId::new([5; 16]),
+        pairing: pairing_id,
+    })
+    .unwrap();
+    let binding = CanonicalOperationRequest::new(
+        operation,
+        Command::Pairing(PairingCommand::BindAdditionalClient {
+            target,
+            expected_authorization_version: FieldVersion::new(7),
+            claim_digest: spaceterm_core::operations::RequestDigest::from_bytes([6; 32]),
+        }),
+        &spaceterm_core::operation_ledger::canonical::CanonicalCodec,
+    )
+    .unwrap()
+    .binding();
+    let expected = Outcome::Pairing(Box::new(PairingOutcome::Failed(
+        PairingFailure::StaleAssessment,
+    )));
+    macro_rules! check { ($p:ident) => {{
+        let outcome = $p::Outcome { operation: Some(identity::encode_operation(operation)), publication_revision: 0, result: Some($p::outcome::Result::PairingResult(Box::new($p::PairingOutcome { operation: Some(Box::new(pairing_adapter::operation_to_wire(operation))), disposition: 7, classified_failure: spaceterm_protocol::wire::pairing::PairingFailure::PairingStaleAssessment as i32, ..Default::default() }))) };
+        assert_eq!(pairing::$p::outcome(&outcome, binding, pin).unwrap(), (OrganizationRevision::new(0), expected.clone()));
+        let lookup = $p::OperationLookupResult { operation: Some(identity::encode_operation(operation)), request_digest: binding.digest.bytes().to_vec(), disposition: Some($p::operation_lookup_result::Disposition::Completed(Box::new(outcome.clone()))) };
+        assert_eq!(pairing::$p::lookup(&lookup, binding, pin).unwrap(), OperationLookup::Completed { result: expected.clone(), publication_revision: OrganizationRevision::new(0) });
+        let mut malformed = outcome;
+        let Some($p::outcome::Result::PairingResult(result)) = &mut malformed.result else { unreachable!() };
+        result.classified_failure = 999;
+        assert!(pairing::$p::outcome(&malformed, binding, pin).is_err());
+    }}; }
+    check!(v1);
+    check!(v2);
+}
