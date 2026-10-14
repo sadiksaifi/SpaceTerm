@@ -5,3 +5,4 @@ pub mod linger;
 pub mod probe;
 pub mod process;
 pub mod setup;
+pub mod wire;

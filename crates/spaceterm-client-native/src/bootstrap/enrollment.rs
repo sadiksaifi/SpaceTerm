@@ -56,6 +56,22 @@ pub trait BootstrapOwnerExchange: Send + Sync {
         request: [u8; 16],
         proposal: &'a EnrollmentProposal,
     ) -> PairingFuture<'a, Result<BootstrapOwnerDelivery, PairingFailure>>;
+    fn lookup_verified<'a>(
+        &'a self,
+        server: &'a BootstrapServer,
+        request: [u8; 16],
+        proposal: &'a EnrollmentProposal,
+        _device_proof: [u8; 64],
+        _authentication_proof: [u8; 64],
+    ) -> PairingFuture<'a, Result<BootstrapOwnerDelivery, PairingFailure>> {
+        self.lookup(server, request, proposal)
+    }
+    fn prepare_binding<'a>(
+        &'a self,
+        _prepared: &'a PreparedEnrollment,
+    ) -> PairingFuture<'a, Result<(), PairingFailure>> {
+        Box::pin(async { Ok(()) })
+    }
     fn connect<'a>(
         &'a self,
         server: &'a BootstrapServer,
@@ -65,9 +81,9 @@ pub trait BootstrapOwnerExchange: Send + Sync {
 
 /// Foreground-only production enrollment with native credentials and the canonical SQLite journal.
 /// Namespace and route reference are explicit local composition, not protocol-supplied authority.
-pub struct NativeBootstrapEnrollment<R, O> {
-    journal: Arc<NativeClientJournal>,
-    credentials: DeviceCredentials,
+pub struct NativeBootstrapEnrollment<R, O, J = NativeClientJournal, C = DeviceCredentials> {
+    journal: Arc<J>,
+    credentials: C,
     connector: R,
     owner: O,
     namespace: CredentialNamespace,
@@ -75,11 +91,18 @@ pub struct NativeBootstrapEnrollment<R, O> {
     reference: RevocationRouteReference,
     preparation: tokio::sync::Mutex<()>,
     connections: std::sync::Mutex<Vec<(BootstrapAttempt, LocalPairingKey)>>,
+    completed: std::sync::Mutex<Option<(PreparedEnrollment, SavedPairing)>>,
 }
-impl<R: EnrollmentConnector + Clone, O: BootstrapOwnerExchange> NativeBootstrapEnrollment<R, O> {
+impl<
+    R: EnrollmentConnector + Clone,
+    O: BootstrapOwnerExchange,
+    J: spaceterm_client::journal::PairingClientJournal,
+    C: NativeDeviceCredentials + Clone,
+> NativeBootstrapEnrollment<R, O, J, C>
+{
     pub fn new(
-        journal: Arc<NativeClientJournal>,
-        credentials: DeviceCredentials,
+        journal: Arc<J>,
+        credentials: C,
         connector: R,
         owner: O,
         namespace: CredentialNamespace,
@@ -99,9 +122,17 @@ impl<R: EnrollmentConnector + Clone, O: BootstrapOwnerExchange> NativeBootstrapE
             reference,
             preparation: tokio::sync::Mutex::new(()),
             connections: std::sync::Mutex::new(Vec::new()),
+            completed: std::sync::Mutex::new(None),
         })
     }
-    fn store(&self) -> JournalPairingStore<NativeClientJournal> {
+    /// Returns the exact durable enrollment completed by this foreground coordinator.
+    pub fn completed(&self) -> Result<Option<(PreparedEnrollment, SavedPairing)>, PairingFailure> {
+        self.completed
+            .lock()
+            .map(|slot| slot.clone())
+            .map_err(|_| PairingFailure::RecoveryRequired)
+    }
+    fn store(&self) -> JournalPairingStore<J> {
         JournalPairingStore::new(Arc::clone(&self.journal))
     }
     fn check(
@@ -234,8 +265,12 @@ impl<R: EnrollmentConnector + Clone, O: BootstrapOwnerExchange> NativeBootstrapE
         Ok((generation, device, authentication, proposal))
     }
 }
-impl<R: EnrollmentConnector + Clone + Send + Sync, O: BootstrapOwnerExchange> BootstrapEnrollment
-    for NativeBootstrapEnrollment<R, O>
+impl<
+    R: EnrollmentConnector + Clone + Send + Sync,
+    O: BootstrapOwnerExchange,
+    J: spaceterm_client::journal::PairingClientJournal,
+    C: NativeDeviceCredentials + Clone,
+> BootstrapEnrollment for NativeBootstrapEnrollment<R, O, J, C>
 {
     fn preflight<'a>(
         &'a self,
@@ -287,9 +322,58 @@ impl<R: EnrollmentConnector + Clone + Send + Sync, O: BootstrapOwnerExchange> Bo
                     BootstrapPhase::Enrolled,
                 ));
             }
+            let comparison =
+                DirectEnrollmentAttempt::new(server.pin, self.reference, attempt.generation())
+                    .map_err(|e| BootstrapFailure::new(e, BootstrapPhase::Enrolled))?;
+            let verified = comparison
+                .confirm(
+                    server.pin,
+                    self.reference,
+                    attempt.generation(),
+                    &comparison.fingerprint(),
+                )
+                .map_err(|e| BootstrapFailure::new(e, BootstrapPhase::Enrolled))?;
+            let device_signer = self
+                .credentials
+                .signing_key(
+                    &device,
+                    &verified
+                        .credential_use(&device)
+                        .map_err(|e| BootstrapFailure::new(e, BootstrapPhase::Enrolled))?,
+                )
+                .await
+                .map_err(|e| BootstrapFailure::new(e, BootstrapPhase::Enrolled))?;
+            let auth_signer = self
+                .credentials
+                .signing_key(
+                    &authentication,
+                    &verified
+                        .credential_use(&authentication)
+                        .map_err(|e| BootstrapFailure::new(e, BootstrapPhase::Enrolled))?,
+                )
+                .await
+                .map_err(|e| BootstrapFailure::new(e, BootstrapPhase::Enrolled))?;
+            let (device_proof, authentication_proof) =
+                spaceterm_protocol::pairing_adapter::VerifiedDeviceClaim::proofs(
+                    &proposal,
+                    device_signer.as_ref(),
+                    auth_signer.as_ref(),
+                )
+                .map_err(|_| {
+                    BootstrapFailure::new(
+                        PairingFailure::AuthorizationDenied,
+                        BootstrapPhase::Enrolled,
+                    )
+                })?;
             let delivery = self
                 .owner
-                .lookup(server, request, &proposal)
+                .lookup_verified(
+                    server,
+                    request,
+                    &proposal,
+                    device_proof,
+                    authentication_proof,
+                )
                 .await
                 .map_err(|e| BootstrapFailure::new(e, BootstrapPhase::Enrolled))?;
             self.check(server.route, attempt, BootstrapPhase::Enrolled)?;
@@ -354,6 +438,10 @@ impl<R: EnrollmentConnector + Clone + Send + Sync, O: BootstrapOwnerExchange> Bo
                     &comparison.fingerprint(),
                 )
                 .map_err(|e| BootstrapFailure::new(e, BootstrapPhase::Enrolled))?;
+            self.owner
+                .prepare_binding(&prepared)
+                .await
+                .map_err(|e| BootstrapFailure::new(e, BootstrapPhase::Enrolled))?;
             let driver = EnrollmentDriver::new(
                 self.store(),
                 self.credentials.clone(),
@@ -369,12 +457,17 @@ impl<R: EnrollmentConnector + Clone + Send + Sync, O: BootstrapOwnerExchange> Bo
                     majors: server
                         .protocol_majors
                         .iter()
+                        .rev()
                         .copied()
+                        .filter(|major| matches!(major, 1 | 2))
                         .map(u32::from)
                         .collect(),
                 })
                 .await
                 .map_err(|e| BootstrapFailure::new(e, BootstrapPhase::Enrolled))?;
+            *self.completed.lock().map_err(|_| {
+                BootstrapFailure::new(PairingFailure::RecoveryRequired, BootstrapPhase::Enrolled)
+            })? = Some((prepared, saved.clone()));
             self.check(server.route, attempt, BootstrapPhase::Enrolled)?;
             let mut connections = self.connections.lock().map_err(|_| {
                 BootstrapFailure::new(PairingFailure::RecoveryRequired, BootstrapPhase::Enrolled)
@@ -439,7 +532,9 @@ impl<R: EnrollmentConnector + Clone + Send + Sync, O: BootstrapOwnerExchange> Bo
                     server
                         .protocol_majors
                         .iter()
+                        .rev()
                         .copied()
+                        .filter(|major| matches!(major, 1 | 2))
                         .map(u32::from)
                         .collect(),
                 )

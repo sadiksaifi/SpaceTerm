@@ -32,7 +32,7 @@ struct NativeStdio {
     uid: u32,
 }
 impl NativeStdio {
-    fn new(uid: u32) -> Result<Self, OwnerEndpointFailure> {
+    fn new(uid: u32, budget: Duration) -> Result<Self, OwnerEndpointFailure> {
         // Bearer delivery is never printed to a terminal.
         if std::io::stdin().is_terminal() || std::io::stdout().is_terminal() {
             return Err(OwnerEndpointFailure::InvalidRequest);
@@ -49,7 +49,7 @@ impl NativeStdio {
         Ok(Self {
             input: Arc::new(input),
             output: Arc::new(output),
-            deadline: Instant::now() + Duration::from_secs(60),
+            deadline: Instant::now() + budget,
             uid,
         })
     }
@@ -165,6 +165,7 @@ pub async fn run_native(invocation: ServerInvocation) -> Option<Result<(), Owner
         ServerInvocation::OwnerEnrollment
             | ServerInvocation::SetupConfirmed
             | ServerInvocation::ReserveNativeRequest
+            | ServerInvocation::BootstrapAccount
     ) {
         return None;
     }
@@ -189,8 +190,12 @@ pub async fn run_native_with_supervisor(
     supervisor: Arc<ServiceSupervisor>,
 ) -> Result<(), OwnerEndpointFailure> {
     match invocation {
+        ServerInvocation::BootstrapAccount => {
+            let channel = NativeStdio::new(supervisor.key().account_uid, Duration::from_secs(600))?;
+            super::bootstrap::execute(supervisor, &channel).await
+        }
         ServerInvocation::OwnerEnrollment => {
-            let channel = NativeStdio::new(supervisor.key().account_uid)?;
+            let channel = NativeStdio::new(supervisor.key().account_uid, Duration::from_secs(60))?;
             super::owner::execute(supervisor, &channel).await
         }
         ServerInvocation::ReserveNativeRequest => {

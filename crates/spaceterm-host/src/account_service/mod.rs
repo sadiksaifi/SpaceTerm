@@ -57,7 +57,7 @@ pub type ServiceFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, ServiceFailure>> + Send + 'a>>;
 
 /// Independently observed account linger.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum LingerState {
     /// The account user manager survives logout and starts at boot.
     Enabled,
@@ -90,7 +90,7 @@ pub enum SudoMode {
     NonInteractive,
 }
 /// Native supervision observation, separate from deliberate intent and authentication.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum SupervisorState {
     /// This service has no installed configuration.
     NotInstalled,

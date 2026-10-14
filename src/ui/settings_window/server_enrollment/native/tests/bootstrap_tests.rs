@@ -1,0 +1,1173 @@
+//! Production provider acceptance with SSH, credential custody and manager boundaries injected.
+//! Account setup, signed installation, owner actor, handshake and journal remain real.
+
+use super::*;
+use spaceterm_client::pairing::bootstrap::*;
+use spaceterm_client::{
+    journal::{JournalLimits, ReceiptVerifier},
+    pairing::{
+        credentials::*,
+        enrollment::{EnrollmentConnector, PairingTransport},
+        revocation::RestrictedConnector,
+    },
+};
+use spaceterm_client_native::bootstrap::production::{
+    BootstrapHostConnection, BootstrapHostFactory, BootstrapRemoteConnection,
+    ProductionSshBootstrap,
+};
+use spaceterm_core::{operation_ledger::canonical::CanonicalCodec, pairing::SignedPairingReceipt};
+use spaceterm_distribution::{UpdateKey, VerifiedAccountServerArtifact};
+use spaceterm_host::{
+    account_service::{
+        LingerState, NativeServiceInstallations, RegisteredServer, RuntimeAssessment,
+        ServiceAction, ServiceClock, ServiceFailure, ServiceFuture, ServiceManager,
+        ServiceProcesses, ServiceSupervisor, ServiceTime, SupervisorState,
+        test_support::AccountServiceFixture,
+    },
+    bootstrap::{
+        linger::{LingerFuture, LingerInvocation, ScopedLingerAuthentication},
+        process::{BootstrapProbeFailure, BootstrapProbeFuture},
+        setup::AccountBootstrapSetup,
+        wire::*,
+    },
+    shell_launch::ShellLaunchPlanner,
+    startup::{BuildIdentity, DesiredServerState},
+    transport::{MessageTransport, PeerFacts, TransportError, TransportFuture, TransportRoute},
+};
+use spaceterm_server::{
+    account_startup::{AccountStartup, RecoveredAccountServer, test_support::StartupAbsence},
+    adapters::terminal::AccountLaunchFacts,
+};
+use std::{
+    os::unix::fs::DirBuilderExt,
+    path::PathBuf,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+};
+
+#[path = "../../../../../../crates/spaceterm-host/tests/support/signed_installation.rs"]
+mod signed;
+
+#[derive(Clone, Default)]
+struct Credentials(
+    Arc<
+        Mutex<
+            Vec<(
+                PreparedCredential,
+                Arc<spaceterm_client::testing::DeterministicKey>,
+            )>,
+        >,
+    >,
+);
+impl NativeDeviceCredentials for Credentials {
+    fn create(
+        &self,
+        reservation: CredentialCreationReservation,
+    ) -> PairingFuture<'_, Result<PreparedCredential, PairingFailure>> {
+        Box::pin(async move {
+            let mut keys = self.0.lock().unwrap();
+            let key = Arc::new(
+                spaceterm_client::testing::DeterministicKey::new(30 + keys.len() as u8).unwrap(),
+            );
+            let prepared = PreparedCredential {
+                scope: reservation.scope().clone(),
+                public_key: spaceterm_protocol::authentication::SigningKey::public_key(
+                    key.as_ref(),
+                ),
+            };
+            keys.push((prepared.clone(), key));
+            Ok(prepared)
+        })
+    }
+    fn recover_preparation<'a>(
+        &'a self,
+        scope: &'a CredentialScope,
+    ) -> PairingFuture<'a, Result<Option<PreparedCredential>, PairingFailure>> {
+        Box::pin(async move {
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(key, _)| &key.scope == scope)
+                .map(|(key, _)| key.clone()))
+        })
+    }
+    fn signing_key<'a>(
+        &'a self,
+        prepared: &'a PreparedCredential,
+        lease: &'a CredentialUse,
+    ) -> PairingFuture<
+        'a,
+        Result<Arc<dyn spaceterm_protocol::authentication::SigningKey>, PairingFailure>,
+    > {
+        Box::pin(async move {
+            lease.validate(&prepared.scope)?;
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(key, _)| key == prepared)
+                .map(|(_, key)| {
+                    key.clone() as Arc<dyn spaceterm_protocol::authentication::SigningKey>
+                })
+                .ok_or(PairingFailure::CredentialUnavailable)
+        })
+    }
+    fn delete_pairing_key<'a>(
+        &'a self,
+        _: &'a PreparedCredential,
+    ) -> PairingFuture<'a, Result<CredentialDeletion, PairingFailure>> {
+        Box::pin(async { panic!("Bootstrap must not delete a credential") })
+    }
+}
+struct NoPairingRoute;
+impl EnrollmentConnector for NoPairingRoute {
+    fn open<'a>(
+        &'a self,
+        _: spaceterm_protocol::authentication::ServerPin,
+        _: spaceterm_core::pairing::RevocationRouteReference,
+    ) -> PairingFuture<'a, Result<Box<dyn PairingTransport>, PairingFailure>> {
+        Box::pin(async {
+            panic!("Bootstrap uses its retained owner channel, not a replacement route")
+        })
+    }
+}
+impl RestrictedConnector for NoPairingRoute {
+    fn open<'a>(
+        &'a self,
+        _: &'a PendingRevocationTask,
+    ) -> PairingFuture<'a, Result<Box<dyn PairingTransport>, PairingFailure>> {
+        Box::pin(async { panic!("Bootstrap cannot revoke") })
+    }
+}
+struct Verify;
+impl ReceiptVerifier for Verify {
+    fn verify(
+        &self,
+        pin: spaceterm_protocol::authentication::ServerPin,
+        receipt: &SignedPairingReceipt,
+    ) -> Result<(), ClientFailure> {
+        spaceterm_protocol::pairing_adapter::ReceiptCodec::new(pin)
+            .verify(receipt)
+            .map(|_| ())
+            .map_err(|_| ClientFailure::new(ClientFailureClass::InvalidPeer))
+    }
+}
+struct Clock;
+impl ServiceClock for Clock {
+    fn now(&self) -> Result<ServiceTime, ServiceFailure> {
+        ServiceTime::current()
+    }
+}
+struct Manager {
+    key: UpdateKey,
+    running: AtomicBool,
+    effects: Mutex<Vec<&'static str>>,
+    linux: AtomicBool,
+    linger_enabled: AtomicBool,
+}
+impl ServiceManager for Manager {
+    fn status<'a>(&'a self, _: Option<&'a RegisteredServer>) -> ServiceFuture<'a, SupervisorState> {
+        Box::pin(async {
+            Ok(if self.running.load(Ordering::SeqCst) {
+                SupervisorState::Running
+            } else {
+                SupervisorState::Inactive
+            })
+        })
+    }
+    fn scoped_processes<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, Vec<u32>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn linger(&self) -> ServiceFuture<'_, Option<LingerState>> {
+        Box::pin(async {
+            Ok(if self.linux.load(Ordering::SeqCst) {
+                Some(if self.linger_enabled.load(Ordering::SeqCst) {
+                    LingerState::Enabled
+                } else {
+                    LingerState::Disabled
+                })
+            } else {
+                None
+            })
+        })
+    }
+    fn configure<'a>(&'a self, registration: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
+        Box::pin(async move {
+            self.verify_installation(registration)?;
+            self.effects.lock().unwrap().push("configure");
+            Ok(())
+        })
+    }
+    fn start<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
+        Box::pin(async {
+            self.effects.lock().unwrap().push("start");
+            self.running.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+    fn stop<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
+        Box::pin(async {
+            self.effects.lock().unwrap().push("stop");
+            self.running.store(false, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+    fn uninstall<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
+        Box::pin(async { panic!("Bootstrap cannot uninstall") })
+    }
+    fn verify_installation(&self, registration: &RegisteredServer) -> Result<(), ServiceFailure> {
+        NativeServiceInstallations::test_approved_executable(registration, self.key.clone())
+            .map(drop)
+    }
+}
+struct Remote {
+    fixture: Arc<AccountServiceFixture>,
+    supervisor: Arc<ServiceSupervisor>,
+    manager: Arc<Manager>,
+    root: PathBuf,
+    requests: Mutex<Vec<&'static str>>,
+    lost_reply: AtomicBool,
+    lost_owner_reply: AtomicBool,
+    cancel_owner_ready: Mutex<Option<Arc<AtomicBool>>>,
+    owner_client_frames: Arc<AtomicUsize>,
+    unsupported: AtomicBool,
+    prospective_roots: Mutex<Option<(PathBuf, PathBuf)>>,
+    actor: tokio::sync::Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::task::JoinHandle<()>,
+        )>,
+    >,
+    owners: AtomicUsize,
+}
+impl Remote {
+    fn route_value(&self) -> BootstrapRoute {
+        BootstrapRoute::capture(
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            self.supervisor.key().account_uid,
+            BuildChannel::Development,
+        )
+        .unwrap()
+    }
+    async fn observed(&self) -> Result<AccountObservation, ServiceFailure> {
+        let facts = AccountBootstrapSetup::new((*self.supervisor).clone())
+            .inspect()
+            .await?;
+        let remote_socket = self.supervisor.discover()?.map(|registered| {
+            registered
+                .endpoint()
+                .unwrap()
+                .path()
+                .to_str()
+                .unwrap()
+                .to_owned()
+        });
+        Ok(AccountObservation {
+            facts,
+            remote_socket,
+        })
+    }
+    async fn ensure_actor(&self) {
+        let mut actor = self.actor.lock().await;
+        if actor.is_some() {
+            return;
+        }
+        let registration = self.supervisor.discover().unwrap().unwrap();
+        let startup = AccountStartup::admit(&self.supervisor).unwrap();
+        let server = RecoveredAccountServer::recover(
+            self.supervisor.clone(),
+            startup,
+            AccountLaunchFacts {
+                uid: registration.key().account_uid,
+                home: self.root.clone(),
+                planner: ShellLaunchPlanner::for_test(self.root.join("shell"), self.root.clone()),
+                machine: spaceterm_terminal::metadata::LocalMachine::default(),
+            },
+        )
+        .await
+        .unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = server
+                .run_until(async {
+                    let _ = stopped.await;
+                })
+                .await;
+        });
+        let endpoint = registration.endpoint().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if tokio::net::UnixStream::connect(endpoint.path())
+                    .await
+                    .is_ok()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        *actor = Some((stop, task));
+    }
+    async fn close(&self) {
+        if let Some((stop, task)) = self.actor.lock().await.take() {
+            let _ = stop.send(());
+            task.await.unwrap();
+        }
+    }
+}
+impl BootstrapRemoteConnection for Remote {
+    fn route(&self) -> BootstrapRoute {
+        self.route_value()
+    }
+    fn destination(&self) -> &str {
+        "test-account"
+    }
+    fn revalidate(&self) -> Result<(), BootstrapFailure> {
+        Ok(())
+    }
+    fn probe(&self) -> BootstrapProbeFuture<'_, Vec<u8>> {
+        Box::pin(async move {
+            self.revalidate()
+                .map_err(|_| BootstrapProbeFailure::RouteChanged)?;
+            let uid = self.supervisor.key().account_uid;
+            if self.unsupported.load(Ordering::SeqCst) {
+                return Ok(format!("STBP2\nuid={uid}\nos=Linux\narch=x86_64\nversion=22.04\nlibc=musl\nkernel=5.15.0\nmanager=systemd-user\nmanager_version=249\nmanager_reachable=yes\nlinger=yes\nsudo=available\n").into_bytes());
+            }
+            if self.manager.linux.load(Ordering::SeqCst) {
+                Ok(format!("STBP2\nuid={uid}\nos=Linux\narch=x86_64\nversion=22.04\nlibc=glibc 2.35\nkernel=5.15.0\nmanager=systemd-user\nmanager_version=249\nmanager_reachable=yes\nlinger={}\nsudo=available\n", if self.manager.linger_enabled.load(Ordering::SeqCst) { "yes" } else { "no" }).into_bytes())
+            } else {
+                Ok(format!("STBP2\nuid={uid}\nos=Darwin\narch=arm64\nversion=26.0.0\nlibc=none\nkernel=25.0.0\nmanager=launchagent\nmanager_version=1\nmanager_reachable=yes\nlinger=none\nsudo=unavailable\n").into_bytes())
+            }
+        })
+    }
+    fn account<'a>(
+        &'a self,
+        request: AccountRequest,
+        artifact: Option<&'a VerifiedAccountServerArtifact>,
+    ) -> PairingFuture<'a, Result<AccountReply, BootstrapFailure>> {
+        Box::pin(async move {
+            self.revalidate()?;
+            let setup = AccountBootstrapSetup::new((*self.supervisor).clone());
+            let is_install = matches!(request, AccountRequest::Install { .. });
+            let result = async {
+                match request {
+                    AccountRequest::Inspect => {
+                        self.requests.lock().unwrap().push("inspect");
+                        Ok(AccountReply::Observation(self.observed().await?))
+                    }
+                    AccountRequest::Reserve => {
+                        self.requests.lock().unwrap().push("reserve");
+                        Ok(AccountReply::Reserved(setup.reserve_request()?))
+                    }
+                    AccountRequest::ReserveOwner { proposal } => {
+                        self.requests.lock().unwrap().push("reserve-owner");
+                        let request = match self.supervisor.retained_owner_proposal(
+                            proposal.parts().server,
+                            &proposal.parts().keys,
+                        )? {
+                            Some((request, original)) => {
+                                assert_eq!(original, proposal);
+                                request
+                            }
+                            None => {
+                                let request = setup.reserve_request()?;
+                                self.supervisor.record_owner_proposal(request, proposal)?;
+                                request
+                            }
+                        };
+                        Ok(AccountReply::Reserved(request))
+                    }
+                    AccountRequest::Install {
+                        request,
+                        artifact: expected,
+                        transfer_bytes,
+                    } => {
+                        self.requests.lock().unwrap().push("install");
+                        let artifact = artifact.unwrap();
+                        assert_eq!(artifact.artifact_sha256(), expected);
+                        let mut bytes = Vec::new();
+                        spaceterm_client_native::bootstrap::write_artifact(artifact, &mut bytes)
+                            .unwrap();
+                        assert_eq!(bytes.len() as u64, transfer_bytes);
+                        let (_, artifact) = signed::fixture("9.0.0", 7, signed::native_machine());
+                        assert_eq!(artifact.artifact_sha256(), expected);
+                        let mut assessment = self.fixture.assess_test_install(artifact);
+                        if let Some((data, runtime)) =
+                            self.prospective_roots.lock().unwrap().clone()
+                        {
+                            assessment = assessment.with_roots(data, runtime)?;
+                        }
+                        setup.install(request, assessment.confirm()).await?;
+                        Ok(AccountReply::Observation(self.observed().await?))
+                    }
+                    AccountRequest::AuthorizeOwner {
+                        request,
+                        expected,
+                        proposal,
+                    } => {
+                        self.requests.lock().unwrap().push("authorize-owner");
+                        let digest = setup.authorize_owner(request, &expected, &proposal).await?;
+                        Ok(AccountReply::Owner {
+                            observation: self.observed().await?,
+                            digest,
+                        })
+                    }
+                    AccountRequest::OwnerBinding { request, proposal } => {
+                        let claim =
+                            spaceterm_protocol::pairing_adapter::enrollment_proposal_digest(
+                                &proposal,
+                            )
+                            .unwrap();
+                        let digest = self
+                            .supervisor
+                            .retained_owner_enrollment_digest(
+                                request,
+                                proposal.parts().server,
+                                claim,
+                            )?
+                            .unwrap();
+                        Ok(AccountReply::Owner {
+                            observation: self.observed().await?,
+                            digest,
+                        })
+                    }
+                    AccountRequest::Resolve { request, artifact } => {
+                        self.requests.lock().unwrap().push("resolve");
+                        setup.resolve(request, artifact).await?;
+                        Ok(AccountReply::Observation(self.observed().await?))
+                    }
+                    AccountRequest::RetainedOwner { keys } => {
+                        let pin = self.supervisor.discover()?.unwrap().server_pin();
+                        Ok(AccountReply::RetainedOwner(
+                            self.supervisor.retained_owner_proposal(
+                                spaceterm_core::identity::ServerId::new(pin.identity),
+                                &keys,
+                            )?,
+                        ))
+                    }
+                    AccountRequest::Start { expected } => {
+                        self.requests.lock().unwrap().push("explicit-start");
+                        if setup.inspect().await?.registration != expected {
+                            return Err(ServiceFailure::StaleAssessment);
+                        }
+                        self.supervisor
+                            .start(self.supervisor.allocate_request()?)
+                            .await?;
+                        Ok(AccountReply::Observation(self.observed().await?))
+                    }
+                    AccountRequest::OwnerChannel => {
+                        panic!("owner channel uses its independent stream")
+                    }
+                }
+            }
+            .await;
+            if is_install && self.lost_reply.swap(false, Ordering::SeqCst) {
+                return Err(BootstrapFailure::new(
+                    PairingFailure::Offline,
+                    BootstrapPhase::Applied,
+                ));
+            }
+            result.map_err(|error| {
+                spaceterm_client_native::bootstrap::service_failure(error, BootstrapPhase::Applied)
+            })
+        })
+    }
+    fn owner_channel(
+        &self,
+    ) -> PairingFuture<'_, Result<Arc<dyn MessageTransport>, PairingFailure>> {
+        Box::pin(async move {
+            self.ensure_actor().await;
+            self.owners.fetch_add(1, Ordering::SeqCst);
+            let (a, ar) = tokio::sync::mpsc::channel(1);
+            let (b, br) = tokio::sync::mpsc::channel(1);
+            let uid = self.supervisor.key().account_uid;
+            let lost_reply = self.lost_owner_reply.swap(false, Ordering::SeqCst);
+            let server = Channel {
+                loss_at: if lost_reply { 5 } else { 0 },
+                sent: Arc::new(AtomicUsize::new(0)),
+                cancel_on_ready: self.cancel_owner_ready.lock().unwrap().take(),
+                send: tokio::sync::Mutex::new(Some(a)),
+                receive: tokio::sync::Mutex::new(br),
+                completion: tokio::sync::Mutex::new(None),
+                uid,
+            };
+            let supervisor = self.supervisor.clone();
+            let task = tokio::spawn(async move {
+                let result =
+                    spaceterm_server::deployment::owner::execute(supervisor, &server).await;
+                if lost_reply {
+                    assert!(result.is_err());
+                } else {
+                    result.unwrap();
+                }
+            });
+            Ok(Arc::new(Channel {
+                loss_at: 0,
+                sent: self.owner_client_frames.clone(),
+                cancel_on_ready: None,
+                send: tokio::sync::Mutex::new(Some(b)),
+                receive: tokio::sync::Mutex::new(ar),
+                completion: tokio::sync::Mutex::new(Some(task)),
+                uid,
+            }) as Arc<dyn MessageTransport>)
+        })
+    }
+    fn prompt(&self) -> PairingFuture<'_, Result<Zeroizing<Vec<u8>>, BootstrapFailure>> {
+        Box::pin(async {
+            Err(BootstrapFailure::new(
+                PairingFailure::AuthorizationDenied,
+                BootstrapPhase::Authorized,
+            ))
+        })
+    }
+    fn enable_linger<'a>(
+        &'a self,
+        invocation: &'a LingerInvocation,
+        authentication: &'a ScopedLingerAuthentication<'a>,
+    ) -> LingerFuture<'a, ()> {
+        Box::pin(async move {
+            assert_eq!(invocation.executable(), "/usr/bin/sudo");
+            assert_eq!(invocation.account_uid(), self.supervisor.key().account_uid);
+            authentication
+                .respond(invocation.account_uid())
+                .await
+                .map(drop)
+        })
+    }
+}
+struct Channel {
+    loss_at: usize,
+    sent: Arc<AtomicUsize>,
+    cancel_on_ready: Option<Arc<AtomicBool>>,
+    send: tokio::sync::Mutex<Option<tokio::sync::mpsc::Sender<Vec<u8>>>>,
+    receive: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Vec<u8>>>,
+    completion: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    uid: u32,
+}
+impl MessageTransport for Channel {
+    fn peer_facts(&self) -> PeerFacts {
+        PeerFacts {
+            route: TransportRoute::PrivateIpc,
+            local_uid: Some(self.uid),
+            local_pid: None,
+            pinned_server_key: None,
+        }
+    }
+    fn send<'a>(&'a self, bytes: &'a [u8]) -> TransportFuture<'a, ()> {
+        Box::pin(async move {
+            let count = self.sent.fetch_add(1, Ordering::SeqCst) + 1;
+            if count == 4
+                && let Some(valid) = &self.cancel_on_ready
+            {
+                valid.store(false, Ordering::Release);
+            }
+            if count == self.loss_at {
+                self.send.lock().await.take();
+                return Err(TransportError::Closed);
+            }
+            self.send
+                .lock()
+                .await
+                .as_ref()
+                .ok_or(TransportError::Closed)?
+                .send(bytes.to_vec())
+                .await
+                .map_err(|_| TransportError::Closed)
+        })
+    }
+    fn recv(&self) -> TransportFuture<'_, Option<Vec<u8>>> {
+        Box::pin(async { Ok(self.receive.lock().await.recv().await) })
+    }
+    fn close(&self) -> TransportFuture<'_, ()> {
+        Box::pin(async {
+            self.send.lock().await.take();
+            if let Some(task) = self.completion.lock().await.take() {
+                task.await.map_err(|_| TransportError::Unavailable)?;
+            }
+            Ok(())
+        })
+    }
+}
+struct Factory {
+    remote: Arc<Remote>,
+}
+impl BootstrapHostFactory for Factory {
+    fn open(
+        &self,
+        host: String,
+        _: u64,
+    ) -> PairingFuture<'_, Result<BootstrapHostConnection, BootstrapFailure>> {
+        Box::pin(async move {
+            assert_eq!(host, "test-account");
+            let (_, artifact) = signed::fixture("9.0.0", 7, signed::native_machine());
+            Ok(BootstrapHostConnection {
+                connection: self.remote.clone(),
+                artifact: Some(artifact),
+            })
+        })
+    }
+}
+struct Harness {
+    root: tempfile::TempDir,
+    remote: Arc<Remote>,
+    journal: Arc<spaceterm_client::journal::JournalController>,
+    pairing: Arc<NativePairingRuntime>,
+    provider: super::super::bootstrap::NativeForegroundBootstrap,
+}
+impl Harness {
+    async fn new() -> Self {
+        let parent = if cfg!(target_os = "macos") {
+            PathBuf::from("/private/tmp")
+        } else {
+            spaceterm_host::account_service::TrustedAccountFacts::current()
+                .unwrap()
+                .home()
+                .to_owned()
+        };
+        let root = tempfile::Builder::new()
+            .prefix("stb")
+            .tempdir_in(parent)
+            .unwrap();
+        let fixture =
+            Arc::new(AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap());
+        let (key, _) = signed::fixture("9.0.0", 7, signed::native_machine());
+        let manager = Arc::new(Manager {
+            key: key.clone(),
+            running: AtomicBool::new(false),
+            effects: Mutex::new(Vec::new()),
+            linux: AtomicBool::new(cfg!(target_os = "linux")),
+            linger_enabled: AtomicBool::new(true),
+        });
+        let supervisor = fixture.with_installation_trust(
+            fixture.with_providers(
+                manager.clone(),
+                Arc::new(StartupAbsence),
+                Arc::new(Clock),
+                None,
+            ),
+            key,
+        );
+        let client = root.path().join("client");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&client)
+            .unwrap();
+        let codec = Arc::new(CanonicalCodec);
+        let verifier = Arc::new(Verify);
+        let storage = spaceterm_client_native::journal::NativeClientJournal::create(
+            client,
+            codec.clone(),
+            verifier.clone(),
+            JournalLimits::default(),
+        )
+        .await
+        .unwrap();
+        let journal = Arc::new(
+            spaceterm_client::journal::JournalController::recover(
+                Arc::new(storage),
+                codec,
+                verifier,
+                JournalLimits::default(),
+            )
+            .await
+            .unwrap(),
+        );
+        let credentials = Credentials::default();
+        let pairing = Arc::new(NativePairingRuntime::with_adapters(
+            journal.clone(),
+            Arc::new(credentials),
+            Arc::new(NoPairingRoute),
+            Arc::new(NoPairingRoute),
+            Arc::new(Invalidator),
+            HandshakeConfig::default(),
+        ));
+        let remote = Arc::new(Remote {
+            fixture,
+            supervisor: Arc::new(supervisor),
+            manager,
+            root: root.path().to_owned(),
+            requests: Mutex::new(Vec::new()),
+            lost_reply: AtomicBool::new(false),
+            lost_owner_reply: AtomicBool::new(false),
+            cancel_owner_ready: Mutex::new(None),
+            owner_client_frames: Arc::new(AtomicUsize::new(0)),
+            unsupported: AtomicBool::new(false),
+            prospective_roots: Mutex::new(None),
+            actor: tokio::sync::Mutex::new(None),
+            owners: AtomicUsize::new(0),
+        });
+        let provider =
+            super::super::bootstrap::NativeForegroundBootstrap(ProductionSshBootstrap::new(
+                pairing.clone(),
+                Arc::new(Factory {
+                    remote: remote.clone(),
+                }),
+            ));
+        Self {
+            root,
+            remote,
+            journal,
+            pairing,
+            provider,
+        }
+    }
+    async fn install_existing(&self) {
+        let setup = AccountBootstrapSetup::new((*self.remote.supervisor).clone());
+        let request = setup.reserve_request().unwrap();
+        let (_, artifact) = signed::fixture("9.0.0", 7, signed::native_machine());
+        setup
+            .install(request, self.remote.fixture.confirm_install(artifact))
+            .await
+            .unwrap();
+        self.remote.manager.effects.lock().unwrap().clear();
+        self.remote.requests.lock().unwrap().clear();
+    }
+    async fn candidate(&self, generation: u64) -> SshCandidate {
+        let attempt = EnrollmentAttempt::new(generation);
+        let (facts, pending) = self
+            .provider
+            .inspect("test-account".into(), attempt.clone())
+            .await
+            .unwrap();
+        assert!(pending.is_none());
+        SshCandidate::new(attempt, facts).unwrap()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_installs_or_reuses_then_enrolls() {
+    for existing in [false, true] {
+        let h = Harness::new().await;
+        if existing {
+            h.install_existing().await;
+        }
+        let original = h
+            .remote
+            .supervisor
+            .discover()
+            .unwrap()
+            .map(|registration| registration.server_pin());
+        let candidate = h.candidate(1).await;
+        let completion = h
+            .provider
+            .0
+            .bootstrap(candidate.confirm().unwrap(), candidate.facts())
+            .await
+            .unwrap();
+        assert_eq!(completion.outcome.reused, existing);
+        if let Some(pin) = original {
+            assert_eq!(completion.saved.pin(), pin);
+        }
+        let state = h.journal.snapshot().unwrap();
+        assert_eq!(state.bindings().len(), 1);
+        assert!(state.pairing().acknowledgements().is_empty());
+        let binding = state.bindings()[0].binding().unwrap();
+        assert!(h.journal.ordinary_use_allowed(&binding).unwrap());
+        assert!(
+            matches!(binding.target().route().parts(), spaceterm_client::api::RouteParts::Ssh { destination, .. } if destination == "test-account")
+        );
+        assert_eq!(h.remote.owners.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.remote.manager.effects.lock().unwrap().as_slice(),
+            if existing {
+                &[][..]
+            } else {
+                &["configure", "start"][..]
+            }
+        );
+        assert!(h.root.path().exists());
+        h.remote.close().await;
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_unsupported_host_preflight_has_no_mutation() {
+    let h = Harness::new().await;
+    h.remote.unsupported.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        h.provider
+            .inspect("test-account".into(), EnrollmentAttempt::new(1))
+            .await,
+        Err(EnrollmentFailure::Bootstrap(
+            BootstrapFailureClass::Pairing(PairingFailure::UnsupportedTarget)
+        ))
+    ));
+    assert!(!h.remote.fixture.anchor().exists());
+    assert!(h.remote.manager.effects.lock().unwrap().is_empty());
+    assert_eq!(h.remote.owners.load(Ordering::SeqCst), 0);
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_denied_scoped_authorization_has_no_mutation() {
+    let h = Harness::new().await;
+    h.install_existing().await;
+    h.remote.manager.linux.store(true, Ordering::SeqCst);
+    h.remote
+        .manager
+        .linger_enabled
+        .store(false, Ordering::SeqCst);
+    let candidate = h.candidate(1).await;
+    assert!(matches!(
+        h.provider
+            .bootstrap(candidate.confirm().unwrap(), candidate)
+            .await,
+        Err(EnrollmentFailure::Bootstrap(
+            BootstrapFailureClass::Pairing(PairingFailure::AuthorizationDenied)
+        ))
+    ));
+    assert!(h.remote.manager.effects.lock().unwrap().is_empty());
+    assert_eq!(h.remote.owners.load(Ordering::SeqCst), 0);
+    assert!(
+        !h.remote
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| matches!(*request, "reserve" | "reserve-owner" | "authorize-owner"))
+    );
+}
+// The fixture has no running process until owner_channel starts its account actor.
+// Supply that exact empty external runtime scope only to the explicit Stop test.
+struct EmptyRuntimeScope;
+impl ServiceProcesses for EmptyRuntimeScope {
+    fn assess<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+    ) -> ServiceFuture<'a, RuntimeAssessment> {
+        Box::pin(async move {
+            Ok(RuntimeAssessment {
+                server: spaceterm_core::identity::ServerId::new(registration.server_pin().identity),
+                epoch: None,
+                generation: 1,
+                sessions: Vec::new(),
+                token: [9; 32],
+            })
+        })
+    }
+    fn revalidate<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+        assessment: &'a RuntimeAssessment,
+    ) -> ServiceFuture<'a, ()> {
+        Box::pin(async move {
+            assert_eq!(
+                assessment.server.bytes(),
+                registration.server_pin().identity
+            );
+            assert_eq!(assessment.token, [9; 32]);
+            assert!(assessment.sessions.is_empty());
+            StartupAbsence.verify_absent(registration).await
+        })
+    }
+    fn abort_reservation<'a>(
+        &'a self,
+        _: &'a RegisteredServer,
+        _: &'a RuntimeAssessment,
+    ) -> ServiceFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+    fn quiesce<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+        _: spaceterm_core::native_management::NativeManagementRequestRef,
+        _: spaceterm_core::native_management::NativeRetirementAction,
+        assessment: &'a RuntimeAssessment,
+    ) -> ServiceFuture<'a, Vec<spaceterm_core::retirement::SessionCleanupObservation>> {
+        Box::pin(async move {
+            self.revalidate(registration, assessment).await?;
+            Ok(Vec::new())
+        })
+    }
+    fn verify_absent<'a>(&'a self, registration: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
+        StartupAbsence.verify_absent(registration)
+    }
+    fn previous_instance_cleanup<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+        epoch: spaceterm_core::authority::ServerEpoch,
+        sessions: &'a [spaceterm_core::authority::SessionKey],
+    ) -> ServiceFuture<'a, Vec<spaceterm_core::retirement::SessionCleanupObservation>> {
+        StartupAbsence.previous_instance_cleanup(registration, epoch, sessions)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_deliberately_stopped_requires_separate_start() {
+    let h = Harness::new().await;
+    h.install_existing().await;
+    let stopper = h.remote.fixture.with_providers(
+        h.remote.manager.clone(),
+        Arc::new(EmptyRuntimeScope),
+        Arc::new(Clock),
+        None,
+    );
+    let request = stopper.allocate_request().unwrap();
+    let action = stopper
+        .assess(request, ServiceAction::Stop)
+        .await
+        .unwrap()
+        .confirm()
+        .unwrap();
+    stopper.stop(action).await.unwrap();
+    h.remote.manager.effects.lock().unwrap().clear();
+    let candidate = h.candidate(1).await;
+    assert!(matches!(
+        candidate.confirm(),
+        Err(EnrollmentFailure::Pairing(
+            PairingFailure::ExplicitStartRequired
+        ))
+    ));
+    assert!(h.remote.manager.effects.lock().unwrap().is_empty());
+    assert_eq!(
+        h.remote
+            .supervisor
+            .discover()
+            .unwrap()
+            .unwrap()
+            .desired_state(),
+        DesiredServerState::Stopped
+    );
+    assert_eq!(h.remote.owners.load(Ordering::SeqCst), 0);
+    h.provider.start(candidate).await.unwrap();
+    assert_eq!(
+        h.remote.manager.effects.lock().unwrap().as_slice(),
+        &["configure", "start"]
+    );
+    assert_eq!(
+        h.remote
+            .supervisor
+            .discover()
+            .unwrap()
+            .unwrap()
+            .desired_state(),
+        DesiredServerState::Running
+    );
+    assert_eq!(h.remote.owners.load(Ordering::SeqCst), 0);
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_changed_roots_refuses_parallel_installation() {
+    let h = Harness::new().await;
+    h.install_existing().await;
+    let original = h.remote.supervisor.discover().unwrap().unwrap();
+    let candidate = h.candidate(1).await;
+    // Model newly selected XDG roots at the remote native install boundary. The
+    // existing home anchor still owns the original registration and its roots.
+    let changed_data = h.root.path().join("changed-data");
+    let changed_runtime = h.root.path().join("changed-runtime");
+    *h.remote.prospective_roots.lock().unwrap() =
+        Some((changed_data.clone(), changed_runtime.clone()));
+    let completion = h
+        .provider
+        .bootstrap(candidate.confirm().unwrap(), candidate)
+        .await
+        .unwrap();
+    assert!(completion.outcome.reused);
+    assert_eq!(completion.saved.pin(), original.server_pin());
+    assert!(!changed_data.exists());
+    assert!(!changed_runtime.exists());
+    let after = h.remote.supervisor.discover().unwrap().unwrap();
+    assert_eq!(original.server_pin(), after.server_pin());
+    assert_eq!(original.data_directory(), after.data_directory());
+    assert!(h.remote.manager.effects.lock().unwrap().is_empty());
+    assert_eq!(h.remote.owners.load(Ordering::SeqCst), 1);
+    assert!(!h.remote.requests.lock().unwrap().contains(&"install"));
+    h.remote.close().await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_lost_install_reply_resolves_original_then_enrolls_once() {
+    let h = Harness::new().await;
+    let candidate = h.candidate(1).await;
+    h.remote.lost_reply.store(true, Ordering::SeqCst);
+    let completion = h
+        .provider
+        .0
+        .bootstrap(candidate.confirm().unwrap(), candidate.facts())
+        .await
+        .unwrap();
+    assert!(!completion.outcome.reused);
+    let requests = h.remote.requests.lock().unwrap().clone();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| **request == "install")
+            .count(),
+        1
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| **request == "resolve")
+            .count(),
+        1
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| **request == "authorize-owner")
+            .count(),
+        1
+    );
+    assert_eq!(
+        h.remote.manager.effects.lock().unwrap().as_slice(),
+        &["configure", "start"]
+    );
+    assert_eq!(h.journal.snapshot().unwrap().bindings().len(), 1);
+    assert_eq!(h.remote.owners.load(Ordering::SeqCst), 1);
+    h.remote.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_lost_owner_reply_recovers_original_after_provider_recreation() {
+    let h = Harness::new().await;
+    h.install_existing().await;
+    let candidate = h.candidate(1).await;
+    h.remote.lost_owner_reply.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        h.provider
+            .bootstrap(candidate.confirm().unwrap(), candidate)
+            .await,
+        Err(EnrollmentFailure::Bootstrap(
+            BootstrapFailureClass::Pairing(PairingFailure::Offline)
+        ))
+    ));
+    let original = h.pairing.inventory().await.unwrap();
+    assert_eq!(original.prepared.len(), 1);
+    let original_pairing = original.prepared[0].local_pairing.clone();
+    let provider = super::super::bootstrap::NativeForegroundBootstrap(ProductionSshBootstrap::new(
+        h.pairing.clone(),
+        Arc::new(Factory {
+            remote: h.remote.clone(),
+        }),
+    ));
+    let attempt = EnrollmentAttempt::new(2);
+    let (facts, pending) = provider
+        .inspect("test-account".into(), attempt.clone())
+        .await
+        .unwrap();
+    let pending = pending.unwrap();
+    let candidate = SshCandidate::new(attempt, facts)
+        .unwrap()
+        .retain_request(pending)
+        .unwrap();
+    let recovered = provider.resolve(candidate, pending).await.unwrap();
+    assert_eq!(recovered.saved.key(), &original_pairing);
+    let state = h.journal.snapshot().unwrap();
+    assert_eq!(state.bindings().len(), 1);
+    assert!(state.pairing().acknowledgements().is_empty());
+    let requests = h.remote.requests.lock().unwrap().clone();
+    assert_eq!(
+        requests.iter().filter(|r| **r == "reserve-owner").count(),
+        1
+    );
+    assert_eq!(
+        requests.iter().filter(|r| **r == "authorize-owner").count(),
+        1
+    );
+    assert_eq!(requests.iter().filter(|r| **r == "resolve").count(), 1);
+    assert!(h.remote.manager.effects.lock().unwrap().is_empty());
+    h.remote.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_account_endpoint_rejects_nonembedded_artifact_trust() {
+    let h = Harness::new().await;
+    let setup = AccountBootstrapSetup::new((*h.remote.supervisor).clone());
+    let request = setup.reserve_request().unwrap();
+    let (_, artifact) = signed::fixture("9.0.0", 7, signed::native_machine());
+    let mut transfer = Vec::new();
+    spaceterm_client_native::bootstrap::write_artifact(&artifact, &mut transfer).unwrap();
+    let (a, ar) = tokio::sync::mpsc::channel(1);
+    let (b, br) = tokio::sync::mpsc::channel(1);
+    let uid = h.remote.supervisor.key().account_uid;
+    let server = Channel {
+        loss_at: 0,
+        sent: Arc::new(AtomicUsize::new(0)),
+        cancel_on_ready: None,
+        send: tokio::sync::Mutex::new(Some(a)),
+        receive: tokio::sync::Mutex::new(br),
+        completion: tokio::sync::Mutex::new(None),
+        uid,
+    };
+    let supervisor = h.remote.supervisor.clone();
+    let task = tokio::spawn(async move {
+        spaceterm_server::deployment::bootstrap::execute(supervisor, &server)
+            .await
+            .unwrap();
+    });
+    let client = Channel {
+        loss_at: 0,
+        sent: Arc::new(AtomicUsize::new(0)),
+        cancel_on_ready: None,
+        send: tokio::sync::Mutex::new(Some(b)),
+        receive: tokio::sync::Mutex::new(ar),
+        completion: tokio::sync::Mutex::new(Some(task)),
+        uid,
+    };
+    client
+        .send(
+            &serde_json::to_vec(&AccountRequest::Install {
+                request,
+                artifact: artifact.artifact_sha256(),
+                transfer_bytes: transfer.len() as u64,
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    for chunk in transfer.chunks(TRANSFER_CHUNK) {
+        client.send(chunk).await.unwrap();
+    }
+    let reply: AccountReply =
+        serde_json::from_slice(&client.recv().await.unwrap().unwrap()).unwrap();
+    assert!(matches!(
+        reply,
+        AccountReply::Failure(ServiceFailure::ArtifactRejected)
+    ));
+    client.close().await.unwrap();
+    assert!(h.remote.supervisor.discover().unwrap().is_none());
+    assert!(h.remote.manager.effects.lock().unwrap().is_empty());
+    assert_eq!(h.remote.owners.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_cancellation_after_ready_never_sends_enrollment() {
+    let h = Harness::new().await;
+    h.install_existing().await;
+    let candidate = h.candidate(1).await;
+    *h.remote.cancel_owner_ready.lock().unwrap() = Some(candidate.attempt.valid.clone());
+    assert!(matches!(
+        h.provider
+            .bootstrap(candidate.confirm().unwrap(), candidate)
+            .await,
+        Err(EnrollmentFailure::Bootstrap(
+            BootstrapFailureClass::Pairing(PairingFailure::Cancelled)
+        ))
+    ));
+    assert_eq!(h.remote.owner_client_frames.load(Ordering::SeqCst), 3);
+    assert!(h.journal.snapshot().unwrap().bindings().is_empty());
+    assert!(h.remote.manager.effects.lock().unwrap().is_empty());
+    h.remote.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_rejects_another_foreground_scope_with_the_same_counter() {
+    let h = Harness::new().await;
+    let candidate = h.candidate(1).await;
+    assert!(matches!(
+        h.provider
+            .0
+            .bind_foreground(candidate.facts.route, 1, Arc::new(AtomicBool::new(true))),
+        Err(BootstrapFailure {
+            class: BootstrapFailureClass::Pairing(PairingFailure::RouteChanged),
+            ..
+        })
+    ));
+    assert!(h.remote.manager.effects.lock().unwrap().is_empty());
+    assert!(h.journal.snapshot().unwrap().bindings().is_empty());
+}

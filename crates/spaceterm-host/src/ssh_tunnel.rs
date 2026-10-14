@@ -238,6 +238,28 @@ pub struct AskPassHandoff {
 }
 
 impl AskPassHandoff {
+    /// Transfers only the existing broker capability to a supervised native child.
+    /// These values are never derived from a remote reply.
+    pub fn configure(&self, command: &mut std::process::Command) {
+        command
+            .env("SPACETERM_SSH_ASKPASS_MODE", "broker-v1")
+            .env("SSH_ASKPASS", &self.helper)
+            .env("SPACETERM_SSH_ASKPASS_SOCKET", &self.endpoint)
+            .env(
+                "SPACETERM_SSH_ASKPASS_CAPABILITY",
+                std::ffi::OsStr::from_bytes(&self.capability),
+            )
+            .env("SSH_ASKPASS_REQUIRE", "force")
+            .env("DISPLAY", "spaceterm-askpass");
+    }
+    /// Runs the same obscured broker prompt for the fixed linger authorization.
+    pub fn prompt_command(&self) -> std::process::Command {
+        let mut command = std::process::Command::new(&self.helper);
+        command.env_clear();
+        self.configure(&mut command);
+        command.arg("[SpaceTerm linger password]");
+        command
+    }
     /// Validates the existing broker-v1 endpoint and its 64-byte hexadecimal capability.
     /// No authentication response crosses this handoff.
     pub fn new(

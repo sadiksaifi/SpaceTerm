@@ -2,6 +2,7 @@
 //! the existing OpenSSH owner retains host/account trust, deadlines and child cleanup.
 
 mod enrollment;
+pub mod production;
 #[cfg(test)]
 mod tests;
 pub use enrollment::{BootstrapOwnerDelivery, BootstrapOwnerExchange, NativeBootstrapEnrollment};
@@ -41,6 +42,12 @@ pub trait BootstrapAccountTransport:
     fn route(&self) -> BootstrapRoute;
     fn inspect(&self) -> PairingFuture<'_, Result<BootstrapAccountFacts, BootstrapFailure>>;
     fn reserve_request(&self) -> PairingFuture<'_, Result<[u8; 16], BootstrapFailure>>;
+    fn reserve_owner_request<'a>(
+        &'a self,
+        _proposal: &'a EnrollmentProposal,
+    ) -> PairingFuture<'a, Result<[u8; 16], BootstrapFailure>> {
+        self.reserve_request()
+    }
     fn install(
         &self,
         request: [u8; 16],
@@ -236,7 +243,11 @@ impl<T: BootstrapAccountTransport> BootstrapAuthorizationBoundary for NativeBoot
             .map_err(linger_failure)?;
             recheck(self.transport.as_ref(), route)?;
             prompt.revalidate(plan)?;
-            let request = self.transport.reserve_request().await?;
+            let request = if let Some(proposal) = plan.owner_proposal() {
+                self.transport.reserve_owner_request(proposal).await?
+            } else {
+                self.transport.reserve_request().await?
+            };
             recheck(self.transport.as_ref(), route)?;
             prompt.revalidate(plan)?;
             if request == [0; 16] {
@@ -387,12 +398,6 @@ fn host_facts(
         (BootstrapOs::Linux, Some(LingerState::Disabled)) => BootstrapLinger::Disabled,
         _ => BootstrapLinger::Unavailable,
     };
-    if linger != host.linger {
-        return Err(failure(
-            PairingFailure::RouteChanged,
-            BootstrapPhase::ReadOnlyPreflight,
-        ));
-    }
     let registration = match native.registration {
         BootstrapAccountRegistration::Missing => BootstrapRegistration::Missing,
         BootstrapAccountRegistration::Stopped { pin, generation } => {
@@ -412,7 +417,7 @@ fn host_facts(
             protocol_majors: majors(&protocol_majors)?,
         },
     };
-    Ok(BootstrapHostFacts {
+    let facts = BootstrapHostFacts {
         route,
         account_uid: host.account_uid,
         os: host.os,
@@ -437,7 +442,15 @@ fn host_facts(
             == spaceterm_core::bootstrap::BootstrapSudoAvailability::Available,
         background_items_allowed: native.supervisor
             != spaceterm_host::account_service::SupervisorState::Suppressed,
-    })
+    };
+    facts.supported_platform()?;
+    if linger != host.linger {
+        return Err(failure(
+            PairingFailure::RouteChanged,
+            BootstrapPhase::ReadOnlyPreflight,
+        ));
+    }
+    Ok(facts)
 }
 fn server_facts(
     route: BootstrapRoute,

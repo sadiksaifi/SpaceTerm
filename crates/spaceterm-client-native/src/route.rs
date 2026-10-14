@@ -452,7 +452,9 @@ fn invalid_route() -> ClientFailure {
     ClientFailure::new(ClientFailureClass::UnsafeEndpoint)
 }
 
+mod bootstrap_ssh;
 mod captured_ssh;
+pub use bootstrap_ssh::NativeBootstrapHostFactory;
 
 #[cfg(test)]
 mod tests;

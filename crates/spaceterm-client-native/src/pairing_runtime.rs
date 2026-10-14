@@ -159,6 +159,29 @@ impl NativePairingRuntime {
         runtime
     }
 
+    /// Shares the application's ordinary SSH owner and retains its exact enrollment capture.
+    pub fn with_shared_routes(
+        journal: Arc<JournalController>,
+        routes: Arc<NativeRouteConnector>,
+        invalidator: Arc<dyn LocalUseInvalidator>,
+        config: HandshakeConfig,
+    ) -> Self {
+        let connector = Arc::new(NativePairingConnector::with_shared_routes(
+            journal.clone(),
+            routes,
+        ));
+        let mut runtime = Self::with_adapters(
+            journal,
+            Arc::new(DeviceCredentials::native()),
+            connector.clone(),
+            connector.clone(),
+            invalidator,
+            config,
+        );
+        runtime.native_connector = Some(connector);
+        runtime
+    }
+
     /// Injection is confined to native credential and transport boundaries.
     /// The portable journal, receipts, enrollment driver and scheduler stay real.
     pub fn with_adapters(
@@ -193,6 +216,10 @@ impl NativePairingRuntime {
             invalidator,
             majors: config.majors,
         }
+    }
+
+    pub(crate) fn shared_credentials(&self) -> SharedCredentials {
+        self.credentials.clone()
     }
 
     pub fn journal(&self) -> &Arc<JournalController> {
@@ -782,7 +809,7 @@ impl NativePairingRuntime {
 }
 
 #[derive(Clone)]
-struct SharedCredentials(Arc<dyn NativeDeviceCredentials>);
+pub(crate) struct SharedCredentials(Arc<dyn NativeDeviceCredentials>);
 impl NativeDeviceCredentials for SharedCredentials {
     fn create(
         &self,

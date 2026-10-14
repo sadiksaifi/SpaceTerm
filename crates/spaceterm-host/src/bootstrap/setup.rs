@@ -18,13 +18,15 @@ use crate::{
 };
 
 /// Public registration observations. Missing is distinct from locked or unreadable storage.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum BootstrapAccountRegistration {
     /// No established registration exists for this actual account and compiled build.
     Missing,
     /// Deliberate Stop forbids automatic start and owner enrollment during Bootstrap.
     Stopped {
         /// Original retained public server identity.
+        #[serde(with = "pin_wire")]
         pin: ServerPin,
         /// Exact registration comparison generation.
         generation: u64,
@@ -32,6 +34,7 @@ pub enum BootstrapAccountRegistration {
     /// Exact approved signed installation and independently observed running service.
     Running {
         /// Original retained public server identity.
+        #[serde(with = "pin_wire")]
         pin: ServerPin,
         /// Exact registration comparison generation.
         generation: u64,
@@ -45,7 +48,8 @@ pub enum BootstrapAccountRegistration {
 }
 
 /// Bounded native observations. There are no executable paths or service labels in this DTO.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BootstrapAccountFacts {
     /// Actual native account and compiled build identity.
     pub key: AccountBuildKey,
@@ -180,7 +184,7 @@ impl AccountBootstrapSetup {
                 .supervisor
                 .owner_enrollment_digest(request, server, claim)?;
             self.supervisor
-                .record_owner_enrollment(request, digest, server, claim)?;
+                .record_owner_proposal(request, proposal.clone())?;
             Ok(digest)
         })
     }
@@ -233,6 +237,29 @@ impl AccountBootstrapSetup {
                 _ => return Err(ServiceFailure::IdentityMismatch),
             }
             Ok(observed)
+        })
+    }
+}
+
+mod pin_wire {
+    use serde::{Deserialize, Serialize};
+    use spaceterm_protocol::authentication::ServerPin;
+    pub fn serialize<S: serde::Serializer>(
+        pin: &ServerPin,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        (pin.identity, pin.public_key).serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<ServerPin, D::Error> {
+        let (identity, public_key) = <([u8; 16], [u8; 32])>::deserialize(deserializer)?;
+        if identity == [0; 16] || public_key == [0; 32] {
+            return Err(serde::de::Error::custom("invalid public server pin"));
+        }
+        Ok(ServerPin {
+            identity,
+            public_key,
         })
     }
 }

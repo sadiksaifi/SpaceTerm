@@ -817,3 +817,5 @@ async fn desktop_explicit_repair_publishes_new_incarnation_after_old_binding_sup
     cx.update(|cx| provider.publish(enrollment, cx)).unwrap();
     assert_eq!(h.publication.0.borrow().as_slice(), &[prepared.local_pairing]);
 }
+
+mod bootstrap_tests;

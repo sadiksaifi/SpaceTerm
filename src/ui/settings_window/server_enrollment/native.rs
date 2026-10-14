@@ -1,6 +1,7 @@
 //! Foreground enrollment shares the application's native pairing runtime and registry.
 //! Native invitation delivery and SSH effects remain constructor-injected capabilities.
 
+mod bootstrap;
 mod direct;
 
 use std::{rc::Rc, sync::Arc};
@@ -102,23 +103,29 @@ pub(crate) fn production(
     local: Option<spaceterm_client_native::NativeClientProvider>,
     executor: tokio::runtime::Handle,
 ) -> NativeEnrollmentServices {
-    let connector = Arc::new(
-        spaceterm_client_native::restricted_routes::NativePairingConnector::with_shared_routes(
-            journal.clone(),
-            routes,
-        ),
+    let pairing = Arc::new(NativePairingRuntime::with_shared_routes(
+        journal,
+        routes.clone(),
+        invalidator,
+        spaceterm_protocol::authentication::HandshakeConfig::default(),
+    ));
+    let build = if cfg!(spaceterm_packaged) && cfg!(spaceterm_release) {
+        spaceterm_client::pairing::bootstrap::BuildChannel::Release
+    } else if cfg!(spaceterm_packaged) {
+        spaceterm_client::pairing::bootstrap::BuildChannel::Preflight
+    } else {
+        spaceterm_client::pairing::bootstrap::BuildChannel::Development
+    };
+    let factory =
+        Arc::new(spaceterm_client_native::route::NativeBootstrapHostFactory::new(routes, build));
+    let bootstrap = spaceterm_client_native::bootstrap::production::ProductionSshBootstrap::new(
+        pairing.clone(),
+        factory,
     );
     NativeEnrollmentServices {
-        pairing: Arc::new(NativePairingRuntime::with_adapters(
-            journal,
-            Arc::new(spaceterm_client_native::credentials::adapter::DeviceCredentials::native()),
-            connector.clone(),
-            connector,
-            invalidator,
-            spaceterm_protocol::authentication::HandshakeConfig::default(),
-        )),
+        pairing,
         direct: Arc::new(direct::NativeDirectInvitation),
-        bootstrap: None,
+        bootstrap: Some(Arc::new(bootstrap::NativeForegroundBootstrap(bootstrap))),
         executor,
         local,
     }
@@ -255,7 +262,16 @@ impl EnrollmentProvider for NativeEnrollmentProvider {
         let services = self.services.clone();
         self.task(cx, async move {
             attempt.validate()?;
-            let claim = services.direct.prepare_claim(address, descriptor, compared_fingerprint, attempt.clone(), &services.pairing).await?;
+            let claim = services
+                .direct
+                .prepare_claim(
+                    address,
+                    descriptor,
+                    compared_fingerprint,
+                    attempt.clone(),
+                    &services.pairing,
+                )
+                .await?;
             attempt.validate()?;
             Ok(claim)
         })
