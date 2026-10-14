@@ -206,7 +206,14 @@ async fn controller(directory: &std::path::Path, create: bool) -> Arc<JournalCon
     )
 }
 
-async fn exercise(kind: NativeConsumerKind, major: u32, self_remove: bool) {
+async fn exercise(
+    kind: NativeConsumerKind,
+    major: u32,
+    self_remove: bool,
+    restart: bool,
+    processes: bool,
+    recover_pairing: bool,
+) {
     use std::os::unix::fs::DirBuilderExt;
     let root = tempfile::Builder::new()
         .prefix("st-consumer-")
@@ -367,66 +374,153 @@ async fn exercise(kind: NativeConsumerKind, major: u32, self_remove: bool) {
         AdmissionLimits::new(4, Duration::from_secs(5)).unwrap(),
     )
     .unwrap();
+    let lost_pairing_operation = Arc::new(std::sync::Mutex::new(None));
+    let original_pairing_operation = lost_pairing_operation.clone();
     let served = tokio::spawn(async move {
-        let pending = listener.accept().await.unwrap();
-        let hello = pending.recv().await.unwrap().unwrap();
-        let (handshake, reply) = ServerHandshake::accept(
-            server.bytes(),
-            1,
-            HandshakeConfig {
-                majors: vec![major],
-                capabilities: vec![
-                    CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
-                    CAPABILITY_CANONICAL_DOMAIN,
-                    CAPABILITY_ORGANIZATION_COMPARISONS,
-                ],
-                ..HandshakeConfig::default()
-            },
-            signer,
-            &lookup,
-            &hello,
-        )
-        .unwrap();
-        pending.send(&reply).await.unwrap();
-        let proof = pending.recv().await.unwrap().unwrap();
-        let (Established::Ordinary(mut codec), ready) =
-            handshake.receive_device(&lookup, &proof).unwrap()
-        else {
-            panic!("ordinary connection required")
-        };
-        pending.send(&ready).await.unwrap();
-        let transport = pending.finish_authentication().unwrap();
         let mut queries = 0;
         let mut writes = 0;
-        while let Some(bytes) = transport.recv().await.unwrap() {
-            let payload = codec.decode(&bytes).unwrap();
-            macro_rules! respond {($m:expr,$p:ident,$v:ident)=>{match $m.kind{
+        for _ in 0..if restart || processes { 2 } else { 1 } {
+            let pending = listener.accept().await.unwrap();
+            let hello = pending.recv().await.unwrap().unwrap();
+            let (handshake, reply) = ServerHandshake::accept(
+                server.bytes(),
+                1,
+                HandshakeConfig {
+                    majors: vec![major],
+                    capabilities: vec![
+                        CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
+                        CAPABILITY_CANONICAL_DOMAIN,
+                        CAPABILITY_ORGANIZATION_COMPARISONS,
+                    ],
+                    ..HandshakeConfig::default()
+                },
+                signer.clone(),
+                &lookup,
+                &hello,
+            )
+            .unwrap();
+            pending.send(&reply).await.unwrap();
+            let proof = pending.recv().await.unwrap().unwrap();
+            let (Established::Ordinary(mut codec), ready) =
+                handshake.receive_device(&lookup, &proof).unwrap()
+            else {
+                panic!("ordinary connection required")
+            };
+            pending.send(&ready).await.unwrap();
+            let transport = pending.finish_authentication().unwrap();
+            let mut retained_pairing = None;
+            while let Some(bytes) = transport.recv().await.unwrap() {
+                let payload = codec.decode(&bytes).unwrap();
+                macro_rules! respond {($m:expr,$p:ident,$v:ident)=>{match $m.kind{
                 Some($p::message::Kind::OrganizationQuery(query))=>organization::$p::snapshot_payload(&snapshot(server),0..0,organization::PublicationPart{request:query.request,generation:query.request_generation,transfer:query.request,index:0,total:1,epoch:ServerEpoch::new(1),base:OrganizationRevision::new(0),revision:OrganizationRevision::new(1)}).unwrap(),
                 Some($p::message::Kind::Reconciliation(mut query))=>{query.acknowledged=true;query.connection_generation=1;Payload::$v($p::Message{kind:Some($p::message::Kind::Reconciliation(query))})},
                 Some($p::message::Kind::StatusQuery(query))=>{queries+=1;let query=management::$p::decode_query(&query,ConnectionBinding{client,generation:ConnectionGeneration::new(1)}).unwrap();Payload::$v($p::Message{kind:Some($p::message::Kind::StatusPublication(management::$p::encode_publication(&StatusPublication::Snapshot{request:query.request,generation:query.generation,status:status(server,queries)})))})},
                 Some($p::message::Kind::Operation(value))=>{assert_eq!(kind,NativeConsumerKind::Cli);let request=if let Some($p::operation::Action::IdentifiedPairing(inner))=&value.action {let Some($p::pairing_request::Action::AssessUnpair(action))=&inner.action else{panic!("unexpected pairing command")};let id=spaceterm_protocol::pairing_adapter::operation_from_wire(inner.operation.as_ref().unwrap()).unwrap();spaceterm_core::operation_ledger_contracts::CanonicalOperationRequest::new(id,Command::Pairing(PairingCommand::AssessUnpair{target:spaceterm_protocol::pairing_adapter::target_from_wire(action.target.as_ref().unwrap()).unwrap()}),&CanonicalCodec).unwrap()}else{spaceterm_protocol::convert::operations::$p::decode_request(&value,pairing,client,&CanonicalCodec).unwrap()};let outcome=match request.command(){Command::SetRemoteAccess{expected_version,value,..}=>{assert_eq!(expected_version.get(),1);assert_eq!(value.endpoints(),&["127.0.0.1:443".parse().unwrap()]);writes+=1;Outcome::Applied},Command::Pairing(PairingCommand::AssessUnpair{target})=>Outcome::Pairing(Box::new(PairingOutcome::UnpairAssessed(spaceterm_core::pairing::UnpairAssessment::new(UnpairAssessmentParts{reference:AssessmentRef{operation:request.binding().id,digest:request.binding().digest},target:target.clone(),authorization_version:FieldVersion::new(1),clients:vec![ClientRecord{id:client,pairing}]}).unwrap()))),_=>panic!("unexpected management mutation")};Payload::$v($p::Message{kind:Some($p::message::Kind::Outcome(if let Outcome::Pairing(outcome)=&outcome{let PairingOutcome::UnpairAssessed(value)=outcome.as_ref() else{panic!("unpair assessment required")};let parts=value.parts();$p::Outcome{operation:Some(spaceterm_protocol::pairing_adapter::operation_to_wire(request.binding().id)),publication_revision:2,result:Some($p::outcome::Result::PairingResult(Box::new($p::PairingOutcome{operation:Some(Box::new(spaceterm_protocol::pairing_adapter::operation_to_wire(request.binding().id))),disposition:4,unpair_assessment:Some(Box::new(spaceterm_protocol::wire::pairing::UnpairAssessment{assessment_operation:Some(spaceterm_protocol::pairing_adapter::operation_to_wire(parts.reference.operation)),assessment_digest:parts.reference.digest.bytes().to_vec(),target:Some(spaceterm_protocol::pairing_adapter::target_to_wire(&parts.target)),authorization_version:parts.authorization_version.get(),clients:parts.clients.iter().map(|client|spaceterm_protocol::convert::identity::encode_client(client.id)).collect()})),..Default::default()})))}}else{spaceterm_protocol::convert::operations::$p::encode_outcome(request.binding().id,OrganizationRevision::new(2),&outcome).unwrap()}))})},
+                Some($p::message::Kind::OperationLookupRequest(value))=>{
+                    let Some(Payload::$v($p::Message{kind:Some($p::message::Kind::Outcome(outcome))})) = &retained_pairing else {panic!("lost pairing outcome required")};
+                    assert_eq!(value.operation,outcome.operation);
+                    let Some($p::outcome::Result::PairingResult(pairing_result))=&outcome.result else {panic!("pairing result required")};
+                    assert_eq!(value.request_digest,pairing_result.unpair_assessment.as_ref().unwrap().assessment_digest);
+                    Payload::$v($p::Message{kind:Some($p::message::Kind::OperationLookupResult($p::OperationLookupResult{operation:value.operation,request_digest:value.request_digest,disposition:Some($p::operation_lookup_result::Disposition::Completed(Box::new(outcome.clone())))}))})
+                },
                 Some($p::message::Kind::Acknowledgement(value))=>{let(stream,through)=spaceterm_protocol::convert::operations::$p::decode_acknowledgement(&value,pairing,client).unwrap();Payload::$v($p::Message{kind:Some($p::message::Kind::AcknowledgementConfirmation($p::AcknowledgementConfirmation{stream:Some(spaceterm_protocol::convert::identity::encode_stream(stream)),acknowledged_through:through.get()}))})},
                 _=>panic!("unexpected consumer request"),
             }};}
-            let response = match payload {
-                Payload::Major1(m) => respond!(m, v1, Major1),
-                Payload::Major2(m) => respond!(m, v2, Major2),
-            };
-            transport
-                .send(&codec.encode(&response).unwrap())
-                .await
-                .unwrap();
+                let response = match payload {
+                    Payload::Major1(m) => respond!(m, v1, Major1),
+                    Payload::Major2(m) => respond!(m, v2, Major2),
+                };
+                if recover_pairing {
+                    let operation = match &response {
+                        Payload::Major1(v1::Message {
+                            kind: Some(v1::message::Kind::Outcome(value)),
+                        }) if matches!(
+                            value.result,
+                            Some(v1::outcome::Result::PairingResult(_))
+                        ) =>
+                        {
+                            Some(
+                                spaceterm_protocol::convert::identity::decode_operation(
+                                    value.operation.as_ref().unwrap(),
+                                )
+                                .unwrap(),
+                            )
+                        }
+                        Payload::Major2(v2::Message {
+                            kind: Some(v2::message::Kind::Outcome(value)),
+                        }) if matches!(
+                            value.result,
+                            Some(v2::outcome::Result::PairingResult(_))
+                        ) =>
+                        {
+                            Some(
+                                spaceterm_protocol::convert::identity::decode_operation(
+                                    value.operation.as_ref().unwrap(),
+                                )
+                                .unwrap(),
+                            )
+                        }
+                        _ => None,
+                    };
+                    if let Some(operation) = operation {
+                        assert!(
+                            retained_pairing.is_none(),
+                            "the client must not submit a replacement assessment"
+                        );
+                        *original_pairing_operation.lock().unwrap() = Some(operation);
+                        retained_pairing = Some(response);
+                        continue;
+                    }
+                }
+                if transport
+                    .send(&codec.encode(&response).unwrap())
+                    .await
+                    .is_err()
+                {
+                    assert!(
+                        matches!(
+                            response,
+                            Payload::Major1(v1::Message {
+                                kind: Some(v1::message::Kind::AcknowledgementConfirmation(_))
+                            }) | Payload::Major2(v2::Message {
+                                kind: Some(v2::message::Kind::AcknowledgementConfirmation(_))
+                            })
+                        ),
+                        "only a one-shot client's final acknowledgement may race its disconnect"
+                    );
+                    break;
+                }
+            }
         }
         listener.close().unwrap();
         (queries, writes)
     });
+    if processes {
+        drop(journal);
+        run_cli_process(root.path(), None).await;
+        let result: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.path().join("cli-result.json")).unwrap())
+                .unwrap();
+        let token = result["result"]["token"].as_str().unwrap().to_owned();
+        run_cli_process(root.path(), Some(token)).await;
+        let result: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.path().join("cli-result.json")).unwrap())
+                .unwrap();
+        assert_eq!(result["result"]["state"], "Completed");
+        assert_eq!(served.await.unwrap(), (3, 1));
+        return;
+    }
     let provider = NativeClientProvider::from_supervisor(account.reopen());
-    let consumer = NativeConsumer::restore(
+    let mut consumer = NativeConsumer::restore(
         provider.management(),
         kind,
-        journal,
-        Arc::new(Credentials(device)),
-        NativeRouteConnector::new(vec![route], None).unwrap(),
+        journal.clone(),
+        Arc::new(Credentials(device.clone())),
+        NativeRouteConnector::new(
+            vec![LocalRouteAuthority::new(registration.endpoint().unwrap()).unwrap()],
+            None,
+        )
+        .unwrap(),
     )
     .await
     .unwrap();
@@ -452,6 +546,44 @@ async fn exercise(kind: NativeConsumerKind, major: u32, self_remove: bool) {
             )
             .await
             .unwrap();
+        let assessment = if restart {
+            let action = assessment.action().clone();
+            let token = assessment.token().clone();
+            consumer.shutdown().await.unwrap();
+            drop(journal);
+            consumer = NativeConsumer::restore(
+                provider.management(),
+                kind,
+                controller(&directory, false).await,
+                Arc::new(Credentials(device.clone())),
+                NativeRouteConnector::new(
+                    vec![LocalRouteAuthority::new(registration.endpoint().unwrap()).unwrap()],
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                consumer
+                    .restore_assessment(
+                        spaceterm_client::management_cli::ManagementAction::RemoteAccess {
+                            policy: RemoteAccessPolicy::disabled(server)
+                        },
+                        token.clone(),
+                    )
+                    .await,
+                Err(spaceterm_client::management_cli::ManagementFailure::StaleAssessment)
+            );
+            let restored = consumer.restore_assessment(action, token).await.unwrap();
+            assert_eq!(
+                restored, assessment,
+                "restoration must preserve the original scope and expiry"
+            );
+            restored
+        } else {
+            assessment
+        };
         let duplicate = assessment.clone();
         let token = assessment.token().clone();
         let confirmed = spaceterm_client::management_cli::confirm_exact(
@@ -474,6 +606,17 @@ async fn exercise(kind: NativeConsumerKind, major: u32, self_remove: bool) {
             progress.request.operation_id().unwrap().stream().client(),
             client
         );
+        if recover_pairing {
+            use spaceterm_client_native::cli::bindings::PairingCommandBindings;
+            assert_eq!(
+                consumer.assess_unpair(DeviceId::new([6; 16]), None).await,
+                Err(spaceterm_client::management_cli::ManagementFailure::OutcomePending)
+            );
+            let operation = lost_pairing_operation.lock().unwrap().unwrap();
+            let recovered = consumer.resolve(operation).await.unwrap();
+            assert_eq!(recovered.request.operation_id(), Some(operation));
+            assert_eq!(recovered.state, ManagementProgressState::Completed);
+        }
         if self_remove {
             use spaceterm_client_native::cli::bindings::{PairingCommandBindings, RevocationState};
             let result = consumer.assess_unpair(DeviceId::new([6; 16]), None).await;
@@ -579,14 +722,22 @@ async fn exercise(kind: NativeConsumerKind, major: u32, self_remove: bool) {
 async fn production_cli_reopens_saved_additional_client_and_executes_authenticated_management_in_both_majors()
  {
     for major in [1, 2] {
-        exercise(NativeConsumerKind::Cli, major, false).await;
+        exercise(NativeConsumerKind::Cli, major, false, false, false, false).await;
     }
 }
 #[tokio::test]
 async fn production_companion_reopens_saved_additional_client_and_subscribes_over_authenticated_ipc()
  {
     for major in [1, 2] {
-        exercise(NativeConsumerKind::StatusCompanion, major, false).await;
+        exercise(
+            NativeConsumerKind::StatusCompanion,
+            major,
+            false,
+            false,
+            false,
+            false,
+        )
+        .await;
     }
 }
 
@@ -594,6 +745,127 @@ async fn production_companion_reopens_saved_additional_client_and_subscribes_ove
 async fn production_cli_self_unpair_closes_ordinary_worker_before_restricted_retry_in_both_majors()
 {
     for major in [1, 2] {
-        exercise(NativeConsumerKind::Cli, major, true).await;
+        exercise(NativeConsumerKind::Cli, major, true, false, false, false).await;
+    }
+}
+
+#[tokio::test]
+async fn cli_assessment_survives_consumer_and_journal_restart_without_refreshing_scope() {
+    for major in [1, 2] {
+        exercise(NativeConsumerKind::Cli, major, false, true, false, false).await;
+    }
+}
+
+async fn run_cli_process(root: &std::path::Path, token: Option<String>) {
+    let root = root.to_owned();
+    let output = tokio::task::spawn_blocking(move || {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .arg("--exact")
+            .arg("cli_assess_and_confirm_work_in_separate_processes")
+            .arg("--nocapture")
+            .env("SPACETERM_ASSESSMENT_TEST_ROOT", root);
+        if let Some(token) = token {
+            command.env("SPACETERM_ASSESSMENT_TEST_TOKEN", token);
+        }
+        command.output().unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "child CLI dispatch failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test]
+async fn cli_assess_and_confirm_work_in_separate_processes() {
+    use spaceterm_client::management_cli::{ConfirmationPrompt, ConfirmationReply};
+    use spaceterm_client_native::cli::{
+        CliFailure,
+        arguments::parse,
+        runner::{CliDependencies, CliIo, Dispatch, dispatch},
+    };
+    if let Some(root) = std::env::var_os("SPACETERM_ASSESSMENT_TEST_ROOT") {
+        struct Io(Vec<u8>);
+        impl CliIo for Io {
+            fn write_stdout(&mut self, bytes: &[u8]) -> Result<(), CliFailure> {
+                self.0.extend_from_slice(bytes);
+                Ok(())
+            }
+            fn write_stderr(&mut self, bytes: &[u8]) -> Result<(), CliFailure> {
+                panic!("{}", String::from_utf8_lossy(bytes));
+            }
+            fn read_confirmation(
+                &mut self,
+                _: &ConfirmationPrompt,
+            ) -> Result<ConfirmationReply, CliFailure> {
+                panic!("noninteractive CLI must not prompt")
+            }
+        }
+        let root = std::path::PathBuf::from(root).canonicalize().unwrap();
+        let account = AccountServiceFixture::new(&root, BuildIdentity::Development).unwrap();
+        let registration = account.initialize(DesiredServerState::Running).unwrap();
+        let provider = NativeClientProvider::from_supervisor(account.reopen());
+        let consumer = Arc::new(NativeConsumer::with_recovered_journal(
+            provider.management(),
+            NativeConsumerKind::Cli,
+            controller(&root.join("cli"), false).await,
+            Arc::new(Credentials(Arc::new(Key(
+                Ed25519KeyPair::from_seed_unchecked(&[27; 32]).unwrap(),
+            )))),
+            NativeRouteConnector::new(
+                vec![LocalRouteAuthority::new(registration.endpoint().unwrap()).unwrap()],
+                None,
+            )
+            .unwrap(),
+        ));
+        let dependencies = CliDependencies::new(
+            Ok(provider.key()),
+            consumer.clone(),
+            provider.management(),
+            consumer.clone(),
+        );
+        let mut args = vec![
+            "--json".to_owned(),
+            "--non-interactive".to_owned(),
+            "remote-access".to_owned(),
+            "enable".to_owned(),
+            "--bind".to_owned(),
+            "127.0.0.1:443".to_owned(),
+        ];
+        if let Ok(token) = std::env::var("SPACETERM_ASSESSMENT_TEST_TOKEN") {
+            args.extend(["--confirm".to_owned(), token]);
+        } else {
+            args.push("--assess".to_owned());
+        }
+        let invocation = parse(args.into_iter().map(std::ffi::OsString::from)).unwrap();
+        let mut io = Io(Vec::new());
+        let Dispatch::Exit(exit) = dispatch(invocation, &dependencies, &mut io).await else {
+            panic!("client only")
+        };
+        assert_eq!(exit.code(), 0);
+        std::fs::write(root.join("cli-result.json"), io.0).unwrap();
+        drop(dependencies);
+        Arc::try_unwrap(consumer)
+            .ok()
+            .unwrap()
+            .shutdown()
+            .await
+            .unwrap();
+    } else {
+        for major in [1, 2] {
+            exercise(NativeConsumerKind::Cli, major, false, false, true, false).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn lost_assess_unpair_reply_recovers_original_operation_over_authenticated_ipc_in_both_majors()
+ {
+    for major in [1, 2] {
+        exercise(NativeConsumerKind::Cli, major, false, false, false, true).await;
     }
 }

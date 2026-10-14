@@ -134,6 +134,13 @@ pub struct ServiceTime {
     pub millis: u64,
 }
 
+impl ServiceTime {
+    /// Reads the shared native boot identity and cross-process monotonic origin.
+    pub fn current() -> Result<Self, ServiceFailure> {
+        NativeClock.now()
+    }
+}
+
 /// Injected only at composition; test clocks never enter production constructors.
 pub trait ServiceClock: Send + Sync {
     /// Reads the actual monotonic time and boot identity.

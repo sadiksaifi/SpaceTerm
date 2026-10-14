@@ -337,8 +337,7 @@ impl ConnectionDelegate for ManagementOperations {
                             )
                             .map_err(|_| invalid())?;
                             let binding = self.record(operation)?;
-                            let result = operations::$p::decode_lookup_result(&value, binding)
-                                .map_err(|_| invalid())?;
+                            let result = pairing::$p::lookup(&value, binding)?;
                             let reply = self
                                 .lookups
                                 .lock()
@@ -495,6 +494,35 @@ macro_rules! pairing_profile {
                 )
                 .map_err(|_| invalid())
             }
+            pub(crate) fn lookup(
+                value: &wire::OperationLookupResult,
+                binding: OperationBinding,
+            ) -> Result<OperationLookup, ClientFailure> {
+                // The generic decoder first enforces its byte ceiling and both
+                // outer binding fields. UnexpectedMessage delegates only the
+                // identified pairing grammar to this profile.
+                match operations::$p::decode_lookup_result(value, binding) {
+                    Ok(result) => return Ok(result),
+                    Err(spaceterm_protocol::ProtocolError::UnexpectedMessage) => {}
+                    Err(_) => return Err(invalid()),
+                }
+                let Some(wire::operation_lookup_result::Disposition::Completed(completed)) =
+                    &value.disposition
+                else {
+                    return Err(invalid());
+                };
+                if !matches!(
+                    completed.result,
+                    Some(wire::outcome::Result::PairingResult(_))
+                ) {
+                    return Err(invalid());
+                }
+                let (publication_revision, result) = outcome(completed, binding)?;
+                Ok(OperationLookup::Completed {
+                    result,
+                    publication_revision,
+                })
+            }
             pub(crate) fn outcome(
                 value: &wire::Outcome,
                 binding: OperationBinding,
@@ -575,3 +603,6 @@ mod pairing {
     pairing_profile!(v1, v1);
     pairing_profile!(v2, v2);
 }
+
+#[cfg(test)]
+mod tests;

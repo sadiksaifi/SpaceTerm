@@ -399,7 +399,7 @@ impl<R: EnrollmentConnector + Clone + Send + Sync, O: BootstrapOwnerExchange> Bo
     ) -> PairingFuture<'a, Result<(), BootstrapFailure>> {
         Box::pin(async move {
             self.check(server.route, attempt, BootstrapPhase::Connected)?;
-            let recovered = self
+            let mut recovered = self
                 .store()
                 .recover()
                 .await
@@ -422,6 +422,46 @@ impl<R: EnrollmentConnector + Clone + Send + Sync, O: BootstrapOwnerExchange> Bo
                         BootstrapPhase::Connected,
                     )
                 })?;
+            if let Some(pending) = recovered
+                .enrollment_acknowledgements
+                .iter()
+                .find(|pending| pending.prepared.local_pairing == key)
+            {
+                // A saved receipt does not settle its acknowledgement. Resume
+                // only that historical exchange, never another enrollment.
+                EnrollmentDriver::new(
+                    self.store(),
+                    self.credentials.clone(),
+                    self.connector.clone(),
+                )
+                .acknowledge_once(
+                    pending.prepared.enrollment.id,
+                    server
+                        .protocol_majors
+                        .iter()
+                        .copied()
+                        .map(u32::from)
+                        .collect(),
+                )
+                .await
+                .map_err(|e| BootstrapFailure::new(e, BootstrapPhase::Connected))?;
+                self.check(server.route, attempt, BootstrapPhase::Connected)?;
+                recovered = self
+                    .store()
+                    .recover()
+                    .await
+                    .map_err(|e| BootstrapFailure::new(e, BootstrapPhase::Connected))?;
+                if recovered
+                    .enrollment_acknowledgements
+                    .iter()
+                    .any(|pending| pending.prepared.local_pairing == key)
+                {
+                    return Err(BootstrapFailure::new(
+                        PairingFailure::RecoveryRequired,
+                        BootstrapPhase::Connected,
+                    ));
+                }
+            }
             let saved = recovered
                 .active(&key)
                 .filter(|saved| saved.pin() == server.pin)
