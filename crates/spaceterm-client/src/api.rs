@@ -229,6 +229,9 @@ impl ConnectionCapabilities {
             CAPABILITY_CANONICAL_DOMAIN,
             CAPABILITY_SERVER_GIT,
             CAPABILITY_SERVER_DIRECTORIES,
+            CAPABILITY_ORGANIZATION_COMPARISONS,
+            CAPABILITY_TERMINAL_STREAMS,
+            CAPABILITY_NATIVE_NOTIFICATIONS,
         ]
         .into_iter()
         .enumerate()
@@ -246,6 +249,9 @@ impl ConnectionCapabilities {
             CAPABILITY_CANONICAL_DOMAIN => 1,
             CAPABILITY_SERVER_GIT => 2,
             CAPABILITY_SERVER_DIRECTORIES => 3,
+            CAPABILITY_ORGANIZATION_COMPARISONS => 4,
+            CAPABILITY_TERMINAL_STREAMS => 5,
+            CAPABILITY_NATIVE_NOTIFICATIONS => 6,
             _ => return false,
         };
         self.0 & (1 << index) != 0
@@ -292,3 +298,21 @@ pub struct ServerSummary {
 }
 
 pub use crate::connection::queries::{PairedDevicePage, ServerQueries, ServerStatusBackend};
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+    #[test]
+    fn installed_terminal_capabilities_survive_connection_negotiation() {
+        use spaceterm_protocol::negotiation::*;
+        let installed = [
+            CAPABILITY_ORGANIZATION_COMPARISONS,
+            CAPABILITY_TERMINAL_STREAMS,
+            CAPABILITY_NATIVE_NOTIFICATIONS,
+        ];
+        let capabilities = ConnectionCapabilities::from_advertisement(&installed);
+        for capability in installed {
+            assert!(capabilities.supports(capability));
+        }
+    }
+}

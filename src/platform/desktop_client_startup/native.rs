@@ -182,10 +182,7 @@ impl NativeOwnerFactory for Factory {
                     delegate: protocol.clone(),
                     discovery: native.map(crate::platform::local_server_client::trusted_discovery),
                     limits: spaceterm_client::limits::ClientLimits::default(),
-                    additional_capabilities: vec![
-                        spaceterm_protocol::negotiation::CAPABILITY_SERVER_GIT,
-                        spaceterm_protocol::negotiation::CAPABILITY_SERVER_DIRECTORIES,
-                    ],
+                    additional_capabilities: protocol::desktop_capabilities(),
                 },
                 journal,
                 channels,
