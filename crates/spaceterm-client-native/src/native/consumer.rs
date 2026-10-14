@@ -3,6 +3,7 @@
 
 mod assessments;
 mod enrollment;
+mod listing;
 
 use super::{NativeServiceManagement, classify_service};
 use crate::{
@@ -1057,13 +1058,9 @@ impl crate::cli::bindings::PairingCommandBindings for NativeConsumer {
     }
     fn list_page(
         &self,
-        _: Option<crate::cli::bindings::InventoryCursor>,
+        cursor: Option<crate::cli::bindings::InventoryCursor>,
     ) -> ManagementFuture<'_, crate::cli::bindings::PairingInventoryPage> {
-        Box::pin(async {
-            self.mutable()?;
-            self.opened().await?;
-            Err(ManagementFailure::NativeUnavailable)
-        })
+        Box::pin(async move { self.list_registered_devices(cursor).await })
     }
     fn assess_unpair(
         &self,
