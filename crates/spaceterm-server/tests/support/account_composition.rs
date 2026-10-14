@@ -1328,7 +1328,23 @@ async fn real_binary_retains_only_explicit_remote_scope_across_stop_start_and_di
         let status = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let status = query_status(&transport, &mut codec).await;
-                if status.parts().listeners.len() == endpoints.len() {
+                assert!(
+                    status.parts().listeners.iter().all(|fact| matches!(
+                        fact.state,
+                        ListenerState::Binding | ListenerState::Listening
+                    )),
+                    "restored listener failure: {:?}",
+                    status.parts().listeners
+                );
+                // Binding already publishes every retained endpoint. The count
+                // alone does not mean the restarted listeners are ready.
+                if status.parts().listeners.len() == endpoints.len()
+                    && status
+                        .parts()
+                        .listeners
+                        .iter()
+                        .all(|fact| fact.state == ListenerState::Listening)
+                {
                     break status;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1344,7 +1360,9 @@ async fn real_binary_retains_only_explicit_remote_scope_across_stop_start_and_di
                 .parts()
                 .listeners
                 .iter()
-                .all(|fact| fact.state == ListenerState::Listening)
+                .all(|fact| fact.state == ListenerState::Listening),
+            "restored listener states: {:?}",
+            status.parts().listeners
         );
         operation(
             &seed,
