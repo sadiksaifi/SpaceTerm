@@ -490,9 +490,7 @@ fn delete_unassigns_and_the_row_reset_restores_the_default(cx: &mut TestAppConte
 #[gpui::test]
 fn an_override_reserved_here_is_explained_and_its_default_stays_active(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(
-        with_keybindings(
-            r#"{"create_tab":"ctrl-c","close_workspace":"cmd-q","close_pane":"cmd-q"}"#,
-        ),
+        with_keybindings(r#"{"create_tab":"ctrl-c","close_workspace":"cmd-q"}"#),
         cx,
     );
 
@@ -526,7 +524,26 @@ fn an_override_reserved_here_is_explained_and_its_default_stays_active(cx: &mut 
             .cloned()),
         Some(shortcut("cmd-w"))
     );
-    // Close Pane has no default to fall back to.
+    // Rejected overrides stay retained until the person changes them.
+    assert_eq!(
+        retained(&window, Command::CreateTab, cx),
+        Some(Some(shortcut("ctrl-c")))
+    );
+    assert_eq!(
+        retained(&window, Command::CloseWorkspace, cx),
+        Some(Some(shortcut("cmd-q")))
+    );
+    // Focus scrolls the row, which sits below the first screen of Commands, into view.
+    focus_recorder(&window, Command::CreateTab, cx);
+    click("settings-row-shortcut-create-tab-reset", cx);
+    assert_eq!(retained(&window, Command::CreateTab, cx), None);
+    assert_eq!(description(&window, Command::CreateTab, cx), None);
+}
+
+#[gpui::test]
+fn a_reserved_close_pane_override_is_retained_without_a_default_fallback(cx: &mut TestAppContext) {
+    let (window, cx) = open_keybindings(with_keybindings(r#"{"close_pane":"cmd-q"}"#), cx);
+
     assert_eq!(
         description(&window, Command::ClosePane, cx),
         Some(ShortcutDescription {
@@ -542,24 +559,10 @@ fn an_override_reserved_here_is_explained_and_its_default_stays_active(cx: &mut 
             .cloned()),
         None
     );
-    // Rejected overrides stay retained until the person changes them.
-    assert_eq!(
-        retained(&window, Command::CreateTab, cx),
-        Some(Some(shortcut("ctrl-c")))
-    );
-    assert_eq!(
-        retained(&window, Command::CloseWorkspace, cx),
-        Some(Some(shortcut("cmd-q")))
-    );
     assert_eq!(
         retained(&window, Command::ClosePane, cx),
         Some(Some(shortcut("cmd-q")))
     );
-    // Focus scrolls the row, which sits below the first screen of Commands, into view.
-    focus_recorder(&window, Command::CreateTab, cx);
-    click("settings-row-shortcut-create-tab-reset", cx);
-    assert_eq!(retained(&window, Command::CreateTab, cx), None);
-    assert_eq!(description(&window, Command::CreateTab, cx), None);
 }
 
 #[gpui::test]

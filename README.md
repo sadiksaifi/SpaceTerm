@@ -8,7 +8,7 @@ A native desktop terminal multiplexer for macOS and Linux, coming soon for Windo
 
 - **Workspaces** for local and remote terminal work
 - **Tabs and Panes** with recursive splits, focus, resize, and zoom
-- **Remote terminals** through your existing OpenSSH configuration
+- **Remote terminals** on paired SpaceTerm Servers, with optional OpenSSH tunnels
 - **Keyboard-first navigation** through the Command Palette and Workspace Switcher
 
 ## Install macOS/Linux

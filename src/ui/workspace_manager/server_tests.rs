@@ -244,9 +244,29 @@ fn desktop_server_kill_uses_close_workspace_command_and_exact_confirmation(
 ) {
     let (manager, runtime, cx) = harness(cx);
     servers(&runtime, &[A]);
-    let mut workspace = replica(A);
-    workspace.org.add_tab(1, 2, 2, None);
+    let mut org = Org::new(A);
+    org.add_workspace(1, 1, 1).add_tab(1, 2, 2, None).split(
+        1,
+        3,
+        1,
+        spaceterm_core::organization::SplitAxis::Horizontal,
+        spaceterm_core::organization::SplitEdge::After,
+    );
+    let workspace = Replica::attached(org, 1);
     publish(&workspace, 1, &runtime, cx);
+    let tabs = manager.read_with(cx, |manager, _| {
+        manager
+            .server
+            .as_ref()
+            .unwrap()
+            .collection
+            .payload(ws(A, 1))
+            .unwrap()
+            .clone()
+    });
+    let membership =
+        |cx: &mut VisualTestContext| tabs.read_with(cx, |tabs, cx| tabs.aggregate_counts(cx));
+    assert_eq!(membership(cx), (2, 3));
     cx.update(|window, cx| {
         window.activate_window();
         manager.update(cx, |manager, cx| manager.focus(window, cx));
@@ -273,7 +293,7 @@ fn desktop_server_kill_uses_close_workspace_command_and_exact_confirmation(
             .unwrap(),
         },
         spaceterm_core::authority::ServerEpoch::new(1),
-        AssessmentSummary::new(AssessmentTarget::KillWorkspace(ws(A, 1)), 1, 5, 7, 4, true)
+        AssessmentSummary::new(AssessmentTarget::KillWorkspace(ws(A, 1)), 1, 2, 3, 3, true)
             .unwrap(),
     )
     .unwrap();
@@ -306,6 +326,11 @@ fn desktop_server_kill_uses_close_workspace_command_and_exact_confirmation(
     cx.simulate_click(cancel, gpui::Modifiers::none());
     cx.run_until_parked();
     assert_eq!(runtime.begun().len(), 1, "Cancel must not submit Kill");
+    assert_eq!(
+        membership(cx),
+        (2, 3),
+        "Cancel preserves every Tab and Pane"
+    );
     assert!(manager.read_with(cx, |manager, _| {
         manager.server.as_ref().unwrap().confirmation.is_none()
     }));
@@ -349,6 +374,11 @@ fn desktop_server_kill_uses_close_workspace_command_and_exact_confirmation(
         manager.read_with(cx, |manager, _| manager.active_server_workspace()),
         Some(ws(A, 1)),
         "only replica deletion removes shared work"
+    );
+    assert_eq!(
+        membership(cx),
+        (2, 3),
+        "confirmation alone cannot delete local membership"
     );
 }
 
