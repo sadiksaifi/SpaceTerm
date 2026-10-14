@@ -35,6 +35,8 @@ use crate::ui::{
     reason = "native client provider supplies the published ports at startup"
 )]
 pub(crate) struct NativeDesktopOwners {
+    #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+    pub(crate) fixture: bool,
     pub(crate) services: ClientServices,
     pub(crate) journal: Arc<JournalController>,
     pub(crate) channels: Arc<PaneChannels>,
@@ -49,6 +51,8 @@ pub(crate) struct NativeDesktopOwners {
 impl Clone for NativeDesktopOwners {
     fn clone(&self) -> Self {
         Self {
+            #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+            fixture: self.fixture,
             services: ClientServices {
                 routes: self.services.routes.clone(),
                 credentials: self.services.credentials.clone(),
@@ -402,6 +406,8 @@ pub(crate) async fn recover<S: ViewStore + 'static>(
     store: S,
 ) -> Result<DesktopClientComposition<S>, DesktopClientError> {
     let NativeDesktopOwners {
+        #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+        fixture,
         mut services,
         journal,
         channels,
@@ -455,7 +461,7 @@ pub(crate) async fn recover<S: ViewStore + 'static>(
     )
     .map_err(DesktopClientError::from)?;
     settings.inventories.extend(recovered_settings.inventories);
-    Ok(DesktopClientComposition {
+    let composition = DesktopClientComposition {
         registry,
         runtime,
         channels,
@@ -467,7 +473,14 @@ pub(crate) async fn recover<S: ViewStore + 'static>(
         executor: tokio::runtime::Handle::current(),
         servers,
         settings,
-    })
+    };
+    #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+    let composition = if fixture {
+        native::test_composition::initialize_workspace(composition).await?
+    } else {
+        composition
+    };
+    Ok(composition)
 }
 
 /// Retained startup task and single admission gate. Reopen waits for the original task instead

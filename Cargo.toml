@@ -36,6 +36,8 @@ native-tests = [
     "spaceterm-host/native-tests",
     "spaceterm-terminal/native-tests",
 ]
+# The isolated accessibility composition also requires debug assertions; package builds omit it.
+desktop-test-support = ["spaceterm-host/test-support"]
 developer-tools = ["spaceterm-ui/control-preview"]
 status-companion = ["objc2-app-kit/NSButton", "objc2-app-kit/NSControl", "objc2-app-kit/NSStatusBar", "objc2-app-kit/NSStatusBarButton", "objc2-app-kit/NSStatusItem"]
 

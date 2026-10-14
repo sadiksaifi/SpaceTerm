@@ -191,6 +191,8 @@ impl Fixture {
     }
     fn owners(&self) -> NativeDesktopOwners {
         NativeDesktopOwners {
+            #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+            fixture: false,
             services: ClientServices {
                 routes: self.ports.clone(),
                 credentials: self.server.clone(),

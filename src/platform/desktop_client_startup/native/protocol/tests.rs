@@ -111,6 +111,8 @@ async fn authenticated_case(major: u32, cx: &mut TestAppContext) {
     let plan = Arc::new(plan);
     let startup = NativeDesktopStartup::new(
         NativeDesktopOwners {
+            #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+            fixture: false,
             services: ClientServices {
                 routes: Arc::new(fixture::peer::Peers::one(
                     &server.binding(1).unwrap(),

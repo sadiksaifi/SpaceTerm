@@ -375,6 +375,8 @@ async fn native_enrollment_publishes_into_existing_desktop_and_settings(cx: &mut
         .channels(ProjectionBudgets::supported().unwrap())
         .unwrap();
     let owners = NativeDesktopOwners {
+        #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+        fixture: false,
         services: ClientServices {
             routes: h.ports.clone(),
             credentials: h.ports.clone(),

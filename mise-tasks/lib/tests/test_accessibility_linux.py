@@ -350,3 +350,119 @@ class Accessible(list):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AccessibilityAccountServerTests(unittest.TestCase):
+    def setUp(self):
+        specification = importlib.util.spec_from_file_location(
+            "accessibility_account_smoke", ROOT / "mise-tasks/test/accessibility/linux.py"
+        )
+        self.smoke = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(self.smoke)
+
+    def test_builds_explicit_test_compositions_for_both_binaries(self):
+        with patch.object(
+            self.smoke, "build_executable", return_value=Path("/fixture/binary")
+        ) as build:
+            self.smoke.build_fixture_binaries()
+        self.assertEqual(build.call_count, 2)
+        self.assertIn("desktop-test-support", build.call_args_list[0].args)
+        self.assertIn("test-support", build.call_args_list[1].args)
+        self.assertEqual(build.call_args_list[1].kwargs["binary"], "spaceterm-server")
+
+    def test_durable_storage_is_not_selected_from_tmpdir(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(self.smoke.tempfile, "mkdtemp", return_value=directory) as allocate:
+                self.smoke.create_durable_fixture_root()
+        self.assertEqual(allocate.call_args.kwargs["dir"], "/var/tmp")
+
+    def test_initialization_failure_does_not_launch_the_server(self):
+        initializer = SimpleNamespace(wait=lambda timeout: 1)
+        processes = SimpleNamespace(start=lambda command: initializer)
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(SmokeFailure, "^account_fixture_initialization_failed$"):
+                self.smoke.start_account_fixture(processes, Path("/server"), Path(directory))
+
+    def test_server_death_cannot_satisfy_endpoint_readiness(self):
+        initializer = SimpleNamespace(wait=lambda timeout: 0)
+        server = SimpleNamespace(poll=lambda: 2)
+        calls = []
+
+        def start(command):
+            calls.append(command)
+            return initializer if len(calls) == 1 else server
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(SmokeFailure, "^account_fixture_process_exited$"):
+                self.smoke.start_account_fixture(
+                    SimpleNamespace(start=start), Path("/server"), Path(directory)
+                )
+        self.assertEqual(calls[0][-1], "initialize-accessibility")
+        self.assertEqual(
+            calls[1], ["/server", "--test-account-root", directory, "--test-shell-home", directory]
+        )
+
+    def test_live_server_is_registered_with_existing_process_owner(self):
+        initializer = SimpleNamespace(wait=lambda timeout: 0)
+        server = SimpleNamespace(poll=lambda: None)
+        with tempfile.TemporaryDirectory() as directory:
+            endpoint = Path(directory) / "development/runtime/server"
+            endpoint.parent.mkdir(parents=True)
+            endpoint.touch()
+            with patch.object(self.smoke, "fixture_endpoint_ready", return_value=True):
+                owner = SimpleNamespace(start=unittest.mock.Mock(side_effect=[initializer, server]))
+                self.assertIs(
+                    self.smoke.start_account_fixture(owner, Path("/server"), Path(directory)),
+                    server,
+                )
+                self.assertEqual(owner.start.call_count, 2)
+
+    def test_fixture_storage_is_removed_only_after_process_cleanup_is_confirmed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "account"
+            root.mkdir()
+            self.smoke.cleanup_fixture_storage(root, False)
+            self.assertTrue(root.is_dir())
+            self.smoke.cleanup_fixture_storage(root, True)
+            self.assertFalse(root.exists())
+
+    def test_existing_process_owner_retires_account_children_in_reverse_order(self):
+        initializer = SimpleNamespace(pid=41, wait=lambda timeout: 0)
+        server = SimpleNamespace(pid=42, poll=lambda: None)
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch.dict(os.environ, {"HOME": directory, "XDG_RUNTIME_DIR": directory}),
+                patch(
+                    "spaceterm_tasks.accessibility_linux.subprocess.Popen",
+                    side_effect=[initializer, server],
+                ),
+                patch(
+                    "spaceterm_tasks.accessibility_linux.process_identity", return_value=(1, 2, 3)
+                ),
+                patch("spaceterm_tasks.accessibility_linux.retire_direct_child") as retire,
+                patch.object(self.smoke, "fixture_endpoint_ready", return_value=True),
+            ):
+                owner = self.smoke.Processes(Path(directory) / "owned.json")
+                self.smoke.start_account_fixture(owner, Path("/server"), Path(directory))
+                owner.close()
+                self.assertEqual(
+                    [call.args[0] for call in retire.call_args_list], [server, initializer]
+                )
+
+    def test_private_settings_scope_accepts_explicit_owned_durable_data_and_state_roots(self):
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as directory:
+            root = Path(directory)
+            (root / "data").mkdir(mode=0o700)
+            (root / "state").mkdir(mode=0o700)
+            expected = self.smoke.private_settings_directories(Path("/evidence/x11"), root)
+            self.assertEqual(expected["HOME"], "/evidence/x11/home")
+            self.assertEqual(expected["XDG_CONFIG_HOME"], "/evidence/x11/config")
+            self.assertEqual(expected["XDG_DATA_HOME"], str(root / "data"))
+            self.assertEqual(expected["XDG_STATE_HOME"], str(root / "state"))
+
+    def test_private_settings_scope_refuses_nonprivate_durable_root(self):
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as directory:
+            root = Path(directory)
+            root.chmod(0o755)
+            with self.assertRaisesRegex(SmokeFailure, "^private_durable_storage_scope_invalid$"):
+                self.smoke.private_settings_directories(Path("/evidence/x11"), root)
