@@ -1,6 +1,12 @@
 //! One-shot dispatch. Waiting ends independently of service-owned admitted work.
 
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use spaceterm_client::management_cli::{
     ConfirmationPrompt, ConfirmationReply, ManagementAction, ManagementFuture, ProtocolManagement,
@@ -12,7 +18,8 @@ use super::{
     CliFailure,
     arguments::{CliCommand, CliInvocation, ConfirmationMode, RequestSelector},
     bindings::{
-        NativeCliCommand, NativeCommandBindings, PairingCommandBindings, RegistrationAvailability,
+        NativeCliCommand, NativeCommandBindings, PairingAuthorizationAdmission,
+        PairingAuthorizationFailure, PairingCommandBindings, RegistrationAvailability,
     },
     output,
 };
@@ -20,6 +27,41 @@ use super::{
 pub trait CliIo: Send {
     fn write_stdout(&mut self, bytes: &[u8]) -> Result<(), CliFailure>;
     fn write_stderr(&mut self, bytes: &[u8]) -> Result<(), CliFailure>;
+    /// Verify BOTH stdin and stdout are private anonymous pipes before consuming
+    /// a bounded public claim JSON document. Never read a terminal or a file.
+    fn read_authorization_claim(&mut self) -> Result<zeroize::Zeroizing<Vec<u8>>, CliFailure> {
+        Err(CliFailure::AuthorizationUnavailable)
+    }
+    /// Immediate delivery adapter for nonblocking byte stores. Implementations
+    /// must not wait for I/O. OS pipe adapters override the asynchronous method.
+    /// The default cannot fall back to ordinary stdout or a JSON envelope.
+    fn write_authorization_delivery(&mut self, _bytes: &[u8]) -> Result<(), CliFailure> {
+        Err(CliFailure::AuthorizationUnavailable)
+    }
+    /// Cancellable raw delivery. Readiness waits occur outside the invocation's
+    /// output gate; only an immediate write can compete with interruption.
+    fn write_authorization_delivery_async<'a>(
+        &'a mut self,
+        bytes: &'a [u8],
+        signal: &'a CliSignalContext,
+    ) -> ManagementFuture<'a, ()> {
+        Box::pin(
+            async move { signal.deliver_immediate(|| self.write_authorization_delivery(bytes)) },
+        )
+    }
+    /// Raw-mode diagnostics carry only typed public metadata on stderr. Pipe
+    /// adapters bound this write independently of the raw stdout channel.
+    fn write_authorization_diagnostic(&mut self, bytes: &[u8]) -> Result<(), CliFailure> {
+        self.write_stderr(bytes)
+    }
+    /// Shares the invocation's nonblocking endpoint leases with its raw writer.
+    fn write_authorization_diagnostic_scoped(
+        &mut self,
+        bytes: &[u8],
+        _signal: &CliSignalContext,
+    ) -> Result<(), CliFailure> {
+        self.write_authorization_diagnostic(bytes)
+    }
     /// Deliberate direct enrollment asks for the exact public Server fingerprint.
     /// The pairing driver verifies the pin; this reply alone grants no authority.
     fn confirm_server_fingerprint(
@@ -42,6 +84,251 @@ pub trait CliIo: Send {
         prompt: &ConfirmationPrompt,
     ) -> Result<ConfirmationReply, CliFailure>;
 }
+#[derive(Default)]
+enum AuthorizationOutputState {
+    #[default]
+    Pending,
+    Delivered,
+    Interrupted,
+    Failed,
+}
+
+/// One dispatch and its signal handler share this context, never dependencies.
+/// Creating a context does not admit a request or grant output authority.
+#[derive(Clone)]
+pub struct CliSignalContext {
+    invocation: CliInvocation,
+    state: Arc<InvocationOutput>,
+}
+#[derive(Default)]
+struct InvocationOutput {
+    admission: PairingAuthorizationAdmission,
+    authorization: Mutex<AuthorizationOutputState>,
+    interrupted: tokio::sync::Notify,
+    diagnostic_complete: AtomicBool,
+    diagnostic_finished: tokio::sync::Notify,
+    #[cfg(unix)]
+    pipe_flags: super::pairing_pipe::InvocationPipeFlags,
+}
+struct InterruptionDiagnostic<'a>(&'a InvocationOutput);
+impl Drop for InterruptionDiagnostic<'_> {
+    fn drop(&mut self) {
+        // The Interrupted gate already forbids any further raw write. Restore
+        // inherited flags before process::exit, which will skip context Drop.
+        #[cfg(unix)]
+        self.0.pipe_flags.restore();
+        self.0.diagnostic_complete.store(true, Ordering::Release);
+        self.0.diagnostic_finished.notify_waiters();
+    }
+}
+impl CliSignalContext {
+    pub fn new(invocation: CliInvocation) -> Self {
+        Self {
+            invocation,
+            state: Arc::default(),
+        }
+    }
+
+    pub fn pairing_authorization_admission(&self) -> PairingAuthorizationAdmission {
+        self.state.admission.clone()
+    }
+
+    /// Reports composition failure before dispatch or a signal handler starts.
+    /// Raw mode uses its bounded diagnostic channel; normal envelopes are unchanged.
+    pub fn emit_initial_failure(
+        &self,
+        failure: CliFailure,
+        io: &mut dyn CliIo,
+    ) -> Result<(), CliFailure> {
+        let result = if matches!(
+            self.invocation.command,
+            CliCommand::PairAuthorizeClaim { .. }
+        ) {
+            output::emit_authorization_failure_scoped(
+                &PairingAuthorizationFailure::new(failure, self.state.admission.request()),
+                self.invocation.json,
+                io,
+                self,
+            )
+        } else {
+            output::emit_failure(failure, self.invocation.json, io)
+        };
+        self.finish_output();
+        result
+    }
+
+    fn finish_output(&self) {
+        // Task cancellation and runtime shutdown need not destroy a signal
+        // clone before process exit. Terminal dispatch restores flags itself.
+        #[cfg(unix)]
+        self.state.pipe_flags.restore();
+    }
+
+    /// Returns false when this invocation already selected its final output.
+    /// No diagnostic write, readiness wait or producer effect holds the gate.
+    pub fn emit_interruption(
+        &self,
+        failure: CliFailure,
+        io: &mut dyn CliIo,
+    ) -> Result<bool, CliFailure> {
+        if !matches!(
+            self.invocation.command,
+            CliCommand::PairAuthorizeClaim { .. }
+        ) {
+            output::emit_failure(failure, self.invocation.json, io)?;
+            return Ok(true);
+        }
+        {
+            let mut state = self
+                .state
+                .authorization
+                .lock()
+                .map_err(|_| CliFailure::UnsafeNativeState)?;
+            match *state {
+                AuthorizationOutputState::Delivered | AuthorizationOutputState::Failed => {
+                    return Ok(false);
+                }
+                AuthorizationOutputState::Interrupted => return Ok(true),
+                AuthorizationOutputState::Pending => {}
+            }
+            *state = AuthorizationOutputState::Interrupted;
+        }
+        let _diagnostic = InterruptionDiagnostic(&self.state);
+        self.state.interrupted.notify_waiters();
+        output::emit_authorization_failure_scoped(
+            &PairingAuthorizationFailure::new(failure, self.state.admission.request()),
+            self.invocation.json,
+            io,
+            self,
+        )?;
+        Ok(true)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn keep_nonblocking(
+        &self,
+        fd: std::os::fd::BorrowedFd<'_>,
+    ) -> Result<(), CliFailure> {
+        self.state.pipe_flags.keep(fd)
+    }
+
+    async fn wait_interruption_diagnostic(&self) {
+        loop {
+            let notified = self.state.diagnostic_finished.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let interrupted = self
+                .state
+                .authorization
+                .lock()
+                .is_ok_and(|state| matches!(*state, AuthorizationOutputState::Interrupted));
+            if !interrupted || self.state.diagnostic_complete.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Compatibility for immediate, nonblocking byte stores. Production OS
+    /// output uses try_delivery_write and never invokes a blocking Write here.
+    fn deliver_immediate(
+        &self,
+        write: impl FnOnce() -> Result<(), CliFailure>,
+    ) -> Result<(), CliFailure> {
+        let mut state = self
+            .state
+            .authorization
+            .lock()
+            .map_err(|_| CliFailure::UnsafeNativeState)?;
+        match *state {
+            AuthorizationOutputState::Pending => {}
+            AuthorizationOutputState::Interrupted => return Err(CliFailure::OutcomePending),
+            _ => return Err(CliFailure::UnsafeNativeState),
+        }
+        write()?;
+        *state = AuthorizationOutputState::Delivered;
+        Ok(())
+    }
+
+    /// The callback must be one nonblocking syscall, never write_all or flush.
+    /// The final accepted byte and interruption have one ordering point.
+    pub(crate) fn try_delivery_write(
+        &self,
+        remaining: usize,
+        write: impl FnOnce() -> std::io::Result<usize>,
+    ) -> Result<std::io::Result<usize>, CliFailure> {
+        let mut state = self
+            .state
+            .authorization
+            .lock()
+            .map_err(|_| CliFailure::UnsafeNativeState)?;
+        match *state {
+            AuthorizationOutputState::Pending => {}
+            AuthorizationOutputState::Interrupted => return Err(CliFailure::OutcomePending),
+            _ => return Err(CliFailure::UnsafeNativeState),
+        }
+        let result = write();
+        if let Ok(count) = result {
+            if count == 0 || count > remaining {
+                return Err(CliFailure::IoUnavailable);
+            }
+            if count == remaining {
+                *state = AuthorizationOutputState::Delivered;
+            }
+        }
+        Ok(result)
+    }
+
+    pub(crate) async fn interrupted(&self) {
+        loop {
+            // Register before inspecting state so notify_waiters cannot be lost.
+            let notified = self.state.interrupted.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self
+                .state
+                .authorization
+                .lock()
+                .is_ok_and(|state| matches!(*state, AuthorizationOutputState::Interrupted))
+            {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    fn emit_authorization_failure(
+        &self,
+        failure: PairingAuthorizationFailure,
+        io: &mut dyn CliIo,
+    ) -> Result<Dispatch, CliFailure> {
+        {
+            let mut state = self
+                .state
+                .authorization
+                .lock()
+                .map_err(|_| CliFailure::UnsafeNativeState)?;
+            match *state {
+                AuthorizationOutputState::Interrupted => {
+                    return Ok(Dispatch::Exit(CliExit(
+                        CliFailure::OutcomePending.exit_code(),
+                    )));
+                }
+                AuthorizationOutputState::Delivered => return Ok(Dispatch::Exit(CliExit(0))),
+                AuthorizationOutputState::Failed => {
+                    return Ok(Dispatch::Exit(CliExit(failure.failure.exit_code())));
+                }
+                AuthorizationOutputState::Pending => *state = AuthorizationOutputState::Failed,
+            }
+        }
+        let classification =
+            output::emit_authorization_failure_scoped(&failure, self.invocation.json, io, self)
+                .err()
+                .unwrap_or(failure.failure);
+        Ok(Dispatch::Exit(CliExit(classification.exit_code())))
+    }
+}
+
 pub struct CliDependencies {
     key: Result<AccountBuildKey, CliFailure>,
     protocol: Arc<dyn ProtocolManagement>,
@@ -85,16 +372,41 @@ pub async fn dispatch(
     dependencies: &CliDependencies,
     io: &mut dyn CliIo,
 ) -> Dispatch {
-    let result = run(invocation.clone(), dependencies, io).await;
-    match result {
+    dispatch_with_context(&CliSignalContext::new(invocation), dependencies, io).await
+}
+
+/// Dispatch with the context shared by this invocation's independent handler.
+/// Use a new context for every command, including when dependencies are reused.
+pub async fn dispatch_with_context(
+    signal: &CliSignalContext,
+    dependencies: &CliDependencies,
+    io: &mut dyn CliIo,
+) -> Dispatch {
+    let invocation = &signal.invocation;
+    let result = run(invocation.clone(), dependencies, io, signal).await;
+    let dispatch = match result {
         Ok(dispatch) => dispatch,
         Err(failure) => {
-            let failure = output::emit_failure(failure, invocation.json, io)
-                .err()
-                .unwrap_or(failure);
-            Dispatch::Exit(CliExit(failure.exit_code()))
+            if matches!(invocation.command, CliCommand::PairAuthorizeClaim { .. }) {
+                signal
+                    .emit_authorization_failure(
+                        PairingAuthorizationFailure::new(failure, signal.state.admission.request()),
+                        io,
+                    )
+                    .unwrap_or_else(|failure| Dispatch::Exit(CliExit(failure.exit_code())))
+            } else {
+                let failure = output::emit_failure(failure, invocation.json, io)
+                    .err()
+                    .unwrap_or(failure);
+                Dispatch::Exit(CliExit(failure.exit_code()))
+            }
         }
-    }
+    };
+    // The executable may abort its signal task after this returns. Wait until
+    // that task has completed the bounded diagnostic, without holding the gate.
+    signal.wait_interruption_diagnostic().await;
+    signal.finish_output();
+    dispatch
 }
 /// Ends only this client's wait when interrupted. Admitted host work retains its
 /// original durable request; interruption neither acknowledges nor reissues it.
@@ -104,9 +416,23 @@ pub async fn dispatch_until(
     io: &mut dyn CliIo,
     interrupted: impl std::future::Future<Output = ()>,
 ) -> Dispatch {
-    let json = invocation.json;
+    dispatch_until_with_context(
+        &CliSignalContext::new(invocation),
+        dependencies,
+        io,
+        interrupted,
+    )
+    .await
+}
+
+pub async fn dispatch_until_with_context(
+    signal: &CliSignalContext,
+    dependencies: &CliDependencies,
+    io: &mut dyn CliIo,
+    interrupted: impl std::future::Future<Output = ()>,
+) -> Dispatch {
     let completed = {
-        let waiting = dispatch(invocation, dependencies, io);
+        let waiting = dispatch_with_context(signal, dependencies, io);
         tokio::pin!(waiting);
         tokio::pin!(interrupted);
         tokio::select! {
@@ -115,18 +441,23 @@ pub async fn dispatch_until(
             result = &mut waiting => Some(result),
         }
     };
-    completed.unwrap_or_else(|| {
-        let failure = output::emit_failure(CliFailure::OutcomePending, json, io)
-            .err()
-            .unwrap_or(CliFailure::OutcomePending);
-        Dispatch::Exit(CliExit(failure.exit_code()))
-    })
+    let dispatch = completed.unwrap_or_else(|| {
+        match signal.emit_interruption(CliFailure::OutcomePending, io) {
+            Ok(false) => Dispatch::Exit(CliExit(0)),
+            Ok(true) => Dispatch::Exit(CliExit(CliFailure::OutcomePending.exit_code())),
+            Err(failure) => Dispatch::Exit(CliExit(failure.exit_code())),
+        }
+    });
+    signal.wait_interruption_diagnostic().await;
+    signal.finish_output();
+    dispatch
 }
 
 async fn run(
     invocation: CliInvocation,
     deps: &CliDependencies,
     io: &mut dyn CliIo,
+    signal: &CliSignalContext,
 ) -> Result<Dispatch, CliFailure> {
     let CliInvocation {
         json,
@@ -349,6 +680,38 @@ async fn run(
             request,
             fingerprint,
         } => output::CliOutput::Progress(deps.pairing.authorize(request, fingerprint).await?),
+        CliCommand::PairAuthorizeClaim { fingerprint } => {
+            let claim = io.read_authorization_claim()?;
+            if claim.len() > super::pairing_pipe::MAX_PUBLIC_CLAIM_BYTES {
+                return Err(CliFailure::LimitExceeded);
+            }
+            if claim.is_empty() {
+                return Err(CliFailure::Usage);
+            }
+            let delivered = match deps
+                .pairing
+                .authorize_claim_admitted(
+                    claim,
+                    fingerprint,
+                    signal.pairing_authorization_admission(),
+                )
+                .await
+            {
+                Ok(delivery) => {
+                    signal.state.admission.record(delivery.request());
+                    io.write_authorization_delivery_async(delivery.bytes(), signal)
+                        .await
+                        .map_err(|failure| {
+                            PairingAuthorizationFailure::new(failure, Some(delivery.request()))
+                        })
+                }
+                Err(failure) => Err(failure),
+            };
+            return match delivered {
+                Ok(()) => Ok(Dispatch::Exit(CliExit(0))),
+                Err(failure) => signal.emit_authorization_failure(failure, io),
+            };
+        }
         CliCommand::EndAllSessions { confirmation } => {
             require_confirmation(&confirmation, mode)?;
             let server = read_query(deps.protocol.status()).await?.parts().server;

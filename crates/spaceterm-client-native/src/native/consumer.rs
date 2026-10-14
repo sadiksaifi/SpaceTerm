@@ -2,6 +2,7 @@
 //! Restoration never creates storage, enrolls or selects another consumer's Client.
 
 mod assessments;
+mod authorization;
 mod enrollment;
 
 pub(super) fn require_account_recovery(
@@ -10,6 +11,11 @@ pub(super) fn require_account_recovery(
     enrollment::recovery::require_complete(supervisor)
 }
 mod listing;
+
+pub use authorization::{
+    PublicEnrollmentChannel, PublicEnrollmentClaim, PublicEnrollmentDelivery,
+    PublicEnrollmentDeliveryParts,
+};
 
 use super::{NativeServiceManagement, classify_service};
 use crate::{
@@ -1054,13 +1060,27 @@ impl crate::cli::bindings::PairingCommandBindings for NativeConsumer {
     }
     fn authorize(
         &self,
-        _: crate::cli::arguments::PublicRequestId,
-        _: crate::cli::arguments::PublicFingerprint,
+        request: crate::cli::arguments::PublicRequestId,
+        expected: crate::cli::arguments::PublicFingerprint,
     ) -> ManagementFuture<'_, spaceterm_core::management::ManagementProgress> {
-        Box::pin(async {
-            self.mutable()?;
-            self.opened().await?;
-            Err(ManagementFailure::AuthorizationUnavailable)
+        Box::pin(async move { self.authorize_registered(request, expected).await })
+    }
+    fn authorize_claim(
+        &self,
+        claim_json: zeroize::Zeroizing<Vec<u8>>,
+        expected: crate::cli::arguments::PublicFingerprint,
+    ) -> crate::cli::bindings::PairingAuthorizationFuture<'_> {
+        Box::pin(async move { self.authorize_public_claim_json(claim_json, expected).await })
+    }
+    fn authorize_claim_admitted(
+        &self,
+        claim_json: zeroize::Zeroizing<Vec<u8>>,
+        expected: crate::cli::arguments::PublicFingerprint,
+        admission: crate::cli::bindings::PairingAuthorizationAdmission,
+    ) -> crate::cli::bindings::PairingAuthorizationFuture<'_> {
+        Box::pin(async move {
+            self.authorize_public_claim_json_admitted(claim_json, expected, admission)
+                .await
         })
     }
     fn list_page(

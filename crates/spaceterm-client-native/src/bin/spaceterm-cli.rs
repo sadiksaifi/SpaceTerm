@@ -6,7 +6,7 @@ use spaceterm_client_native::NativeClientProvider;
 use spaceterm_client_native::cli::{
     arguments::{CliCommand, MAX_ARGUMENTS, parse},
     output::{emit_failure, emit_text},
-    runner::{CliDependencies, Dispatch, dispatch},
+    runner::{CliDependencies, CliSignalContext, Dispatch, dispatch_with_context},
     tty::TerminalIo,
 };
 
@@ -68,34 +68,41 @@ async fn run() -> ExitCode {
     } else {
         spaceterm_host::account_service::SudoMode::Interactive
     };
+    let signal = CliSignalContext::new(invocation.clone());
     let provider = match NativeClientProvider::with_authorization(Some(Arc::new(
         spaceterm_host::account_service::SudoLingerAuthorization::new(mode),
     ))) {
         Ok(provider) => provider,
         Err(failure) => {
-            let _ = emit_failure(failure, json, &mut io);
+            let _ = signal.emit_initial_failure(failure, &mut io);
             return ExitCode::from(failure.exit_code());
         }
     };
     let consumer = provider.cli_consumer();
-    let dependencies = CliDependencies::new(
+    let dependencies = Arc::new(CliDependencies::new(
         Ok(provider.key()),
         consumer.clone(),
         provider.management(),
         consumer,
-    );
+    ));
     // The signal task also runs while a controlling-terminal read blocks the
     // dispatch thread. Exiting never acknowledges or reissues admitted work.
+    let interrupt_signal = signal.clone();
     let interrupt = tokio::spawn(async move {
         let failure = if tokio::signal::ctrl_c().await.is_ok() {
             spaceterm_client_native::cli::CliFailure::OutcomePending
         } else {
             spaceterm_client_native::cli::CliFailure::IoUnavailable
         };
-        let _ = emit_failure(failure, json, &mut TerminalIo);
+        if matches!(
+            interrupt_signal.emit_interruption(failure, &mut TerminalIo),
+            Ok(false)
+        ) {
+            return;
+        }
         std::process::exit(i32::from(failure.exit_code()));
     });
-    let result = dispatch(invocation, &dependencies, &mut io).await;
+    let result = dispatch_with_context(&signal, &dependencies, &mut io).await;
     interrupt.abort();
     match result {
         Dispatch::Exit(exit) => ExitCode::from(exit.code()),
