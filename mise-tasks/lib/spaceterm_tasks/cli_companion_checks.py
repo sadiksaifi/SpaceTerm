@@ -23,7 +23,7 @@ from pathlib import Path
 
 from spaceterm_tasks import TaskError, main
 from spaceterm_tasks.cargo import build_executable
-from spaceterm_tasks.processes import OWN_GROUP, group_alive, stop_group
+from spaceterm_tasks.processes import OWN_GROUP, child_exited, group_alive, stop_group
 
 PATH = "/usr/bin:/bin"
 CASE_TIMEOUT = 10
@@ -152,7 +152,7 @@ def collect(process, deadline):
                 output[key.data] += chunk
                 if len(output[key.data]) > OUTPUT_LIMIT:
                     return output, False
-            exited = exited or process.poll() is not None
+            exited = exited or child_exited(process)
     return output, True
 
 
@@ -171,15 +171,13 @@ def run_case(executable, case, environment, directory, label):
     finished = lingering = False
     try:
         output, closed = collect(process, deadline)
-        try:
-            process.wait(timeout=max(0, deadline - time.monotonic()))
-            finished = True
-        except subprocess.TimeoutExpired:
-            pass
-        lingering = finished and group_alive(process.pid)
+        while not child_exited(process) and time.monotonic() < deadline:
+            time.sleep(POLL_INTERVAL)
+        finished = child_exited(process)
+        lingering = finished and group_alive(process.pid, exclude=process.pid)
     finally:
-        # Stopping an exited group only reaps it. A descendant cannot outlive the check
-        # unless it left the group, and then its open pipes report it below.
+        # Keep the leader's PID reserved until every group signal has finished.
+        # An escaped descendant's open pipes still report it below.
         stop_group(process)
         for stream in (process.stdout, process.stderr):
             if stream is not None:

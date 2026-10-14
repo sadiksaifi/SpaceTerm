@@ -1,6 +1,11 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use spaceterm_core::{identity::ServerId, operations::RequestDigest};
+use spaceterm_core::{
+    identity::ServerId,
+    operations::RequestDigest,
+    pairing::{EnrollmentProposal, PairingKeys},
+};
+use spaceterm_protocol::pairing_adapter::enrollment_proposal_digest;
 
 use super::{ServiceFailure, ServiceSupervisor};
 use crate::{
@@ -14,6 +19,8 @@ pub(super) struct OwnerEnrollment {
     request_digest: RequestDigest,
     server: ServerId,
     claim_digest: RequestDigest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proposal: Option<EnrollmentProposal>,
 }
 impl OwnerEnrollment {
     pub(super) fn validate(
@@ -24,6 +31,14 @@ impl OwnerEnrollment {
         if self.server.bytes() == [0; 16]
             || self.claim_digest.bytes() == [0; 32]
             || self.request_digest != digest(key, request, self.server, self.claim_digest)
+        {
+            return Err(ServiceFailure::InvalidRecord);
+        }
+        if let Some(proposal) = &self.proposal
+            && (proposal.parts().server != self.server
+                || enrollment_proposal_digest(proposal)
+                    .map_err(|_| ServiceFailure::InvalidRecord)?
+                    != self.claim_digest)
         {
             return Err(ServiceFailure::InvalidRecord);
         }
@@ -115,14 +130,79 @@ impl ServiceSupervisor {
         server: ServerId,
         claim_digest: RequestDigest,
     ) -> Result<(), ServiceFailure> {
-        let owner = OwnerEnrollment {
-            request_digest,
-            server,
-            claim_digest,
+        self.record_owner(
+            request,
+            OwnerEnrollment {
+                request_digest,
+                server,
+                claim_digest,
+                proposal: None,
+            },
+        )
+    }
+
+    /// Retains the public claim before the first owner exchange. Private keys, proofs
+    /// and bearer authorization are never stored in the native request journal.
+    pub fn record_owner_proposal(
+        &self,
+        request: NativeRequestId,
+        proposal: EnrollmentProposal,
+    ) -> Result<(), ServiceFailure> {
+        let server = proposal.parts().server;
+        let claim_digest =
+            enrollment_proposal_digest(&proposal).map_err(|_| ServiceFailure::InvalidRecord)?;
+        let request_digest = self.owner_enrollment_digest(request, server, claim_digest)?;
+        self.record_owner(
+            request,
+            OwnerEnrollment {
+                request_digest,
+                server,
+                claim_digest,
+                proposal: Some(proposal),
+            },
+        )
+    }
+
+    /// Recovers the exact original foreground owner request by its public native keys.
+    /// It never allocates, reenrolls or resumes service work.
+    pub fn retained_owner_proposal(
+        &self,
+        server: ServerId,
+        keys: &PairingKeys,
+    ) -> Result<Option<(NativeRequestId, EnrollmentProposal)>, ServiceFailure> {
+        let (_, _, journal) = match self.read_journal() {
+            Ok(journal) => journal,
+            Err(ServiceFailure::Missing | ServiceFailure::UnknownRequest) => return Ok(None),
+            Err(failure) => return Err(failure),
         };
+        let mut retained = None;
+        for reservation in &journal.reservations {
+            let Some(owner) = &reservation.owner else {
+                continue;
+            };
+            let request = journal.request(reservation.sequence)?;
+            owner.validate(self.key, request)?;
+            if let Some(proposal) = &owner.proposal
+                && owner.server == server
+                && &proposal.parts().keys == keys
+            {
+                if retained.is_some() {
+                    return Err(ServiceFailure::RequestConflict);
+                }
+                retained = Some((request, proposal.clone()));
+            }
+        }
+        Ok(retained)
+    }
+
+    fn record_owner(
+        &self,
+        request: NativeRequestId,
+        owner: OwnerEnrollment,
+    ) -> Result<(), ServiceFailure> {
         owner.validate(self.key, request)?;
         let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
-        if registration.server_pin().identity != server.bytes() {
+        if registration.server_pin().identity != owner.server.bytes() {
             return Err(ServiceFailure::IdentityMismatch);
         }
         self.mutate_request(request, |journal, index| {
@@ -133,7 +213,14 @@ impl ServiceSupervisor {
             }
             let retained = &mut journal.reservations[index].owner;
             match retained {
-                Some(original) if original == &owner => Ok(()),
+                Some(original)
+                    if original.request_digest == owner.request_digest
+                        && original.server == owner.server
+                        && original.claim_digest == owner.claim_digest
+                        && (owner.proposal.is_none() || original.proposal == owner.proposal) =>
+                {
+                    Ok(())
+                }
                 Some(_) => Err(ServiceFailure::RequestConflict),
                 None => {
                     *retained = Some(owner.clone());
@@ -172,9 +259,14 @@ impl ServiceSupervisor {
             request_digest,
             server,
             claim_digest,
+            proposal: None,
         };
         expected.validate(self.key, *request)?;
-        if retained != expected {
+        retained.validate(self.key, *request)?;
+        if retained.request_digest != expected.request_digest
+            || retained.server != expected.server
+            || retained.claim_digest != expected.claim_digest
+        {
             return Err(ServiceFailure::RequestConflict);
         }
         Ok(())

@@ -18,7 +18,8 @@ mod processes;
 pub mod runtime_inventory;
 pub use installations::NativeServiceInstallations;
 pub use native_processes::{
-    NativeServiceProcessTable, NativeServiceProcesses, ServiceProcessIdentity,
+    InstanceProcessObserver, NativeServiceProcessTable, NativeServiceProcesses,
+    ServiceProcessIdentity,
 };
 mod systemd;
 
@@ -303,6 +304,8 @@ pub enum ServiceFailure {
     StaleAssessment,
     /// Explicit foreground confirmation is required.
     ConfirmationRequired,
+    /// A saved paired Client identity is required for live runtime access.
+    PairingRequired,
     /// Linger authorization was denied.
     AuthorizationDenied,
     /// Linger authorization was cancelled.

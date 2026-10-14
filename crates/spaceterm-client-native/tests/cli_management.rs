@@ -835,3 +835,32 @@ async fn native_dispatch_preserves_exact_action_scope_confirmation_and_sudo_mode
         assert!(calls.lock().unwrap().is_empty());
     }
 }
+
+#[test]
+fn starting_service_result_explains_original_status_lookup_in_json_and_text() {
+    use spaceterm_host::{
+        account_service::{ServicePhase, ServiceProgress, ServiceRequestState},
+        native_deployment::contracts::NativeRequestId,
+    };
+    let output = CliOutput::ServiceProgress(ServiceProgress {
+        request: NativeRequestId::new([5; 16]).unwrap(),
+        request_digest: spaceterm_core::operations::RequestDigest::from_bytes([9; 32]),
+        phase: ServicePhase::Starting,
+        state: ServiceRequestState::Pending,
+    });
+    let original = "native:05050505050505050505050505050505";
+    assert_eq!(output.exit_code(), 75);
+    let mut json = Io::default();
+    emit(&output, true, &mut json).unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(result["result"]["state"], "pending");
+    assert_eq!(result["result"]["follow_up"]["command"], "status");
+    assert_eq!(result["result"]["follow_up"]["operation"], original);
+    let mut text = Io::default();
+    emit(&output, false, &mut text).unwrap();
+    assert!(
+        String::from_utf8(text.stdout)
+            .unwrap()
+            .contains(&format!("status --operation {original}"))
+    );
+}

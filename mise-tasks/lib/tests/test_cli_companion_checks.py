@@ -230,8 +230,19 @@ class NoDisplayTests(unittest.TestCase):
 
     def test_only_the_checked_executable_runs(self):
         executable = self.cli()
-        with patch.object(checks.subprocess, "Popen", wraps=subprocess.Popen) as popen:
+        stop_group = checks.stop_group
+        statuses_before_cleanup = []
+
+        def cleanup(process):
+            statuses_before_cleanup.append(process.returncode)
+            stop_group(process)
+
+        with (
+            patch.object(checks.subprocess, "Popen", wraps=subprocess.Popen) as popen,
+            patch.object(checks, "stop_group", side_effect=cleanup),
+        ):
             self.check(executable)
+        self.assertEqual(statuses_before_cleanup, [None] * len(checks.CASES))
         self.assertEqual(popen.call_count, len(checks.CASES))
         for call in popen.call_args_list:
             self.assertEqual(call.args[0][0], str(executable))

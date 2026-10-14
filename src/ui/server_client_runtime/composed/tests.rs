@@ -414,6 +414,287 @@ fn composed_start_completes_the_original_intent_only_after_tagged_measurement(
 }
 
 #[gpui::test]
+fn composed_measurement_waits_for_reserved_view_save_and_is_accepted_once(cx: &mut TestAppContext) {
+    let harness = Harness::new(cx);
+    harness.request(
+        DesktopRequest::StartSession {
+            pane: harness.pane,
+            source: SelectionSource::Pointer,
+        },
+        cx,
+    );
+    harness.publish(cx);
+    let original = harness.provider.pane_measurement(harness.pane).unwrap();
+    let measurement = DesktopRequest::Measured(PaneMeasurement {
+        token: original.token,
+        ticket: original.ticket,
+        layout: original.layout,
+        grid: grid(),
+    });
+    let before_measurement = harness.server.received_operations().unwrap().len();
+    // Admission reserves the save lock before GPUI polls either task.
+    let save = cx
+        .update(|cx| {
+            harness.provider.begin(
+                DesktopRequest::PersonalEdit(ViewEdit::ActivateWorkspace(harness.workspace)),
+                cx,
+            )
+        })
+        .unwrap();
+    let measured = cx
+        .update(|cx| harness.provider.begin(measurement.clone(), cx))
+        .unwrap();
+    assert!(!measured.is_ready());
+    assert!(matches!(
+        cx.update(|cx| harness.provider.begin(measurement.clone(), cx)),
+        Err(DesktopClientError::AdmissionFull)
+    ));
+    assert_eq!(
+        harness.provider.pane_measurement(harness.pane),
+        Some(original)
+    );
+    assert_eq!(
+        harness.server.received_operations().unwrap().len(),
+        before_measurement
+    );
+    finish(save, &harness.tokio, cx).unwrap();
+    finish(measured, &harness.tokio, cx).unwrap();
+    harness.publish(cx);
+    assert!(matches!(
+        harness.server.snapshot().unwrap().runtime()[0].phase,
+        spaceterm_core::organization::SessionPhase::Running { .. }
+    ));
+    assert_eq!(
+        harness.server.received_operations().unwrap().len(),
+        before_measurement + 1
+    );
+    assert!(matches!(
+        cx.update(|cx| harness.provider.begin(measurement, cx)),
+        Err(DesktopClientError::StaleContext)
+    ));
+}
+
+#[gpui::test]
+fn composed_queued_measurement_never_substitutes_changed_context(cx: &mut TestAppContext) {
+    let harness = Harness::new(cx);
+    harness.request(
+        DesktopRequest::StartSession {
+            pane: harness.pane,
+            source: SelectionSource::Pointer,
+        },
+        cx,
+    );
+    harness.publish(cx);
+    let original = harness.provider.pane_measurement(harness.pane).unwrap();
+    let save = cx
+        .update(|cx| {
+            harness.provider.begin(
+                DesktopRequest::PersonalEdit(ViewEdit::ActivateWorkspace(harness.workspace)),
+                cx,
+            )
+        })
+        .unwrap();
+    let measured = cx
+        .update(|cx| {
+            harness.provider.begin(
+                DesktopRequest::Measured(PaneMeasurement {
+                    token: original.token,
+                    ticket: original.ticket,
+                    layout: original.layout,
+                    grid: grid(),
+                }),
+                cx,
+            )
+        })
+        .unwrap();
+    let before_measurement = harness.server.received_operations().unwrap().len();
+    harness
+        .provider
+        .pane_channel(harness.pane)
+        .unwrap()
+        .update_context(spaceterm_client::pane_channel::PaneContextFacts::default())
+        .unwrap();
+    finish(save, &harness.tokio, cx).unwrap();
+    assert_eq!(
+        finish(measured, &harness.tokio, cx),
+        Err(DesktopClientError::StaleContext)
+    );
+    assert_eq!(
+        harness.server.received_operations().unwrap().len(),
+        before_measurement
+    );
+    assert!(matches!(
+        harness.server.snapshot().unwrap().runtime()[0].phase,
+        spaceterm_core::organization::SessionPhase::NotStarted
+    ));
+}
+
+#[gpui::test]
+fn composed_queued_measurement_requires_new_geometry_after_saved_layout_change(
+    cx: &mut TestAppContext,
+) {
+    let harness = Harness::new(cx);
+    harness
+        .tokio
+        .block_on(harness.peer.submit(
+            Command::CreatePane {
+                tab: harness.tab,
+                source: harness.pane,
+                axis: spaceterm_core::organization::SplitAxis::Horizontal,
+                edge: spaceterm_core::organization::SplitEdge::After,
+            },
+            Some(harness.workspace),
+        ))
+        .unwrap();
+    harness.publish(cx);
+    harness.request(
+        DesktopRequest::StartSession {
+            pane: harness.pane,
+            source: SelectionSource::Pointer,
+        },
+        cx,
+    );
+    harness.publish(cx);
+    let original = harness.provider.pane_measurement(harness.pane).unwrap();
+    let save = cx
+        .update(|cx| {
+            harness.provider.begin(
+                DesktopRequest::PersonalEdit(ViewEdit::Arrange {
+                    workspace: harness.workspace,
+                    tab: harness.tab,
+                    edit: view::ArrangementEdit::ToggleZoom,
+                }),
+                cx,
+            )
+        })
+        .unwrap();
+    let measured = cx
+        .update(|cx| {
+            harness.provider.begin(
+                DesktopRequest::Measured(PaneMeasurement {
+                    token: original.token,
+                    ticket: original.ticket,
+                    layout: original.layout,
+                    grid: grid(),
+                }),
+                cx,
+            )
+        })
+        .unwrap();
+    let before_measurement = harness.server.received_operations().unwrap().len();
+    finish(save, &harness.tokio, cx).unwrap();
+    assert_eq!(finish(measured, &harness.tokio, cx), Ok(None));
+    let replacement = harness.provider.pane_measurement(harness.pane).unwrap();
+    assert_eq!(replacement.token, original.token);
+    assert_eq!(replacement.ticket, original.ticket);
+    assert_ne!(replacement.layout, original.layout);
+    assert_eq!(
+        harness.server.received_operations().unwrap().len(),
+        before_measurement
+    );
+    assert!(matches!(
+        harness.server.snapshot().unwrap().runtime()[0].phase,
+        spaceterm_core::organization::SessionPhase::NotStarted
+    ));
+    harness.request(
+        DesktopRequest::Measured(PaneMeasurement {
+            token: replacement.token,
+            ticket: replacement.ticket,
+            layout: replacement.layout,
+            grid: grid(),
+        }),
+        cx,
+    );
+    harness.publish(cx);
+    assert!(matches!(
+        harness.server.snapshot().unwrap().runtime()[0].phase,
+        spaceterm_core::organization::SessionPhase::Running { .. }
+    ));
+    assert_eq!(
+        harness.server.received_operations().unwrap().len(),
+        before_measurement + 1
+    );
+}
+
+#[gpui::test]
+fn composed_attach_then_start_needs_no_intervening_render(cx: &mut TestAppContext) {
+    let harness = Harness::new(cx);
+    harness
+        .tokio
+        .block_on(harness.peer.submit(
+            Command::CreateWorkspace {
+                server: harness.server.server(),
+                source: WorkspaceCreationSource::ServerHome {
+                    server: harness.server.server(),
+                },
+                name: NameDraft::Automatic,
+            },
+            None,
+        ))
+        .unwrap();
+    harness.publish(cx);
+    let snapshot = harness.server.snapshot().unwrap();
+    let workspace = snapshot.state().workspaces[1].id;
+    let pane = snapshot.state().panes[1].id;
+    harness.request(DesktopRequest::AttachWorkspace(workspace), cx);
+    let channel = harness.provider.pane_channel(pane).unwrap();
+    assert_eq!(
+        channel.state().borrow().facts,
+        spaceterm_client::pane_channel::PaneContextFacts::default()
+    );
+    assert!(matches!(
+        harness.server.snapshot().unwrap().runtime()[1].phase,
+        spaceterm_core::organization::SessionPhase::NotStarted
+    ));
+    // No TerminalPane, presentation read or native render establishes focus for this action.
+    harness.request(
+        DesktopRequest::StartSession {
+            pane,
+            source: SelectionSource::Pointer,
+        },
+        cx,
+    );
+    harness.publish(cx);
+    let request = harness.provider.pane_measurement(pane).unwrap();
+    let facts = *channel.state().borrow();
+    assert!(facts.facts.focused_pane && facts.facts.presentable);
+    assert!(!facts.facts.terminal_input_focus);
+    assert_eq!(request.token.context_generation, facts.context);
+    harness.request(
+        DesktopRequest::Measured(PaneMeasurement {
+            token: request.token,
+            ticket: request.ticket,
+            layout: request.layout,
+            grid: grid(),
+        }),
+        cx,
+    );
+    harness.publish(cx);
+    assert!(matches!(
+        harness.server.snapshot().unwrap().runtime()[1].phase,
+        spaceterm_core::organization::SessionPhase::Running { .. }
+    ));
+    assert!(matches!(
+        harness.server.snapshot().unwrap().runtime()[0].phase,
+        spaceterm_core::organization::SessionPhase::NotStarted
+    ));
+    harness.request(
+        DesktopRequest::SelectPane {
+            pane: harness.pane,
+            source: SelectionSource::Pointer,
+        },
+        cx,
+    );
+    let selected = harness.provider.pane_channel(harness.pane).unwrap();
+    assert!(selected.state().borrow().facts.focused_pane);
+    assert!(!channel.state().borrow().facts.focused_pane);
+    assert_eq!(
+        selected.state().borrow().context,
+        channel.state().borrow().context
+    );
+}
+
+#[gpui::test]
 fn composed_stale_context_measurement_cannot_start_a_session(cx: &mut TestAppContext) {
     let harness = Harness::new(cx);
     harness.request(
@@ -641,6 +922,190 @@ fn composed_multi_server_views_keep_saved_order_and_disconnect_independently(
             .personal
             .workspace(harness.workspace)
             .is_some()
+    );
+}
+
+#[gpui::test]
+fn composed_shared_commands_use_the_owning_workspace_not_the_active_workspace(
+    cx: &mut TestAppContext,
+) {
+    let harness = Harness::new(cx);
+    harness
+        .tokio
+        .block_on(harness.peer.submit(
+            Command::CreateWorkspace {
+                server: harness.server.server(),
+                source: WorkspaceCreationSource::ServerHome {
+                    server: harness.server.server(),
+                },
+                name: NameDraft::Automatic,
+            },
+            None,
+        ))
+        .unwrap();
+    harness.publish(cx);
+    let other = harness.server.snapshot().unwrap().state().workspaces[1].id;
+    harness.request(DesktopRequest::AttachWorkspace(other), cx);
+    harness.request(
+        DesktopRequest::PersonalEdit(ViewEdit::ActivateWorkspace(other)),
+        cx,
+    );
+    let version = harness.server.snapshot().unwrap().state().workspaces[0]
+        .name
+        .version;
+    for command in [
+        Command::RenameWorkspace {
+            workspace: harness.workspace,
+            expected_version: version,
+            draft: NameDraft::Custom(
+                spaceterm_core::organization::NameText::new("Inactive workspace".into()).unwrap(),
+            ),
+        },
+        Command::CreateTab {
+            workspace: harness.workspace,
+            source: spaceterm_core::operations::TabCreationSource::Pane(harness.pane),
+        },
+        Command::CreatePane {
+            tab: harness.tab,
+            source: harness.pane,
+            axis: spaceterm_core::organization::SplitAxis::Horizontal,
+            edge: spaceterm_core::organization::SplitEdge::After,
+        },
+    ] {
+        let task = cx
+            .update(|cx| {
+                harness.provider.begin(
+                    DesktopRequest::Shared {
+                        server: harness.server.server(),
+                        command,
+                    },
+                    cx,
+                )
+            })
+            .unwrap();
+        let operation = finish(task, &harness.tokio, cx).unwrap().unwrap();
+        assert_eq!(
+            harness
+                .peer
+                .journal()
+                .snapshot()
+                .unwrap()
+                .operation(operation)
+                .unwrap()
+                .workspace,
+            Some(harness.workspace),
+        );
+        harness.publish(cx);
+    }
+    let snapshot = harness.server.snapshot().unwrap();
+    assert_eq!(
+        snapshot
+            .state()
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == harness.workspace)
+            .unwrap()
+            .name
+            .value
+            .display
+            .as_str(),
+        "Inactive workspace"
+    );
+    assert_eq!(
+        snapshot
+            .state()
+            .tabs
+            .iter()
+            .filter(|tab| tab.workspace == harness.workspace)
+            .count(),
+        2
+    );
+    assert_eq!(
+        snapshot
+            .state()
+            .panes
+            .iter()
+            .filter(|pane| pane.tab == harness.tab)
+            .count(),
+        2
+    );
+    assert_eq!(
+        harness
+            .provider
+            .frame(harness.server.server())
+            .unwrap()
+            .personal
+            .active_workspace(),
+        Some(other)
+    );
+}
+
+#[gpui::test]
+fn composed_attachment_waits_for_the_authenticated_publication_cursor(cx: &mut TestAppContext) {
+    let harness = Harness::new(cx);
+    let old_info = match *harness.connection.borrow() {
+        ConnectionState::Connected { info } => info,
+        _ => panic!("connected fixture"),
+    };
+    harness
+        .tokio
+        .block_on(harness.peer.submit(
+            Command::CreateWorkspace {
+                server: harness.server.server(),
+                source: WorkspaceCreationSource::ServerHome {
+                    server: harness.server.server(),
+                },
+                name: NameDraft::Automatic,
+            },
+            None,
+        ))
+        .unwrap();
+    harness.publish(cx);
+    let workspace = harness.server.snapshot().unwrap().state().workspaces[1].id;
+    harness
+        .connection
+        .send_replace(ConnectionState::Connected { info: old_info });
+    cx.run_until_parked();
+    let task = cx
+        .update(|cx| {
+            harness
+                .provider
+                .begin(DesktopRequest::AttachWorkspace(workspace), cx)
+        })
+        .unwrap();
+    for _ in 0..3 {
+        cx.run_until_parked();
+        harness.tokio.block_on(tokio::task::yield_now());
+    }
+    assert!(
+        !task.is_ready(),
+        "attachment must wait rather than fail or expose an incoherent lease"
+    );
+    let ready = harness.server.connected_info(1, 1, 1, 2).unwrap();
+    harness
+        .connection
+        .send_replace(ConnectionState::Connected { info: ready });
+    finish(task, &harness.tokio, cx).unwrap();
+    assert!(
+        harness
+            .provider
+            .frame(harness.server.server())
+            .unwrap()
+            .personal
+            .workspace(workspace)
+            .is_some()
+    );
+    assert!(
+        harness
+            .server
+            .snapshot()
+            .unwrap()
+            .runtime()
+            .iter()
+            .all(|runtime| matches!(
+                runtime.phase,
+                spaceterm_core::organization::SessionPhase::NotStarted
+            ))
     );
 }
 
@@ -1031,5 +1496,50 @@ fn desktop_offline_detach_reconnect_drains_original_release(cx: &mut gpui::TestA
     assert!(matches!(
         harness.server.snapshot().unwrap().runtime()[0].control,
         spaceterm_core::organization::ControlRecord::Unclaimed
+    ));
+}
+
+#[gpui::test]
+fn composed_repeat_selection_preserves_the_original_pending_measurement(cx: &mut TestAppContext) {
+    let harness = Harness::new(cx);
+    harness.request(
+        DesktopRequest::StartSession {
+            pane: harness.pane,
+            source: SelectionSource::Pointer,
+        },
+        cx,
+    );
+    harness.publish(cx);
+    let original = harness.provider.pane_measurement(harness.pane).unwrap();
+    let operations = harness.server.received_operations().unwrap().len();
+    harness.request(
+        DesktopRequest::SelectPane {
+            pane: harness.pane,
+            source: SelectionSource::Pointer,
+        },
+        cx,
+    );
+    harness.publish(cx);
+    let repeated = harness.provider.pane_measurement(harness.pane).unwrap();
+    assert_eq!(repeated.token, original.token);
+    assert_eq!(repeated.ticket, original.ticket);
+    assert_eq!(repeated.layout, original.layout);
+    assert_eq!(
+        harness.server.received_operations().unwrap().len(),
+        operations
+    );
+    harness.request(
+        DesktopRequest::Measured(PaneMeasurement {
+            token: original.token,
+            ticket: original.ticket,
+            layout: original.layout,
+            grid: grid(),
+        }),
+        cx,
+    );
+    harness.publish(cx);
+    assert!(matches!(
+        harness.server.snapshot().unwrap().runtime()[0].phase,
+        spaceterm_core::organization::SessionPhase::Running { .. }
     ));
 }

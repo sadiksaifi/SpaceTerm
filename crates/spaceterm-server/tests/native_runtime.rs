@@ -632,3 +632,303 @@ async fn abandoning_a_real_owner_joins_cleanup_despite_retained_handles_and_subs
         }))
     ));
 }
+
+#[cfg(target_os = "macos")]
+struct BlockedSettlementHost {
+    armed: std::sync::atomic::AtomicBool,
+    entered: std::sync::mpsc::SyncSender<()>,
+    released: std::sync::Mutex<bool>,
+    wake: std::sync::Condvar,
+}
+#[cfg(target_os = "macos")]
+impl BlockedSettlementHost {
+    fn release(&self) {
+        *self.released.lock().unwrap() = true;
+        self.wake.notify_all();
+    }
+}
+#[cfg(target_os = "macos")]
+impl spaceterm_host::pty::unix_pty::UnixPtyHost for BlockedSettlementHost {
+    fn observe_process(
+        &self,
+        process: i32,
+    ) -> Option<spaceterm_host::pty::unix_pty::ProcessObservation> {
+        spaceterm_host::pty::macos_pty_host::MacosPtyHost.observe_process(process)
+    }
+    fn observe_spawned_child(
+        &self,
+        process: i32,
+    ) -> Option<spaceterm_host::pty::unix_pty::ProcessObservation> {
+        spaceterm_host::pty::macos_pty_host::MacosPtyHost.observe_spawned_child(process)
+    }
+    fn inspect_process(
+        &self,
+        process: i32,
+    ) -> std::io::Result<Option<spaceterm_host::pty::unix_pty::ProcessObservation>> {
+        spaceterm_host::pty::macos_pty_host::MacosPtyHost.inspect_process(process)
+    }
+    fn process_birth(&self, process: i32) -> std::io::Result<Option<u64>> {
+        spaceterm_host::pty::macos_pty_host::MacosPtyHost.process_birth(process)
+    }
+    fn inspect_session_member(
+        &self,
+        process: i32,
+        leader: spaceterm_host::pty::unix_pty::ProcessIdentity,
+        birth: Option<u64>,
+    ) -> std::io::Result<Option<spaceterm_host::pty::unix_pty::ProcessObservation>> {
+        spaceterm_host::pty::macos_pty_host::MacosPtyHost
+            .inspect_session_member(process, leader, birth)
+    }
+    fn process_ids(&self) -> std::io::Result<Vec<i32>> {
+        if self.armed.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            self.entered.send(()).unwrap();
+            let mut released = self.released.lock().unwrap();
+            while !*released {
+                released = self.wake.wait(released).unwrap();
+            }
+        }
+        spaceterm_host::pty::macos_pty_host::MacosPtyHost.process_ids()
+    }
+    fn process_creation_epoch(
+        &self,
+    ) -> std::io::Result<spaceterm_host::pty::unix_pty::ProcessCreationEpoch> {
+        spaceterm_host::pty::macos_pty_host::MacosPtyHost.process_creation_epoch()
+    }
+    fn settlement_process_ids(&self) -> std::io::Result<Vec<i32>> {
+        spaceterm_host::pty::macos_pty_host::MacosPtyHost.settlement_process_ids()
+    }
+    fn master_read_error(
+        &self,
+        error: &std::io::Error,
+    ) -> spaceterm_host::pty::unix_pty::MasterReadError {
+        spaceterm_host::pty::macos_pty_host::MacosPtyHost.master_read_error(error)
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct ReleaseSettlement {
+    host: Arc<BlockedSettlementHost>,
+    _isolation: tokio::sync::MutexGuard<'static, ()>,
+}
+#[cfg(target_os = "macos")]
+impl Drop for ReleaseSettlement {
+    fn drop(&mut self) {
+        self.host.release();
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn block_settlement(
+    path: &std::path::Path,
+) -> (ReleaseSettlement, tokio::task::JoinHandle<()>) {
+    use spaceterm_host::pty::{
+        NativePtyAdapterFactory, NativePtySize, UnixNativePtyAdapterFactory,
+    };
+    static ISOLATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let isolation = ISOLATION.lock().await;
+    // Delay another real Session's native census, keeping signalling, process
+    // identity validation, fork fences and the PTY intact.
+    let (entered, observed) = std::sync::mpsc::sync_channel(1);
+    let blocked = Arc::new(BlockedSettlementHost {
+        armed: std::sync::atomic::AtomicBool::new(false),
+        entered,
+        released: std::sync::Mutex::new(false),
+        wake: std::sync::Condvar::new(),
+    });
+    // Release the blocking callback even if the test panics or is cancelled.
+    let release = ReleaseSettlement {
+        host: blocked.clone(),
+        _isolation: isolation,
+    };
+    let fixture = spaceterm_host::pty::native_fixture::NativePtyFixture::new();
+    let parts = UnixNativePtyAdapterFactory::new(blocked.clone())
+        .create(
+            fixture.shell_launch(path),
+            NativePtySize {
+                rows: 4,
+                columns: 8,
+                pixel_width: 64,
+                pixel_height: 64,
+            },
+        )
+        .unwrap();
+    let proof = tokio::task::spawn_blocking(move || {
+        parts.termination.request_termination().unwrap();
+        blocked
+            .armed
+            .store(true, std::sync::atomic::Ordering::Release);
+        parts.termination.settle();
+        drop(parts.adapter);
+    });
+    tokio::task::spawn_blocking(move || observed.recv_timeout(Duration::from_secs(10)).unwrap())
+        .await
+        .unwrap();
+    (release, proof)
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn native_abandon_waits_for_original_session_reproof_after_settlement_contention() {
+    use spaceterm_core::retirement::{CleanupResult, ConfirmedCleanupClass};
+    use spaceterm_server::adapters::terminal::RuntimeCleanupPort;
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().canonicalize().unwrap();
+    std::fs::write(
+        path.join("shell"),
+        "#!/bin/sh\nprintf '%s' \"$$\" > runtime-pid\nexec /bin/sh \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(path.join("shell"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let request = measured_request(&path);
+    let runtime = runtime(&path);
+    let owner = runtime.start(&request).await.unwrap();
+    let (blocked, proof) = block_settlement(&path).await;
+    let host = blocked.host.clone();
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        host.release();
+    });
+    let cleanup = runtime.abandon(owner).await;
+    release.await.unwrap();
+    proof.await.unwrap();
+    let cleanup = cleanup.unwrap();
+    assert_eq!(cleanup.session(), request.reservation().session());
+    assert_eq!(cleanup.first_reason(), RetirementReason::RuntimeFailure);
+    assert_eq!(
+        cleanup.result(),
+        CleanupResult::Confirmed(ConfirmedCleanupClass::ReapedAndReleased)
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn native_ordinary_exit_snapshot_waits_for_original_session_reproof() {
+    use spaceterm_core::retirement::{CleanupResult, ConfirmedCleanupClass};
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().canonicalize().unwrap();
+    std::fs::write(
+        path.join("shell"),
+        "#!/bin/sh\nwhile [ ! -f exit-now ]; do /bin/sleep 0.05; done\nexit 0\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(path.join("shell"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let request = measured_request(&path);
+    let runtime = runtime(&path);
+    let owner = runtime.start(&request).await.unwrap();
+    let (blocked, proof) = block_settlement(&path).await;
+    std::fs::write(path.join("exit-now"), "").unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !matches!(owner.lifecycle_snapshot(), RuntimeLifecycle::Finished(_)) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let pending = owner.cleanup_snapshot();
+    blocked.host.release();
+    proof.await.unwrap();
+    let cleanup = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(cleanup) = owner.cleanup_snapshot()
+                && matches!(cleanup.result(), CleanupResult::Confirmed(_))
+            {
+                break cleanup;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        pending, None,
+        "foreground failure is not final cleanup evidence"
+    );
+    assert_eq!(cleanup.session(), request.reservation().session());
+    assert_eq!(cleanup.first_reason(), RetirementReason::OrdinaryExit);
+    assert_eq!(
+        cleanup.result(),
+        CleanupResult::Confirmed(ConfirmedCleanupClass::ReapedAndReleased)
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn native_cancelled_retirement_resumes_original_join_and_reason() {
+    use spaceterm_core::retirement::*;
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().canonicalize().unwrap();
+    std::fs::write(path.join("shell"), "#!/bin/sh\nexec /bin/sh \"$@\"\n").unwrap();
+    std::fs::set_permissions(path.join("shell"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let request = measured_request(&path);
+    let runtime = runtime(&path);
+    let mut owner = runtime.start(&request).await.unwrap();
+    let session = owner.session();
+    let binding = OperationBinding {
+        id: operation(1, 1),
+        digest: RequestDigest::from_bytes([20; 32]),
+    };
+    let descriptor = RetirementDescriptor::new(RetirementDescriptorParts {
+        batch: RetirementBatchId::new(server(), session.epoch, 1).unwrap(),
+        binding,
+        assessment: AssessmentRef {
+            operation: binding.id,
+            digest: binding.digest,
+        },
+        acceptance_revision: OrganizationRevision::new(2),
+        target: AssessmentTarget::EndAllSessions(server()),
+        panes: vec![
+            RetirementPane::new(
+                workspace(),
+                tab(),
+                pane(),
+                None,
+                session.generation.checked_successor().unwrap(),
+            )
+            .unwrap(),
+        ],
+        sessions: vec![
+            RetiredSession::new(
+                session,
+                RetirementReason::EndAllSessions,
+                RetirementCleanupState::AwaitingEvidence,
+            )
+            .unwrap(),
+        ],
+        completion: RetirementCompletion::AppliedAtAcceptanceRevision,
+        eventual_result: spaceterm_core::operation_ledger_contracts::CompactOutcome::new(
+            &Outcome::Applied,
+            &spaceterm_core::operation_ledger::canonical::CanonicalCodec,
+        )
+        .unwrap(),
+    })
+    .unwrap();
+    let (blocked, proof) = block_settlement(&path).await;
+    let cancelled = tokio::time::timeout(
+        Duration::from_millis(50),
+        owner.retire(RetirementRequest::Operation(&descriptor)),
+    )
+    .await;
+    blocked.host.release();
+    proof.await.unwrap();
+    assert!(
+        cancelled.is_err(),
+        "retirement must still be joining when cancelled"
+    );
+    let cleanup = tokio::time::timeout(
+        Duration::from_secs(10),
+        owner.retire(RetirementRequest::Operation(&descriptor)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(cleanup.session(), session);
+    assert_eq!(cleanup.first_reason(), RetirementReason::EndAllSessions);
+    assert_eq!(
+        cleanup.result(),
+        CleanupResult::Confirmed(ConfirmedCleanupClass::ReapedAndReleased)
+    );
+}

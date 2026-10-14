@@ -77,23 +77,64 @@ pub(super) fn instance_owner() -> Result<super::runtime_inventory::InstanceOwner
     })
 }
 
+/// Native sensor boundary for the previous instance's immutable root and descendant scope.
+/// Implementations observe only; they must not signal sampled PIDs.
+pub trait InstanceProcessObserver: Send + Sync {
+    /// Refuses absence while the exact root or any retained descendant is live.
+    /// Historical births are signed local facts, never wire-supplied authority.
+    fn verify_absent(
+        &self,
+        pid: u32,
+        birth: u64,
+        retained: &[[u64; 2]],
+    ) -> Result<(), ServiceFailure>;
+}
+
+struct NativeInstanceObserver;
+impl InstanceProcessObserver for NativeInstanceObserver {
+    fn verify_absent(
+        &self,
+        pid: u32,
+        birth: u64,
+        retained: &[[u64; 2]],
+    ) -> Result<(), ServiceFailure> {
+        if native::instance_birth(pid)? == Some(birth) {
+            return Err(ServiceFailure::CleanupUnresolved);
+        }
+        #[cfg(target_os = "macos")]
+        native::previous_instance_absent(birth, retained)?;
+        #[cfg(target_os = "linux")]
+        let _ = retained;
+        Ok(())
+    }
+}
+
 pub(super) fn previous_owner_absent(
     owner: super::runtime_inventory::InstanceOwner,
     boot: [u8; 32],
+    retained: &[[u64; 2]],
+    observer: &dyn InstanceProcessObserver,
 ) -> Result<(), ServiceFailure> {
     if boot != owner.boot {
         // No process or kernel runtime resource from another boot can survive.
         // NativeServiceProcesses still verifies the current fixed manager scope.
         return Ok(());
     }
-    if native::instance_birth(owner.pid)? == Some(owner.birth) {
-        return Err(ServiceFailure::CleanupUnresolved);
-    }
-    #[cfg(target_os = "macos")]
-    native::previous_instance_absent(owner.birth)?;
+    observer.verify_absent(owner.pid, owner.birth, retained)?;
     // On Linux the opaque proof requires an empty, twice-observed fixed unit
     // cgroup, including delegated child cgroups. Root death alone grants none.
     Ok(())
+}
+
+pub(super) fn instance_lineage() -> Result<Vec<[u64; 2]>, ServiceFailure> {
+    #[cfg(target_os = "macos")]
+    {
+        native::instance_lineage()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Ok(Vec::new())
+    }
 }
 
 /// Native absence observations for account services.
@@ -105,6 +146,7 @@ pub struct NativeServiceProcesses {
     manager: Arc<dyn super::ServiceManager>,
     runtime: Option<Arc<dyn ServiceProcesses>>,
     clock: Arc<dyn super::ServiceClock>,
+    observer: Arc<dyn InstanceProcessObserver>,
 }
 impl NativeServiceProcesses {
     /// Composes actual-account native observations with signed executable selection.
@@ -119,6 +161,7 @@ impl NativeServiceProcesses {
             manager: Arc::new(manager),
             runtime: None,
             clock: Arc::new(super::processes::NativeClock),
+            observer: Arc::new(NativeInstanceObserver),
         })
     }
     /// Uses the same manager scope provider as the lifecycle supervisor.
@@ -130,6 +173,12 @@ impl NativeServiceProcesses {
     /// construction always selects the OS clock; tests can model a new boot.
     pub fn with_clock(mut self, clock: Arc<dyn super::ServiceClock>) -> Self {
         self.clock = clock;
+        self
+    }
+    /// Supplies the trusted native observation boundary, without changing the
+    /// manager scope, private listener checks or signed custody validation.
+    pub fn with_instance_observer(mut self, observer: Arc<dyn InstanceProcessObserver>) -> Self {
+        self.observer = observer;
         self
     }
     /// Adds the owning actor's assessment, admission-barrier and descendant-custody port.
@@ -286,6 +335,7 @@ impl ServiceProcesses for NativeServiceProcesses {
                 server: spaceterm_core::identity::ServerId::new(registration.server_pin().identity),
                 epoch,
                 boot,
+                observer: self.observer.clone(),
             };
             let observations = self
                 .runtime()?

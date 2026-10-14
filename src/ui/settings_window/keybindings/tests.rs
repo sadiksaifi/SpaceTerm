@@ -450,7 +450,8 @@ fn a_bound_chord_while_recording_is_recorded_instead_of_closing_settings(cx: &mu
         retained(&window, Command::NewWorkspace, cx),
         Some(Some(shortcut("cmd-w")))
     );
-    assert_eq!(retained(&window, Command::ClosePane, cx), Some(None));
+    assert_eq!(retained(&window, Command::CloseWorkspace, cx), Some(None));
+    assert_eq!(retained(&window, Command::ClosePane, cx), None);
 }
 
 #[gpui::test]
@@ -508,16 +509,22 @@ fn an_override_reserved_here_is_explained_and_its_default_stays_active(cx: &mut 
             .cloned()),
         Some(shortcut("cmd-t"))
     );
-    // Close Workspace has no default to fall back to.
     assert_eq!(
         description(&window, Command::CloseWorkspace, cx),
         Some(ShortcutDescription {
-            text: "Primary+Q is reserved by Operating System for Quit here and isn't active."
+            text: "Primary+Q is reserved by Operating System for Quit here, so the default shortcut is active."
                 .into(),
-            tone: CaptionTone::Error,
+            tone: CaptionTone::Warning,
         })
     );
-    // Both overrides stay retained until the person changes them.
+    assert_eq!(
+        window.read_with(cx, |settings, cx| settings
+            .resolved_keymap(cx)
+            .shortcut(Command::CloseWorkspace)
+            .cloned()),
+        Some(shortcut("cmd-w"))
+    );
+    // Rejected overrides stay retained until the person changes them.
     assert_eq!(
         retained(&window, Command::CreateTab, cx),
         Some(Some(shortcut("ctrl-c")))
@@ -534,6 +541,31 @@ fn an_override_reserved_here_is_explained_and_its_default_stays_active(cx: &mut 
 }
 
 #[gpui::test]
+fn a_reserved_close_pane_override_is_retained_without_a_default_fallback(cx: &mut TestAppContext) {
+    let (window, cx) = open_keybindings(with_keybindings(r#"{"close_pane":"cmd-q"}"#), cx);
+
+    assert_eq!(
+        description(&window, Command::ClosePane, cx),
+        Some(ShortcutDescription {
+            text: "Primary+Q is reserved by Operating System for Quit here and isn't active."
+                .into(),
+            tone: CaptionTone::Error,
+        })
+    );
+    assert_eq!(
+        window.read_with(cx, |settings, cx| settings
+            .resolved_keymap(cx)
+            .shortcut(Command::ClosePane)
+            .cloned()),
+        None
+    );
+    assert_eq!(
+        retained(&window, Command::ClosePane, cx),
+        Some(Some(shortcut("cmd-q")))
+    );
+}
+
+#[gpui::test]
 fn a_displaced_default_is_explained_and_its_reset_reclaims_it(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(with_keybindings(r#"{"close_workspace":"cmd-n"}"#), cx);
 
@@ -547,8 +579,22 @@ fn a_displaced_default_is_explained_and_its_reset_reclaims_it(cx: &mut TestAppCo
     click("settings-row-shortcut-new-workspace-reset", cx);
 
     assert_eq!(retained(&window, Command::NewWorkspace, cx), None);
-    assert_eq!(retained(&window, Command::CloseWorkspace, cx), None);
+    assert_eq!(retained(&window, Command::CloseWorkspace, cx), Some(None));
     assert_eq!(description(&window, Command::NewWorkspace, cx), None);
+    assert_eq!(
+        window.read_with(cx, |settings, cx| settings
+            .resolved_keymap(cx)
+            .shortcut(Command::NewWorkspace)
+            .cloned()),
+        Some(shortcut("cmd-n"))
+    );
+    assert_eq!(
+        window.read_with(cx, |settings, cx| settings
+            .resolved_keymap(cx)
+            .shortcut(Command::CloseWorkspace)
+            .cloned()),
+        None
+    );
 }
 
 #[gpui::test]
@@ -708,7 +754,7 @@ fn searching_by_shortcut_captures_a_chord_that_closes_the_window(cx: &mut TestAp
     cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
 
-    assert_eq!(found(&window, cx), vec![Command::ClosePane]);
+    assert_eq!(found(&window, cx), vec![Command::CloseWorkspace]);
     assert!(cx.debug_bounds("settings-window-surface").is_some());
 }
 

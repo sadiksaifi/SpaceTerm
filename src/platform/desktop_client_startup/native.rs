@@ -45,6 +45,7 @@ pub(crate) fn production(
             #[cfg(all(feature = "desktop-test-support", debug_assertions))]
             fixture,
             paths: paths.clone(),
+            legacy: std::sync::Mutex::new(None),
             context: tokio::sync::Mutex::new(None),
             enrollment: Arc::clone(&enrollment),
             ssh,
@@ -66,6 +67,9 @@ struct Factory {
     paths: Arc<AppPaths>,
     ssh: crate::platform::server_client_route::SshStartup,
     askpass: Arc<crate::platform::server_client_route::askpass::DesktopTunnelAskPass>,
+    legacy: std::sync::Mutex<
+        Option<spaceterm_host::organization_store::bootstrap::LegacyWorktreeLocation>,
+    >,
     context: tokio::sync::Mutex<Option<Arc<Context>>>,
     enrollment: Arc<
         std::sync::Mutex<
@@ -172,6 +176,22 @@ impl Factory {
 impl NativeOwnerFactory for Factory {
     fn bind_window(&self, window: &gpui::Window, cx: &mut App) {
         self.askpass.bind_window(window, cx);
+        if let Some(appearance) =
+            cx.try_global::<crate::ui::appearance_runtime::AppearanceRuntime>()
+            && let Ok(mut legacy) = self.legacy.lock()
+        {
+            // Only committed, validated client preferences can seed confirmed local creation.
+            *legacy = spaceterm_host::organization_store::bootstrap::LegacyWorktreeLocation::parse(
+                appearance
+                    .settings
+                    .snapshot()
+                    .committed
+                    .git
+                    .worktree_path_template
+                    .clone(),
+            )
+            .ok();
+        }
     }
     fn foreground_setup(
         &self,
@@ -189,9 +209,14 @@ impl NativeOwnerFactory for Factory {
                 return Ok(None);
             };
             let journal = context.journal.clone();
+            let legacy = self
+                .legacy
+                .lock()
+                .map_err(|_| fail(ClientFailureClass::StorageUnavailable))?
+                .clone();
             // Failure of local native discovery cannot retire healthy saved remote servers.
             tokio::task::spawn_blocking(move || {
-                crate::platform::local_server_client::setup_offer(native, journal)
+                crate::platform::local_server_client::setup_offer(native, journal, legacy)
             })
             .await
             .map_err(|_| fail(ClientFailureClass::Unavailable))
@@ -267,24 +292,39 @@ impl NativeOwnerFactory for Factory {
             .map_err(|_| fail(ClientFailureClass::Unavailable))?;
             // Restricted pairing shares the same native transport configuration.
             // Ordinary IPC still refreshes trusted registration on every attempt.
-            let local_routes = local.and_then(|local| {
-                local.route.or_else(|| {
-                    local.binding.as_ref()?;
-                    spaceterm_client_native::route::LocalRouteAuthority::new(
-                        local.registration.endpoint().ok()?,
-                    ).ok()
+            let local_routes = local
+                .and_then(|local| {
+                    local.route.or_else(|| {
+                        local.binding.as_ref()?;
+                        spaceterm_client_native::route::LocalRouteAuthority::new(
+                            local.registration.endpoint().ok()?,
+                        )
+                        .ok()
+                    })
                 })
-            }).into_iter().collect();
-            let (remote, pairing_routes): (Arc<dyn spaceterm_client::ports::RouteConnector>, _) = match configuration {
-                Ok((configuration, owner)) => {
-                    let shared = crate::platform::server_client_route::connector(local_routes, Some(configuration))?;
-                    (crate::platform::server_client_route::retain_runtime(shared.clone(), owner), shared)
-                }
-                Err(_) => {
-                    let shared = crate::platform::server_client_route::connector(local_routes, None)?;
-                    (shared.clone(), shared)
-                }
-            };
+                .into_iter()
+                .collect();
+            let (remote, pairing_routes): (Arc<dyn spaceterm_client::ports::RouteConnector>, _) =
+                match configuration {
+                    Ok((configuration, owner)) => {
+                        let shared = crate::platform::server_client_route::connector(
+                            local_routes,
+                            Some(configuration),
+                        )?;
+                        (
+                            crate::platform::server_client_route::retain_runtime(
+                                shared.clone(),
+                                owner,
+                            ),
+                            shared,
+                        )
+                    }
+                    Err(_) => {
+                        let shared =
+                            crate::platform::server_client_route::connector(local_routes, None)?;
+                        (shared.clone(), shared)
+                    }
+                };
             let routes = crate::platform::server_client_route::refreshing_connector_with_failure(
                 native.clone(),
                 context.native_failure,

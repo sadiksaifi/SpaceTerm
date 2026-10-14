@@ -662,21 +662,67 @@ impl TerminalConnection {
                     }),
                     _ => return Err(failure(ServerFailureClass::ScopeMismatch)),
                 };
-                // Metadata is an optional display publication. A tiny negotiated
-                // frame must not disconnect a peer or truncate a display fact.
                 if payload.encoded_len() > self.limits.frame_bytes.saturating_sub(128) {
-                    return Ok(());
+                    // Frozen metadata peers cannot reassemble fragments. Do not
+                    // truncate display facts or disconnect those peers.
+                    if !session.codec.capabilities().contains(
+                        &spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA_FRAGMENTS,
+                    ) {
+                        return Ok(());
+                    }
+                    let bytes = spaceterm_protocol::convert::metadata::snapshot_bytes(&snapshot)
+                        .map_err(protocol_failure)?;
+                    // Reserve space for the fence, fragment identity and signed
+                    // envelope. The negotiated frame minimum leaves a nonzero chunk.
+                    let chunk_bytes = self.limits.frame_bytes.saturating_sub(512).max(1);
+                    for (index, chunk) in bytes.chunks(chunk_bytes).enumerate() {
+                        let offset = (index * chunk_bytes) as u32;
+                        macro_rules! fragment {
+                            ($p:ident, $major:ident) => {
+                                Payload::$major($p::Message {
+                                    kind: Some($p::message::Kind::MetadataFragment(Box::new(
+                                        spaceterm_protocol::convert::metadata::$p::encode_fragment(
+                                            subscription.token.fence,
+                                            subscription.token.request,
+                                            subscription.token.generation,
+                                            &snapshot,
+                                            offset,
+                                            chunk,
+                                            bytes.len() as u32,
+                                        )
+                                        .map_err(protocol_failure)?,
+                                    ))),
+                                })
+                            };
+                        }
+                        let payload = match session.codec.major() {
+                            1 => fragment!(v1, Major1),
+                            2 => fragment!(v2, Major2),
+                            _ => return Err(failure(ServerFailureClass::ScopeMismatch)),
+                        };
+                        let reservation = egress
+                            .reserve_content_reply(payload.encoded_len() as u32)
+                            .map_err(egress_failure)?;
+                        if !current(handle, session.principal, subscription.token.fence).await? {
+                            self.remove(pane);
+                            return Ok(());
+                        }
+                        dispatcher
+                            .send(session, transport, &payload, egress, Some(reservation))
+                            .await?;
+                    }
+                } else {
+                    let reservation = egress
+                        .reserve_content_reply(payload.encoded_len() as u32)
+                        .map_err(egress_failure)?;
+                    if !current(handle, session.principal, subscription.token.fence).await? {
+                        self.remove(pane);
+                        return Ok(());
+                    }
+                    dispatcher
+                        .send(session, transport, &payload, egress, Some(reservation))
+                        .await?;
                 }
-                let reservation = egress
-                    .reserve_content_reply(payload.encoded_len() as u32)
-                    .map_err(egress_failure)?;
-                if !current(handle, session.principal, subscription.token.fence).await? {
-                    self.remove(pane);
-                    return Ok(());
-                }
-                dispatcher
-                    .send(session, transport, &payload, egress, Some(reservation))
-                    .await?;
                 subscription.metadata = Some((parts.sequence, parts.observed_at));
             }
             RuntimePresentationEvent::NativeRequest(request) => {

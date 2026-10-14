@@ -307,6 +307,7 @@ impl ProductionFixture {
                 self.paths.clone(),
                 Arc::new(crate::platform::unix_askpass_transport::AskPassWindowFactory::new(None)),
             ),
+            legacy: std::sync::Mutex::new(None),
             context: tokio::sync::Mutex::new(None),
             fixture: Some(fixture),
         };

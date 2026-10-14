@@ -347,21 +347,19 @@ impl NativeConsumer {
             return Err(ManagementFailure::PairingRequired);
         }
         let saved = &inventory.saved[0];
-        let registration = self
-            .native
-            .supervisor
-            .discover()
-            .map_err(classify_service)?
-            .ok_or(ManagementFailure::NativeUnavailable)?;
-        if saved.pin() != registration.server_pin() {
-            return Err(ManagementFailure::AuthorizationDenied);
-        }
         let scope = assessments::Scope::local(
             saved.client().parts().ordinary,
             saved.device(),
-            registration.server_pin(),
+            saved.pin(),
         )?;
-        Ok((registration.data_directory().join("cli-assessments"), scope))
+        // Account/build authority selects storage even if server registration is
+        // absent or unreadable. The verified journal supplies pairing scope only.
+        let directory = self
+            .native
+            .supervisor
+            .client_connections_directory()
+            .with_file_name("cli-assessments");
+        Ok((directory, scope))
     }
     async fn retained_assessment(
         &self,
@@ -404,6 +402,34 @@ impl NativeConsumer {
     pub async fn pairing_runtime(&self) -> Result<Arc<NativePairingRuntime>, ManagementFailure> {
         self.mutable()?;
         Ok(self.owner().await?.pairing.clone())
+    }
+}
+impl super::runtime::RuntimeClientIdentity for NativeConsumer {
+    fn access<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+    ) -> spaceterm_host::account_service::ServiceFuture<'a, super::runtime::RuntimeClientAccess>
+    {
+        Box::pin(async move {
+            use spaceterm_host::account_service::ServiceFailure;
+            let owner = self.owner().await.map_err(|failure| match failure {
+                ManagementFailure::PairingRequired => ServiceFailure::PairingRequired,
+                ManagementFailure::StorageLocked => ServiceFailure::StorageLocked,
+                ManagementFailure::UnsafeNativeState => ServiceFailure::UnsafeStorage,
+                ManagementFailure::AuthorizationDenied => ServiceFailure::AuthorizationDenied,
+                ManagementFailure::LimitExceeded => ServiceFailure::LimitExceeded,
+                ManagementFailure::Indeterminate => ServiceFailure::Indeterminate,
+                _ => ServiceFailure::StorageUnavailable,
+            })?;
+            super::runtime::RuntimeClientIdentity::access(
+                &super::runtime::NativeRuntimeIdentity::from_journal(
+                    owner.pairing.journal().clone(),
+                    self.credentials.clone(),
+                ),
+                registration,
+            )
+            .await
+        })
     }
 }
 impl OpenedConsumer {

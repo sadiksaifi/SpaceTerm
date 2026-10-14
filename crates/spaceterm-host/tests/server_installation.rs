@@ -767,37 +767,60 @@ mod account_installation {
 
     #[tokio::test]
     async fn original_first_install_recovers_uncertain_creation_identity_publication() {
-        let root = private_root();
-        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
-        let (key, artifact) = fixture("1.2.3", 7, native_machine());
-        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
-        let supervisor = installer(&account, key.clone(), manager.clone());
-        let request = supervisor.allocate_request().unwrap();
-        spaceterm_host::storage::testing::after_initialization_boundary(5, || {
-            spaceterm_host::account_service::test_support::fail_next_publication_durability();
-        });
-        assert!(
-            supervisor
+        // Boundary 5 precedes inode binding; boundary 4 precedes creation sealing.
+        for boundary in [5, 4] {
+            let root = private_root();
+            let account =
+                AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+            let (key, artifact) = fixture("1.2.3", 7, native_machine());
+            let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+            let supervisor = installer(&account, key.clone(), manager.clone());
+            let request = supervisor.allocate_request().unwrap();
+            let replacement = supervisor.allocate_request().unwrap();
+            spaceterm_host::storage::testing::after_initialization_boundary(boundary, || {
+                spaceterm_host::account_service::test_support::fail_next_publication_durability();
+            });
+            assert!(
+                supervisor
+                    .install(request, account.confirm_install(artifact))
+                    .await
+                    .is_err(),
+                "boundary {boundary}"
+            );
+            assert!(manager.effects.lock().unwrap().is_empty());
+            drop(supervisor);
+            let supervisor = installer(&account, key, manager.clone());
+            assert_eq!(
+                supervisor.resolve_install(replacement).await,
+                Err(spaceterm_host::account_service::ServiceFailure::Pending)
+            );
+            assert!(matches!(
+                supervisor.discover(),
+                Err(spaceterm_host::account_service::ServiceFailure::Indeterminate)
+            ));
+            let (_, artifact) = fixture("1.2.3", 7, native_machine());
+            let progress = supervisor
                 .install(request, account.confirm_install(artifact))
                 .await
-                .is_err()
-        );
-        assert!(manager.effects.lock().unwrap().is_empty());
-        drop(supervisor);
-        let supervisor = installer(&account, key, manager);
-        let (_, artifact) = fixture("1.2.3", 7, native_machine());
-        let progress = supervisor
-            .install(request, account.confirm_install(artifact))
-            .await
-            .unwrap();
-        assert!(matches!(
-            progress.state,
-            spaceterm_host::account_service::ServiceRequestState::Completed(_)
-        ));
-        assert_eq!(
-            read_template(&supervisor.discover().unwrap().unwrap()),
-            spaceterm_host::git::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE
-        );
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "original creation publication must recover boundary {boundary}: {error:?}"
+                    )
+                });
+            assert!(matches!(
+                progress.state,
+                spaceterm_host::account_service::ServiceRequestState::Completed(_)
+            ));
+            assert_eq!(
+                read_template(&supervisor.discover().unwrap().unwrap()),
+                spaceterm_host::git::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE
+            );
+            assert_eq!(supervisor.resolve_install(request).await.unwrap(), progress);
+            assert_eq!(
+                manager.effects.lock().unwrap().as_slice(),
+                &["configure", "start"]
+            );
+        }
     }
 
     #[tokio::test]
@@ -1802,6 +1825,34 @@ mod account_installation {
         assert_eq!(
             std::fs::metadata(executable).unwrap().permissions().mode() & 0o777,
             0o700
+        );
+    }
+
+    #[test]
+    fn stored_packaging_feed_with_build_commit_reopens_compatible_approved_executable() {
+        let root = installation_root();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registered = account.initialize(DesiredServerState::Running).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let feed: serde_json::Value = serde_json::from_slice(artifact.feed().bytes()).unwrap();
+        assert_eq!(
+            feed["build_commit"],
+            "0101010101010101010101010101010101010101"
+        );
+        let store = test_support::store(&registered, key.clone()).unwrap();
+        let approved = store.stage(&artifact).unwrap();
+        store
+            .activate(approved, store.snapshot().unwrap().generation, 1)
+            .unwrap();
+        drop(store);
+        let selected = test_support::existing_store(&registered, key)
+            .unwrap()
+            .retain_compatible_approved(1)
+            .unwrap();
+        assert_eq!(selected.status().installation, approved);
+        assert_eq!(
+            selected.status().artifact_sha256,
+            artifact.artifact_sha256()
         );
     }
 
@@ -3555,7 +3606,7 @@ mod account_installation {
         use spaceterm_host::bootstrap::setup::{
             AccountBootstrapSetup, BootstrapAccountRegistration,
         };
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
         let digest = artifact.artifact_sha256();
@@ -3584,7 +3635,7 @@ mod account_installation {
     #[tokio::test]
     async fn bootstrap_lost_remote_reply_resolves_original_request_after_restart() {
         use spaceterm_host::bootstrap::setup::AccountBootstrapSetup;
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
         let digest = artifact.artifact_sha256();
@@ -3614,7 +3665,7 @@ mod account_installation {
         use spaceterm_host::bootstrap::setup::{
             AccountBootstrapSetup, BootstrapAccountRegistration,
         };
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
         let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
@@ -3661,7 +3712,7 @@ mod account_installation {
             account_service::{ServiceFailure, ServicePhase},
             bootstrap::setup::AccountBootstrapSetup,
         };
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
         let digest = artifact.artifact_sha256();
@@ -3695,7 +3746,7 @@ mod account_installation {
         use spaceterm_host::{
             account_service::ServiceFailure, bootstrap::setup::AccountBootstrapSetup,
         };
-        let root = tempfile::tempdir().unwrap();
+        let root = installation_root();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
         let (key, artifact) = fixture("1.2.3", 7, native_machine());
         let digest = artifact.artifact_sha256();

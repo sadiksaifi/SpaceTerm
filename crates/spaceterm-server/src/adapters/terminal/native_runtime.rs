@@ -221,7 +221,7 @@ impl NativeRuntime {
         })
         .await
         .map_err(|_| failure(ServerFailureClass::RuntimeUnavailable))?;
-        let handle = Arc::new(NativeHandle(owner.handle()));
+        let handle = Arc::new(NativeHandle(owner.handle(), Mutex::default()));
         let session = owner.session();
         let mut handles = self
             .handles
@@ -232,6 +232,7 @@ impl NativeRuntime {
         drop(handles);
         Ok(Box::new(NativeOwner {
             owner: Some(owner),
+            joining: None,
             handle,
             native: Arc::new(Mutex::new(NativeRoute {
                 subscription: Some(native_subscription),
@@ -322,19 +323,18 @@ impl RuntimeCleanupPort for NativeRuntime {
             Arc::ptr_eq(&owner.handle(), &expected)
         });
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
+            let handle = tokio::task::spawn_blocking(move || {
                 // RuntimeOwner Drop seals authority and joins the worker, reader and native cleanup.
                 // It uses RuntimeFailure, not invented management or durable-operation authority.
                 drop(owner);
                 if !matches {
                     return Err(failure(ServerFailureClass::ScopeMismatch));
                 }
-                handle
-                    .and_then(|handle| handle.0.cleanup_snapshot())
-                    .ok_or_else(|| failure(ServerFailureClass::CleanupIncomplete))
+                handle.ok_or_else(|| failure(ServerFailureClass::CleanupIncomplete))
             })
             .await
-            .map_err(|_| failure(ServerFailureClass::CleanupIncomplete))?
+            .map_err(|_| failure(ServerFailureClass::CleanupIncomplete))??;
+            handle.finalized_cleanup().await
         })
     }
 }
@@ -466,7 +466,80 @@ fn preparation_failure(error: ServerFailure) -> OperationFailure {
     }
 }
 
-struct NativeHandle(RuntimeHandle);
+const CLEANUP_FINALIZATION_TIMEOUT: Duration = Duration::from_secs(60);
+
+// The factory retains failed foreground cleanup and re-proves the same native
+// Session. Snapshots and explicit joins must share one deadline and final result
+// so the actor cannot record a transient failure or conflicting late evidence.
+#[derive(Default)]
+struct CleanupFinalization {
+    deadline: Option<Instant>,
+    initial: Option<SessionCleanupObservation>,
+    finalized: Option<Result<SessionCleanupObservation, ServerFailure>>,
+}
+impl CleanupFinalization {
+    fn begin(&mut self, now: Instant) {
+        self.deadline
+            .get_or_insert(now + CLEANUP_FINALIZATION_TIMEOUT);
+    }
+    fn observe(
+        &mut self,
+        current: Option<SessionCleanupObservation>,
+        now: Instant,
+    ) -> Result<Option<SessionCleanupObservation>, ServerFailure> {
+        use spaceterm_core::retirement::CleanupResult;
+        if let Some(finalized) = self.finalized {
+            return finalized.map(Some);
+        }
+        if self.deadline.is_some_and(|deadline| now >= deadline) {
+            let finalized = self
+                .initial
+                .ok_or_else(|| failure(ServerFailureClass::CleanupIncomplete));
+            self.finalized = Some(finalized);
+            return finalized.map(Some);
+        }
+        let Some(current) = current else {
+            return Ok(None);
+        };
+        if self.initial.is_some_and(|initial| {
+            current.session() != initial.session()
+                || current.first_reason() != initial.first_reason()
+        }) {
+            let error = failure(ServerFailureClass::ScopeMismatch);
+            self.finalized = Some(Err(error));
+            return Err(error);
+        }
+        if matches!(current.result(), CleanupResult::Confirmed(_)) {
+            self.finalized = Some(Ok(current));
+            return Ok(Some(current));
+        }
+        self.initial.get_or_insert(current);
+        self.begin(now);
+        Ok(None)
+    }
+}
+
+struct NativeHandle(RuntimeHandle, Mutex<CleanupFinalization>);
+impl NativeHandle {
+    fn cleanup_snapshot(&self) -> Result<Option<SessionCleanupObservation>, ServerFailure> {
+        self.1
+            .lock()
+            .map_err(|_| failure(ServerFailureClass::CleanupIncomplete))?
+            .observe(self.0.cleanup_snapshot(), Instant::now())
+    }
+    async fn finalized_cleanup(&self) -> Result<SessionCleanupObservation, ServerFailure> {
+        self.1
+            .lock()
+            .map_err(|_| failure(ServerFailureClass::CleanupIncomplete))?
+            .begin(Instant::now());
+        loop {
+            if let Some(current) = self.cleanup_snapshot()? {
+                return Ok(current);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+}
 fn reply<T: Send + 'static>(
     reply: RuntimeReply<T>,
 ) -> ServerFuture<'static, Result<T, ServerFailure>> {
@@ -553,8 +626,14 @@ impl<T: Send + 'static> RuntimeStream<T> for NativeResourceStream<T> {
     }
 }
 
+type OwnerJoin = tokio::task::JoinHandle<(
+    RuntimeOwner,
+    Result<SessionCleanupObservation, RuntimeFailure>,
+)>;
+
 struct NativeOwner {
     owner: Option<RuntimeOwner>,
+    joining: Option<OwnerJoin>,
     handle: Arc<NativeHandle>,
     native: Arc<Mutex<NativeRoute>>,
     runtime: Weak<NativeRuntime>,
@@ -582,7 +661,7 @@ impl RuntimeObservationSource for NativeOwner {
         self.handle.0.close_work_snapshot()
     }
     fn cleanup_snapshot(&self) -> Option<SessionCleanupObservation> {
-        self.handle.0.cleanup_snapshot()
+        self.handle.cleanup_snapshot().ok().flatten()
     }
 }
 impl RuntimeOwnerPort for NativeOwner {
@@ -652,19 +731,29 @@ impl RuntimeOwnerPort for NativeOwner {
             .map(|v| v.first_reason());
         Box::pin(async move {
             let reason = reason.ok_or_else(|| failure(ServerFailureClass::ScopeMismatch))?;
-            let mut owner = self
-                .owner
-                .take()
-                .ok_or_else(|| failure(ServerFailureClass::CleanupIncomplete))?;
-            owner.retire(reason);
-            let (owner, result) = tokio::task::spawn_blocking(move || {
-                let result = owner.join();
-                (owner, result)
-            })
-            .await
-            .map_err(|_| failure(ServerFailureClass::CleanupIncomplete))?;
+            if self.joining.is_none() {
+                let mut owner = self
+                    .owner
+                    .take()
+                    .ok_or_else(|| failure(ServerFailureClass::CleanupIncomplete))?;
+                owner.retire(reason);
+                // Retain the join on the port, not in its cancellable waiter.
+                self.joining = Some(tokio::task::spawn_blocking(move || {
+                    let result = owner.join();
+                    (owner, result)
+                }));
+            }
+            let joined = self
+                .joining
+                .as_mut()
+                .ok_or_else(|| failure(ServerFailureClass::CleanupIncomplete))?
+                .await;
+            self.joining = None;
+            let (owner, result) =
+                joined.map_err(|_| failure(ServerFailureClass::CleanupIncomplete))?;
             self.owner = Some(owner);
-            result.map_err(runtime_failure)
+            result.map_err(runtime_failure)?;
+            self.handle.finalized_cleanup().await
         })
     }
 }
@@ -779,5 +868,113 @@ impl LocalIdentitySource for UnixLocalIdentity {
             identity: LocalObjectIdentity::from_file(file)?,
             kind,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spaceterm_core::{
+        identity::PaneId,
+        retirement::{CleanupResult, ConfirmedCleanupClass},
+    };
+
+    fn cleanup(result: CleanupResult) -> SessionCleanupObservation {
+        SessionCleanupObservation::new(
+            SessionKey {
+                pane: PaneId::new(ServerId::new([1; 16]), 1).unwrap(),
+                epoch: ServerEpoch::new(1),
+                generation: SessionGeneration::new(1),
+            },
+            spaceterm_core::organization::RetirementReason::OrdinaryExit,
+            result,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn cleanup_finalization_withholds_failure_until_original_session_reproof() {
+        let mut state = CleanupFinalization::default();
+        let now = Instant::now();
+        let failed = cleanup(CleanupResult::Failed(FailureClass::RuntimeUnavailable));
+        let confirmed = cleanup(CleanupResult::Confirmed(
+            ConfirmedCleanupClass::ReapedAndReleased,
+        ));
+        assert_eq!(state.observe(Some(failed), now), Ok(None));
+        assert_eq!(
+            state.observe(Some(confirmed), now + Duration::from_secs(4)),
+            Ok(Some(confirmed))
+        );
+        assert_eq!(
+            state.observe(Some(failed), now + Duration::from_secs(5)),
+            Ok(Some(confirmed))
+        );
+    }
+
+    #[test]
+    fn cleanup_finalization_timeout_keeps_failure_after_late_reproof() {
+        let mut state = CleanupFinalization::default();
+        let now = Instant::now();
+        let failed = cleanup(CleanupResult::Failed(FailureClass::RuntimeUnavailable));
+        let confirmed = cleanup(CleanupResult::Confirmed(
+            ConfirmedCleanupClass::ReapedAndReleased,
+        ));
+        assert_eq!(state.observe(Some(failed), now), Ok(None));
+        assert_eq!(
+            state.observe(Some(failed), now + CLEANUP_FINALIZATION_TIMEOUT),
+            Ok(Some(failed))
+        );
+        assert_eq!(
+            state.observe(
+                Some(confirmed),
+                now + CLEANUP_FINALIZATION_TIMEOUT + Duration::from_secs(1)
+            ),
+            Ok(Some(failed))
+        );
+    }
+
+    #[test]
+    fn cleanup_finalization_retry_does_not_refresh_deadline() {
+        let mut state = CleanupFinalization::default();
+        let now = Instant::now();
+        let failed = cleanup(CleanupResult::Failed(FailureClass::RuntimeUnavailable));
+        assert_eq!(state.observe(Some(failed), now), Ok(None));
+        state.begin(now + Duration::from_secs(50));
+        assert_eq!(
+            state.observe(Some(failed), now + CLEANUP_FINALIZATION_TIMEOUT),
+            Ok(Some(failed))
+        );
+    }
+
+    #[test]
+    fn cleanup_finalization_rejects_changed_session_or_first_reason() {
+        let failed = cleanup(CleanupResult::Failed(FailureClass::RuntimeUnavailable));
+        for (session, reason) in [
+            (
+                SessionKey {
+                    generation: SessionGeneration::new(2),
+                    ..failed.session()
+                },
+                failed.first_reason(),
+            ),
+            (
+                failed.session(),
+                spaceterm_core::organization::RetirementReason::RuntimeFailure,
+            ),
+        ] {
+            let mut state = CleanupFinalization::default();
+            let now = Instant::now();
+            assert_eq!(state.observe(Some(failed), now), Ok(None));
+            let changed = SessionCleanupObservation::new(
+                session,
+                reason,
+                CleanupResult::Confirmed(ConfirmedCleanupClass::ReapedAndReleased),
+            )
+            .unwrap();
+            assert_eq!(
+                state.observe(Some(changed), now),
+                Err(failure(ServerFailureClass::ScopeMismatch))
+            );
+        }
     }
 }

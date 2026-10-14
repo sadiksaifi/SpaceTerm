@@ -116,14 +116,18 @@ impl NativeRuntimeIdentity {
         let codec = Arc::new(spaceterm_core::operation_ledger::canonical::CanonicalCodec);
         let verifier: Arc<dyn ReceiptVerifier> = Arc::new(PinnedReceipts);
         let limits = JournalLimits::default();
-        let storage = NativeClientJournal::open_existing(
-            Self::directory(registration)?,
-            codec.clone(),
-            verifier.clone(),
-            limits,
-        )
-        .await
-        .map_err(client_failure)?;
+        let directory = Self::directory(registration)?;
+        match std::fs::symlink_metadata(&directory) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ServiceFailure::PairingRequired);
+            }
+            Err(_) => return Err(ServiceFailure::StorageUnavailable),
+            Ok(_) => {}
+        }
+        let storage =
+            NativeClientJournal::open_existing(directory, codec.clone(), verifier.clone(), limits)
+                .await
+                .map_err(client_failure)?;
         JournalController::recover(Arc::new(storage), codec, verifier, limits)
             .await
             .map(Arc::new)
@@ -141,7 +145,7 @@ impl RuntimeClientIdentity for NativeRuntimeIdentity {
             let binding = bindings
                 .into_iter()
                 .find(|binding| binding.target().pin() == registration.server_pin())
-                .ok_or(ServiceFailure::Missing)?;
+                .ok_or(ServiceFailure::PairingRequired)?;
             let key = binding.target().local_pairing().map_err(client_failure)?;
             let store = JournalPairingStore::new(Arc::clone(&journal));
             let snapshot = store

@@ -7,7 +7,7 @@ use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Component, Path};
 use std::sync::Arc;
 
-use sha2::{Digest, Sha256};
+use ring::digest;
 
 #[cfg(target_os = "linux")]
 use super::linux_atomic_rename as atomic_rename;
@@ -976,7 +976,9 @@ fn file_matches_snapshot_at(
 }
 
 fn fingerprint(bytes: &[u8]) -> [u8; 32] {
-    Sha256::digest(bytes).into()
+    let mut fingerprint = [0; 32];
+    fingerprint.copy_from_slice(digest::digest(&digest::SHA256, bytes).as_ref());
+    fingerprint
 }
 
 fn file_fingerprint(
@@ -984,7 +986,7 @@ fn file_fingerprint(
     expected_size: u64,
     fingerprint_bytes: u64,
 ) -> Result<[u8; 32], SecureFilesystemError> {
-    let mut hasher = Sha256::new();
+    let mut hasher = digest::Context::new(&digest::SHA256);
     let mut buffer = [0_u8; 8 * 1024];
     let mut offset = 0_u64;
     while offset < fingerprint_bytes {
@@ -1013,7 +1015,9 @@ fn file_fingerprint(
     {
         return Err(SecureFilesystemError::Unsafe);
     }
-    Ok(hasher.finalize().into())
+    let mut fingerprint = [0; 32];
+    fingerprint.copy_from_slice(hasher.finish().as_ref());
+    Ok(fingerprint)
 }
 
 fn socket_identity_at(

@@ -1,12 +1,15 @@
 """Account tasks cannot mutate by default or count empty targets as evidence."""
 
+import io
 import json
+import os
 import shlex
 import subprocess
 import sys
 import tempfile
 import tomllib
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -233,6 +236,56 @@ class AccountCheckTests(unittest.TestCase):
             with self.assertRaises(TaskError):
                 checks.run(["bootstrap"])
         self.assertEqual(run.call_count, 2)
+
+    def test_gate_uses_exit_status_and_test_summary_not_native_warnings(self):
+        summary = (
+            "running 1 test\n"
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; "
+            "finished in 0.01s\n"
+        )
+        marker = "private-native-warning-marker"
+        with tempfile.TemporaryDirectory() as temporary:
+            cargo = Path(temporary) / "cargo"
+            for status, output, classification in (
+                (0, summary, None),
+                (7, summary, "tool-failed"),
+                (0, "running 1 test\n", "target-incomplete"),
+                (
+                    0,
+                    summary.replace("1 passed; 0 failed", "0 passed; 1 failed"),
+                    "target-incomplete",
+                ),
+            ):
+                with self.subTest(status=status, classification=classification):
+                    cargo.write_text(
+                        "#!/bin/sh\n"
+                        f"printf '%s' {shlex.quote(output)}\n"
+                        f"printf '%s' {shlex.quote(marker)} >&2\n"
+                        f"exit {status}\n"
+                    )
+                    cargo.chmod(0o700)
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    with (
+                        patch.dict(os.environ, {"PATH": f"{temporary}:/usr/bin:/bin"}),
+                        patch.object(
+                            checks,
+                            "GATES",
+                            {"account": {"spaceterm-host": ("server_installation",)}},
+                        ),
+                        redirect_stdout(stdout),
+                        redirect_stderr(stderr),
+                    ):
+                        if classification is None:
+                            self.assertEqual(checks.test_gate("account"), 1)
+                        else:
+                            with self.assertRaises(TaskError) as raised:
+                                checks.test_gate("account")
+                            self.assertEqual(
+                                str(raised.exception),
+                                "package=spaceterm-host target=server_installation "
+                                f"classification={classification}",
+                            )
+                    self.assertNotIn(marker, stdout.getvalue() + stderr.getvalue())
 
     def test_account_gate_classifies_the_failed_target_without_native_output(self):
         nonempty = (

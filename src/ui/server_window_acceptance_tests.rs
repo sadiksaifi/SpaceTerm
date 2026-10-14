@@ -321,17 +321,31 @@ impl Desktop {
         drive(executor, cx);
     }
     fn shared(&self, command: Command, executor: &tokio::runtime::Runtime) -> Outcome {
+        let kind = std::mem::discriminant(&command);
         executor.block_on(async {
             let binding = self
                 .bindings
                 .iter()
                 .find(|binding| binding.target().server() == command.server())
                 .unwrap();
+            let snapshot = self.registry.server(command.server()).unwrap().replica();
+            let workspace = crate::ui::server_client_runtime::composed::shared_command_workspace(
+                &command,
+                &snapshot.borrow().retained().unwrap().organization,
+            )
+            .unwrap();
             let ticket = self
                 .tracker
-                .submit(binding, command, None, self.protocol.as_ref())
+                .submit(binding, command, workspace, self.protocol.as_ref())
                 .await
-                .unwrap();
+                .unwrap_or_else(|failure| {
+                    let handle = self.registry.server(binding.target().server()).unwrap();
+                    panic!(
+                        "shared command {kind:?} failed: {failure:?}; connection={:?}; replica_ready={}",
+                        *handle.state().borrow(),
+                        handle.replica().borrow().is_ready(),
+                    )
+                });
             let mut status = ticket.status();
             tokio::time::timeout(Duration::from_secs(20), async {
                 loop {

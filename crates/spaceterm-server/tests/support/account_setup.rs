@@ -112,6 +112,7 @@ fn fixture(version: &str, seed: u8, machine: u32) -> (UpdateKey, VerifiedAccount
         build_identity: build,
         platform,
         version: BuildVersion::parse(version).unwrap(),
+        build_commit: [1; 20],
         published_at: 1,
         protocol_majors: vec![1, 2],
         storage: StorageCompatibility {

@@ -17,10 +17,8 @@ use super::{
 };
 use spaceterm_client::pairing::{bootstrap::*, credentials::PairingFuture};
 use spaceterm_core::pairing::PairingFailure;
-use spaceterm_host::bootstrap::{
-    process::{
-        BootstrapProbeFailure, BootstrapProbeLease, BootstrapProbeTransport,
-    },
+use spaceterm_host::bootstrap::process::{
+    BootstrapProbeFailure, BootstrapProbeLease, BootstrapProbeTransport,
 };
 
 use std::sync::{
@@ -279,8 +277,8 @@ use spaceterm_client_native::bootstrap::{BootstrapNativePreflight, SshNativeServ
 
 #[cfg(test)]
 mod tests {
-    use spaceterm_host::bootstrap::probe::ReadOnlyHostProbe;
     use super::*;
+    use spaceterm_host::bootstrap::probe::ReadOnlyHostProbe;
     use std::sync::atomic::AtomicUsize;
 
     const PROBE: &[u8] = b"STBP2\nuid=1000\nos=Other\narch=x86_64\nversion=22.04\nlibc=unknown\nkernel=5.15.0\nmanager=missing\nmanager_version=0\nmanager_reachable=no\nlinger=unavailable\nsudo=available\n";

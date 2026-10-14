@@ -24,7 +24,7 @@ use spaceterm_client::{
 };
 use spaceterm_core::identity::ServerId;
 
-pub(crate) const NATIVE_PROTOCOL_CAPABILITIES: [u32; 9] = [
+pub(crate) const NATIVE_PROTOCOL_CAPABILITIES: [u32; 10] = [
     spaceterm_protocol::negotiation::CAPABILITY_SERVER_GIT,
     spaceterm_protocol::negotiation::CAPABILITY_SERVER_DIRECTORIES,
     spaceterm_protocol::negotiation::CAPABILITY_ORGANIZATION_COMPARISONS,
@@ -32,6 +32,7 @@ pub(crate) const NATIVE_PROTOCOL_CAPABILITIES: [u32; 9] = [
     spaceterm_protocol::negotiation::CAPABILITY_NATIVE_NOTIFICATIONS,
     spaceterm_protocol::negotiation::CAPABILITY_APPLICATION_MOUSE,
     spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA,
+    spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA_FRAGMENTS,
     spaceterm_protocol::negotiation::CAPABILITY_NATIVE_PASTE_CORRELATION,
     spaceterm_protocol::negotiation::CAPABILITY_ENHANCED_COPY,
 ];

@@ -90,9 +90,17 @@ mod tests {
         )
         .unwrap();
         let resolved = profile.resolve(&KeybindingPreferences::default());
+        assert_eq!(
+            resolved.shortcut(Command::CloseWorkspace),
+            Some(&Shortcut::parse("cmd-w").unwrap())
+        );
+        assert_eq!(
+            resolved.owner(&Shortcut::parse("cmd-w").unwrap()),
+            Some(Command::CloseWorkspace)
+        );
         let unassigned = [
             Command::NewWorktree,
-            Command::CloseWorkspace,
+            Command::ClosePane,
             Command::MoveTabRight,
             Command::MoveTabLeft,
             Command::ShowRepositoryStatus,
@@ -115,6 +123,78 @@ mod tests {
                 Err(Reservation::System(reserved.reason))
             );
         }
+    }
+
+    #[test]
+    fn schema_seven_close_overrides_keep_their_command_ids_and_dispatch_targets() {
+        let profile = crate::desktop_profile::default_keymap::profile(
+            crate::platform::keyboard_layout::testing::us(),
+            shortcuts(),
+        )
+        .unwrap();
+        for (overrides, workspace_shortcut, pane_shortcut) in [
+            (
+                serde_json::json!({"close_workspace": "alt-cmd-w", "close_pane": "cmd-w", "close_tab": null}),
+                Some("alt-cmd-w"),
+                Some("cmd-w"),
+            ),
+            (
+                serde_json::json!({"close_workspace": null, "close_pane": "cmd-w"}),
+                None,
+                Some("cmd-w"),
+            ),
+            (
+                serde_json::json!({"close_workspace": "cmd-y"}),
+                Some("cmd-y"),
+                None,
+            ),
+        ] {
+            let mut value =
+                serde_json::to_value(crate::settings::SettingsDocument::default()).unwrap();
+            value["schema_version"] = serde_json::json!(7);
+            value["keybindings"] = overrides.clone();
+            let document =
+                crate::settings::parse_settings(&serde_json::to_vec(&value).unwrap()).unwrap();
+            let exported: serde_json::Value =
+                serde_json::from_str(&crate::settings::export_settings(&document).unwrap())
+                    .unwrap();
+            assert_eq!(exported["schema_version"], 7);
+            assert_eq!(exported["keybindings"], overrides);
+
+            let resolved = profile.resolve(&document.keybindings);
+            for (command, expected, expected_action) in [
+                (
+                    Command::CloseWorkspace,
+                    workspace_shortcut,
+                    &crate::ui::CloseWorkspace as &dyn gpui::Action,
+                ),
+                (
+                    Command::ClosePane,
+                    pane_shortcut,
+                    &crate::ui::ClosePane as &dyn gpui::Action,
+                ),
+            ] {
+                let expected = expected.map(|source| Shortcut::parse(source).unwrap());
+                assert_eq!(resolved.shortcut(command), expected.as_ref());
+                if let Some(shortcut) = expected {
+                    assert_eq!(profile.check(&shortcut), Ok(()));
+                    assert_eq!(resolved.owner(&shortcut), Some(command));
+                    assert!(resolved.key_bindings().iter().any(|binding| {
+                        binding.action().partial_eq(expected_action)
+                            && binding.keystrokes().len() == 1
+                            && shortcut
+                                .to_keystroke()
+                                .should_match(&binding.keystrokes()[0])
+                    }));
+                }
+            }
+        }
+        assert_eq!(
+            Command::from_id("close_workspace"),
+            Some(Command::CloseWorkspace)
+        );
+        assert_eq!(Command::from_id("close_pane"), Some(Command::ClosePane));
+        assert_eq!(Command::from_id("detach_workspace"), None);
     }
 
     #[test]

@@ -71,6 +71,8 @@ mod transport;
 
 // Bounds test coordination only, not protocol admission or product deadlines.
 const HARNESS_TIMEOUT: Duration = Duration::from_secs(180);
+// OpenSSH startup uses the transport's valid deadline, not content-test coordination.
+const SSH_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 
 use spaceterm_terminal::{runtime::budget::RuntimeLimits, runtime_contracts::*};
 
@@ -457,7 +459,7 @@ impl Routes<'_> {
                     )
                     .unwrap(),
                     None,
-                    HARNESS_TIMEOUT,
+                    SSH_STARTUP_TIMEOUT,
                 )
                 .await
                 .unwrap();
@@ -517,6 +519,8 @@ struct Client {
     text: String,
     content_stamp: Option<QueryStamp>,
     metadata: Vec<RuntimeMetadataSnapshot>,
+    metadata_assembler: spaceterm_protocol::convert::metadata::MetadataAssembler,
+    metadata_fragments: usize,
     base: Option<spaceterm_core::content::ContentBase>,
     row_revisions: BTreeMap<spaceterm_core::content::RowId, u64>,
     mouse_enabled: bool,
@@ -561,6 +565,8 @@ impl Client {
             text: String::new(),
             content_stamp: None,
             metadata: Vec::new(),
+            metadata_assembler: Default::default(),
+            metadata_fragments: 0,
             base: None,
             row_revisions: BTreeMap::new(),
             mouse_enabled: false,
@@ -586,6 +592,7 @@ impl Client {
             .unwrap()
             .unwrap()
             .expect("authenticated response");
+        assert!(bytes.len() <= self.codec.limits().frame_bytes);
         let payload = self.codec.decode(&bytes).unwrap();
         macro_rules! record {
             ($publication:expr, $p:ident) => {{
@@ -653,6 +660,26 @@ impl Client {
                     spaceterm_protocol::convert::metadata::v2::decode_publication(value).unwrap();
                 self.metadata.push(snapshot);
             }
+            Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::MetadataFragment(value)),
+            }) => {
+                let fragment =
+                    spaceterm_protocol::convert::metadata::v1::decode_fragment(value).unwrap();
+                self.metadata_fragments += 1;
+                if let Some((_, snapshot)) = self.metadata_assembler.receive(fragment).unwrap() {
+                    self.metadata.push(snapshot);
+                }
+            }
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::MetadataFragment(value)),
+            }) => {
+                let fragment =
+                    spaceterm_protocol::convert::metadata::v2::decode_fragment(value).unwrap();
+                self.metadata_fragments += 1;
+                if let Some((_, snapshot)) = self.metadata_assembler.receive(fragment).unwrap() {
+                    self.metadata.push(snapshot);
+                }
+            }
             _ => {}
         }
         payload
@@ -666,11 +693,13 @@ impl Client {
                     kind: Some(
                         v1::message::Kind::ContentPublication(_)
                             | v1::message::Kind::MetadataPublication(_)
+                            | v1::message::Kind::MetadataFragment(_)
                     )
                 }) | Payload::Major2(v2::Message {
                     kind: Some(
                         v2::message::Kind::ContentPublication(_)
                             | v2::message::Kind::MetadataPublication(_)
+                            | v2::message::Kind::MetadataFragment(_)
                     )
                 })
             ) {
@@ -1065,8 +1094,8 @@ impl Client {
         assert_eq!(found, expected_matches);
         assert!(chunks > 1);
 
-        // Rich output uses the same authenticated stream and digest contract.
-        // The producer's full rich-expansion bounds are covered by terminal tests.
+        // Full-Scrollback rich output uses the same authenticated stream and
+        // validates both digests, including the final HTML chunk after coalescing.
         let rich_stamp = QueryStamp::new(
             stamp.fence(),
             stamp.base(),
@@ -1074,7 +1103,7 @@ impl Client {
             stamp.generation(),
         )
         .unwrap();
-        let rich_end = rows[3];
+        let rich_end = last;
         let rich = CopyRequest::new(
             rich_stamp,
             ContentSelection::new(
@@ -1091,8 +1120,11 @@ impl Client {
         )
         .unwrap();
         let (rich_plain, rich_html, _) = self.copy_bytes(rich).await;
-        assert!(!rich_plain.is_empty());
-        assert!(String::from_utf8(rich_html).unwrap().contains("<div"));
+        assert_eq!(String::from_utf8(rich_plain).unwrap(), plain);
+        let rich_html = String::from_utf8(rich_html).unwrap();
+        assert!(rich_html.contains("<div"));
+        assert!(rich_html.contains("full-history-09999-abcdefghijklmnopqrstuvwxyz0123456789"));
+        assert!(rich_html.matches("full-history-").count() >= expected_matches);
 
         let cancelled = QueryStamp::new(
             stamp.fence(),
@@ -1424,6 +1456,7 @@ async fn handshake_with_limits(
                 spaceterm_protocol::negotiation::CAPABILITY_TERMINAL_STREAMS,
                 spaceterm_protocol::negotiation::CAPABILITY_APPLICATION_MOUSE,
                 spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA,
+                spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA_FRAGMENTS,
             ],
         },
         Arc::new(Key::new(seed)),
@@ -1979,6 +2012,148 @@ async fn authenticated_wss_major_2_full_scrollback_copy_find_topology() {
     exercise(Route::Wss, 2, true).await;
 }
 
+async fn copy_with_small_negotiated_limits(major: u32) {
+    use spaceterm_core::content::CellRef;
+    use spaceterm_protocol::limits::NegotiatedLimits;
+    for (limits, capacity) in [
+        (
+            NegotiatedLimits {
+                resource_chunk_bytes: 1,
+                ..Default::default()
+            },
+            true,
+        ),
+        (
+            NegotiatedLimits {
+                frame_bytes: 4096,
+                management_bytes: 4096,
+                ..Default::default()
+            },
+            true,
+        ),
+        (
+            NegotiatedLimits {
+                resource_chunk_bytes: 3,
+                ..Default::default()
+            },
+            false,
+        ),
+    ] {
+        let fixture = Fixture::new(major).await;
+        let mut routes = Routes {
+            fixture: &fixture,
+            route: Route::Ipc,
+            wss: None,
+            ssh: None,
+            next_endpoint: 0,
+        };
+        // Produce content on the ordinary connection. The tiny Copy frame
+        // ceiling cannot also carry semantic subscription pages.
+        let mut client = Client::connect(&mut routes, 0, major).await;
+        client.reconcile(&fixture.handle).await;
+        let Outcome::CreatedWithControl(created) = client
+            .command(Command::CreateWorkspace {
+                server: client.stream.server(),
+                source: WorkspaceCreationSource::ServerHome {
+                    server: client.stream.server(),
+                },
+                name: NameDraft::Custom(NameText::new("small Copy limits".into()).unwrap()),
+            })
+            .await
+        else {
+            panic!("created workspace")
+        };
+        let grant = created.control().grant();
+        let session = client.start(&fixture.handle, grant).await;
+        let fence = client.fence(session, grant);
+        client.subscribe(fence).await;
+        // Runtime startup precedes the login shell's input readiness.
+        tokio::time::timeout(HARNESS_TIMEOUT, async {
+            while client.text.trim().is_empty() {
+                client.recv().await;
+            }
+        })
+        .await
+        .unwrap();
+        // Park the shell after output so reconnecting does not race a new prompt.
+        client
+            .line(
+                fence,
+                r"printf '\342\202\254x\r\nchunk-ready\r\n'; sleep 60",
+            )
+            .await;
+        client.output("chunk-ready").await;
+        let stamp = client.content_stamp.unwrap();
+        let row = *client
+            .rows
+            .iter()
+            .find(|(_, text)| text.starts_with('€'))
+            .unwrap()
+            .0;
+        let cell = CellRef {
+            session,
+            row,
+            row_revision: client.row_revisions[&row],
+            column: 0,
+        };
+        let base = stamp.base();
+        client.route.close().await;
+        let mut client = Client::connect_with_limits(&mut routes, 0, major, limits).await;
+        client.reconcile(&fixture.handle).await;
+        client.context(grant.pane()).await;
+        let fence = client.fence(session, grant);
+        let stamp = QueryStamp::new(
+            EffectFence::new(
+                session,
+                grant,
+                fence.connection(),
+                fence.context(),
+                Some(base.revision),
+            )
+            .unwrap(),
+            base,
+            ContentRequestId::new(42).unwrap(),
+            RequestGeneration::new(1),
+        )
+        .unwrap();
+        let copy = CopyRequest::new(
+            stamp,
+            ContentSelection::new(stamp, cell, CellRef { column: 1, ..cell }, false).unwrap(),
+            CopyOptions {
+                unwrap_soft_wraps: true,
+                trim_trailing_spaces: true,
+                include_html: false,
+            },
+        )
+        .unwrap();
+        if capacity {
+            client
+                .read_query(&content::reads::ReadQuery::Copy(copy))
+                .await;
+            client.copy_failure(stamp, 4).await;
+        } else {
+            let (plain, html, chunks) = client.copy_bytes(copy).await;
+            assert_eq!(plain, "€x".as_bytes());
+            assert!(html.is_empty());
+            assert_eq!(chunks, 2);
+        }
+        // Capacity is a typed read rejection, not a disconnect or truncated success.
+        assert_eq!(client.status().await.parts().epoch, session.epoch);
+        client.route.close().await;
+        drop(routes);
+        fixture.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn authenticated_ipc_major_1_copy_rejects_insufficient_utf8_and_frame_capacity() {
+    copy_with_small_negotiated_limits(1).await;
+}
+#[tokio::test]
+async fn authenticated_ipc_major_2_copy_rejects_insufficient_utf8_and_frame_capacity() {
+    copy_with_small_negotiated_limits(2).await;
+}
+
 async fn reduced_terminal_pages(major: u32, limits: spaceterm_protocol::limits::NegotiatedLimits) {
     let fixture = Fixture::new(major).await;
     let mut routes = Routes {
@@ -2233,6 +2408,74 @@ async fn runtime_metadata_title_and_progress_expiry_major_1() {
 #[tokio::test]
 async fn runtime_metadata_title_and_progress_expiry_major_2() {
     metadata_without_content(2).await;
+}
+
+async fn tiny_frame_metadata(major: u32) {
+    let fixture = Fixture::new(major).await;
+    let mut routes = Routes {
+        fixture: &fixture,
+        route: Route::Ipc,
+        wss: None,
+        ssh: None,
+        next_endpoint: 0,
+    };
+    let mut client = Client::connect_with_limits(
+        &mut routes,
+        0,
+        major,
+        spaceterm_protocol::limits::NegotiatedLimits {
+            frame_bytes: 1024,
+            management_bytes: 1024,
+            ..Default::default()
+        },
+    )
+    .await;
+    client.reconcile(&fixture.handle).await;
+    let Outcome::CreatedWithControl(created) = client
+        .command(Command::CreateWorkspace {
+            server: client.stream.server(),
+            source: WorkspaceCreationSource::ServerHome {
+                server: client.stream.server(),
+            },
+            name: NameDraft::Custom(NameText::new("tiny metadata".into()).unwrap()),
+        })
+        .await
+    else {
+        panic!("created workspace")
+    };
+    let grant = created.control().grant();
+    let session = client.start(&fixture.handle, grant).await;
+    let fence = client.fence(session, grant);
+    client.subscribe(fence).await;
+    client
+        .line(
+            fence,
+            r#"printf '\033]0;'; i=0; while [ "$i" -lt 256 ]; do printf '\360\220\220\200'; i=$((i+1)); done; printf '\007'"#,
+        )
+        .await;
+    let title = "\u{10400}".repeat(256);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !client.metadata.iter().any(|snapshot| {
+            snapshot.session() == session && snapshot.parts().title.value.as_ref() == title
+        }) {
+            client.recv().await;
+        }
+    })
+    .await
+    .expect("a bounded title larger than the frame must arrive intact");
+    assert!(client.metadata_fragments >= 2);
+    client.status().await;
+    client.route.close().await;
+    drop(routes);
+    fixture.shutdown().await;
+}
+#[tokio::test]
+async fn runtime_metadata_reassembles_tiny_frames_major_1() {
+    tiny_frame_metadata(1).await;
+}
+#[tokio::test]
+async fn runtime_metadata_reassembles_tiny_frames_major_2() {
+    tiny_frame_metadata(2).await;
 }
 
 async fn authenticated_application_mouse(major: u32) {

@@ -100,4 +100,5 @@ pub const EXTENSION_ENVELOPES: &[(u32, u32, bool, bool)] = &[
     (51, CAPABILITY_ACCOUNT_RUNTIME, true, false),
     (52, CAPABILITY_ACCOUNT_RUNTIME, false, true),
     (53, CAPABILITY_RUNTIME_METADATA, false, true),
+    (54, CAPABILITY_RUNTIME_METADATA_FRAGMENTS, false, true),
 ];

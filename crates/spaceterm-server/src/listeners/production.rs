@@ -295,6 +295,7 @@ impl<S: PairingSnapshotPort + 'static> AuthenticationFactoryPort for ProductionA
         capabilities.extend([
             spaceterm_protocol::negotiation::CAPABILITY_APPLICATION_MOUSE,
             spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA,
+            spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA_FRAGMENTS,
             spaceterm_protocol::negotiation::CAPABILITY_NATIVE_PASTE_CORRELATION,
             spaceterm_protocol::negotiation::CAPABILITY_ENHANCED_COPY,
         ]);
