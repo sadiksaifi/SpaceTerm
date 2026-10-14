@@ -46,6 +46,9 @@ use tokio::sync::{Semaphore, watch};
 /// Correlated request numbers are nonzero and monotonic per connection. Reply
 /// delivery must not call back synchronously from an admission method.
 pub trait PaneConnectionPort: Send + Sync {
+    /// Wake the connection-owned presentation worker after local demand changes.
+    fn presentation_changed(&self) {}
+
     fn grid_limits(
         &self,
         info: ConnectedInfo,
@@ -233,7 +236,7 @@ impl PaneChannels {
                     spaceterm_protocol::limits::MAX_EGRESS_BYTES as u64,
                 )?,
                 slots: Arc::new(Semaphore::new(4096)),
-                context_high_water: AtomicU64::new(0),
+                context_high_water: AtomicU64::new(1),
                 servers: Mutex::new(BTreeMap::new()),
                 leases: Mutex::new(BTreeMap::new()),
             }),
@@ -336,6 +339,7 @@ impl PaneChannels {
         for channel in self.channels(info.server)? {
             channel.apply(info, &snapshot)?;
         }
+        self.shared.peer.presentation_changed();
         Ok(())
     }
     /// The attachment owner invalidates and captures grants under the exact
@@ -445,6 +449,54 @@ impl PaneChannels {
             channel.published.send_replace(state.facts);
         }
         Ok(())
+    }
+    /// Disposable local presentation demand. The caller must not retain these
+    /// handles between worker turns because they keep the attachment alive.
+    pub fn presentation_channels(
+        &self,
+        server: ServerId,
+    ) -> Result<Vec<PaneChannel>, ClientFailure> {
+        Ok(self
+            .channels(server)?
+            .into_iter()
+            .filter_map(|inner| {
+                let lease = inner.lease.upgrade()?;
+                lease
+                    .active
+                    .load(Ordering::Acquire)
+                    .then_some(PaneChannel { inner, lease })
+            })
+            .collect())
+    }
+    /// All Panes on one authenticated connection use its acknowledged context.
+    /// Moving the connection context invalidates earlier input and native work.
+    pub fn align_connection_context(
+        &self,
+        server: ServerId,
+        context: ContextGeneration,
+    ) -> Result<(), ClientFailure> {
+        if context.get() > self.shared.context_high_water.load(Ordering::Acquire) {
+            return Err(stale());
+        }
+        for channel in self.channels(server)? {
+            let mut state = channel.state.lock().map_err(|_| stale())?;
+            if state.facts.context >= context {
+                continue;
+            }
+            state.facts.context = context;
+            state.intent = None;
+            state.intent_pending = None;
+            state.native.clear();
+            state.effects.clear();
+            channel.update_projection(&state)?;
+            events::refresh_metadata(&mut state);
+            channel.published.send_replace(state.facts);
+        }
+        Ok(())
+    }
+    /// Allocate a local generation when the focused Pane disappears.
+    pub fn next_connection_context(&self) -> Result<ContextGeneration, ClientFailure> {
+        self.shared.next_context()
     }
     #[cfg(feature = "test-support")]
     pub(crate) fn contexts(
@@ -589,6 +641,8 @@ impl WorkspaceLease {
         if active {
             channel.apply(info, &snapshot)?;
         }
+        drop(channels);
+        self.0.shared.peer.presentation_changed();
         Ok(PaneChannel {
             inner: channel,
             lease: Arc::clone(&self.0),
@@ -617,6 +671,7 @@ impl WorkspaceLease {
             events::publish(&mut state, PaneEvent::Invalidated, true);
             channel.published.send_replace(state.facts);
         }
+        self.0.shared.peer.presentation_changed();
         Ok(())
     }
 }
@@ -704,7 +759,10 @@ impl PaneChannel {
             events::refresh_metadata(&mut state);
             self.inner.published.send_replace(state.facts);
         }
-        Ok(state.facts.context)
+        let context = state.facts.context;
+        drop(state);
+        self.inner.shared.peer.presentation_changed();
+        Ok(context)
     }
     pub fn publish_content_base(
         &self,
@@ -1422,6 +1480,7 @@ fn effect_kind(effect: &RuntimeEffect) -> EffectKind {
 
 impl Drop for ChannelInner {
     fn drop(&mut self) {
+        self.shared.peer.presentation_changed();
         if let Ok(mut projection) = self.projection.lock() {
             let _ = projection.revoke();
         }

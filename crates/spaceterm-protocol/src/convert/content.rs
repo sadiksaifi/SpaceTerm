@@ -368,6 +368,7 @@ macro_rules! profile {
                 };
                 Ok(wire::ContentQuery {
                     kind,
+                    fence: Some(encode_fence(value.stamp().fence())),
                     start,
                     end,
                     stamp: Some(Box::new(encode_stamp(value.stamp()))),
