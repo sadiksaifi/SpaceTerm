@@ -311,3 +311,12 @@ message QualifiedOperationId { OperationStream stream = 1; uint64 sequence = 2; 
 // Account lifecycle comparisons on paired local connections. Native custody
 // observations and authorization proofs never cross this wire.
 message AccountRuntimeMessage { uint64 request = 1; bytes body = 2; }
+
+// Bounded display facts only. These values grant no local or remote authority.
+message RuntimeMetadataSnapshot {
+  Session session = 1; uint64 sequence = 2; uint64 observed_at = 3;
+  string title = 4; uint32 title_provenance = 5; uint32 origin_kind = 6;
+  optional string user = 7; optional string host = 8;
+  uint32 progress_kind = 9; uint32 progress_percent = 10;
+  uint32 freshness = 11; uint32 prompt_zone = 12; bool hidden_input = 13;
+}

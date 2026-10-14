@@ -78,7 +78,7 @@ impl OpenSshExecutable {
         Ok(Self(path))
     }
 
-    pub(super) fn as_path(&self) -> &Path {
+    pub(crate) fn as_path(&self) -> &Path {
         &self.0
     }
 

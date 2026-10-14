@@ -57,7 +57,7 @@ pub(crate) enum ServerSidebarEvent {
     RemoveWorktree(QualifiedWorktreeId),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum ServerRowKey {
     Server(ServerId),
     Workspace(QualifiedWorkspaceId),
@@ -70,6 +70,9 @@ pub(crate) struct ServerSidebar {
     expanded: BTreeMap<ServerId, bool>,
     cursor: Option<ServerRowKey>,
     pub(super) menu: Option<QualifiedWorkspaceId>,
+    /// Where each Workspace and Worktree row last painted, in list content coordinates. The
+    /// list's scroll children are whole server sections, so keyboard reveal needs row spans.
+    row_spans: std::collections::HashMap<ServerRowKey, (Pixels, Pixels)>,
 }
 
 #[derive(Clone, Copy)]
@@ -108,13 +111,23 @@ impl ServerSidebar {
             })
             .collect()
     }
+    /// The keyboard cursor, or else the active Worktree of the active Workspace, or else the
+    /// active Workspace, as the local sidebar selects.
     fn selected(&self) -> Option<ServerRowKey> {
         self.cursor.or_else(|| {
-            self.sections
+            let row = self
+                .sections
                 .iter()
                 .flat_map(|section| &section.rows)
-                .find(|row| row.active)
-                .map(|row| ServerRowKey::Workspace(row.workspace))
+                .find(|row| row.active)?;
+            Some(
+                row.worktrees
+                    .iter()
+                    .find(|worktree| worktree.active)
+                    .map_or(ServerRowKey::Workspace(row.workspace), |worktree| {
+                        ServerRowKey::Worktree(row.workspace, worktree.worktree)
+                    }),
+            )
         })
     }
 }
@@ -253,10 +266,80 @@ impl WorkspaceSidebar {
             }
         }
         self.focus_visible = true;
-        self.scroll_handle.scroll_to_item(next);
+        self.reveal_server_row(keys[next]);
         window.prevent_default();
         cx.stop_propagation();
         cx.notify();
+    }
+
+    /// Scrolls the least distance that shows a row whole, or the top of a row taller than the
+    /// list. Before a row has painted, the list shows its server section instead.
+    fn reveal_server_row(&self, key: ServerRowKey) {
+        let Some(server) = &self.server else {
+            return;
+        };
+        let server_id = match key {
+            ServerRowKey::Server(id) => id,
+            ServerRowKey::Workspace(workspace) | ServerRowKey::Worktree(workspace, _) => {
+                workspace.server()
+            }
+        };
+        let Some(section) = server
+            .sections
+            .iter()
+            .position(|section| section.server == server_id)
+        else {
+            return;
+        };
+        let span = match key {
+            // A server header spans from its section's top to its first row.
+            ServerRowKey::Server(_) => self.scroll_handle.bounds_for_item(section).map(|bounds| {
+                let first = server.sections[section]
+                    .rows
+                    .first()
+                    .filter(|_| server.expanded.get(&server_id).copied().unwrap_or(true))
+                    .and_then(|row| {
+                        server
+                            .row_spans
+                            .get(&ServerRowKey::Workspace(row.workspace))
+                    })
+                    .map_or(bounds.bottom(), |(top, _)| *top);
+                (bounds.top(), first.min(bounds.bottom()))
+            }),
+            _ => server.row_spans.get(&key).copied(),
+        };
+        let Some((top, bottom)) = span else {
+            self.scroll_handle.scroll_to_item(section);
+            return;
+        };
+        let viewport = self.scroll_handle.bounds();
+        let mut offset = self.scroll_handle.offset();
+        if top + offset.y < viewport.top() || bottom - top > viewport.size.height {
+            offset.y = viewport.top() - top;
+        } else if bottom + offset.y > viewport.bottom() {
+            offset.y = viewport.bottom() - bottom;
+        } else {
+            return;
+        }
+        self.scroll_handle.set_offset(offset);
+    }
+
+    /// Records where one Workspace group painted its rows. `keys` names each child in order.
+    fn record_server_row_spans(
+        &mut self,
+        keys: &[ServerRowKey],
+        children: &[gpui::Bounds<Pixels>],
+    ) {
+        // Painted bounds include the list's scroll offset; spans are kept without it.
+        let offset = self.scroll_handle.offset().y;
+        let Some(server) = &mut self.server else {
+            return;
+        };
+        for (key, bounds) in keys.iter().zip(children) {
+            server
+                .row_spans
+                .insert(*key, (bounds.top() - offset, bounds.bottom() - offset));
+        }
     }
 
     pub(crate) fn render_server_sections(
@@ -376,26 +459,20 @@ impl WorkspaceSidebar {
                         let lifecycle = owner.clone();
                         let entries = vec![
                             MenuEntry::action(
-                                "Starting Directory...",
+                                "Starting Directory…",
                                 ServerWorkspaceCommand::StartingDirectory,
                             )
                             .disabled(section.connection != ServerConnection::Connected)
                             .debug_selector("server-workspace-menu-starting-directory"),
-                            MenuEntry::action(
-                                "Server Settings...",
-                                ServerWorkspaceCommand::Settings,
-                            )
-                            .debug_selector("server-workspace-menu-settings"),
+                            MenuEntry::action("Server Settings…", ServerWorkspaceCommand::Settings)
+                                .debug_selector("server-workspace-menu-settings"),
                             MenuEntry::separator(),
-                            MenuEntry::action(
-                                "New Worktree...",
-                                ServerWorkspaceCommand::NewWorktree,
-                            )
-                            .disabled(
-                                !row.creates_worktrees
-                                    || section.connection != ServerConnection::Connected,
-                            )
-                            .debug_selector("server-workspace-menu-new-worktree"),
+                            MenuEntry::action("New Worktree…", ServerWorkspaceCommand::NewWorktree)
+                                .disabled(
+                                    !row.creates_worktrees
+                                        || section.connection != ServerConnection::Connected,
+                                )
+                                .debug_selector("server-workspace-menu-new-worktree"),
                             MenuEntry::separator(),
                             MenuEntry::action("Detach Workspace", ServerWorkspaceCommand::Detach)
                                 .icon(|foreground, size| {
@@ -461,7 +538,18 @@ impl WorkspaceSidebar {
                         })
                         .debug_selector(workspace_selector(workspace, "menu"))
                         .into_any_element();
+                        let keys = std::iter::once(ServerRowKey::Workspace(workspace))
+                            .chain(row.worktrees.iter().map(|worktree| {
+                                ServerRowKey::Worktree(workspace, worktree.worktree)
+                            }))
+                            .collect::<Vec<_>>();
+                        let measure = owner.clone();
                         div()
+                            .on_children_prepainted(move |bounds, _, cx| {
+                                let _ = measure.update(cx, |sidebar, _| {
+                                    sidebar.record_server_row_spans(&keys, &bounds);
+                                });
+                            })
                             .w_full()
                             .flex()
                             .flex_col()
@@ -474,7 +562,10 @@ impl WorkspaceSidebar {
                                     section.connection,
                                     owner.clone(),
                                     appearance,
-                                    &self.focus,
+                                    (
+                                        &self.focus,
+                                        self.focus_visible && self.focus.is_focused(window),
+                                    ),
                                     cx,
                                 )
                             }))
@@ -541,12 +632,14 @@ fn render_server_worktree(
     connection: ServerConnection,
     owner: WeakEntity<WorkspaceSidebar>,
     appearance: &crate::ui::appearance::ChromeAppearance,
-    focus: &FocusHandle,
+    (focus, emphasized): (&FocusHandle, bool),
     cx: &App,
 ) -> AnyElement {
     let worktree = row.worktree;
+    // Like Workspace rows, the selected row takes the accent while the sidebar has keyboard
+    // focus. The active Worktree is the selection only until the cursor moves.
     let selected = selected == Some(ServerRowKey::Worktree(workspace, worktree));
-    let (chip, colors) = super::view::row_paint(selected || row.active, false, 0.0, appearance, cx);
+    let (chip, colors) = super::view::row_paint(selected, emphasized, 0.0, appearance, cx);
     let activate = owner.clone();
     let id = format!(
         "{}-worktree-{}",
@@ -615,7 +708,7 @@ fn render_server_worktree(
             MenuEntry::action("Open Worktree", WorktreeCommand::Open)
                 .disabled(!row.has_tabs && connection != ServerConnection::Connected),
             MenuEntry::separator(),
-            MenuEntry::action("Remove Worktree...", WorktreeCommand::Remove)
+            MenuEntry::action("Remove Worktree…", WorktreeCommand::Remove)
                 .destructive(true)
                 .disabled(!row.removable || connection != ServerConnection::Connected),
         ],
@@ -631,4 +724,63 @@ fn render_server_worktree(
         let _ = activate.update(cx, |_, cx| cx.emit(SidebarEvent::Server(event)));
     })
     .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::server_view_testing::{A, server, worktree, ws};
+
+    fn worktree_row(local: u64, active: bool) -> ServerWorktreeRow {
+        ServerWorktreeRow {
+            worktree: worktree(A, local),
+            name: "feature".into(),
+            path: "/server/feature".into(),
+            repository: None,
+            active,
+            has_tabs: true,
+            removable: true,
+        }
+    }
+
+    fn sidebar(active_worktree: bool) -> ServerSidebar {
+        ServerSidebar {
+            sections: vec![ServerSidebarSection {
+                server: server(A),
+                name: DisplayName::reported("Local"),
+                connection: ServerConnection::Connected,
+                rows: vec![ServerWorkspaceRow {
+                    workspace: ws(A, 1),
+                    name: DisplayName::reported("work"),
+                    pinned: false,
+                    active: true,
+                    paused: false,
+                    repository: None,
+                    worktrees: vec![worktree_row(1, false), worktree_row(2, active_worktree)],
+                    creates_worktrees: true,
+                }],
+            }],
+            ..ServerSidebar::default()
+        }
+    }
+
+    #[test]
+    fn server_sidebar_selects_one_worktree_row_at_a_time() {
+        assert_eq!(
+            sidebar(false).selected(),
+            Some(ServerRowKey::Workspace(ws(A, 1)))
+        );
+        let mut sidebar = sidebar(true);
+        assert_eq!(
+            sidebar.selected(),
+            Some(ServerRowKey::Worktree(ws(A, 1), worktree(A, 2))),
+            "the active Worktree is the selection until the cursor moves"
+        );
+        sidebar.cursor = Some(ServerRowKey::Worktree(ws(A, 1), worktree(A, 1)));
+        assert_eq!(
+            sidebar.selected(),
+            Some(ServerRowKey::Worktree(ws(A, 1), worktree(A, 1))),
+            "the keyboard cursor, not the active Worktree, is the one selected row"
+        );
+    }
 }

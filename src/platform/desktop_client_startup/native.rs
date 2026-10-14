@@ -1,7 +1,12 @@
 //! Production native desktop owners. All routes use the pinned authenticated actor.
 //! Recovery reads retained bindings. Only the explicit foreground setup offer may install or enroll.
 
-mod protocol;
+mod organization_cache;
+pub(super) mod protocol;
+#[cfg(test)]
+pub(super) use organization_cache::OrganizationCache;
+#[cfg(all(feature = "desktop-test-support", debug_assertions))]
+pub(super) mod test_composition;
 
 use super::*;
 use crate::platform::{app_paths::AppPaths, client_view_store::NativeViewStore};
@@ -23,32 +28,55 @@ use std::sync::atomic::AtomicBool;
 
 pub(crate) fn production(
     paths: Arc<AppPaths>,
+    ssh: crate::platform::server_client_route::SshStartup,
+    askpass: Arc<dyn crate::ssh::askpass::AskPassWindowFactory>,
 ) -> Result<Rc<dyn DesktopClientStartup>, crate::desktop_profile::DesktopProfileError> {
+    #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+    let fixture = test_composition::Fixture::from_arguments(std::env::args_os().skip(1))?;
     let executor = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .map_err(|_| crate::desktop_profile::DesktopProfileError::InvalidCombination)?;
+    let enrollment = Arc::default();
     Ok(Rc::new(NativeDesktopStartup {
         owners: Arc::new(tokio::sync::Mutex::new(None)),
         factory: Some(Arc::new(Factory {
+            #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+            fixture,
             paths: paths.clone(),
             context: tokio::sync::Mutex::new(None),
+            enrollment: Arc::clone(&enrollment),
+            ssh,
+            askpass: crate::platform::server_client_route::askpass::DesktopTunnelAskPass::new(
+                paths.clone(),
+                askpass,
+            ),
         })),
         store: SharedViewStore(Arc::new(std::sync::Mutex::new(NativeViewStore::new(paths)))),
         consumed: Arc::new(AtomicBool::new(false)),
         executor: Arc::new(executor),
-        enrollment: Arc::default(),
+        enrollment,
     }))
 }
 
 struct Factory {
+    #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+    fixture: Option<test_composition::Fixture>,
     paths: Arc<AppPaths>,
+    ssh: crate::platform::server_client_route::SshStartup,
+    askpass: Arc<crate::platform::server_client_route::askpass::DesktopTunnelAskPass>,
     context: tokio::sync::Mutex<Option<Arc<Context>>>,
+    enrollment: Arc<
+        std::sync::Mutex<
+            Option<crate::ui::settings_window::server_enrollment::native::NativeEnrollmentServices>,
+        >,
+    >,
 }
 struct Context {
     journal: Arc<JournalController>,
     native: Option<NativeClientProvider>,
+    native_failure: Option<ClientFailure>,
 }
 impl Factory {
     async fn context(&self) -> Result<Arc<Context>, ClientFailure> {
@@ -89,7 +117,17 @@ impl Factory {
             JournalLimits::default(),
         )
         .await?;
-        let native = tokio::task::spawn_blocking(|| {
+        #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+        let fixture_native = self
+            .fixture
+            .as_ref()
+            .map(|fixture| fixture.native())
+            .transpose()?;
+        let native = tokio::task::spawn_blocking(move || {
+            #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+            if let Some(native) = fixture_native {
+                return Ok(native);
+            }
             #[cfg(target_os = "linux")]
             let authorization = Some(Arc::new(
                 spaceterm_host::account_service::PkexecLingerAuthorization::new(),
@@ -100,14 +138,41 @@ impl Factory {
             NativeClientProvider::with_authorization(authorization)
         })
         .await
-        .map_err(|_| fail(ClientFailureClass::Unavailable))?
-        .ok();
-        let context = Arc::new(Context { journal, native });
+        .map_err(|_| fail(ClientFailureClass::Unavailable))?;
+        let native_failure = native.as_ref().err().copied().map(|failure| {
+            use spaceterm_client::management_cli::ManagementFailure;
+            fail(match failure {
+                ManagementFailure::StorageLocked
+                | ManagementFailure::StorageUnavailable
+                | ManagementFailure::CredentialUnavailable => {
+                    ClientFailureClass::StorageUnavailable
+                }
+                ManagementFailure::UnsafeNativeState => ClientFailureClass::UnsafeStorage,
+                ManagementFailure::AuthorizationDenied | ManagementFailure::Revoked => {
+                    ClientFailureClass::AuthorizationDenied
+                }
+                ManagementFailure::Incompatible => ClientFailureClass::Incompatible,
+                ManagementFailure::Indeterminate | ManagementFailure::OutcomePending => {
+                    ClientFailureClass::RecoveryRequired
+                }
+                ManagementFailure::LimitExceeded => ClientFailureClass::ResourceLimit,
+                _ => ClientFailureClass::Unavailable,
+            })
+        });
+        let native = native.ok();
+        let context = Arc::new(Context {
+            journal,
+            native,
+            native_failure,
+        });
         *retained = Some(context.clone());
         Ok(context)
     }
 }
 impl NativeOwnerFactory for Factory {
+    fn bind_window(&self, window: &gpui::Window, cx: &mut App) {
+        self.askpass.bind_window(window, cx);
+    }
     fn foreground_setup(
         &self,
     ) -> ClientFuture<
@@ -115,6 +180,10 @@ impl NativeOwnerFactory for Factory {
         Option<Arc<dyn crate::platform::local_server_client::foreground::ForegroundSetup>>,
     > {
         Box::pin(async {
+            #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+            if self.fixture.is_some() {
+                return Ok(None);
+            }
             let context = self.context().await?;
             let Some(native) = context.native.clone() else {
                 return Ok(None);
@@ -134,6 +203,17 @@ impl NativeOwnerFactory for Factory {
             let context = self.context().await?;
             let journal = context.journal.clone();
             let native = context.native.clone();
+            #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+            if let Some(fixture) = &self.fixture {
+                fixture
+                    .enroll(
+                        native
+                            .as_ref()
+                            .ok_or_else(|| fail(ClientFailureClass::Unavailable))?,
+                        journal.clone(),
+                    )
+                    .await?;
+            }
             let local = if let Some(provider) = native.clone() {
                 let discovery_journal = journal.clone();
                 tokio::task::spawn_blocking(move || {
@@ -146,20 +226,71 @@ impl NativeOwnerFactory for Factory {
             } else {
                 None
             };
-            let local_server = local.as_ref().map(|local| {
-                spaceterm_core::identity::ServerId::new(local.registration.server_pin().identity)
-            });
+            let local_server = local
+                .as_ref()
+                .map(|local| {
+                    spaceterm_core::identity::ServerId::new(
+                        local.registration.server_pin().identity,
+                    )
+                })
+                .or_else(|| {
+                    journal
+                        .snapshot()
+                        .ok()?
+                        .bindings()
+                        .iter()
+                        .find_map(|saved| {
+                            let binding = saved.binding().ok()?;
+                            matches!(
+                                binding.target().route().parts(),
+                                spaceterm_client::api::RouteParts::Ipc { .. }
+                            )
+                            .then(|| binding.target().server())
+                        })
+                });
             let mut settings =
                 crate::ui::settings_window::server_runtime::SettingsServices::default();
             if let (Some(native), Some(local)) = (&native, &local)
                 && let Some(binding) = &local.binding
             {
-                settings.admit_native(native, &local.registration, binding)?;
+                // Endpoint admission failure disables only this computer's native Settings
+                // capability. Its connection actor retains the classified local failure.
+                let _ = settings.admit_native(native, &local.registration, binding);
             }
-            let routes = crate::platform::server_client_route::connector(
-                local.and_then(|local| local.route).into_iter().collect(),
-                None,
-            )?;
+            let paths = self.paths.clone();
+            let ssh = self.ssh.clone();
+            let askpass = self.askpass.clone();
+            let configuration = tokio::task::spawn_blocking(move || {
+                crate::platform::server_client_route::ssh_configuration(&paths, &ssh, Some(askpass))
+            })
+            .await
+            .map_err(|_| fail(ClientFailureClass::Unavailable))?;
+            // Restricted pairing shares the same native transport configuration.
+            // Ordinary IPC still refreshes trusted registration on every attempt.
+            let local_routes = local.and_then(|local| {
+                local.route.or_else(|| {
+                    local.binding.as_ref()?;
+                    spaceterm_client_native::route::LocalRouteAuthority::new(
+                        local.registration.endpoint().ok()?,
+                    ).ok()
+                })
+            }).into_iter().collect();
+            let (remote, pairing_routes): (Arc<dyn spaceterm_client::ports::RouteConnector>, _) = match configuration {
+                Ok((configuration, owner)) => {
+                    let shared = crate::platform::server_client_route::connector(local_routes, Some(configuration))?;
+                    (crate::platform::server_client_route::retain_runtime(shared.clone(), owner), shared)
+                }
+                Err(_) => {
+                    let shared = crate::platform::server_client_route::connector(local_routes, None)?;
+                    (shared.clone(), shared)
+                }
+            };
+            let routes = crate::platform::server_client_route::refreshing_connector_with_failure(
+                native.clone(),
+                context.native_failure,
+                journal.clone(),
+                remote,
+            );
             let tracker = OperationTracker::new(journal.clone());
             let protocol = Arc::new(protocol::NativeProtocol::new(
                 journal.clone(),
@@ -170,22 +301,50 @@ impl NativeOwnerFactory for Factory {
                 ProjectionBudgets::supported()?,
             )?);
             protocol.set_channels(channels.clone())?;
+            let enrollment = crate::ui::settings_window::server_enrollment::native::production(
+                journal.clone(),
+                pairing_routes,
+                protocol.clone(),
+                native.clone(),
+                tokio::runtime::Handle::current(),
+            );
+            *self
+                .enrollment
+                .lock()
+                .map_err(|_| fail(ClientFailureClass::Unavailable))? = Some(enrollment);
+            protocol.set_cache(organization_cache::OrganizationCache::new(
+                self.paths.clone(),
+            ))?;
+            let credentials: Arc<dyn CredentialSource> = Arc::new(Credentials {
+                store: JournalPairingStore::new(journal.clone()),
+                credentials: DeviceCredentials::native(),
+            });
+            #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+            let credentials: Arc<dyn CredentialSource> = match &self.fixture {
+                Some(fixture) => Arc::new(Credentials {
+                    store: JournalPairingStore::new(journal.clone()),
+                    credentials: fixture.credentials.clone(),
+                }),
+                None => credentials,
+            };
             Ok(NativeDesktopOwners {
+                #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+                fixture: self.fixture.is_some(),
                 services: ClientServices {
                     routes,
-                    credentials: Arc::new(Credentials {
-                        store: JournalPairingStore::new(journal.clone()),
-                        credentials: DeviceCredentials::native(),
-                    }),
+                    credentials,
                     journal: journal.clone(),
                     organization: Arc::new(protocol::Decoder),
                     delegate: protocol.clone(),
-                    discovery: native.map(crate::platform::local_server_client::trusted_discovery),
+                    discovery: native
+                        .map(crate::platform::local_server_client::trusted_discovery)
+                        .or_else(|| {
+                            context
+                                .native_failure
+                                .map(crate::platform::server_client_route::failed_local_discovery)
+                        }),
                     limits: spaceterm_client::limits::ClientLimits::default(),
-                    additional_capabilities: vec![
-                        spaceterm_protocol::negotiation::CAPABILITY_SERVER_GIT,
-                        spaceterm_protocol::negotiation::CAPABILITY_SERVER_DIRECTORIES,
-                    ],
+                    additional_capabilities: protocol::desktop_capabilities(),
                 },
                 journal,
                 channels,
@@ -213,11 +372,11 @@ impl ReceiptVerifier for Verifier {
     }
 }
 
-struct Credentials {
+struct Credentials<N> {
     store: JournalPairingStore<JournalController>,
-    credentials: DeviceCredentials,
+    credentials: N,
 }
-impl CredentialSource for Credentials {
+impl<N: NativeDeviceCredentials + Send + Sync> CredentialSource for Credentials<N> {
     fn signing_access<'a>(
         &'a self,
         target: &'a ConnectionTarget,
@@ -260,3 +419,6 @@ fn pairing_failure(failure: PairingFailure) -> ClientFailure {
         _ => ClientFailureClass::InvalidStorage,
     })
 }
+
+#[cfg(test)]
+mod enrollment_tests;

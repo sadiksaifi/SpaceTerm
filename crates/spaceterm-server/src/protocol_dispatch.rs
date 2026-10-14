@@ -29,6 +29,15 @@ pub const MAX_DECODED_DISPATCH_BYTES: usize = 16 * 1024 * 1024;
 /// operations must use actor ledger admission, never an ephemeral request ID.
 /// Publication and terminal resource replies retain their owning egress policy.
 pub trait OrdinaryDispatchPort: Send + Sync {
+    /// Extensions backed by providers installed in this dispatch composition.
+    fn capabilities(&self) -> Vec<u32> {
+        Vec::new()
+    }
+    /// Close read admission and join work retained by this provider.
+    fn shutdown(&self) -> ServerFuture<'_, Result<(), ServerFailure>> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn dispatch(
         &self,
         principal: VerifiedPrincipal,
@@ -72,7 +81,22 @@ impl OrdinaryDispatchPort for ActorOrdinaryDispatch {
                             )
                             .map_err(protocol_failure)?;
                             let binding = request.binding();
-                            match handle.submit(principal, request).await? {
+                            let response = match handle.submit(principal, request).await {
+                                Ok(response) => response,
+                                Err(error) if error.class == ServerFailureClass::Capacity => {
+                                    // Actor contention is not a broken connection. Only an
+                                    // authoritative NeverAdmitted permits resubmission.
+                                    let result = handle.lookup_state(principal, binding).await?;
+                                    return Ok(Some(Payload::$major($p::Message {
+                                        kind: Some($p::message::Kind::OperationLookupResult(
+                                            operations::$p::encode_lookup_result(binding, &result)
+                                                .map_err(protocol_failure)?,
+                                        )),
+                                    })));
+                                }
+                                Err(error) => return Err(error),
+                            };
+                            match response {
                                 OperationResponse::Completed {
                                     binding: completed,
                                     revision,
@@ -162,15 +186,29 @@ impl OrdinaryDispatchPort for ActorOrdinaryDispatch {
                             {
                                 return Err(failure(ServerFailureClass::ScopeMismatch));
                             }
-                            let access = handle
+                            match handle
                                 .reconcile(
                                     principal,
                                     OrganizationRevision::new(value.organization_revision),
                                 )
-                                .await?;
-                            value.connection_generation = access.binding.generation.get();
-                            value.acknowledged = true;
-                            $p::message::Kind::Reconciliation(value)
+                                .await
+                            {
+                                Ok(access) => {
+                                    value.connection_generation = access.binding.generation.get();
+                                    value.acknowledged = true;
+                                    $p::message::Kind::Reconciliation(value)
+                                }
+                                Err(error) if error.class == ServerFailureClass::StaleAuthority => {
+                                    let current = handle.snapshot();
+                                    $p::message::Kind::OrganizationResync($p::OrganizationResync {
+                                        request: value.request,
+                                        request_generation: value.request_generation,
+                                        epoch: current.epoch().get(),
+                                        revision: current.state().revision.get(),
+                                    })
+                                }
+                                Err(error) => return Err(error),
+                            }
                         }
                         $p::message::Kind::ClientContext(mut value) => {
                             if value.request == 0
@@ -198,6 +236,12 @@ impl OrdinaryDispatchPort for ActorOrdinaryDispatch {
                             };
                             match handle.update_client_focus(principal, update).await {
                                 Ok(_) => value.acknowledged = true,
+                                Err(error) if error.class == ServerFailureClass::Capacity => {
+                                    value.failure = Some(common::Failure {
+                                        classification: common::FailureClass::Busy as i32,
+                                        retry_after_ms: 10,
+                                    })
+                                }
                                 Err(error) if error.class == ServerFailureClass::StaleAuthority => {
                                     value.failure = Some(common::Failure {
                                         classification: common::FailureClass::Stale as i32,
@@ -226,7 +270,8 @@ impl OrdinaryDispatchPort for ActorOrdinaryDispatch {
                                     &value,
                                 )
                                 .map_err(protocol_failure)?;
-                            let request = terminal::bounded_page_request(request)?;
+                            let request =
+                                terminal::bounded_page_request(request, Default::default())?;
                             let access = handle
                                 .runtime_access(principal, request.stamp().fence().session())
                                 .await?;
@@ -412,6 +457,18 @@ impl ProtocolDispatcher {
                                 )
                                 .await?
                         }
+                        terminal::Wake::Read(event) => {
+                            terminal
+                                .publish_read(
+                                    *event,
+                                    self,
+                                    session,
+                                    &peer.transport,
+                                    &handle,
+                                    &mut egress,
+                                )
+                                .await?
+                        }
                         terminal::Wake::Effect(reply) => {
                             self.send(
                                 session,
@@ -513,7 +570,9 @@ impl ProtocolDispatcher {
                         }
                         PeerConnection::Ordinary(session) => {
                             self.authenticator.check_current(session.principal)?;
-                            let payload = session.codec.decode(&bytes).map_err(protocol_failure)?;
+                            let mut payload =
+                                session.codec.decode(&bytes).map_err(protocol_failure)?;
+                            terminal.bound_page_query(&mut payload)?;
                             if let Some(query) = organization_action(&payload)? {
                                 if organization_query.is_some_and(|old| {
                                     (old.request == query.request
@@ -545,6 +604,12 @@ impl ProtocolDispatcher {
                             }
                             if terminal
                                 .graphics_request(&payload, session.principal, &handle)
+                                .await?
+                            {
+                                continue;
+                            }
+                            if terminal
+                                .read_request(&payload, session.principal, &handle)
                                 .await?
                             {
                                 continue;

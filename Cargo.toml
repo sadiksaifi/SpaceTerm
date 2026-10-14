@@ -36,6 +36,8 @@ native-tests = [
     "spaceterm-host/native-tests",
     "spaceterm-terminal/native-tests",
 ]
+# The isolated accessibility composition also requires debug assertions; package builds omit it.
+desktop-test-support = ["spaceterm-host/test-support"]
 developer-tools = ["spaceterm-ui/control-preview"]
 status-companion = ["objc2-app-kit/NSButton", "objc2-app-kit/NSControl", "objc2-app-kit/NSStatusBar", "objc2-app-kit/NSStatusBarButton", "objc2-app-kit/NSStatusItem"]
 
@@ -66,7 +68,7 @@ spaceterm-core = { path = "crates/spaceterm-core" }
 spaceterm-client = { path = "crates/spaceterm-client", default-features = false }
 spaceterm-client-native = { path = "crates/spaceterm-client-native" }
 spaceterm-protocol = { path = "crates/spaceterm-protocol" }
-tokio = { version = "=1.53.1", default-features = false, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "=1.53.1", default-features = false, features = ["macros", "net", "rt-multi-thread", "sync", "time", "process", "io-util"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
@@ -118,6 +120,9 @@ raw-window-handle = "=0.6.2"
 
 [dev-dependencies]
 spaceterm-server = { path = "crates/spaceterm-server", default-features = false, features = ["test-support"] }
+tempfile = "=3.27.0"
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std"] }
+rcgen = { version = "=0.14.5", default-features = false, features = ["ring"] }
 spaceterm-client = { path = "crates/spaceterm-client", default-features = false, features = ["test-support"] }
 spaceterm-terminal = { path = "crates/spaceterm-terminal", features = ["test-support"] }
 accesskit_consumer = "=0.38.0"

@@ -1089,6 +1089,7 @@ impl WorkspaceManager {
             .map_or_else(|| "Unnamed Server".to_owned(), |name| name.to_string());
         if let Some(previous) = self.server.as_mut().and_then(|server| server.repair.take()) {
             previous.update(cx, |repair, cx| repair.cancel(window, cx));
+            self.sync_server_pane_repair_status(previous, cx);
         }
         let repair =
             match ServerPaneRepair::install(runtime.clone(), pane, source, &name, port, window, cx)
@@ -1111,6 +1112,7 @@ impl WorkspaceManager {
                 {
                     return;
                 }
+                manager.sync_server_pane_repair_status(repair.clone(), cx);
                 if let PaneRepairEvent::StartRequested { token, request } = event {
                     let Some(runtime) =
                         manager.server.as_ref().map(|server| server.runtime.clone())
@@ -1148,8 +1150,33 @@ impl WorkspaceManager {
                 repair.retry(window, cx);
             }
         });
+        self.sync_server_pane_repair_status(repair, cx);
         self.sync_terminal_focus_blocker(window, cx);
         cx.notify();
+    }
+
+    /// Shows a repair's status on its Pane's Directory unavailable screen, so Retry has a visible
+    /// and spoken result.
+    fn sync_server_pane_repair_status(
+        &self,
+        repair: Entity<crate::ui::directory_picker::pane_repair::ServerPaneRepair>,
+        cx: &mut Context<Self>,
+    ) {
+        let (pane, status) = {
+            let repair = repair.read(cx);
+            (repair.pane(), repair.status())
+        };
+        let Some(terminal) = self.server.as_ref().and_then(|server| {
+            server
+                .collection
+                .payloads()
+                .find_map(|manager| manager.read(cx).server_terminal(pane, cx))
+        }) else {
+            return;
+        };
+        terminal.update(cx, |terminal, cx| {
+            terminal.set_server_repair_status(Some(status), cx);
+        });
     }
 
     pub(super) fn open_server_workspace_switcher(
@@ -1953,12 +1980,15 @@ fn close_copy(
 ) -> (&'static str, String, &'static str) {
     let summary = assessment.summary();
     let sessions = summary.live_session_count();
-    let ending = if sessions == 0 {
-        String::new()
-    } else {
-        format!(
-            " {sessions} Terminal Sessions end for every client. Any command running in them stops."
-        )
+    let ending = match sessions {
+        0 => String::new(),
+        1 => {
+            " 1 Terminal Session ends for every client. Any command running in it stops.".to_owned()
+        }
+        _ => format!(
+            " {} end for every client. Any command running in them stops.",
+            count(sessions, "Terminal Session")
+        ),
     };
     match summary.target() {
         AssessmentTarget::KillWorkspace(workspace) => {
@@ -1979,8 +2009,8 @@ fn close_copy(
             (
                 "Kill Workspace?",
                 format!(
-                    "{name} and its {} Tabs are deleted from {server_name} for every client.{ending} This can't be undone. Repository files and Git Worktree directories stay on disk.",
-                    summary.tab_count()
+                    "{name} and its {} are deleted from {server_name} for every client.{ending} This can't be undone. Repository files and Git Worktree directories stay on disk.",
+                    count(summary.tab_count(), "Tab")
                 ),
                 "Kill Workspace",
             )
@@ -1992,22 +2022,35 @@ fn close_copy(
         ),
         AssessmentTarget::Close(ServerCloseTarget::Tab(_)) => (
             "Close Tab?",
-            format!(
-                "Its {} Panes close for every client.{ending}",
-                summary.pane_count()
-            ),
+            match summary.pane_count() {
+                1 => format!("Its 1 Pane closes for every client.{ending}"),
+                panes => format!(
+                    "Its {} close for every client.{ending}",
+                    count(panes, "Pane")
+                ),
+            },
             "Close Tab",
         ),
         _ => (
             "Close Tabs?",
             format!(
-                "{} Tabs with {} Panes close for every client.{ending}",
-                summary.tab_count(),
-                summary.pane_count()
+                "{} with {} {} for every client.{ending}",
+                count(summary.tab_count(), "Tab"),
+                count(summary.pane_count(), "Pane"),
+                if summary.tab_count() == 1 {
+                    "closes"
+                } else {
+                    "close"
+                }
             ),
             "Close Tabs",
         ),
     }
+}
+
+/// Formats a confirmation count with its singular or plural noun.
+fn count(count: u32, unit: &str) -> String {
+    crate::repository_status::presentation::plural(count, unit)
 }
 
 #[cfg(test)]

@@ -809,7 +809,9 @@ fn apply_change(
                 })
                 .ok_or_else(invalid)?
                 .binding()?;
-            if epoch.get() == 0 || revision.get() == 0 {
+            // A fresh server has revision zero and no control grants. A grant
+            // still requires a publication from an accepted mutation.
+            if epoch.get() == 0 || (revision.get() == 0 && !grants.is_empty()) {
                 return Err(invalid());
             }
             for (workspace, control) in grants {

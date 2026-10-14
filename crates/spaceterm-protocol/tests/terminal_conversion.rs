@@ -249,3 +249,196 @@ inputs!(
     v2,
     Major2
 );
+
+#[test]
+fn both_major_content_page_requests_round_trip_through_authenticated_payloads() {
+    use spaceterm_protocol::authentication::{
+        ClientHandshake, Established, HandshakeConfig, PairingRecord, Principal, Purpose,
+        ServerHandshake, ServerPin, SigningKey,
+    };
+    #[expect(
+        dead_code,
+        reason = "Only signing and pairing helpers from the shared fixture are needed"
+    )]
+    #[path = "support/mod.rs"]
+    mod auth_support;
+    for major in [1, 2] {
+        let server_key = auth_support::TestKey::seeded(41);
+        let device_key = auth_support::TestKey::seeded(42);
+        let mut client_id = [0; 16];
+        client_id[8..].copy_from_slice(&1u64.to_be_bytes());
+        let principal = Principal {
+            server: [1; 16],
+            device: [2; 16],
+            pairing: [3; 16],
+            client: client_id,
+        };
+        let pairings = auth_support::Pairings {
+            record: PairingRecord {
+                principal,
+                device_public_key: device_key.public_key(),
+                active: true,
+            },
+            active: std::cell::Cell::new(true),
+        };
+        let config = HandshakeConfig {
+            majors: vec![major],
+            capabilities: vec![spaceterm_protocol::negotiation::CAPABILITY_CANONICAL_DOMAIN],
+            ..Default::default()
+        };
+        let (client, hello) = ClientHandshake::begin(
+            ServerPin {
+                identity: principal.server,
+                public_key: server_key.public_key(),
+            },
+            principal,
+            Purpose::Ordinary,
+            config.clone(),
+            device_key,
+        )
+        .unwrap();
+        let (server, reply) =
+            ServerHandshake::accept(principal.server, 1, config, server_key, &pairings, &hello)
+                .unwrap();
+        let (client, proof) = client.receive_server(&reply).unwrap();
+        let (server, ready) = server.receive_device(&pairings, &proof).unwrap();
+        let Established::Ordinary(mut client) = client.receive_ready(&ready).unwrap() else {
+            panic!("ordinary client")
+        };
+        let Established::Ordinary(mut server) = server else {
+            panic!("ordinary server")
+        };
+        let (active, _) = page();
+        for range in [
+            ContentRange::ActiveGrid,
+            ContentRange::History {
+                first: None,
+                last: None,
+            },
+        ] {
+            let request =
+                ContentPageRequest::new(active.stamp(), range, None, active.limits()).unwrap();
+            let payload = if major == 1 {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::ContentQuery(
+                        content::v1::encode_page_request(request).unwrap(),
+                    )),
+                })
+            } else {
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::ContentQuery(
+                        content::v2::encode_page_request(request).unwrap(),
+                    )),
+                })
+            };
+            let bytes = payload
+                .encode()
+                .expect("canonical request must pass required-field preflight");
+            assert_eq!(Payload::decode(major, &bytes).unwrap(), payload);
+            let encoded = client.encode(&payload).unwrap();
+            assert_eq!(server.decode(&encoded).unwrap(), payload);
+        }
+    }
+}
+macro_rules! mouse_inputs {
+    ($name:ident, $p:ident) => {
+        #[test]
+        fn $name() {
+            use spaceterm_terminal::{
+                InputModifiers,
+                pointer_input::{PointerButton, PointerPhase},
+            };
+            let captured = fence(Some(ContentRevision::new(7)));
+            let base = ContentBase {
+                session: captured.session(),
+                revision: ContentRevision::new(7),
+                topology_revision: 8,
+                screen_generation: 9,
+                screen: Screen::Alternate,
+            };
+            let stamp = QueryStamp::new(
+                captured,
+                base,
+                ContentRequestId::new(11).unwrap(),
+                RequestGeneration::new(12),
+            )
+            .unwrap();
+            let cell = CellRef {
+                session: base.session,
+                row: RowId {
+                    screen: base.screen,
+                    screen_generation: 9,
+                    node_serial: 0,
+                    page_row: 13,
+                },
+                row_revision: 14,
+                column: 15,
+            };
+            let modifiers = InputModifiers {
+                shift: true,
+                control: true,
+                alt_right: true,
+                ..Default::default()
+            };
+            for command in [
+                RuntimeCommand::Pointer(ApplicationPointerInput {
+                    stamp,
+                    cell,
+                    phase: PointerPhase::Press,
+                    button: Some(PointerButton::Left),
+                    modifiers,
+                }),
+                RuntimeCommand::Pointer(ApplicationPointerInput {
+                    stamp,
+                    cell,
+                    phase: PointerPhase::Motion,
+                    button: Some(PointerButton::Right),
+                    modifiers,
+                }),
+                RuntimeCommand::Pointer(ApplicationPointerInput {
+                    stamp,
+                    cell,
+                    phase: PointerPhase::Release,
+                    button: Some(PointerButton::Middle),
+                    modifiers,
+                }),
+                RuntimeCommand::Pointer(ApplicationPointerInput {
+                    stamp,
+                    cell,
+                    phase: PointerPhase::Motion,
+                    button: None,
+                    modifiers,
+                }),
+                RuntimeCommand::Wheel(ApplicationWheelInput {
+                    stamp,
+                    cell,
+                    horizontal_steps: -3,
+                    vertical_steps: 4,
+                    modifiers,
+                }),
+            ] {
+                let expected = FencedRuntimeCommand {
+                    fence: captured,
+                    command,
+                };
+                let encoded = runtime::$p::encode_command(21, &expected)
+                    .expect("application mouse input must encode");
+                assert_eq!(runtime::$p::decode_command(&encoded).unwrap(), expected);
+                let mut wrong = expected.clone();
+                wrong.fence = fence(Some(ContentRevision::new(6)));
+                assert_eq!(
+                    runtime::$p::encode_command(21, &wrong),
+                    Err(ProtocolError::Malformed)
+                );
+            }
+        }
+    };
+}
+mouse_inputs!(
+    application_mouse_preserves_complete_content_binding_major_1,
+    v1
+);
+mouse_inputs!(
+    application_mouse_preserves_complete_content_binding_major_2,
+    v2
+);

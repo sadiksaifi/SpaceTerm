@@ -218,7 +218,7 @@ pub struct RetryState {
 
 /// Authenticated optional capabilities, not authorization or release versions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ConnectionCapabilities(u8);
+pub struct ConnectionCapabilities(u16);
 impl ConnectionCapabilities {
     pub const NONE: Self = Self(0);
     pub(crate) fn from_advertisement(values: &[u32]) -> Self {
@@ -229,6 +229,11 @@ impl ConnectionCapabilities {
             CAPABILITY_CANONICAL_DOMAIN,
             CAPABILITY_SERVER_GIT,
             CAPABILITY_SERVER_DIRECTORIES,
+            CAPABILITY_ORGANIZATION_COMPARISONS,
+            CAPABILITY_TERMINAL_STREAMS,
+            CAPABILITY_NATIVE_NOTIFICATIONS,
+            CAPABILITY_APPLICATION_MOUSE,
+            CAPABILITY_RUNTIME_METADATA,
         ]
         .into_iter()
         .enumerate()
@@ -246,6 +251,11 @@ impl ConnectionCapabilities {
             CAPABILITY_CANONICAL_DOMAIN => 1,
             CAPABILITY_SERVER_GIT => 2,
             CAPABILITY_SERVER_DIRECTORIES => 3,
+            CAPABILITY_ORGANIZATION_COMPARISONS => 4,
+            CAPABILITY_TERMINAL_STREAMS => 5,
+            CAPABILITY_NATIVE_NOTIFICATIONS => 6,
+            CAPABILITY_APPLICATION_MOUSE => 7,
+            CAPABILITY_RUNTIME_METADATA => 8,
             _ => return false,
         };
         self.0 & (1 << index) != 0
@@ -292,3 +302,21 @@ pub struct ServerSummary {
 }
 
 pub use crate::connection::queries::{PairedDevicePage, ServerQueries, ServerStatusBackend};
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+    #[test]
+    fn installed_terminal_capabilities_survive_connection_negotiation() {
+        use spaceterm_protocol::negotiation::*;
+        let installed = [
+            CAPABILITY_ORGANIZATION_COMPARISONS,
+            CAPABILITY_TERMINAL_STREAMS,
+            CAPABILITY_NATIVE_NOTIFICATIONS,
+        ];
+        let capabilities = ConnectionCapabilities::from_advertisement(&installed);
+        for capability in installed {
+            assert!(capabilities.supports(capability));
+        }
+    }
+}

@@ -115,6 +115,17 @@ pub(super) struct Fixture {
 }
 impl Fixture {
     pub(super) fn new(major: u32, lose_reply: bool) -> Self {
+        Self::new_with_route(
+            major,
+            lose_reply,
+            RouteDescription::new(RouteParts::Wss {
+                address: "127.0.0.1:443".parse().unwrap(),
+                server_name: "enrollment.invalid".into(),
+            })
+            .unwrap(),
+        )
+    }
+    pub(super) fn new_with_route(major: u32, lose_reply: bool, route: RouteDescription) -> Self {
         let storage = TestStore::new();
         let server_key = Arc::new(DeterministicKey::new(1).unwrap());
         let device_key = Arc::new(DeterministicKey::new(3).unwrap());
@@ -256,11 +267,7 @@ impl Fixture {
             changes.push(ClientJournalChange::BindCredentialRoute {
                 reference: prepared.credential.scope.reference(),
                 route_reference: prepared.route,
-                route: RouteDescription::new(RouteParts::Wss {
-                    address: "127.0.0.1:443".parse().unwrap(),
-                    server_name: "enrollment.invalid".into(),
-                })
-                .unwrap(),
+                route,
             });
             storage.journal.transact(changes).await.unwrap();
         });
@@ -317,9 +324,18 @@ pub(super) struct Keys {
 impl NativeDeviceCredentials for Keys {
     fn recover_preparation<'a>(
         &'a self,
-        _: &'a CredentialScope,
+        scope: &'a CredentialScope,
     ) -> PairingFuture<'a, Result<Option<PreparedCredential>, PairingFailure>> {
-        panic!("the fixture has prepared keys")
+        Box::pin(async move {
+            let public_key = match scope.parts().purpose {
+                CredentialPurpose::DeviceIdentity => self.device.public_key(),
+                CredentialPurpose::PairingAuthentication { .. } => self.auth.public_key(),
+            };
+            Ok(Some(PreparedCredential {
+                scope: scope.clone(),
+                public_key,
+            }))
+        })
     }
     fn create(
         &self,
@@ -748,6 +764,11 @@ fn lost_reply_checks_original_request_without_new_authorization_or_inspection(
         recovered.prepared.as_slice(),
         std::slice::from_ref(&provider.fixture.prepared)
     );
+    assert!(
+        cx.debug_bounds("settings-server-enrollment-confirm")
+            .is_none(),
+        "a submitted enrollment offers one Check Original Enrollment control"
+    );
     click("settings-server-enrollment-check", cx);
     assert_eq!(provider.inspections.get(), 1);
     assert_eq!(provider.authorizations.borrow().as_slice(), &[true, false]);
@@ -987,6 +1008,11 @@ fn lost_ssh_reply_and_reopened_sheet_resolve_only_the_retained_native_request(
     click("settings-server-enrollment-check", cx);
     assert_eq!(provider.bootstraps.get(), 0);
     click("settings-server-enrollment-confirm", cx);
+    assert!(
+        cx.debug_bounds("settings-server-enrollment-confirm")
+            .is_none(),
+        "a submitted setup offers one Check Original Setup control"
+    );
     click("settings-server-enrollment-check", cx);
     assert_eq!(provider.bootstraps.get(), 1);
     assert_eq!(provider.resolutions.get(), 1);
@@ -995,7 +1021,8 @@ fn lost_ssh_reply_and_reopened_sheet_resolve_only_the_retained_native_request(
     click("settings-server-enrollment-ssh", cx);
     write_field("Server address or SSH host", "build-box", cx);
     click("settings-server-enrollment-check", cx);
-    click("settings-server-enrollment-confirm", cx);
+    // The reopened sheet found the retained setup, so Check Original Setup is its one control.
+    click("settings-server-enrollment-check", cx);
     assert_eq!(provider.bootstraps.get(), 1);
     assert_eq!(provider.resolutions.get(), 2);
     assert!(provider.publications.borrow().is_empty());

@@ -191,6 +191,8 @@ impl Fixture {
     }
     fn owners(&self) -> NativeDesktopOwners {
         NativeDesktopOwners {
+            #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+            fixture: false,
             services: ClientServices {
                 routes: self.ports.clone(),
                 credentials: self.server.clone(),
@@ -543,3 +545,104 @@ fn desktop_application_composes_native_directory_ports_for_all_paired_servers(
 
 #[path = "foreground_tests.rs"]
 mod foreground;
+
+struct CachedRegistryBinding {
+    cache: Arc<native::OrganizationCache>,
+    journal: Arc<JournalController>,
+}
+impl NativeRegistryBinding for CachedRegistryBinding {
+    fn retained_organization(
+        &self,
+    ) -> ClientFuture<'_, Vec<spaceterm_core::organization::OrganizationSnapshot>> {
+        Box::pin(async move { self.cache.load(&self.journal) })
+    }
+    fn bind(&self, _: ClientRegistry) -> Result<(), ClientFailure> {
+        Ok(())
+    }
+}
+
+#[gpui::test]
+fn desktop_offline_navigation_materializes_never_presented_pane(cx: &mut gpui::TestAppContext) {
+    use crate::platform::{
+        app_directories::{AppDirectories, AppDirectoryEnvironment},
+        app_paths::AppPaths,
+        unix_secure_filesystem::UnixSecureFilesystem,
+    };
+    use crate::ui::server_desktop_contracts::ReplicaStatus;
+    cx.update(crate::ui::init).unwrap();
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let fixture = executor.block_on(Fixture::new());
+    let root = crate::platform::local_server_client::tests::Root::new();
+    let directories = AppDirectories::resolve_xdg(
+        "desktop-cache-test",
+        &AppDirectoryEnvironment {
+            home: Some(root.0.clone().into_os_string()),
+            xdg_state_home: Some(root.0.join("state").into_os_string()),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    let paths = Arc::new(
+        AppPaths::from_directories(directories, 104, Arc::new(UnixSecureFilesystem)).unwrap(),
+    );
+    let binding = fixture.server.binding(1).unwrap();
+    let snapshot = fixture.server.snapshot().unwrap();
+    let pane = snapshot.state().panes[0].id;
+    let cache = native::OrganizationCache::new(paths.clone());
+    cache.save(&binding, &snapshot).unwrap();
+    let mut persistence = ViewPersistence::new(
+        crate::platform::client_view_store::NativeViewStore::new(paths.clone()),
+    );
+    persistence.load().unwrap();
+    persistence
+        .save(&fixture.view.persisted().unwrap())
+        .unwrap();
+    drop(persistence);
+    drop(cache);
+    // Reopen the native stores and a fresh registry, without any in-memory organization replica.
+    let mut owners = fixture.owners();
+    let cold_peer = executor
+        .block_on(FakePaneConnection::new(fixture.server.clone(), 1, 2))
+        .unwrap();
+    owners.channels =
+        Arc::new(PaneChannels::new(cold_peer, ProjectionBudgets::supported().unwrap()).unwrap());
+    owners.registry_binding = Some(Arc::new(CachedRegistryBinding {
+        cache: native::OrganizationCache::new(paths.clone()),
+        journal: fixture.journal.clone(),
+    }));
+    let composition = executor
+        .block_on(recover(
+            owners,
+            crate::platform::client_view_store::NativeViewStore::new(paths),
+        ))
+        .unwrap();
+    let handle = composition
+        .registry
+        .server(fixture.server.server())
+        .unwrap();
+    assert!(!handle.replica().borrow().is_ready());
+    let runtime = cx.update(|cx| composed::install(composition, cx).unwrap());
+    let frame = cx
+        .update(|cx| runtime.read(cx).frame(fixture.server.server()))
+        .expect("cold offline frame");
+    assert_eq!(frame.replica_status, ReplicaStatus::RetainedOffline);
+    assert_eq!(frame.organization.state().panes[0].id, pane);
+    let workspace = frame.personal.workspaces()[0].attachment().workspace();
+    let tab = frame.personal.workspace(workspace).unwrap().tab_order()[0];
+    assert!(
+        frame
+            .personal
+            .workspace(workspace)
+            .unwrap()
+            .arrangement(tab)
+            .unwrap()
+            .pane_ids()
+            .contains(&pane)
+    );
+    assert!(cx.update(|cx| runtime.read(cx).pane_channel(pane)).is_err());
+    assert_eq!(fixture.ports.opens.load(Ordering::SeqCst), 0);
+}

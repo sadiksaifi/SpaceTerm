@@ -109,7 +109,31 @@ impl AccountOwnerEnrollmentPort for Owner {
     }
 }
 
+struct DelayedStore {
+    inner: SqliteOrganizationStore,
+    gate: Arc<std::sync::Mutex<Option<Arc<native::StoreGate>>>>,
+}
+impl spaceterm_core::storage::OrganizationStore for DelayedStore {
+    fn recover(
+        &mut self,
+    ) -> Result<spaceterm_core::storage::RecoveredState, spaceterm_core::storage::StoreFailure>
+    {
+        self.inner.recover()
+    }
+    fn commit(
+        &mut self,
+        transaction: &spaceterm_core::storage::DurableTransaction,
+    ) -> spaceterm_core::storage::CommitDisposition {
+        let gate = self.gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.block();
+        }
+        self.inner.commit(transaction)
+    }
+}
+
 struct Fixture {
+    write_gate: Arc<std::sync::Mutex<Option<Arc<native::StoreGate>>>>,
     _root: tempfile::TempDir,
     registration: spaceterm_host::account_service::RegisteredServer,
     identity: Arc<spaceterm_host::server_keys::ServerIdentity>,
@@ -205,7 +229,11 @@ impl Fixture {
         boundary.config.outcomes = ports.outcomes.clone();
         boundary.config.extensions = ports.extensions(boundary.config.extensions);
         boundary.dependencies.credentials = account.credentials.clone();
-        boundary.dependencies.store = Box::new(account.store);
+        let write_gate = Arc::new(std::sync::Mutex::new(None));
+        boundary.dependencies.store = Box::new(DelayedStore {
+            inner: account.store,
+            gate: write_gate.clone(),
+        });
         let server = RecoveredServer::recover(boundary.config, boundary.dependencies)
             .await
             .unwrap();
@@ -225,6 +253,7 @@ impl Fixture {
         )
         .unwrap();
         Self {
+            write_gate,
             _root: root,
             registration: account.registration,
             identity: account.credentials,
@@ -355,8 +384,11 @@ async fn handshake(
         majors: vec![major],
         capabilities: vec![
             spaceterm_protocol::negotiation::CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
+            spaceterm_protocol::negotiation::CAPABILITY_SERVER_GIT,
+            spaceterm_protocol::negotiation::CAPABILITY_SERVER_DIRECTORIES,
             spaceterm_protocol::negotiation::CAPABILITY_CANONICAL_DOMAIN,
             spaceterm_protocol::negotiation::CAPABILITY_ORGANIZATION_COMPARISONS,
+            spaceterm_protocol::negotiation::CAPABILITY_TERMINAL_STREAMS,
             spaceterm_protocol::negotiation::CAPABILITY_NATIVE_NOTIFICATIONS,
             spaceterm_protocol::negotiation::CAPABILITY_ACCOUNT_RUNTIME,
         ],
@@ -1002,12 +1034,11 @@ async fn listener_owner_shutdown_joins_actor_and_removes_endpoint() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(
-        result.unwrap_err().class,
-        ServerFailureClass::RecoveryRequired
-    );
+    let report = result.unwrap();
+    assert!(report.cleanup_confirmed && report.listeners_closed && report.started_writes_finished);
+    assert!(!report.recovery_required);
     assert!(!endpoint.path().exists());
-    assert_eq!(handle.phase(), ServicePhase::RecoveryRequired);
+    assert_eq!(handle.phase(), ServicePhase::Stopped);
     assert_eq!(handle.runtime_status().intent, ServerRunIntent::Running);
     assert_eq!(handle.runtime_status().storage, StorageStatus::Ready);
 }
@@ -1332,4 +1363,405 @@ async fn native_status_observations_reach_both_majors_and_clear_after_provider_f
             .unwrap();
         running.await.unwrap().unwrap();
     }
+}
+
+#[tokio::test]
+async fn production_focus_and_acknowledgement_survive_another_clients_pending_commit_in_both_majors()
+ {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        for major in [1, 2] {
+            let fixture = Fixture::new().await;
+            let (first_streams, first_principal, first_key) = fixture.enroll(major).await;
+            let (second_streams, second_principal, second_key) =
+                fixture.enroll_with_seed(major, 81).await;
+            let handle = fixture.server.handle();
+            let endpoint = fixture.registration.endpoint().unwrap();
+            let listeners = production_listener_factories(
+                handle.clone(),
+                ProductionListenerConfig {
+                    registration: &fixture.registration,
+                    identity: fixture.identity.clone(),
+                    running: spaceterm_distribution::BuildVersion::parse("1.2.3").unwrap(),
+                    codec: Arc::new(CanonicalCodec),
+                    pairing: fixture.service.clone(),
+                    ports: fixture.ports.clone(),
+                },
+                Arc::new(PairingProtocolLookup::new(handle.clone())),
+            )
+            .unwrap();
+            let run = tokio::spawn(fixture.server.run(listeners));
+            while handle.phase() != ServicePhase::Serving {
+                tokio::task::yield_now().await;
+            }
+            let first = IpcTransport::connect(&endpoint, MessageLimit::envelope())
+                .await
+                .unwrap();
+            let second = IpcTransport::connect(&endpoint, MessageLimit::envelope())
+                .await
+                .unwrap();
+            let mut first_codec = handshake(
+                &first,
+                fixture.identity.pin(),
+                first_principal,
+                first_key,
+                major,
+            )
+            .await;
+            let mut second_codec = handshake(
+                &second,
+                fixture.identity.pin(),
+                second_principal,
+                second_key,
+                major,
+            )
+            .await;
+            reconcile(&first, &mut first_codec, &handle).await;
+            let second_connection = reconcile(&second, &mut second_codec, &handle).await;
+            let server_id = ServerId::new(fixture.identity.pin().identity);
+            for (transport, codec, stream) in [
+                (&first, &mut first_codec, first_streams.parts().ordinary),
+                (&second, &mut second_codec, second_streams.parts().ordinary),
+            ] {
+                let create = CanonicalOperationRequest::new(
+                    OperationId::new(stream, OperationSequence::new(1).unwrap()),
+                    Command::CreateWorkspace {
+                        server: server_id,
+                        source: WorkspaceCreationSource::ServerHome { server: server_id },
+                        name: NameDraft::Automatic,
+                    },
+                    &CanonicalCodec,
+                )
+                .unwrap();
+                assert!(matches!(
+                    decode_outcome(
+                        round_trip(transport, codec, request_payload(&create, major)).await,
+                        create.binding().id
+                    ),
+                    Outcome::CreatedWithControl(_)
+                ));
+            }
+            let snapshot = handle.snapshot();
+            let workspace = &snapshot.state().workspaces[0];
+            let gate = native::StoreGate::new();
+            *fixture.write_gate.lock().unwrap() = Some(gate.clone());
+            let rename = CanonicalOperationRequest::new(
+                OperationId::new(
+                    first_streams.parts().ordinary,
+                    OperationSequence::new(2).unwrap(),
+                ),
+                Command::RenameWorkspace {
+                    workspace: workspace.id,
+                    expected_version: workspace.name.version,
+                    draft: NameDraft::Custom(NameText::new("shared commit".into()).unwrap()),
+                },
+                &CanonicalCodec,
+            )
+            .unwrap();
+            first
+                .send(
+                    &first_codec
+                        .encode(&request_payload(&rename, major))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            gate.entered().await;
+            macro_rules! frames {
+                ($p:ident, $variant:ident) => {
+                    (
+                        Payload::$variant($p::Message {
+                            kind: Some($p::message::Kind::ClientContext($p::ClientContext {
+                                request: 40,
+                                epoch: snapshot.epoch().get(),
+                                connection_generation: second_connection,
+                                context_generation: 2,
+                                focused_pane: None,
+                                terminal_input_focus: false,
+                                native_effects_eligible: false,
+                                acknowledged: false,
+                                failure: None,
+                            })),
+                        }),
+                        Payload::$variant($p::Message {
+                            kind: Some($p::message::Kind::Acknowledgement(
+                                operations::$p::encode_acknowledgement(
+                                    second_streams.parts().ordinary,
+                                    OperationSequence::new(1).unwrap(),
+                                ),
+                            )),
+                        }),
+                    )
+                };
+            }
+            let (focus, acknowledgement) = if major == 1 {
+                frames!(v1, Major1)
+            } else {
+                frames!(v2, Major2)
+            };
+            second
+                .send(&second_codec.encode(&focus).unwrap())
+                .await
+                .unwrap();
+            second
+                .send(&second_codec.encode(&acknowledgement).unwrap())
+                .await
+                .unwrap();
+            let early = tokio::time::timeout(Duration::from_millis(50), second.recv()).await;
+            gate.release();
+            assert!(
+                early.is_err(),
+                "context waits instead of disconnecting during serialization: {early:?}"
+            );
+            let mut focused = false;
+            let mut acknowledged = false;
+            while !focused || !acknowledged {
+                let payload = second_codec
+                    .decode(
+                        &second
+                            .recv()
+                            .await
+                            .unwrap()
+                            .expect("authenticated peer remains open"),
+                    )
+                    .unwrap();
+                match payload {
+                    Payload::Major1(v1::Message {
+                        kind: Some(v1::message::Kind::ClientContext(value)),
+                    }) => {
+                        assert!(value.acknowledged);
+                        assert!(value.failure.is_none());
+                        focused = true;
+                    }
+                    Payload::Major2(v2::Message {
+                        kind: Some(v2::message::Kind::ClientContext(value)),
+                    }) => {
+                        assert!(value.acknowledged);
+                        assert!(value.failure.is_none());
+                        focused = true;
+                    }
+                    Payload::Major1(v1::Message {
+                        kind: Some(v1::message::Kind::AcknowledgementConfirmation(value)),
+                    }) => {
+                        assert_eq!(value.acknowledged_through, 1);
+                        acknowledged = true;
+                    }
+                    Payload::Major2(v2::Message {
+                        kind: Some(v2::message::Kind::AcknowledgementConfirmation(value)),
+                    }) => {
+                        assert_eq!(value.acknowledged_through, 1);
+                        acknowledged = true;
+                    }
+                    _ => panic!("context and acknowledgement replies"),
+                }
+            }
+            assert_eq!(
+                query_status(&second, &mut second_codec)
+                    .await
+                    .parts()
+                    .server,
+                server_id
+            );
+            let payload = first_codec
+                .decode(&first.recv().await.unwrap().unwrap())
+                .unwrap();
+            decode_outcome(payload, rename.binding().id);
+            macro_rules! stale_reconciliation {
+                ($p:ident, $variant:ident) => {
+                    Payload::$variant($p::Message {
+                        kind: Some($p::message::Kind::Reconciliation($p::Reconciliation {
+                            request: 41,
+                            request_generation: 3,
+                            server: Some(spaceterm_protocol::convert::identity::encode_global(
+                                server_id.bytes(),
+                            )),
+                            client: Some(spaceterm_protocol::convert::identity::encode_client(
+                                second_streams.parts().client.id,
+                            )),
+                            epoch: snapshot.epoch().get(),
+                            organization_revision: snapshot.state().revision.get(),
+                            ..Default::default()
+                        })),
+                    })
+                };
+            }
+            let stale = if major == 1 {
+                stale_reconciliation!(v1, Major1)
+            } else {
+                stale_reconciliation!(v2, Major2)
+            };
+            second
+                .send(&second_codec.encode(&stale).unwrap())
+                .await
+                .unwrap();
+            let response = second_codec
+                .decode(
+                    &second
+                        .recv()
+                        .await
+                        .unwrap()
+                        .expect("stale organization comparison must not disconnect the peer"),
+                )
+                .unwrap();
+            match response {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::OrganizationResync(value)),
+                }) => {
+                    assert_eq!(
+                        (value.request, value.request_generation, value.revision),
+                        (41, 3, handle.snapshot().state().revision.get())
+                    );
+                }
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::OrganizationResync(value)),
+                }) => {
+                    assert_eq!(
+                        (value.request, value.request_generation, value.revision),
+                        (41, 3, handle.snapshot().state().revision.get())
+                    );
+                }
+                _ => panic!("stale reconciliation requires an authoritative organization resync"),
+            }
+            reconcile(&second, &mut second_codec, &handle).await;
+            assert_eq!(
+                query_status(&second, &mut second_codec)
+                    .await
+                    .parts()
+                    .server,
+                server_id
+            );
+            first.close().await.unwrap();
+            second.close().await.unwrap();
+            handle
+                .shutdown(TrustedShutdownRequest {
+                    authority: fixture.stop,
+                })
+                .await
+                .unwrap();
+            run.await.unwrap().unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn production_listener_shutdown_joins_a_cancelled_directory_observation() {
+    use spaceterm_core::server_directories::*;
+    use spaceterm_server::{
+        git::directories::{DirectoryOrdinaryDispatch, DirectoryService},
+        listeners::production_listener_factories_with_dispatch,
+        protocol_dispatch::ActorOrdinaryDispatch,
+    };
+    struct PausedDirectory {
+        provider: spaceterm_host::server_directories::native::NativeDirectoryProvider,
+        gate: Arc<native::StoreGate>,
+    }
+    impl ServerDirectoryQueries for PausedDirectory {
+        fn query(
+            &self,
+            request: &DirectoryQuery,
+        ) -> Result<DirectoryQueryResult, DirectoryFailure> {
+            self.gate.block();
+            self.provider.query(request)
+        }
+        fn containment(
+            &self,
+            ancestor: &ServerDirectory,
+            candidate: &ServerDirectory,
+        ) -> Result<DirectoryContainment, DirectoryFailure> {
+            self.provider.containment(ancestor, candidate)
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let fixture = Fixture::new().await;
+        let (_, principal, key) = fixture.enroll(2).await;
+        let handle = fixture.server.handle();
+        let server_id = ServerId::new(fixture.identity.pin().identity);
+        let gate = native::StoreGate::new();
+        let directories = Arc::new(DirectoryService::new(
+            server_id,
+            Arc::new(PausedDirectory {
+                provider: spaceterm_host::server_directories::native::NativeDirectoryProvider::new(
+                    server_id,
+                    fixture._root.path().to_owned(),
+                )
+                .unwrap(),
+                gate: gate.clone(),
+            }),
+            Arc::new(handle.clone()),
+        ));
+        let listeners = production_listener_factories_with_dispatch(
+            handle.clone(),
+            ProductionListenerConfig {
+                registration: &fixture.registration,
+                identity: fixture.identity.clone(),
+                running: spaceterm_distribution::BuildVersion::parse("1.2.3").unwrap(),
+                codec: Arc::new(CanonicalCodec),
+                pairing: fixture.service.clone(),
+                ports: fixture.ports.clone(),
+            },
+            Arc::new(PairingProtocolLookup::new(handle.clone())),
+            Arc::new(DirectoryOrdinaryDispatch::new(
+                directories.clone(),
+                Arc::new(ActorOrdinaryDispatch::new(Arc::new(CanonicalCodec))),
+            )),
+        )
+        .unwrap();
+        let lifecycle = listeners.lifecycle.clone();
+        let run = tokio::spawn(fixture.server.run(listeners));
+        while handle.phase() != ServicePhase::Serving {
+            tokio::task::yield_now().await;
+        }
+        let transport = IpcTransport::connect(
+            &fixture.registration.endpoint().unwrap(),
+            MessageLimit::envelope(),
+        )
+        .await
+        .unwrap();
+        let mut codec = handshake(&transport, fixture.identity.pin(), principal, key, 2).await;
+        let generation = spaceterm_core::authority::ConnectionGeneration::new(
+            reconcile(&transport, &mut codec, &handle).await,
+        );
+        let principal = VerifiedPrincipal::from_authenticated(&codec, generation).unwrap();
+        let context = DirectoryContext::new(DirectoryContextParts {
+            server: principal.server(),
+            epoch: principal.epoch(),
+            pairing: principal.pairing(),
+            client: principal.client(),
+        })
+        .unwrap();
+        let request = spaceterm_protocol::convert::directories::DirectoryRequest::new(
+            1,
+            1,
+            DirectoryQuery::new(DirectoryQueryParts {
+                context,
+                action: DirectoryQueryAction::Home,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let payload = spaceterm_protocol::convert::directories::encode_query(2, &request).unwrap();
+        transport
+            .send(&codec.encode(&payload).unwrap())
+            .await
+            .unwrap();
+        gate.entered().await;
+        let mut closing = tokio::spawn(async move { lifecycle.close().await });
+        let early = tokio::time::timeout(Duration::from_millis(50), &mut closing).await;
+        gate.release();
+        assert!(
+            early.is_err(),
+            "listener shutdown must join cancelled filesystem work: {early:?}"
+        );
+        closing.await.unwrap().unwrap();
+        handle
+            .shutdown(TrustedShutdownRequest {
+                authority: fixture.stop,
+            })
+            .await
+            .unwrap();
+        run.await.unwrap().unwrap();
+    })
+    .await
+    .unwrap();
 }

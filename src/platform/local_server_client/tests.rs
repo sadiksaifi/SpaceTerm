@@ -182,3 +182,50 @@ fn repeated_discovery_never_changes_first_approved_registration_or_stop_intent()
         );
     }
 }
+
+#[test]
+fn desktop_remote_servers_survive_local_service_discovery_failure() {
+    use spaceterm_client::{
+        api::{ConnectionTarget, RouteDescription, RouteParts},
+        ports::DiscoveryState,
+    };
+    let root = Root::new();
+    let fixture = AccountServiceFixture::new(&root.0, BuildIdentity::Development).unwrap();
+    fixture.initialize(DesiredServerState::Stopped).unwrap();
+    std::fs::write(
+        fixture.anchor().join("registration"),
+        b"invalid retained registration",
+    )
+    .unwrap();
+    let (runtime, journal) = journal();
+    let saved = journal.snapshot().unwrap().bindings()[0].binding().unwrap();
+    let old = saved.target();
+    let remote = ConnectionTarget::new(
+        old.pin(),
+        old.device(),
+        old.pairing(),
+        old.client(),
+        RouteDescription::new(RouteParts::Wss {
+            address: "127.0.0.1:4443".parse().unwrap(),
+            server_name: "remote.example".into(),
+        })
+        .unwrap(),
+        old.credential(),
+        old.incarnation(),
+    )
+    .unwrap();
+    let provider = NativeClientProvider::from_supervisor(fixture.reopen());
+    assert_eq!(
+        discover(&provider, &journal).err().unwrap().class(),
+        ClientFailureClass::InvalidStorage
+    );
+    let discovery = trusted_discovery(provider);
+    assert_eq!(
+        runtime.block_on(discovery.status(&remote)).unwrap(),
+        DiscoveryState::Unverified
+    );
+    assert_eq!(
+        std::fs::read(fixture.anchor().join("registration")).unwrap(),
+        b"invalid retained registration"
+    );
+}

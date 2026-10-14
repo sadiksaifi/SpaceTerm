@@ -382,7 +382,8 @@ fn is_bidirectional_format(character: char) -> bool {
     )
 }
 
-fn plural(count: impl Into<u64>, unit: &str) -> String {
+/// Formats a count with the singular or plural form of a unit whose plural adds "s".
+pub(crate) fn plural(count: impl Into<u64>, unit: &str) -> String {
     match count.into() {
         1 => format!("1 {unit}"),
         count => format!("{count} {unit}s"),

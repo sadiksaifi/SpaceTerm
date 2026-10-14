@@ -757,6 +757,7 @@ async fn native_dispatch_preserves_exact_action_scope_confirmation_and_sudo_mode
     );
     let CliCommand::UpdateStage {
         version: Some(version),
+        ..
     } = parse(["update", "stage", "--version", "1.2.3"].map(std::ffi::OsString::from))
         .unwrap()
         .command
@@ -800,6 +801,7 @@ async fn native_dispatch_preserves_exact_action_scope_confirmation_and_sudo_mode
             vec!["--non-interactive", "update", "stage", "--version", "1.2.3"],
             NativeCliCommand::UpdateStage {
                 version: Some(version),
+                source: None,
             },
             ConfirmationMode::Interactive,
             SudoMode::NonInteractive,

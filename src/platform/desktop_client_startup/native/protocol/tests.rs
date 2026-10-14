@@ -85,7 +85,7 @@ fn publication(request: &Payload, target: &ConnectionTarget) -> Option<Payload> 
     }
 }
 
-async fn authenticated_case(major: u32, cx: &mut TestAppContext) {
+async fn authenticated_case(major: u32, cx: &mut TestAppContext, terminal: bool) {
     cx.executor().allow_parking();
     let executor = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
@@ -107,10 +107,25 @@ async fn authenticated_case(major: u32, cx: &mut TestAppContext) {
     );
     protocol.set_channels(channels.clone()).unwrap();
     let mut plan = fixture::peer::PeerPlan::new(vec![major]);
-    plan.query_handler = Some(publication);
+    plan.query_handler = Some(if terminal {
+        terminal_publication
+    } else {
+        publication
+    });
+    if terminal {
+        let seeded = executor.block_on(terminal_fixture::Fixture::new(true));
+        TERMINAL_SNAPSHOT.get_or_init(|| seeded.server.snapshot().unwrap());
+        plan.capabilities.extend([
+            spaceterm_protocol::negotiation::CAPABILITY_ORGANIZATION_COMPARISONS,
+            spaceterm_protocol::negotiation::CAPABILITY_TERMINAL_STREAMS,
+            spaceterm_protocol::negotiation::CAPABILITY_NATIVE_NOTIFICATIONS,
+        ]);
+    }
     let plan = Arc::new(plan);
     let startup = NativeDesktopStartup::new(
         NativeDesktopOwners {
+            #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+            fixture: false,
             services: ClientServices {
                 routes: Arc::new(fixture::peer::Peers::one(
                     &server.binding(1).unwrap(),
@@ -122,7 +137,11 @@ async fn authenticated_case(major: u32, cx: &mut TestAppContext) {
                 delegate: protocol.clone(),
                 discovery: None,
                 limits: spaceterm_client::limits::ClientLimits::default(),
-                additional_capabilities: vec![],
+                additional_capabilities: if terminal {
+                    desktop_capabilities()
+                } else {
+                    vec![]
+                },
             },
             journal,
             channels,
@@ -172,6 +191,13 @@ async fn authenticated_case(major: u32, cx: &mut TestAppContext) {
                 frame.replica_status == crate::ui::server_desktop_contracts::ReplicaStatus::Ready
             })
     }));
+    if terminal {
+        terminal_acceptance(&protocol, &plan, &executor, info).await;
+        let quit =
+            cx.update(|cx| installed.update(cx, |runtime, cx| runtime.prepare_client_quit(cx)));
+        quit.await.unwrap();
+        return;
+    }
     let journal = protocol.journal.clone();
     let binding = server.binding(1).unwrap();
     let ticket = executor
@@ -223,13 +249,13 @@ async fn authenticated_case(major: u32, cx: &mut TestAppContext) {
 async fn desktop_composed_provider_uses_authenticated_native_client_registry(
     cx: &mut TestAppContext,
 ) {
-    authenticated_case(2, cx).await;
+    authenticated_case(2, cx, false).await;
 }
 #[gpui::test]
 async fn desktop_composed_provider_negotiates_previous_major_with_native_ports(
     cx: &mut TestAppContext,
 ) {
-    authenticated_case(1, cx).await;
+    authenticated_case(1, cx, false).await;
 }
 
 #[test]
@@ -350,4 +376,455 @@ fn desktop_native_decoder_installs_settings_deltas_without_losing_retained_membe
         let observed = replica.subscribe().borrow().retained().cloned().unwrap();
         assert_eq!(observed.organization, current);
     }
+}
+
+#[path = "../../../../../crates/spaceterm-client/tests/projection/support.rs"]
+mod terminal_fixture;
+static TERMINAL_SNAPSHOT: std::sync::OnceLock<spaceterm_core::organization::OrganizationSnapshot> =
+    std::sync::OnceLock::new();
+
+fn terminal_publication(request: &Payload, target: &ConnectionTarget) -> Option<Payload> {
+    use spaceterm_core::{content::*, content_queries::*};
+    macro_rules! profile {
+        ($message:expr, $p:ident, $variant:ident) => {{
+            match $message.kind.as_ref()? {
+                $p::message::Kind::OrganizationQuery(query) => {
+                    let state = TERMINAL_SNAPSHOT.get().unwrap();
+                    Some(
+                        organization::$p::snapshot_payload(
+                            state,
+                            0..organization::record_count(state),
+                            PublicationPart {
+                                request: query.request,
+                                generation: query.request_generation,
+                                transfer: 1,
+                                index: 0,
+                                total: 1,
+                                epoch: state.epoch(),
+                                base: OrganizationRevision::new(0),
+                                revision: state.state().revision,
+                            },
+                        )
+                        .unwrap(),
+                    )
+                }
+                $p::message::Kind::ClientContext(context) => {
+                    assert!(!context.acknowledged);
+                    let mut response = context.clone();
+                    response.acknowledged = true;
+                    Some(Payload::$variant($p::Message {
+                        kind: Some($p::message::Kind::ClientContext(response)),
+                    }))
+                }
+                $p::message::Kind::PaneSubscription(subscription) if !subscription.cancel => {
+                    let fence =
+                        identity::decode_fence(subscription.fence.as_ref().unwrap(), None).unwrap();
+                    let base = ContentBase {
+                        session: fence.session(),
+                        revision: ContentRevision::new(0),
+                        screen: Screen::Primary,
+                        screen_generation: 1,
+                        topology_revision: 1,
+                    };
+                    let content_fence = EffectFence::new(
+                        fence.session(),
+                        fence.grant(),
+                        fence.connection(),
+                        fence.context(),
+                        Some(base.revision),
+                    )
+                    .unwrap();
+                    let stamp = QueryStamp::new(
+                        content_fence,
+                        base,
+                        ContentRequestId::new(subscription.request).unwrap(),
+                        RequestGeneration::new(subscription.request_generation),
+                    )
+                    .unwrap();
+                    let limits = subscription.limits.as_ref().unwrap();
+                    let request = ContentPageRequest::new(
+                        stamp,
+                        ContentRange::ActiveGrid,
+                        None,
+                        PageLimits::new(limits.rows as u16, limits.cells, limits.bytes).unwrap(),
+                    )
+                    .unwrap();
+                    let reply =
+                        ContentPageReply::new(&request, terminal_fixture::page(base, 1, false))
+                            .unwrap();
+                    Some(Payload::$variant($p::Message {
+                        kind: Some($p::message::Kind::ContentPublication(Box::new(
+                            $p::ContentPublication {
+                                request: subscription.request,
+                                request_generation: subscription.request_generation,
+                                transfer: 1,
+                                index: 0,
+                                base_revision: 0,
+                                response: Some(
+                                    spaceterm_protocol::convert::content::$p::encode_page_result(
+                                        &ContentReadResult::Ready(reply),
+                                    )
+                                    .unwrap(),
+                                ),
+                                complete: true,
+                            },
+                        ))),
+                    }))
+                }
+                $p::message::Kind::ResourceRequest(value) => {
+                    let request =
+                        spaceterm_protocol::convert::content::$p::decode_graphics_request(value)
+                            .unwrap();
+                    Some(Payload::$variant($p::Message {
+                        kind: Some($p::message::Kind::ContentReadResponse(Box::new(
+                            spaceterm_protocol::convert::content::$p::encode_page_result(
+                                &ContentReadResult::Rejected {
+                                    request: request.stamp(),
+                                    reason: ContentReadFailure::MissingResource,
+                                },
+                            )
+                            .unwrap(),
+                        ))),
+                    }))
+                }
+                $p::message::Kind::ContentQuery(query) => {
+                    let request =
+                        spaceterm_protocol::convert::content::$p::decode_page_request(query)
+                            .unwrap();
+                    let reply = ContentPageReply::new(
+                        &request,
+                        terminal_fixture::page(request.stamp().base(), 1, false),
+                    )
+                    .unwrap();
+                    Some(Payload::$variant($p::Message {
+                        kind: Some($p::message::Kind::ContentReadResponse(Box::new(
+                            spaceterm_protocol::convert::content::$p::encode_page_result(
+                                &ContentReadResult::Ready(reply),
+                            )
+                            .unwrap(),
+                        ))),
+                    }))
+                }
+                $p::message::Kind::NativeCompletion(command) => {
+                    Some(Payload::$variant($p::Message {
+                        kind: Some($p::message::Kind::RuntimeOutcome($p::RuntimeOutcome {
+                            request: command.request,
+                            fence: command.fence.clone(),
+                            ..Default::default()
+                        })),
+                    }))
+                }
+                $p::message::Kind::RuntimeCommand(command) => {
+                    Some(Payload::$variant($p::Message {
+                        kind: Some($p::message::Kind::RuntimeOutcome($p::RuntimeOutcome {
+                            request: command.request,
+                            fence: command.fence.clone(),
+                            ..Default::default()
+                        })),
+                    }))
+                }
+                _ => publication(request, target),
+            }
+        }};
+    }
+    match request {
+        Payload::Major1(message) => profile!(message, v1, Major1),
+        Payload::Major2(message) => profile!(message, v2, Major2),
+    }
+}
+
+fn next_terminal_frame(subscription: &Payload, target: &ConnectionTarget) -> Payload {
+    use spaceterm_core::content_queries::*;
+    let mut response = terminal_publication(subscription, target).unwrap();
+    macro_rules! advance {
+        ($message:expr, $p:ident) => {{
+            let Some($p::message::Kind::ContentPublication(value)) = $message.kind.as_mut() else {
+                panic!("content publication")
+            };
+            let Some($p::content_read_response::Result::Page(page)) =
+                value.response.as_ref().unwrap().result.as_ref()
+            else {
+                panic!("active grid")
+            };
+            let old = spaceterm_protocol::convert::content::$p::decode_stamp(
+                page.stamp.as_ref().unwrap(),
+            )
+            .unwrap();
+            let mut base = old.base();
+            base.revision = ContentRevision::new(1);
+            let fence = EffectFence::new(
+                old.fence().session(),
+                old.fence().grant(),
+                old.fence().connection(),
+                old.fence().context(),
+                Some(base.revision),
+            )
+            .unwrap();
+            let stamp = QueryStamp::new(fence, base, old.request(), old.generation()).unwrap();
+            let request = ContentPageRequest::new(
+                stamp,
+                ContentRange::ActiveGrid,
+                None,
+                PageLimits::new(256, 16_384, 128 * 1024).unwrap(),
+            )
+            .unwrap();
+            let page =
+                ContentPageReply::new(&request, terminal_fixture::page(base, 2, false)).unwrap();
+            value.transfer = 2;
+            value.response = Some(
+                spaceterm_protocol::convert::content::$p::encode_page_result(
+                    &ContentReadResult::Ready(page),
+                )
+                .unwrap(),
+            );
+        }};
+    }
+    match &mut response {
+        Payload::Major1(message) => advance!(message, v1),
+        Payload::Major2(message) => advance!(message, v2),
+    }
+    response
+}
+
+async fn terminal_acceptance(
+    protocol: &Arc<NativeProtocol>,
+    plan: &Arc<fixture::peer::PeerPlan>,
+    executor: &tokio::runtime::Runtime,
+    info: ConnectedInfo,
+) {
+    use spaceterm_client::pane_channel::*;
+    use spaceterm_core::content_queries::*;
+    for capability in [
+        spaceterm_protocol::negotiation::CAPABILITY_ORGANIZATION_COMPARISONS,
+        spaceterm_protocol::negotiation::CAPABILITY_TERMINAL_STREAMS,
+        spaceterm_protocol::negotiation::CAPABILITY_NATIVE_NOTIFICATIONS,
+    ] {
+        assert!(
+            info.capabilities.supports(capability),
+            "installed terminal handler must retain negotiated capability {capability}"
+        );
+    }
+    let snapshot = TERMINAL_SNAPSHOT.get().unwrap();
+    let channels = protocol.channels().unwrap();
+    let lease = channels
+        .attach(
+            snapshot.state().workspaces[0].id,
+            spaceterm_client::view::AttachmentIncarnation::new(500 + u64::from(info.major))
+                .unwrap(),
+        )
+        .unwrap();
+    let pane = lease.pane(snapshot.state().panes[0].id).unwrap();
+    pane.update_context(PaneContextFacts {
+        focused_pane: true,
+        terminal_input_focus: true,
+        presentable: true,
+    })
+    .unwrap();
+    executor.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while pane.current_frame().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("production subscription must install the active grid");
+        let permit = pane.permit(EffectKind::Read).unwrap();
+        let stamp = pane
+            .query_stamp(&permit, RequestGeneration::new(1))
+            .unwrap();
+        let request = ContentPageRequest::new(
+            stamp,
+            ContentRange::ActiveGrid,
+            None,
+            PageLimits::new(256, 16384, 128 * 1024).unwrap(),
+        )
+        .unwrap();
+        let mut stream = pane
+            .read(&permit, PaneReadRequest::Page(request))
+            .await
+            .unwrap();
+        assert!(matches!(
+            stream.next().await.unwrap(),
+            Some(PaneReadItem::Page(ContentReadResult::Ready(_)))
+        ));
+        let subscription = plan
+            .messages
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|payload| match payload {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::PaneSubscription(value)),
+                }) => !value.cancel,
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::PaneSubscription(value)),
+                }) => !value.cancel,
+                _ => false,
+            })
+            .cloned()
+            .unwrap();
+        let next = next_terminal_frame(
+            &subscription,
+            protocol.binding(info.server).unwrap().target(),
+        );
+        plan.control(fixture::peer::PeerControl::publication(next))
+            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while pane.current_frame().is_none_or(|frame| {
+                frame.frame().unwrap().base().revision != ContentRevision::new(1)
+            }) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("later shell output must replace the previous active grid");
+        let permit = pane.permit(EffectKind::Read).unwrap();
+        let stamp = pane
+            .query_stamp(&permit, RequestGeneration::new(3))
+            .unwrap();
+        let resource = spaceterm_core::content::GraphicsResourceRef {
+            key: spaceterm_core::content::GraphicsResourceKey {
+                session: stamp.base().session,
+                id: spaceterm_core::content::GraphicsResourceId::new(1).unwrap(),
+                generation: 1,
+            },
+            width: 1,
+            height: 1,
+            rgba_bytes: 4,
+            digest: [9; 32],
+        };
+        let request =
+            GraphicsRequest::new(stamp, ResourceTransferId::new(1).unwrap(), resource, 0).unwrap();
+        let mut graphics = pane
+            .read(&permit, PaneReadRequest::Graphics(request))
+            .await
+            .unwrap();
+        assert!(matches!(
+            graphics.next().await.unwrap(),
+            Some(PaneReadItem::Graphics(ContentReadResult::Rejected {
+                reason: ContentReadFailure::MissingResource,
+                ..
+            }))
+        ));
+        let permit = pane.permit(EffectKind::ImeCommit).unwrap();
+        pane.try_effect(
+            &permit,
+            RuntimeEffect::InputMethodCommit(
+                spaceterm_terminal::runtime_contracts::BoundedInputMethodText::new("input".into())
+                    .unwrap(),
+            ),
+        )
+        .unwrap();
+        let permit = pane.permit(EffectKind::Resize).unwrap();
+        pane.try_effect(
+            &permit,
+            RuntimeEffect::Resize(terminal_fixture::grid().into()),
+        )
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let count = plan
+                    .messages
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|payload| {
+                        matches!(
+                            payload,
+                            Payload::Major1(v1::Message {
+                                kind: Some(v1::message::Kind::RuntimeCommand(_))
+                            }) | Payload::Major2(v2::Message {
+                                kind: Some(v2::message::Kind::RuntimeCommand(_))
+                            })
+                        )
+                    })
+                    .count();
+                if count == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut events = pane.events().unwrap();
+        let permit = pane.permit(EffectKind::NativeCompletion).unwrap();
+        let notice = spaceterm_core::native_requests::NativeRequest::new(
+            permit.fence(),
+            spaceterm_core::native_requests::NativeRequestId::new(1000).unwrap(),
+            spaceterm_core::observations::MonotonicTick::new(0),
+            spaceterm_core::observations::MonotonicTick::new(0),
+            Some(spaceterm_core::observations::MonotonicTick::new(10_000)),
+            spaceterm_core::native_requests::NativeRequestKind::Notification(
+                spaceterm_core::native_requests::NotificationNotice::Bell,
+            ),
+        )
+        .unwrap();
+        let payload = if info.major == 1 {
+            Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::NativeRequest(
+                    spaceterm_protocol::convert::native_requests::v1::encode_request(
+                        &notice,
+                        spaceterm_core::observations::MonotonicTick::new(0),
+                    )
+                    .unwrap(),
+                )),
+            })
+        } else {
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::NativeRequest(
+                    spaceterm_protocol::convert::native_requests::v2::encode_request(
+                        &notice,
+                        spaceterm_core::observations::MonotonicTick::new(0),
+                    )
+                    .unwrap(),
+                )),
+            })
+        };
+        plan.control(fixture::peer::PeerControl::publication(payload))
+            .await;
+        let Some(PaneEvent::Native { request, .. }) =
+            tokio::time::timeout(std::time::Duration::from_secs(15), events.next())
+                .await
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("native notification must reach the owned Pane")
+        };
+        assert_eq!(request.id(), notice.id());
+        let completion = spaceterm_core::native_requests::NativeCompletion::new(
+            &request,
+            spaceterm_core::native_requests::NativeCompletionKind::NotificationAcknowledged,
+        )
+        .unwrap();
+        pane.complete_native(&permit, completion).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                if plan.messages.lock().unwrap().iter().any(|payload| {
+                    matches!(
+                        payload,
+                        Payload::Major1(v1::Message {
+                            kind: Some(v1::message::Kind::NativeCompletion(_))
+                        }) | Payload::Major2(v2::Message {
+                            kind: Some(v2::message::Kind::NativeCompletion(_))
+                        })
+                    )
+                }) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    });
+    let frame = pane.current_frame().unwrap();
+    assert!(frame.is_paintable());
+    assert!(!frame.frame().unwrap().pages().is_empty());
+}
+
+#[gpui::test]
+async fn desktop_native_terminal_stream_publishes_owned_active_grid(cx: &mut TestAppContext) {
+    authenticated_case(1, cx, true).await;
+    authenticated_case(2, cx, true).await;
 }

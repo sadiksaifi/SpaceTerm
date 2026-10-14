@@ -252,6 +252,9 @@ pub fn assessment_description(assessment: &ManagementAssessment) -> String {
             hex(&value.parts().target.parts().device.bytes()),
             value.parts().target.parts().pairing.local()
         ),
+        AssessmentEvidence::LocalSelfUnpair { .. } => format!(
+            "Remove this device's saved connection to server {server} now. Retain a restricted revocation request until the server confirms. Keep Terminal Sessions running."
+        ),
         AssessmentEvidence::RemoteAccess { .. } => {
             let spaceterm_client::management_cli::ManagementAction::RemoteAccess { policy } =
                 assessment.action()
@@ -348,7 +351,7 @@ pub fn emit_failure(
     }
 }
 
-pub const USAGE: &str = "Usage: spaceterm-cli [--json] [--non-interactive] <command>\n\nstatus [--operation <server:pairing:client:stream:sequence|native:request>]\ninstall [--version <stable-version>] [--feed <local-json> --archive <local-tar-gz>]\nstart\nrestart [--assess | --confirm <assessment>]\nuninstall [--assess | --confirm <assessment>]\nstop [--assess | --confirm <assessment>]\npair enroll [--server-fingerprint <64 lowercase hex digits>] [--recover-account]\npair authorize <32 lowercase hex request digits> --device-fingerprint <64 lowercase hex digits>\npair list\nunpair --device <32 lowercase hex digits> [--assess | --confirm <assessment>]\nunpair --retry-pending\nremote-access enable --bind <ip:port>... [--assess | --confirm <assessment>]\nremote-access disable [--assess | --confirm <assessment>]\nend-all-sessions [--assess | --confirm <assessment>]\nupdate check\nupdate stage [--version <stable-version>]\nupdate activate --installation <installation-id> [--assess | --confirm <assessment>]\n--help\n--version\nserve (requires the daemon's native-startup composition)\n\nRun as the owning account, not root. Noninteractive destructive actions require an exact, unexpired assessment. No discovery action installs, pairs, starts or updates a server. Local install reads <local-json>.sig and requires the same release-key signatures as GitHub downloads.\n";
+pub const USAGE: &str = "Usage: spaceterm-cli [--json] [--non-interactive] <command>\n\nstatus [--operation <server:pairing:client:stream:sequence|native:request>]\ninstall [--version <stable-version>] [--feed <local-json> --archive <local-tar-gz>]\nstart\nrestart [--assess | --confirm <assessment>]\nuninstall [--assess | --confirm <assessment>]\nstop [--assess | --confirm <assessment>]\npair enroll [--server-fingerprint <64 lowercase hex digits>] [--recover-account]\npair authorize <32 lowercase hex request digits> --device-fingerprint <64 lowercase hex digits>\npair list\nunpair --device <32 lowercase hex digits> [--assess | --confirm <assessment>]\nunpair --retry-pending\nremote-access enable --bind <ip:port>... [--assess | --confirm <assessment>]\nremote-access disable [--assess | --confirm <assessment>]\nend-all-sessions [--assess | --confirm <assessment>]\nupdate check\nupdate stage [--version <stable-version>] [--feed <local-json> --archive <local-tar-gz>]\nupdate activate --installation <installation-id> [--assess | --confirm <assessment>]\n--help\n--version\nserve (requires the daemon's native-startup composition)\n\nRun as the owning account, not root. Noninteractive destructive actions require an exact, unexpired assessment. No discovery action installs, pairs, starts or updates a server. Local artifact actions read <local-json>.sig and requires the same release-key signatures as GitHub downloads.\n";
 
 pub fn emit_text(
     kind: &str,

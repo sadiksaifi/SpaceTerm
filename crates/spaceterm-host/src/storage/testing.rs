@@ -91,3 +91,46 @@ impl TestControl {
         Ok(())
     }
 }
+
+struct InitializationHook {
+    boundary: u8,
+    operation: Box<dyn FnOnce()>,
+}
+thread_local! {
+    static INITIALIZATION_INTERRUPT: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
+    static INITIALIZATION_HOOK: std::cell::RefCell<Option<InitializationHook>> = const { std::cell::RefCell::new(None) };
+}
+/// Interrupts only one original first-install storage/seed boundary.
+/// 0: bound creation, 1: before migration, 2: migrated, 3: before seed,
+/// 4: seeded, 5: creation intent, 6: created before identity publication.
+pub fn interrupt_initialization_at(boundary: u8) {
+    INITIALIZATION_INTERRUPT.set(Some(boundary));
+}
+/// Runs a controlled filesystem fault at one original creation boundary.
+pub fn after_initialization_boundary(boundary: u8, operation: impl FnOnce() + 'static) {
+    INITIALIZATION_HOOK.with(|hook| {
+        *hook.borrow_mut() = Some(InitializationHook {
+            boundary,
+            operation: Box::new(operation),
+        })
+    });
+}
+pub(crate) fn initialization_boundary(boundary: u8) -> Result<(), StorageFailure> {
+    let operation = INITIALIZATION_HOOK.with(|hook| {
+        let mut hook = hook.borrow_mut();
+        if hook.as_ref().is_some_and(|hook| hook.boundary == boundary) {
+            hook.take()
+        } else {
+            None
+        }
+    });
+    if let Some(hook) = operation {
+        (hook.operation)();
+    }
+    if INITIALIZATION_INTERRUPT.get() == Some(boundary) {
+        INITIALIZATION_INTERRUPT.set(None);
+        Err(StorageFailure::Io)
+    } else {
+        Ok(())
+    }
+}

@@ -1,3 +1,6 @@
+#[cfg(feature = "test-support")]
+#[path = "support/signed_installation.rs"]
+mod signed_installation;
 use spaceterm_host::{
     installation::{propose_lifecycle, propose_staging},
     native_deployment::contracts::{DataGenerationId, NativeFailure, PublicationDisposition},
@@ -263,8 +266,6 @@ mod account_installation {
         let parent = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
         tempfile::tempdir_in(parent).unwrap()
     }
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
-    use ring::signature::{Ed25519KeyPair, KeyPair as _};
     use sha2::{Digest as _, Sha256};
     use spaceterm_distribution::*;
     use spaceterm_host::{
@@ -286,151 +287,7 @@ mod account_installation {
             .unwrap()
     }
 
-    fn fixture(
-        version: &str,
-        seed: u8,
-        machine: u32,
-    ) -> (UpdateKey, VerifiedAccountServerArtifact) {
-        let build = BuildChannel::Development;
-        let platform = if cfg!(target_os = "macos") {
-            ServerPlatform::DarwinArm64
-        } else {
-            ServerPlatform::LinuxX86_64
-        };
-        let signer = Ed25519KeyPair::from_seed_unchecked(&[seed; 32]).unwrap();
-        let key = UpdateKey::from_base64(&STANDARD.encode(signer.public_key().as_ref())).unwrap();
-        let mut payload = vec![0; 64];
-        if platform == ServerPlatform::DarwinArm64 {
-            payload[..4].copy_from_slice(&0xfeedfacf_u32.to_le_bytes());
-            payload[4..8].copy_from_slice(&machine.to_le_bytes());
-            payload[12..16].copy_from_slice(&2_u32.to_le_bytes());
-        } else {
-            payload[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
-            payload[16..18].copy_from_slice(&2_u16.to_le_bytes());
-            payload[18..20].copy_from_slice(&(machine as u16).to_le_bytes());
-        }
-        payload[63] = version.as_bytes()[version.len() - 1];
-        let name = match platform {
-            ServerPlatform::LinuxX86_64 => "bin/spaceterm-server".to_owned(),
-            ServerPlatform::DarwinArm64 => {
-                format!("{}/Contents/MacOS/spaceterm-server", build.bundle_name())
-            }
-        };
-        let resource_root = match platform {
-            ServerPlatform::LinuxX86_64 => "share/spaceterm-server".to_owned(),
-            ServerPlatform::DarwinArm64 => format!("{}/Contents/Resources", build.bundle_name()),
-        };
-        let mut files = vec![(name.clone(), 0o755, payload.as_slice())];
-        for resource in [
-            "shell-integration/VERSION",
-            "shell-integration/bash/spaceterm.bash",
-            "shell-integration/sh/spaceterm.sh",
-            "shell-integration/zsh/.zshenv",
-            "shell-integration/zsh/spaceterm-integration",
-            "terminfo/x/xterm-spaceterm",
-            "THIRD-PARTY-NOTICES.txt",
-        ] {
-            files.push((
-                format!("{resource_root}/{resource}"),
-                0o644,
-                b"bundled resource".as_slice(),
-            ));
-        }
-        files.sort_by(|a, b| a.0.cmp(&b.0));
-        let manifest = AccountInstallationManifestV2 {
-            schema_version: 2,
-            component: ServerComponent::Server,
-            build_identity: build,
-            platform,
-            version: BuildVersion::parse(version).unwrap(),
-            build_commit: [1; 20],
-            protocol_majors: vec![1, 2],
-            storage: StorageCompatibility {
-                read: vec![1],
-                write: 1,
-                migrate_from: vec![],
-            },
-            native_identifier: build.native_identifier().into(),
-            entry_points: AccountEntryPoints {
-                server: name.clone(),
-                cli: None,
-            },
-            files: files
-                .iter()
-                .map(|(name, mode, bytes)| InstallationFile {
-                    name: name.clone(),
-                    mode: *mode,
-                    size: bytes.len() as u64,
-                    sha256: Sha256::digest(bytes).into(),
-                })
-                .collect(),
-            dependencies: vec![],
-        };
-        let manifest = serde_json::to_vec(&manifest).unwrap();
-        let mut tar = tar::Builder::new(Vec::new());
-        for (name, mode, bytes) in
-            std::iter::once(("installation.json".to_owned(), 0o644, manifest.as_slice()))
-                .chain(files)
-        {
-            let mut header = tar::Header::new_ustar();
-            header.set_uid(0);
-            header.set_gid(0);
-            header.set_mtime(0);
-            header.set_size(bytes.len() as u64);
-            header.set_mode(mode);
-            header.set_entry_type(tar::EntryType::Regular);
-            header.set_cksum();
-            tar.append_data(&mut header, format!("spaceterm-server/{name}"), bytes)
-                .unwrap();
-        }
-        let tar = tar.into_inner().unwrap();
-        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        std::io::Write::write_all(&mut gzip, &tar).unwrap();
-        let archive = gzip.finish().unwrap();
-        let feed = AccountServerFeedV2 {
-            schema_version: 2,
-            component: ServerComponent::Server,
-            build_identity: build,
-            platform,
-            version: BuildVersion::parse(version).unwrap(),
-            build_commit: [1; 20],
-            published_at: 1,
-            protocol_majors: vec![1, 2],
-            storage: StorageCompatibility {
-                read: vec![1],
-                write: 1,
-                migrate_from: vec![],
-            },
-            installation: AccountInstallationCompatibility {
-                manifest_schema: 2,
-                registration_schema: 1,
-                journal_schema: 1,
-            },
-            archive: ServerArchiveV1 {
-                name: platform.account_archive_name(build, version),
-                size: archive.len() as u64,
-                sha256: Sha256::digest(&archive).into(),
-                signature: signer.sign(&archive).as_ref().try_into().unwrap(),
-                manifest_sha256: Sha256::digest(&manifest).into(),
-            },
-        };
-        let bytes = serde_json::to_vec(&feed).unwrap();
-        let signature = STANDARD.encode(signer.sign(&bytes).as_ref());
-        let feed =
-            verify_account_server_feed(&key, build, platform, &bytes, signature.as_bytes(), 1)
-                .unwrap();
-        let artifact = ServerArchiveVerifier::new()
-            .verify_account_owned(&key, feed, archive)
-            .unwrap();
-        (key, artifact)
-    }
-    fn native_machine() -> u32 {
-        if cfg!(target_os = "macos") {
-            0x0100000c
-        } else {
-            62
-        }
-    }
+    use super::signed_installation::{fixture, native_machine};
 
     struct InstallManager {
         key: UpdateKey,
@@ -531,7 +388,10 @@ mod account_installation {
             _: &'a spaceterm_host::account_service::RegisteredServer,
         ) -> spaceterm_host::account_service::ServiceFuture<'a, ()> {
             Box::pin(async {
-                Err(spaceterm_host::account_service::ServiceFailure::SupervisorUnavailable)
+                self.running
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                self.effects.lock().unwrap().push("stop");
+                Ok(())
             })
         }
         fn uninstall<'a>(
@@ -546,18 +406,11 @@ mod account_installation {
             &self,
             registration: &spaceterm_host::account_service::RegisteredServer,
         ) -> Result<(), spaceterm_host::account_service::ServiceFailure> {
-            let selected = test_support::existing_store(registration, self.key.clone())?
-                .retain_compatible_approved(1)?
-                .status();
-            let approved = registration
-                .approved_installation()
-                .ok_or(spaceterm_host::account_service::ServiceFailure::Missing)?;
-            if selected.installation != approved.installation
-                || selected.artifact_sha256 != approved.artifact_sha256
-            {
-                return Err(spaceterm_host::account_service::ServiceFailure::IdentityMismatch);
-            }
-            Ok(())
+            spaceterm_host::account_service::NativeServiceInstallations::test_approved_executable(
+                registration,
+                self.key.clone(),
+            )
+            .map(drop)
         }
     }
     struct InstallClock;
@@ -638,6 +491,348 @@ mod account_installation {
             .value
             .as_str()
             .to_owned()
+    }
+
+    #[tokio::test]
+    async fn signed_update_staging_preserves_running_and_stopped_intent_and_original_request() {
+        use spaceterm_host::account_service::{
+            InstallationStatus, ServiceOutcome, ServiceRequestState,
+        };
+        for desired in [DesiredServerState::Running, DesiredServerState::Stopped] {
+            let root = installation_root();
+            let account =
+                AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+            let (key, original_artifact) = fixture("1.2.3", 7, native_machine());
+            let approved = InstallationStatus {
+                installation: spaceterm_host::startup::InstallationId(
+                    std::num::NonZeroU64::new(1).unwrap(),
+                ),
+                version: original_artifact.manifest().version.clone(),
+                artifact_sha256: original_artifact.artifact_sha256(),
+            };
+            let registration = account
+                .initialize_with_installation(desired, Some(approved))
+                .unwrap();
+            let store = test_support::store(&registration, key.clone()).unwrap();
+            let original_id = store.stage(&original_artifact).unwrap();
+            store
+                .activate(original_id, store.snapshot().unwrap().generation, 1)
+                .unwrap();
+            drop(store);
+            let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+            let supervisor = installer(&account, key.clone(), manager.clone());
+            let before = supervisor.discover().unwrap().unwrap();
+            let effects = manager.effects.lock().unwrap().clone();
+            let (_, candidate) = fixture("1.2.4", 7, native_machine());
+            let request = supervisor.allocate_request().unwrap();
+            let result = supervisor
+                .stage_installation(request, account.confirm_install(candidate))
+                .await
+                .unwrap();
+            let ServiceRequestState::Completed(ServiceOutcome::Staged(staged)) = &result.state
+            else {
+                panic!("candidate must be staged")
+            };
+            assert_eq!(staged.version.as_str(), "1.2.4");
+            let after = supervisor.discover().unwrap().unwrap();
+            assert_eq!(after.desired_state(), desired);
+            assert_eq!(after.server_pin(), before.server_pin());
+            assert_eq!(
+                after.approved_installation(),
+                before.approved_installation()
+            );
+            assert_eq!(after.staged_installation(), Some(staged));
+            assert_eq!(*manager.effects.lock().unwrap(), effects);
+            let reopened = installer(&account, key.clone(), manager.clone());
+            assert_eq!(reopened.resolve(request).await.unwrap(), result);
+            let (_, candidate) = fixture("1.2.4", 7, native_machine());
+            assert_eq!(
+                reopened
+                    .stage_installation(request, account.confirm_install(candidate))
+                    .await
+                    .unwrap(),
+                result
+            );
+            assert_eq!(*manager.effects.lock().unwrap(), effects);
+            let (_, conflicting) = fixture("1.2.5", 7, native_machine());
+            let conflicting_request = reopened.allocate_request().unwrap();
+            assert_eq!(
+                reopened
+                    .stage_installation(conflicting_request, account.confirm_install(conflicting))
+                    .await,
+                Err(spaceterm_host::account_service::ServiceFailure::RequestConflict)
+            );
+            assert_eq!(
+                reopened.request_progress(conflicting_request),
+                Err(spaceterm_host::account_service::ServiceFailure::Pending)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn activation_reconciles_signed_selection_for_running_and_stopped_servers() {
+        use spaceterm_host::account_service::{ServiceAction, ServiceOutcome, ServiceRequestState};
+        for (stopped, interrupted) in [(false, false), (true, false), (false, true), (true, true)] {
+            let root = private_root();
+            let account =
+                AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+            let (key, artifact) = fixture("1.2.3", 7, native_machine());
+            let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+            let supervisor = account.with_installation_trust(account.with_providers(
+                manager.clone(),
+                std::sync::Arc::new(spaceterm_host::account_service::runtime_inventory::RetainedRuntimeProcesses),
+                std::sync::Arc::new(InstallClock), None,
+            ), key.clone());
+            let install = supervisor.allocate_request().unwrap();
+            supervisor
+                .install(install, account.confirm_install(artifact))
+                .await
+                .unwrap();
+            if stopped {
+                let request = supervisor.allocate_request().unwrap();
+                let confirmation = supervisor
+                    .assess(request, ServiceAction::Stop)
+                    .await
+                    .unwrap()
+                    .confirm()
+                    .unwrap();
+                supervisor.stop(confirmation).await.unwrap();
+            }
+            let registration = supervisor.discover().unwrap().unwrap();
+            let store = test_support::store(&registration, key.clone()).unwrap();
+            let (_, next) = fixture("1.2.4", 7, native_machine());
+            let id = store.stage(&next).unwrap();
+            let staged = store.staged_status().unwrap().unwrap();
+            account
+                .stage_installation(spaceterm_host::account_service::InstallationStatus {
+                    installation: staged.installation,
+                    version: staged.version,
+                    artifact_sha256: staged.artifact_sha256,
+                })
+                .unwrap();
+            let request = supervisor.allocate_request().unwrap();
+            let confirmation = supervisor
+                .assess(request, ServiceAction::Activate(id))
+                .await
+                .unwrap()
+                .confirm()
+                .unwrap();
+            if interrupted {
+                test_support::after_next_publication(|| {
+                    spaceterm_host::account_service::test_support::fail_next_publication_before_effect();
+                });
+            }
+            let result = supervisor.activate(confirmation).await;
+            let progress = if interrupted {
+                assert!(
+                    result.is_err(),
+                    "registration interruption must retain the original activation"
+                );
+                supervisor.resolve(request).await.unwrap()
+            } else {
+                result.unwrap()
+            };
+            assert!(
+                matches!(progress.state, ServiceRequestState::Completed(ServiceOutcome::Activated(selected)) if selected.installation == id)
+            );
+            let registration = supervisor.discover().unwrap().unwrap();
+            assert_eq!(
+                registration.desired_state(),
+                if stopped {
+                    DesiredServerState::Stopped
+                } else {
+                    DesiredServerState::Running
+                }
+            );
+            assert_eq!(
+                registration.approved_installation().unwrap().installation,
+                id
+            );
+            assert!(registration.staged_installation().is_none());
+            let store = test_support::existing_store(&registration, key).unwrap();
+            assert_eq!(store.snapshot().unwrap().approved, Some(id));
+            assert!(store.snapshot().unwrap().staged.is_none());
+            spaceterm_host::account_service::ServiceManager::verify_installation(
+                manager.as_ref(),
+                &registration,
+            )
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn signed_stage_response_loss_resolves_same_candidate_without_activation() {
+        use spaceterm_host::account_service::{
+            InstallationStatus, ServiceFailure, ServiceOutcome, ServicePhase, ServiceRequestState,
+        };
+        for phase in [ServicePhase::Publishing, ServicePhase::Completed] {
+            let root = installation_root();
+            let account =
+                AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+            let (key, original_artifact) = fixture("1.2.3", 7, native_machine());
+            let approved = InstallationStatus {
+                installation: spaceterm_host::startup::InstallationId(
+                    std::num::NonZeroU64::new(1).unwrap(),
+                ),
+                version: original_artifact.manifest().version.clone(),
+                artifact_sha256: original_artifact.artifact_sha256(),
+            };
+            let registration = account
+                .initialize_with_installation(DesiredServerState::Stopped, Some(approved.clone()))
+                .unwrap();
+            let store = test_support::store(&registration, key.clone()).unwrap();
+            let id = store.stage(&original_artifact).unwrap();
+            store
+                .activate(id, store.snapshot().unwrap().generation, 1)
+                .unwrap();
+            drop(store);
+            let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+            let supervisor = installer(&account, key.clone(), manager.clone());
+            let (_, candidate) = fixture("1.2.4", 7, native_machine());
+            let digest = candidate.artifact_sha256();
+            let request = supervisor.allocate_request().unwrap();
+            spaceterm_host::account_service::test_support::interrupt_after_phase(phase);
+            assert_eq!(
+                supervisor
+                    .stage_installation(request, account.confirm_install(candidate))
+                    .await,
+                Err(ServiceFailure::SupervisorUnavailable)
+            );
+            let reopened = installer(&account, key.clone(), manager.clone());
+            let result = reopened.resolve(request).await.unwrap();
+            let ServiceRequestState::Completed(ServiceOutcome::Staged(staged)) = &result.state
+            else {
+                panic!("original staging must resolve")
+            };
+            assert_eq!(result.request, request);
+            assert_eq!(staged.artifact_sha256, digest);
+            let registration = reopened.discover().unwrap().unwrap();
+            assert_eq!(registration.approved_installation(), Some(&approved));
+            assert_eq!(registration.desired_state(), DesiredServerState::Stopped);
+            assert_eq!(registration.staged_installation(), Some(staged));
+            assert!(manager.effects.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn original_first_install_recovers_every_database_initialization_boundary() {
+        for boundary in 0..=6 {
+            let root = private_root();
+            let account =
+                AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+            let (key, artifact) = fixture("1.2.3", 7, native_machine());
+            let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+            let supervisor = installer(&account, key.clone(), manager.clone());
+            let request = supervisor.allocate_request().unwrap();
+            spaceterm_host::storage::testing::interrupt_initialization_at(boundary);
+            assert!(
+                supervisor
+                    .install(request, account.confirm_install(artifact))
+                    .await
+                    .is_err(),
+                "boundary {boundary}"
+            );
+            let pin = supervisor.discover().unwrap().unwrap().server_pin();
+            drop(supervisor);
+            let supervisor = installer(&account, key, manager.clone());
+            let (_, artifact) = fixture("1.2.3", 7, native_machine());
+            let result = supervisor
+                .install(request, account.confirm_install(artifact))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("original initialization must recover boundary {boundary}: {error:?}")
+                });
+            assert!(matches!(
+                result.state,
+                spaceterm_host::account_service::ServiceRequestState::Completed(_)
+            ));
+            let registration = supervisor.discover().unwrap().unwrap();
+            assert_eq!(registration.server_pin(), pin);
+            assert_eq!(
+                read_template(&registration),
+                spaceterm_host::git::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE
+            );
+            assert_eq!(
+                manager
+                    .effects
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|effect| **effect == "start")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn original_first_install_recovers_uncertain_creation_identity_publication() {
+        let root = private_root();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let supervisor = installer(&account, key.clone(), manager.clone());
+        let request = supervisor.allocate_request().unwrap();
+        spaceterm_host::storage::testing::after_initialization_boundary(5, || {
+            spaceterm_host::account_service::test_support::fail_next_publication_durability();
+        });
+        assert!(
+            supervisor
+                .install(request, account.confirm_install(artifact))
+                .await
+                .is_err()
+        );
+        assert!(manager.effects.lock().unwrap().is_empty());
+        drop(supervisor);
+        let supervisor = installer(&account, key, manager);
+        let (_, artifact) = fixture("1.2.3", 7, native_machine());
+        let progress = supervisor
+            .install(request, account.confirm_install(artifact))
+            .await
+            .unwrap();
+        assert!(matches!(
+            progress.state,
+            spaceterm_host::account_service::ServiceRequestState::Completed(_)
+        ));
+        assert_eq!(
+            read_template(&supervisor.discover().unwrap().unwrap()),
+            spaceterm_host::git::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE
+        );
+    }
+
+    #[tokio::test]
+    async fn original_first_install_refuses_a_replacement_database_inode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = private_root();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let (key, artifact) = fixture("1.2.3", 7, native_machine());
+        let manager = std::sync::Arc::new(InstallManager::new(key.clone()));
+        let supervisor = installer(&account, key, manager.clone());
+        let request = supervisor.allocate_request().unwrap();
+        spaceterm_host::storage::testing::interrupt_initialization_at(2);
+        assert!(
+            supervisor
+                .install(request, account.confirm_install(artifact))
+                .await
+                .is_err()
+        );
+        let registration = supervisor.discover().unwrap().unwrap();
+        let database = registration
+            .organization_directory()
+            .join(spaceterm_host::storage::DATABASE_FILE_NAME);
+        let original = database.with_extension("retained-original");
+        std::fs::rename(&database, &original).unwrap();
+        std::fs::write(&database, []).unwrap();
+        std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (_, artifact) = fixture("1.2.3", 7, native_machine());
+        assert!(
+            supervisor
+                .install(request, account.confirm_install(artifact))
+                .await
+                .is_err()
+        );
+        assert!(manager.effects.lock().unwrap().is_empty());
+        assert_eq!(std::fs::metadata(&database).unwrap().len(), 0);
     }
 
     #[tokio::test]

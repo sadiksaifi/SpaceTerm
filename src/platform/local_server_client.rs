@@ -2,7 +2,7 @@
 //! Launch never creates a server identity, requests authorization, starts a deliberately
 //! stopped service, activates staged code, or enrolls a replacement client binding.
 
-mod enrollment;
+pub(crate) mod enrollment;
 pub(crate) mod foreground;
 mod setup;
 pub(crate) use setup::offer as setup_offer;
@@ -111,6 +111,14 @@ impl spaceterm_client::ports::TrustedDiscovery for LocalDiscovery {
         &'a self,
         target: &'a spaceterm_client::api::ConnectionTarget,
     ) -> spaceterm_client::ports::ClientFuture<'a, spaceterm_client::ports::DiscoveryState> {
+        // Native registration belongs only to This Computer. Remote connections must not
+        // depend on this account's local service storage or acquire local endpoint authority.
+        if !matches!(
+            target.route().parts(),
+            spaceterm_client::api::RouteParts::Ipc { .. }
+        ) {
+            return Box::pin(async { Ok(spaceterm_client::ports::DiscoveryState::Unverified) });
+        }
         let provider = self.0.clone();
         let pin = target.pin();
         Box::pin(async move {
@@ -141,7 +149,7 @@ impl spaceterm_client::ports::TrustedDiscovery for LocalDiscovery {
     }
 }
 
-fn classify(failure: ServiceFailure) -> ClientFailure {
+pub(crate) fn classify(failure: ServiceFailure) -> ClientFailure {
     let class = match failure {
         ServiceFailure::StorageLocked
         | ServiceFailure::StorageUnavailable

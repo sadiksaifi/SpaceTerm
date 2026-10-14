@@ -18,7 +18,10 @@ use spaceterm_protocol::{
     authentication::{ClientHandshake, Established, HandshakeConfig, Principal, Purpose},
     codec::Payload,
     connection::AuthenticatedConnection,
-    negotiation::{CAPABILITY_CANONICAL_DOMAIN, CAPABILITY_NORMALIZED_CREATION_TOPOLOGY},
+    negotiation::{
+        CAPABILITY_CANONICAL_DOMAIN, CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
+        CAPABILITY_ORGANIZATION_COMPARISONS,
+    },
     wire::{common, v1, v2},
 };
 
@@ -84,6 +87,7 @@ impl ProtocolSession {
         let mut capabilities = vec![
             CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
             CAPABILITY_CANONICAL_DOMAIN,
+            CAPABILITY_ORGANIZATION_COMPARISONS,
         ];
         capabilities.extend_from_slice(additional_capabilities);
         capabilities.sort_unstable();

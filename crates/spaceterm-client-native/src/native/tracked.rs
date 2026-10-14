@@ -36,8 +36,8 @@ macro_rules! pairing_decode {
     };
 }
 macro_rules! pairing_outcome {
-    ($p:ident, $value:expr, $binding:expr) => {
-        pairing::$p::outcome($value, $binding)
+    ($p:ident, $value:expr, $binding:expr, $pin:expr) => {
+        pairing::$p::outcome($value, $binding, $pin)
     };
 }
 pub(super) struct ManagementOperations {
@@ -81,6 +81,38 @@ impl ManagementOperations {
     pub async fn submit_command(&self, command: Command) -> Result<OperationTicket, ClientFailure> {
         self.tracker
             .submit(&self.binding, command, None, self)
+            .await
+    }
+    pub fn next_operation(&self) -> Result<OperationId, ClientFailure> {
+        let state = self.tracker.journal().snapshot()?;
+        let saved = state
+            .bindings()
+            .iter()
+            .find(|saved| saved.binding().as_ref() == Ok(&self.binding))
+            .ok_or_else(invalid)?;
+        let stream = saved.streams().parts().ordinary;
+        let sequence = state
+            .stream(stream)
+            .ok_or_else(invalid)?
+            .high_water
+            .checked_add(1)
+            .ok_or_else(invalid)?;
+        Ok(OperationId::new(
+            stream,
+            OperationSequence::new(sequence).map_err(|_| invalid())?,
+        ))
+    }
+    pub async fn submit_additional_client(
+        &self,
+        proof: spaceterm_client::pairing::enrollment::AdditionalClientProof,
+    ) -> Result<OperationTicket, ClientFailure> {
+        let command = Command::Pairing(proof.command().clone());
+        let peer = AdditionalClientPeer {
+            operations: self,
+            proof,
+        };
+        self.tracker
+            .submit(&self.binding, command, None, &peer)
             .await
     }
     pub async fn wait(&self, ticket: &OperationTicket) -> Result<Outcome, ClientFailure> {
@@ -128,7 +160,10 @@ impl ManagementOperations {
             Command::AssessEndAllSessions { .. }
                 | Command::EndAllSessions { .. }
                 | Command::SetRemoteAccess { .. }
-                | Command::Pairing(spaceterm_core::pairing::PairingCommand::AssessUnpair { .. })
+                | Command::Pairing(
+                    spaceterm_core::pairing::PairingCommand::AssessUnpair { .. }
+                        | spaceterm_core::pairing::PairingCommand::BindAdditionalClient { .. }
+                )
         )
     }
 }
@@ -319,7 +354,8 @@ impl ConnectionDelegate for ManagementOperations {
                             )
                             .map_err(|_| invalid())?;
                             let binding = self.record(operation)?;
-                            let (revision, result) = pairing_outcome!($p, &value, binding)?;
+                            let (revision, result) =
+                                pairing_outcome!($p, &value, binding, self.binding.target().pin())?;
                             self.tracker
                                 .resolve_bound(
                                     binding,
@@ -337,8 +373,8 @@ impl ConnectionDelegate for ManagementOperations {
                             )
                             .map_err(|_| invalid())?;
                             let binding = self.record(operation)?;
-                            let result = operations::$p::decode_lookup_result(&value, binding)
-                                .map_err(|_| invalid())?;
+                            let result =
+                                pairing::$p::lookup(&value, binding, self.binding.target().pin())?;
                             let reply = self
                                 .lookups
                                 .lock()
@@ -369,6 +405,71 @@ impl ConnectionDelegate for ManagementOperations {
                 Payload::Major2(m) => receive!(m, v2),
             }
         })
+    }
+}
+struct AdditionalClientPeer<'a> {
+    operations: &'a ManagementOperations,
+    proof: spaceterm_client::pairing::enrollment::AdditionalClientProof,
+}
+impl OperationPeer for AdditionalClientPeer<'_> {
+    fn validate_submission(
+        &self,
+        binding: &PairedServerBinding,
+        command: &Command,
+        workspace: Option<spaceterm_core::identity::WorkspaceId>,
+    ) -> Result<(), ClientFailure> {
+        if command != &Command::Pairing(self.proof.command().clone()) {
+            return Err(denied());
+        }
+        self.operations
+            .validate_submission(binding, command, workspace)
+    }
+    fn submit<'a>(&'a self, request: &'a CanonicalOperationRequest) -> ClientFuture<'a, ()> {
+        Box::pin(async move {
+            if request.binding().id != self.proof.operation()
+                || request.command() != &Command::Pairing(self.proof.command().clone())
+            {
+                return Err(denied());
+            }
+            self.operations.tracker.admit_dispatch(request.binding())?;
+            let (server, info) = self.operations.connected()?;
+            macro_rules! payload {
+                ($p:ident, $v:ident) => {
+                    Payload::$v($p::Message {
+                        kind: Some($p::message::Kind::Operation($p::Operation {
+                            id: Some(identity::encode_operation(request.binding().id)),
+                            action: Some($p::operation::Action::IdentifiedPairing(
+                                $p::PairingRequest {
+                                    operation: Some(
+                                        spaceterm_protocol::pairing_adapter::operation_to_wire(
+                                            request.binding().id,
+                                        ),
+                                    ),
+                                    action: Some(
+                                        $p::pairing_request::Action::BindAdditionalClient(
+                                            self.proof.wire().clone(),
+                                        ),
+                                    ),
+                                    ..Default::default()
+                                },
+                            )),
+                        })),
+                    })
+                };
+            }
+            let payload = match info.major {
+                1 => payload!(v1, Major1),
+                2 => payload!(v2, Major2),
+                _ => return Err(invalid()),
+            };
+            server.dispatch(info, payload).await
+        })
+    }
+    fn lookup(&self, binding: OperationBinding) -> ClientFuture<'_, OperationLookup> {
+        self.operations.lookup(binding)
+    }
+    fn acknowledge(&self, stream: OperationStreamId, through: u64) -> ClientFuture<'_, ()> {
+        self.operations.acknowledge(stream, through)
     }
 }
 // A receive callback must use its writer channel. Dispatching through the
@@ -481,23 +582,61 @@ macro_rules! pairing_profile {
                 {
                     return Err(invalid());
                 }
-                let Some(wire::pairing_request::Action::AssessUnpair(value)) =
-                    &pairing_request.action
-                else {
-                    return Err(denied());
+                let command = match &pairing_request.action {
+                    Some(wire::pairing_request::Action::AssessUnpair(value)) => PairingCommand::AssessUnpair {
+                        target: pairing::target_from_wire(value.target.as_ref().ok_or_else(invalid)?).map_err(|_| invalid())?,
+                    },
+                    Some(wire::pairing_request::Action::BindAdditionalClient(value)) => {
+                        if value.device_identity_proof.len() != 64 || value.pairing_authentication_proof.len() != 64 { return Err(denied()); }
+                        PairingCommand::BindAdditionalClient {
+                            target: pairing::target_from_wire(value.target.as_ref().ok_or_else(invalid)?).map_err(|_| invalid())?,
+                            expected_authorization_version: FieldVersion::new(value.expected_authorization_version),
+                            claim_digest: spaceterm_core::operations::RequestDigest::from_bytes(value.claim_digest.as_slice().try_into().map_err(|_| invalid())?),
+                        }
+                    },
+                    _ => return Err(denied()),
                 };
-                let target = pairing::target_from_wire(value.target.as_ref().ok_or_else(invalid)?)
-                    .map_err(|_| invalid())?;
                 CanonicalOperationRequest::new(
                     id,
-                    Command::Pairing(PairingCommand::AssessUnpair { target }),
+                    Command::Pairing(command),
                     codec,
                 )
                 .map_err(|_| invalid())
             }
+            pub(crate) fn lookup(
+                value: &wire::OperationLookupResult,
+                binding: OperationBinding,
+                pin: spaceterm_protocol::authentication::ServerPin,
+            ) -> Result<OperationLookup, ClientFailure> {
+                // The generic decoder first enforces its byte ceiling and both
+                // outer binding fields. UnexpectedMessage delegates only the
+                // identified pairing grammar to this profile.
+                match operations::$p::decode_lookup_result(value, binding) {
+                    Ok(result) => return Ok(result),
+                    Err(spaceterm_protocol::ProtocolError::UnexpectedMessage) => {}
+                    Err(_) => return Err(invalid()),
+                }
+                let Some(wire::operation_lookup_result::Disposition::Completed(completed)) =
+                    &value.disposition
+                else {
+                    return Err(invalid());
+                };
+                if !matches!(
+                    completed.result,
+                    Some(wire::outcome::Result::PairingResult(_))
+                ) {
+                    return Err(invalid());
+                }
+                let (publication_revision, result) = outcome(completed, binding, pin)?;
+                Ok(OperationLookup::Completed {
+                    result,
+                    publication_revision,
+                })
+            }
             pub(crate) fn outcome(
                 value: &wire::Outcome,
                 binding: OperationBinding,
+                pin: spaceterm_protocol::authentication::ServerPin,
             ) -> Result<(spaceterm_core::authority::OrganizationRevision, Outcome), ClientFailure>
             {
                 let Some(wire::outcome::Result::PairingResult(result)) = &value.result else {
@@ -515,7 +654,6 @@ macro_rules! pairing_profile {
                     || result.request != 0
                     || result.authorization_delivery.is_some()
                     || result.enrollment_receipt.is_some()
-                    || result.client_binding_receipt.is_some()
                     || result.revocation_proof.is_some()
                     || result.reservation.is_some()
                 {
@@ -524,6 +662,13 @@ macro_rules! pairing_profile {
                 let revision = spaceterm_core::authority::OrganizationRevision::new(
                     value.publication_revision,
                 );
+                if result.disposition == 3 {
+                    if result.unpair_assessment.is_some() { return Err(invalid()); }
+                    let receipt = pairing::ReceiptCodec::new(pin).from_wire(result.client_binding_receipt.as_deref().ok_or_else(invalid)?).map_err(|_| invalid())?;
+                    if !matches!(&receipt.parts().claims, PairingReceiptBody::ClientBinding { operation, .. } if *operation == binding) { return Err(invalid()); }
+                    return Ok((revision, Outcome::Pairing(Box::new(PairingOutcome::ClientBound(receipt)))));
+                }
+                if result.client_binding_receipt.is_some() { return Err(invalid()); }
                 let value = result.unpair_assessment.as_deref().ok_or_else(invalid)?;
                 if result.disposition != 4 || value.clients.len() > MAX_CLIENTS_PER_PAIRING {
                     return Err(invalid());
@@ -575,3 +720,6 @@ mod pairing {
     pairing_profile!(v1, v1);
     pairing_profile!(v2, v2);
 }
+
+#[cfg(test)]
+mod tests;

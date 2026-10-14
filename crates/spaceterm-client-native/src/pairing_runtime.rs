@@ -33,8 +33,8 @@ use spaceterm_core::{
     operation_ledger::canonical::CanonicalCodec,
     operations::{OperationId, OperationSequence, RequestDigest},
     pairing::{
-        LocalPairingGeneration, LocalPairingKey, PairingFailure, PendingRevocationTask,
-        RevocationRouteReference, SignedPairingReceipt,
+        LocalPairingGeneration, LocalPairingKey, PairingFailure, PairingReceiptBody,
+        PendingRevocationTask, RevocationRouteReference, SignedPairingReceipt,
     },
 };
 use spaceterm_host::{
@@ -284,6 +284,48 @@ impl NativePairingRuntime {
         JournalPairingStore::new(self.journal.clone())
     }
 
+    pub(crate) fn credentials(&self) -> Arc<dyn NativeDeviceCredentials> {
+        self.credentials.0.clone()
+    }
+    /// Deliberate provisioning proves both native keys for the exact originating
+    /// operation. Restoration does not call this foreground credential path.
+    pub async fn prepare_additional_client(
+        &self,
+        key: &LocalPairingKey,
+        client: ClientId,
+        version: spaceterm_core::authority::FieldVersion,
+        operation: OperationId,
+    ) -> Result<spaceterm_client::pairing::enrollment::AdditionalClientProof, PairingFailure> {
+        let ordinary = self.restore(key, client).await?;
+        let inventory = self.inventory().await?;
+        let saved = inventory
+            .active(key)
+            .ok_or(PairingFailure::ClientNotBound)?;
+        let keys = match &saved.receipt().parts().claims {
+            PairingReceiptBody::Enrollment { keys, .. }
+            | PairingReceiptBody::ClientBinding { keys, .. } => keys,
+            _ => return Err(PairingFailure::ReceiptInvalid),
+        };
+        let device = inventory
+            .credential_preparations
+            .iter()
+            .filter_map(|preparation| preparation.credential.as_ref())
+            .find(|credential| {
+                credential.scope.parts().purpose
+                    == spaceterm_client::pairing::credentials::CredentialPurpose::DeviceIdentity
+                    && credential.public_key == keys.parts().device_identity_public_key
+            })
+            .ok_or(PairingFailure::CredentialUnavailable)?;
+        spaceterm_client::pairing::enrollment::prepare_additional_client_binding(
+            saved,
+            ordinary.authority(),
+            device,
+            &self.credentials,
+            version,
+            operation,
+        )
+        .await
+    }
     /// The durable reservation precedes insertion into Keychain/Secret Service.
     pub async fn prepare_credential(
         &self,

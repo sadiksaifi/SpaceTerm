@@ -115,6 +115,25 @@ impl Fixture<'_> {
             ServerRequest::AssessEndAllSessions(_) => {
                 server.management.end_all = Some(end_all_assessment(server))
             }
+            ServerRequest::AssessInstallUpdate(_) => {
+                let mut assessment = staged_server(server.clone())
+                    .installations
+                    .activation
+                    .unwrap();
+                let token = if server
+                    .installations
+                    .activation
+                    .as_ref()
+                    .is_some_and(|value| value.reference.as_str() == "activation-1")
+                {
+                    "activation-2"
+                } else {
+                    "activation-1"
+                };
+                assessment.reference =
+                    spaceterm_client::management_cli::AssessmentToken::new(token.into()).unwrap();
+                server.installations.activation = Some(assessment);
+            }
             _ => panic!("expected a read-only management assessment"),
         }
         self.publish(snapshot);
@@ -879,14 +898,25 @@ fn a_staged_version_offers_an_update_that_names_its_effect(cx: &mut TestAppConte
         Some("Version 1.5.0 is ready. Installing it restarts Studio.")
     );
 
-    fixture.click("settings-server-update");
+    fixture.review_management("settings-server-update");
+    let assessed = fixture.servers.read_with(fixture.cx, |source, _| {
+        source.snapshot().servers[0]
+            .installations
+            .activation
+            .clone()
+            .unwrap()
+    });
+    assert_ne!(
+        assessed.reference,
+        staged.installations.activation.as_ref().unwrap().reference
+    );
     fixture.click("modal-action-settings-server-update-confirm");
     assert_eq!(
         fixture.requests.take(),
         vec![ServerRequest::InstallUpdate {
             server: ServerKey::new("local"),
             version: "1.5.0".into(),
-            assessment: staged.installations.activation.clone().unwrap(),
+            assessment: assessed,
         }]
     );
 
@@ -954,7 +984,7 @@ fn over_wss_an_update_explains_where_it_can_be_installed(cx: &mut TestAppContext
     };
     let mut fixture = open(Appearance::Dark, snapshot(vec![staged]), cx);
 
-    fixture.click("settings-server-update");
+    fixture.review_management("settings-server-update");
     assert!(!fixture.modal_open());
     assert!(fixture.requests.take().is_empty());
     assert_eq!(
@@ -995,7 +1025,7 @@ fn a_confirmation_accepted_after_its_server_changed_sends_nothing(cx: &mut TestA
     // The update was confirmed for a stopped server, which it would leave stopped. A server that
     // started meanwhile would restart instead, which nobody confirmed.
     fixture.click("settings-server-option-build");
-    fixture.click("settings-server-update");
+    fixture.review_management("settings-server-update");
     assert!(fixture.modal_open());
     fixture.publish(snapshot(vec![
         local(),
@@ -2175,7 +2205,7 @@ fn a_changed_exact_update_candidate_requires_another_confirmation_with_cancel_fo
     let mut server = staged_server(local());
     server.staged_version = Some("1.5.0".into());
     let mut fixture = open(Appearance::Dark, snapshot(vec![server.clone()]), cx);
-    fixture.click("settings-server-update");
+    fixture.review_management("settings-server-update");
     server
         .installations
         .staged
@@ -2379,4 +2409,77 @@ fn known_bind_endpoints_are_shown_without_inventing_an_offered_scope(cx: &mut Te
             .contains("[::1]:4444")
     );
     assert!(!fixture.rendered("settings-server-remote-access-scope-lan"));
+}
+
+#[gpui::test]
+fn server_update_click_assesses_before_confirmation_for_running_and_stopped(
+    cx: &mut TestAppContext,
+) {
+    for status in [ServerStatus::Running, ServerStatus::Stopped] {
+        let mut server = staged_server(ServerSummary {
+            status,
+            staged_version: Some("1.5.0".into()),
+            ..local()
+        });
+        server.installations.activation = None;
+        let mut fixture = open(Appearance::Dark, snapshot(vec![server.clone()]), cx);
+        fixture.click("settings-server-update");
+        assert_eq!(
+            fixture.requests.take(),
+            vec![ServerRequest::AssessInstallUpdate(server.key.clone())]
+        );
+        assert!(
+            !fixture.modal_open(),
+            "native assessment must precede confirmation"
+        );
+        let assessed = staged_server(server.clone());
+        fixture.publish(snapshot(vec![assessed.clone()]));
+        assert!(fixture.modal_open());
+        fixture.click("modal-action-settings-server-update-confirm");
+        assert_eq!(
+            fixture.requests.take(),
+            vec![ServerRequest::InstallUpdate {
+                server: server.key,
+                version: "1.5.0".into(),
+                assessment: assessed.installations.activation.unwrap()
+            }]
+        );
+    }
+}
+
+#[gpui::test]
+fn stopped_pane_recovery_opens_settings_for_its_owning_server_without_effects(
+    cx: &mut TestAppContext,
+) {
+    struct Movement;
+    impl crate::platform::window_movement::WindowMovementFactory for Movement {
+        fn create(
+            &self,
+        ) -> Rc<dyn crate::platform::window_movement::OperatingSystemWindowDragPlatform> {
+            Rc::new(RecordingOperatingSystemWindowDragPlatform::default())
+        }
+    }
+    cx.update(|cx| {
+        appearance_runtime::install(
+            crate::settings::Settings::load(MemoryStorage::with_document(
+                &SettingsDocument::default(),
+            )),
+            Rc::new(RecordingAppearancePlatform::default()),
+            cx,
+        )
+        .unwrap();
+        super::super::configure_window_chrome(Rc::new(Movement), Default::default(), None, cx);
+    });
+    let window = crate::ui::workspace_manager::tests::stopped_pane_settings(cx);
+    window
+        .read_with(cx, |settings, _| {
+            assert_eq!(settings.active_section, SettingsSectionId::Servers);
+            assert_eq!(
+                settings.servers.requested,
+                Some(crate::domain::server_view_testing::server(
+                    crate::domain::server_view_testing::B
+                ))
+            );
+        })
+        .unwrap();
 }

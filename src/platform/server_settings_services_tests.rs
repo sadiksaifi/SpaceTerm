@@ -111,7 +111,7 @@ impl ServiceManager for Manager {
         Ok(())
     }
 }
-struct Processes(AtomicU64);
+struct Processes(AtomicU64, Mutex<Option<ServerEpoch>>);
 impl ServiceProcesses for Processes {
     fn assess<'a>(
         &'a self,
@@ -122,7 +122,7 @@ impl ServiceProcesses for Processes {
             token[..8].copy_from_slice(&self.0.fetch_add(1, Ordering::SeqCst).to_be_bytes());
             Ok(RuntimeAssessment {
                 server: ServerId::new(registration.server_pin().identity),
-                epoch: None,
+                epoch: *self.1.lock().unwrap(),
                 generation: 1,
                 sessions: vec![],
                 token,
@@ -199,7 +199,7 @@ impl Fixture {
                 start_entered: tokio::sync::Notify::new(),
                 start_release: tokio::sync::Notify::new(),
             }),
-            processes: Arc::new(Processes(AtomicU64::new(1))),
+            processes: Arc::new(Processes(AtomicU64::new(1), Mutex::new(None))),
             clock: Arc::new(Clock(AtomicU64::new(100))),
         }
     }
@@ -333,6 +333,14 @@ async fn servers_settings_native_pending_request_resolves_without_reallocation()
     assert!(
         matches!(read.recovered, Some(ResultPublication::Native { request, unresolved: true, .. }) if request == original)
     );
+    let mut presentation = ServerState::default();
+    presentation.management.native_request = Some(original);
+    presentation.native_pending = Some(original);
+    apply_native_read(
+        &mut presentation,
+        recover_native(&reopened, &binding).await.unwrap(),
+    );
+    assert!(presentation.is_busy());
     fixture.manager.start_release.notify_one();
     let completed = start.await.unwrap().unwrap();
     assert!(matches!(completed.state, ServiceRequestState::Completed(_)));
@@ -343,6 +351,15 @@ async fn servers_settings_native_pending_request_resolves_without_reallocation()
     assert!(
         matches!(read.recovered, Some(ResultPublication::Native { request, unresolved: false, failure: None }) if request == original)
     );
+    apply_native_read(
+        &mut presentation,
+        recover_native(&native, &binding).await.unwrap(),
+    );
+    assert!(
+        !presentation.is_busy(),
+        "the lost completed reply must retire the original Settings pending state"
+    );
+    assert_eq!(presentation.management.native_request, Some(original));
     let next = native.supervisor().allocate_request().unwrap();
     assert_eq!(
         u64::from_be_bytes(next.as_bytes()[8..].try_into().unwrap()),
@@ -383,4 +400,146 @@ async fn servers_settings_uses_real_native_provider_for_stop_assessment() {
             .desired_state(),
         DesiredServerState::Stopped
     );
+}
+
+#[tokio::test]
+async fn desktop_native_server_action_updates_retained_connection_authority() {
+    use spaceterm_client::ports::DiscoveryState;
+    let fixture = Fixture::new(Some(DesiredServerState::Stopped));
+    let provider = fixture.provider();
+    let registration = provider
+        .management()
+        .supervisor()
+        .discover()
+        .unwrap()
+        .unwrap();
+    let binding = binding(&registration, 1);
+    let discovery = crate::platform::local_server_client::trusted_discovery(provider.clone());
+    assert_eq!(
+        discovery.status(binding.target()).await.unwrap(),
+        DiscoveryState::Stopped
+    );
+    let request = provider
+        .management()
+        .supervisor()
+        .allocate_request()
+        .unwrap();
+    provider.management().start(request).await.unwrap();
+    assert_eq!(
+        discovery.status(binding.target()).await.unwrap(),
+        DiscoveryState::Running
+    );
+    assert_eq!(
+        provider
+            .management()
+            .supervisor()
+            .discover()
+            .unwrap()
+            .unwrap()
+            .server_pin(),
+        registration.server_pin()
+    );
+    assert_eq!(
+        fixture.manager.effects.lock().unwrap().as_slice(),
+        &["configure", "start"]
+    );
+}
+
+#[tokio::test]
+async fn settings_native_update_assessment_retains_exact_running_and_stopped_scope() {
+    for (desired, replacement) in [
+        (DesiredServerState::Running, 2),
+        (DesiredServerState::Running, 3),
+        (DesiredServerState::Stopped, 2),
+        (DesiredServerState::Stopped, 3),
+    ] {
+        let fixture = Fixture::new(Some(desired));
+        let epoch = (desired == DesiredServerState::Running).then_some(ServerEpoch::new(3));
+        *fixture.processes.1.lock().unwrap() = epoch;
+        let artifact = |id: u64| -> InstallationStatus {
+            serde_json::from_value(serde_json::json!({ "installation": id, "version": format!("1.{id}.0"), "artifact_sha256": vec![id as u8; 32] })).unwrap()
+        };
+        fixture.account.stage_installation(artifact(2)).unwrap();
+        let native = fixture.provider().management();
+        let registration = native.supervisor().discover().unwrap().unwrap();
+        let original = binding(&registration, 1);
+        let server = original.target().server();
+        let read = check_native(&native, &original).await.unwrap();
+        let mut state = ServerState::default();
+        apply_native_read(&mut state, read);
+        let presentation = state.native.as_ref().unwrap();
+        let mut summary = ServerSummary {
+            key: server_key(server),
+            pairing: original.target().local_pairing().unwrap(),
+            runtime_epoch: epoch,
+            service_lifecycle: None,
+            compatibility: None,
+            installations: ServerInstallations {
+                selection_generation: Some(presentation.generation),
+                approved: presentation.approved.clone(),
+                staged: presentation.staged.clone(),
+                running: presentation.running.clone(),
+                activation: None,
+            },
+            paired_devices: None,
+            unpair_assessment: None,
+            management: ServerManagement::default(),
+            name: "Server".into(),
+            route: ServerRoute::Local,
+            status: if desired == DesiredServerState::Stopped {
+                ServerStatus::Stopped
+            } else {
+                ServerStatus::Running
+            },
+            version: Some("1.2.3".into()),
+            staged_version: Some("1.2.0".into()),
+            worktree_location: None,
+            permissions: None,
+            remote_access: None,
+        };
+        let (assessment, observed) = assess_update(&native, &original, &summary).await.unwrap();
+        assert_eq!(assessment.candidate.artifact_sha256, [2; 32]);
+        assert_eq!(assessment.selection_generation.get(), 2);
+        assert_eq!(assessment.approved, Some(artifact(1).installation));
+        assert_eq!(assessment.running, epoch.map(|_| artifact(1).installation));
+        assert_eq!(assessment.runtime_epoch, epoch);
+        assert_eq!(assessment.desired, desired);
+        apply_native_read(&mut state, observed);
+        state.native.as_mut().unwrap().activation = Some(assessment.clone());
+        summary.installations.activation = Some(assessment.clone());
+        assert!(summary.activation_matches(&assessment));
+        let restored = native
+            .restore_assessment(
+                ServiceAction::Activate(assessment.candidate.installation),
+                assessment.reference.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            restored.request(),
+            assessment.native_request,
+            "confirmation must retain the original native request"
+        );
+        fixture
+            .account
+            .stage_installation(artifact(replacement))
+            .unwrap();
+        apply_native_read(&mut state, check_native(&native, &original).await.unwrap());
+        assert!(
+            state.native.as_ref().unwrap().activation.is_none(),
+            "a changed candidate or selection invalidates the confirmation"
+        );
+        assert_eq!(
+            native
+                .supervisor()
+                .activate(restored.confirm().unwrap())
+                .await
+                .err(),
+            Some(ServiceFailure::StaleAssessment)
+        );
+        assert!(
+            fixture.manager.effects.lock().unwrap().is_empty(),
+            "assessment and stale activation must not start or stop a service"
+        );
+    }
 }

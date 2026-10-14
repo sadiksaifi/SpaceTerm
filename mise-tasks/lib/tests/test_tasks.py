@@ -3,6 +3,7 @@
 import os
 import plistlib
 import re
+import shlex
 import tomllib
 import unittest
 
@@ -53,6 +54,67 @@ class TaskCatalogTests(unittest.TestCase):
                 if isinstance(entry, dict) and not DISPATCH.match(entry["task"]):
                     with self.subTest(task=name):
                         self.assertIn(entry["task"], self.names)
+
+    def cargo_commands(self, task):
+        """Resolve TOML task calls without mistaking dependency builds for package coverage."""
+        for entry in run_entries(self.config["tasks"].get(task, {})):
+            if isinstance(entry, dict):
+                yield from self.cargo_commands(entry["task"])
+            elif entry.startswith("cargo "):
+                yield shlex.split(entry)
+
+    def test_validation_gates_check_lint_and_test_every_headless_package(self):
+        packages = {
+            "spaceterm-core",
+            "spaceterm-protocol",
+            "spaceterm-client",
+            "spaceterm-client-native",
+            "spaceterm-host",
+            "spaceterm-server",
+            "spaceterm-distribution",
+        }
+        for platform in (*PLATFORMS, "portable"):
+            coverage = {action: set() for action in ("test", "check", "clippy")}
+            for command in self.cargo_commands(f"validate:{platform}"):
+                action = command[1]
+                if action not in coverage or "--all-targets" not in command:
+                    continue
+                if any(flag in command for flag in ("--test", "--bin", "--lib", "--doc")):
+                    continue
+                if action == "clippy" and "--no-deps" not in command:
+                    continue
+                selected = {
+                    command[index + 1]
+                    for index, token in enumerate(command[:-1])
+                    if token in ("--package", "-p")
+                }
+                coverage[action].update(selected)
+            for action, selected in coverage.items():
+                with self.subTest(platform=platform, action=action):
+                    self.assertFalse(
+                        packages - selected, f"Missing packages: {packages - selected}"
+                    )
+
+    def test_validation_gates_include_cli_and_storage_test_features(self):
+        for platform in (*PLATFORMS, "portable"):
+            commands = list(self.cargo_commands(f"validate:{platform}"))
+            for package, feature in (
+                ("spaceterm-client-native", "cli"),
+                ("spaceterm-host", "test-support"),
+                ("spaceterm-client", "test-support"),
+            ):
+                with self.subTest(platform=platform, package=package):
+                    self.assertTrue(
+                        any(
+                            command[1] == "test"
+                            and package in command
+                            and "--all-targets" in command
+                            and "--features" in command
+                            and feature in command[command.index("--features") + 1].split(",")
+                            for command in commands
+                        ),
+                        f"Missing {package} tests with {feature}",
+                    )
 
     def test_file_tasks_are_executable_and_described_and_library_code_is_not(self):
         for name, path in self.files.items():

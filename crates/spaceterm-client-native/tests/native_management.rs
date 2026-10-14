@@ -1,6 +1,9 @@
 //! Real native lifecycle and CLI dispatch against isolated storage and injected OS effects.
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
+#[path = "../../spaceterm-host/tests/support/signed_installation.rs"]
+mod signed_installation;
+
 use spaceterm_client::management_cli::{
     AssessmentToken, ConfirmationPrompt, ConfirmationReply, ManagementFailure,
 };
@@ -158,6 +161,7 @@ struct Fixture {
     manager: Arc<Manager>,
     processes: Arc<Processes>,
     clock: Arc<Clock>,
+    installation_trust: Option<spaceterm_distribution::UpdateKey>,
 }
 impl Fixture {
     fn new(desired: Option<DesiredServerState>) -> Self {
@@ -189,15 +193,23 @@ impl Fixture {
             }),
             processes: Arc::new(Processes(AtomicU64::new(1))),
             clock: Arc::new(Clock(AtomicU64::new(100))),
+            installation_trust: None,
         }
     }
     fn provider(&self) -> NativeClientProvider {
-        NativeClientProvider::from_supervisor(self.account.with_providers(
+        let supervisor = self.account.with_providers(
             self.manager.clone(),
             self.processes.clone(),
             self.clock.clone(),
             None,
-        ))
+        );
+        let supervisor = match &self.installation_trust {
+            Some(key) => self
+                .account
+                .with_installation_trust(supervisor, key.clone()),
+            None => supervisor,
+        };
+        NativeClientProvider::from_supervisor(supervisor)
     }
 }
 #[derive(Default)]
@@ -793,12 +805,39 @@ async fn interrupted_cli_wait_preserves_and_resolves_the_original_admitted_start
 
 #[tokio::test]
 async fn cli_activates_only_the_assessed_staged_installation_and_preserves_stopped() {
-    let fixture = Fixture::new(Some(DesiredServerState::Stopped));
-    let staged: InstallationStatus = serde_json::from_value(serde_json::json!({
-        "installation":2,"version":"1.2.4","artifact_sha256":vec![4;32]
-    }))
-    .unwrap();
+    use spaceterm_host::server_installation::test_support;
+    let mut fixture = Fixture::new(None);
+    *fixture.manager.state.lock().unwrap() = SupervisorState::Disabled;
+    let (key, original) =
+        signed_installation::fixture("1.2.3", 7, signed_installation::native_machine());
+    let registration = fixture
+        .account
+        .initialize_with_installation(
+            DesiredServerState::Stopped,
+            Some(InstallationStatus {
+                installation: spaceterm_host::startup::InstallationId(std::num::NonZeroU64::MIN),
+                version: original.manifest().version.clone(),
+                artifact_sha256: original.artifact_sha256(),
+            }),
+        )
+        .unwrap();
+    let store = test_support::store(&registration, key.clone()).unwrap();
+    let original_id = store.stage(&original).unwrap();
+    store
+        .activate(original_id, store.snapshot().unwrap().generation, 1)
+        .unwrap();
+    let (_, candidate) =
+        signed_installation::fixture("1.2.4", 7, signed_installation::native_machine());
+    let candidate_id = store.stage(&candidate).unwrap();
+    assert_eq!(candidate_id.0.get(), 2);
+    let staged = InstallationStatus {
+        installation: candidate_id,
+        version: candidate.manifest().version.clone(),
+        artifact_sha256: candidate.artifact_sha256(),
+    };
+    drop(store);
     fixture.account.stage_installation(staged.clone()).unwrap();
+    fixture.installation_trust = Some(key);
     let provider = fixture.provider();
     let deps = dependencies(&provider);
     let mut assessed = Io::default();
@@ -949,4 +988,179 @@ async fn cli_local_install_rejects_unsigned_inputs_before_request_or_service_eff
     assert!(!diagnostic.contains("private-path-marker"));
     assert!(!diagnostic.contains("private-content-marker"));
     assert!(!diagnostic.contains("native_request"));
+}
+
+#[tokio::test]
+async fn cli_native_results_release_capacity_across_more_than_256_provider_restarts() {
+    let fixture = Fixture::new(Some(DesiredServerState::Running));
+    let mut first = None;
+    for _ in 0..260 {
+        let provider = fixture.provider();
+        let CliOutput::ServiceProgress(progress) = run(
+            &provider,
+            NativeCliCommand::Start,
+            ConfirmationMode::Interactive,
+            &mut Io::default(),
+        )
+        .await
+        .unwrap() else {
+            panic!("missing progress")
+        };
+        assert_eq!(
+            progress.state,
+            ServiceRequestState::Completed(ServiceOutcome::Started)
+        );
+        first.get_or_insert(progress);
+    }
+    let provider = fixture.provider();
+    let first = first.unwrap();
+    let CliOutput::ServiceProgress(recovered) = run(
+        &provider,
+        NativeCliCommand::Resolve {
+            request: first.request,
+        },
+        ConfirmationMode::Interactive,
+        &mut Io::default(),
+    )
+    .await
+    .unwrap() else {
+        panic!("missing original result")
+    };
+    assert_eq!(recovered, first);
+}
+#[tokio::test]
+async fn cli_update_stage_authenticates_artifacts_before_request_or_service_effects() {
+    for desired in [DesiredServerState::Running, DesiredServerState::Stopped] {
+        let fixture = Fixture::new(Some(desired));
+        let artifacts = Arc::new(DeniedArtifacts(AtomicU64::new(0)));
+        let provider = fixture
+            .provider()
+            .with_artifact_transport(artifacts.clone());
+        assert!(matches!(
+            run(
+                &provider,
+                NativeCliCommand::UpdateStage {
+                    version: None,
+                    source: None
+                },
+                ConfirmationMode::Interactive,
+                &mut Io::default()
+            )
+            .await,
+            Err(ManagementFailure::AuthorizationDenied)
+        ));
+        assert_eq!(artifacts.0.load(Ordering::SeqCst), 1);
+        assert!(fixture.manager.effects.lock().unwrap().is_empty());
+        assert_eq!(
+            provider.management().status().await.unwrap().desired,
+            Some(desired)
+        );
+    }
+}
+
+#[tokio::test]
+async fn cli_native_completion_recovery_settles_crashes_before_and_after_host_acknowledgement() {
+    for acknowledged in [false, true] {
+        let fixture = Fixture::new(Some(DesiredServerState::Running));
+        let provider = fixture.provider();
+        let management = provider.management();
+        let request = management.supervisor().allocate_request().unwrap();
+        let original = management.start(request).await.unwrap();
+        assert_eq!(management.retain_cli_completion(request).unwrap(), original);
+        if acknowledged {
+            management.acknowledge_request(request).unwrap();
+        }
+        drop(management);
+        drop(provider);
+        let reopened = fixture.provider();
+        let CliOutput::ServiceProgress(recovered) = run(
+            &reopened,
+            NativeCliCommand::Resolve { request },
+            ConfirmationMode::Interactive,
+            &mut Io::default(),
+        )
+        .await
+        .unwrap() else {
+            panic!("missing original completion")
+        };
+        assert_eq!(recovered, original);
+        assert_eq!(
+            reopened.management().supervisor().request_progress(request),
+            Err(ServiceFailure::RequestRetired)
+        );
+        assert_eq!(
+            fixture
+                .manager
+                .effects
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|effect| **effect == "start")
+                .count(),
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn cli_local_update_stage_uses_release_verification_without_network_or_lifecycle_effects() {
+    for desired in [DesiredServerState::Running, DesiredServerState::Stopped] {
+        let fixture = Fixture::new(Some(desired));
+        let artifacts = Arc::new(DeniedArtifacts(AtomicU64::new(0)));
+        let provider = fixture
+            .provider()
+            .with_artifact_transport(artifacts.clone());
+        let local = tempfile::tempdir().unwrap();
+        let feed = local.path().join("private-path-marker.json");
+        let archive = local.path().join("private-path-marker.tar.gz");
+        std::fs::write(&feed, b"private-content-marker").unwrap();
+        std::fs::write(
+            local.path().join("private-path-marker.json.sig"),
+            b"unsigned",
+        )
+        .unwrap();
+        std::fs::write(&archive, b"private-content-marker").unwrap();
+        let invocation = spaceterm_client_native::cli::parse(
+            [
+                "--json",
+                "--non-interactive",
+                "update",
+                "stage",
+                "--feed",
+                feed.to_str().unwrap(),
+                "--archive",
+                archive.to_str().unwrap(),
+            ]
+            .map(Into::into),
+        )
+        .unwrap();
+        let dependencies = CliDependencies::new(
+            Ok(provider.key()),
+            Arc::new(UnavailableProtocolManagement),
+            provider.management(),
+            Arc::new(UnavailablePairingBindings),
+        );
+        let mut io = Io::default();
+        let Dispatch::Exit(exit) = dispatch(invocation, &dependencies, &mut io).await else {
+            panic!("staging cannot serve")
+        };
+        assert_eq!(
+            exit.code(),
+            ManagementFailure::UnsafeNativeState.exit_code()
+        );
+        assert_eq!(artifacts.0.load(Ordering::SeqCst), 0);
+        assert!(fixture.manager.effects.lock().unwrap().is_empty());
+        assert_eq!(
+            provider.management().status().await.unwrap().desired,
+            Some(desired)
+        );
+        let diagnostic = format!(
+            "{}{}",
+            String::from_utf8_lossy(&io.stdout),
+            String::from_utf8_lossy(&io.stderr)
+        );
+        assert!(!diagnostic.contains("private-path-marker"));
+        assert!(!diagnostic.contains("private-content-marker"));
+        assert!(!diagnostic.contains("native_request"));
+    }
 }

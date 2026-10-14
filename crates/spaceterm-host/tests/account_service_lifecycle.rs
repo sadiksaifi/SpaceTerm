@@ -3,6 +3,9 @@
     any(target_os = "macos", target_os = "linux")
 ))]
 
+#[path = "support/signed_installation.rs"]
+mod signed_installation;
+
 use spaceterm_core::{
     authority::{ServerEpoch, SessionKey},
     identity::ServerId,
@@ -273,6 +276,19 @@ impl Fixture {
         account
             .initialize_with_installation(DesiredServerState::Running, Some(installation(1)))
             .unwrap();
+        let registration = account.reopen().discover().unwrap().unwrap();
+        let (key, first) =
+            signed_installation::fixture("1.0.0", 7, signed_installation::native_machine());
+        let store =
+            spaceterm_host::server_installation::test_support::store(&registration, key).unwrap();
+        let id = store.stage(&first).unwrap();
+        store
+            .activate(id, store.snapshot().unwrap().generation, 1)
+            .unwrap();
+        let (_, second) =
+            signed_installation::fixture("2.0.0", 7, signed_installation::native_machine());
+        store.stage(&second).unwrap();
+        drop(store);
         Self {
             _root: root,
             account,
@@ -282,11 +298,16 @@ impl Fixture {
         }
     }
     fn supervisor(&self) -> ServiceSupervisor {
-        self.account.with_providers(
-            self.manager.clone(),
-            self.processes.clone(),
-            self.clock.clone(),
-            None,
+        let (key, _) =
+            signed_installation::fixture("1.0.0", 7, signed_installation::native_machine());
+        self.account.with_installation_trust(
+            self.account.with_providers(
+                self.manager.clone(),
+                self.processes.clone(),
+                self.clock.clone(),
+                None,
+            ),
+            key,
         )
     }
 }
@@ -461,7 +482,13 @@ fn installation(id: u64) -> InstallationStatus {
             std::num::NonZeroU64::new(id).unwrap(),
         ),
         version: spaceterm_distribution::BuildVersion::parse(&format!("{id}.0.0")).unwrap(),
-        artifact_sha256: [id as u8; 32],
+        artifact_sha256: signed_installation::fixture(
+            &format!("{id}.0.0"),
+            7,
+            signed_installation::native_machine(),
+        )
+        .1
+        .artifact_sha256(),
     }
 }
 
@@ -1200,10 +1227,18 @@ async fn unresolved_original_stop_blocks_new_action_admission_before_effects() {
 }
 
 #[tokio::test]
-async fn incompatible_staged_activation_is_rejected_before_retirement_or_manager_effects() {
+async fn damaged_staged_activation_is_rejected_before_retirement_or_manager_effects() {
     let fixture = Fixture::new(false, true);
     fixture.account.stage_installation(installation(2)).unwrap();
-    *fixture.manager.rejected_installation.lock().unwrap() = Some(installation(2).installation);
+    let selected = spaceterm_host::server_installation::test_support::existing_store(
+        &fixture.account.reopen().discover().unwrap().unwrap(),
+        signed_installation::fixture("1.0.0", 7, signed_installation::native_machine()).0,
+    )
+    .unwrap();
+    let executable = selected
+        .retain_compatible_staged(installation(2).installation, 1)
+        .unwrap();
+    std::fs::write(executable.path(), b"damaged candidate").unwrap();
     let supervisor = fixture.supervisor();
     let request = supervisor.allocate_request().unwrap();
     let action = supervisor
@@ -1217,7 +1252,7 @@ async fn incompatible_staged_activation_is_rejected_before_retirement_or_manager
         .unwrap();
     assert_eq!(
         supervisor.activate(action).await,
-        Err(ServiceFailure::IncompatibleStorage)
+        Err(ServiceFailure::ArtifactRejected)
     );
     assert!(fixture.processes.calls.lock().unwrap().is_empty());
     assert!(fixture.manager.effects.lock().unwrap().is_empty());
@@ -1461,6 +1496,44 @@ async fn near_ceiling_journal_reserves_nonempty_scope_and_original_outcome_befor
                 generation: spaceterm_core::authority::SessionGeneration::new(1),
             })
             .collect();
+        // Retain exact nonempty scopes until another assessment no longer fits.
+        for _ in 0..32 {
+            let next = match supervisor.allocate_request() {
+                Ok(next) => next,
+                Err(ServiceFailure::LimitExceeded) => break,
+                Err(failure) => panic!("unexpected allocation failure {failure:?}"),
+            };
+            match supervisor.assess(next, ServiceAction::Stop).await {
+                Ok(_) => {}
+                Err(ServiceFailure::LimitExceeded) => break,
+                Err(failure) => panic!("unexpected assessment failure {failure:?}"),
+            }
+        }
+        // Later allocations must not consume capacity already owed to this outcome.
+        // Allocation may retire old unsubmitted IDs rather than fail. Padding
+        // is bounded by the journal's 256 slots, not an unreachable byte target.
+        for _ in 0..256 {
+            if std::fs::metadata(fixture.account.anchor().join("requests"))
+                .unwrap()
+                .len()
+                >= (256 * 1024 - 120)
+            {
+                break;
+            }
+            match supervisor.allocate_request() {
+                Ok(_) => {}
+                Err(ServiceFailure::LimitExceeded) => break,
+                Err(failure) => panic!("unexpected allocation failure {failure:?}"),
+            }
+        }
+        assert!(
+            std::fs::metadata(fixture.account.anchor().join("requests"))
+                .unwrap()
+                .len()
+                > 240 * 1024
+        );
+        // Unsubmitted IDs may be retired under pressure. Capture this original
+        // confirmation after pressure, then test its reserved completion budget.
         let request = supervisor.allocate_request().unwrap();
         let action = supervisor
             .assess(
@@ -1475,37 +1548,6 @@ async fn near_ceiling_journal_reserves_nonempty_scope_and_original_outcome_befor
             .unwrap()
             .confirm()
             .unwrap();
-        // Retain exact nonempty scopes until another assessment no longer fits.
-        loop {
-            let next = match supervisor.allocate_request() {
-                Ok(next) => next,
-                Err(ServiceFailure::LimitExceeded) => break,
-                Err(failure) => panic!("unexpected allocation failure {failure:?}"),
-            };
-            match supervisor.assess(next, ServiceAction::Stop).await {
-                Ok(_) => {}
-                Err(ServiceFailure::LimitExceeded) => break,
-                Err(failure) => panic!("unexpected assessment failure {failure:?}"),
-            }
-        }
-        // Later allocations must not consume capacity already owed to this outcome.
-        while std::fs::metadata(fixture.account.anchor().join("requests"))
-            .unwrap()
-            .len()
-            < (256 * 1024 - 120)
-        {
-            match supervisor.allocate_request() {
-                Ok(_) => {}
-                Err(ServiceFailure::LimitExceeded) => break,
-                Err(failure) => panic!("unexpected allocation failure {failure:?}"),
-            }
-        }
-        assert!(
-            std::fs::metadata(fixture.account.anchor().join("requests"))
-                .unwrap()
-                .len()
-                > 240 * 1024
-        );
         let result = if activate {
             supervisor.activate(action).await
         } else {

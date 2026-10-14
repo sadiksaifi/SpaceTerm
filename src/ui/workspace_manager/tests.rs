@@ -5212,7 +5212,7 @@ fn risky_pane_close_should_follow_keyboard_focus_and_confirm_once(cx: &mut TestA
         (1, 2)
     );
 
-    cx.simulate_keystrokes("cmd-w");
+    cx.dispatch_action(crate::ui::ClosePane);
     cx.run_until_parked();
     let first_pending = manager.read_with(cx, |manager, _| {
         manager
@@ -5220,7 +5220,7 @@ fn risky_pane_close_should_follow_keyboard_focus_and_confirm_once(cx: &mut TestA
             .pending()
             .expect("risky close should present one confirmation")
     });
-    cx.simulate_keystrokes("cmd-w");
+    cx.dispatch_action(crate::ui::ClosePane);
     cx.run_until_parked();
 
     assert_eq!(
@@ -5313,7 +5313,7 @@ fn prompt_metadata_should_close_a_pane_without_confirmation(cx: &mut TestAppCont
         .unwrap();
     cx.run_until_parked();
 
-    cx.simulate_keystrokes("cmd-w");
+    cx.dispatch_action(crate::ui::ClosePane);
     cx.run_until_parked();
 
     assert!(manager.read_with(cx, |manager, _| {
@@ -13245,3 +13245,5 @@ fn a_menu_should_keep_the_keyboards_row_in_a_focused_sidebar(cx: &mut TestAppCon
     );
     assert_eq!(after_keyboard_menu, landed);
 }
+
+pub(in crate::ui) use super::server::tests::stopped_pane_settings;

@@ -7,6 +7,8 @@ use std::{rc::Rc, sync::Arc};
 
 mod native;
 pub(crate) use native::production;
+#[cfg(test)]
+pub(crate) use native::protocol::{Decoder as AcceptanceDecoder, NativeProtocol as AcceptanceProtocol};
 
 use gpui::{App, Entity, Task};
 use spaceterm_client::{
@@ -19,6 +21,16 @@ use spaceterm_client::{
     view::{ViewPersistence, ViewStore},
 };
 use spaceterm_core::identity::ServerId;
+
+pub(crate) const NATIVE_PROTOCOL_CAPABILITIES: [u32; 7] = [
+    spaceterm_protocol::negotiation::CAPABILITY_SERVER_GIT,
+    spaceterm_protocol::negotiation::CAPABILITY_SERVER_DIRECTORIES,
+    spaceterm_protocol::negotiation::CAPABILITY_ORGANIZATION_COMPARISONS,
+    spaceterm_protocol::negotiation::CAPABILITY_TERMINAL_STREAMS,
+    spaceterm_protocol::negotiation::CAPABILITY_NATIVE_NOTIFICATIONS,
+    spaceterm_protocol::negotiation::CAPABILITY_APPLICATION_MOUSE,
+    spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA,
+];
 
 use crate::ui::{
     server_client_runtime::{
@@ -35,6 +47,8 @@ use crate::ui::{
     reason = "native client provider supplies the published ports at startup"
 )]
 pub(crate) struct NativeDesktopOwners {
+    #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+    pub(crate) fixture: bool,
     pub(crate) services: ClientServices,
     pub(crate) journal: Arc<JournalController>,
     pub(crate) channels: Arc<PaneChannels>,
@@ -49,6 +63,8 @@ pub(crate) struct NativeDesktopOwners {
 impl Clone for NativeDesktopOwners {
     fn clone(&self) -> Self {
         Self {
+            #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+            fixture: self.fixture,
             services: ClientServices {
                 routes: self.services.routes.clone(),
                 credentials: self.services.credentials.clone(),
@@ -72,12 +88,21 @@ impl Clone for NativeDesktopOwners {
 }
 
 pub(crate) trait NativeRegistryBinding: Send + Sync {
+    fn retained_organization(
+        &self,
+    ) -> spaceterm_client::ports::ClientFuture<
+        '_,
+        Vec<spaceterm_core::organization::OrganizationSnapshot>,
+    > {
+        Box::pin(async { Ok(vec![]) })
+    }
     fn bind(
         &self,
         registry: ClientRegistry,
     ) -> Result<(), spaceterm_client::failure::ClientFailure>;
 }
 trait NativeOwnerFactory: Send + Sync {
+    fn bind_window(&self, _: &gpui::Window, _: &mut App) {}
     fn foreground_setup(
         &self,
     ) -> spaceterm_client::ports::ClientFuture<
@@ -167,6 +192,7 @@ impl<S: ViewStore + 'static> RecoveredDesktopClient for RecoveredWithEnrollment<
 
 /// Application-scoped native recovery. The host constructs this once, never per window or Pane.
 pub(crate) trait DesktopClientStartup {
+    fn bind_window(&self, _: &gpui::Window, _: &mut App) {}
     fn recover(
         &self,
         cx: &mut App,
@@ -269,6 +295,11 @@ impl<S: ViewStore + 'static> NativeDesktopStartup<S> {
 }
 
 impl<S: ViewStore + 'static> DesktopClientStartup for NativeDesktopStartup<S> {
+    fn bind_window(&self, window: &gpui::Window, cx: &mut App) {
+        if let Some(factory) = &self.factory {
+            factory.bind_window(window, cx);
+        }
+    }
     fn recover(
         &self,
         cx: &mut App,
@@ -402,6 +433,8 @@ pub(crate) async fn recover<S: ViewStore + 'static>(
     store: S,
 ) -> Result<DesktopClientComposition<S>, DesktopClientError> {
     let NativeDesktopOwners {
+        #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+        fixture,
         mut services,
         journal,
         channels,
@@ -414,7 +447,7 @@ pub(crate) async fn recover<S: ViewStore + 'static>(
     } = owners;
     journal.ensure_healthy().map_err(DesktopClientError::from)?;
     let view_journal = journal.clone();
-    let (persistence, view) = tokio::task::spawn_blocking(move || {
+    let (persistence, _view) = tokio::task::spawn_blocking(move || {
         let mut persistence = ViewPersistence::new(store);
         // The portable launch hook rereads suppression after storage IO and preserves every
         // malformed, locked or unavailable document instead of replacing it with defaults.
@@ -427,9 +460,27 @@ pub(crate) async fn recover<S: ViewStore + 'static>(
     .map_err(|_| DesktopClientError::LocalStorageUnavailable)??;
     // No connection-specific or pairing-specific second journal may admit a suppressed binding.
     services.journal = journal.clone();
-    let (registry, runtime) = ClientRegistry::recover(services)
+    let snapshots = match &registry_binding {
+        Some(binding) => binding
+            .retained_organization()
+            .await
+            .map_err(DesktopClientError::from)?,
+        None => vec![],
+    };
+    let (registry, runtime) = ClientRegistry::recover_with_retained(services, snapshots)
         .await
         .map_err(DesktopClientError::from)?;
+    let recovered_registry = registry.clone();
+    let recovered_journal = journal.clone();
+    let (persistence, view) = tokio::task::spawn_blocking(move || {
+        let mut persistence = persistence;
+        let (view, _) = recovered_registry
+            .restore_view(&mut persistence, &recovered_journal)
+            .map_err(|_| DesktopClientError::LocalStorageUnavailable)?;
+        Ok::<_, DesktopClientError>((persistence, view))
+    })
+    .await
+    .map_err(|_| DesktopClientError::LocalStorageUnavailable)??;
     if let Some(binding) = registry_binding {
         binding
             .bind(registry.clone())
@@ -455,7 +506,7 @@ pub(crate) async fn recover<S: ViewStore + 'static>(
     )
     .map_err(DesktopClientError::from)?;
     settings.inventories.extend(recovered_settings.inventories);
-    Ok(DesktopClientComposition {
+    let composition = DesktopClientComposition {
         registry,
         runtime,
         channels,
@@ -467,7 +518,14 @@ pub(crate) async fn recover<S: ViewStore + 'static>(
         executor: tokio::runtime::Handle::current(),
         servers,
         settings,
-    })
+    };
+    #[cfg(all(feature = "desktop-test-support", debug_assertions))]
+    let composition = if fixture {
+        native::test_composition::initialize_workspace(composition).await?
+    } else {
+        composition
+    };
+    Ok(composition)
 }
 
 /// Retained startup task and single admission gate. Reopen waits for the original task instead

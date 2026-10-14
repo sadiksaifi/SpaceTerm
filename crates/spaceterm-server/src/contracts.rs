@@ -159,6 +159,29 @@ pub trait ExternalWorkPort: Send + Sync {
 /// durable Stopped authorization before shutting down. This port is not a
 /// decoded wire request, same-UID shortcut, or fabricated pairing identity.
 pub trait HostManagementPort: Send + Sync {
+    /// Fences the exact next recovery epoch after previous-instance cleanup and
+    /// before any external reconciliation work or epoch commit can start.
+    fn prepare_next_instance<'a>(
+        &'a self,
+        _server: ServerId,
+        _next_epoch: ServerEpoch,
+    ) -> ServerFuture<'a, Result<(), ServerFailure>> {
+        Box::pin(async { Ok(()) })
+    }
+    /// The first retirement reason comes from the recovered store, not a new
+    /// request. Existing providers must return observations matching it exactly.
+    fn reconcile_previous_instance<'a>(
+        &'a self,
+        server: ServerId,
+        epoch: ServerEpoch,
+        expected: &'a [spaceterm_core::retirement::RetiredSession],
+    ) -> ServerFuture<'a, Result<Vec<SessionCleanupObservation>, ServerFailure>> {
+        Box::pin(async move {
+            let sessions: Vec<_> = expected.iter().map(|value| value.session()).collect();
+            self.previous_instance_cleanup(server, epoch, &sessions)
+                .await
+        })
+    }
     fn previous_instance_cleanup<'a>(
         &'a self,
         server: ServerId,

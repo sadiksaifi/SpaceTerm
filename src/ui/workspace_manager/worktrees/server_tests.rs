@@ -287,9 +287,12 @@ fn server_worktree_removal_displays_every_page_without_local_holder_reduction(
             .collect::<Vec<_>>(),
         vec![ws(A, 1), ws(A, 2)]
     );
-    let message = removal_message(&assessment);
-    assert!(message.contains("2 Tabs in 2 Workspaces"));
-    assert!(message.contains("Workspace 2, Tab 2"));
+    let message = removal_message(&assessment, &organization().org.snapshot());
+    assert!(message.contains("Closes 2 Tabs in 2 Workspaces: work and work, for every client."));
+    assert!(
+        !message.contains("Tab 2") && !message.contains("Pane 2"),
+        "the confirmation names Workspaces instead of listing local IDs: {message}"
+    );
     assert!(message.contains("uncommitted changes"));
     assert!(message.contains("submodule checkouts"));
     assert!(message.contains("for every client"));
@@ -715,4 +718,22 @@ fn server_worktree_detach_does_not_lose_unattached_inventory_interest(cx: &mut T
     });
     assert!(store.read_with(cx, |store, _| store.inventory(id).is_some()));
     assert!(peer.queries.lock().unwrap().len() > before);
+}
+
+#[test]
+fn server_worktree_removal_names_at_most_three_workspaces() {
+    let names = |count: usize| {
+        bounded_names(
+            ["Docs", "Api", "Web", "Ops", "Lab"]
+                .into_iter()
+                .take(count)
+                .map(|name| Some(name.to_owned()))
+                .collect::<Vec<_>>()
+                .into_iter(),
+        )
+    };
+    assert_eq!(names(1), "Docs");
+    assert_eq!(names(2), "Docs and Api");
+    assert_eq!(names(3), "Docs, Api and Web");
+    assert_eq!(names(5), "Docs, Api, Web and 2 more");
 }

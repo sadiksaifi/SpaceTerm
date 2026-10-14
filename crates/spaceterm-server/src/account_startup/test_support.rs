@@ -32,6 +32,9 @@ impl ServiceManager for Manager {
                 .map_err(|_| ServiceFailure::SupervisorUnavailable)?)
         })
     }
+    fn scoped_processes<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, Vec<u32>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
     fn linger(&self) -> ServiceFuture<'_, Option<LingerState>> {
         Box::pin(async { Ok(Some(LingerState::Enabled)) })
     }
@@ -84,6 +87,52 @@ pub fn supervisor(
     Ok(Arc::new(fixture.with_providers(
         Arc::new(Manager(Mutex::new(SupervisorState::Running))),
         processes,
+        Arc::new(Clock),
+        None,
+    )))
+}
+
+struct FixtureInstallations;
+impl spaceterm_host::account_service::ServiceInstallations for FixtureInstallations {
+    fn approved_executable(
+        &self,
+        _: &RegisteredServer,
+    ) -> Result<std::path::PathBuf, ServiceFailure> {
+        std::env::current_exe().map_err(|_| ServiceFailure::StorageUnavailable)
+    }
+    fn uninstall(&self, _: &RegisteredServer) -> Result<(), ServiceFailure> {
+        Ok(())
+    }
+}
+
+/// Uses the production signed custody and native process provider. Only the
+/// service-manager scope and executable selection are supplied by the fixture.
+pub fn retained_supervisor(root: &Path) -> Result<Arc<ServiceSupervisor>, StartupFailure> {
+    retained_supervisor_with_clock(root, None)
+}
+
+/// Injects only the native boot-clock observation for reboot acceptance.
+pub fn retained_supervisor_with_clock(
+    root: &Path,
+    clock: Option<Arc<dyn ServiceClock>>,
+) -> Result<Arc<ServiceSupervisor>, StartupFailure> {
+    use spaceterm_host::account_service::{
+        NativeServiceProcesses, runtime_inventory::RetainedRuntimeProcesses,
+    };
+    let fixture = AccountServiceFixture::new(root, BuildIdentity::Development)
+        .map_err(StartupFailure::Account)?;
+    let manager: Arc<dyn ServiceManager> = Arc::new(Manager(Mutex::new(SupervisorState::Running)));
+    let processes = NativeServiceProcesses::current(Arc::new(FixtureInstallations))
+        .map_err(StartupFailure::Account)?
+        .with_manager(manager.clone())
+        .with_runtime(Arc::new(RetainedRuntimeProcesses));
+    let processes = match clock {
+        Some(clock) => processes.with_clock(clock),
+        None => processes,
+    };
+    Ok(Arc::new(fixture.with_providers(
+        manager,
+        Arc::new(processes),
         Arc::new(Clock),
         None,
     )))
@@ -153,15 +202,27 @@ impl ServiceProcesses for StartupAbsence {
 /// Runs the same server composition against an existing fixture registration.
 /// This does not initialize a key, organization store or service configuration.
 pub async fn run(root: &Path) -> Result<crate::shutdown::ShutdownReport, StartupFailure> {
+    run_with_home(root, root).await
+}
+
+/// Supplies the private display harness's HOME so its existing process retirement scope
+/// includes every shell descendant. Storage remains under the separately admitted root.
+pub async fn run_with_home(
+    root: &Path,
+    home: &Path,
+) -> Result<crate::shutdown::ShutdownReport, StartupFailure> {
+    let home = home
+        .canonicalize()
+        .map_err(|_| StartupFailure::Account(ServiceFailure::StorageUnavailable))?;
     let root = root
         .canonicalize()
         .map_err(|_| StartupFailure::Account(ServiceFailure::StorageUnavailable))?;
     let facts = TrustedAccountFacts::current().map_err(StartupFailure::Account)?;
-    let supervisor = supervisor(&root, Arc::new(StartupAbsence))?;
+    let supervisor = retained_supervisor(&root)?;
     let startup = AccountStartup::admit(&supervisor)?;
     let launch = AccountLaunchFacts {
         uid: facts.uid(),
-        home: root.clone(),
+        home,
         planner: ShellLaunchPlanner::for_test(root.join("shell"), root.clone()),
         machine: LocalMachine::default(),
     };
@@ -177,4 +238,120 @@ pub async fn run(root: &Path) -> Result<crate::shutdown::ShutdownReport, Startup
             tokio::select! { _ = terminate.recv() => {}, _ = interrupt.recv() => {} }
         })
         .await
+}
+
+/// Initializes a fresh accessibility fixture with real private keys and SQLite storage.
+/// Only test-enabled binaries expose this operation; existing roots are never reset.
+pub fn initialize(root: &Path) -> Result<(), StartupFailure> {
+    use spaceterm_core::{identity::ServerId, organization::ServerDirectory};
+    use spaceterm_host::{
+        organization_store::{
+            SqliteOrganizationStore, StoreIdentity, StoreLimits,
+            bootstrap::{InitializationDisposition, NewServerOrigin, NewStoreSeed},
+            migrations, schema,
+        },
+        startup::DesiredServerState,
+        storage::Database,
+    };
+    use std::{io::Write as _, os::unix::fs::OpenOptionsExt as _};
+    let root = root
+        .canonicalize()
+        .map_err(|_| StartupFailure::Account(ServiceFailure::StorageUnavailable))?;
+    let fixture = AccountServiceFixture::new(&root, BuildIdentity::Development)
+        .map_err(StartupFailure::Account)?;
+    if fixture
+        .reopen()
+        .discover()
+        .map_err(StartupFailure::Account)?
+        .is_some()
+    {
+        return Err(StartupFailure::Account(ServiceFailure::IdentityMismatch));
+    }
+    let mut shell = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o700)
+        .open(root.join("shell"))
+        .map_err(|_| StartupFailure::Account(ServiceFailure::StorageUnavailable))?;
+    shell
+        .write_all(b"#!/bin/sh\nexec /bin/bash --noprofile --norc \"$@\"\n")
+        .and_then(|_| shell.sync_all())
+        .map_err(|_| StartupFailure::Account(ServiceFailure::StorageUnavailable))?;
+    let registration = fixture
+        .initialize_with_installation(
+            DesiredServerState::Running,
+            Some(spaceterm_host::account_service::InstallationStatus {
+                installation: spaceterm_host::startup::InstallationId(std::num::NonZeroU64::MIN),
+                version: crate::distribution_metadata::version()
+                    .map_err(StartupFailure::Distribution)?,
+                artifact_sha256: [1; 32],
+            }),
+        )
+        .map_err(StartupFailure::Account)?;
+    let pin = registration.server_pin();
+    let identity = StoreIdentity {
+        server: ServerId::new(pin.identity),
+        account: registration.key(),
+        server_public_key: pin.public_key,
+    };
+    let home = ServerDirectory::new(
+        identity.server,
+        root.as_os_str().as_encoded_bytes().to_vec(),
+    )
+    .map_err(|_| StartupFailure::Account(ServiceFailure::UnsafeStorage))?;
+    let database = Database::open_for_application(
+        registration.organization_directory(),
+        migrations(),
+        schema::APPLICATION_ID,
+    )
+    .map_err(StartupFailure::Storage)?;
+    let services = crate::adapters::store::production_services(identity, home)
+        .map_err(StartupFailure::Store)?;
+    match SqliteOrganizationStore::initialize_new(
+        database,
+        NewStoreSeed {
+            identity,
+            origin: NewServerOrigin::LocalHeadless,
+        },
+        StoreLimits::production(),
+        services,
+    ) {
+        InitializationDisposition::Durable { .. } => Ok(()),
+        InitializationDisposition::NotApplied(failure) => Err(StartupFailure::Store(failure)),
+        InitializationDisposition::Indeterminate => {
+            Err(StartupFailure::Account(ServiceFailure::Indeterminate))
+        }
+    }
+}
+
+#[cfg(test)]
+mod fixture_tests {
+    use super::*;
+
+    #[test]
+    fn accessibility_fixture_initializes_real_account_store_and_refuses_reinitialization() {
+        #[cfg(target_os = "linux")]
+        let parent = "/var/tmp";
+        #[cfg(target_os = "macos")]
+        let parent = "/private/tmp";
+        let root = tempfile::tempdir_in(parent).unwrap();
+        initialize(root.path()).unwrap();
+        let supervisor = supervisor(root.path(), Arc::new(StartupAbsence)).unwrap();
+        let registration = supervisor.discover().unwrap().unwrap();
+        let pin = registration.server_pin();
+        // Opening SQLite alone is insufficient: the account startup also requires an approved installation.
+        drop(AccountStartup::admit(&supervisor).unwrap());
+        let home = spaceterm_core::organization::ServerDirectory::new(
+            spaceterm_core::identity::ServerId::new(pin.identity),
+            root.path().as_os_str().as_encoded_bytes().to_vec(),
+        )
+        .unwrap();
+        AccountStartup::open(registration)
+            .unwrap()
+            .open_store(home)
+            .unwrap();
+        assert!(root.path().join("shell").is_file());
+        assert!(initialize(root.path()).is_err());
+        assert_eq!(supervisor.discover().unwrap().unwrap().server_pin(), pin);
+    }
 }

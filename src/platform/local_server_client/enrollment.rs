@@ -1,7 +1,10 @@
 //! Local account-owner exchange over a separately verified private endpoint.
 //! The ordinary desktop binding is published only by the portable enrollment driver.
 
+mod channel;
+
 use super::classify;
+use channel::{NativeOwnerChannel, OwnerChannelProvider};
 use spaceterm_client::{
     failure::{ClientFailure, ClientFailureClass},
     journal::{ClientJournalChange, JournalController},
@@ -69,53 +72,42 @@ pub(super) async fn enroll(
     enroll_with_credentials(native, journal, DeviceCredentials::native()).await
 }
 
-async fn enroll_with_credentials<N: NativeDeviceCredentials>(
+pub(crate) async fn enroll_with_credentials<N: NativeDeviceCredentials + Clone + 'static>(
     native: &NativeClientProvider,
     journal: Arc<JournalController>,
     credentials: N,
 ) -> Result<(), ClientFailure> {
+    enroll_using(
+        native,
+        journal,
+        credentials,
+        &NativeOwnerChannel(native.clone()),
+    )
+    .await
+}
+
+async fn enroll_using<N: NativeDeviceCredentials + Clone + 'static>(
+    native: &NativeClientProvider,
+    journal: Arc<JournalController>,
+    credentials: N,
+    channels: &dyn OwnerChannelProvider,
+) -> Result<(), ClientFailure> {
+    let provisioning_credentials = Arc::new(credentials.clone());
     let management = native.management();
     let supervisor = management.supervisor();
     let registration = supervisor
         .discover()
         .map_err(classify)?
         .ok_or_else(|| failure(ClientFailureClass::StaleAuthority))?;
-    // This IPC owner endpoint belongs to the running actor. An unavailable or
-    // deliberately stopped service never grants permission to Start or open its store.
-    if registration.desired_state() != DesiredServerState::Running {
-        return Err(failure(ClientFailureClass::Unavailable));
-    }
+    // Running uses the existing actor's private owner endpoint. Stopped uses
+    // the deliberate listener-free owner command, never service-manager Start.
     let pin = registration.server_pin();
     let server = ServerId::new(pin.identity);
     let ordinary = spaceterm_client_native::route::LocalRouteAuthority::new(
         registration.endpoint().map_err(classify)?,
     )?;
     let route = ordinary.description().clone();
-    let endpoint = registration.endpoint().map_err(classify)?;
-    let directory = endpoint
-        .path()
-        .parent()
-        .ok_or_else(|| failure(ClientFailureClass::UnsafeEndpoint))?;
-    let owner = PrivateIpcDirectory::open(directory)
-        .and_then(|directory| directory.endpoint("owner"))
-        .map_err(spaceterm_client_native::route::classify)?;
-    let until = tokio::time::Instant::now() + DEADLINE;
-    let transport = loop {
-        match IpcTransport::connect(
-            &owner,
-            MessageLimit::new(FRAME_LIMIT).map_err(spaceterm_client_native::route::classify)?,
-        )
-        .await
-        {
-            Ok(transport) => break Arc::new(transport),
-            Err(spaceterm_host::transport::TransportError::Unavailable)
-                if tokio::time::Instant::now() < until =>
-            {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            Err(error) => return Err(spaceterm_client_native::route::classify(error)),
-        }
-    };
+    let transport = channels.open(&registration).await?;
     let result = async {
         let namespace = CredentialNamespace::new(
             match native.key().build_identity {
@@ -325,13 +317,29 @@ async fn enroll_with_credentials<N: NativeDeviceCredentials>(
         .close()
         .await
         .map_err(spaceterm_client_native::route::classify);
-    result.and(closed)
+    result.and(closed)?;
+    // Dedicated Clients need the ordinary actor. Stopped enrollment must not
+    // start it or invalidate the completed listener-free owner transaction.
+    if registration.desired_state() == spaceterm_host::startup::DesiredServerState::Stopped {
+        return Ok(());
+    }
+    spaceterm_client_native::native::consumer::NativeConsumer::new(
+        native.management(), spaceterm_client_native::native::consumer::NativeConsumerKind::Cli,
+    ).with_credentials(provisioning_credentials).provision_journal(journal).await.map(|_| ()).map_err(|error| {
+        use spaceterm_client::management_cli::ManagementFailure;
+        failure(match error {
+            ManagementFailure::CredentialUnavailable | ManagementFailure::StorageUnavailable => ClientFailureClass::StorageUnavailable,
+            ManagementFailure::AuthorizationDenied | ManagementFailure::Revoked => ClientFailureClass::AuthorizationDenied,
+            ManagementFailure::OutcomePending => ClientFailureClass::RecoveryRequired,
+            _ => ClientFailureClass::Unavailable,
+        })
+    })
 }
 
 struct OwnerConnector {
     pin: ServerPin,
     reference: RevocationRouteReference,
-    transport: std::sync::Mutex<Option<Arc<IpcTransport>>>,
+    transport: std::sync::Mutex<Option<Arc<dyn MessageTransport>>>,
 }
 impl EnrollmentConnector for OwnerConnector {
     fn open<'a>(
@@ -353,7 +361,7 @@ impl EnrollmentConnector for OwnerConnector {
         })
     }
 }
-struct OwnerTransport(Arc<IpcTransport>);
+struct OwnerTransport(Arc<dyn MessageTransport>);
 impl PairingTransport for OwnerTransport {
     fn send<'a>(&'a mut self, bytes: &'a [u8]) -> PairingFuture<'a, Result<(), PairingFailure>> {
         Box::pin(send(&self.0, bytes))
@@ -362,13 +370,15 @@ impl PairingTransport for OwnerTransport {
         Box::pin(receive(&self.0))
     }
 }
-async fn send(transport: &IpcTransport, bytes: &[u8]) -> Result<(), PairingFailure> {
+async fn send(transport: &Arc<dyn MessageTransport>, bytes: &[u8]) -> Result<(), PairingFailure> {
     tokio::time::timeout(DEADLINE, transport.send(bytes))
         .await
         .map_err(|_| PairingFailure::TimedOut)?
         .map_err(|_| PairingFailure::Offline)
 }
-async fn receive(transport: &IpcTransport) -> Result<Zeroizing<Vec<u8>>, PairingFailure> {
+async fn receive(
+    transport: &Arc<dyn MessageTransport>,
+) -> Result<Zeroizing<Vec<u8>>, PairingFailure> {
     tokio::time::timeout(DEADLINE, transport.recv())
         .await
         .map_err(|_| PairingFailure::TimedOut)?

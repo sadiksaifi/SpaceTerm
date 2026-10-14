@@ -70,7 +70,7 @@ mod native;
 mod transport;
 
 // Bounds test coordination only, not protocol admission or product deadlines.
-const HARNESS_TIMEOUT: Duration = Duration::from_secs(60);
+const HARNESS_TIMEOUT: Duration = Duration::from_secs(180);
 
 use spaceterm_terminal::{runtime::budget::RuntimeLimits, runtime_contracts::*};
 
@@ -419,7 +419,7 @@ impl Routes<'_> {
                         "localhost",
                         spaceterm_host::transport::EnrolledServerKey(self.fixture.pin.public_key),
                         MessageLimit::envelope(),
-                        HARNESS_TIMEOUT,
+                        Duration::from_secs(10),
                     )
                     .await
                     .unwrap(),
@@ -515,16 +515,30 @@ struct Client {
     runtime_request: u64,
     rows: BTreeMap<spaceterm_core::content::RowId, String>,
     text: String,
+    content_stamp: Option<QueryStamp>,
+    metadata: Vec<RuntimeMetadataSnapshot>,
+    base: Option<spaceterm_core::content::ContentBase>,
+    row_revisions: BTreeMap<spaceterm_core::content::RowId, u64>,
+    mouse_enabled: bool,
 }
 impl Client {
     async fn connect(routes: &mut Routes<'_>, index: usize, major: u32) -> Self {
+        Self::connect_with_limits(routes, index, major, Default::default()).await
+    }
+    async fn connect_with_limits(
+        routes: &mut Routes<'_>,
+        index: usize,
+        major: u32,
+        limits: spaceterm_protocol::limits::NegotiatedLimits,
+    ) -> Self {
         let route = routes.open().await;
-        let codec = handshake(
+        let codec = handshake_with_limits(
             &route,
             routes.fixture.pin,
             routes.fixture.principal(index),
             major,
             43 + index as u8 * 2,
+            limits,
         )
         .await
         .unwrap();
@@ -545,6 +559,11 @@ impl Client {
             runtime_request: 0,
             rows: BTreeMap::new(),
             text: String::new(),
+            content_stamp: None,
+            metadata: Vec::new(),
+            base: None,
+            row_revisions: BTreeMap::new(),
+            mouse_enabled: false,
         }
     }
     fn request(&mut self, command: Command) -> CanonicalOperationRequest {
@@ -579,6 +598,8 @@ impl Client {
                         self.rows.clear();
                     }
                     let stamp = content::$p::decode_stamp(page.stamp.as_ref().unwrap()).unwrap();
+                    self.content_stamp = Some(stamp);
+                    self.base = Some(stamp.base());
                     let request = ContentPageRequest::new(
                         stamp,
                         ContentRange::ActiveGrid,
@@ -587,7 +608,10 @@ impl Client {
                     )
                     .unwrap();
                     let decoded = content::$p::decode_page(page, &request).unwrap();
+                    self.mouse_enabled = decoded.page().parts().modes.mouse_tracking
+                        != spaceterm_core::content::MouseTracking::None;
                     for row in &decoded.page().parts().rows {
+                        self.row_revisions.insert(row.id(), row.revision());
                         let text: String = row
                             .cells()
                             .iter()
@@ -615,6 +639,20 @@ impl Client {
             Payload::Major2(v2::Message {
                 kind: Some(v2::message::Kind::ContentPublication(value)),
             }) => record!(value, v2),
+            Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::MetadataPublication(value)),
+            }) => {
+                let (_, snapshot) =
+                    spaceterm_protocol::convert::metadata::v1::decode_publication(value).unwrap();
+                self.metadata.push(snapshot);
+            }
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::MetadataPublication(value)),
+            }) => {
+                let (_, snapshot) =
+                    spaceterm_protocol::convert::metadata::v2::decode_publication(value).unwrap();
+                self.metadata.push(snapshot);
+            }
             _ => {}
         }
         payload
@@ -625,9 +663,15 @@ impl Client {
             if !matches!(
                 &payload,
                 Payload::Major1(v1::Message {
-                    kind: Some(v1::message::Kind::ContentPublication(_))
+                    kind: Some(
+                        v1::message::Kind::ContentPublication(_)
+                            | v1::message::Kind::MetadataPublication(_)
+                    )
                 }) | Payload::Major2(v2::Message {
-                    kind: Some(v2::message::Kind::ContentPublication(_))
+                    kind: Some(
+                        v2::message::Kind::ContentPublication(_)
+                            | v2::message::Kind::MetadataPublication(_)
+                    )
                 })
             ) {
                 return payload;
@@ -772,6 +816,10 @@ impl Client {
         session
     }
     async fn subscribe(&mut self, fence: EffectFence) {
+        self.subscribe_with_limits(fence, PageLimits::new(4, 1024, 16384).unwrap())
+            .await;
+    }
+    async fn subscribe_with_limits(&mut self, fence: EffectFence, limits: PageLimits) {
         macro_rules! payload {
             ($p:ident, $major:ident) => {
                 Payload::$major($p::Message {
@@ -781,9 +829,9 @@ impl Client {
                         fence: Some(identity::encode_fence(fence)),
                         cancel: false,
                         limits: Some($p::PageLimits {
-                            rows: 4,
-                            cells: 1024,
-                            bytes: 16384,
+                            rows: u32::from(limits.rows()),
+                            cells: limits.cells(),
+                            bytes: limits.bytes(),
                         }),
                     })),
                 })
@@ -795,6 +843,392 @@ impl Client {
             payload!(v2, Major2)
         })
         .await;
+    }
+    async fn read_query(&mut self, query: &content::reads::ReadQuery) {
+        self.send(if self.codec.major() == 1 {
+            Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::ContentQuery(
+                    content::reads::v1::encode_query(query),
+                )),
+            })
+        } else {
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::ContentQuery(
+                    content::reads::v2::encode_query(query),
+                )),
+            })
+        })
+        .await;
+    }
+    async fn authenticated_content_reads(&mut self) {
+        use spaceterm_core::content::CellRef;
+        let old = self.content_stamp.expect("content publication");
+        let input_fence = EffectFence::new(
+            old.fence().session(),
+            old.fence().grant(),
+            old.fence().connection(),
+            old.fence().context(),
+            None,
+        )
+        .unwrap();
+        self.line(input_fence, "stty -echo; i=0; while [ $i -lt 10000 ]; do printf 'full-history-%05d-abcdefghijklmnopqrstuvwxyz0123456789\\n' \"$i\"; i=$((i + 1)); done; printf 'history-complete\\n'").await;
+        self.output("history-complete").await;
+        let old = self.content_stamp.unwrap();
+        let mut stamp = QueryStamp::new(
+            old.fence(),
+            old.base(),
+            ContentRequestId::new(101).unwrap(),
+            RequestGeneration::new(1),
+        )
+        .unwrap();
+        let limits = PageLimits::new(256, 16384, 128 * 1024).unwrap();
+        let mut rows = Vec::new();
+        let mut after = None;
+        let mut retries = 0;
+        loop {
+            let request = TopologyPageRequest::new(stamp, after, limits).unwrap();
+            self.read_query(&content::reads::ReadQuery::Topology(request))
+                .await;
+            let response = self.response().await;
+            macro_rules! topology {
+                ($value:expr, $p:ident) => {{
+                    match $value.result.unwrap() {
+                        $p::content_read_response::Result::Topology(page) => {
+                            assert_eq!(
+                                content::$p::decode_stamp(page.stamp.as_ref().unwrap()).unwrap(),
+                                stamp
+                            );
+                            rows.extend(
+                                page.rows.iter().map(|row| {
+                                    content::reads::$p::decode_topology_row(row).unwrap()
+                                }),
+                            );
+                            after = page.after.as_ref().map(|row| {
+                                TopologyContinuation::new(
+                                    stamp,
+                                    content::reads::$p::decode_topology_row(row).unwrap(),
+                                )
+                                .unwrap()
+                            });
+                            if after.is_none() {
+                                break;
+                            }
+                        }
+                        $p::content_read_response::Result::ResyncRequired(value) => {
+                            assert_eq!(
+                                content::$p::decode_stamp(value.stamp.as_ref().unwrap()).unwrap(),
+                                stamp
+                            );
+                            let base =
+                                content::$p::decode_base(value.current.as_ref().unwrap()).unwrap();
+                            let fence = EffectFence::new(
+                                stamp.fence().session(),
+                                stamp.fence().grant(),
+                                stamp.fence().connection(),
+                                stamp.fence().context(),
+                                Some(base.revision),
+                            )
+                            .unwrap();
+                            stamp = QueryStamp::new(
+                                fence,
+                                base,
+                                stamp.request(),
+                                stamp.generation().checked_successor().unwrap(),
+                            )
+                            .unwrap();
+                            after = None;
+                            rows.clear();
+                            retries += 1;
+                            assert!(retries < 20);
+                        }
+                        $p::content_read_response::Result::Rejected(value) if value.reason == 1 => {
+                            let old = self.content_stamp.unwrap();
+                            stamp = QueryStamp::new(
+                                old.fence(),
+                                old.base(),
+                                stamp.request(),
+                                stamp.generation().checked_successor().unwrap(),
+                            )
+                            .unwrap();
+                            after = None;
+                            rows.clear();
+                            retries += 1;
+                            assert!(retries < 20);
+                        }
+                        other => panic!("topology response: {other:?}"),
+                    }
+                }};
+            }
+            match response {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::ContentReadResponse(value)),
+                }) => topology!(value, v1),
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::ContentReadResponse(value)),
+                }) => topology!(value, v2),
+                other => panic!("topology response: {other:?}"),
+            }
+        }
+        assert!(
+            rows.len() >= 10000,
+            "full supported Scrollback plus active grid"
+        );
+        let endpoint = |row: TopologyRow, column| CellRef {
+            session: stamp.base().session,
+            row: row.row(),
+            row_revision: row.revision(),
+            column,
+        };
+        let first = rows[0];
+        let last = *rows.last().unwrap();
+        let copy = CopyRequest::new(
+            stamp,
+            ContentSelection::new(
+                stamp,
+                endpoint(first, 0),
+                endpoint(last, last.columns() - 1),
+                false,
+            )
+            .unwrap(),
+            CopyOptions {
+                unwrap_soft_wraps: true,
+                trim_trailing_spaces: true,
+                include_html: false,
+            },
+        )
+        .unwrap();
+        let (plain, html, copy_chunks) = self.copy_bytes(copy).await;
+        assert!(html.is_empty());
+        assert!(plain.len() > MAX_RESOURCE_CHUNK_BYTES);
+        assert!(copy_chunks > 2);
+        let plain = String::from_utf8(plain).unwrap();
+        let history_lines = plain
+            .lines()
+            .filter(|line| line.starts_with("full-history-"))
+            .count();
+        let expected_matches = plain.matches("full-history-").count();
+        assert!(
+            history_lines >= 9990,
+            "copy covers retained history, not just the active grid"
+        );
+        assert!(plain.contains("full-history-09999-abcdefghijklmnopqrstuvwxyz0123456789"));
+        let find = FindRequest::new(
+            stamp,
+            BoundedFindQuery::new("full-history-".into()).unwrap(),
+            None,
+        )
+        .unwrap();
+        self.read_query(&content::reads::ReadQuery::Find(find))
+            .await;
+        let mut found = 0;
+        let mut chunks = 0;
+        loop {
+            macro_rules! find_event {
+                ($value:expr, $p:ident) => {{
+                    match $value.item.unwrap() {
+                        $p::find_event::Item::Chunk(chunk) => {
+                            assert_eq!(
+                                content::$p::decode_stamp(chunk.stamp.as_ref().unwrap()).unwrap(),
+                                stamp
+                            );
+                            assert_eq!(chunk.index, chunks);
+                            chunks += 1;
+                            assert!(chunk.matches.len() <= MAX_FIND_CHUNK_MATCHES);
+                            for value in &chunk.matches {
+                                assert_eq!(
+                                    content::reads::$p::decode_cell(value.start.as_ref().unwrap())
+                                        .unwrap()
+                                        .session,
+                                    stamp.base().session
+                                );
+                            }
+                            found += chunk.matches.len();
+                        }
+                        $p::find_event::Item::Complete(value) => {
+                            assert_eq!(value.chunks, chunks);
+                            break;
+                        }
+                        other => panic!("find response: {other:?}"),
+                    }
+                }};
+            }
+            match self.response().await {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::FindEvent(value)),
+                }) => find_event!(value, v1),
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::FindEvent(value)),
+                }) => find_event!(value, v2),
+                other => panic!("find response: {other:?}"),
+            }
+        }
+        assert_eq!(found, expected_matches);
+        assert!(chunks > 1);
+
+        // Rich output uses the same authenticated stream and digest contract.
+        // The producer's full rich-expansion bounds are covered by terminal tests.
+        let rich_stamp = QueryStamp::new(
+            stamp.fence(),
+            stamp.base(),
+            ContentRequestId::new(103).unwrap(),
+            stamp.generation(),
+        )
+        .unwrap();
+        let rich_end = rows[3];
+        let rich = CopyRequest::new(
+            rich_stamp,
+            ContentSelection::new(
+                rich_stamp,
+                endpoint(first, 0),
+                endpoint(rich_end, rich_end.columns() - 1),
+                false,
+            )
+            .unwrap(),
+            CopyOptions {
+                include_html: true,
+                ..copy.options()
+            },
+        )
+        .unwrap();
+        let (rich_plain, rich_html, _) = self.copy_bytes(rich).await;
+        assert!(!rich_plain.is_empty());
+        assert!(String::from_utf8(rich_html).unwrap().contains("<div"));
+
+        let cancelled = QueryStamp::new(
+            stamp.fence(),
+            stamp.base(),
+            stamp.request(),
+            stamp.generation().checked_successor().unwrap(),
+        )
+        .unwrap();
+        let cancelled_copy = CopyRequest::new(cancelled, copy.selection(), copy.options()).unwrap();
+        self.read_query(&content::reads::ReadQuery::Copy(cancelled_copy))
+            .await;
+        self.read_query(&content::reads::ReadQuery::Cancel {
+            stamp: cancelled,
+            kind: 5,
+        })
+        .await;
+        self.copy_failure(cancelled, 2).await;
+        // Cancellation leaves the same authenticated connection and Session usable.
+        assert_eq!(
+            self.status().await.parts().epoch,
+            stamp.base().session.epoch
+        );
+
+        let mut wrong_base = stamp.base();
+        wrong_base.revision = wrong_base.revision.checked_successor().unwrap();
+        let fence = EffectFence::new(
+            stamp.fence().session(),
+            stamp.fence().grant(),
+            stamp.fence().connection(),
+            stamp.fence().context(),
+            Some(wrong_base.revision),
+        )
+        .unwrap();
+        let stale = QueryStamp::new(
+            fence,
+            wrong_base,
+            ContentRequestId::new(102).unwrap(),
+            stamp.generation(),
+        )
+        .unwrap();
+        self.read_query(&content::reads::ReadQuery::Copy(
+            CopyRequest::new(stale, copy.selection(), copy.options()).unwrap(),
+        ))
+        .await;
+        self.copy_failure(stale, 1).await;
+        assert_eq!(
+            self.status().await.parts().epoch,
+            stamp.base().session.epoch
+        );
+    }
+    async fn copy_bytes(&mut self, copy: CopyRequest) -> (Vec<u8>, Vec<u8>, usize) {
+        use sha2::{Digest, Sha256};
+        let stamp = copy.stamp();
+        self.read_query(&content::reads::ReadQuery::Copy(copy))
+            .await;
+        let mut plain = Vec::new();
+        let mut html = Vec::new();
+        let mut copy_chunks = 0;
+        loop {
+            macro_rules! copy_event {
+                ($value:expr, $p:ident) => {{
+                    match $value.item.unwrap() {
+                        $p::copy_event::Item::Chunk(chunk) => {
+                            assert_eq!(
+                                content::$p::decode_stamp(chunk.stamp.as_ref().unwrap()).unwrap(),
+                                stamp
+                            );
+                            let bytes = if chunk.part == 1 {
+                                &mut plain
+                            } else {
+                                assert_eq!(chunk.part, 2);
+                                &mut html
+                            };
+                            assert_eq!(chunk.offset, bytes.len() as u64);
+                            assert!(chunk.data.len() <= MAX_RESOURCE_CHUNK_BYTES);
+                            bytes.extend(chunk.data);
+                            copy_chunks += 1;
+                        }
+                        $p::copy_event::Item::Complete(value) => {
+                            assert_eq!(
+                                content::$p::decode_stamp(value.stamp.as_ref().unwrap()).unwrap(),
+                                stamp
+                            );
+                            assert_eq!(value.plain_bytes, plain.len() as u64);
+                            assert_eq!(value.plain_digest, Sha256::digest(&plain).to_vec());
+                            assert_eq!(
+                                value.html_bytes,
+                                copy.options().include_html.then_some(html.len() as u64)
+                            );
+                            assert_eq!(
+                                value.html_digest,
+                                copy.options()
+                                    .include_html
+                                    .then(|| Sha256::digest(&html).to_vec())
+                            );
+                            break;
+                        }
+                        other => panic!("copy response: {other:?}"),
+                    }
+                }};
+            }
+            match self.response().await {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::CopyEvent(value)),
+                }) => copy_event!(value, v1),
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::CopyEvent(value)),
+                }) => copy_event!(value, v2),
+                other => panic!("copy response: {other:?}"),
+            }
+        }
+        (plain, html, copy_chunks)
+    }
+    async fn copy_failure(&mut self, stamp: QueryStamp, reason: i32) {
+        let response = self.response().await;
+        macro_rules! check {
+            ($value:expr, $p:ident) => {{
+                let $p::copy_event::Item::ContentFailure(value) = $value.item.unwrap() else {
+                    panic!("copy must not complete after cancellation or stale content")
+                };
+                assert_eq!(
+                    content::$p::decode_stamp(value.stamp.as_ref().unwrap()).unwrap(),
+                    stamp
+                );
+                assert_eq!(value.reason, reason);
+            }};
+        }
+        match response {
+            Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::CopyEvent(value)),
+            }) => check!(value, v1),
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::CopyEvent(value)),
+            }) => check!(value, v2),
+            other => panic!("copy failure: {other:?}"),
+        }
     }
     async fn effect(&mut self, fence: EffectFence, command: RuntimeCommand) -> Option<i32> {
         self.runtime_request += 1;
@@ -968,17 +1402,29 @@ async fn handshake(
     major: u32,
     seed: u8,
 ) -> Result<AuthenticatedConnection, ProtocolError> {
+    handshake_with_limits(route, pin, principal, major, seed, Default::default()).await
+}
+async fn handshake_with_limits(
+    route: &OpenRoute,
+    pin: authentication::ServerPin,
+    principal: authentication::Principal,
+    major: u32,
+    seed: u8,
+    limits: spaceterm_protocol::limits::NegotiatedLimits,
+) -> Result<AuthenticatedConnection, ProtocolError> {
     let (client, hello) = ClientHandshake::begin(
         pin,
         principal,
         Purpose::Ordinary,
         HandshakeConfig {
             majors: vec![major],
+            limits,
             capabilities: vec![
                 spaceterm_protocol::negotiation::CAPABILITY_CANONICAL_DOMAIN,
                 spaceterm_protocol::negotiation::CAPABILITY_TERMINAL_STREAMS,
+                spaceterm_protocol::negotiation::CAPABILITY_APPLICATION_MOUSE,
+                spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA,
             ],
-            ..Default::default()
         },
         Arc::new(Key::new(seed)),
     )?;
@@ -1151,7 +1597,7 @@ fn keygen(path: &Path) {
     );
 }
 
-async fn exercise(route: Route, major: u32) {
+async fn exercise(route: Route, major: u32, reads: bool) {
     let fixture = Fixture::new(major).await;
     let mut routes = Routes {
         fixture: &fixture,
@@ -1336,6 +1782,14 @@ async fn exercise(route: Route, major: u32) {
         !b.text.contains("route-A:1"),
         "client B must not receive client A's content"
     );
+    if reads {
+        a.authenticated_content_reads().await;
+        a.route.close().await;
+        b.route.close().await;
+        drop(routes);
+        fixture.shutdown().await;
+        return;
+    }
     let original_frame = a.last_frame.clone();
     assert!(
         a.effect(
@@ -1487,7 +1941,7 @@ macro_rules! route_test {
     ($name:ident, $route:ident, $major:literal) => {
         #[tokio::test]
         async fn $name() {
-            exercise(Route::$route, $major).await;
+            exercise(Route::$route, $major, false).await;
         }
     };
 }
@@ -1507,3 +1961,412 @@ route_test!(
     Jump,
     2
 );
+
+#[tokio::test]
+async fn authenticated_ipc_major_1_copy_find_topology() {
+    exercise(Route::Ipc, 1, true).await;
+}
+#[tokio::test]
+async fn authenticated_ipc_major_2_copy_find_topology() {
+    exercise(Route::Ipc, 2, true).await;
+}
+#[tokio::test]
+async fn authenticated_wss_major_1_full_scrollback_copy_find_topology() {
+    exercise(Route::Wss, 1, true).await;
+}
+#[tokio::test]
+async fn authenticated_wss_major_2_full_scrollback_copy_find_topology() {
+    exercise(Route::Wss, 2, true).await;
+}
+
+async fn reduced_terminal_pages(major: u32, limits: spaceterm_protocol::limits::NegotiatedLimits) {
+    let fixture = Fixture::new(major).await;
+    let mut routes = Routes {
+        fixture: &fixture,
+        route: Route::Ipc,
+        wss: None,
+        ssh: None,
+        next_endpoint: 0,
+    };
+    let mut client = Client::connect_with_limits(&mut routes, 0, major, limits).await;
+    client.reconcile(&fixture.handle).await;
+    let Outcome::CreatedWithControl(created) = client
+        .command(Command::CreateWorkspace {
+            server: client.stream.server(),
+            source: WorkspaceCreationSource::ServerHome {
+                server: client.stream.server(),
+            },
+            name: NameDraft::Custom(NameText::new("bounded pages".into()).unwrap()),
+        })
+        .await
+    else {
+        panic!("created workspace")
+    };
+    let grant = created.control().grant();
+    let session = client.start(&fixture.handle, grant).await;
+    let fence = client.fence(session, grant);
+    client
+        .subscribe_with_limits(fence, PageLimits::new(256, 16384, 1024 * 1024).unwrap())
+        .await;
+    let mut pages = 0;
+    tokio::time::timeout(HARNESS_TIMEOUT, async {
+        loop {
+            let payload = client.recv().await;
+            let complete = match payload {
+                Payload::Major1(v1::Message {
+                    kind: Some(v1::message::Kind::ContentPublication(value)),
+                }) => value.complete,
+                Payload::Major2(v2::Message {
+                    kind: Some(v2::message::Kind::ContentPublication(value)),
+                }) => value.complete,
+                _ => continue,
+            };
+            pages += 1;
+            if complete {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(pages > 1);
+    assert_eq!(client.rows.len(), 24);
+    assert!(client.rows.values().all(|row| row.chars().count() == 100));
+    let base = client.base.unwrap();
+    let query_fence = EffectFence::new(
+        session,
+        grant,
+        fence.connection(),
+        fence.context(),
+        Some(base.revision),
+    )
+    .unwrap();
+    let stamp = QueryStamp::new(
+        query_fence,
+        base,
+        ContentRequestId::new(42).unwrap(),
+        RequestGeneration::new(1),
+    )
+    .unwrap();
+    let mut continuation = None;
+    let mut reconstructed = BTreeMap::<spaceterm_core::content::RowId, String>::new();
+    loop {
+        let request = ContentPageRequest::new(
+            stamp,
+            ContentRange::ActiveGrid,
+            continuation,
+            PageLimits::new(256, 16384, 1024 * 1024).unwrap(),
+        )
+        .unwrap();
+        let payload = if major == 1 {
+            Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::ContentQuery(
+                    content::v1::encode_page_request(request).unwrap(),
+                )),
+            })
+        } else {
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::ContentQuery(
+                    content::v2::encode_page_request(request).unwrap(),
+                )),
+            })
+        };
+        let result = match client.exchange(payload).await {
+            Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::ContentReadResponse(value)),
+            }) => match value.result {
+                Some(v1::content_read_response::Result::Page(page)) => {
+                    ContentReadResult::Ready(content::v1::decode_page(&page, &request).unwrap())
+                }
+                _ => panic!("ready one-shot grid"),
+            },
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::ContentReadResponse(value)),
+            }) => match value.result {
+                Some(v2::content_read_response::Result::Page(page)) => {
+                    ContentReadResult::Ready(content::v2::decode_page(&page, &request).unwrap())
+                }
+                _ => panic!("ready one-shot grid"),
+            },
+            _ => panic!("one-shot page response"),
+        };
+        let ContentReadResult::Ready(reply) = result else {
+            panic!("stable one-shot grid")
+        };
+        let parts = reply.page().parts();
+        assert!(parts.rows.len() <= limits.semantic_rows);
+        assert!(
+            parts
+                .rows
+                .iter()
+                .map(|row| row.cells().len())
+                .sum::<usize>()
+                <= limits.semantic_cells
+        );
+        for row in &parts.rows {
+            reconstructed
+                .entry(row.id())
+                .or_default()
+                .extend(row.cells().iter().map(|cell| cell.content().text()));
+        }
+        continuation = reply.continuation().unwrap();
+        if continuation.is_none() {
+            break;
+        }
+    }
+    assert_eq!(reconstructed, client.rows);
+    client.status().await;
+    client.route.close().await;
+    drop(routes);
+    fixture.shutdown().await;
+}
+async fn reduced_terminal_cases(major: u32) {
+    use spaceterm_protocol::limits::NegotiatedLimits;
+    for limits in [
+        NegotiatedLimits {
+            frame_bytes: 65536,
+            management_bytes: 32768,
+            semantic_rows: 4,
+            ..Default::default()
+        },
+        NegotiatedLimits {
+            frame_bytes: 32768,
+            management_bytes: 32768,
+            semantic_cells: 70,
+            ..Default::default()
+        },
+        NegotiatedLimits {
+            frame_bytes: 8192,
+            management_bytes: 8192,
+            ..Default::default()
+        },
+    ] {
+        reduced_terminal_pages(major, limits).await;
+    }
+}
+#[tokio::test]
+async fn negotiated_terminal_pages_reconstruct_grid_major_1() {
+    reduced_terminal_cases(1).await;
+}
+#[tokio::test]
+async fn negotiated_terminal_pages_reconstruct_grid_major_2() {
+    reduced_terminal_cases(2).await;
+}
+
+async fn metadata_without_content(major: u32) {
+    use spaceterm_terminal::metadata::ProgressMetadata;
+    let fixture = Fixture::new(major).await;
+    let mut routes = Routes {
+        fixture: &fixture,
+        route: Route::Ipc,
+        wss: None,
+        ssh: None,
+        next_endpoint: 0,
+    };
+    let mut client = Client::connect(&mut routes, 0, major).await;
+    client.reconcile(&fixture.handle).await;
+    let Outcome::CreatedWithControl(created) = client
+        .command(Command::CreateWorkspace {
+            server: client.stream.server(),
+            source: WorkspaceCreationSource::ServerHome {
+                server: client.stream.server(),
+            },
+            name: NameDraft::Custom(NameText::new("metadata stream".into()).unwrap()),
+        })
+        .await
+    else {
+        panic!("created workspace")
+    };
+    let grant = created.control().grant();
+    let session = client.start(&fixture.handle, grant).await;
+    let fence = client.fence(session, grant);
+    client.subscribe(fence).await;
+    client
+        .line(
+            fence,
+            r"printf '\033]0;server-metadata-title\007\033]9;4;1;37\007'; sleep 35",
+        )
+        .await;
+    let initial = tokio::time::timeout(HARNESS_TIMEOUT, async {
+        loop {
+            if let Some(snapshot) = client.metadata.iter().find(|snapshot| {
+                snapshot.parts().title.value.as_ref() == "server-metadata-title"
+                    && snapshot.parts().progress == ProgressMetadata::Normal(37)
+            }) {
+                break snapshot.clone();
+            }
+            client.recv().await;
+        }
+    })
+    .await
+    .expect("OSC title and progress must be published");
+    let content_at_progress = client.base;
+    let expired = tokio::time::timeout(HARNESS_TIMEOUT, async {
+        loop {
+            if let Some(snapshot) = client.metadata.iter().find(|snapshot| {
+                snapshot.parts().sequence > initial.parts().sequence
+                    && snapshot.parts().progress == ProgressMetadata::None
+                    && snapshot.parts().title.value.as_ref() == "server-metadata-title"
+            }) {
+                break snapshot.clone();
+            }
+            client.recv().await;
+        }
+    })
+    .await
+    .expect("progress expiry must be published without terminal text");
+    assert_eq!(expired.session(), session);
+    assert_eq!(
+        client.base, content_at_progress,
+        "progress expiry needs no content change"
+    );
+    assert!(expired.parts().observed_at.get() >= initial.parts().observed_at.get() + 30000);
+    client.status().await;
+    client.route.close().await;
+    drop(routes);
+    fixture.shutdown().await;
+}
+#[tokio::test]
+async fn runtime_metadata_title_and_progress_expiry_major_1() {
+    metadata_without_content(1).await;
+}
+#[tokio::test]
+async fn runtime_metadata_title_and_progress_expiry_major_2() {
+    metadata_without_content(2).await;
+}
+
+async fn authenticated_application_mouse(major: u32) {
+    use spaceterm_core::content::CellRef;
+    use spaceterm_terminal::{
+        InputModifiers,
+        pointer_input::{PointerButton, PointerPhase},
+    };
+    let fixture = Fixture::new(major).await;
+    let mut routes = Routes {
+        fixture: &fixture,
+        route: Route::Ipc,
+        wss: None,
+        ssh: None,
+        next_endpoint: 0,
+    };
+    let mut client = Client::connect(&mut routes, 0, major).await;
+    client.reconcile(&fixture.handle).await;
+    let Outcome::CreatedWithControl(created) = client
+        .command(Command::CreateWorkspace {
+            server: client.stream.server(),
+            source: WorkspaceCreationSource::ServerHome {
+                server: client.stream.server(),
+            },
+            name: NameDraft::Custom(NameText::new("mouse application".into()).unwrap()),
+        })
+        .await
+    else {
+        panic!("created workspace")
+    };
+    let grant = created.control().grant();
+    let session = client.start(&fixture.handle, grant).await;
+    let fence = client.fence(session, grant);
+    client.subscribe(fence).await;
+    let capture = fixture._root.path().join("mouse-input");
+    client.line(fence, &format!(r"stty raw -echo; printf '\033[?1002h\033[?1006h\r\nMOUSE_READY\r\n'; dd bs=1 count=38 of='{}' 2>/dev/null; stty -raw echo; printf '\033[?1002l\033[?1006l\r\nMOUSE_DONE\r\n'", capture.display())).await;
+    client.output("MOUSE_READY").await;
+    assert!(client.mouse_enabled);
+    let base = client.base.unwrap();
+    let row = *client.rows.keys().next().unwrap();
+    let cell = CellRef {
+        session,
+        row,
+        row_revision: client.row_revisions[&row],
+        column: 0,
+    };
+    let captured = EffectFence::new(
+        session,
+        grant,
+        fence.connection(),
+        fence.context(),
+        Some(base.revision),
+    )
+    .unwrap();
+    let stamp = QueryStamp::new(
+        captured,
+        base,
+        ContentRequestId::new(101).unwrap(),
+        RequestGeneration::new(1),
+    )
+    .unwrap();
+    let pointer = |phase| {
+        RuntimeCommand::Pointer(ApplicationPointerInput {
+            stamp,
+            cell,
+            phase,
+            button: Some(PointerButton::Left),
+            modifiers: InputModifiers::default(),
+        })
+    };
+    for phase in [
+        PointerPhase::Press,
+        PointerPhase::Motion,
+        PointerPhase::Release,
+    ] {
+        assert_eq!(client.effect(captured, pointer(phase)).await, None);
+    }
+    assert_eq!(
+        client
+            .effect(
+                captured,
+                RuntimeCommand::Wheel(ApplicationWheelInput {
+                    stamp,
+                    cell,
+                    horizontal_steps: 0,
+                    vertical_steps: 1,
+                    modifiers: InputModifiers::default()
+                })
+            )
+            .await,
+        None
+    );
+    client.output("MOUSE_DONE").await;
+    assert_eq!(
+        fs::read(capture).unwrap(),
+        b"\x1b[<0;1;1M\x1b[<32;1;1M\x1b[<0;1;1m\x1b[<64;1;1M"
+    );
+    assert!(
+        client
+            .effect(captured, pointer(PointerPhase::Press))
+            .await
+            .is_some(),
+        "content changes reject old mouse coordinates"
+    );
+    let mut other = Client::connect(&mut routes, 1, major).await;
+    other.reconcile(&fixture.handle).await;
+    assert!(matches!(
+        other
+            .command(Command::TakeOver(TakeOverRequest {
+                epoch: session.epoch,
+                pane: session.pane,
+                client: other.stream.client()
+            }))
+            .await,
+        Outcome::ControlGranted(_)
+    ));
+    assert!(
+        client
+            .effect(captured, pointer(PointerPhase::Press))
+            .await
+            .is_some(),
+        "takeover rejects the original mouse grant"
+    );
+    client.status().await;
+    client.route.close().await;
+    other.route.close().await;
+    drop(routes);
+    fixture.shutdown().await;
+}
+#[tokio::test]
+async fn authenticated_click_drag_wheel_reject_stale_and_takeover_major_1() {
+    authenticated_application_mouse(1).await;
+}
+#[tokio::test]
+async fn authenticated_click_drag_wheel_reject_stale_and_takeover_major_2() {
+    authenticated_application_mouse(2).await;
+}

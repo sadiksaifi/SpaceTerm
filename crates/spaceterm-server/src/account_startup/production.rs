@@ -14,6 +14,7 @@ use crate::{
     extensions::ExtensionObserverPort,
     failure::failure,
     git::{
+        directories::{DirectoryOrdinaryDispatch, DirectoryService},
         dispatch::GitOrdinaryDispatch,
         host::NativeServerGitHost,
         recovery::GitExternalWork,
@@ -99,8 +100,45 @@ impl StartupAuthorityPort for Admission {
     }
 }
 
-struct NativeManagement(Arc<ServiceSupervisor>);
+struct NativeManagement(
+    Arc<ServiceSupervisor>,
+    Option<Arc<dyn spaceterm_protocol::authentication::SigningKey>>,
+);
 impl HostManagementPort for NativeManagement {
+    fn prepare_next_instance<'a>(
+        &'a self,
+        server: ServerId,
+        next_epoch: ServerEpoch,
+    ) -> ServerFuture<'a, Result<(), ServerFailure>> {
+        Box::pin(async move {
+            let Some(signer) = &self.1 else {
+                return Ok(());
+            };
+            let registration = self
+                .0
+                .discover()
+                .map_err(native_failure)?
+                .ok_or_else(|| native_failure(ServiceFailure::Missing))?;
+            if registration.server_pin().identity != server.bytes() {
+                return Err(native_failure(ServiceFailure::IdentityMismatch));
+            }
+            spaceterm_host::account_service::runtime_inventory::RuntimeCustody::prepare_start_for_epoch(&registration, signer.as_ref(), next_epoch).map_err(native_failure)?;
+            Ok(())
+        })
+    }
+    fn reconcile_previous_instance<'a>(
+        &'a self,
+        server: ServerId,
+        epoch: ServerEpoch,
+        expected: &'a [spaceterm_core::retirement::RetiredSession],
+    ) -> ServerFuture<'a, Result<Vec<SessionCleanupObservation>, ServerFailure>> {
+        Box::pin(async move {
+            self.0
+                .reconcile_previous_instance(server, epoch, expected)
+                .await
+                .map_err(native_failure)
+        })
+    }
     fn previous_instance_cleanup<'a>(
         &'a self,
         server: ServerId,
@@ -197,11 +235,28 @@ impl RecoveredAccountServer {
             launch.home.as_os_str().as_encoded_bytes().to_vec(),
         )
         .map_err(|_| StartupFailure::Account(ServiceFailure::InvalidRecord))?;
-        let account = startup.open_store(home.clone())?;
+        let mut account = startup.open_store(home.clone())?;
         let admission = account.admission.ok_or(StartupFailure::Account(
             ServiceFailure::ConfirmationRequired,
         ))?;
         admission.revalidate().map_err(StartupFailure::Account)?;
+        let recovered = account
+            .store
+            .recover_bundle()
+            .map_err(StartupFailure::Store)?
+            .core;
+        let sessions: Vec<_> = crate::recovery::expected_cleanup(&recovered)
+            .map_err(StartupFailure::Runtime)?
+            .keys()
+            .copied()
+            .collect();
+        spaceterm_host::account_service::runtime_inventory::StoppedRuntimeCustody::resume_start(
+            admission.as_ref(),
+            recovered.last_epoch,
+            &sessions,
+            account.credentials.as_ref(),
+        )
+        .map_err(StartupFailure::Account)?;
         let identity = StoreIdentity {
             server: server_id,
             account: account.registration.key(),
@@ -217,7 +272,7 @@ impl RecoveredAccountServer {
             PathBuf::from("/usr/bin/git"),
             launch.home.clone(),
             spaceterm_host::git::MINIMUM_GIT_VERSION,
-            directories,
+            directories.clone(),
         ));
         let core = CorePorts::production_with_git_host(
             identity,
@@ -238,7 +293,10 @@ impl RecoveredAccountServer {
             RuntimeLimits::default(),
         )
         .map_err(StartupFailure::Runtime)?;
-        let management = Arc::new(NativeManagement(supervisor.clone()));
+        let management = Arc::new(NativeManagement(
+            supervisor.clone(),
+            Some(account.credentials.clone()),
+        ));
         let ports = ProductionListenerPorts::with_native_status(
             crate::listeners::AccountNativeStatusObserver::new(supervisor.clone()),
         );
@@ -265,11 +323,6 @@ impl RecoveredAccountServer {
             host_management: management.clone(),
             clock,
         };
-        spaceterm_host::account_service::runtime_inventory::RuntimeCustody::prepare_start(
-            &account.registration,
-            account.credentials.as_ref(),
-        )
-        .map_err(StartupFailure::Account)?;
         let server = RecoveredServer::recover(config, dependencies)
             .await
             .map_err(StartupFailure::Runtime)?;
@@ -309,6 +362,11 @@ impl RecoveredAccountServer {
             account.registration.server_pin(),
         )
         .map_err(|_| StartupFailure::Runtime(failure(ServerFailureClass::Authentication)))?;
+        let directory_service = Arc::new(DirectoryService::new(
+            server_id,
+            directories,
+            Arc::new(handle.clone()),
+        ));
         let listeners = production_listener_factories_with_dispatch(
             handle,
             ProductionListenerConfig {
@@ -321,7 +379,10 @@ impl RecoveredAccountServer {
                 ports,
             },
             lookup,
-            Arc::new(GitOrdinaryDispatch::new(git, codec)),
+            Arc::new(DirectoryOrdinaryDispatch::new(
+                directory_service,
+                Arc::new(GitOrdinaryDispatch::new(git, codec)),
+            )),
         )
         .map_err(StartupFailure::Runtime)?;
         Ok(Self {
@@ -404,10 +465,16 @@ impl RecoveredAccountServer {
             .finish_retirements()
             .await
             .map_err(StartupFailure::Account);
-        drop(admission);
+        // Hold admission until both the actor and the owner endpoint have joined
+        // and signed whole-instance cleanup has been durably published.
         owner_closed?;
         retirements?;
-        result
+        let report = result?;
+        cleanup
+            .finish_instance(report)
+            .map_err(StartupFailure::Account)?;
+        drop(admission);
+        Ok(report)
     }
 }
 fn appearance() -> RuntimeAppearance {
@@ -592,7 +659,7 @@ pub async fn production_stopped_owner(
         claim,
         StoppedOwnerProviders {
             config,
-            host_management: Arc::new(NativeManagement(supervisor)),
+            host_management: Arc::new(NativeManagement(supervisor, None)),
             external_work: external.clone(),
             clock,
         },

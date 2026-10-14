@@ -417,3 +417,8 @@ fn desktop_server_native_view_store_crash_after_publication_reopens_published_do
         "platform::client_view_store::tests::desktop_server_native_view_store_crash_after_publication_reopens_published_document",
     );
 }
+
+/// Reuses native path and filesystem composition for real-server desktop acceptance.
+pub(crate) fn paths_for_root(root: &std::path::Path) -> Arc<AppPaths> {
+    Fixture::paths(root)
+}

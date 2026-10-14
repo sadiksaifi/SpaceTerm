@@ -107,7 +107,7 @@ pub(crate) fn notify_failure(failure: ClientFailure, cx: &mut App) -> Task<bool>
     )
 }
 
-fn show(alert: Alert<bool>, cx: &mut App) -> Task<bool> {
+pub(crate) fn show(alert: Alert<bool>, cx: &mut App) -> Task<bool> {
     let bounds = Bounds::centered(None, size(px(640.0), px(360.0)), cx);
     let opened = cx.open_window(
         cx.global::<crate::platform::window_chrome::WindowChrome>()

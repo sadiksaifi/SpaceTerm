@@ -1,7 +1,7 @@
 //! Deliberate owner requests use the running actor or an exclusive stopped actor.
 //! Neither path grants ordinary access from account IPC reachability.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::{
     account_startup::AccountOwnerEnrollment,
@@ -56,6 +56,9 @@ pub struct AccountOwnerRequestExecutor {
     credentials: Arc<spaceterm_host::server_keys::ServerIdentity>,
     stopped: Option<RecoveredServer>,
     admission: Option<Arc<StoppedOwnerAdmission>>,
+    custody: Option<
+        Arc<Mutex<spaceterm_host::account_service::runtime_inventory::StoppedRuntimeCustody>>,
+    >,
 }
 impl AccountOwnerRequestExecutor {
     pub fn running(
@@ -91,6 +94,7 @@ impl AccountOwnerRequestExecutor {
             credentials: identity,
             stopped: None,
             admission: None,
+            custody: None,
         })
     }
 
@@ -138,6 +142,13 @@ impl AccountOwnerRequestExecutor {
             services,
         )
         .map_err(pairing_store_failure)?;
+        let custody = Arc::new(Mutex::new(
+            spaceterm_host::account_service::runtime_inventory::StoppedRuntimeCustody::new(
+                admission.clone(),
+                credentials.clone(),
+            )
+            .map_err(crate::account_startup::owner_failure)?,
+        ));
         providers.config.host.authority = Arc::new(StoppedAuthority(admission.clone()));
         providers.config.core = CorePorts::production(identity, home, providers.clock.clone())
             .map_err(crate::service::pairing_actor::pairing_failure)?;
@@ -147,6 +158,7 @@ impl AccountOwnerRequestExecutor {
                 store: Box::new(StoppedStore {
                     store,
                     _admission: admission.clone(),
+                    custody: custody.clone(),
                 }),
                 credentials: credentials.clone(),
                 pairing: Arc::new(NoOrdinaryAccess),
@@ -177,6 +189,7 @@ impl AccountOwnerRequestExecutor {
             credentials,
             stopped: Some(stopped),
             admission: Some(admission),
+            custody: Some(custody),
         })
     }
 
@@ -261,7 +274,24 @@ impl AccountOwnerRequestExecutor {
     /// Closing a running executor does not stop or restart its server.
     pub async fn close(mut self) -> Result<Option<ShutdownReport>, ServerFailure> {
         match self.stopped.take() {
-            Some(server) => server.close_owner_enrollment().await.map(Some),
+            Some(server) => {
+                let epoch = server.handle().snapshot().epoch();
+                let report = server.close_owner_enrollment().await?;
+                if !report.cleanup_confirmed
+                    || !report.listeners_closed
+                    || !report.started_writes_finished
+                {
+                    return Err(failure(ServerFailureClass::RecoveryRequired));
+                }
+                self.custody
+                    .as_ref()
+                    .ok_or_else(|| failure(ServerFailureClass::RecoveryRequired))?
+                    .lock()
+                    .map_err(|_| failure(ServerFailureClass::RecoveryRequired))?
+                    .finish(epoch)
+                    .map_err(|_| failure(ServerFailureClass::RecoveryRequired))?;
+                Ok(Some(report))
+            }
             None => Ok(None),
         }
     }
@@ -328,19 +358,51 @@ impl OwnerEnrollmentHandshake {
 struct StoppedStore {
     store: SqliteOrganizationStore,
     _admission: Arc<StoppedOwnerAdmission>,
+    custody: Arc<Mutex<spaceterm_host::account_service::runtime_inventory::StoppedRuntimeCustody>>,
 }
 impl spaceterm_core::storage::OrganizationStore for StoppedStore {
     fn recover(
         &mut self,
     ) -> Result<spaceterm_core::storage::RecoveredState, spaceterm_core::storage::StoreFailure>
     {
-        self.store.recover()
+        let recovered = self.store.recover()?;
+        let sessions: Vec<_> = crate::recovery::expected_cleanup(&recovered)
+            .map_err(|_| spaceterm_core::storage::StoreFailure::RecoveryRequired)?
+            .keys()
+            .copied()
+            .collect();
+        self.custody
+            .lock()
+            .map_err(|_| spaceterm_core::storage::StoreFailure::RecoveryRequired)?
+            .recover(recovered.last_epoch, &sessions)
+            .map_err(|_| spaceterm_core::storage::StoreFailure::RecoveryRequired)?;
+        Ok(recovered)
     }
     fn commit(
         &mut self,
         transaction: &spaceterm_core::storage::DurableTransaction,
     ) -> spaceterm_core::storage::CommitDisposition {
-        self.store.commit(transaction)
+        use spaceterm_core::storage::{CommitDisposition, StoreFailure};
+        let parts = transaction.parts();
+        let advances = parts.resulting_epoch != parts.expected_epoch;
+        let Ok(custody) = self.custody.lock() else {
+            return CommitDisposition::NotApplied(StoreFailure::RecoveryRequired);
+        };
+        if advances
+            && custody
+                .prepare_epoch(parts.expected_epoch, parts.resulting_epoch)
+                .is_err()
+        {
+            return CommitDisposition::NotApplied(StoreFailure::RecoveryRequired);
+        }
+        let disposition = self.store.commit(transaction);
+        if advances
+            && matches!(disposition, CommitDisposition::Durable(_))
+            && custody.committed_epoch(parts.resulting_epoch).is_err()
+        {
+            return CommitDisposition::Indeterminate;
+        }
+        disposition
     }
 }
 

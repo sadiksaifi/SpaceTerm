@@ -134,6 +134,15 @@ class NoDisplayTests(unittest.TestCase):
                 self.assertIn(f"no-display {arguments}: reported an unexpected result", message)
                 self.assertNotIn("private-detail", message)
 
+    def test_version_must_include_a_version_in_both_output_formats(self):
+        for arguments, answer in (
+            ("--version", "printf 'spaceterm-cli\\n'"),
+            ("--json --version", """printf '{"schema":1,"version":"spaceterm-cli"}\\n'"""),
+        ):
+            with self.subTest(arguments=arguments):
+                message = self.rejected(self.cli(**{arguments.replace(" ", "_"): answer}))
+                self.assertIn(f"no-display {arguments}: reported an unexpected result", message)
+
     def test_state_written_by_the_cli_is_rejected(self):
         for answer in (
             'mkdir "$HOME/.local"',

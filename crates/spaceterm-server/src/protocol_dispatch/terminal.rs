@@ -1,6 +1,7 @@
 //! Connection-owned presentation demand. Dropping demand never retires a Session.
 
 mod graphics;
+mod reads;
 
 use super::*;
 use crate::egress::EgressFailure;
@@ -23,6 +24,10 @@ struct Subscription {
     limits: PageLimits,
     transfer: u64,
     base: Option<ContentBase>,
+    metadata: Option<(
+        spaceterm_core::observations::RuntimeObservationSequence,
+        spaceterm_core::observations::MonotonicTick,
+    )>,
     task: AbortHandle,
 }
 pub(super) struct Event {
@@ -38,9 +43,12 @@ pub(super) enum Wake {
     Presentation(Box<Event>),
     Effect(Box<EffectReply>),
     Graphics(Box<graphics::GraphicsEvent>),
+    Read(Box<reads::ReadEvent>),
 }
 pub(super) struct TerminalConnection {
     graphics: graphics::GraphicsConnection,
+    reads: reads::ReadConnection,
+    limits: spaceterm_protocol::limits::NegotiatedLimits,
     subscriptions: BTreeMap<PaneId, Subscription>,
     native: BTreeMap<(SessionKey, u64), spaceterm_core::native_requests::NativeRequest>,
     sender: mpsc::Sender<Event>,
@@ -69,6 +77,8 @@ impl TerminalConnection {
         let (effect_sender, effect_receiver) = mpsc::channel(4);
         Self {
             graphics: graphics::GraphicsConnection::new(limits),
+            reads: reads::ReadConnection::new(limits),
+            limits,
             effect_sender,
             effect_receiver,
             effect_sequence: 0,
@@ -81,11 +91,34 @@ impl TerminalConnection {
             last_effect_request: 0,
         }
     }
+    pub(super) fn bound_page_query(&self, payload: &mut Payload) -> Result<(), ServerFailure> {
+        macro_rules! bound {
+            ($message:expr, $p:ident) => {
+                if let Some($p::message::Kind::ContentQuery(value)) = &mut $message.kind
+                    && matches!(value.kind, 1 | 2)
+                {
+                    let request =
+                        content::$p::decode_page_request(value).map_err(protocol_failure)?;
+                    *value = content::$p::encode_page_request(bounded_page_request(
+                        request,
+                        self.limits,
+                    )?)
+                    .map_err(protocol_failure)?;
+                }
+            };
+        }
+        match payload {
+            Payload::Major1(message) => bound!(message, v1),
+            Payload::Major2(message) => bound!(message, v2),
+        }
+        Ok(())
+    }
     pub(super) fn pending_effects(&self) -> usize {
         self.effects.len()
     }
     pub(super) fn reset(&mut self) {
         self.graphics.reset();
+        self.reads.reset();
         for (_, subscription) in std::mem::take(&mut self.subscriptions) {
             subscription.task.abort();
         }
@@ -93,6 +126,7 @@ impl TerminalConnection {
     }
     pub(super) async fn next(&mut self) -> Option<Wake> {
         tokio::select! {
+            event = self.reads.next() => event.map(|event| Wake::Read(Box::new(event))),
             event = self.graphics.next() => event.map(|event| Wake::Graphics(Box::new(event))),
             event = self.receiver.recv() => event.map(|event| Wake::Presentation(Box::new(event))),
             reply = self.effect_receiver.recv() => reply.map(|reply| { self.effects.remove(&reply.id); Wake::Effect(Box::new(reply)) }),
@@ -152,15 +186,16 @@ impl TerminalConnection {
                         .limits
                         .as_ref()
                         .ok_or_else(|| failure(ServerFailureClass::ScopeMismatch))?;
-                    Some(
+                    Some(bounded_limits(
                         PageLimits::new(
                             u16::try_from(limits.rows)
                                 .map_err(|_| failure(ServerFailureClass::Capacity))?,
                             limits.cells,
-                            limits.bytes.min(PAGE_BYTES),
+                            limits.bytes,
                         )
                         .map_err(|_| failure(ServerFailureClass::Capacity))?,
-                    )
+                        self.limits,
+                    )?)
                 };
                 (
                     Token {
@@ -229,6 +264,7 @@ impl TerminalConnection {
             limits: limits.ok_or_else(|| failure(ServerFailureClass::ScopeMismatch))?,
             transfer: 0,
             base: None,
+            metadata: None,
             task,
         };
         if let Some(old) = self.subscriptions.insert(pane, subscription) {
@@ -236,6 +272,27 @@ impl TerminalConnection {
         }
         self.native.retain(|(session, _), _| session.pane != pane);
         Ok(true)
+    }
+    pub(super) async fn read_request(
+        &mut self,
+        payload: &Payload,
+        principal: VerifiedPrincipal,
+        handle: &ServerHandle,
+    ) -> Result<bool, ServerFailure> {
+        self.reads.admit(payload, principal, handle).await
+    }
+    pub(super) async fn publish_read(
+        &mut self,
+        event: reads::ReadEvent,
+        dispatcher: &ProtocolDispatcher,
+        session: &mut AuthenticatedSession,
+        transport: &Arc<dyn spaceterm_host::transport::MessageTransport>,
+        handle: &ServerHandle,
+        egress: &mut ConnectionEgress,
+    ) -> Result<(), ServerFailure> {
+        self.reads
+            .publish(event, dispatcher, session, transport, handle, egress)
+            .await
     }
     pub(super) async fn graphics_request(
         &mut self,
@@ -546,6 +603,69 @@ impl TerminalConnection {
                         .ok_or_else(|| failure(ServerFailureClass::Exhausted))?;
                 }
             }
+            RuntimePresentationEvent::Metadata(snapshot) => {
+                if !session
+                    .codec
+                    .capabilities()
+                    .contains(&spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA)
+                {
+                    return Ok(());
+                }
+                let subscription = self
+                    .subscriptions
+                    .get_mut(&pane)
+                    .ok_or_else(|| failure(ServerFailureClass::StaleAuthority))?;
+                let parts = snapshot.parts();
+                if snapshot.session() != subscription.token.fence.session() {
+                    return Err(failure(ServerFailureClass::ScopeMismatch));
+                }
+                if subscription.metadata.is_some_and(|(sequence, tick)| {
+                    parts.sequence <= sequence || parts.observed_at < tick
+                }) {
+                    return Ok(());
+                }
+                let payload = match session.codec.major() {
+                    1 => Payload::Major1(v1::Message {
+                        kind: Some(v1::message::Kind::MetadataPublication(Box::new(
+                            spaceterm_protocol::convert::metadata::v1::encode_publication(
+                                subscription.token.fence,
+                                subscription.token.request,
+                                subscription.token.generation,
+                                &snapshot,
+                            )
+                            .map_err(protocol_failure)?,
+                        ))),
+                    }),
+                    2 => Payload::Major2(v2::Message {
+                        kind: Some(v2::message::Kind::MetadataPublication(Box::new(
+                            spaceterm_protocol::convert::metadata::v2::encode_publication(
+                                subscription.token.fence,
+                                subscription.token.request,
+                                subscription.token.generation,
+                                &snapshot,
+                            )
+                            .map_err(protocol_failure)?,
+                        ))),
+                    }),
+                    _ => return Err(failure(ServerFailureClass::ScopeMismatch)),
+                };
+                // Metadata is an optional display publication. A tiny negotiated
+                // frame must not disconnect a peer or truncate a display fact.
+                if payload.encoded_len() > self.limits.frame_bytes.saturating_sub(128) {
+                    return Ok(());
+                }
+                let reservation = egress
+                    .reserve_content_reply(payload.encoded_len() as u32)
+                    .map_err(egress_failure)?;
+                if !current(handle, session.principal, subscription.token.fence).await? {
+                    self.remove(pane);
+                    return Ok(());
+                }
+                dispatcher
+                    .send(session, transport, &payload, egress, Some(reservation))
+                    .await?;
+                subscription.metadata = Some((parts.sequence, parts.observed_at));
+            }
             RuntimePresentationEvent::NativeRequest(request) => {
                 let Some(clock) = &self.clock else {
                     // No local tick provider means there is no safe deadline translation.
@@ -655,6 +775,7 @@ impl TerminalConnection {
     }
     fn remove(&mut self, pane: PaneId) {
         self.graphics.remove_pane(pane);
+        self.reads.remove_pane(pane);
         if let Some(subscription) = self.subscriptions.remove(&pane) {
             subscription.task.abort();
         }
@@ -753,18 +874,14 @@ async fn deny_native(
 
 pub(super) fn bounded_page_request(
     request: ContentPageRequest,
+    negotiated: spaceterm_protocol::limits::NegotiatedLimits,
 ) -> Result<ContentPageRequest, ServerFailure> {
     let limits = request.limits();
     ContentPageRequest::new(
         request.stamp(),
         request.range(),
         request.continuation(),
-        PageLimits::new(
-            limits.rows(),
-            limits.cells(),
-            limits.bytes().min(PAGE_BYTES),
-        )
-        .map_err(|_| failure(ServerFailureClass::Capacity))?,
+        bounded_limits(limits, negotiated)?,
     )
     .map_err(|_| failure(ServerFailureClass::ScopeMismatch))
 }
@@ -772,11 +889,38 @@ pub(super) fn page_reply_budget(payload: &Payload) -> Result<Option<u32>, Server
     let request = match payload {
         Payload::Major1(v1::Message {
             kind: Some(v1::message::Kind::ContentQuery(value)),
-        }) => content::v1::decode_page_request(value).map_err(protocol_failure)?,
+        }) if matches!(value.kind, 1 | 2) => {
+            content::v1::decode_page_request(value).map_err(protocol_failure)?
+        }
         Payload::Major2(v2::Message {
             kind: Some(v2::message::Kind::ContentQuery(value)),
-        }) => content::v2::decode_page_request(value).map_err(protocol_failure)?,
+        }) if matches!(value.kind, 1 | 2) => {
+            content::v2::decode_page_request(value).map_err(protocol_failure)?
+        }
         _ => return Ok(None),
     };
-    Ok(Some(bounded_page_request(request)?.limits().bytes()))
+    Ok(Some(
+        bounded_page_request(request, Default::default())?
+            .limits()
+            .bytes(),
+    ))
+}
+
+fn bounded_limits(
+    limits: PageLimits,
+    negotiated: spaceterm_protocol::limits::NegotiatedLimits,
+) -> Result<PageLimits, ServerFailure> {
+    // ContentPage's conservative accounting includes its stamp, colors and row
+    // descriptors. Reserve additional space for the publication wrapper and
+    // authenticated envelope (signature, sequence and nested byte lengths).
+    let bytes = negotiated
+        .frame_bytes
+        .saturating_sub(512)
+        .min(PAGE_BYTES as usize) as u32;
+    PageLimits::new(
+        limits.rows().min(negotiated.semantic_rows as u16),
+        limits.cells().min(negotiated.semantic_cells as u32),
+        limits.bytes().min(bytes),
+    )
+    .map_err(|_| failure(ServerFailureClass::Capacity))
 }

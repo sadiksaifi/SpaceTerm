@@ -67,6 +67,35 @@ impl NativeServiceProcessTable {
     }
 }
 
+pub(super) fn instance_owner() -> Result<super::runtime_inventory::InstanceOwner, ServiceFailure> {
+    use super::ServiceClock as _;
+    let pid = std::process::id();
+    Ok(super::runtime_inventory::InstanceOwner {
+        boot: super::processes::NativeClock.now()?.boot,
+        pid,
+        birth: native::instance_birth(pid)?.ok_or(ServiceFailure::CleanupUnresolved)?,
+    })
+}
+
+pub(super) fn previous_owner_absent(
+    owner: super::runtime_inventory::InstanceOwner,
+    boot: [u8; 32],
+) -> Result<(), ServiceFailure> {
+    if boot != owner.boot {
+        // No process or kernel runtime resource from another boot can survive.
+        // NativeServiceProcesses still verifies the current fixed manager scope.
+        return Ok(());
+    }
+    if native::instance_birth(owner.pid)? == Some(owner.birth) {
+        return Err(ServiceFailure::CleanupUnresolved);
+    }
+    #[cfg(target_os = "macos")]
+    native::previous_instance_absent(owner.birth)?;
+    // On Linux the opaque proof requires an empty, twice-observed fixed unit
+    // cgroup, including delegated child cgroups. Root death alone grants none.
+    Ok(())
+}
+
 /// Native absence observations for account services.
 /// A live runtime or old Session requires runtime-owned custody and is never
 /// declared clean merely because its main PID disappeared.
@@ -75,6 +104,7 @@ pub struct NativeServiceProcesses {
     installations: Arc<dyn ServiceInstallations>,
     manager: Arc<dyn super::ServiceManager>,
     runtime: Option<Arc<dyn ServiceProcesses>>,
+    clock: Arc<dyn super::ServiceClock>,
 }
 impl NativeServiceProcesses {
     /// Composes actual-account native observations with signed executable selection.
@@ -88,11 +118,18 @@ impl NativeServiceProcesses {
             installations,
             manager: Arc::new(manager),
             runtime: None,
+            clock: Arc::new(super::processes::NativeClock),
         })
     }
     /// Uses the same manager scope provider as the lifecycle supervisor.
     pub fn with_manager(mut self, manager: Arc<dyn super::ServiceManager>) -> Self {
         self.manager = manager;
+        self
+    }
+    /// Supplies the boot clock at the native evidence boundary. Production
+    /// construction always selects the OS clock; tests can model a new boot.
+    pub fn with_clock(mut self, clock: Arc<dyn super::ServiceClock>) -> Self {
+        self.clock = clock;
         self
     }
     /// Adds the owning actor's assessment, admission-barrier and descendant-custody port.
@@ -223,6 +260,48 @@ impl ServiceProcesses for NativeServiceProcesses {
             // the approved root process and retained listener are also absent.
             self.runtime()?.verify_absent(registration).await?;
             self.absent(registration, false).await
+        })
+    }
+    fn reconcile_previous_instance<'a>(
+        &'a self,
+        registration: &'a RegisteredServer,
+        epoch: ServerEpoch,
+        expected: &'a [spaceterm_core::retirement::RetiredSession],
+    ) -> ServiceFuture<'a, Vec<SessionCleanupObservation>> {
+        Box::pin(async move {
+            self.account(registration)?;
+            let sessions: Vec<_> = expected.iter().map(|value| value.session()).collect();
+            super::processes::validate_previous_scope(
+                spaceterm_core::identity::ServerId::new(registration.server_pin().identity),
+                epoch,
+                &sessions,
+            )?;
+            self.absent(registration, true).await?;
+            let boot = self.clock.now()?.boot;
+            if boot == [0; 32] {
+                return Err(ServiceFailure::SupervisorUnavailable);
+            }
+            let absence = super::runtime_inventory::NativeInstanceAbsence {
+                key: registration.key(),
+                server: spaceterm_core::identity::ServerId::new(registration.server_pin().identity),
+                epoch,
+                boot,
+            };
+            let observations = self
+                .runtime()?
+                .reconcile_previous_instance_with_absence(registration, epoch, expected, &absence)
+                .await?;
+            super::processes::cleanup_matches(&sessions, &observations)?;
+            if !expected
+                .iter()
+                .zip(&observations)
+                .all(|(expected, observed)| expected.first_reason() == observed.first_reason())
+            {
+                return Err(ServiceFailure::CleanupUnresolved);
+            }
+            // A manager observation cannot discharge a changed scope.
+            self.absent(registration, true).await?;
+            Ok(observations)
         })
     }
     fn previous_instance_cleanup<'a>(

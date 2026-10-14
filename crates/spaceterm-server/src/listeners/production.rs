@@ -34,7 +34,7 @@ use crate::{
         AuthenticationConfig, Authenticator, HANDSHAKE_DEADLINE, MAX_AUTHENTICATED_CONNECTIONS,
         MAX_UNAUTHENTICATED_CONNECTIONS,
     },
-    contracts::{ServerFailure, ServerFailureClass, ServerFuture},
+    contracts::{ServerClock, ServerFailure, ServerFailureClass, ServerFuture},
     extensions::ExtensionObserverPort,
     failure::failure,
     pairing::{
@@ -177,16 +177,18 @@ pub fn production_listener_factories_with_dispatch<S: PairingSnapshotPort + 'sta
     let authentication = Arc::new(ProductionAuthentication {
         uid: config.registration.key().account_uid,
         account_runtime: account_runtime.is_some(),
+        extensions: ordinary.capabilities(),
         identity: config.identity.clone(),
         lookup,
         server: snapshot.state().server,
         epoch: snapshot.epoch(),
     });
     let dispatch = Arc::new(ProductionDispatch {
+        clock: handle.clock.clone(),
         status: status_receiver.clone(),
         ordinary: Arc::new(PairingOrdinaryDispatch::new(
             config.pairing.clone(),
-            ordinary,
+            ordinary.clone(),
         )),
         pairing: config.pairing,
         outcomes: config.ports.outcomes.clone(),
@@ -221,6 +223,7 @@ pub fn production_listener_factories_with_dispatch<S: PairingSnapshotPort + 'sta
     Ok(ListenerFactories {
         lifecycle: Arc::new(StatusListeners {
             listeners,
+            ordinary,
             handle,
             running: config.running,
             status: status_sender,
@@ -233,6 +236,7 @@ pub fn production_listener_factories_with_dispatch<S: PairingSnapshotPort + 'sta
 }
 
 struct ProductionAuthentication<S> {
+    extensions: Vec<u32>,
     account_runtime: bool,
     uid: u32,
     identity: Arc<ServerIdentity>,
@@ -262,6 +266,13 @@ impl<S: PairingSnapshotPort + 'static> AuthenticationFactoryPort for ProductionA
         if self.account_runtime {
             capabilities.push(spaceterm_protocol::negotiation::CAPABILITY_ACCOUNT_RUNTIME);
         }
+        capabilities.extend([
+            spaceterm_protocol::negotiation::CAPABILITY_APPLICATION_MOUSE,
+            spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA,
+        ]);
+        capabilities.extend_from_slice(&self.extensions);
+        capabilities.sort_unstable();
+        capabilities.dedup();
         Ok(AuthenticationConfig {
             server: self.server,
             epoch: self.epoch,
@@ -287,6 +298,7 @@ impl<S: PairingSnapshotPort + 'static> AuthenticationFactoryPort for ProductionA
     }
 }
 struct ProductionDispatch {
+    clock: Arc<dyn ServerClock>,
     account_runtime: Option<Arc<crate::account_runtime::AccountRuntimeProcesses>>,
     status: watch::Receiver<ServerStatus>,
     ordinary: Arc<dyn crate::protocol_dispatch::OrdinaryDispatchPort>,
@@ -304,6 +316,7 @@ impl ConnectionDispatchFactoryPort for ProductionDispatch {
             self.ordinary.clone(),
             Arc::new(RejectRestrictedFallback),
         )
+        .with_clock(self.clock.clone())
         .with_pairing(self.pairing.clone())
         .with_outcomes(self.outcomes.clone());
         if let Some(runtime) = &self.account_runtime {
@@ -396,6 +409,7 @@ pub(crate) fn retirement_progress(
 }
 
 struct StatusListeners {
+    ordinary: Arc<dyn OrdinaryDispatchPort>,
     listeners: Arc<ServerListeners>,
     handle: ServerHandle,
     running: spaceterm_distribution::BuildVersion,
@@ -476,6 +490,7 @@ impl ListenerLifecyclePort for StatusListeners {
     fn close(&self) -> ServerFuture<'_, Result<(), ServerFailure>> {
         Box::pin(async move {
             let closed = self.listeners.close().await;
+            let providers = self.ordinary.shutdown().await;
             // Keep the last status truthful after the endpoint is gone.
             self.publish_current()?;
             self.stop.send_replace(true);
@@ -489,7 +504,7 @@ impl ListenerLifecyclePort for StatusListeners {
                     .await
                     .map_err(|_| failure(ServerFailureClass::CleanupIncomplete))??;
             }
-            closed
+            closed.and(providers)
         })
     }
 }
