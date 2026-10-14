@@ -99,6 +99,9 @@ impl fmt::Debug for PublicRequestId {
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct PublicFingerprint([u8; 32]);
 impl PublicFingerprint {
+    pub(crate) fn from_public_key(key: [u8; 32]) -> Self {
+        Self(key)
+    }
     pub fn bytes(self) -> [u8; 32] {
         self.0
     }

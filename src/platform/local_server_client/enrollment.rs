@@ -72,7 +72,7 @@ pub(super) async fn enroll(
     enroll_with_credentials(native, journal, DeviceCredentials::native()).await
 }
 
-async fn enroll_with_credentials<N: NativeDeviceCredentials>(
+async fn enroll_with_credentials<N: NativeDeviceCredentials + Clone + 'static>(
     native: &NativeClientProvider,
     journal: Arc<JournalController>,
     credentials: N,
@@ -86,12 +86,13 @@ async fn enroll_with_credentials<N: NativeDeviceCredentials>(
     .await
 }
 
-async fn enroll_using<N: NativeDeviceCredentials>(
+async fn enroll_using<N: NativeDeviceCredentials + Clone + 'static>(
     native: &NativeClientProvider,
     journal: Arc<JournalController>,
     credentials: N,
     channels: &dyn OwnerChannelProvider,
 ) -> Result<(), ClientFailure> {
+    let provisioning_credentials = Arc::new(credentials.clone());
     let management = native.management();
     let supervisor = management.supervisor();
     let registration = supervisor
@@ -316,7 +317,23 @@ async fn enroll_using<N: NativeDeviceCredentials>(
         .close()
         .await
         .map_err(spaceterm_client_native::route::classify);
-    result.and(closed)
+    result.and(closed)?;
+    // Dedicated Clients need the ordinary actor. Stopped enrollment must not
+    // start it or invalidate the completed listener-free owner transaction.
+    if registration.desired_state() == spaceterm_host::startup::DesiredServerState::Stopped {
+        return Ok(());
+    }
+    spaceterm_client_native::native::consumer::NativeConsumer::new(
+        native.management(), spaceterm_client_native::native::consumer::NativeConsumerKind::Cli,
+    ).with_credentials(provisioning_credentials).provision_journal(journal).await.map(|_| ()).map_err(|error| {
+        use spaceterm_client::management_cli::ManagementFailure;
+        failure(match error {
+            ManagementFailure::CredentialUnavailable | ManagementFailure::StorageUnavailable => ClientFailureClass::StorageUnavailable,
+            ManagementFailure::AuthorizationDenied | ManagementFailure::Revoked => ClientFailureClass::AuthorizationDenied,
+            ManagementFailure::OutcomePending => ClientFailureClass::RecoveryRequired,
+            _ => ClientFailureClass::Unavailable,
+        })
+    })
 }
 
 struct OwnerConnector {

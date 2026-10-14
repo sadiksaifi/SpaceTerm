@@ -10,6 +10,7 @@ use spaceterm_protocol::pairing_adapter;
 #[test]
 fn lost_unpair_assessment_lookup_recovers_original_id_in_both_majors() {
     let server = ServerId::new([1; 16]);
+    let pin = spaceterm_protocol::authentication::ServerPin { identity: server.bytes(), public_key: [8; 32] };
     let pairing_id = PairingId::new(server, 2).unwrap();
     let client = ClientId::new(server, 3).unwrap();
     let stream = OperationStreamId::new(
@@ -79,7 +80,7 @@ fn lost_unpair_assessment_lookup_recovers_original_id_in_both_majors() {
                 )),
             };
             assert_eq!(
-                pairing::$p::lookup(&lookup, binding).unwrap(),
+                pairing::$p::lookup(&lookup, binding, pin).unwrap(),
                 OperationLookup::Completed {
                     result: Outcome::Pairing(Box::new(PairingOutcome::UnpairAssessed(
                         expected.clone()
@@ -101,12 +102,12 @@ fn lost_unpair_assessment_lookup_recovers_original_id_in_both_majors() {
                 ..Default::default()
             });
             assert!(
-                pairing::$p::lookup(&oversized, binding).is_err(),
+                pairing::$p::lookup(&oversized, binding, pin).is_err(),
                 "pairing extension preserves the generic byte ceiling"
             );
             lookup.request_digest[0] ^= 1;
             assert!(
-                pairing::$p::lookup(&lookup, binding).is_err(),
+                pairing::$p::lookup(&lookup, binding, pin).is_err(),
                 "outer digest is authenticated"
             );
             lookup.request_digest = binding.digest.bytes().to_vec();
@@ -120,12 +121,12 @@ fn lost_unpair_assessment_lookup_recovers_original_id_in_both_majors() {
                 OperationSequence::new(2).unwrap(),
             )));
             assert!(
-                pairing::$p::lookup(&lookup, binding).is_err(),
+                pairing::$p::lookup(&lookup, binding, pin).is_err(),
                 "nested outcome keeps the original identity"
             );
             lookup.disposition = Some($p::operation_lookup_result::Disposition::Pending(true));
             assert_eq!(
-                pairing::$p::lookup(&lookup, binding).unwrap(),
+                pairing::$p::lookup(&lookup, binding, pin).unwrap(),
                 OperationLookup::Pending
             );
         }};

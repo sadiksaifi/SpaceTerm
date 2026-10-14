@@ -2,6 +2,7 @@
 //! Restoration never creates storage, enrolls or selects another consumer's Client.
 
 mod assessments;
+mod enrollment;
 
 use super::{NativeServiceManagement, classify_service};
 use crate::{
@@ -83,6 +84,7 @@ impl NativeConsumerKind {
 /// dedicated journal is PairingRequired, never a request to provision a new key.
 pub struct NativeConsumer {
     native: Arc<NativeServiceManagement>,
+    credentials: Arc<dyn NativeDeviceCredentials>,
     kind: NativeConsumerKind,
     mutation: tokio::sync::Mutex<()>,
     owner: OnceCell<PairingOwner>,
@@ -102,9 +104,12 @@ struct OpenedConsumer {
     _runtime: ClientRuntime,
 }
 impl NativeConsumer {
-    pub(crate) fn new(native: Arc<NativeServiceManagement>, kind: NativeConsumerKind) -> Self {
+    /// Selects one dedicated consumer with native credentials. Construction is
+    /// read-only; enrollment remains an explicit foreground operation.
+    pub fn new(native: Arc<NativeServiceManagement>, kind: NativeConsumerKind) -> Self {
         Self {
             native,
+            credentials: Arc::new(DeviceCredentials::native()),
             kind,
             mutation: tokio::sync::Mutex::new(()),
             owner: OnceCell::new(),
@@ -112,6 +117,12 @@ impl NativeConsumer {
         }
     }
 
+    /// Native credential boundary for deliberate enrollment and restoration.
+    /// Production construction selects Keychain or Secret Service.
+    pub fn with_credentials(mut self, credentials: Arc<dyn NativeDeviceCredentials>) -> Self {
+        self.credentials = credentials;
+        self
+    }
     /// Retains one already recovered consumer journal without ordinary dialing.
     /// Restricted retry remains available when ordinary use has been suppressed.
     pub fn with_recovered_journal(
@@ -123,6 +134,7 @@ impl NativeConsumer {
     ) -> Self {
         Self {
             native,
+            credentials: credentials.clone(),
             kind,
             mutation: tokio::sync::Mutex::new(()),
             owner: OnceCell::new_with(Some(pairing_owner(journal, credentials, routes))),
@@ -145,14 +157,11 @@ impl NativeConsumer {
     async fn owner(&self) -> Result<&PairingOwner, ManagementFailure> {
         self.owner
             .get_or_try_init(|| async {
-                let registration = self
+                let directory = self
                     .native
                     .supervisor
-                    .discover()
-                    .map_err(classify_service)?
-                    .ok_or(ManagementFailure::NativeUnavailable)?;
-
-                let directory = self.kind.directory(&registration)?;
+                    .client_connections_directory()
+                    .join(self.kind.directory_name());
                 match std::fs::symlink_metadata(&directory) {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                         return Err(ManagementFailure::PairingRequired);
@@ -176,16 +185,17 @@ impl NativeConsumer {
                         .await
                         .map_err(classify_client)?,
                 );
-                let local =
-                    LocalRouteAuthority::new(registration.endpoint().map_err(classify_service)?)
-                        .map_err(classify_client)?;
-                let routes =
-                    NativeRouteConnector::new(vec![local], None).map_err(classify_client)?;
-                Ok(pairing_owner(
-                    journal,
-                    Arc::new(DeviceCredentials::native()),
-                    routes,
-                ))
+                let local = self
+                    .native
+                    .supervisor
+                    .retained_local_endpoint()
+                    .map_err(classify_service)?
+                    .map(LocalRouteAuthority::new)
+                    .transpose()
+                    .map_err(classify_client)?;
+                let routes = NativeRouteConnector::new(local.into_iter().collect(), None)
+                    .map_err(classify_client)?;
+                Ok(pairing_owner(journal, self.credentials.clone(), routes))
             })
             .await
     }
@@ -677,23 +687,35 @@ async fn open_consumer(
     kind: NativeConsumerKind,
     owner: &PairingOwner,
 ) -> Result<OpenedConsumer, ManagementFailure> {
+    open_pairing(kind, owner, true, None).await
+}
+async fn open_pairing(
+    kind: NativeConsumerKind,
+    owner: &PairingOwner,
+    additional_only: bool,
+    selected_pin: Option<ServerPin>,
+) -> Result<OpenedConsumer, ManagementFailure> {
     let pairing = &owner.pairing;
     let journal = pairing.journal().clone();
     let inventory = pairing.inventory().await.map_err(classify_pairing)?;
     // Dedicated stores contain exactly one explicitly selected server-issued
     // additional Client. Ambiguous stores never fall back to the first record.
-    if inventory.saved.len() != 1 {
-        return Err(if inventory.saved.is_empty() {
-            ManagementFailure::PairingRequired
-        } else {
-            ManagementFailure::UnsafeNativeState
-        });
-    }
-    let saved = &inventory.saved[0];
-    if !matches!(
-        saved.receipt().parts().claims,
-        PairingReceiptBody::ClientBinding { .. }
-    ) {
+    let selected = inventory
+        .saved
+        .iter()
+        .filter(|saved| selected_pin.is_none_or(|pin| saved.pin() == pin))
+        .collect::<Vec<_>>();
+    let saved = match selected.as_slice() {
+        [saved] => *saved,
+        [] => return Err(ManagementFailure::PairingRequired),
+        _ => return Err(ManagementFailure::UnsafeNativeState),
+    };
+    if additional_only
+        && !matches!(
+            saved.receipt().parts().claims,
+            PairingReceiptBody::ClientBinding { .. }
+        )
+    {
         return Err(ManagementFailure::AuthorizationDenied);
     }
     let ordinary = pairing
@@ -744,18 +766,20 @@ async fn open_consumer(
         .ok_or(ManagementFailure::PairingRequired)?;
     server.connect().await.map_err(classify_client)?;
     let mut state = server.state();
+    let mut replica = server.replica();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             if matches!(
                 *state.borrow_and_update(),
                 spaceterm_client::api::ConnectionState::Connected { .. }
-            ) {
+            ) && replica.borrow_and_update().is_ready()
+            {
                 return Ok(());
             }
-            state
-                .changed()
-                .await
-                .map_err(|_| ManagementFailure::Offline)?;
+            tokio::select! {
+                result = state.changed() => result.map_err(|_| ManagementFailure::Offline)?,
+                result = replica.changed() => result.map_err(|_| ManagementFailure::Offline)?,
+            }
         }
     })
     .await
@@ -977,15 +1001,12 @@ fn progress_binding(
 impl crate::cli::bindings::PairingCommandBindings for NativeConsumer {
     fn enroll<'a>(
         &'a self,
-        _: Option<crate::cli::arguments::PublicFingerprint>,
-        _: bool,
+        expected: Option<crate::cli::arguments::PublicFingerprint>,
+        recover_account: bool,
         _: spaceterm_host::native_management::SudoMode,
-        _: &'a mut dyn crate::cli::runner::CliIo,
+        io: &'a mut dyn crate::cli::runner::CliIo,
     ) -> ManagementFuture<'a, crate::cli::output::CliOutput> {
-        Box::pin(async {
-            self.mutable()?;
-            Err(ManagementFailure::AuthorizationUnavailable)
-        })
+        Box::pin(async move { self.enroll_registered(expected, recover_account, io).await })
     }
     fn authorize(
         &self,

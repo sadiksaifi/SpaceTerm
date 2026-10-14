@@ -40,7 +40,8 @@ pub use processes::{
 };
 pub use registration::RegisteredServer;
 pub use supervisor::{
-    AccountStartup, AccountStartupAdmission, ServiceSupervisor, StoppedOwnerAdmission, StorageWait,
+    AccountStartup, AccountStartupAdmission, ClientProvisioning, ServiceSupervisor,
+    StoppedOwnerAdmission, StorageWait,
 };
 
 use crate::{
