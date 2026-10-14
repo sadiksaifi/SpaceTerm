@@ -170,6 +170,7 @@ impl StartupFailure {
                 ServiceFailure::Suppressed => "server account unavailable: Suppressed",
                 ServiceFailure::LimitExceeded => "server account unavailable: LimitExceeded",
                 ServiceFailure::Pending => "server account unavailable: Pending",
+                ServiceFailure::PairingRequired => "server account unavailable: PairingRequired",
                 ServiceFailure::CleanupUnresolved => {
                     "server account unavailable: CleanupUnresolved"
                 }

@@ -113,6 +113,10 @@ fn startup_failure_diagnostics_include_only_typed_inner_classifications() {
             "server account unavailable: ArtifactRejected",
         ),
         (
+            StartupFailure::Account(ServiceFailure::PairingRequired),
+            "server account unavailable: PairingRequired",
+        ),
+        (
             StartupFailure::Key(KeyStoreFailure::StorageLocked),
             "server key unavailable: StorageLocked",
         ),
@@ -187,6 +191,7 @@ fn fixed_service_serve_operand_reports_only_a_bounded_account_startup_classifica
             "Suppressed",
             "LimitExceeded",
             "Pending",
+            "PairingRequired",
             "CleanupUnresolved",
             "Indeterminate",
         ],
