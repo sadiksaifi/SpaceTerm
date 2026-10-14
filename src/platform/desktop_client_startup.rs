@@ -22,6 +22,12 @@ use spaceterm_client::{
 };
 use spaceterm_core::identity::ServerId;
 
+pub(crate) const NATIVE_PROTOCOL_CAPABILITIES: [u32; 3] = [
+    spaceterm_protocol::negotiation::CAPABILITY_SERVER_GIT,
+    spaceterm_protocol::negotiation::CAPABILITY_SERVER_DIRECTORIES,
+    spaceterm_protocol::negotiation::CAPABILITY_ORGANIZATION_COMPARISONS,
+];
+
 use crate::ui::{
     server_client_runtime::{
         DesktopClientRuntime,

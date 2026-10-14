@@ -188,7 +188,8 @@ impl Desktop {
                             delegate: protocol.clone(),
                             discovery: None,
                             limits: Default::default(),
-                            additional_capabilities: vec![],
+                            additional_capabilities:
+                                desktop_client_startup::NATIVE_PROTOCOL_CAPABILITIES.to_vec(),
                         },
                         journal: journal.clone(),
                         channels,
@@ -197,6 +198,7 @@ impl Desktop {
                         local_server: None,
                         tracker: Some(tracker.clone()),
                         registry_binding: Some(protocol.clone()),
+                        settings: Default::default(),
                     },
                     NativeViewStore::new(paths.clone()),
                 )
@@ -404,65 +406,11 @@ fn create_workspace(
     (workspace, tab, pane)
 }
 
-fn compatible_server(executor: &tokio::runtime::Runtime, major: u32) -> authenticated::Fixture {
-    executor.block_on(async {
-        let server = authenticated::Fixture::with_bootstrap_client(major).await;
-        let mut routes = authenticated::Routes {
-            fixture: &server,
-            route: authenticated::Route::Ipc,
-            wss: None,
-            ssh: None,
-            next_endpoint: 0,
-        };
-        let route = routes.open().await;
-        let (stream, principal) = server.bootstrap.unwrap();
-        let codec = authenticated::handshake_limits(
-            &route,
-            server.pin,
-            principal,
-            major,
-            47,
-            Default::default(),
-        )
-        .await
-        .unwrap();
-        let mut bootstrap = authenticated::Client {
-            route,
-            codec,
-            stream,
-            sequence: 1,
-            last_frame: vec![],
-            generation: None,
-            runtime_request: 0,
-            rows: BTreeMap::new(),
-            text: String::new(),
-        };
-        bootstrap.reconcile(&server.handle).await;
-        // Exercise established compatible servers. The revision-zero native grant
-        // reconciliation defect is reported separately rather than bypassed in production.
-        assert_eq!(
-            bootstrap
-                .command(Command::SetWorktreeLocation {
-                    server: stream.server(),
-                    expected_version: server
-                        .handle
-                        .snapshot()
-                        .state()
-                        .settings
-                        .worktree_location
-                        .version,
-                    template: spaceterm_core::organization::WorktreeLocationTemplate::new(
-                        "~/.worktrees/{repository}/acceptance-{branch}".into()
-                    )
-                    .unwrap(),
-                })
-                .await,
-            Outcome::Applied
-        );
-        bootstrap.route.close().await;
-        drop(routes);
-        server
-    })
+fn fresh_server(executor: &tokio::runtime::Runtime, major: u32) -> authenticated::Fixture {
+    let server = executor.block_on(authenticated::Fixture::new(major));
+    assert_eq!(server.handle.snapshot().state().revision.get(), 0);
+    assert!(server.handle.snapshot().state().workspaces.is_empty());
+    server
 }
 
 #[gpui::test]
@@ -474,8 +422,8 @@ fn authenticated_desktop_two_servers_preserve_independent_views_and_inactive_ent
         .enable_all()
         .build()
         .unwrap();
-    let first = compatible_server(&executor, 2);
-    let second = compatible_server(&executor, 1);
+    let first = fresh_server(&executor, 2);
+    let second = fresh_server(&executor, 1);
     let a = Desktop::new(&executor, &[&first, &second], 0, cx);
     let b = Desktop::new(&executor, &[&first, &second], 1, cx);
     let first_id = first.handle.snapshot().state().server;
@@ -851,7 +799,7 @@ fn authenticated_desktop_settings_closure_and_native_reopen_preserve_ended_and_d
         .enable_all()
         .build()
         .unwrap();
-    let server = compatible_server(&executor, 2);
+    let server = fresh_server(&executor, 2);
     let desktop = Desktop::new(&executor, &[&server], 0, cx);
     let server_id = server.handle.snapshot().state().server;
     desktop.wait_connected(server_id, &executor, cx);
@@ -1039,8 +987,8 @@ fn authenticated_desktop_native_geometry_and_offline_settings_preserve_client_do
         .enable_all()
         .build()
         .unwrap();
-    let first = compatible_server(&executor, 2);
-    let second = compatible_server(&executor, 1);
+    let first = fresh_server(&executor, 2);
+    let second = fresh_server(&executor, 1);
     let a = Desktop::new(&executor, &[&first, &second], 0, cx);
     let b = Desktop::new(&executor, &[&first, &second], 1, cx);
     let first_id = first.handle.snapshot().state().server;
