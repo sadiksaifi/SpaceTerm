@@ -488,6 +488,11 @@ impl ChildTermination {
             self.force_after_proof_contention();
             return NativePtySettlement::Unavailable;
         };
+        // Queueing for another Session and proving this Session have separate
+        // bounded budgets. A late gate acquisition must still permit a complete
+        // census and fork-fenced absence proof, not just the queue deadline's tail.
+        #[cfg(target_os = "macos")]
+        let deadline = Some(Instant::now() + SETTLEMENT_ATTEMPT_TIMEOUT);
         let Ok(mut receipt) = lock_for_settlement(&self.settlement, deadline) else {
             return NativePtySettlement::Unavailable;
         };
@@ -2345,6 +2350,7 @@ mod tests {
         let mut first_host = ReprovableSettlementHost::new(true);
         first_host.blocked_census = Some(control.clone());
         let (first_pty, first, _) = reprovable_pty(Arc::new(first_host), i32::MAX);
+        let _release = control.release_on_drop();
         let first_cleanup = thread::spawn(move || drop(first_pty));
         control.wait_until_entered("foreground cleanup census");
         let mut second_host = ReprovableSettlementHost::new(true);
@@ -2386,6 +2392,7 @@ mod tests {
         let mut host = ReprovableSettlementHost::new(true);
         host.blocked_census = Some(control.clone());
         let (pty, termination, _) = reprovable_pty(Arc::new(host), i32::MAX);
+        let _release = control.release_on_drop();
         let proving = Arc::clone(&termination);
         let proof = thread::spawn(move || proving.settle());
         control.wait_until_entered("same-authority proof census");
@@ -2427,6 +2434,7 @@ mod tests {
         let mut gate_host = ReprovableSettlementHost::new(true);
         gate_host.blocked_census = Some(control.clone());
         let (gate_pty, gate_termination, _) = reprovable_pty(Arc::new(gate_host), i32::MAX);
+        let _release = control.release_on_drop();
         let gate_holder = thread::spawn(move || gate_termination.settle());
         control.wait_until_entered("cross-session proof gate");
         let started = Instant::now();
@@ -2475,12 +2483,74 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn settlement_gate_wait_does_not_spend_the_owned_proof_budget() {
+        let _isolation = lock_real_pty_test();
+        let (entered, observed) = mpsc::channel();
+        let mut host = ReprovableSettlementHost::new(false);
+        host.census_entered = Some(entered);
+        let host = Arc::new(host);
+        let (pty, termination, _) = reprovable_pty(host.clone(), i32::MAX);
+        let gate = SETTLEMENT_ATTEMPT_LOCK.lock().unwrap();
+        let (started, starting) = mpsc::channel();
+        let proving = Arc::clone(&termination);
+        let proof = thread::spawn(move || {
+            started.send(()).unwrap();
+            proving.settle()
+        });
+        starting.recv_timeout(Duration::from_secs(1)).unwrap();
+        // Queueing behind another Session must not leave only the tail of the
+        // attempt deadline for this Session's complete census and fork fences.
+        thread::sleep(Duration::from_millis(500));
+        drop(gate);
+        observed.recv_timeout(Duration::from_secs(1)).unwrap();
+        thread::sleep(Duration::from_millis(400));
+        host.conclusive.store(true, Ordering::Release);
+        let result = proof.join().unwrap();
+        // Clean the original authority even on RED before asserting its receipt.
+        assert_eq!(termination.settle(), NativePtySettlement::Settled);
+        drop(pty);
+        assert_eq!(result, NativePtySettlement::Settled);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn settlement_fixture_unwind_releases_callback_and_process_gate() {
+        let _isolation = lock_real_pty_test();
+        let control = BlockingCallControl::default();
+        let mut host = ReprovableSettlementHost::new(true);
+        host.blocked_census = Some(control.clone());
+        let (pty, termination, _) = reprovable_pty(Arc::new(host), i32::MAX);
+        let (finished, completion) = mpsc::channel();
+        let mut proof = None;
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _release = control.release_on_drop();
+            proof = Some(thread::spawn(move || {
+                drop(pty);
+                finished.send(()).unwrap();
+            }));
+            control.wait_until_entered("unwind fixture census");
+            // Unwind poisons the fixture state before the release guard runs.
+            let _held_control = control.state.0.lock().unwrap();
+            panic!("injected fixture failure");
+        }));
+        let completed = completion.recv_timeout(Duration::from_secs(2));
+        // Clean the original authority even on RED before checking release.
+        control.release();
+        proof.unwrap().join().unwrap();
+        assert!(panic.is_err());
+        assert!(completed.is_ok(), "unwind left the native census blocked");
+        assert_eq!(termination.settle(), NativePtySettlement::Settled);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn settlement_contention_is_bounded_and_does_not_cache_unavailable() {
         let _isolation = lock_real_pty_test();
         let control = BlockingCallControl::default();
         let mut first_host = ReprovableSettlementHost::new(true);
         first_host.blocked_census = Some(control.clone());
         let (first_pty, first, _) = reprovable_pty(Arc::new(first_host), i32::MAX);
+        let _release = control.release_on_drop();
         let first_cleanup = thread::spawn(move || drop(first_pty));
         control.wait_until_entered("held foreground cleanup attempt");
         let second_host = Arc::new(ReprovableSettlementHost::new(true));
@@ -3215,14 +3285,28 @@ mod tests {
         released: bool,
     }
 
+    struct BlockingCallRelease(BlockingCallControl);
+    impl Drop for BlockingCallRelease {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+
     impl BlockingCallControl {
+        // Declare this after a locally owned PTY so the guard drops first.
+        fn release_on_drop(&self) -> BlockingCallRelease {
+            BlockingCallRelease(self.clone())
+        }
+
         fn block(&self) {
             let (state, changed) = &*self.state;
-            let mut state = state.lock().unwrap();
+            let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
             state.entered = true;
             changed.notify_all();
             while !state.released {
-                state = changed.wait(state).unwrap();
+                state = changed
+                    .wait(state)
+                    .unwrap_or_else(|error| error.into_inner());
             }
         }
 
@@ -3244,7 +3328,10 @@ mod tests {
 
         fn release(&self) {
             let (state, changed) = &*self.state;
-            state.lock().unwrap().released = true;
+            state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .released = true;
             changed.notify_all();
         }
     }
@@ -3570,6 +3657,33 @@ mod tests {
     }
 
     #[test]
+    fn blocking_fixture_unwind_releases_before_local_pty_drop() {
+        let cleanup = CleanupCounts::default();
+        let kill_control = BlockingCallControl::default();
+        let worker_control = kill_control.clone();
+        let worker_cleanup = cleanup.clone();
+        let (finished, completion) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let (_pty, _terminator) = spawned_pty(Box::new(BlockingOwnerKillChild {
+                    cleanup: worker_cleanup,
+                    kill_control: worker_control.clone(),
+                }));
+                let _release = worker_control.release_on_drop();
+                panic!("injected failure before local PTY cleanup");
+            }));
+            finished.send(panic.is_err()).unwrap();
+        });
+        let completed = completion.recv_timeout(Duration::from_secs(2));
+        // Bound RED cleanup without allowing fallback release to prove success.
+        kill_control.release();
+        worker.join().unwrap();
+        assert_eq!(completed, Ok(true), "PTY drop ran before fixture release");
+        assert_eq!(cleanup.owner_kill.load(Ordering::Relaxed), 1);
+        assert_eq!(cleanup.wait.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
     fn terminator_should_signal_without_invoking_owner_kill() {
         let cleanup = CleanupCounts::default();
         let kill_control = BlockingCallControl::default();
@@ -3577,6 +3691,7 @@ mod tests {
             cleanup: cleanup.clone(),
             kill_control: kill_control.clone(),
         }));
+        let _release = kill_control.release_on_drop();
         let (termination_finished, termination_completion) = mpsc::sync_channel(1);
 
         let termination_thread = thread::spawn(move || {
@@ -3623,6 +3738,7 @@ mod tests {
             cleanup: cleanup.clone(),
             kill_control: kill_control.clone(),
         }));
+        let _release = kill_control.release_on_drop();
         let (cleanup_finished, cleanup_completion) = mpsc::sync_channel(1);
         let cleanup_thread = thread::spawn(move || {
             drop(pty);
@@ -3682,6 +3798,7 @@ mod tests {
             cleanup: cleanup.clone(),
             wait_control: wait_control.clone(),
         }));
+        let _release = wait_control.release_on_drop();
         let (cleanup_finished, cleanup_completion) = mpsc::sync_channel(1);
 
         let cleanup_thread = thread::spawn(move || {
@@ -3847,6 +3964,7 @@ mod tests {
             cleanup: cleanup.clone(),
             try_wait_control: try_wait_control.clone(),
         }));
+        let _release = try_wait_control.release_on_drop();
         let (wait_finished, wait_completion) = mpsc::sync_channel(1);
         let wait_thread = thread::spawn(move || {
             let result = pty.wait_for_child(Duration::from_secs(1));
