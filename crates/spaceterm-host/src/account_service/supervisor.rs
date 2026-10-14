@@ -253,6 +253,38 @@ impl ServiceSupervisor {
     pub fn key(&self) -> AccountBuildKey {
         self.key
     }
+    /// Client journals remain account/build scoped even after service registration
+    /// is removed or cannot be read. This path is never selected by remote data.
+    pub fn client_connections_directory(&self) -> PathBuf {
+        self.anchor.join("client-connections")
+    }
+    /// Deliberate enrollment owns the private client storage lease. This never
+    /// reads or opens the server's organization database.
+    pub fn admit_client_provisioning(&self) -> Result<ClientProvisioning, ServiceFailure> {
+        let path = self.client_connections_directory();
+        let directory = Directory::create(&path)?;
+        let lease = directory.lease("provisioning-lock")?;
+        Ok(ClientProvisioning {
+            path,
+            directory,
+            lease,
+        })
+    }
+    /// Restricted local retries may reopen only the fixed account/build runtime.
+    /// Missing runtime storage gives no route authority and creates nothing.
+    pub fn retained_local_endpoint(
+        &self,
+    ) -> Result<Option<crate::ipc::IpcEndpoint>, ServiceFailure> {
+        let runtime = self.anchor.join("runtime");
+        let Some(directory) = Directory::open(&runtime)? else {
+            return Ok(None);
+        };
+        directory.verify()?;
+        crate::ipc::PrivateIpcDirectory::open(&runtime)
+            .and_then(|directory| directory.endpoint("server"))
+            .map(Some)
+            .map_err(|_| ServiceFailure::UnsafeStorage)
+    }
     /// Reads an existing fixed registration and opens its existing private storage.
     /// Missing registration never causes key, directory or database creation.
     pub fn discover(&self) -> Result<Option<RegisteredServer>, ServiceFailure> {
@@ -2162,5 +2194,30 @@ impl ServiceSupervisor {
         };
         admission.revalidate()?;
         Ok(admission)
+    }
+}
+
+/// Account/build storage admission held for one deliberate provisioning action.
+/// Consumer names are fixed; caller or remote paths grant no local authority.
+pub struct ClientProvisioning {
+    path: PathBuf,
+    directory: Directory,
+    lease: crate::private_filesystem::Lease,
+}
+impl ClientProvisioning {
+    /// Opens or explicitly provisions one fixed dedicated consumer directory.
+    /// The boolean distinguishes first creation from read-only reopening.
+    pub fn journal_directory(&self, consumer: &str) -> Result<(PathBuf, bool), ServiceFailure> {
+        if !matches!(consumer, "enrollment" | "cli" | "companion" | "management") {
+            return Err(ServiceFailure::InvalidRecord);
+        }
+        self.directory.verify()?;
+        self.lease.verify()?;
+        let path = self.path.join(consumer);
+        let create = Directory::open(&path)?.is_none();
+        if create {
+            Directory::create(&path)?;
+        }
+        Ok((path, create))
     }
 }

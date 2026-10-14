@@ -2388,13 +2388,20 @@ async fn cli_reopens_suppressed_pairing_for_restricted_retry_without_native_regi
     use spaceterm_client_native::{
         NativeClientProvider,
         cli::bindings::{PairingCommandBindings, RevocationState},
-        native::consumer::{NativeConsumer, NativeConsumerKind},
-        route::NativeRouteConnector,
     };
     use spaceterm_host::{
         account_service::test_support::AccountServiceFixture, startup::BuildIdentity,
     };
-    let directory = Directory::new();
+    let account_root = Directory::new();
+    let account = AccountServiceFixture::new(&account_root.0, BuildIdentity::Development).unwrap();
+    let path = account.reopen().client_connections_directory().join("cli");
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&path)
+        .unwrap();
+    let directory = Directory(path);
     let native = Arc::new(directory.create().await);
     let fixture = Fixture::new(1);
     fixture.seed(native.as_ref()).await;
@@ -2407,30 +2414,9 @@ async fn cli_reopens_suppressed_pairing_for_restricted_retry_without_native_regi
     let removal = composition.self_unpair(assessment).await.unwrap();
     composition.dismiss_notice(removal.operation).await.unwrap();
     drop(composition);
-    let storage = NativeClientJournal::open_existing(
-        directory.0.clone(),
-        Arc::new(CanonicalCodec),
-        Arc::new(Verifier),
-        JournalLimits::default(),
-    )
-    .await
-    .unwrap();
-    let journal = controller(Arc::new(storage)).await;
-    let account_root = tempfile::Builder::new()
-        .prefix("st-retry-")
-        .tempdir_in("/var/tmp")
-        .unwrap();
-    let account =
-        AccountServiceFixture::new(account_root.path(), BuildIdentity::Development).unwrap();
     assert!(account.reopen().discover().unwrap().is_none());
     let provider = NativeClientProvider::from_supervisor(account.reopen());
-    let consumer = NativeConsumer::with_recovered_journal(
-        provider.management(),
-        NativeConsumerKind::Cli,
-        journal.clone(),
-        Arc::new(Credentials::new()),
-        NativeRouteConnector::new(vec![], None).unwrap(),
-    );
+    let consumer = provider.cli_consumer();
     let reports = consumer.retry_pending().await.unwrap();
     assert_eq!(reports.len(), 1);
     assert!(reports[0].local_connection_removed);
@@ -2444,6 +2430,42 @@ async fn cli_reopens_suppressed_pairing_for_restricted_retry_without_native_regi
         .unwrap();
     assert!(inventory.is_suppressed(&key));
     assert!(inventory.task(removal.operation).unwrap().notice_dismissed);
-    assert!(journal.snapshot().unwrap().bindings().is_empty());
+    assert!(
+        consumer
+            .pairing_runtime()
+            .await
+            .unwrap()
+            .journal()
+            .snapshot()
+            .unwrap()
+            .bindings()
+            .is_empty()
+    );
     assert!(account.reopen().discover().unwrap().is_none());
+    // A malformed live registration must not hide an independently retained,
+    // restricted revocation journal in a newly launched consumer.
+    let registration = account
+        .reopen()
+        .client_connections_directory()
+        .parent()
+        .unwrap()
+        .join("registration");
+    std::fs::write(&registration, b"invalid registration").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&registration, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(account.reopen().discover().is_err());
+    let retry = NativeClientProvider::from_supervisor(account.reopen()).cli_consumer();
+    let reports = retry.retry_pending().await.unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].revocation, RevocationState::Pending);
+    assert!(
+        retry
+            .pairing_runtime()
+            .await
+            .unwrap()
+            .inventory()
+            .await
+            .unwrap()
+            .is_suppressed(&key)
+    );
 }

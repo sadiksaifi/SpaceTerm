@@ -135,6 +135,15 @@ async fn journal(root: &Root) -> Arc<JournalController> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desktop_foreground_owner_pairing_publishes_verified_binding_from_running_account_actor() {
+    foreground_owner_pairing(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_foreground_owner_pairing_provisions_dedicated_clients_from_running_account_actor() {
+    foreground_owner_pairing(true).await;
+}
+
+async fn foreground_owner_pairing(cli: bool) {
     let root = Root::new();
     let fixture = AccountServiceFixture::new(&root.0, BuildIdentity::Development).unwrap();
     let registration = fixture
@@ -199,7 +208,37 @@ async fn desktop_foreground_owner_pairing_publishes_verified_binding_from_runnin
     let journal = journal(&root).await;
     let credentials = Credentials::default();
     let native = NativeClientProvider::from_supervisor((*supervisor).clone());
-    let result = enroll_with_credentials(&native, journal.clone(), credentials.clone()).await;
+    let result = if cli {
+        use spaceterm_client_native::{
+            cli::{arguments::{parse, CliCommand}, bindings::PairingCommandBindings},
+            native::consumer::{NativeConsumer, NativeConsumerKind},
+        };
+        let invocation = parse(["pair", "enroll", "--server-fingerprint", &spaceterm_client_native::cli::output::hex(&pin.public_key)].into_iter().map(std::ffi::OsString::from)).unwrap();
+        let CliCommand::PairEnroll { fingerprint, .. } = invocation.command else { panic!("pair enroll required"); };
+        let consumer = NativeConsumer::new(native.management(), NativeConsumerKind::Cli).with_credentials(Arc::new(credentials.clone()));
+        consumer.enroll(fingerprint, false, spaceterm_host::native_management::SudoMode::NonInteractive, &mut PairIo).await.map(|_| ())
+            .map_err(|_| spaceterm_client::failure::ClientFailure::new(spaceterm_client::failure::ClientFailureClass::Unavailable))
+    } else {
+        enroll_with_credentials(&native, journal.clone(), credentials.clone()).await
+    };
+    if result.is_ok() {
+        use spaceterm_client::management_cli::{ProtocolManagement, StatusManagement};
+        use spaceterm_client_native::native::consumer::{NativeConsumer, NativeConsumerKind};
+        let cli = NativeConsumer::new(native.management(), NativeConsumerKind::Cli)
+            .with_credentials(Arc::new(credentials.clone()));
+        assert_eq!(ProtocolManagement::status(&cli).await.unwrap().parts().server.bytes(), pin.identity);
+        cli.shutdown().await.unwrap();
+        let companion = NativeConsumer::new(native.management(), NativeConsumerKind::StatusCompanion)
+            .with_credentials(Arc::new(credentials.clone()));
+        let mut subscription = StatusManagement::subscribe_status(&companion).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while subscription.latest().unwrap().is_none() {
+                subscription.changed().await.unwrap();
+            }
+        }).await.unwrap();
+        assert_eq!(subscription.latest().unwrap().unwrap().parts().server.bytes(), pin.identity);
+        companion.shutdown().await.unwrap();
+    }
     let _ = stop.send(());
     let report = running.await.unwrap();
     assert!(
@@ -212,12 +251,32 @@ async fn desktop_foreground_owner_pairing_publishes_verified_binding_from_runnin
         matches!(report, Err(spaceterm_server::StartupFailure::Runtime(error))
         if error.class == spaceterm_server::failure::ServerFailureClass::RecoveryRequired)
     );
-    let snapshot = journal.snapshot().unwrap();
-    assert_eq!(snapshot.bindings().len(), 1);
-    let binding = snapshot.bindings()[0].binding().unwrap();
-    assert_eq!(binding.target().pin(), pin);
-    assert!(journal.ordinary_use_allowed(&binding).unwrap());
-    assert!(snapshot.pairing().acknowledgements().is_empty());
+    if !cli {
+        let snapshot = journal.snapshot().unwrap();
+        assert_eq!(snapshot.bindings().len(), 1);
+        let binding = snapshot.bindings()[0].binding().unwrap();
+        assert_eq!(binding.target().pin(), pin);
+        assert!(journal.ordinary_use_allowed(&binding).unwrap());
+        assert!(snapshot.pairing().acknowledgements().is_empty());
+    }
+    let mut clients = std::collections::BTreeSet::new();
+    for consumer in ["cli", "companion", "management"] {
+        let codec = Arc::new(CanonicalCodec);
+        let verifier = Arc::new(Verifier);
+        let storage = spaceterm_client_native::journal::NativeClientJournal::open_existing(
+            native.management().supervisor().client_connections_directory().join(consumer), codec.clone(), verifier.clone(), JournalLimits::default(),
+        ).await.unwrap();
+        let journal = JournalController::recover(Arc::new(storage), codec, verifier, JournalLimits::default()).await.unwrap();
+        let snapshot = journal.snapshot().unwrap();
+        assert_eq!(snapshot.bindings().len(), 1);
+        let saved = &snapshot.bindings()[0];
+        assert!(matches!(saved.proof().parts().claims, spaceterm_core::pairing::PairingReceiptBody::ClientBinding { .. }));
+        assert!(!saved.additional_client_acknowledgement_pending());
+        let binding = saved.binding().unwrap();
+        assert!(journal.ordinary_use_allowed(&binding).unwrap());
+        assert_eq!(binding.target().pin(), pin);
+        assert!(clients.insert(binding.target().client()));
+    }
     assert_eq!(credentials.0.lock().unwrap().len(), 2);
     assert_eq!(handle.snapshot().state(), before.state());
     assert_eq!(
@@ -233,4 +292,12 @@ async fn desktop_foreground_owner_pairing_publishes_verified_binding_from_runnin
         fixture.reopen().discover().unwrap().unwrap().server_pin(),
         pin
     );
+}
+
+
+struct PairIo;
+impl spaceterm_client_native::cli::runner::CliIo for PairIo {
+    fn write_stdout(&mut self, _: &[u8]) -> Result<(), spaceterm_client_native::cli::CliFailure> { Ok(()) }
+    fn write_stderr(&mut self, _: &[u8]) -> Result<(), spaceterm_client_native::cli::CliFailure> { Ok(()) }
+    fn read_confirmation(&mut self, _: &spaceterm_client::management_cli::ConfirmationPrompt) -> Result<spaceterm_client::management_cli::ConfirmationReply, spaceterm_client_native::cli::CliFailure> { panic!("explicit fingerprint must not prompt") }
 }

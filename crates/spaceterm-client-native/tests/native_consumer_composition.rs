@@ -597,3 +597,511 @@ async fn production_cli_self_unpair_closes_ordinary_worker_before_restricted_ret
         exercise(NativeConsumerKind::Cli, major, true).await;
     }
 }
+
+struct ProvisionCredentials {
+    device: Arc<Key>,
+    authentication: Arc<Key>,
+    items: std::sync::Mutex<Vec<PreparedCredential>>,
+}
+impl ProvisionCredentials {
+    fn new() -> Self {
+        Self {
+            device: Arc::new(Key(Ed25519KeyPair::from_seed_unchecked(&[41; 32]).unwrap())),
+            authentication: Arc::new(Key(Ed25519KeyPair::from_seed_unchecked(&[42; 32]).unwrap())),
+            items: Default::default(),
+        }
+    }
+}
+impl NativeDeviceCredentials for ProvisionCredentials {
+    fn create(
+        &self,
+        reservation: CredentialCreationReservation,
+    ) -> PairingFuture<'_, Result<PreparedCredential, PairingFailure>> {
+        Box::pin(async move {
+            let scope = reservation.scope().clone();
+            let public_key = if scope.parts().purpose == CredentialPurpose::DeviceIdentity {
+                self.device.public_key()
+            } else {
+                self.authentication.public_key()
+            };
+            let credential = PreparedCredential { scope, public_key };
+            self.items.lock().unwrap().push(credential.clone());
+            Ok(credential)
+        })
+    }
+    fn recover_preparation<'a>(
+        &'a self,
+        scope: &'a CredentialScope,
+    ) -> PairingFuture<'a, Result<Option<PreparedCredential>, PairingFailure>> {
+        Box::pin(async move {
+            Ok(self
+                .items
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|item| &item.scope == scope)
+                .cloned())
+        })
+    }
+    fn signing_key<'a>(
+        &'a self,
+        credential: &'a PreparedCredential,
+        authorization: &'a CredentialUse,
+    ) -> PairingFuture<'a, Result<Arc<dyn SigningKey>, PairingFailure>> {
+        Box::pin(async move {
+            authorization.validate(&credential.scope)?;
+            let key = if credential.scope.parts().purpose == CredentialPurpose::DeviceIdentity {
+                &self.device
+            } else {
+                &self.authentication
+            };
+            assert_eq!(key.public_key(), credential.public_key);
+            Ok(key.clone() as Arc<dyn SigningKey>)
+        })
+    }
+    fn delete_pairing_key<'a>(
+        &'a self,
+        _: &'a PreparedCredential,
+    ) -> PairingFuture<'a, Result<CredentialDeletion, PairingFailure>> {
+        Box::pin(async { panic!("provisioning must not delete any native key") })
+    }
+}
+struct ProvisionInvalidator;
+impl spaceterm_client::pending::LocalUseInvalidator for ProvisionInvalidator {
+    fn invalidate_workspace(
+        &self,
+        _: &LocalPairingKey,
+        _: WorkspaceId,
+    ) -> Result<Vec<GrantedControl>, ClientFailure> {
+        Ok(vec![])
+    }
+    fn invalidate_attachment(
+        &self,
+        _: &LocalPairingKey,
+        _: spaceterm_client::view::WorkspaceAttachment,
+    ) -> Result<Vec<GrantedControl>, ClientFailure> {
+        Err(ClientFailure::new(ClientFailureClass::StaleAuthority))
+    }
+    fn remove_pairing<'a>(
+        &'a self,
+        _: &'a LocalPairingKey,
+    ) -> spaceterm_client::ports::ClientFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+    fn invalidate_pairing(&self, _: &LocalPairingKey) {}
+}
+
+#[tokio::test]
+async fn deliberate_provisioning_creates_three_server_issued_clients_before_native_restoration_in_both_majors()
+ {
+    use spaceterm_client::pairing::journal::PreparedEnrollment;
+    use spaceterm_client_native::{
+        pairing_runtime::NativePairingRuntime, restricted_routes::NativePairingConnector,
+    };
+    for major in [1, 2] {
+        let root = tempfile::Builder::new()
+            .prefix("st-provision-")
+            .tempdir_in("/var/tmp")
+            .unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        let registration = account.initialize(DesiredServerState::Running).unwrap();
+        let provider = NativeClientProvider::from_supervisor(account.reopen());
+        let pin = registration.server_pin();
+        let server = ServerId::new(pin.identity);
+        let pairing = PairingId::new(server, 1).unwrap();
+        let original_client = ClientId::new(server, 1).unwrap();
+        let target = PairingTarget::new(PairingTargetParts {
+            server,
+            pairing,
+            device: DeviceId::new([43; 16]),
+        })
+        .unwrap();
+        let signer = ServerKeyStore::open(&registration)
+            .unwrap()
+            .load_identity(pin)
+            .unwrap();
+        let credentials = Arc::new(ProvisionCredentials::new());
+        let admission = provider
+            .management()
+            .supervisor()
+            .admit_client_provisioning()
+            .unwrap();
+        let (origin_directory, create) = admission.journal_directory("enrollment").unwrap();
+        let journal = controller(&origin_directory, create).await;
+        drop(admission);
+        let route = LocalRouteAuthority::new(registration.endpoint().unwrap()).unwrap();
+        let description = route.description().clone();
+        let connector = Arc::new(NativePairingConnector::new(
+            journal.clone(),
+            NativeRouteConnector::new(vec![route], None).unwrap(),
+        ));
+        let origin = Arc::new(NativePairingRuntime::with_adapters(
+            journal.clone(),
+            credentials.clone(),
+            connector.clone(),
+            connector,
+            Arc::new(ProvisionInvalidator),
+            HandshakeConfig::default(),
+        ));
+        let namespace = CredentialNamespace::new("dev.spaceterm.provision-test".into()).unwrap();
+        let scope = |purpose, reference| {
+            CredentialScope::new(CredentialScopeParts {
+                namespace: namespace.clone(),
+                purpose,
+                reference: CredentialReference::new([reference; 16]),
+            })
+            .unwrap()
+        };
+        let (_, device) = origin
+            .prepare_credential(scope(CredentialPurpose::DeviceIdentity, 45))
+            .await
+            .unwrap();
+        let (generation, authentication) = origin
+            .prepare_credential(scope(
+                CredentialPurpose::PairingAuthentication { server },
+                46,
+            ))
+            .await
+            .unwrap();
+        let keys = PairingKeys::new(PairingKeysParts {
+            device_identity_public_key: device.public_key,
+            pairing_authentication_public_key: authentication.public_key,
+        })
+        .unwrap();
+        let streams_for = |client: ClientId| {
+            PairingClientStreams::new(PairingClientStreamsParts {
+                client: ClientRecord {
+                    id: client,
+                    pairing,
+                },
+                ordinary: OperationStreamId::new(
+                    OperationStreamKey::new(server, client.local() * 2).unwrap(),
+                    pairing,
+                    client,
+                )
+                .unwrap(),
+                self_revocation: OperationStreamId::new(
+                    OperationStreamKey::new(server, client.local() * 2 + 1).unwrap(),
+                    pairing,
+                    client,
+                )
+                .unwrap(),
+            })
+            .unwrap()
+        };
+        let streams = streams_for(original_client);
+        let original_operation = OperationBinding {
+            id: OperationId::new(
+                OperationStreamId::new(
+                    OperationStreamKey::new(server, 1).unwrap(),
+                    pairing,
+                    original_client,
+                )
+                .unwrap(),
+                OperationSequence::new(1).unwrap(),
+            ),
+            digest: RequestDigest::from_bytes([47; 32]),
+        };
+        let proof = ReceiptCodec::new(pin)
+            .sign(
+                PairingReceiptBody::Enrollment {
+                    target: target.clone(),
+                    keys: keys.clone(),
+                    client: streams.clone(),
+                    enrollment: original_operation,
+                    revision: StoreRevision::new(1),
+                },
+                signer.as_ref(),
+            )
+            .unwrap();
+        let binding = PairedServerBinding::new(
+            ConnectionTarget::new(
+                pin,
+                target.parts().device,
+                pairing,
+                original_client,
+                description.clone(),
+                authentication.scope.reference(),
+                generation,
+            )
+            .unwrap(),
+        );
+        origin
+            .prepare_route(
+                &PreparedEnrollment {
+                    local_pairing: binding.target().local_pairing().unwrap(),
+                    device: target.parts().device,
+                    pin,
+                    keys: keys.clone(),
+                    client: original_client,
+                    credential: authentication.clone(),
+                    route: RevocationRouteReference::new([48; 16]),
+                    enrollment: original_operation,
+                    reservation: None,
+                },
+                description,
+            )
+            .await
+            .unwrap();
+        journal
+            .transact(vec![ClientJournalChange::SaveBinding(Box::new(
+                SavedBinding::verified(binding, streams, proof, &Verifier).unwrap(),
+            ))])
+            .await
+            .unwrap();
+        let listener = IpcListener::bind(
+            registration.endpoint().unwrap(),
+            MessageLimit::envelope(),
+            AdmissionLimits::new(4, Duration::from_secs(20)).unwrap(),
+        )
+        .unwrap();
+        let serving_credentials = credentials.clone();
+        let serving_keys = keys.clone();
+        let served = tokio::spawn(async move {
+            let pending = listener.accept().await.unwrap();
+            let lookup = Lookup(PairingRecord {
+                principal: Principal {
+                    server: server.bytes(),
+                    device: target.parts().device.bytes(),
+                    pairing: local(pairing.local()),
+                    client: local(original_client.local()),
+                },
+                device_public_key: serving_credentials.authentication.public_key(),
+                active: true,
+            });
+            let hello = pending.recv().await.unwrap().unwrap();
+            let (handshake, reply) = ServerHandshake::accept(
+                server.bytes(),
+                1,
+                HandshakeConfig {
+                    majors: vec![major],
+                    capabilities: vec![
+                        CAPABILITY_NORMALIZED_CREATION_TOPOLOGY,
+                        CAPABILITY_CANONICAL_DOMAIN,
+                        CAPABILITY_ORGANIZATION_COMPARISONS,
+                    ],
+                    ..HandshakeConfig::default()
+                },
+                signer.clone(),
+                &lookup,
+                &hello,
+            )
+            .unwrap();
+            pending.send(&reply).await.unwrap();
+            let proof = pending.recv().await.unwrap().unwrap();
+            let (Established::Ordinary(mut codec), ready) =
+                handshake.receive_device(&lookup, &proof).unwrap()
+            else {
+                panic!("ordinary source required")
+            };
+            pending.send(&ready).await.unwrap();
+            let transport = pending.finish_authentication().unwrap();
+            let mut next_client = 2;
+            let mut version = 1;
+            let mut observed = vec![];
+            while let Some(bytes) = transport.recv().await.unwrap() {
+                let payload = codec.decode(&bytes).unwrap();
+                macro_rules! respond { ($m:expr, $p:ident, $v:ident) => { match $m.kind {
+                    Some($p::message::Kind::OrganizationQuery(query)) => organization::$p::snapshot_payload(&snapshot(server), 0..0, organization::PublicationPart { request: query.request, generation: query.request_generation, transfer: query.request, index: 0, total: 1, epoch: ServerEpoch::new(1), base: OrganizationRevision::new(0), revision: OrganizationRevision::new(1) }).unwrap(),
+                    Some($p::message::Kind::Reconciliation(mut query)) => { query.acknowledged = true; query.connection_generation = 1; Payload::$v($p::Message { kind: Some($p::message::Kind::Reconciliation(query)) }) },
+                    Some($p::message::Kind::Operation(value)) => {
+                        let Some($p::operation::Action::IdentifiedPairing(request)) = value.action else { panic!("identified pairing required") };
+                        let id = spaceterm_protocol::pairing_adapter::operation_from_wire(request.operation.as_ref().unwrap()).unwrap();
+                        let mut outcome = $p::PairingOutcome { operation: Some(Box::new(spaceterm_protocol::pairing_adapter::operation_to_wire(id))), ..Default::default() };
+                        match request.action.unwrap() {
+                            $p::pairing_request::Action::AssessUnpair(value) => {
+                                let target = spaceterm_protocol::pairing_adapter::target_from_wire(value.target.as_ref().unwrap()).unwrap();
+                                let binding = spaceterm_core::operation_ledger_contracts::CanonicalOperationRequest::new(id, Command::Pairing(PairingCommand::AssessUnpair { target: target.clone() }), &CanonicalCodec).unwrap().binding();
+                                outcome.disposition = 4;
+                                outcome.unpair_assessment = Some(Box::new(spaceterm_protocol::wire::pairing::UnpairAssessment { assessment_operation: Some(spaceterm_protocol::pairing_adapter::operation_to_wire(id)), assessment_digest: binding.digest.bytes().to_vec(), target: Some(spaceterm_protocol::pairing_adapter::target_to_wire(&target)), authorization_version: version, clients: vec![spaceterm_protocol::convert::identity::encode_client(original_client)] }));
+                            },
+                            $p::pairing_request::Action::BindAdditionalClient(value) => {
+                                assert_eq!(value.expected_authorization_version, version);
+                                let target = spaceterm_protocol::pairing_adapter::target_from_wire(value.target.as_ref().unwrap()).unwrap();
+                                let claim = RequestDigest::from_bytes(value.claim_digest.as_slice().try_into().unwrap());
+                                spaceterm_protocol::pairing_adapter::verify_client_binding_claim(&target, FieldVersion::new(version), id, &serving_keys, claim, &value.device_identity_proof, &value.pairing_authentication_proof).unwrap();
+                                let binding = spaceterm_core::operation_ledger_contracts::CanonicalOperationRequest::new(id, Command::Pairing(PairingCommand::BindAdditionalClient { target: target.clone(), expected_authorization_version: FieldVersion::new(version), claim_digest: claim }), &CanonicalCodec).unwrap().binding();
+                                let client = ClientId::new(server, next_client).unwrap();
+                                let streams = PairingClientStreams::new(PairingClientStreamsParts { client: ClientRecord { id: client, pairing }, ordinary: OperationStreamId::new(OperationStreamKey::new(server, next_client * 2).unwrap(), pairing, client).unwrap(), self_revocation: OperationStreamId::new(OperationStreamKey::new(server, next_client * 2 + 1).unwrap(), pairing, client).unwrap() }).unwrap();
+                                let receipt = ReceiptCodec::new(pin).sign(PairingReceiptBody::ClientBinding { target, keys: serving_keys.clone(), client: streams, operation: binding, revision: StoreRevision::new(next_client) }, signer.as_ref()).unwrap();
+                                observed.push(client); next_client += 1; version += 1;
+                                outcome.disposition = 3;
+                                outcome.client_binding_receipt = Some(Box::new(spaceterm_protocol::pairing_adapter::receipt_to_wire(&receipt)));
+                            },
+                            _ => panic!("unexpected pairing request"),
+                        }
+                        Payload::$v($p::Message { kind: Some($p::message::Kind::Outcome($p::Outcome { operation: Some(spaceterm_protocol::convert::identity::encode_operation(id)), publication_revision: 2, result: Some($p::outcome::Result::PairingResult(Box::new(outcome))) })) })
+                    },
+                    Some($p::message::Kind::Acknowledgement(value)) => {
+                        let (stream, through) = spaceterm_protocol::convert::operations::$p::decode_acknowledgement(&value, pairing, original_client).unwrap();
+                        // Delay server confirmation so provisioning must wait for
+                        // the originating journal's durable confirmed prefix.
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                        Payload::$v($p::Message { kind: Some($p::message::Kind::AcknowledgementConfirmation($p::AcknowledgementConfirmation { stream: Some(spaceterm_protocol::convert::identity::encode_stream(stream)), acknowledged_through: through.get() })) })
+                    },
+                    _ => panic!("unexpected provisioning request"),
+                } }; }
+                let response = match payload {
+                    Payload::Major1(m) => respond!(m, v1, Major1),
+                    Payload::Major2(m) => respond!(m, v2, Major2),
+                };
+                transport
+                    .send(&codec.encode(&response).unwrap())
+                    .await
+                    .unwrap();
+            }
+            listener.close().unwrap();
+            observed
+        });
+        let consumer = Arc::try_unwrap(provider.cli_consumer())
+            .ok()
+            .unwrap()
+            .with_credentials(credentials.clone());
+        let cli = consumer.provision_consumers(origin.clone()).await.unwrap();
+        let observed = served.await.unwrap();
+        assert_eq!(observed.len(), 3);
+        assert_eq!(cli, observed[0]);
+        let mut identities = std::collections::BTreeSet::from([original_client]);
+        for (index, name) in ["cli", "companion", "management"].into_iter().enumerate() {
+            let receiving = controller(
+                &account.reopen().client_connections_directory().join(name),
+                false,
+            )
+            .await;
+            let state = receiving.snapshot().unwrap();
+            let saved = &state.bindings()[0];
+            assert!(!saved.additional_client_acknowledgement_pending());
+            let binding = saved.binding().unwrap();
+            assert_eq!(binding.target().client(), observed[index]);
+            assert!(identities.insert(binding.target().client()));
+            assert!(receiving.ordinary_use_allowed(&binding).unwrap());
+            if name == "management" {
+                use spaceterm_client_native::native::runtime::{
+                    NativeRuntimeIdentity, RuntimeClientIdentity,
+                };
+                let access = NativeRuntimeIdentity::from_journal(receiving, credentials.clone())
+                    .access(&registration)
+                    .await
+                    .unwrap();
+                assert_eq!(access.binding.target().client(), observed[index]);
+            }
+        }
+        use spaceterm_client_native::cli::{
+            arguments::{CliCommand, parse},
+            bindings::PairingCommandBindings,
+            output::CliOutput,
+        };
+        let invocation = parse(
+            [
+                "pair",
+                "enroll",
+                "--server-fingerprint",
+                &spaceterm_client_native::cli::output::hex(&pin.public_key),
+            ]
+            .into_iter()
+            .map(std::ffi::OsString::from),
+        )
+        .unwrap();
+        let CliCommand::PairEnroll { fingerprint, .. } = invocation.command else {
+            panic!("pair enroll required");
+        };
+        assert!(
+            matches!(consumer.enroll(fingerprint, false, spaceterm_host::native_management::SudoMode::NonInteractive, &mut RepeatPairIo).await.unwrap(), CliOutput::Enrolled { client, .. } if client == cli)
+        );
+        assert_eq!(
+            credentials.items.lock().unwrap().len(),
+            2,
+            "additional Clients reuse native keys without replacing them"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pair_enroll_requires_fingerprint_confirmation_before_native_credentials_or_journal_creation()
+ {
+    use spaceterm_client::management_cli::{
+        ConfirmationPrompt, ConfirmationReply, ManagementFailure,
+    };
+    use spaceterm_client_native::cli::{
+        arguments::{CliCommand, parse},
+        bindings::PairingCommandBindings,
+        runner::CliIo,
+    };
+    struct Decline;
+    impl CliIo for Decline {
+        fn write_stdout(&mut self, _: &[u8]) -> Result<(), ManagementFailure> {
+            Ok(())
+        }
+        fn write_stderr(&mut self, _: &[u8]) -> Result<(), ManagementFailure> {
+            Ok(())
+        }
+        fn read_confirmation(
+            &mut self,
+            _: &ConfirmationPrompt,
+        ) -> Result<ConfirmationReply, ManagementFailure> {
+            panic!("pairing uses fingerprint verification")
+        }
+    }
+    let root = tempfile::Builder::new()
+        .prefix("st-provision-consent-")
+        .tempdir_in("/var/tmp")
+        .unwrap();
+    let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+    account.initialize(DesiredServerState::Running).unwrap();
+    let provider = NativeClientProvider::from_supervisor(account.reopen());
+    let credentials = Arc::new(ProvisionCredentials::new());
+    let consumer = NativeConsumer::new(provider.management(), NativeConsumerKind::Cli)
+        .with_credentials(credentials.clone());
+    let invocation = parse(
+        ["pair", "enroll", "--server-fingerprint", &"ff".repeat(32)]
+            .into_iter()
+            .map(std::ffi::OsString::from),
+    )
+    .unwrap();
+    let CliCommand::PairEnroll { fingerprint, .. } = invocation.command else {
+        panic!("pair enroll required");
+    };
+    assert!(matches!(
+        consumer
+            .enroll(
+                fingerprint,
+                false,
+                spaceterm_host::native_management::SudoMode::NonInteractive,
+                &mut Decline
+            )
+            .await,
+        Err(ManagementFailure::AuthorizationDenied)
+    ));
+    assert!(matches!(
+        consumer
+            .enroll(
+                None,
+                false,
+                spaceterm_host::native_management::SudoMode::Interactive,
+                &mut Decline
+            )
+            .await,
+        Err(ManagementFailure::ConfirmationRequired)
+    ));
+    assert!(credentials.items.lock().unwrap().is_empty());
+    assert!(!account.reopen().client_connections_directory().exists());
+}
+
+struct RepeatPairIo;
+impl spaceterm_client_native::cli::runner::CliIo for RepeatPairIo {
+    fn write_stdout(&mut self, _: &[u8]) -> Result<(), spaceterm_client_native::cli::CliFailure> {
+        Ok(())
+    }
+    fn write_stderr(&mut self, _: &[u8]) -> Result<(), spaceterm_client_native::cli::CliFailure> {
+        Ok(())
+    }
+    fn read_confirmation(
+        &mut self,
+        _: &spaceterm_client::management_cli::ConfirmationPrompt,
+    ) -> Result<
+        spaceterm_client::management_cli::ConfirmationReply,
+        spaceterm_client_native::cli::CliFailure,
+    > {
+        panic!("explicit fingerprint must not prompt")
+    }
+}

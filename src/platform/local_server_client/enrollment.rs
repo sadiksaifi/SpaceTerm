@@ -69,11 +69,12 @@ pub(super) async fn enroll(
     enroll_with_credentials(native, journal, DeviceCredentials::native()).await
 }
 
-async fn enroll_with_credentials<N: NativeDeviceCredentials>(
+async fn enroll_with_credentials<N: NativeDeviceCredentials + Clone + 'static>(
     native: &NativeClientProvider,
     journal: Arc<JournalController>,
     credentials: N,
 ) -> Result<(), ClientFailure> {
+    let provisioning_credentials = Arc::new(credentials.clone());
     let management = native.management();
     let supervisor = management.supervisor();
     let registration = supervisor
@@ -325,7 +326,18 @@ async fn enroll_with_credentials<N: NativeDeviceCredentials>(
         .close()
         .await
         .map_err(spaceterm_client_native::route::classify);
-    result.and(closed)
+    result.and(closed)?;
+    spaceterm_client_native::native::consumer::NativeConsumer::new(
+        native.management(), spaceterm_client_native::native::consumer::NativeConsumerKind::Cli,
+    ).with_credentials(provisioning_credentials).provision_journal(journal).await.map(|_| ()).map_err(|error| {
+        use spaceterm_client::management_cli::ManagementFailure;
+        failure(match error {
+            ManagementFailure::CredentialUnavailable | ManagementFailure::StorageUnavailable => ClientFailureClass::StorageUnavailable,
+            ManagementFailure::AuthorizationDenied | ManagementFailure::Revoked => ClientFailureClass::AuthorizationDenied,
+            ManagementFailure::OutcomePending => ClientFailureClass::RecoveryRequired,
+            _ => ClientFailureClass::Unavailable,
+        })
+    })
 }
 
 struct OwnerConnector {
