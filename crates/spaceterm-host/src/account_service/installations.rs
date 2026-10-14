@@ -16,21 +16,12 @@ impl ServiceInstallations for NativeServiceInstallations {
         &self,
         registration: &RegisteredServer,
     ) -> Result<PathBuf, ServiceFailure> {
-        let expected = registration
-            .approved_installation()
-            .ok_or(ServiceFailure::Missing)?;
-        let store = ServerInstallationStore::open_existing(registration)?;
-        let executable =
-            store.retain_compatible_approved(crate::organization_store::schema::SCHEMA_VERSION)?;
-        let actual = executable.status();
-        if actual.installation != expected.installation
-            || actual.version != expected.version
-            || actual.artifact_sha256 != expected.artifact_sha256
-        {
-            return Err(ServiceFailure::IdentityMismatch);
-        }
-        Ok(executable.path().to_owned())
+        self.approved_from_store(
+            registration,
+            ServerInstallationStore::open_existing(registration)?,
+        )
     }
+
     fn uninstall(&self, registration: &RegisteredServer) -> Result<(), ServiceFailure> {
         if registration.desired_state() != DesiredServerState::Stopped {
             return Err(ServiceFailure::ConfirmationRequired);
@@ -44,6 +35,40 @@ impl ServiceInstallations for NativeServiceInstallations {
         store.uninstall(&scope)
     }
 }
+impl NativeServiceInstallations {
+    fn approved_from_store(
+        &self,
+        registration: &RegisteredServer,
+        store: ServerInstallationStore,
+    ) -> Result<PathBuf, ServiceFailure> {
+        let expected = registration
+            .approved_installation()
+            .ok_or(ServiceFailure::Missing)?;
+        let executable =
+            store.retain_compatible_approved(crate::organization_store::schema::SCHEMA_VERSION)?;
+        let actual = executable.status();
+        if actual.installation != expected.installation
+            || actual.version != expected.version
+            || actual.artifact_sha256 != expected.artifact_sha256
+        {
+            return Err(ServiceFailure::IdentityMismatch);
+        }
+        Ok(executable.path().to_owned())
+    }
+    /// Uses isolated signing trust while retaining the production selection checks.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn test_approved_executable(
+        registration: &RegisteredServer,
+        key: spaceterm_distribution::UpdateKey,
+    ) -> Result<PathBuf, ServiceFailure> {
+        Self.approved_from_store(
+            registration,
+            crate::server_installation::test_support::existing_store(registration, key)?,
+        )
+    }
+}
+
 struct StoppedRemoval;
 impl InstallationAdmission for StoppedRemoval {
     fn verify(

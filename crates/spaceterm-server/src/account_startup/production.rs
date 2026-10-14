@@ -197,11 +197,28 @@ impl RecoveredAccountServer {
             launch.home.as_os_str().as_encoded_bytes().to_vec(),
         )
         .map_err(|_| StartupFailure::Account(ServiceFailure::InvalidRecord))?;
-        let account = startup.open_store(home.clone())?;
+        let mut account = startup.open_store(home.clone())?;
         let admission = account.admission.ok_or(StartupFailure::Account(
             ServiceFailure::ConfirmationRequired,
         ))?;
         admission.revalidate().map_err(StartupFailure::Account)?;
+        let recovered = account
+            .store
+            .recover_bundle()
+            .map_err(StartupFailure::Store)?
+            .core;
+        let sessions: Vec<_> = crate::recovery::expected_cleanup(&recovered)
+            .map_err(StartupFailure::Runtime)?
+            .keys()
+            .copied()
+            .collect();
+        spaceterm_host::account_service::runtime_inventory::StoppedRuntimeCustody::resume_start(
+            admission.as_ref(),
+            recovered.last_epoch,
+            &sessions,
+            account.credentials.as_ref(),
+        )
+        .map_err(StartupFailure::Account)?;
         let identity = StoreIdentity {
             server: server_id,
             account: account.registration.key(),
@@ -400,7 +417,10 @@ impl RecoveredAccountServer {
             .close()
             .await
             .map_err(|_| StartupFailure::Runtime(failure(ServerFailureClass::CleanupIncomplete)));
-        let retirements = cleanup.finish_retirements().await.map_err(StartupFailure::Account);
+        let retirements = cleanup
+            .finish_retirements()
+            .await
+            .map_err(StartupFailure::Account);
         drop(admission);
         owner_closed?;
         retirements?;

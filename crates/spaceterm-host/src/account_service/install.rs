@@ -333,6 +333,46 @@ impl ServiceSupervisor {
         record.phase = phase;
         self.write_install(request, record)
     }
+    pub(super) fn reconcile_initial_creation(
+        &self,
+        request: NativeRequestId,
+    ) -> Result<(), ServiceFailure> {
+        use crate::private_filesystem::{Directory, Failure};
+        let directory =
+            Directory::open_for_recovery(&self.anchor)?.ok_or(ServiceFailure::Missing)?;
+        let snapshot = directory
+            .read_for_recovery("requests", super::supervisor::JOURNAL_LIMIT)?
+            .ok_or(ServiceFailure::UnknownRequest)?;
+        let journal: super::supervisor::Journal =
+            super::supervisor::decode(&snapshot.bytes, super::supervisor::JOURNAL_LIMIT)?;
+        journal.validate(self.key)?;
+        let index = journal.reservation(request)?;
+        let original = journal.reservations[index]
+            .install
+            .as_ref()
+            .ok_or(ServiceFailure::Indeterminate)?;
+        if !original.new_organization || !original.pending() || original.reused {
+            return Err(ServiceFailure::RequestConflict);
+        }
+        let snapshot = directory
+            .read_for_recovery("registration", super::registration::REGISTRATION_LIMIT)?
+            .ok_or(ServiceFailure::Missing)?;
+        let registration: super::registration::Registration =
+            super::supervisor::decode(&snapshot.bytes, super::registration::REGISTRATION_LIMIT)?;
+        registration.validate(self.key)?;
+        let binding = creation_binding(
+            original.digest,
+            registration.server,
+            registration.public_key,
+        );
+        crate::storage::InitialCreation::reconcile(&self.anchor, binding).map_err(|error| {
+            match error {
+                Failure::Indeterminate => ServiceFailure::Indeterminate,
+                other => other.into(),
+            }
+        })
+    }
+
     fn initialize_organization(
         &self,
         registration: &RegisteredServer,
@@ -363,11 +403,22 @@ impl ServiceSupervisor {
                 SignedReceiptReader::new(registration.server_pin()).map_err(classify_store)?,
             ),
         );
-        let database = if record.new_organization {
-            crate::storage::Database::open_for_application(
+        let creation = record.new_organization.then(|| {
+            crate::storage::InitialCreation::new(
+                registration.directory.clone(),
+                creation_binding(
+                    record.digest,
+                    registration.server_pin().identity,
+                    registration.server_pin().public_key,
+                ),
+            )
+        });
+        let database = if let Some(creation) = &creation {
+            crate::storage::Database::open_initial_for_application(
                 registration.organization_directory(),
                 migrations(),
                 schema::APPLICATION_ID,
+                creation,
             )
         } else {
             crate::storage::Database::open_existing_for_application(
@@ -377,7 +428,10 @@ impl ServiceSupervisor {
             )
         }
         .map_err(classify_storage)?;
-        if database.is_new_storage().map_err(classify_storage)? {
+        let initialized: u64 = database
+            .query_row("SELECT count(*) FROM store_metadata", [], |row| row.get(0))
+            .map_err(classify_storage)?;
+        if database.is_new_storage().map_err(classify_storage)? && initialized == 0 {
             if !record.new_organization {
                 return Err(ServiceFailure::ConfirmationRequired);
             }
@@ -387,6 +441,8 @@ impl ServiceSupervisor {
                 .map(DesktopSeed::origin)
                 .transpose()?
                 .unwrap_or(NewServerOrigin::LocalHeadless);
+            #[cfg(feature = "test-support")]
+            crate::storage::testing::initialization_boundary(3).map_err(classify_storage)?;
             match SqliteOrganizationStore::initialize_new(
                 database,
                 NewStoreSeed { identity, origin },
@@ -395,21 +451,32 @@ impl ServiceSupervisor {
             ) {
                 InitializationDisposition::Durable { store, .. } => {
                     drop(store);
+                    #[cfg(feature = "test-support")]
+                    crate::storage::testing::initialization_boundary(4)
+                        .map_err(classify_storage)?;
+                    if let Some(creation) = &creation {
+                        creation.complete().map_err(classify_storage)?;
+                    }
                     Ok(())
                 }
                 InitializationDisposition::NotApplied(failure) => Err(classify_store(failure)),
                 InitializationDisposition::Indeterminate => Err(ServiceFailure::Indeterminate),
             }
         } else {
-            // An existing empty, damaged or locked database never grants first-creation authority.
-            SqliteOrganizationStore::open_existing(
+            // Missing metadata on established storage never grants seed authority.
+            // A committed seed from this original request is validated, then sealed.
+            let store = SqliteOrganizationStore::open_existing(
                 database,
                 identity,
                 StoreLimits::production(),
                 services,
             )
-            .map(drop)
-            .map_err(classify_store)
+            .map_err(classify_store)?;
+            drop(store);
+            if let Some(creation) = &creation {
+                creation.complete().map_err(classify_storage)?;
+            }
+            Ok(())
         }
     }
 
@@ -781,4 +848,17 @@ fn classify_store(failure: spaceterm_core::storage::StoreFailure) -> ServiceFail
         StoreFailure::RecoveryRequired => ServiceFailure::Indeterminate,
         _ => ServiceFailure::InvalidRecord,
     }
+}
+
+fn creation_binding(
+    digest: spaceterm_core::operations::RequestDigest,
+    server: [u8; 16],
+    public_key: [u8; 32],
+) -> [u8; 32] {
+    let mut binding = Sha256::new();
+    binding.update(b"spaceterm-original-organization-creation-v1\0");
+    binding.update(digest.bytes());
+    binding.update(server);
+    binding.update(public_key);
+    binding.finalize().into()
 }

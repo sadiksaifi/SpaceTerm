@@ -1220,7 +1220,7 @@ impl ServiceSupervisor {
                     registration.validate(key).map_err(|_| Failure::Unsafe)
                 },
             );
-            if registration_recovery.is_err() {
+            if registration_recovery.is_err() && self.reconcile_initial_creation(request).is_err() {
                 self.reconcile_owner_archive(request)?;
             }
         }
@@ -1376,13 +1376,7 @@ impl ServiceSupervisor {
                         .as_ref()
                         .filter(|status| status.installation == id)
                         .ok_or(ServiceFailure::InvalidRecord)?;
-                    let mut record = registration.record.clone();
-                    record.approved = Some(target.clone());
-                    record.staged = None;
-                    self.manager()?.verify_installation(&RegisteredServer {
-                        record,
-                        directory: registration.directory.clone(),
-                    })
+                    self.verify_staged_activation(registration, target)
                 }
                 ServiceAction::Restart => self.manager()?.verify_installation(registration),
             },
@@ -1466,6 +1460,13 @@ impl ServiceSupervisor {
                             .as_ref()
                             .filter(|candidate| candidate.installation == id)
                             .ok_or(ServiceFailure::InvalidRecord)?;
+                        self.activate_installation_selection(
+                            &record.progress(request),
+                            &registration,
+                            lease,
+                            target,
+                            assessment.basis.approved.as_ref(),
+                        )?;
                         if registration.record.approved.as_ref() != Some(target) {
                             if registration.record.staged.as_ref() != Some(target) {
                                 return Err(ServiceFailure::RequestConflict);
@@ -2104,6 +2105,28 @@ impl StoppedOwnerAdmission {
     pub fn registration(&self) -> &RegisteredServer {
         &self.registration
     }
+    /// Retains cleanup custody after an explicit Start changes desired intent.
+    /// This verifies only the existing instance and original owner record. It
+    /// cannot authorize another owner mutation, Stop, Start, or a code selection.
+    pub fn verify_instance_custody(&self) -> Result<(), ServiceFailure> {
+        self.lease.verify()?;
+        let current = self.supervisor.discover()?.ok_or(ServiceFailure::Missing)?;
+        if current.key() != self.registration.key()
+            || current.server_pin() != self.registration.server_pin()
+            || current.record.data != self.registration.record.data
+            || current.record.organization != self.registration.record.organization
+            || current.record.runtime != self.registration.record.runtime
+        {
+            return Err(ServiceFailure::IdentityMismatch);
+        }
+        self.supervisor.validate_owner_enrollment(
+            &self.request,
+            self.digest,
+            spaceterm_core::identity::ServerId::new(self.registration.server_pin().identity),
+            self.claim,
+        )
+    }
+
     /// Rechecks the original journal and exact registration, never Start.
     pub fn revalidate(&self) -> Result<(), ServiceFailure> {
         self.lease.verify()?;

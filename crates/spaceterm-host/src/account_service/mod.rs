@@ -3,6 +3,7 @@
 //! The native manager and runtime producers are selected at composition. Read-only
 //! discovery and owner validation never initialize storage or issue authority.
 
+mod activation;
 mod install;
 pub use install::{ConfirmedServiceInstall, ServiceInstallAssessment};
 mod account;

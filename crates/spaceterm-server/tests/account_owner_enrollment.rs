@@ -287,6 +287,12 @@ fn verified_claim(server: ServerId, seed: u8) -> VerifiedDeviceClaim {
 fn initialized_account(
     desired: DesiredServerState,
 ) -> (tempfile::TempDir, AccountServiceFixture, ServerDirectory) {
+    initialized_account_with_installation(desired, None)
+}
+fn initialized_account_with_installation(
+    desired: DesiredServerState,
+    installation: Option<spaceterm_host::account_service::InstallationStatus>,
+) -> (tempfile::TempDir, AccountServiceFixture, ServerDirectory) {
     #[cfg(target_os = "macos")]
     let parent = std::path::PathBuf::from("/private/tmp");
     // Keep real SQLite synchronization off the shared Linux build filesystem.
@@ -294,7 +300,9 @@ fn initialized_account(
     let parent = std::path::PathBuf::from("/var/tmp");
     let root = tempfile::tempdir_in(parent).unwrap();
     let fixture = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
-    let registration = fixture.initialize(desired).unwrap();
+    let registration = fixture
+        .initialize_with_installation(desired, installation)
+        .unwrap();
     let identity = StoreIdentity {
         server: ServerId::new(registration.server_pin().identity),
         account: registration.key(),
@@ -439,7 +447,13 @@ async fn stopped_owner_lost_reply_replays_original_request_after_reconstruction(
         .issue(request, verified_claim(server, 41))
         .await
         .unwrap();
+    let epoch = spaceterm_core::authority::ServerEpoch::new(1);
     executor.close().await.unwrap();
+    let registration = supervisor.discover().unwrap().unwrap();
+    use spaceterm_host::account_service::ServiceProcesses;
+    spaceterm_host::account_service::runtime_inventory::RetainedRuntimeProcesses
+        .previous_instance_cleanup(&registration, epoch, &[]).await
+        .expect("stopped enrollment must publish its committed epoch for reconstruction and explicit Start");
     let (providers, _, _) = stopped_providers();
     let executor = AccountOwnerRequestExecutor::stopped(
         Arc::new(fixture.reopen()),
@@ -464,6 +478,169 @@ async fn stopped_owner_lost_reply_replays_original_request_after_reconstruction(
         Some(PairingFailure::RequestIdentityReused)
     );
     executor.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn interrupted_stopped_owner_epoch_recovers_only_the_original_request() {
+    use spaceterm_host::account_service::{
+        ServiceProcesses, runtime_inventory::RetainedRuntimeProcesses,
+    };
+    let (_root, fixture, home) = initialized_account(DesiredServerState::Stopped);
+    let supervisor = Arc::new(fixture.reopen());
+    let registration = supervisor.discover().unwrap().unwrap();
+    let server = ServerId::new(registration.server_pin().identity);
+    let request = supervisor.allocate_request().unwrap();
+    let (providers, _, _) = stopped_providers();
+    let executor = AccountOwnerRequestExecutor::stopped(
+        supervisor.clone(),
+        home.clone(),
+        request,
+        &verified_claim(server, 41),
+        providers,
+    )
+    .await
+    .unwrap();
+    executor
+        .issue(request, verified_claim(server, 41))
+        .await
+        .unwrap();
+    assert!(
+        RetainedRuntimeProcesses
+            .previous_instance_cleanup(
+                &registration,
+                spaceterm_core::authority::ServerEpoch::new(1),
+                &[]
+            )
+            .await
+            .is_err()
+    );
+    drop(executor);
+    let recovered = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let (providers, _, _) = stopped_providers();
+            match AccountOwnerRequestExecutor::stopped(
+                supervisor.clone(),
+                home.clone(),
+                request,
+                &verified_claim(server, 41),
+                providers,
+            )
+            .await
+            {
+                Ok(executor) => break executor,
+                Err(
+                    PairingFailure::RecoveryRequired | PairingFailure::AuthorizationUnavailable,
+                ) => tokio::task::yield_now().await,
+                Err(error) => panic!("original stopped epoch reconstruction: {error:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    recovered.close().await.unwrap();
+    RetainedRuntimeProcesses
+        .previous_instance_cleanup(
+            &registration,
+            spaceterm_core::authority::ServerEpoch::new(2),
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        supervisor.discover().unwrap().unwrap().desired_state(),
+        DesiredServerState::Stopped
+    );
+}
+
+#[tokio::test]
+async fn explicit_start_recovers_an_interrupted_stopped_owner_epoch_with_native_custody() {
+    use spaceterm_host::account_service::{
+        TrustedAccountFacts, runtime_inventory::RetainedRuntimeProcesses,
+    };
+    use spaceterm_server::account_startup::{AccountStartup, RecoveredAccountServer};
+    let installation = spaceterm_host::account_service::InstallationStatus {
+        installation: spaceterm_host::startup::InstallationId(
+            std::num::NonZeroU64::new(1).unwrap(),
+        ),
+        version: spaceterm_distribution::BuildVersion::parse("1.0.0").unwrap(),
+        artifact_sha256: [1; 32],
+    };
+    let (root, fixture, home) =
+        initialized_account_with_installation(DesiredServerState::Stopped, Some(installation));
+    let supervisor = spaceterm_server::account_startup::test_support::supervisor(
+        root.path(),
+        Arc::new(RetainedRuntimeProcesses),
+    )
+    .unwrap();
+    let registration = supervisor.discover().unwrap().unwrap();
+    let server = ServerId::new(registration.server_pin().identity);
+    let request = supervisor.allocate_request().unwrap();
+    let (providers, _, _) = stopped_providers();
+    let executor = AccountOwnerRequestExecutor::stopped(
+        supervisor.clone(),
+        home,
+        request,
+        &verified_claim(server, 41),
+        providers,
+    )
+    .await
+    .unwrap();
+    executor
+        .issue(request, verified_claim(server, 41))
+        .await
+        .unwrap();
+    drop(executor);
+    let start = supervisor.allocate_request().unwrap();
+    supervisor.start(start).await.unwrap();
+    let startup = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match AccountStartup::admit(&supervisor) {
+                Ok(startup) => break startup,
+                Err(spaceterm_server::StartupFailure::Account(
+                    spaceterm_host::account_service::ServiceFailure::Pending,
+                )) => tokio::task::yield_now().await,
+                Err(error) => panic!("native startup admission: {error:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let facts = TrustedAccountFacts::current().unwrap();
+    let launch = spaceterm_server::adapters::terminal::AccountLaunchFacts {
+        uid: facts.uid(),
+        home: root.path().to_owned(),
+        planner: spaceterm_host::shell_launch::ShellLaunchPlanner::for_test(
+            root.path().join("shell"),
+            root.path().to_owned(),
+        ),
+        machine: spaceterm_terminal::metadata::LocalMachine::default(),
+    };
+    let runtime = RecoveredAccountServer::recover(supervisor.clone(), startup, launch).await.expect("explicit Start must reconcile the retained stopped epoch without repeating owner issuance");
+    assert_eq!(
+        runtime.handle().snapshot().epoch(),
+        spaceterm_core::authority::ServerEpoch::new(2)
+    );
+    assert_eq!(
+        fixture.reopen().discover().unwrap().unwrap().server_pin(),
+        registration.server_pin()
+    );
+    drop(runtime);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match supervisor.admit_startup() {
+                Ok(spaceterm_host::account_service::AccountStartupAdmission::Ready(admission)) => {
+                    drop(admission);
+                    break;
+                }
+                Err(spaceterm_host::account_service::ServiceFailure::Pending) => {
+                    tokio::task::yield_now().await
+                }
+                other => panic!("started actor must release its native lease: {other:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
 }
 
 async fn enroll_owner(
@@ -934,7 +1111,24 @@ async fn owner_consumption_revalidates_stopped_registration_inside_actor() {
             .await
             .is_err()
     );
-    executor.close().await.unwrap();
+    // Lost native admission cannot publish a positive stopped-instance proof,
+    // even though the actor and physical store have joined.
+    assert_eq!(
+        executor.close().await.unwrap_err().class,
+        spaceterm_server::contracts::ServerFailureClass::RecoveryRequired
+    );
+    use spaceterm_host::account_service::ServiceProcesses;
+    let registration = supervisor.discover().unwrap().unwrap();
+    assert!(
+        spaceterm_host::account_service::runtime_inventory::RetainedRuntimeProcesses
+            .previous_instance_cleanup(
+                &registration,
+                spaceterm_core::authority::ServerEpoch::new(1),
+                &[]
+            )
+            .await
+            .is_err()
+    );
 }
 
 fn authenticated_pairing(
