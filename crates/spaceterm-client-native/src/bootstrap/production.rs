@@ -8,7 +8,7 @@ use super::{
 use crate::pairing_runtime::{NativePairingRuntime, SharedCredentials};
 use spaceterm_client::{
     api::{RouteDescription, RouteParts},
-    journal::JournalController,
+    journal::{JournalController, JournalSshCapture},
     pairing::{
         bootstrap::*,
         credentials::{CredentialNamespace, PairingFuture},
@@ -21,8 +21,8 @@ use spaceterm_host::{
     bootstrap::{
         command::{MAX_PROBE_BYTES, read_only_probe_script},
         linger::{
-            BootstrapLingerFailure, BootstrapLingerTransport, LingerFuture, LingerInvocation,
-            ScopedLingerAuthentication,
+            BootstrapLingerFailure, BootstrapLingerTransport, LingerAuthenticationPrompt,
+            LingerFuture, LingerInvocation, ScopedLingerAuthentication, enable_linger_if_needed,
         },
         process::{
             BootstrapProbeFailure, BootstrapProbeFuture, BootstrapProbeLease,
@@ -31,7 +31,7 @@ use spaceterm_host::{
         wire::*,
     },
     native_deployment::contracts::NativeRequestId,
-    transport::MessageTransport,
+    transport::{MessageTransport, TransportError},
 };
 use spaceterm_protocol::pairing_adapter::{EnrollmentAuthorization, PublicEnrollmentReservation};
 use std::sync::{
@@ -46,12 +46,23 @@ pub trait BootstrapRemoteConnection: Send + Sync {
     fn route(&self) -> BootstrapRoute;
     fn destination(&self) -> &str;
     fn revalidate(&self) -> Result<(), BootstrapFailure>;
+    fn bind_foreground_fence(&self, _valid: Arc<AtomicBool>) -> Result<(), BootstrapFailure> {
+        Ok(())
+    }
+    fn captured_ssh(&self) -> Option<JournalSshCapture> {
+        None
+    }
+    fn revalidate_capture(&self) -> PairingFuture<'_, Result<(), BootstrapFailure>> {
+        Box::pin(async move { self.revalidate() })
+    }
     fn probe(&self) -> BootstrapProbeFuture<'_, Vec<u8>>;
     fn account<'a>(
         &'a self,
         request: AccountRequest,
         artifact: Option<&'a VerifiedServerArtifact>,
     ) -> PairingFuture<'a, Result<AccountReply, BootstrapFailure>>;
+    /// Returns a fresh restricted session. Its final Drop retires and reaps its
+    /// exact native process even when a failed frame has already closed it.
     fn owner_channel(&self)
     -> PairingFuture<'_, Result<Arc<dyn MessageTransport>, PairingFailure>>;
     fn prompt(&self) -> PairingFuture<'_, Result<Zeroizing<Vec<u8>>, BootstrapFailure>>;
@@ -86,11 +97,25 @@ struct RetainedHost {
     connection: Arc<ForegroundConnection>,
     artifact: Mutex<Option<VerifiedServerArtifact>>,
 }
+struct HostOperation {
+    hosts: Arc<Mutex<Vec<Arc<RetainedHost>>>>,
+    host: Arc<RetainedHost>,
+    release_on_drop: bool,
+}
+impl Drop for HostOperation {
+    fn drop(&mut self) {
+        if self.release_on_drop
+            && let Ok(mut hosts) = self.hosts.lock()
+        {
+            hosts.retain(|old| !Arc::ptr_eq(old, &self.host));
+        }
+    }
+}
 /// Public production provider used by Settings and production-composition tests.
 pub struct ProductionSshBootstrap {
     pairing: Arc<NativePairingRuntime>,
     credentials: SharedCredentials,
-    hosts: Mutex<Vec<Arc<RetainedHost>>>,
+    hosts: Arc<Mutex<Vec<Arc<RetainedHost>>>>,
     factory: Arc<dyn BootstrapHostFactory>,
 }
 impl ProductionSshBootstrap {
@@ -99,7 +124,7 @@ impl ProductionSshBootstrap {
         Self {
             pairing,
             credentials,
-            hosts: Mutex::new(Vec::new()),
+            hosts: Arc::new(Mutex::new(Vec::new())),
             factory,
         }
     }
@@ -108,48 +133,83 @@ impl ProductionSshBootstrap {
         destination: String,
         generation: u64,
     ) -> Result<BootstrapHostFacts, BootstrapFailure> {
+        self.inspect_foreground(destination, generation, None).await
+    }
+    async fn inspect_foreground(
+        &self,
+        destination: String,
+        generation: u64,
+        valid: Option<Arc<AtomicBool>>,
+    ) -> Result<BootstrapHostFacts, BootstrapFailure> {
         if generation == 0 {
             return Err(fail(
                 PairingFailure::InvalidRequest,
                 BootstrapPhase::ExplicitIntent,
             ));
         }
+        check_foreground(valid.as_ref())?;
         let host = self.factory.open(destination, generation).await?;
-        host.connection.revalidate()?;
-        let transport = AccountTransport(host.connection.clone());
-        let intent = ForegroundBootstrap::confirm(host.connection.route(), generation)?;
+        check_foreground(valid.as_ref())?;
+        let connection = Arc::new(ForegroundConnection {
+            inner: host.connection,
+            foreground: Mutex::new(None),
+        });
+        if let Some(valid) = &valid {
+            connection.bind_foreground_fence(valid.clone())?;
+        }
+        connection.revalidate()?;
+        let transport = AccountTransport(connection.clone());
+        let intent = ForegroundBootstrap::confirm(connection.route(), generation)?;
         let attempt = intent.cancellation();
         let setup = SshNativeServerSetup::new(
             transport.clone(),
             NativeBootstrapAccount::new(Arc::new(transport))?,
         );
-        let ssh = setup
-            .authenticate(&host.connection.route(), &attempt)
-            .await?;
+        let ssh = setup.authenticate(&connection.route(), &attempt).await?;
         let facts = setup.discover(&ssh).await?;
         facts.supported_platform()?;
         facts.prerequisites(matches!(facts.registration, BootstrapRegistration::Missing))?;
+        connection.revalidate()?;
         let retained = Arc::new(RetainedHost {
             generation,
-            connection: Arc::new(ForegroundConnection {
-                inner: host.connection,
-                foreground: Mutex::new(None),
-            }),
+            connection,
             artifact: Mutex::new(host.artifact),
         });
-        let mut hosts = self.hosts.lock().map_err(|_| {
-            fail(
-                PairingFailure::RecoveryRequired,
-                BootstrapPhase::ReadOnlyPreflight,
-            )
-        })?;
-        hosts.retain(|old| old.generation != generation);
-        if hosts.len() >= 4 {
-            // Retire the oldest foreground session. Its candidate now fails the
-            // exact generation lookup instead of exhausting Bootstrap forever.
-            hosts.remove(0);
+        {
+            let mut hosts = self.hosts.lock().map_err(|_| {
+                fail(
+                    PairingFailure::RecoveryRequired,
+                    BootstrapPhase::ReadOnlyPreflight,
+                )
+            })?;
+            // A sheet's counter is not a process-wide session identity. A canceled
+            // completion must not remove another sheet before the adapter checks it.
+            check_foreground(valid.as_ref())?;
+            hosts.retain(|old| old.connection.live());
+            if hosts.iter().any(|old| {
+                old.generation == generation
+                    && old.connection.route() == retained.connection.route()
+                    && old.connection.same_scope(valid.as_ref())
+            }) {
+                return Err(fail(
+                    PairingFailure::RouteChanged,
+                    BootstrapPhase::ReadOnlyPreflight,
+                ));
+            }
+            if hosts.len() >= 4 {
+                return Err(fail(
+                    PairingFailure::LimitExceeded,
+                    BootstrapPhase::ReadOnlyPreflight,
+                ));
+            }
+            hosts.push(retained.clone());
         }
-        hosts.push(retained);
+        if let Some(valid) = valid
+            && let Err(error) = self.watch_foreground(&retained, &valid)
+        {
+            self.release(&retained)?;
+            return Err(error);
+        }
         Ok(facts)
     }
     fn host(
@@ -157,18 +217,28 @@ impl ProductionSshBootstrap {
         route: BootstrapRoute,
         generation: u64,
     ) -> Result<Arc<RetainedHost>, BootstrapFailure> {
-        self.hosts
-            .lock()
-            .map_err(|_| {
-                fail(
-                    PairingFailure::RecoveryRequired,
-                    BootstrapPhase::ExplicitIntent,
-                )
-            })?
-            .iter()
-            .find(|host| host.generation == generation && host.connection.route() == route)
+        let hosts = self.hosts.lock().map_err(|_| {
+            fail(
+                PairingFailure::RecoveryRequired,
+                BootstrapPhase::ExplicitIntent,
+            )
+        })?;
+        let mut matches = hosts.iter().filter(|host| {
+            host.generation == generation
+                && host.connection.route() == route
+                && host.connection.live()
+        });
+        let host = matches
+            .next()
             .cloned()
-            .ok_or_else(|| fail(PairingFailure::RouteChanged, BootstrapPhase::ExplicitIntent))
+            .ok_or_else(|| fail(PairingFailure::RouteChanged, BootstrapPhase::ExplicitIntent))?;
+        if matches.next().is_some() {
+            return Err(fail(
+                PairingFailure::RouteChanged,
+                BootstrapPhase::ExplicitIntent,
+            ));
+        }
+        Ok(host)
     }
     /// Binds the native sheet's live cancellation fence to this exact retained session.
     /// All subsequent remote effects and enrollment frames revalidate the fence.
@@ -179,30 +249,18 @@ impl ProductionSshBootstrap {
         valid: Arc<AtomicBool>,
     ) -> Result<(), BootstrapFailure> {
         let host = self.host(route, generation)?;
-        if !valid.load(Ordering::Acquire) {
-            return Err(fail(
-                PairingFailure::Cancelled,
-                BootstrapPhase::ExplicitIntent,
-            ));
+        let already_bound = host.connection.same_scope(Some(&valid));
+        if let Err(error) = host.connection.bind_foreground_fence(valid.clone()) {
+            if !host.connection.live() {
+                self.release(&host)?;
+            }
+            return Err(error);
         }
-        let mut foreground = host.connection.foreground.lock().map_err(|_| {
-            fail(
-                PairingFailure::RecoveryRequired,
-                BootstrapPhase::ExplicitIntent,
-            )
-        })?;
-        if foreground
-            .as_ref()
-            .is_some_and(|original| !Arc::ptr_eq(original, &valid))
-        {
-            return Err(fail(
-                PairingFailure::RouteChanged,
-                BootstrapPhase::ExplicitIntent,
-            ));
+        if !already_bound && let Err(error) = self.watch_foreground(&host, &valid) {
+            self.release(&host)?;
+            return Err(error);
         }
-        *foreground = Some(valid);
-        drop(foreground);
-        host.connection.revalidate()
+        Ok(())
     }
     /// Retires a canceled inspection without disturbing any accepted native worker.
     pub fn abandon(&self, route: BootstrapRoute, generation: u64) -> Result<(), BootstrapFailure> {
@@ -213,10 +271,55 @@ impl ProductionSshBootstrap {
         self.hosts
             .lock()
             .map_err(|_| fail(PairingFailure::RecoveryRequired, BootstrapPhase::Connected))?
-            .retain(|old| {
-                old.generation != host.generation
-                    || old.connection.route() != host.connection.route()
-            });
+            .retain(|old| !std::ptr::eq(old.as_ref(), host));
+        Ok(())
+    }
+    fn watch_foreground(
+        &self,
+        host: &Arc<RetainedHost>,
+        valid: &Arc<AtomicBool>,
+    ) -> Result<(), BootstrapFailure> {
+        let hosts = Arc::downgrade(&self.hosts);
+        let host = Arc::downgrade(host);
+        let valid = Arc::downgrade(valid);
+        std::thread::Builder::new()
+            .name("bootstrap-retirement".into())
+            .spawn(move || {
+                loop {
+                    // No task owns the session while waiting for cancellation. Workers
+                    // keep their own Arc until their accepted operation has cleaned up.
+                    let Some(hosts) = hosts.upgrade() else {
+                        return;
+                    };
+                    let Some(host) = host.upgrade() else {
+                        return;
+                    };
+                    let live = valid
+                        .upgrade()
+                        .is_some_and(|valid| valid.load(Ordering::Acquire));
+                    let Ok(mut retained) = hosts.lock() else {
+                        return;
+                    };
+                    if !live {
+                        retained.retain(|old| !Arc::ptr_eq(old, &host));
+                        return;
+                    }
+                    let present = retained.iter().any(|old| Arc::ptr_eq(old, &host));
+                    drop(retained);
+                    drop(host);
+                    drop(hosts);
+                    if !present {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            })
+            .map_err(|_| {
+                fail(
+                    PairingFailure::RecoveryRequired,
+                    BootstrapPhase::ReadOnlyPreflight,
+                )
+            })?;
         Ok(())
     }
     pub async fn bootstrap(
@@ -226,6 +329,11 @@ impl ProductionSshBootstrap {
     ) -> Result<ProductionBootstrapCompletion, BootstrapFailure> {
         let attempt = intent.cancellation();
         let host = self.host(facts.route, attempt.generation())?;
+        let _operation = HostOperation {
+            hosts: self.hosts.clone(),
+            host: host.clone(),
+            release_on_drop: true,
+        };
         host.connection.revalidate()?;
         let artifact = if matches!(facts.registration, BootstrapRegistration::Missing) {
             host.artifact
@@ -282,6 +390,12 @@ impl ProductionSshBootstrap {
                 inventory
                     .prepared
                     .iter()
+                    .chain(
+                        inventory
+                            .enrollment_acknowledgements
+                            .iter()
+                            .map(|work| &work.prepared),
+                    )
                     .filter(|prepared| {
                         prepared.pin == pin && !inventory.is_suppressed(&prepared.local_pairing)
                     })
@@ -296,6 +410,7 @@ impl ProductionSshBootstrap {
             pairing: self.pairing.clone(),
             reference,
             channel: Mutex::new(None),
+            session: Mutex::new(None),
             pin: Mutex::new(None),
             route: Mutex::new(None),
         });
@@ -329,6 +444,46 @@ impl ProductionSshBootstrap {
         generation: u64,
     ) -> Result<(BootstrapHostFacts, Option<([u8; 16], [u8; 32])>), BootstrapFailure> {
         let facts = self.inspect(destination, generation).await?;
+        self.pending_for(facts, generation).await
+    }
+    /// The sheet's cancellation scope is bound before discovery and retained
+    /// only while it remains live. Generation counters are local to each sheet.
+    pub async fn inspect_with_pending_foreground(
+        &self,
+        destination: String,
+        generation: u64,
+        valid: Arc<AtomicBool>,
+    ) -> Result<(BootstrapHostFacts, Option<([u8; 16], [u8; 32])>), BootstrapFailure> {
+        let facts = self
+            .inspect_foreground(destination, generation, Some(valid.clone()))
+            .await?;
+        let result = self.pending_for(facts, generation).await;
+        check_foreground(Some(&valid))?;
+        result
+    }
+    async fn pending_for(
+        &self,
+        facts: BootstrapHostFacts,
+        generation: u64,
+    ) -> Result<(BootstrapHostFacts, Option<([u8; 16], [u8; 32])>), BootstrapFailure> {
+        let host = self.host(facts.route, generation)?;
+        let mut operation = HostOperation {
+            hosts: self.hosts.clone(),
+            host: host.clone(),
+            release_on_drop: true,
+        };
+        let result = self.pending_for_host(&host, facts).await;
+        if result.is_ok() {
+            operation.release_on_drop = false;
+        }
+        result
+    }
+    async fn pending_for_host(
+        &self,
+        host: &Arc<RetainedHost>,
+        facts: BootstrapHostFacts,
+    ) -> Result<(BootstrapHostFacts, Option<([u8; 16], [u8; 32])>), BootstrapFailure> {
+        host.connection.revalidate()?;
         let BootstrapRegistration::Running {
             pin,
             artifact_identity,
@@ -345,6 +500,12 @@ impl ProductionSshBootstrap {
         let prepared = inventory
             .prepared
             .iter()
+            .chain(
+                inventory
+                    .enrollment_acknowledgements
+                    .iter()
+                    .map(|work| &work.prepared),
+            )
             .filter(|prepared| {
                 prepared.pin == pin && !inventory.is_suppressed(&prepared.local_pairing)
             })
@@ -358,7 +519,6 @@ impl ProductionSshBootstrap {
         let Some(prepared) = prepared.first() else {
             return Ok((facts, None));
         };
-        let host = self.host(facts.route, generation)?;
         match host
             .connection
             .account(
@@ -396,6 +556,11 @@ impl ProductionSshBootstrap {
         artifact_identity: [u8; 32],
     ) -> Result<ProductionBootstrapCompletion, BootstrapFailure> {
         let host = self.host(facts.route, generation)?;
+        let _operation = HostOperation {
+            hosts: self.hosts.clone(),
+            host: host.clone(),
+            release_on_drop: true,
+        };
         let transport = AccountTransport(host.connection.clone());
         let native = NativeBootstrapAccount::new(Arc::new(transport))?;
         let server = BootstrapNativePreflight::resolve(&native, request, artifact_identity).await?;
@@ -466,6 +631,11 @@ impl ProductionSshBootstrap {
         generation: u64,
     ) -> Result<(), BootstrapFailure> {
         let host = self.host(facts.route, generation)?;
+        let _operation = HostOperation {
+            hosts: self.hosts.clone(),
+            host: host.clone(),
+            release_on_drop: true,
+        };
         let expected = match facts.registration {
             BootstrapRegistration::Stopped { pin, generation } => {
                 spaceterm_host::bootstrap::setup::BootstrapAccountRegistration::Stopped {
@@ -480,6 +650,27 @@ impl ProductionSshBootstrap {
                 ));
             }
         };
+        host.connection.revalidate()?;
+        ensure_stopped(host.connection.as_ref(), &expected).await?;
+        let transport = AccountTransport(host.connection.clone());
+        let probe = spaceterm_host::bootstrap::process::read_only_preflight(&transport, &transport)
+            .await
+            .map_err(super::probe_failure)?;
+        ensure_stopped(host.connection.as_ref(), &expected).await?;
+        let linger = StartLingerTransport {
+            transport: transport.clone(),
+            expected: expected.clone(),
+        };
+        let prompt = StartLingerPrompt {
+            connection: host.connection.clone(),
+            expected: expected.clone(),
+        };
+        enable_linger_if_needed(&linger, &transport, &probe, &prompt)
+            .await
+            .map_err(super::linger_failure)?;
+        // A prompt may wait while another client changes this registration.
+        // Do not publish Start against a newer or no-longer-Stopped generation.
+        ensure_stopped(host.connection.as_ref(), &expected).await?;
         host.connection.revalidate()?;
         match host
             .connection
@@ -504,9 +695,34 @@ impl ProductionSshBootstrap {
     }
 }
 
+fn check_foreground(valid: Option<&Arc<AtomicBool>>) -> Result<(), BootstrapFailure> {
+    if valid.is_some_and(|valid| !valid.load(Ordering::Acquire)) {
+        return Err(fail(
+            PairingFailure::Cancelled,
+            BootstrapPhase::ExplicitIntent,
+        ));
+    }
+    Ok(())
+}
 struct ForegroundConnection {
     inner: Arc<dyn BootstrapRemoteConnection>,
     foreground: Mutex<Option<Arc<AtomicBool>>>,
+}
+impl ForegroundConnection {
+    fn live(&self) -> bool {
+        self.foreground
+            .lock()
+            .is_ok_and(|scope| check_foreground(scope.as_ref()).is_ok())
+    }
+    fn same_scope(&self, valid: Option<&Arc<AtomicBool>>) -> bool {
+        self.foreground
+            .lock()
+            .is_ok_and(|scope| match (scope.as_ref(), valid) {
+                (Some(original), Some(valid)) => Arc::ptr_eq(original, valid),
+                (None, None) => true,
+                _ => false,
+            })
+    }
 }
 impl BootstrapRemoteConnection for ForegroundConnection {
     fn route(&self) -> BootstrapRoute {
@@ -534,6 +750,38 @@ impl BootstrapRemoteConnection for ForegroundConnection {
             ));
         }
         self.inner.revalidate()
+    }
+    fn bind_foreground_fence(&self, valid: Arc<AtomicBool>) -> Result<(), BootstrapFailure> {
+        check_foreground(Some(&valid))?;
+        let mut foreground = self.foreground.lock().map_err(|_| {
+            fail(
+                PairingFailure::RecoveryRequired,
+                BootstrapPhase::ExplicitIntent,
+            )
+        })?;
+        if foreground
+            .as_ref()
+            .is_some_and(|original| !Arc::ptr_eq(original, &valid))
+        {
+            return Err(fail(
+                PairingFailure::RouteChanged,
+                BootstrapPhase::ExplicitIntent,
+            ));
+        }
+        self.inner.bind_foreground_fence(valid.clone())?;
+        *foreground = Some(valid);
+        drop(foreground);
+        self.revalidate()
+    }
+    fn captured_ssh(&self) -> Option<JournalSshCapture> {
+        self.inner.captured_ssh()
+    }
+    fn revalidate_capture(&self) -> PairingFuture<'_, Result<(), BootstrapFailure>> {
+        Box::pin(async move {
+            self.revalidate()?;
+            self.inner.revalidate_capture().await?;
+            self.revalidate()
+        })
     }
     fn probe(&self) -> BootstrapProbeFuture<'_, Vec<u8>> {
         Box::pin(async move {
@@ -863,13 +1111,114 @@ impl ScopedAuthenticationPrompt for Prompt {
     }
 }
 
+async fn ensure_stopped(
+    connection: &dyn BootstrapRemoteConnection,
+    expected: &spaceterm_host::bootstrap::setup::BootstrapAccountRegistration,
+) -> Result<(), BootstrapFailure> {
+    connection.revalidate()?;
+    match connection.account(AccountRequest::Inspect, None).await? {
+        AccountReply::Observation(observation) if observation.facts.registration == *expected => {
+            Ok(())
+        }
+        AccountReply::Observation(_) => Err(fail(
+            PairingFailure::RouteChanged,
+            BootstrapPhase::Authorized,
+        )),
+        AccountReply::Failure(error) => Err(service_failure(error, BootstrapPhase::Authorized)),
+        _ => Err(fail(
+            PairingFailure::InvalidDurableState,
+            BootstrapPhase::Authorized,
+        )),
+    }
+}
+struct StartLingerPrompt {
+    connection: Arc<dyn BootstrapRemoteConnection>,
+    expected: spaceterm_host::bootstrap::setup::BootstrapAccountRegistration,
+}
+impl LingerAuthenticationPrompt for StartLingerPrompt {
+    fn revalidate(&self, uid: u32) -> Result<(), BootstrapLingerFailure> {
+        if uid != self.connection.route().account_uid() {
+            return Err(BootstrapLingerFailure::RouteChanged);
+        }
+        self.connection.revalidate().map_err(super::prompt_failure)
+    }
+    fn respond(&self, uid: u32) -> LingerFuture<'_, Zeroizing<Vec<u8>>> {
+        Box::pin(async move {
+            self.revalidate(uid)?;
+            ensure_stopped(self.connection.as_ref(), &self.expected)
+                .await
+                .map_err(super::prompt_failure)?;
+            let response = self
+                .connection
+                .prompt()
+                .await
+                .map_err(super::prompt_failure)?;
+            self.revalidate(uid)?;
+            ensure_stopped(self.connection.as_ref(), &self.expected)
+                .await
+                .map_err(super::prompt_failure)?;
+            Ok(response)
+        })
+    }
+}
+struct StartLingerTransport {
+    transport: AccountTransport,
+    expected: spaceterm_host::bootstrap::setup::BootstrapAccountRegistration,
+}
+impl BootstrapLingerTransport for StartLingerTransport {
+    type Exchange = u32;
+    fn retain<'a>(
+        &'a self,
+        lease: &'a dyn BootstrapProbeLease,
+        invocation: &'a LingerInvocation,
+    ) -> LingerFuture<'a, u32> {
+        Box::pin(async move {
+            ensure_stopped(self.transport.0.as_ref(), &self.expected)
+                .await
+                .map_err(super::prompt_failure)?;
+            self.transport.retain(lease, invocation).await
+        })
+    }
+    fn revalidate(&self, exchange: &u32) -> Result<(), BootstrapLingerFailure> {
+        BootstrapLingerTransport::revalidate(&self.transport, exchange)
+    }
+    fn invoke<'a>(
+        &'a self,
+        exchange: &'a mut u32,
+        invocation: &'a LingerInvocation,
+        authentication: &'a ScopedLingerAuthentication<'a>,
+    ) -> LingerFuture<'a, ()> {
+        Box::pin(async move {
+            ensure_stopped(self.transport.0.as_ref(), &self.expected)
+                .await
+                .map_err(super::prompt_failure)?;
+            self.transport
+                .invoke(exchange, invocation, authentication)
+                .await
+        })
+    }
+    fn observe<'a>(&'a self, exchange: &'a u32, uid: u32) -> LingerFuture<'a, BootstrapLinger> {
+        self.transport.observe(exchange, uid)
+    }
+}
+
 struct OwnerState {
     connection: Arc<dyn BootstrapRemoteConnection>,
     pairing: Arc<NativePairingRuntime>,
     reference: RevocationRouteReference,
-    channel: Mutex<Option<Arc<dyn MessageTransport>>>,
+    channel: Mutex<Option<(Arc<dyn MessageTransport>, bool)>>,
+    session: Mutex<Option<OwnerSession>>,
     pin: Mutex<Option<spaceterm_protocol::authentication::ServerPin>>,
     route: Mutex<Option<RouteDescription>>,
+}
+#[derive(Clone)]
+struct OwnerSession {
+    server: BootstrapServer,
+    request: [u8; 16],
+    proposal: EnrollmentProposal,
+    device_proof: [u8; 64],
+    authentication_proof: [u8; 64],
+    reservation: PublicEnrollmentReservation,
 }
 #[derive(Clone)]
 struct OwnerConnector(Arc<OwnerState>);
@@ -894,13 +1243,73 @@ impl EnrollmentConnector for OwnerConnector {
                 .connection
                 .revalidate()
                 .map_err(|_| PairingFailure::RouteChanged)?;
-            let channel = self
-                .0
-                .channel
-                .lock()
-                .map_err(|_| PairingFailure::RecoveryRequired)?
-                .clone()
-                .ok_or(PairingFailure::Offline)?;
+            let available = {
+                let mut channel = self
+                    .0
+                    .channel
+                    .lock()
+                    .map_err(|_| PairingFailure::RecoveryRequired)?;
+                channel.as_mut().and_then(|(channel, used)| {
+                    if *used {
+                        return None;
+                    }
+                    *used = true;
+                    Some(channel.clone())
+                })
+            };
+            let channel = if let Some(channel) = available {
+                channel
+            } else {
+                // acknowledge_once begins a new hello. The old channel is already
+                // encrypted and cannot interpret it as another owner handshake.
+                let previous = self
+                    .0
+                    .channel
+                    .lock()
+                    .map_err(|_| PairingFailure::RecoveryRequired)?
+                    .take();
+                if let Some((previous, _)) = previous {
+                    let closed = previous.close().await;
+                    let final_owner = Arc::strong_count(&previous) == 1;
+                    // A failed native frame already retired its child. Repeated
+                    // close may report unavailable, but releasing our final owner
+                    // still completes drop-owned cleanup before the fresh session.
+                    drop(previous);
+                    match closed {
+                        Ok(()) => (),
+                        Err(TransportError::Closed | TransportError::Unavailable)
+                            if final_owner => {}
+                        Err(_) => return Err(PairingFailure::RecoveryRequired),
+                    }
+                }
+                let session = self
+                    .0
+                    .session
+                    .lock()
+                    .map_err(|_| PairingFailure::RecoveryRequired)?
+                    .clone()
+                    .ok_or(PairingFailure::RecoveryRequired)?;
+                let delivery = OwnerExchange(self.0.clone())
+                    .lookup_verified(
+                        &session.server,
+                        session.request,
+                        &session.proposal,
+                        session.device_proof,
+                        session.authentication_proof,
+                    )
+                    .await?;
+                if delivery.authorization.is_some() || delivery.reservation != session.reservation {
+                    return Err(PairingFailure::IdentityMismatch);
+                }
+                let mut channel = self
+                    .0
+                    .channel
+                    .lock()
+                    .map_err(|_| PairingFailure::RecoveryRequired)?;
+                let (channel, used) = channel.as_mut().ok_or(PairingFailure::Offline)?;
+                *used = true;
+                channel.clone()
+            };
             Ok(Box::new(OwnerTransport {
                 channel,
                 connection: self.0.connection.clone(),
@@ -915,7 +1324,12 @@ struct OwnerTransport {
 impl PairingTransport for OwnerTransport {
     fn send<'a>(&'a mut self, bytes: &'a [u8]) -> PairingFuture<'a, Result<(), PairingFailure>> {
         Box::pin(async move {
-            self.connection.revalidate().map_err(pairing_failure)?;
+            // Includes enrollment submission. Mutable SSH configuration never
+            // replaces the capture of the authenticated original session.
+            self.connection
+                .revalidate_capture()
+                .await
+                .map_err(pairing_failure)?;
             self.channel
                 .send(bytes)
                 .await
@@ -978,14 +1392,52 @@ impl BootstrapOwnerExchange for OwnerExchange {
             }
             let remote_socket = observation
                 .remote_socket
+                .clone()
                 .ok_or(PairingFailure::RouteChanged)?;
             let route = RouteDescription::new(RouteParts::Ssh {
                 destination: self.0.connection.destination().to_owned(),
                 remote_socket,
             })
             .map_err(|_| PairingFailure::RouteChanged)?;
-            let channel = self.0.connection.owner_channel().await?;
             let request = native_request(request).map_err(|_| PairingFailure::InvalidRequest)?;
+            // Query every fallible native binding before receiving a single-use
+            // bearer. Failure here leaves the original owner authorization unissued.
+            let digest = match self
+                .0
+                .connection
+                .account(
+                    AccountRequest::OwnerBinding {
+                        request,
+                        proposal: proposal.clone(),
+                    },
+                    None,
+                )
+                .await
+                .map_err(pairing_failure)?
+            {
+                AccountReply::Owner {
+                    observation: binding,
+                    digest,
+                } if digest.bytes() != [0; 32]
+                    && binding.facts.registration == observation.facts.registration
+                    && binding.remote_socket == observation.remote_socket =>
+                {
+                    digest
+                }
+                AccountReply::Failure(error) => {
+                    return Err(pairing_failure(service_failure(
+                        error,
+                        BootstrapPhase::Enrolled,
+                    )));
+                }
+                _ => return Err(PairingFailure::IdentityMismatch),
+            };
+            self.0
+                .connection
+                .revalidate_capture()
+                .await
+                .map_err(pairing_failure)?;
+            let channel = self.0.connection.owner_channel().await?;
             let initial = serde_json::to_vec(&serde_json::json!({"request":request, "proposal":proposal, "device_proof":device_proof.to_vec(), "authentication_proof":authentication_proof.to_vec()})).map_err(|_| PairingFailure::InvalidRequest)?;
             self.0.connection.revalidate().map_err(pairing_failure)?;
             channel
@@ -1047,29 +1499,24 @@ impl BootstrapOwnerExchange for OwnerExchange {
                 .0
                 .channel
                 .lock()
-                .map_err(|_| PairingFailure::RecoveryRequired)? = Some(channel);
+                .map_err(|_| PairingFailure::RecoveryRequired)? = Some((channel, false));
             *self
                 .0
                 .route
                 .lock()
                 .map_err(|_| PairingFailure::RecoveryRequired)? = Some(route);
-            // The native digest binds only public request/claim material.
-            let digest = match self
+            *self
                 .0
-                .connection
-                .account(
-                    AccountRequest::OwnerBinding {
-                        request,
-                        proposal: proposal.clone(),
-                    },
-                    None,
-                )
-                .await
-                .map_err(|_| PairingFailure::RecoveryRequired)?
-            {
-                AccountReply::Owner { digest, .. } => digest,
-                _ => return Err(PairingFailure::IdentityMismatch),
-            };
+                .session
+                .lock()
+                .map_err(|_| PairingFailure::RecoveryRequired)? = Some(OwnerSession {
+                server: *server,
+                request: *request.as_bytes(),
+                proposal: proposal.clone(),
+                device_proof,
+                authentication_proof,
+                reservation: reservation.clone(),
+            });
             Ok(BootstrapOwnerDelivery {
                 native_request: *request.as_bytes(),
                 native_request_digest: digest,
@@ -1083,7 +1530,11 @@ impl BootstrapOwnerExchange for OwnerExchange {
         prepared: &'a PreparedEnrollment,
     ) -> PairingFuture<'a, Result<(), PairingFailure>> {
         Box::pin(async move {
-            self.0.connection.revalidate().map_err(pairing_failure)?;
+            self.0
+                .connection
+                .revalidate_capture()
+                .await
+                .map_err(pairing_failure)?;
             let route = self
                 .0
                 .route
@@ -1091,8 +1542,20 @@ impl BootstrapOwnerExchange for OwnerExchange {
                 .map_err(|_| PairingFailure::RecoveryRequired)?
                 .clone()
                 .ok_or(PairingFailure::RouteChanged)?;
-            self.0.pairing.prepare_route(prepared, route).await?;
-            self.0.connection.revalidate().map_err(pairing_failure)
+            if let Some(capture) = self.0.connection.captured_ssh() {
+                self.0
+                    .pairing
+                    .prepare_route_with_capture(prepared, route, capture)
+                    .await?;
+            } else {
+                // Injected nonnative boundaries may have no OpenSSH capture.
+                self.0.pairing.prepare_route(prepared, route).await?;
+            }
+            self.0
+                .connection
+                .revalidate_capture()
+                .await
+                .map_err(pairing_failure)
         })
     }
     fn connect<'a>(
@@ -1110,7 +1573,7 @@ impl BootstrapOwnerExchange for OwnerExchange {
                 .map_err(|_| PairingFailure::RouteChanged)?;
             // Final ordinary admission belongs to Settings publication, after its attempt fence.
             // Here the authenticated enrollment channel is closed only after its durable ACK.
-            let channel = self
+            let (channel, _) = self
                 .0
                 .channel
                 .lock()

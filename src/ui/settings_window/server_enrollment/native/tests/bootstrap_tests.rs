@@ -165,6 +165,10 @@ impl ServiceClock for Clock {
 struct Manager {
     key: UpdateKey,
     running: AtomicBool,
+    delayed_start: AtomicBool,
+    starting: AtomicBool,
+    start_requested: tokio::sync::Notify,
+    starting_observed: tokio::sync::Notify,
     effects: Mutex<Vec<&'static str>>,
     linux: AtomicBool,
     linger_enabled: AtomicBool,
@@ -174,6 +178,9 @@ impl ServiceManager for Manager {
         Box::pin(async {
             Ok(if self.running.load(Ordering::SeqCst) {
                 SupervisorState::Running
+            } else if self.starting.load(Ordering::SeqCst) {
+                self.starting_observed.notify_one();
+                SupervisorState::Starting
             } else {
                 SupervisorState::Inactive
             })
@@ -205,7 +212,12 @@ impl ServiceManager for Manager {
     fn start<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
         Box::pin(async {
             self.effects.lock().unwrap().push("start");
-            self.running.store(true, Ordering::SeqCst);
+            if self.delayed_start.load(Ordering::SeqCst) {
+                self.starting.store(true, Ordering::SeqCst);
+            } else {
+                self.running.store(true, Ordering::SeqCst);
+            }
+            self.start_requested.notify_one();
             Ok(())
         })
     }
@@ -232,7 +244,17 @@ struct Remote {
     requests: Mutex<Vec<&'static str>>,
     lost_reply: AtomicBool,
     lost_owner_reply: AtomicBool,
+    lost_ack_channels: AtomicUsize,
+    fail_owner_binding: AtomicBool,
+    owner_authorizations: Arc<AtomicUsize>,
+    prompt_allowed: AtomicBool,
+    start_during_prompt: AtomicBool,
+    prompt_count: AtomicUsize,
+    password_deliveries: AtomicUsize,
+    linger_invocations: AtomicUsize,
     cancel_owner_ready: Mutex<Option<Arc<AtomicBool>>>,
+    ssh_capture: Mutex<Option<(PathBuf, spaceterm_client::journal::JournalSshCapture)>>,
+    change_config_on_owner_frame: Mutex<Option<(usize, PathBuf, String)>>,
     owner_client_frames: Arc<AtomicUsize>,
     unsupported: AtomicBool,
     prospective_roots: Mutex<Option<(PathBuf, PathBuf)>>,
@@ -421,6 +443,10 @@ impl BootstrapRemoteConnection for Remote {
                         })
                     }
                     AccountRequest::OwnerBinding { request, proposal } => {
+                        self.requests.lock().unwrap().push("owner-binding");
+                        if self.fail_owner_binding.swap(false, Ordering::SeqCst) {
+                            return Err(ServiceFailure::StorageUnavailable);
+                        }
                         let claim =
                             spaceterm_protocol::pairing_adapter::enrollment_proposal_digest(
                                 &proposal,
@@ -490,8 +516,21 @@ impl BootstrapRemoteConnection for Remote {
             let (b, br) = tokio::sync::mpsc::channel(1);
             let uid = self.supervisor.key().account_uid;
             let lost_reply = self.lost_owner_reply.swap(false, Ordering::SeqCst);
+            let ack_failure = self
+                .lost_ack_channels
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    (left > 0).then(|| left - 1)
+                })
+                .ok();
             let server = Channel {
                 loss_at: if lost_reply { 5 } else { 0 },
+                frame_count: AtomicUsize::new(0),
+                issued: Some(self.owner_authorizations.clone()),
+                change_config_on_owner_frame: self
+                    .change_config_on_owner_frame
+                    .lock()
+                    .unwrap()
+                    .take(),
                 sent: Arc::new(AtomicUsize::new(0)),
                 cancel_on_ready: self.cancel_owner_ready.lock().unwrap().take(),
                 send: tokio::sync::Mutex::new(Some(a)),
@@ -505,12 +544,17 @@ impl BootstrapRemoteConnection for Remote {
                     spaceterm_server::deployment::owner::execute(supervisor, &server).await;
                 if lost_reply {
                     assert!(result.is_err());
-                } else {
+                } else if ack_failure.is_none() {
                     result.unwrap();
                 }
             });
             Ok(Arc::new(Channel {
-                loss_at: 0,
+                // Enrollment's fifth frame is its ACK. On a fresh historical
+                // session it is the lookup confirming that same cumulative ACK.
+                loss_at: if ack_failure.is_some() { 5 } else { 0 },
+                frame_count: AtomicUsize::new(0),
+                issued: None,
+                change_config_on_owner_frame: None,
                 sent: self.owner_client_frames.clone(),
                 cancel_on_ready: None,
                 send: tokio::sync::Mutex::new(Some(b)),
@@ -522,10 +566,58 @@ impl BootstrapRemoteConnection for Remote {
     }
     fn prompt(&self) -> PairingFuture<'_, Result<Zeroizing<Vec<u8>>, BootstrapFailure>> {
         Box::pin(async {
-            Err(BootstrapFailure::new(
-                PairingFailure::AuthorizationDenied,
-                BootstrapPhase::Authorized,
-            ))
+            self.prompt_count.fetch_add(1, Ordering::SeqCst);
+            if self.start_during_prompt.swap(false, Ordering::SeqCst) {
+                // Model another deliberate account action while this prompt waits.
+                // That actor enables linger and Starts through the real native supervisor.
+                self.manager.linger_enabled.store(true, Ordering::SeqCst);
+                self.requests.lock().unwrap().push("concurrent-start");
+                let request = self.supervisor.allocate_request().map_err(|error| {
+                    spaceterm_client_native::bootstrap::service_failure(
+                        error,
+                        BootstrapPhase::Authorized,
+                    )
+                })?;
+                self.supervisor.start(request).await.map_err(|error| {
+                    spaceterm_client_native::bootstrap::service_failure(
+                        error,
+                        BootstrapPhase::Authorized,
+                    )
+                })?;
+            }
+            if self.prompt_allowed.load(Ordering::SeqCst) {
+                Ok(Zeroizing::new(b"scoped-test-response".to_vec()))
+            } else {
+                Err(BootstrapFailure::new(
+                    PairingFailure::AuthorizationDenied,
+                    BootstrapPhase::Authorized,
+                ))
+            }
+        })
+    }
+    fn captured_ssh(&self) -> Option<spaceterm_client::journal::JournalSshCapture> {
+        self.ssh_capture
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(_, capture)| capture.clone())
+    }
+    fn revalidate_capture(&self) -> PairingFuture<'_, Result<(), BootstrapFailure>> {
+        Box::pin(async {
+            // The external SSH boundary holds an immutable original configuration.
+            // Tests change the actual local file at a framed delivery boundary.
+            if let Some((path, original)) = self.ssh_capture.lock().unwrap().as_ref() {
+                let current = std::fs::read_to_string(path).map_err(|_| {
+                    BootstrapFailure::new(PairingFailure::RouteChanged, BootstrapPhase::Enrolled)
+                })?;
+                if current != original.configuration() {
+                    return Err(BootstrapFailure::new(
+                        PairingFailure::RouteChanged,
+                        BootstrapPhase::Enrolled,
+                    ));
+                }
+            }
+            self.revalidate()
         })
     }
     fn enable_linger<'a>(
@@ -536,15 +628,20 @@ impl BootstrapRemoteConnection for Remote {
         Box::pin(async move {
             assert_eq!(invocation.executable(), "/usr/bin/sudo");
             assert_eq!(invocation.account_uid(), self.supervisor.key().account_uid);
-            authentication
-                .respond(invocation.account_uid())
-                .await
-                .map(drop)
+            self.linger_invocations.fetch_add(1, Ordering::SeqCst);
+            let response = authentication.respond(invocation.account_uid()).await?;
+            self.password_deliveries.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(response.as_slice(), b"scoped-test-response");
+            self.manager.linger_enabled.store(true, Ordering::SeqCst);
+            Ok(())
         })
     }
 }
 struct Channel {
     loss_at: usize,
+    frame_count: AtomicUsize,
+    issued: Option<Arc<AtomicUsize>>,
+    change_config_on_owner_frame: Option<(usize, PathBuf, String)>,
     sent: Arc<AtomicUsize>,
     cancel_on_ready: Option<Arc<AtomicBool>>,
     send: tokio::sync::Mutex<Option<tokio::sync::mpsc::Sender<Vec<u8>>>>,
@@ -563,7 +660,22 @@ impl MessageTransport for Channel {
     }
     fn send<'a>(&'a self, bytes: &'a [u8]) -> TransportFuture<'a, ()> {
         Box::pin(async move {
-            let count = self.sent.fetch_add(1, Ordering::SeqCst) + 1;
+            self.sent.fetch_add(1, Ordering::SeqCst);
+            let count = self.frame_count.fetch_add(1, Ordering::SeqCst) + 1;
+            if count == 1
+                && let Some(issued) = &self.issued
+            {
+                let reply: spaceterm_server::deployment::owner::OwnerEnrollmentReply =
+                    serde_json::from_slice(bytes).unwrap();
+                if reply.disposition == spaceterm_server::deployment::owner::OwnerReplyDisposition::AuthorizationDelivered {
+                    issued.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            if let Some((frame, path, replacement)) = &self.change_config_on_owner_frame
+                && count == *frame
+            {
+                std::fs::write(path, replacement).unwrap();
+            }
             if count == 4
                 && let Some(valid) = &self.cancel_on_ready
             {
@@ -591,6 +703,11 @@ impl MessageTransport for Channel {
             self.send.lock().await.take();
             if let Some(task) = self.completion.lock().await.take() {
                 task.await.map_err(|_| TransportError::Unavailable)?;
+            }
+            if self.loss_at != 0 && self.frame_count.load(Ordering::SeqCst) >= self.loss_at {
+                // The native adapter has already retired/reaped a failed frame's
+                // child and its repeated close reports this same classification.
+                return Err(TransportError::Unavailable);
             }
             Ok(())
         })
@@ -620,6 +737,7 @@ struct Harness {
     remote: Arc<Remote>,
     journal: Arc<spaceterm_client::journal::JournalController>,
     pairing: Arc<NativePairingRuntime>,
+    credentials: Credentials,
     provider: super::super::bootstrap::NativeForegroundBootstrap,
 }
 impl Harness {
@@ -642,6 +760,10 @@ impl Harness {
         let manager = Arc::new(Manager {
             key: key.clone(),
             running: AtomicBool::new(false),
+            delayed_start: AtomicBool::new(false),
+            starting: AtomicBool::new(false),
+            start_requested: tokio::sync::Notify::new(),
+            starting_observed: tokio::sync::Notify::new(),
             effects: Mutex::new(Vec::new()),
             linux: AtomicBool::new(cfg!(target_os = "linux")),
             linger_enabled: AtomicBool::new(true),
@@ -683,7 +805,7 @@ impl Harness {
         let credentials = Credentials::default();
         let pairing = Arc::new(NativePairingRuntime::with_adapters(
             journal.clone(),
-            Arc::new(credentials),
+            Arc::new(credentials.clone()),
             Arc::new(NoPairingRoute),
             Arc::new(NoPairingRoute),
             Arc::new(Invalidator),
@@ -697,7 +819,17 @@ impl Harness {
             requests: Mutex::new(Vec::new()),
             lost_reply: AtomicBool::new(false),
             lost_owner_reply: AtomicBool::new(false),
+            lost_ack_channels: AtomicUsize::new(0),
+            fail_owner_binding: AtomicBool::new(false),
+            owner_authorizations: Arc::new(AtomicUsize::new(0)),
+            prompt_allowed: AtomicBool::new(false),
+            start_during_prompt: AtomicBool::new(false),
+            prompt_count: AtomicUsize::new(0),
+            password_deliveries: AtomicUsize::new(0),
+            linger_invocations: AtomicUsize::new(0),
             cancel_owner_ready: Mutex::new(None),
+            ssh_capture: Mutex::new(None),
+            change_config_on_owner_frame: Mutex::new(None),
             owner_client_frames: Arc::new(AtomicUsize::new(0)),
             unsupported: AtomicBool::new(false),
             prospective_roots: Mutex::new(None),
@@ -716,6 +848,7 @@ impl Harness {
             remote,
             journal,
             pairing,
+            credentials,
             provider,
         }
     }
@@ -727,6 +860,24 @@ impl Harness {
             .install(request, self.remote.fixture.confirm_install(artifact))
             .await
             .unwrap();
+        self.remote.manager.effects.lock().unwrap().clear();
+        self.remote.requests.lock().unwrap().clear();
+    }
+    async fn stop_existing(&self) {
+        self.install_existing().await;
+        let stopper = self.remote.fixture.with_providers(
+            self.remote.manager.clone(),
+            Arc::new(EmptyRuntimeScope),
+            Arc::new(Clock),
+            None,
+        );
+        let action = stopper
+            .assess(stopper.allocate_request().unwrap(), ServiceAction::Stop)
+            .await
+            .unwrap()
+            .confirm()
+            .unwrap();
+        stopper.stop(action).await.unwrap();
         self.remote.manager.effects.lock().unwrap().clear();
         self.remote.requests.lock().unwrap().clear();
     }
@@ -1087,6 +1238,9 @@ async fn desktop_ssh_bootstrap_account_endpoint_rejects_nonembedded_artifact_tru
     let uid = h.remote.supervisor.key().account_uid;
     let server = Channel {
         loss_at: 0,
+        frame_count: AtomicUsize::new(0),
+        issued: None,
+        change_config_on_owner_frame: None,
         sent: Arc::new(AtomicUsize::new(0)),
         cancel_on_ready: None,
         send: tokio::sync::Mutex::new(Some(a)),
@@ -1102,6 +1256,9 @@ async fn desktop_ssh_bootstrap_account_endpoint_rejects_nonembedded_artifact_tru
     });
     let client = Channel {
         loss_at: 0,
+        frame_count: AtomicUsize::new(0),
+        issued: None,
+        change_config_on_owner_frame: None,
         sent: Arc::new(AtomicUsize::new(0)),
         cancel_on_ready: None,
         send: tokio::sync::Mutex::new(Some(b)),
@@ -1170,4 +1327,843 @@ async fn desktop_ssh_bootstrap_rejects_another_foreground_scope_with_the_same_co
     ));
     assert!(h.remote.manager.effects.lock().unwrap().is_empty());
     assert!(h.journal.snapshot().unwrap().bindings().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_lost_ack_recovers_saved_original_after_provider_recreation() {
+    let h = Harness::new().await;
+    h.install_existing().await;
+    let candidate = h.candidate(1).await;
+    h.remote.lost_ack_channels.store(2, Ordering::SeqCst);
+    assert!(matches!(
+        h.provider
+            .bootstrap(candidate.confirm().unwrap(), candidate)
+            .await,
+        Err(EnrollmentFailure::Bootstrap(
+            BootstrapFailureClass::Pairing(PairingFailure::Offline)
+        ))
+    ));
+    let original = h.pairing.inventory().await.unwrap();
+    assert!(original.prepared.is_empty());
+    assert_eq!(original.enrollment_acknowledgements.len(), 1);
+    assert_eq!(original.saved.len(), 1);
+    let work = &original.enrollment_acknowledgements[0];
+    let (native_request, claim) = h
+        .remote
+        .supervisor
+        .retained_owner_proposal(
+            work.prepared.local_pairing.parts().server,
+            &work.prepared.keys,
+        )
+        .unwrap()
+        .unwrap();
+    let original_binding = h.journal.snapshot().unwrap().bindings()[0].clone();
+    let provider = super::super::bootstrap::NativeForegroundBootstrap(ProductionSshBootstrap::new(
+        h.pairing.clone(),
+        Arc::new(Factory {
+            remote: h.remote.clone(),
+        }),
+    ));
+    let attempt = EnrollmentAttempt::new(2);
+    let (facts, pending) = provider
+        .inspect("test-account".into(), attempt.clone())
+        .await
+        .unwrap();
+    let pending = pending.expect("saved enrollment must retain its native owner request until ACK");
+    assert_eq!(pending.request(), *native_request.as_bytes());
+    let candidate = SshCandidate::new(attempt, facts)
+        .unwrap()
+        .retain_request(pending)
+        .unwrap();
+    let completion = provider.resolve(candidate, pending).await.unwrap();
+    assert_eq!(completion.prepared, work.prepared);
+    assert_eq!(completion.saved, original.saved[0]);
+    let recovered = h.pairing.inventory().await.unwrap();
+    assert!(recovered.enrollment_acknowledgements.is_empty());
+    assert_eq!(
+        recovered.generation_high_water,
+        original.generation_high_water
+    );
+    assert_eq!(
+        recovered.credential_preparations,
+        original.credential_preparations
+    );
+    assert_eq!(
+        h.journal.snapshot().unwrap().bindings(),
+        &[original_binding]
+    );
+    assert_eq!(
+        h.remote
+            .supervisor
+            .retained_owner_proposal(
+                work.prepared.local_pairing.parts().server,
+                &work.prepared.keys,
+            )
+            .unwrap(),
+        Some((native_request, claim))
+    );
+    assert_eq!(h.remote.owner_authorizations.load(Ordering::SeqCst), 1);
+    let requests = h.remote.requests.lock().unwrap().clone();
+    assert_eq!(
+        requests.iter().filter(|r| **r == "reserve-owner").count(),
+        1
+    );
+    assert_eq!(
+        requests.iter().filter(|r| **r == "authorize-owner").count(),
+        1
+    );
+    assert_eq!(requests.iter().filter(|r| **r == "resolve").count(), 1);
+    assert!(h.remote.manager.effects.lock().unwrap().is_empty());
+    h.remote.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_owner_binding_failure_precedes_single_use_authorization() {
+    let h = Harness::new().await;
+    h.install_existing().await;
+    let candidate = h.candidate(1).await;
+    h.remote.fail_owner_binding.store(true, Ordering::SeqCst);
+    assert!(
+        h.provider
+            .bootstrap(candidate.confirm().unwrap(), candidate)
+            .await
+            .is_err()
+    );
+    assert_eq!(h.remote.owners.load(Ordering::SeqCst), 0);
+    assert_eq!(h.remote.owner_authorizations.load(Ordering::SeqCst), 0);
+    let original = h.pairing.inventory().await.unwrap();
+    assert!(original.prepared.is_empty());
+    assert!(original.saved.is_empty());
+    let authentication = original
+        .credential_preparations
+        .iter()
+        .find(|credential| {
+            matches!(
+                credential.scope.parts().purpose,
+                CredentialPurpose::PairingAuthentication { .. }
+            )
+        })
+        .unwrap();
+    let prepared_key = h
+        .pairing
+        .recover_credential(authentication.generation)
+        .await
+        .unwrap()
+        .unwrap();
+    let server = h.remote.supervisor.discover().unwrap().unwrap();
+    let keys =
+        spaceterm_core::pairing::PairingKeys::new(spaceterm_core::pairing::PairingKeysParts {
+            device_identity_public_key: h
+                .pairing
+                .recover_credential(
+                    original
+                        .credential_preparations
+                        .iter()
+                        .find(|credential| {
+                            credential.scope.parts().purpose == CredentialPurpose::DeviceIdentity
+                        })
+                        .unwrap()
+                        .generation,
+                )
+                .await
+                .unwrap()
+                .unwrap()
+                .public_key,
+            pairing_authentication_public_key: prepared_key.public_key,
+        })
+        .unwrap();
+    let original_request = h
+        .remote
+        .supervisor
+        .retained_owner_proposal(
+            spaceterm_core::identity::ServerId::new(server.server_pin().identity),
+            &keys,
+        )
+        .unwrap()
+        .unwrap();
+    let retry = h.candidate(2).await;
+    let completion = h
+        .provider
+        .bootstrap(retry.confirm().unwrap(), retry)
+        .await
+        .unwrap();
+    assert_eq!(completion.prepared.credential, prepared_key);
+    assert_eq!(
+        completion.prepared.local_pairing.parts().generation,
+        authentication.generation
+    );
+    assert_eq!(
+        h.pairing.inventory().await.unwrap().generation_high_water,
+        original.generation_high_water
+    );
+    assert_eq!(
+        h.remote
+            .supervisor
+            .retained_owner_proposal(
+                spaceterm_core::identity::ServerId::new(server.server_pin().identity),
+                &keys,
+            )
+            .unwrap()
+            .unwrap(),
+        original_request
+    );
+    assert_eq!(h.remote.owner_authorizations.load(Ordering::SeqCst), 1);
+    assert!(h.remote.manager.effects.lock().unwrap().is_empty());
+    h.remote.close().await;
+}
+
+struct SessionRemote {
+    remote: Arc<Remote>,
+    route: BootstrapRoute,
+}
+impl BootstrapRemoteConnection for SessionRemote {
+    fn route(&self) -> BootstrapRoute {
+        self.route
+    }
+    fn destination(&self) -> &str {
+        self.remote.destination()
+    }
+    fn revalidate(&self) -> Result<(), BootstrapFailure> {
+        self.remote.revalidate()
+    }
+    fn probe(&self) -> BootstrapProbeFuture<'_, Vec<u8>> {
+        self.remote.probe()
+    }
+    fn account<'a>(
+        &'a self,
+        request: AccountRequest,
+        artifact: Option<&'a VerifiedAccountServerArtifact>,
+    ) -> PairingFuture<'a, Result<AccountReply, BootstrapFailure>> {
+        self.remote.account(request, artifact)
+    }
+    fn owner_channel(
+        &self,
+    ) -> PairingFuture<'_, Result<Arc<dyn MessageTransport>, PairingFailure>> {
+        self.remote.owner_channel()
+    }
+    fn prompt(&self) -> PairingFuture<'_, Result<Zeroizing<Vec<u8>>, BootstrapFailure>> {
+        self.remote.prompt()
+    }
+    fn enable_linger<'a>(
+        &'a self,
+        invocation: &'a LingerInvocation,
+        authentication: &'a ScopedLingerAuthentication<'a>,
+    ) -> LingerFuture<'a, ()> {
+        self.remote.enable_linger(invocation, authentication)
+    }
+}
+struct RacingFactory {
+    remote: Arc<Remote>,
+    opened: AtomicUsize,
+    delay_first: bool,
+    first_opened: tokio::sync::Notify,
+    release_first: tokio::sync::Notify,
+    sessions: Mutex<Vec<std::sync::Weak<SessionRemote>>>,
+}
+impl RacingFactory {
+    fn new(remote: Arc<Remote>, delay_first: bool) -> Self {
+        Self {
+            remote,
+            opened: AtomicUsize::new(0),
+            delay_first,
+            first_opened: tokio::sync::Notify::new(),
+            release_first: tokio::sync::Notify::new(),
+            sessions: Mutex::new(Vec::new()),
+        }
+    }
+}
+impl BootstrapHostFactory for RacingFactory {
+    fn open(
+        &self,
+        _: String,
+        _: u64,
+    ) -> PairingFuture<'_, Result<BootstrapHostConnection, BootstrapFailure>> {
+        Box::pin(async move {
+            let session = self.opened.fetch_add(1, Ordering::SeqCst) + 1;
+            let connection = Arc::new(SessionRemote {
+                remote: self.remote.clone(),
+                route: BootstrapRoute::capture(
+                    [session as u8; 32],
+                    [2; 32],
+                    [3; 32],
+                    self.remote.supervisor.key().account_uid,
+                    BuildChannel::Development,
+                )
+                .unwrap(),
+            });
+            self.sessions
+                .lock()
+                .unwrap()
+                .push(Arc::downgrade(&connection));
+            if session == 1 && self.delay_first {
+                self.first_opened.notify_one();
+                self.release_first.notified().await;
+            }
+            Ok(BootstrapHostConnection {
+                connection,
+                artifact: None,
+            })
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_canceled_same_generation_reverse_inspection_preserves_other_sheet() {
+    let h = Harness::new().await;
+    h.install_existing().await;
+    let factory = Arc::new(RacingFactory::new(h.remote.clone(), true));
+    let provider = Arc::new(ProductionSshBootstrap::new(
+        h.pairing.clone(),
+        factory.clone(),
+    ));
+    let a_valid = Arc::new(AtomicBool::new(true));
+    let a_provider = provider.clone();
+    let a_scope = a_valid.clone();
+    let a = tokio::spawn(async move {
+        a_provider
+            .inspect_with_pending_foreground("test-account".into(), 1, a_scope)
+            .await
+    });
+    factory.first_opened.notified().await;
+    let b_valid = Arc::new(AtomicBool::new(true));
+    let (facts, pending) = provider
+        .inspect_with_pending_foreground("test-account".into(), 1, b_valid.clone())
+        .await
+        .unwrap();
+    assert!(pending.is_none());
+    a_valid.store(false, Ordering::Release);
+    factory.release_first.notify_one();
+    assert!(matches!(
+        a.await.unwrap(),
+        Err(BootstrapFailure {
+            class: BootstrapFailureClass::Pairing(PairingFailure::Cancelled),
+            ..
+        })
+    ));
+    provider.bind_foreground(facts.route, 1, b_valid).unwrap();
+    let intent = ForegroundBootstrap::confirm_observed(facts, 1).unwrap();
+    let completion = provider.bootstrap(intent, facts).await.unwrap();
+    assert_eq!(
+        completion.outcome.server.pin,
+        h.remote
+            .supervisor
+            .discover()
+            .unwrap()
+            .unwrap()
+            .server_pin()
+    );
+    assert_eq!(h.remote.owner_authorizations.load(Ordering::SeqCst), 1);
+    assert!(h.remote.manager.effects.lock().unwrap().is_empty());
+    h.remote.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_canceled_inspection_releases_session_without_provider_call() {
+    let h = Harness::new().await;
+    h.install_existing().await;
+    let factory = Arc::new(RacingFactory::new(h.remote.clone(), false));
+    let provider = ProductionSshBootstrap::new(h.pairing.clone(), factory.clone());
+    let valid = Arc::new(AtomicBool::new(true));
+    provider
+        .inspect_with_pending_foreground("test-account".into(), 1, valid.clone())
+        .await
+        .unwrap();
+    let session = factory.sessions.lock().unwrap()[0].clone();
+    assert!(session.upgrade().is_some());
+    valid.store(false, Ordering::Release);
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while session.upgrade().is_some() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the retained session must drop without another provider operation");
+    assert!(h.remote.manager.effects.lock().unwrap().is_empty());
+    assert_eq!(h.remote.owners.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_stopped_disabled_linger_explicit_start_uses_scoped_exchange() {
+    let h = Harness::new().await;
+    h.stop_existing().await;
+    h.remote.manager.linux.store(true, Ordering::SeqCst);
+    h.remote
+        .manager
+        .linger_enabled
+        .store(false, Ordering::SeqCst);
+    h.remote.prompt_allowed.store(true, Ordering::SeqCst);
+    let original = h.remote.supervisor.discover().unwrap().unwrap();
+    let candidate = h.candidate(1).await;
+    assert!(matches!(
+        candidate.confirm(),
+        Err(EnrollmentFailure::Pairing(
+            PairingFailure::ExplicitStartRequired
+        ))
+    ));
+    assert_eq!(h.remote.prompt_count.load(Ordering::SeqCst), 0);
+    assert!(h.remote.manager.effects.lock().unwrap().is_empty());
+    h.provider.start(candidate).await.unwrap();
+    assert_eq!(h.remote.prompt_count.load(Ordering::SeqCst), 1);
+    assert_eq!(h.remote.linger_invocations.load(Ordering::SeqCst), 1);
+    assert!(h.remote.manager.linger_enabled.load(Ordering::SeqCst));
+    assert_eq!(
+        h.remote.manager.effects.lock().unwrap().as_slice(),
+        &["configure", "start"]
+    );
+    let started = h.remote.supervisor.discover().unwrap().unwrap();
+    assert_eq!(started.desired_state(), DesiredServerState::Running);
+    assert_eq!(started.server_pin(), original.server_pin());
+    assert_eq!(started.data_directory(), original.data_directory());
+    assert_eq!(h.remote.owners.load(Ordering::SeqCst), 0);
+    assert!(h.pairing.inventory().await.unwrap().saved.is_empty());
+    assert_eq!(
+        h.remote
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| **r == "explicit-start")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_stopped_disabled_linger_denial_preserves_stopped_registration() {
+    let h = Harness::new().await;
+    h.stop_existing().await;
+    h.remote.manager.linux.store(true, Ordering::SeqCst);
+    h.remote
+        .manager
+        .linger_enabled
+        .store(false, Ordering::SeqCst);
+    let original = h.remote.supervisor.discover().unwrap().unwrap();
+    let candidate = h.candidate(1).await;
+    assert!(matches!(
+        h.provider.start(candidate).await,
+        Err(EnrollmentFailure::Bootstrap(
+            BootstrapFailureClass::Pairing(PairingFailure::AuthorizationDenied)
+        ))
+    ));
+    let stopped = h.remote.supervisor.discover().unwrap().unwrap();
+    assert_eq!(stopped.desired_state(), DesiredServerState::Stopped);
+    assert_eq!(stopped.server_pin(), original.server_pin());
+    assert_eq!(stopped.generation(), original.generation());
+    assert!(!h.remote.manager.linger_enabled.load(Ordering::SeqCst));
+    assert_eq!(h.remote.prompt_count.load(Ordering::SeqCst), 1);
+    assert_eq!(h.remote.linger_invocations.load(Ordering::SeqCst), 1);
+    assert!(h.remote.manager.effects.lock().unwrap().is_empty());
+    assert!(
+        !h.remote
+            .requests
+            .lock()
+            .unwrap()
+            .contains(&"explicit-start")
+    );
+    assert_eq!(h.remote.owners.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_initial_starting_completes_original_request_without_second_start() {
+    let h = Harness::new().await;
+    h.remote.manager.delayed_start.store(true, Ordering::SeqCst);
+    let candidate = h.candidate(1).await;
+    let original = Mutex::new(None);
+    let transition = async {
+        h.remote.manager.start_requested.notified().await;
+        h.remote.manager.starting_observed.notified().await;
+        let requests = h
+            .remote
+            .supervisor
+            .retained_initial_install_requests()
+            .unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].phase,
+            spaceterm_host::account_service::ServicePhase::Starting
+        );
+        assert_eq!(
+            requests[0].state,
+            spaceterm_host::account_service::ServiceRequestState::Pending
+        );
+        *original.lock().unwrap() = Some(requests[0].clone());
+        assert_eq!(
+            h.remote.manager.effects.lock().unwrap().as_slice(),
+            &["configure", "start"]
+        );
+        // The manager reports Starting for at least one owned observation. The
+        // accepted native worker must keep observing and complete this request.
+        h.remote.manager.running.store(true, Ordering::SeqCst);
+        h.remote.manager.starting.store(false, Ordering::SeqCst);
+    };
+    let (completion, ()) = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        tokio::join!(
+            h.provider
+                .bootstrap(candidate.confirm().unwrap(), candidate),
+            transition
+        )
+    })
+    .await
+    .unwrap();
+    let completion = completion.unwrap();
+    let original = original.into_inner().unwrap().unwrap();
+    let (finished, artifact) = h
+        .remote
+        .supervisor
+        .inspect_install_request(original.request)
+        .unwrap();
+    assert_eq!(finished.request, original.request);
+    assert_eq!(finished.request_digest, original.request_digest);
+    assert_eq!(
+        finished.phase,
+        spaceterm_host::account_service::ServicePhase::Completed
+    );
+    assert!(matches!(
+        finished.state,
+        spaceterm_host::account_service::ServiceRequestState::Completed(_)
+    ));
+    assert_eq!(
+        artifact,
+        completion.outcome.server.approved_artifact_identity
+    );
+    assert_eq!(
+        h.remote.manager.effects.lock().unwrap().as_slice(),
+        &["configure", "start"]
+    );
+    assert_eq!(
+        h.remote
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| **r == "install")
+            .count(),
+        1
+    );
+    assert_eq!(h.remote.owner_authorizations.load(Ordering::SeqCst), 1);
+    assert_eq!(h.journal.snapshot().unwrap().bindings().len(), 1);
+    assert!(
+        h.journal
+            .snapshot()
+            .unwrap()
+            .pairing()
+            .acknowledgements()
+            .is_empty()
+    );
+    h.remote.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_configuration_change_at_binding_rejects_alternate_capture() {
+    let h = Harness::new().await;
+    h.install_existing().await;
+    let CapturedProvider {
+        provider,
+        configuration,
+        tunnel_started,
+        ..
+    } = captured_provider(&h);
+    let alternate = "Host st-route-0\n hostname alternate.example\n user other\n port 2222\n";
+    let attempt = EnrollmentAttempt::new(1);
+    let (facts, pending) = provider
+        .inspect("test-account".into(), attempt.clone())
+        .await
+        .unwrap();
+    assert!(pending.is_none());
+    let candidate = SshCandidate::new(attempt, facts).unwrap();
+    // Change the actual local configuration after the single-use delivery and
+    // before prepare_binding. The original authenticated account stays fixed.
+    *h.remote.change_config_on_owner_frame.lock().unwrap() =
+        Some((2, configuration.clone(), alternate.into()));
+    assert!(matches!(
+        provider
+            .bootstrap(candidate.confirm().unwrap(), candidate)
+            .await,
+        Err(EnrollmentFailure::Bootstrap(
+            BootstrapFailureClass::Pairing(PairingFailure::RouteChanged)
+        ))
+    ));
+    assert!(!tunnel_started.exists());
+    assert_eq!(std::fs::read_to_string(&configuration).unwrap(), alternate);
+    let state = h.journal.snapshot().unwrap();
+    assert!(state.bindings().is_empty());
+    assert!(state.pairing().prepared().is_empty());
+    assert!(
+        state
+            .pairing()
+            .slots()
+            .iter()
+            .all(|slot| slot.ssh_capture.is_none() && slot.route.is_none())
+    );
+    // Only the owner prefix was sent. No hello, proof or enrollment submission
+    // can authorize a different SSH configuration after binding rejection.
+    assert_eq!(h.remote.owner_client_frames.load(Ordering::SeqCst), 1);
+    assert_eq!(h.remote.owner_authorizations.load(Ordering::SeqCst), 1);
+    assert!(h.remote.manager.effects.lock().unwrap().is_empty());
+    h.remote.close().await;
+}
+
+struct CapturedProvider {
+    provider: super::super::bootstrap::NativeForegroundBootstrap,
+    configuration: PathBuf,
+    original: spaceterm_client::journal::JournalSshCapture,
+    tunnel_started: PathBuf,
+    connector: Arc<spaceterm_client_native::restricted_routes::NativePairingConnector>,
+}
+fn captured_provider(h: &Harness) -> CapturedProvider {
+    use spaceterm_client_native::{
+        restricted_routes::NativePairingConnector,
+        route::{NativeRouteConnector, SshRouteConfiguration, TunnelEndpoints},
+    };
+    use spaceterm_host::ipc::PrivateIpcDirectory;
+    use std::os::unix::fs::PermissionsExt;
+    let directory = h.root.path().join("ssh-boundary");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&directory)
+        .unwrap();
+    let executable = directory.join("ssh-boundary");
+    let configuration = directory.join("config");
+    let tunnel_started = directory.join("tunnel-started");
+    std::fs::write(
+        &executable,
+        r#"#!/usr/bin/python3 -I
+import pathlib, sys
+if '-G' in sys.argv:
+    configuration = pathlib.Path(sys.argv[sys.argv.index('-F') + 1]).read_text()
+    for line in configuration.splitlines():
+        line = line.strip()
+        if line.lower().startswith('host '):
+            continue
+        if line:
+            print(line)
+    sys.exit(0)
+pathlib.Path(__file__).with_name('tunnel-started').touch()
+sys.exit(1)
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let original = spaceterm_client::journal::JournalSshCapture::new(
+        "Host st-route-0\n hostname original.example\n user owner\n port 22\n".into(),
+    )
+    .unwrap();
+    std::fs::write(&configuration, original.configuration()).unwrap();
+    let ssh = SshRouteConfiguration::new(
+        executable,
+        configuration.clone(),
+        h.root.path().to_owned(),
+        vec![("PATH".into(), "/usr/bin:/bin".into())],
+        TunnelEndpoints::new(PrivateIpcDirectory::open(&directory).unwrap()).unwrap(),
+        None,
+    )
+    .unwrap();
+    let routes = Arc::new(NativeRouteConnector::new(Vec::new(), Some(ssh)).unwrap());
+    let connector = Arc::new(NativePairingConnector::with_shared_routes(
+        h.journal.clone(),
+        routes,
+    ));
+    let pairing = Arc::new(NativePairingRuntime::with_adapters(
+        h.journal.clone(),
+        Arc::new(h.credentials.clone()),
+        connector.clone(),
+        connector.clone(),
+        Arc::new(Invalidator),
+        HandshakeConfig::default(),
+    ));
+    *h.remote.ssh_capture.lock().unwrap() = Some((configuration.clone(), original.clone()));
+    let provider = super::super::bootstrap::NativeForegroundBootstrap(ProductionSshBootstrap::new(
+        pairing,
+        Arc::new(Factory {
+            remote: h.remote.clone(),
+        }),
+    ));
+    CapturedProvider {
+        provider,
+        configuration,
+        original,
+        tunnel_started,
+        connector,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_persists_original_capture_for_native_shared_restricted_route() {
+    let h = Harness::new().await;
+    h.install_existing().await;
+    let CapturedProvider {
+        provider,
+        configuration,
+        original,
+        tunnel_started,
+        connector,
+    } = captured_provider(&h);
+    let attempt = EnrollmentAttempt::new(1);
+    let (facts, pending) = provider
+        .inspect("test-account".into(), attempt.clone())
+        .await
+        .unwrap();
+    assert!(pending.is_none());
+    let candidate = SshCandidate::new(attempt, facts).unwrap();
+    let completion = provider
+        .bootstrap(candidate.confirm().unwrap(), candidate)
+        .await
+        .unwrap();
+    let state = h.journal.snapshot().unwrap();
+    assert_eq!(
+        state
+            .pairing()
+            .slot(completion.prepared.credential.scope.reference())
+            .unwrap()
+            .ssh_capture
+            .as_ref(),
+        Some(&original)
+    );
+    let alternate = "Host st-route-0\n hostname alternate.example\n user other\n port 2222\n";
+    std::fs::write(&configuration, alternate).unwrap();
+    // This is the real shared native connector. Its -G process boundary reads
+    // actual config bytes. A changed account/endpoint cannot launch a tunnel.
+    assert!(matches!(
+        EnrollmentConnector::open(
+            connector.as_ref(),
+            completion.prepared.pin,
+            completion.prepared.route
+        )
+        .await,
+        Err(PairingFailure::RouteChanged)
+    ));
+    assert!(!tunnel_started.exists());
+    assert_eq!(
+        h.journal
+            .snapshot()
+            .unwrap()
+            .pairing()
+            .slot(completion.prepared.credential.scope.reference())
+            .unwrap()
+            .ssh_capture
+            .as_ref(),
+        Some(&original)
+    );
+    assert_eq!(h.remote.owner_authorizations.load(Ordering::SeqCst), 1);
+    h.remote.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_lost_ack_reopens_after_failed_channel_retirement() {
+    let h = Harness::new().await;
+    h.install_existing().await;
+    let candidate = h.candidate(1).await;
+    h.remote.lost_ack_channels.store(1, Ordering::SeqCst);
+    let completion = h
+        .provider
+        .bootstrap(candidate.confirm().unwrap(), candidate)
+        .await
+        .unwrap();
+    assert_eq!(h.remote.owners.load(Ordering::SeqCst), 2);
+    assert_eq!(h.remote.owner_authorizations.load(Ordering::SeqCst), 1);
+    let inventory = h.pairing.inventory().await.unwrap();
+    assert!(inventory.prepared.is_empty());
+    assert!(inventory.enrollment_acknowledgements.is_empty());
+    assert_eq!(inventory.saved, vec![completion.saved]);
+    let requests = h.remote.requests.lock().unwrap();
+    assert_eq!(
+        requests.iter().filter(|r| **r == "reserve-owner").count(),
+        1
+    );
+    assert_eq!(
+        requests.iter().filter(|r| **r == "authorize-owner").count(),
+        1
+    );
+    drop(requests);
+    assert!(h.remote.manager.effects.lock().unwrap().is_empty());
+    h.remote.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_configuration_change_after_ready_never_submits_enrollment() {
+    let h = Harness::new().await;
+    h.install_existing().await;
+    let CapturedProvider {
+        provider,
+        configuration,
+        original,
+        tunnel_started,
+        ..
+    } = captured_provider(&h);
+    let attempt = EnrollmentAttempt::new(1);
+    let (facts, pending) = provider
+        .inspect("test-account".into(), attempt.clone())
+        .await
+        .unwrap();
+    assert!(pending.is_none());
+    let candidate = SshCandidate::new(attempt, facts).unwrap();
+    let alternate = "Host st-route-0\n hostname alternate.example\n user other\n port 2222\n";
+    *h.remote.change_config_on_owner_frame.lock().unwrap() =
+        Some((4, configuration.clone(), alternate.into()));
+    assert!(matches!(
+        provider
+            .bootstrap(candidate.confirm().unwrap(), candidate)
+            .await,
+        Err(EnrollmentFailure::Bootstrap(
+            BootstrapFailureClass::Pairing(PairingFailure::RouteChanged)
+        ))
+    ));
+    assert_eq!(std::fs::read_to_string(&configuration).unwrap(), alternate);
+    assert_eq!(h.remote.owner_client_frames.load(Ordering::SeqCst), 3);
+    assert_eq!(h.remote.owner_authorizations.load(Ordering::SeqCst), 1);
+    assert!(!tunnel_started.exists());
+    let state = h.journal.snapshot().unwrap();
+    assert!(state.bindings().is_empty());
+    assert_eq!(state.pairing().prepared().len(), 1);
+    let captures = state
+        .pairing()
+        .slots()
+        .iter()
+        .filter_map(|slot| slot.ssh_capture.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(captures, vec![&original]);
+    assert!(h.remote.manager.effects.lock().unwrap().is_empty());
+    h.remote.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_ssh_bootstrap_stopped_registration_change_during_prompt_blocks_password_and_start()
+{
+    let h = Harness::new().await;
+    h.stop_existing().await;
+    h.remote.manager.linux.store(true, Ordering::SeqCst);
+    h.remote
+        .manager
+        .linger_enabled
+        .store(false, Ordering::SeqCst);
+    h.remote.prompt_allowed.store(true, Ordering::SeqCst);
+    let original = h.remote.supervisor.discover().unwrap().unwrap();
+    let candidate = h.candidate(1).await;
+    h.remote.start_during_prompt.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        h.provider.start(candidate).await,
+        Err(EnrollmentFailure::Bootstrap(
+            BootstrapFailureClass::Pairing(PairingFailure::RouteChanged)
+        ))
+    ));
+    let changed = h.remote.supervisor.discover().unwrap().unwrap();
+    assert_eq!(changed.server_pin(), original.server_pin());
+    assert_ne!(changed.generation(), original.generation());
+    assert_eq!(changed.desired_state(), DesiredServerState::Running);
+    assert_eq!(h.remote.prompt_count.load(Ordering::SeqCst), 1);
+    assert_eq!(h.remote.password_deliveries.load(Ordering::SeqCst), 0);
+    let requests = h.remote.requests.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|r| **r == "concurrent-start")
+            .count(),
+        1
+    );
+    assert!(!requests.contains(&"explicit-start"));
+    assert_eq!(
+        h.remote.manager.effects.lock().unwrap().as_slice(),
+        &["configure", "start"]
+    );
+    assert_eq!(h.remote.owners.load(Ordering::SeqCst), 0);
 }

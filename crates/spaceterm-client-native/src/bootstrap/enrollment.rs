@@ -147,6 +147,26 @@ impl<
         }
         Ok(())
     }
+    fn retain_connection(
+        &self,
+        attempt: &BootstrapAttempt,
+        key: &LocalPairingKey,
+    ) -> Result<(), BootstrapFailure> {
+        let mut connections = self.connections.lock().map_err(|_| {
+            BootstrapFailure::new(PairingFailure::RecoveryRequired, BootstrapPhase::Enrolled)
+        })?;
+        connections.retain(|(original, _)| {
+            original.validate(BootstrapPhase::Enrolled).is_ok() && original != attempt
+        });
+        if connections.len() >= 4 {
+            return Err(BootstrapFailure::new(
+                PairingFailure::LimitExceeded,
+                BootstrapPhase::Enrolled,
+            ));
+        }
+        connections.push((attempt.clone(), key.clone()));
+        Ok(())
+    }
     async fn credential(
         &self,
         purpose: CredentialPurpose,
@@ -154,11 +174,20 @@ impl<
         let store = self.store();
         let recovered = store.recover().await?;
         if let CredentialPurpose::PairingAuthentication { server } = purpose
-            && let Some(prepared) = recovered.prepared.iter().find(|p| {
-                p.pin.identity == server.bytes()
-                    && !recovered.is_suppressed(&p.local_pairing)
-                    && p.credential.scope.parts().namespace == self.namespace
-            })
+            && let Some(prepared) = recovered
+                .prepared
+                .iter()
+                .chain(
+                    recovered
+                        .enrollment_acknowledgements
+                        .iter()
+                        .map(|work| &work.prepared),
+                )
+                .find(|p| {
+                    p.pin.identity == server.bytes()
+                        && !recovered.is_suppressed(&p.local_pairing)
+                        && p.credential.scope.parts().namespace == self.namespace
+                })
         {
             let actual = self
                 .credentials
@@ -393,6 +422,53 @@ impl<
                     BootstrapPhase::Enrolled,
                 ));
             }
+            let recovered = self
+                .store()
+                .recover()
+                .await
+                .map_err(|e| BootstrapFailure::new(e, BootstrapPhase::Enrolled))?;
+            let pending = recovered.enrollment_acknowledgements.iter().find(|work| {
+                work.prepared.pin == server.pin
+                    && work.prepared.keys == proposal.parts().keys
+                    && work.prepared.route == self.reference
+            });
+            if let Some(work) = pending {
+                // SaveEnrollment moved the original preparation into ACK work. Its signed
+                // receipt and native keys are already durable. Never submit enrollment again.
+                work.validate()
+                    .map_err(|e| BootstrapFailure::new(e, BootstrapPhase::Enrolled))?;
+                if delivery.authorization.is_some()
+                    || work.prepared.reservation.as_ref() != Some(&delivery.reservation)
+                    || work.prepared.local_pairing.parts().generation != generation
+                    || work.prepared.credential != authentication
+                    || work.device != device
+                {
+                    return Err(BootstrapFailure::new(
+                        PairingFailure::IdentityMismatch,
+                        BootstrapPhase::Enrolled,
+                    ));
+                }
+                let saved = recovered
+                    .active(&work.prepared.local_pairing)
+                    .ok_or_else(|| {
+                        BootstrapFailure::new(
+                            PairingFailure::PairingRevoked,
+                            BootstrapPhase::Enrolled,
+                        )
+                    })?;
+                self.owner
+                    .prepare_binding(&work.prepared)
+                    .await
+                    .map_err(|e| BootstrapFailure::new(e, BootstrapPhase::Enrolled))?;
+                *self.completed.lock().map_err(|_| {
+                    BootstrapFailure::new(
+                        PairingFailure::RecoveryRequired,
+                        BootstrapPhase::Enrolled,
+                    )
+                })? = Some((work.prepared.clone(), saved.clone()));
+                self.retain_connection(attempt, saved.key())?;
+                return self.check(server.route, attempt, BootstrapPhase::Enrolled);
+            }
             let prepared = PreparedEnrollment {
                 local_pairing: LocalPairingKey::new(LocalPairingKeyParts {
                     server: ServerId::new(server.pin.identity),
@@ -469,20 +545,7 @@ impl<
                 BootstrapFailure::new(PairingFailure::RecoveryRequired, BootstrapPhase::Enrolled)
             })? = Some((prepared, saved.clone()));
             self.check(server.route, attempt, BootstrapPhase::Enrolled)?;
-            let mut connections = self.connections.lock().map_err(|_| {
-                BootstrapFailure::new(PairingFailure::RecoveryRequired, BootstrapPhase::Enrolled)
-            })?;
-            connections.retain(|(original, _)| {
-                original.validate(BootstrapPhase::Enrolled).is_ok() && original != attempt
-            });
-            if connections.len() >= 4 {
-                return Err(BootstrapFailure::new(
-                    PairingFailure::LimitExceeded,
-                    BootstrapPhase::Enrolled,
-                ));
-            }
-            connections.push((attempt.clone(), saved.key().clone()));
-            Ok(())
+            self.retain_connection(attempt, saved.key())
         })
     }
     fn connect<'a>(

@@ -157,6 +157,7 @@ impl BootstrapHostFactory for NativeBootstrapHostFactory {
                 channel: Mutex::new(Some(channel)),
                 account_lock: tokio::sync::Mutex::new(()),
                 original: capture,
+                foreground: Mutex::new(None),
                 routes: self.routes.clone(),
             });
             Ok(BootstrapHostConnection {
@@ -377,6 +378,7 @@ struct Remote {
     channel: Mutex<Option<Arc<Channel>>>,
     account_lock: tokio::sync::Mutex<()>,
     original: JournalSshCapture,
+    foreground: Mutex<Option<Arc<AtomicBool>>>,
     routes: Arc<NativeRouteConnector>,
 }
 impl Remote {
@@ -405,6 +407,32 @@ impl BootstrapRemoteConnection for Remote {
     }
     fn revalidate(&self) -> Result<(), BootstrapFailure> {
         self.master.revalidate()
+    }
+    fn bind_foreground_fence(&self, valid: Arc<AtomicBool>) -> Result<(), BootstrapFailure> {
+        if !valid.load(Ordering::Acquire) {
+            return Err(fail(PairingFailure::Cancelled));
+        }
+        let mut foreground = self
+            .foreground
+            .lock()
+            .map_err(|_| fail(PairingFailure::RecoveryRequired))?;
+        if foreground
+            .as_ref()
+            .is_some_and(|original| !Arc::ptr_eq(original, &valid))
+        {
+            return Err(fail(PairingFailure::RouteChanged));
+        }
+        *foreground = Some(valid);
+        self.revalidate()
+    }
+    fn captured_ssh(&self) -> Option<JournalSshCapture> {
+        Some(self.original.clone())
+    }
+    fn revalidate_capture(&self) -> PairingFuture<'_, Result<(), BootstrapFailure>> {
+        Box::pin(async move {
+            self.check_capture().await?;
+            self.revalidate()
+        })
     }
     fn probe(&self) -> BootstrapProbeFuture<'_, Vec<u8>> {
         Box::pin(async move {
@@ -499,6 +527,17 @@ impl BootstrapRemoteConnection for Remote {
                 .stage(self.staged.clone(), self.route.account_uid())
                 .await
                 .map_err(|_| PairingFailure::Offline)?;
+            // Only enrollment frames observe this fence. An accepted account
+            // Install or Start stays owned by its lifecycle worker after sheet closure.
+            let foreground = self
+                .foreground
+                .lock()
+                .map_err(|_| PairingFailure::RecoveryRequired)?
+                .clone();
+            *channel
+                .foreground
+                .lock()
+                .map_err(|_| PairingFailure::RecoveryRequired)? = foreground;
             let request = serde_json::to_vec(&AccountRequest::OwnerChannel)
                 .map_err(|_| PairingFailure::InvalidRequest)?;
             channel
@@ -630,6 +669,34 @@ struct Channel {
     input: Mutex<Option<std::process::ChildStdin>>,
     output: Mutex<std::process::ChildStdout>,
     uid: u32,
+    foreground: Mutex<Option<Arc<AtomicBool>>>,
+    sending: tokio::sync::Mutex<()>,
+    receiving: tokio::sync::Mutex<()>,
+}
+
+const FRAME_DEADLINE: Duration = Duration::from_secs(120);
+const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(2);
+
+// A partially consumed or written frame cannot be reused. Dropping an async
+// frame wait retires its exact process, even while another Arc retains Channel.
+struct FrameOperation<'a> {
+    channel: &'a Channel,
+    complete: bool,
+}
+impl<'a> FrameOperation<'a> {
+    fn new(channel: &'a Channel) -> Self {
+        Self {
+            channel,
+            complete: false,
+        }
+    }
+}
+impl Drop for FrameOperation<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.channel.retire();
+        }
+    }
 }
 impl Channel {
     fn spawn(command: &mut Command, uid: u32) -> Result<Self, BootstrapFailure> {
@@ -653,6 +720,9 @@ impl Channel {
             input: Mutex::new(Some(input)),
             output: Mutex::new(output),
             uid,
+            foreground: Mutex::new(None),
+            sending: tokio::sync::Mutex::new(()),
+            receiving: tokio::sync::Mutex::new(()),
         })
     }
     fn write(&self, mut bytes: &[u8]) -> Result<(), BootstrapFailure> {
@@ -680,27 +750,104 @@ impl Channel {
         }
         Ok(())
     }
-    fn read_exact(&self, mut bytes: &mut [u8]) -> Result<(), BootstrapFailure> {
-        let mut output = self
-            .output
+    fn check_frame(&self, deadline: tokio::time::Instant) -> Result<(), BootstrapFailure> {
+        if self
+            .foreground
             .lock()
-            .map_err(|_| fail(PairingFailure::RecoveryRequired))?;
-        let until = Instant::now() + Duration::from_secs(120);
+            .map_err(|_| fail(PairingFailure::RecoveryRequired))?
+            .as_ref()
+            .is_some_and(|valid| !valid.load(Ordering::Acquire))
+        {
+            return Err(fail(PairingFailure::Cancelled));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(fail(PairingFailure::TimedOut));
+        }
+        Ok(())
+    }
+    async fn wait_frame(&self, deadline: tokio::time::Instant) {
+        tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + FRAME_POLL_INTERVAL))
+            .await;
+    }
+    async fn write_frame_bytes(
+        &self,
+        mut bytes: &[u8],
+        deadline: tokio::time::Instant,
+    ) -> Result<(), BootstrapFailure> {
         while !bytes.is_empty() {
-            match output.read(bytes) {
+            self.check_frame(deadline)?;
+            // The descriptors are nonblocking. Never hold a native mutex over await.
+            let result = self
+                .input
+                .lock()
+                .map_err(|_| fail(PairingFailure::RecoveryRequired))?
+                .as_mut()
+                .ok_or_else(|| fail(PairingFailure::Offline))?
+                .write(bytes);
+            match result {
+                Ok(0) => return Err(fail(PairingFailure::Offline)),
+                Ok(count) => bytes = &bytes[count..],
+                Err(error) if retry_io(&error) => {}
+                Err(_) => return Err(fail(PairingFailure::Offline)),
+            }
+            if !bytes.is_empty() {
+                self.wait_frame(deadline).await;
+            }
+        }
+        self.check_frame(deadline)
+    }
+    async fn read_frame_bytes(
+        &self,
+        mut bytes: &mut [u8],
+        deadline: tokio::time::Instant,
+    ) -> Result<(), BootstrapFailure> {
+        while !bytes.is_empty() {
+            self.check_frame(deadline)?;
+            let result = self
+                .output
+                .lock()
+                .map_err(|_| fail(PairingFailure::RecoveryRequired))?
+                .read(bytes);
+            match result {
                 Ok(0) => return Err(fail(PairingFailure::Offline)),
                 Ok(count) => bytes = &mut bytes[count..],
                 Err(error) if retry_io(&error) => {}
                 Err(_) => return Err(fail(PairingFailure::Offline)),
             }
-            if Instant::now() >= until {
-                return Err(fail(PairingFailure::TimedOut));
-            }
             if !bytes.is_empty() {
-                std::thread::sleep(Duration::from_millis(2));
+                self.wait_frame(deadline).await;
             }
         }
-        Ok(())
+        self.check_frame(deadline)
+    }
+    async fn recv_frame(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<Vec<u8>, BootstrapFailure> {
+        let mut prefix = [0; 4];
+        self.read_frame_bytes(&mut prefix, deadline).await?;
+        let count = u32::from_be_bytes(prefix) as usize;
+        if count == 0 || count > FRAME_LIMIT {
+            return Err(fail(PairingFailure::LimitExceeded));
+        }
+        let mut bytes = Zeroizing::new(vec![0; count]);
+        // Prefix and payload share the same absolute deadline and allocation bound.
+        self.read_frame_bytes(&mut bytes, deadline).await?;
+        Ok(std::mem::take(&mut *bytes))
+    }
+    fn retire(&self) {
+        self.input
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        let owner = self
+            .child
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .0
+            .take();
+        // ChildOwner kills the still-owned private process group before reaping.
+        drop(ChildOwner(owner));
     }
     fn read_available(&self) -> Result<Zeroizing<Vec<u8>>, BootstrapFailure> {
         let mut bytes = Zeroizing::new(vec![0; 1024]);
@@ -762,47 +909,48 @@ impl MessageTransport for Channel {
             if bytes.is_empty() || bytes.len() > FRAME_LIMIT {
                 return Err(TransportError::MessageTooLarge);
             }
-            // Blocking descriptors are owned and deadline-bounded; no spawned reader outlives this call.
-            tokio::task::block_in_place(|| {
-                self.write(&(bytes.len() as u32).to_be_bytes())?;
-                self.write(bytes)
-            })
-            .map_err(|_| TransportError::Unavailable)
+            let _guard = self.sending.lock().await;
+            let mut operation = FrameOperation::new(self);
+            let deadline = tokio::time::Instant::now() + FRAME_DEADLINE;
+            self.write_frame_bytes(&(bytes.len() as u32).to_be_bytes(), deadline)
+                .await
+                .map_err(|_| TransportError::Unavailable)?;
+            self.write_frame_bytes(bytes, deadline)
+                .await
+                .map_err(|_| TransportError::Unavailable)?;
+            operation.complete = true;
+            Ok(())
         })
     }
     fn recv(&self) -> TransportFuture<'_, Option<Vec<u8>>> {
         Box::pin(async move {
-            tokio::task::block_in_place(|| {
-                let mut prefix = [0; 4];
-                self.read_exact(&mut prefix)?;
-                let count = u32::from_be_bytes(prefix) as usize;
-                if count == 0 || count > FRAME_LIMIT {
-                    return Err(fail(PairingFailure::LimitExceeded));
-                }
-                let mut bytes = Zeroizing::new(vec![0; count]);
-                self.read_exact(&mut bytes)?;
-                Ok(Some(std::mem::take(&mut *bytes)))
-            })
-            .map_err(|_| TransportError::Unavailable)
+            let _guard = self.receiving.lock().await;
+            let mut operation = FrameOperation::new(self);
+            let deadline = tokio::time::Instant::now() + FRAME_DEADLINE;
+            let bytes = self
+                .recv_frame(deadline)
+                .await
+                .map_err(|_| TransportError::Unavailable)?;
+            operation.complete = true;
+            Ok(Some(bytes))
         })
     }
     fn close(&self) -> TransportFuture<'_, ()> {
         Box::pin(async move {
-            tokio::task::block_in_place(|| {
-                self.input
-                    .lock()
-                    .map_err(|_| fail(PairingFailure::RecoveryRequired))?
-                    .take();
-                let until = Instant::now() + Duration::from_secs(15);
-                while !self.exited()? {
-                    if Instant::now() >= until {
-                        return Err(fail(PairingFailure::TimedOut));
-                    }
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                self.finish()
-            })
-            .map_err(|_| TransportError::Unavailable)
+            let mut operation = FrameOperation::new(self);
+            self.input
+                .lock()
+                .map_err(|_| TransportError::Unavailable)?
+                .take();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+            while !self.exited().map_err(|_| TransportError::Unavailable)? {
+                self.check_frame(deadline)
+                    .map_err(|_| TransportError::Unavailable)?;
+                self.wait_frame(deadline).await;
+            }
+            self.finish().map_err(|_| TransportError::Unavailable)?;
+            operation.complete = true;
+            Ok(())
         })
     }
 }

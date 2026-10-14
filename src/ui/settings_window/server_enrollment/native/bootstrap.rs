@@ -24,14 +24,9 @@ impl ForegroundBootstrapServices for NativeForegroundBootstrap {
             attempt.validate()?;
             let (facts, pending) = self
                 .0
-                .inspect_with_pending(host, attempt.generation())
+                .inspect_with_pending_foreground(host, attempt.generation(), attempt.valid.clone())
                 .await?;
-            if let Err(error) = attempt.validate() {
-                self.0.abandon(facts.route, attempt.generation())?;
-                return Err(error);
-            }
-            self.0
-                .bind_foreground(facts.route, attempt.generation(), attempt.valid.clone())?;
+            attempt.validate()?;
             Ok((
                 facts,
                 pending
