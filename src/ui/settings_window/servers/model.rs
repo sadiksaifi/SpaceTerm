@@ -649,6 +649,7 @@ pub(crate) enum ServerRequest {
     /// Read-only comparison prompts. They grant no execution authority.
     AssessStop(ServerKey),
     AssessRestart(ServerKey),
+    AssessInstallUpdate(ServerKey),
     AssessEndAllSessions(ServerKey),
     /// Stops the server and suspends automatic startup until Start.
     Stop(ServerKey),
@@ -712,6 +713,7 @@ impl ServerRequest {
             Self::Start(server)
             | Self::AssessStop(server)
             | Self::AssessRestart(server)
+            | Self::AssessInstallUpdate(server)
             | Self::AssessEndAllSessions(server)
             | Self::Stop(server)
             | Self::Restart(server)

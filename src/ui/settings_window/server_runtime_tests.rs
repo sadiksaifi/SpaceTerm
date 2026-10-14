@@ -1019,3 +1019,124 @@ fn enrolled_settings_connection_replaces_only_an_inactive_original_source(cx: &m
         DisplayName::reported("New enrollment")
     );
 }
+
+#[gpui::test]
+fn servers_settings_native_lost_reply_completion_admits_next_action(cx: &mut TestAppContext) {
+    use spaceterm_host::{
+        account_service::{ServiceStatus, SupervisorState},
+        native_deployment::contracts::NativeRequestId,
+        startup::{AccountBuildKey, BuildIdentity, DesiredServerState},
+    };
+    let fixture = Fixture::new(cx);
+    let runtime = cx.update(|cx| cx.global::<InstalledSettingsRuntime>().0.clone());
+    let request = NativeRequestId::new([19; 16]).unwrap();
+    {
+        let mut states = runtime.state.borrow_mut();
+        let state = states.entry(fixture.server.server()).or_default();
+        state.native_pending = Some(request);
+        state.management.native_request = Some(request);
+        state.management.failure = Some(ManagementFailure::Indeterminate);
+        apply_native_read(
+            state,
+            NativeRead {
+                desired: DesiredServerState::Running,
+                generation: std::num::NonZeroU64::new(1).unwrap(),
+                status: ServiceStatus {
+                    key: AccountBuildKey {
+                        account_uid: 501,
+                        build_identity: BuildIdentity::Development,
+                    },
+                    server: Some(fixture.server.server()),
+                    desired: Some(DesiredServerState::Running),
+                    supervisor: SupervisorState::Running,
+                    linger: None,
+                    approved: None,
+                    staged: None,
+                    pending: None,
+                },
+                recovered: Some(ResultPublication::Native {
+                    request,
+                    unresolved: false,
+                    failure: None,
+                }),
+            },
+        );
+    }
+    cx.update(|cx| runtime.publish(cx));
+    assert!(!fixture.snapshot(cx).servers[0].management.pending);
+    assert_eq!(
+        fixture.snapshot(cx).servers[0].management.native_request,
+        Some(request)
+    );
+    assert_eq!(fixture.snapshot(cx).servers[0].management.failure, None);
+    let server = fixture.snapshot(cx).servers[0].clone();
+    fixture.send(
+        ServerRequest::SetWorktreeLocation {
+            server: server.key,
+            template: "~/recovered/{repository}".into(),
+            base_revision: server.worktree_location.unwrap().revision,
+        },
+        cx,
+    );
+    assert_eq!(
+        fixture
+            .server
+            .snapshot()
+            .unwrap()
+            .state()
+            .settings
+            .worktree_location
+            .value
+            .as_str(),
+        "~/recovered/{repository}"
+    );
+}
+
+#[gpui::test]
+fn servers_settings_native_recovery_does_not_clear_protocol_pending(cx: &mut TestAppContext) {
+    use spaceterm_host::{
+        account_service::{ServiceStatus, SupervisorState},
+        native_deployment::contracts::NativeRequestId,
+        startup::{AccountBuildKey, BuildIdentity, DesiredServerState},
+    };
+    let fixture = Fixture::new(cx);
+    let runtime = cx.update(|cx| cx.global::<InstalledSettingsRuntime>().0.clone());
+    let request = NativeRequestId::new([20; 16]).unwrap();
+    {
+        let mut states = runtime.state.borrow_mut();
+        let state = states.entry(fixture.server.server()).or_default();
+        state.busy = true;
+        state.native_pending = Some(request);
+        apply_native_read(
+            state,
+            NativeRead {
+                desired: DesiredServerState::Running,
+                generation: std::num::NonZeroU64::new(1).unwrap(),
+                status: ServiceStatus {
+                    key: AccountBuildKey {
+                        account_uid: 501,
+                        build_identity: BuildIdentity::Development,
+                    },
+                    server: Some(fixture.server.server()),
+                    desired: Some(DesiredServerState::Running),
+                    supervisor: SupervisorState::Running,
+                    linger: None,
+                    approved: None,
+                    staged: None,
+                    pending: None,
+                },
+                recovered: Some(ResultPublication::Native {
+                    request,
+                    unresolved: false,
+                    failure: None,
+                }),
+            },
+        );
+        assert!(state.native_pending.is_none());
+    }
+    cx.update(|cx| runtime.publish(cx));
+    assert!(
+        fixture.snapshot(cx).servers[0].management.pending,
+        "a completed native request cannot complete unrelated protocol work"
+    );
+}

@@ -243,6 +243,10 @@ impl ServiceAssessment {
     pub fn token(&self) -> [u8; 32] {
         self.record.token
     }
+    /// Returns the exact assessed runtime epoch, absent only with trusted absence evidence.
+    pub fn runtime_epoch(&self) -> Option<spaceterm_core::authority::ServerEpoch> {
+        self.record.runtime.epoch
+    }
     /// Returns the runtime-owned affected count.
     pub fn affected_sessions(&self) -> u32 {
         self.record.runtime.sessions.len() as u32

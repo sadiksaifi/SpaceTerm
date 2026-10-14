@@ -264,7 +264,16 @@ struct ServerState {
     devices: Option<PairedDevices>,
     unpair: Option<ManagementAssessment>,
     management: ServerManagement,
+    /// Protocol work currently executing or awaiting its original outcome.
     busy: bool,
+    /// Native recovery retires only this exact request, never protocol work.
+    native_pending: Option<spaceterm_host::native_deployment::contracts::NativeRequestId>,
+}
+
+impl ServerState {
+    fn is_busy(&self) -> bool {
+        self.busy || self.native_pending.is_some()
+    }
 }
 
 struct NativePresentation {
@@ -272,6 +281,8 @@ struct NativePresentation {
     desired: spaceterm_host::startup::DesiredServerState,
     approved: Option<ServerInstallation>,
     staged: Option<ServerInstallation>,
+    running: Option<ServerInstallation>,
+    activation: Option<UpdateAssessment>,
     pending: Option<spaceterm_host::native_deployment::contracts::NativeRequestId>,
 }
 struct NativeRead {
@@ -430,6 +441,14 @@ impl SettingsRuntime {
             };
             let personal = state.get(&source.name.server);
             let native = personal.and_then(|state| state.native.as_ref());
+            let runtime_epoch = runtime_epoch.or_else(|| {
+                native.and_then(|native| {
+                    native
+                        .activation
+                        .as_ref()
+                        .and_then(|value| value.runtime_epoch)
+                })
+            });
             let worktree_location = replica.retained().map(|snapshot| {
                 let setting = &snapshot.organization.state().settings.worktree_location;
                 let (value, revision) = personal
@@ -505,7 +524,7 @@ impl SettingsRuntime {
                         .machine
                         .as_ref()
                         .map_or_else(Vec::new, |machine| machine.scopes.clone()),
-                    pending: personal.is_some_and(|state| state.busy)
+                    pending: personal.is_some_and(|state| state.is_busy())
                         || edit
                             .as_ref()
                             .is_some_and(|edit| edit.state == SettingEditState::Saving),
@@ -516,7 +535,7 @@ impl SettingsRuntime {
             let mut management = personal
                 .map(|state| state.management.clone())
                 .unwrap_or_default();
-            management.pending = personal.is_some_and(|state| state.busy);
+            management.pending = personal.is_some_and(|state| state.is_busy());
             if let Some(request) = native.and_then(|native| native.pending) {
                 management.native_request = Some(request);
             }
@@ -531,8 +550,8 @@ impl SettingsRuntime {
                         selection_generation: Some(native.generation),
                         approved: native.approved.clone(),
                         staged: native.staged.clone(),
-                        running: None,
-                        activation: None,
+                        running: native.running.clone(),
+                        activation: native.activation.clone(),
                     })
                     .unwrap_or_default(),
                 paired_devices: personal.and_then(|state| state.devices.clone()),
@@ -560,13 +579,17 @@ impl SettingsRuntime {
                         .as_ref()
                         .map(|value| value.as_str().into())
                 }),
-                staged_version: verified_status.and_then(|status| {
-                    status
-                        .parts()
-                        .staged
-                        .as_ref()
-                        .map(|value| value.as_str().into())
-                }),
+                staged_version: native
+                    .and_then(|native| native.staged.as_ref().map(|value| value.version.clone()))
+                    .or_else(|| {
+                        verified_status.and_then(|status| {
+                            status
+                                .parts()
+                                .staged
+                                .as_ref()
+                                .map(|value| value.as_str().into())
+                        })
+                    }),
                 worktree_location,
                 permissions: source
                     .machine
@@ -712,26 +735,7 @@ impl SettingsRuntime {
                         let state = states.entry(server).or_default();
                         match observation {
                             Ok(Ok(read)) => {
-                                let previous_pending =
-                                    state.native.as_ref().and_then(|native| native.pending);
-                                state.native = Some(NativePresentation {
-                                    generation: read.generation,
-                                    desired: read.desired,
-                                    approved: read.status.approved.as_ref().map(installation),
-                                    staged: read.status.staged.as_ref().map(installation),
-                                    pending: read.status.pending,
-                                });
-                                if let Some(ResultPublication::Native {
-                                    request,
-                                    unresolved: _,
-                                    failure,
-                                }) = read.recovered
-                                    && (state.management.native_request != Some(request)
-                                        || previous_pending == Some(request))
-                                {
-                                    state.management.native_request = Some(request);
-                                    state.management.failure = failure;
-                                }
+                                apply_native_read(state, read);
                             }
                             Ok(Err(failure)) => {
                                 state.native = None;
@@ -1012,7 +1016,7 @@ impl SettingsRuntime {
             .state
             .borrow()
             .get(&server)
-            .is_some_and(|state| state.busy)
+            .is_some_and(|state| state.is_busy())
         {
             self.failure(server, ManagementFailure::OutcomePending, cx);
             return;
@@ -1146,6 +1150,12 @@ impl SettingsRuntime {
                         ServiceAction::Restart => state.management.restart = Some(prompt),
                         _ => {}
                     },
+                    Ok(ResultPublication::UpdateAssessment { assessment, read }) => {
+                        apply_native_read(state, *read);
+                        if let Some(native) = &mut state.native {
+                            native.activation = Some(*assessment);
+                        }
+                    }
                     Ok(ResultPublication::Native {
                         request,
                         unresolved,
@@ -1153,7 +1163,7 @@ impl SettingsRuntime {
                     }) => {
                         state.management.native_request = Some(request);
                         state.management.failure = failure;
-                        state.busy = unresolved;
+                        state.native_pending = unresolved.then_some(request);
                     }
                     Ok(ResultPublication::Removed) => {}
                     Err(failure) => {
@@ -1193,6 +1203,10 @@ enum ResultPublication {
     UnpairAssessment(ManagementAssessment),
     Devices(PairedDevices),
     NativeAssessment(HostAssessment),
+    UpdateAssessment {
+        assessment: Box<UpdateAssessment>,
+        read: Box<NativeRead>,
+    },
     Native {
         request: spaceterm_host::native_deployment::contracts::NativeRequestId,
         unresolved: bool,
@@ -1378,6 +1392,23 @@ async fn execute(
                 native.restart(confirmed).await
             };
             return Ok(native_result(prompt.request, progress));
+        }
+        ServerRequest::AssessInstallUpdate(_) => {
+            if !summary.route.manages_host() {
+                return Err(ManagementFailure::NativeUnavailable);
+            }
+            let native = native.ok_or(ManagementFailure::NativeUnavailable)?;
+            let read = check_native(&native, &binding).await?;
+            check_ordinary(&tracker, &binding)?;
+            if let Some(request) = read.status.pending {
+                return Ok(native_result(request, native.resolve(request).await));
+            }
+            let (assessment, read) = assess_update(&native, &binding, &summary).await?;
+            check_ordinary(&tracker, &binding)?;
+            return Ok(ResultPublication::UpdateAssessment {
+                assessment: Box::new(assessment),
+                read: Box::new(read),
+            });
         }
         ServerRequest::InstallUpdate { assessment, .. } => {
             if !summary.activation_matches(&assessment) {
@@ -1565,6 +1596,110 @@ async fn recover_native(
         read.recovered = Some(native_result(request, progress));
     }
     Ok(read)
+}
+
+fn apply_native_read(state: &mut ServerState, read: NativeRead) {
+    let approved = read.status.approved.as_ref().map(installation);
+    let staged = read.status.staged.as_ref().map(installation);
+    let running = (read.status.supervisor
+        == spaceterm_host::account_service::SupervisorState::Running)
+        .then(|| approved.clone())
+        .flatten();
+    let activation = state
+        .native
+        .as_mut()
+        .and_then(|native| native.activation.take())
+        .filter(|assessment| {
+            assessment.selection_generation == read.generation
+                && assessment.approved == approved.as_ref().map(|value| value.installation)
+                && assessment.running == running.as_ref().map(|value| value.installation)
+                && Some(&assessment.candidate) == staged.as_ref()
+                && assessment.desired == read.desired
+        });
+    state.native = Some(NativePresentation {
+        generation: read.generation,
+        desired: read.desired,
+        approved,
+        staged,
+        running,
+        activation,
+        pending: read.status.pending,
+    });
+    if let Some(ResultPublication::Native {
+        request,
+        unresolved,
+        failure,
+    }) = read.recovered
+        && state
+            .native_pending
+            .is_none_or(|pending| pending == request)
+        && (state.native_pending == Some(request)
+            || read.status.pending == Some(request)
+            || !state.is_busy() && state.management.native_request != Some(request))
+    {
+        state.management.native_request = Some(request);
+        state.management.failure = failure;
+        state.native_pending = unresolved.then_some(request);
+    }
+}
+
+async fn assess_update(
+    native: &NativeServiceManagement,
+    binding: &PairedServerBinding,
+    summary: &ServerSummary,
+) -> Result<(UpdateAssessment, NativeRead), ManagementFailure> {
+    let before = check_native(native, binding).await?;
+    let candidate = before
+        .status
+        .staged
+        .as_ref()
+        .map(installation)
+        .ok_or(ManagementFailure::StaleAssessment)?;
+    if summary.installations.selection_generation != Some(before.generation)
+        || summary.installations.approved != before.status.approved.as_ref().map(installation)
+        || summary.installations.staged.as_ref() != Some(&candidate)
+        || candidate.artifact_sha256 == [0; 32]
+        || before.status.pending.is_some()
+    {
+        return Err(ManagementFailure::StaleAssessment);
+    }
+    let original = native
+        .assess(ServiceAction::Activate(candidate.installation))
+        .await
+        .map_err(classify_native)?;
+    let read = check_native(native, binding).await?;
+    if read.generation != before.generation
+        || read.desired != before.desired
+        || read.status.approved != before.status.approved
+        || read.status.staged != before.status.staged
+        || summary
+            .runtime_epoch
+            .is_some_and(|epoch| Some(epoch) != original.runtime_epoch())
+    {
+        return Err(ManagementFailure::StaleAssessment);
+    }
+    let prompt = NativeActionPrompt::from_assessment(&original)?;
+    let assessment = UpdateAssessment {
+        reference: prompt.token,
+        native_request: prompt.request,
+        original_pairing: binding.target().local_pairing().map_err(classify)?,
+        selection_generation: read.generation,
+        approved: read
+            .status
+            .approved
+            .as_ref()
+            .map(|value| value.installation),
+        running: original.runtime_epoch().and_then(|_| {
+            read.status
+                .approved
+                .as_ref()
+                .map(|value| value.installation)
+        }),
+        candidate,
+        runtime_epoch: original.runtime_epoch(),
+        desired: read.desired,
+    };
+    Ok((assessment, read))
 }
 
 fn installation(
