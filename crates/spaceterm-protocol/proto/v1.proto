@@ -226,6 +226,7 @@ message ContentQuery {
   ContentQueryKind kind = 4; bytes continuation = 5; CellRef start = 6; CellRef end = 7;
   string query = 8; bool case_sensitive = 9; bool regex = 10;
   QueryStamp stamp = 11; PageLimits limits = 12; PageContinuation page_continuation = 13; CopyOptions copy_options = 14; FindContinuation find_continuation = 15;
+  TopologyRow topology_after = 16; bool cancel = 17;
 }
 message Color { oneof value { uint32 rgb = 1; uint32 palette_index = 2; bool default_color = 3; } }
 message Style { Color foreground = 1; Color background = 2; Color underline_color = 3; uint32 flags = 4; uint32 underline_style = 5; }

@@ -412,6 +412,18 @@ impl ProtocolDispatcher {
                                 )
                                 .await?
                         }
+                        terminal::Wake::Read(event) => {
+                            terminal
+                                .publish_read(
+                                    *event,
+                                    self,
+                                    session,
+                                    &peer.transport,
+                                    &handle,
+                                    &mut egress,
+                                )
+                                .await?
+                        }
                         terminal::Wake::Effect(reply) => {
                             self.send(
                                 session,
@@ -545,6 +557,12 @@ impl ProtocolDispatcher {
                             }
                             if terminal
                                 .graphics_request(&payload, session.principal, &handle)
+                                .await?
+                            {
+                                continue;
+                            }
+                            if terminal
+                                .read_request(&payload, session.principal, &handle)
                                 .await?
                             {
                                 continue;

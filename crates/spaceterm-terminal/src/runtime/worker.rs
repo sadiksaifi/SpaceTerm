@@ -253,7 +253,12 @@ impl Worker {
             if let Some(process) = self.process.as_deref_mut() {
                 self.input.drain(&self.shared, process)?;
             }
-            self.shared.wake.wait(Duration::from_millis(10));
+            // Bounded content steps already interleave PTY and ingress work.
+            // Sleeping after each runnable step makes full-Scrollback Copy take
+            // minutes before producing its first chunk. Sleep only for demand.
+            if !self.jobs.iter().any(|job| !job.sink.full()) {
+                self.shared.wake.wait(Duration::from_millis(10));
+            }
         }
     }
     fn authority_transition(&mut self) -> Result<(), RuntimeFailure> {
