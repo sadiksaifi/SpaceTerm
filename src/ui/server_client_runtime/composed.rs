@@ -13,7 +13,7 @@ use spaceterm_client::{
     api::{ConnectionState, PairedServerBinding},
     operations::{OperationPeer, OperationStatus, OperationTicket, OperationTracker},
     pane_channel::{PaneChannel, PaneChannels, PaneReadiness, WorkspaceLease},
-    pending::PendingTasks,
+    pending::{PendingRuntime, PendingTasks},
     registry::{ClientRegistry, ClientRuntime, ServerHandle},
     replica::{ReplicaSnapshot, ReplicaState},
     view::{
@@ -146,6 +146,24 @@ pub(crate) fn install_with_enrollment<S: ViewStore + 'static>(
         notifier,
         cx,
     )?);
+    if let Some(services) = &enrollment {
+        // The scheduler belongs to the recovered journal, not to an ordinary connection.
+        // Enter its executor only to spawn the existing worker; installation does no native IO.
+        let pending = {
+            let _entered = provider.inner.executor.enter();
+            services
+                .pairing
+                .start_scheduler()
+                .map_err(DesktopClientError::from)?
+        };
+        provider
+            .inner
+            .runtime
+            .borrow_mut()
+            .as_mut()
+            .ok_or(DesktopClientError::Cancelled)?
+            .pending = Some(pending);
+    }
     let runtime = cx.new(|cx| {
         super::DesktopClientRuntime::new(
             super::DesktopClientDependencies {
@@ -196,6 +214,27 @@ struct State {
     blocked: HashMap<ServerId, (BlockedLocation, IntendedAction)>,
 }
 
+/// Both client workers survive an empty server list and drain before application quit.
+struct DesktopClientWorkers {
+    client: ClientRuntime,
+    pending: Option<PendingRuntime>,
+}
+impl DesktopClientWorkers {
+    async fn shutdown(self) -> Result<(), spaceterm_client::failure::ClientFailure> {
+        let Self { client, pending } = self;
+        let pending = async move {
+            if let Some(pending) = pending {
+                pending.shutdown().await
+            } else {
+                Ok(())
+            }
+        };
+        // A failure in one worker must not skip joining the other's owned native effects.
+        let (pending, client) = tokio::join!(pending, client.shutdown());
+        pending.and(client)
+    }
+}
+
 struct Inner {
     git: gpui::Entity<crate::ui::server_git::ServerGitStore>,
     git_publications: RefCell<BTreeMap<ServerId, GitPublication>>,
@@ -205,7 +244,7 @@ struct Inner {
     tracker: OperationTracker,
     operations: Arc<dyn OperationPeer>,
     pending: PendingTasks,
-    runtime: RefCell<Option<ClientRuntime>>,
+    runtime: RefCell<Option<DesktopClientWorkers>>,
     executor: tokio::runtime::Handle,
     notifier: DesktopClientNotifier,
     state: RefCell<State>,
@@ -295,7 +334,10 @@ impl<S: ViewStore + 'static> ComposedDesktopClientProvider<S> {
             tracker,
             operations,
             pending,
-            runtime: RefCell::new(Some(runtime)),
+            runtime: RefCell::new(Some(DesktopClientWorkers {
+                client: runtime,
+                pending: None,
+            })),
             executor,
             notifier,
             state: RefCell::new(State {
