@@ -1082,6 +1082,7 @@ impl ServiceSupervisor {
                 };
             }
             let lease = self.lifecycle_lease()?;
+            self.reconcile_started_install(&lease).await?;
             self.ensure_no_pending(request)?;
             let registration = self.discover()?.ok_or(ServiceFailure::Missing)?;
             if !registration.is_installed() {
@@ -1318,6 +1319,7 @@ impl ServiceSupervisor {
             }
             Err(error) => return Err(error),
         };
+        self.reconcile_started_install(&lease).await?;
         self.ensure_no_pending(request)?;
         let mut record = if let Some(original) = self.original(request)? {
             original

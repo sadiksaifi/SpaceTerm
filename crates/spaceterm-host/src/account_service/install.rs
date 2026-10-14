@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use spaceterm_core::operations::RequestDigest;
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
+
+const INSTALL_READINESS_WAIT: Duration = Duration::from_secs(5);
+const INSTALL_READINESS_POLL: Duration = Duration::from_millis(100);
 
 use super::supervisor::RegistrationBasis;
 use super::{
@@ -672,6 +675,7 @@ impl ServiceSupervisor {
             );
             return self.finish_install(request, record, &registered);
         }
+        let resuming_start = record.phase == ServicePhase::Starting;
         if record.phase == ServicePhase::Accepted {
             let running = self
                 .discover()?
@@ -819,13 +823,54 @@ impl ServiceSupervisor {
         let registered = self.discover()?.ok_or(ServiceFailure::Missing)?;
         lease.verify()?;
         self.manager()?.verify_installation(&registered)?;
-        self.manager()?.configure(&registered).await?;
-        if registered.desired_state() == DesiredServerState::Running {
-            self.manager()?.start(&registered).await?;
-            if self.manager()?.status(Some(&registered)).await? != SupervisorState::Running {
-                return Ok(record.progress(request));
+        if resuming_start && registered.desired_state() == DesiredServerState::Running {
+            match self.manager()?.status(Some(&registered)).await {
+                Ok(SupervisorState::Running) => {
+                    lease.verify()?;
+                    return self.finish_install(request, record, &registered);
+                }
+                Ok(SupervisorState::Starting | SupervisorState::Stopping)
+                | Err(ServiceFailure::SupervisorUnavailable) => {
+                    lease.verify()?;
+                    return Ok(record.progress(request));
+                }
+                Ok(_) => {}
+                Err(failure) => return Err(failure),
             }
         }
+        self.manager()?.configure(&registered).await?;
+        if registered.desired_state() == DesiredServerState::Running {
+            // A lost native acknowledgement does not undo accepted startup.
+            // Observe the original service before classifying its outcome.
+            if let Err(failure) = self.manager()?.start(&registered).await
+                && !matches!(
+                    failure,
+                    ServiceFailure::SupervisorUnavailable | ServiceFailure::Pending
+                )
+            {
+                return Err(failure);
+            }
+            let readiness = tokio::time::timeout(INSTALL_READINESS_WAIT, async {
+                loop {
+                    match self.manager()?.status(Some(&registered)).await {
+                        Ok(SupervisorState::Running) => return Ok(()),
+                        Ok(SupervisorState::Suppressed) => return Err(ServiceFailure::Suppressed),
+                        Ok(_) | Err(ServiceFailure::SupervisorUnavailable) => {}
+                        Err(failure) => return Err(failure),
+                    }
+                    tokio::time::sleep(INSTALL_READINESS_POLL).await;
+                }
+            })
+            .await;
+            match readiness {
+                Ok(result) => result?,
+                Err(_) => {
+                    lease.verify()?;
+                    return Ok(record.progress(request));
+                }
+            }
+        }
+        lease.verify()?;
         self.finish_install(request, record, &registered)
     }
     fn run_stage_install(
@@ -936,6 +981,41 @@ impl ServiceSupervisor {
         self.write_install(request, &record)?;
         Ok(record.progress(request))
     }
+    pub(super) async fn reconcile_started_install(
+        &self,
+        lease: &Lease,
+    ) -> Result<(), ServiceFailure> {
+        let (_, _, journal) = self.read_journal()?;
+        let Some(reservation) = journal.reservations.iter().find(|reservation| {
+            reservation.install.as_ref().is_some_and(|record| {
+                record.phase == ServicePhase::Starting
+                    && record.state == ServiceRequestState::Pending
+            })
+        }) else {
+            return Ok(());
+        };
+        let request = journal.request(reservation.sequence)?;
+        let record = reservation
+            .install
+            .clone()
+            .ok_or(ServiceFailure::InvalidRecord)?;
+        let registered = self.discover()?.ok_or(ServiceFailure::Missing)?;
+        if registered.desired_state() != DesiredServerState::Running {
+            return Ok(());
+        }
+        match self.manager()?.status(Some(&registered)).await {
+            Ok(SupervisorState::Running) => {}
+            Ok(_) | Err(ServiceFailure::SupervisorUnavailable) => return Ok(()),
+            Err(failure) => return Err(failure),
+        }
+        if record.installation.as_ref() != registered.approved_installation() {
+            return Err(ServiceFailure::IdentityMismatch);
+        }
+        self.manager()?.verify_installation(&registered)?;
+        lease.verify()?;
+        self.finish_install(request, record, &registered)?;
+        Ok(())
+    }
     fn finish_install(
         &self,
         request: NativeRequestId,
@@ -946,6 +1026,9 @@ impl ServiceSupervisor {
             .installation
             .clone()
             .ok_or(ServiceFailure::InvalidRecord)?;
+        if !registered.is_installed() || registered.approved_installation() != Some(&installation) {
+            return Err(ServiceFailure::IdentityMismatch);
+        }
         record.phase = ServicePhase::Completed;
         record.state = ServiceRequestState::Completed(ServiceOutcome::Installed {
             server: registered.server_pin(),

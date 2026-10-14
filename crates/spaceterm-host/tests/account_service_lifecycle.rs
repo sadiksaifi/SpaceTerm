@@ -45,6 +45,9 @@ struct Manager {
     delay_stop: bool,
     linger: Mutex<Option<LingerState>>,
     rejected_installation: Mutex<Option<spaceterm_host::startup::InstallationId>>,
+    start_failure: Mutex<Option<ServiceFailure>>,
+    status_failure: Mutex<Option<ServiceFailure>>,
+    starting: AtomicBool,
 }
 impl Manager {
     fn new(delay_stop: bool) -> Self {
@@ -55,6 +58,9 @@ impl Manager {
             stop_release: Semaphore::new(0),
             delay_stop,
             rejected_installation: Mutex::new(None),
+            start_failure: Mutex::new(None),
+            status_failure: Mutex::new(None),
+            starting: AtomicBool::new(false),
             linger: Mutex::new(if cfg!(target_os = "linux") {
                 Some(LingerState::Enabled)
             } else {
@@ -65,7 +71,12 @@ impl Manager {
 }
 impl ServiceManager for Manager {
     fn status<'a>(&'a self, _: Option<&'a RegisteredServer>) -> ServiceFuture<'a, SupervisorState> {
-        Box::pin(async { Ok(*self.state.lock().unwrap()) })
+        Box::pin(async {
+            match *self.status_failure.lock().unwrap() {
+                Some(failure) => Err(failure),
+                None => Ok(*self.state.lock().unwrap()),
+            }
+        })
     }
     fn linger(&self) -> ServiceFuture<'_, Option<LingerState>> {
         Box::pin(async { Ok(*self.linger.lock().unwrap()) })
@@ -82,8 +93,15 @@ impl ServiceManager for Manager {
     fn start<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
         Box::pin(async {
             self.effects.lock().unwrap().push("start");
-            *self.state.lock().unwrap() = SupervisorState::Running;
-            Ok(())
+            *self.state.lock().unwrap() = if self.starting.load(Ordering::SeqCst) {
+                SupervisorState::Starting
+            } else {
+                SupervisorState::Running
+            };
+            match *self.start_failure.lock().unwrap() {
+                Some(failure) => Err(failure),
+                None => Ok(()),
+            }
         })
     }
     fn stop<'a>(&'a self, _: &'a RegisteredServer) -> ServiceFuture<'a, ()> {
@@ -270,6 +288,17 @@ struct Fixture {
     clock: Arc<Clock>,
 }
 impl Fixture {
+    fn for_install() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+        Self {
+            _root: root,
+            account,
+            manager: Arc::new(Manager::new(false)),
+            processes: Arc::new(Processes::new(false)),
+            clock: Arc::new(Clock(AtomicU64::new(100))),
+        }
+    }
     fn new(delay_stop: bool, absence: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
         let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
@@ -1636,5 +1665,122 @@ async fn native_process_composition_requires_actor_custody_and_validates_actor_a
     assert_eq!(
         native.assess(&registration).await,
         Err(ServiceFailure::InvalidRecord)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn install_reports_completed_when_launch_agent_runs_after_start_acknowledgement_failure() {
+    let fixture = Fixture::for_install();
+    *fixture.manager.start_failure.lock().unwrap() = Some(ServiceFailure::SupervisorUnavailable);
+    let supervisor = fixture.supervisor();
+    let request = supervisor.allocate_request().unwrap();
+    let (_, artifact) =
+        signed_installation::fixture("1.0.0", 7, signed_installation::native_machine());
+    let progress = supervisor
+        .install(request, fixture.account.confirm_install(artifact))
+        .await
+        .unwrap();
+    assert!(matches!(
+        progress.state,
+        ServiceRequestState::Completed(ServiceOutcome::Installed { reused: false, .. })
+    ));
+    assert_eq!(supervisor.resolve(request).await.unwrap(), progress);
+    assert_eq!(
+        *fixture.manager.effects.lock().unwrap(),
+        ["configure", "start"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn assess_completes_original_starting_install_when_launch_agent_is_running_without_restarting()
+ {
+    let fixture = Fixture::for_install();
+    fixture.manager.starting.store(true, Ordering::SeqCst);
+    let supervisor = fixture.supervisor();
+    let install = supervisor.allocate_request().unwrap();
+    let (_, artifact) =
+        signed_installation::fixture("1.0.0", 7, signed_installation::native_machine());
+    let progress = supervisor
+        .install(install, fixture.account.confirm_install(artifact))
+        .await
+        .unwrap();
+    assert_eq!(progress.phase, ServicePhase::Starting);
+    assert_eq!(progress.state, ServiceRequestState::Pending);
+    let blocked = supervisor.allocate_request().unwrap();
+    assert!(matches!(
+        supervisor.assess(blocked, ServiceAction::Stop).await,
+        Err(ServiceFailure::Pending)
+    ));
+    *fixture.manager.state.lock().unwrap() = SupervisorState::Running;
+    let request = supervisor.allocate_request().unwrap();
+    let assessment = supervisor
+        .assess(request, ServiceAction::Stop)
+        .await
+        .unwrap();
+    assert_eq!(assessment.request(), request);
+    assert_ne!(assessment.token(), [0; 32]);
+    assert!(matches!(
+        supervisor.request_progress(install).unwrap().state,
+        ServiceRequestState::Completed(ServiceOutcome::Installed { reused: false, .. })
+    ));
+    assert_eq!(
+        *fixture.manager.effects.lock().unwrap(),
+        ["configure", "start"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn install_waits_for_launch_agent_readiness_within_the_observation_window() {
+    let fixture = Fixture::for_install();
+    fixture.manager.starting.store(true, Ordering::SeqCst);
+    let manager = fixture.manager.clone();
+    let transition = tokio::spawn(async move {
+        loop {
+            if *manager.state.lock().unwrap() == SupervisorState::Starting {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        *manager.state.lock().unwrap() = SupervisorState::Running;
+    });
+    let supervisor = fixture.supervisor();
+    let request = supervisor.allocate_request().unwrap();
+    let (_, artifact) =
+        signed_installation::fixture("1.0.0", 7, signed_installation::native_machine());
+    let progress = supervisor
+        .install(request, fixture.account.confirm_install(artifact))
+        .await
+        .unwrap();
+    assert!(matches!(
+        progress.state,
+        ServiceRequestState::Completed(ServiceOutcome::Installed { reused: false, .. })
+    ));
+    transition.await.unwrap();
+    assert_eq!(
+        *fixture.manager.effects.lock().unwrap(),
+        ["configure", "start"]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn install_resolution_preserves_pending_startup_when_manager_observation_is_unavailable() {
+    let fixture = Fixture::for_install();
+    fixture.manager.starting.store(true, Ordering::SeqCst);
+    *fixture.manager.status_failure.lock().unwrap() = Some(ServiceFailure::SupervisorUnavailable);
+    let supervisor = fixture.supervisor();
+    let request = supervisor.allocate_request().unwrap();
+    let (_, artifact) =
+        signed_installation::fixture("1.0.0", 7, signed_installation::native_machine());
+    let original = supervisor
+        .install(request, fixture.account.confirm_install(artifact))
+        .await
+        .unwrap();
+    assert_eq!(original.phase, ServicePhase::Starting);
+    assert_eq!(original.state, ServiceRequestState::Pending);
+    assert_eq!(supervisor.resolve(request).await.unwrap(), original);
+    assert_eq!(
+        *fixture.manager.effects.lock().unwrap(),
+        ["configure", "start"]
     );
 }

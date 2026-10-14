@@ -78,6 +78,15 @@ async fn run() -> ExitCode {
         }
     };
     let consumer = provider.cli_consumer();
+    // Native lifecycle comparisons use this CLI's saved additional Client,
+    // not a separate management journal that this executable never provisions.
+    let provider = match provider.with_runtime_identity(consumer.clone()) {
+        Ok(provider) => provider,
+        Err(failure) => {
+            let _ = emit_failure(failure, json, &mut io);
+            return ExitCode::from(failure.exit_code());
+        }
+    };
     let dependencies = CliDependencies::new(
         Ok(provider.key()),
         consumer.clone(),

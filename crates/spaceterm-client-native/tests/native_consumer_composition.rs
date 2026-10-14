@@ -222,6 +222,10 @@ async fn controller(directory: &std::path::Path, create: bool) -> Arc<JournalCon
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The fixture covers independent protocol, enrollment and recovery conditions."
+)]
 async fn exercise(
     kind: NativeConsumerKind,
     major: u32,
@@ -617,6 +621,23 @@ async fn exercise(
     .unwrap();
     let mut original_result = None;
     if kind == NativeConsumerKind::Cli {
+        // Native lifecycle comparisons must reuse the saved CLI principal and
+        // its canonical journal, not an unprovisioned management identity.
+        let runtime = spaceterm_client_native::native::runtime::RuntimeClientIdentity::access(
+            &consumer,
+            &registration,
+        )
+        .await
+        .unwrap();
+        assert_eq!(runtime.binding, binding);
+        assert_eq!(runtime.signer.public_key(), device.public_key());
+        assert!(
+            runtime
+                .journal
+                .ordinary_use_allowed(&binding)
+                .await
+                .unwrap()
+        );
         assert_eq!(
             ProtocolManagement::status(&consumer)
                 .await
@@ -1620,4 +1641,48 @@ impl spaceterm_client_native::cli::runner::CliIo for RepeatPairIo {
     > {
         panic!("explicit fingerprint must not prompt")
     }
+}
+
+#[tokio::test]
+async fn running_unclean_custody_without_saved_cli_binding_reports_pairing_required() {
+    use spaceterm_client_native::native::{classify_service, runtime::NativeRuntimeIdentity};
+    let root = tempfile::tempdir().unwrap();
+    let account = AccountServiceFixture::new(root.path(), BuildIdentity::Development).unwrap();
+    let registration = account.initialize(DesiredServerState::Running).unwrap();
+    use std::os::unix::fs::DirBuilderExt;
+    let directory = root.path().canonicalize().unwrap().join("unpaired-client");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&directory)
+        .unwrap();
+    let journal = controller(&directory, true).await;
+    let signer = ServerKeyStore::open(&registration)
+        .unwrap()
+        .load_identity(registration.server_pin())
+        .unwrap();
+    let _custody = spaceterm_host::account_service::runtime_inventory::RuntimeCustody::begin(
+        &registration,
+        ServerEpoch::new(1),
+        signer,
+    )
+    .unwrap();
+    let identity = NativeRuntimeIdentity::from_journal(
+        journal,
+        Arc::new(Credentials(Arc::new(Key(
+            Ed25519KeyPair::from_seed_unchecked(&[27; 32]).unwrap(),
+        )))),
+    );
+    let processes =
+        spaceterm_client_native::native::runtime::RuntimeServiceProcesses::new(Arc::new(identity));
+    let failure =
+        match spaceterm_host::account_service::ServiceProcesses::assess(&processes, &registration)
+            .await
+        {
+            Ok(_) => panic!("an unpaired Client cannot acquire runtime authority"),
+            Err(failure) => failure,
+        };
+    assert_eq!(
+        classify_service(failure),
+        spaceterm_client::management_cli::ManagementFailure::PairingRequired
+    );
 }

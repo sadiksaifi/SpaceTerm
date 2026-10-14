@@ -713,6 +713,7 @@ pub fn classify_service(failure: ServiceFailure) -> ManagementFailure {
         | ServiceFailure::RequestRetired
         | ServiceFailure::StaleAssessment => ManagementFailure::StaleAssessment,
         ServiceFailure::ConfirmationRequired => ManagementFailure::ConfirmationRequired,
+        ServiceFailure::PairingRequired => ManagementFailure::PairingRequired,
         ServiceFailure::AuthorizationUnavailable => ManagementFailure::AuthorizationUnavailable,
         ServiceFailure::LimitExceeded => ManagementFailure::LimitExceeded,
         ServiceFailure::Pending | ServiceFailure::CleanupUnresolved => {
