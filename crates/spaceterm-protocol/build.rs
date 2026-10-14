@@ -42,6 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Message.kind.content_read_response",
             "Message.kind.content_publication",
             "Message.kind.metadata_publication",
+            "Message.kind.metadata_fragment",
             "ContentReadResponse.result.page",
             "PairingOutcome.operation",
             "PairingOutcome.reservation",
@@ -387,6 +388,10 @@ fn required(message: &str, field: &FieldDescriptorProto) -> bool {
                 | "topology_revision"
         ),
         "MetadataPublication" => matches!(field.name(), "fence" | "request" | "snapshot"),
+        "MetadataFragment" => matches!(
+            field.name(),
+            "fence" | "request" | "request_generation" | "sequence" | "total_bytes" | "data"
+        ),
         "RuntimeMetadataSnapshot" => matches!(field.name(), "session" | "sequence" | "origin_kind"),
         "ApplicationPointer" | "ApplicationWheel" => matches!(field.name(), "stamp" | "cell"),
         "RuntimeCommand"

@@ -93,6 +93,71 @@ async fn cleanup_failure_is_not_reported_as_completed() {
     assert!(server.wait().await.is_err());
 }
 
+async fn retained_cleanup_reproof(reason: RetirementReason) {
+    let fixture = Fixture::new();
+    let principal = fixture.principal(1, 1);
+    let codec = fixture.codec.clone();
+    let host = fixture.host.clone();
+    let factory = fixture.factory.clone();
+    let server = RecoveredServer::recover(fixture.config, fixture.dependencies)
+        .await
+        .unwrap();
+    let handle = server.handle();
+    connect(&handle, principal).await;
+    let grant = acquire(&handle, principal, &codec).await;
+    let session = start(&handle, principal, &codec, grant).await;
+    factory.cleanup_failed.store(true, Ordering::SeqCst);
+    let state = factory.states.lock().unwrap()[0].clone();
+    let shutdown = tokio::spawn(async move { stop(&handle, host).await });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while state.lock().unwrap().cleanup.is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        !shutdown.is_finished(),
+        "an inconclusive foreground proof must retain the cleanup owner"
+    );
+    let terminal = state.lock().unwrap().lifecycle;
+    state.lock().unwrap().cleanup = Some(
+        SessionCleanupObservation::new(
+            session,
+            reason,
+            CleanupResult::Confirmed(ConfirmedCleanupClass::ReapedAndReleased),
+        )
+        .unwrap(),
+    );
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), shutdown)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.lock().unwrap().lifecycle, terminal);
+    assert_eq!(state.lock().unwrap().retire_calls, 1);
+    if reason == RetirementReason::Stop {
+        assert!(result.unwrap().cleanup_confirmed);
+        server.wait().await.unwrap();
+    } else {
+        assert!(matches!(
+            result.unwrap_err().class,
+            ServerFailureClass::CleanupIncomplete | ServerFailureClass::RecoveryRequired
+        ));
+        assert!(server.wait().await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn shutdown_waits_for_retained_cleanup_reproof() {
+    retained_cleanup_reproof(RetirementReason::Stop).await;
+}
+
+#[tokio::test]
+async fn shutdown_rejects_cleanup_reproof_for_another_retirement_reason() {
+    retained_cleanup_reproof(RetirementReason::EndAllSessions).await;
+}
+
 #[tokio::test]
 async fn dropping_handles_and_disconnecting_retain_runtime_and_grant() {
     let fixture = Fixture::new();

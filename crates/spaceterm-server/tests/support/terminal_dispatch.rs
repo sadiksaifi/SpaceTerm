@@ -859,7 +859,45 @@ async fn authenticated_ipc_terminal_input_pages_and_two_client_takeover_both_maj
             pane,
             session,
         } = started_terminal(major).await;
-        let mut original = fence(first.principal, session, created.control(), 2);
+        // The provider is inert in this read-only projection. All content and
+        // authority facts below come from the real authenticated server.
+        let fake = spaceterm_client::testing::FakeServer::new(11, vec![major]).unwrap();
+        let provider = spaceterm_client::testing::FakePaneConnection::new(fake, 1, major)
+            .await
+            .unwrap();
+        let channels = spaceterm_client::pane_channel::PaneChannels::new(
+            provider,
+            spaceterm_client::projection::ProjectionBudgets::supported().unwrap(),
+        )
+        .unwrap();
+        let snapshot = handle.snapshot();
+        channels
+            .publish(
+                client_info(first.principal, major, snapshot.state().revision),
+                client_replica(&snapshot),
+            )
+            .unwrap();
+        let lease = channels
+            .attach(
+                snapshot.state().workspaces[0].id,
+                spaceterm_client::view::AttachmentIncarnation::new(1).unwrap(),
+            )
+            .unwrap();
+        let projection_pane = lease.pane(pane).unwrap();
+        let projection_context = projection_pane
+            .update_context(spaceterm_client::pane_channel::PaneContextFacts {
+                presentable: true,
+                focused_pane: true,
+                terminal_input_focus: true,
+            })
+            .unwrap();
+        first.context(pane, projection_context.get(), true).await;
+        let mut original = fence(
+            first.principal,
+            session,
+            created.control(),
+            projection_context.get(),
+        );
         first.subscribe(original, 1, false).await;
         first.line(1, original, "PS1=; echo spaceterm-ok").await;
         first.output("spaceterm-ok").await;
@@ -902,38 +940,6 @@ async fn authenticated_ipc_terminal_input_pages_and_two_client_takeover_both_maj
                 _ => resource_payload!(v2, Major2),
             })
             .await;
-        // The provider is inert in this read-only projection. All content and
-        // authority facts below come from the real authenticated server.
-        let fake = spaceterm_client::testing::FakeServer::new(11, vec![major]).unwrap();
-        let provider = spaceterm_client::testing::FakePaneConnection::new(fake, 1, major)
-            .await
-            .unwrap();
-        let channels = spaceterm_client::pane_channel::PaneChannels::new(
-            provider,
-            spaceterm_client::projection::ProjectionBudgets::supported().unwrap(),
-        )
-        .unwrap();
-        let snapshot = handle.snapshot();
-        channels
-            .publish(
-                client_info(first.principal, major, snapshot.state().revision),
-                client_replica(&snapshot),
-            )
-            .unwrap();
-        let lease = channels
-            .attach(
-                snapshot.state().workspaces[0].id,
-                spaceterm_client::view::AttachmentIncarnation::new(1).unwrap(),
-            )
-            .unwrap();
-        let projection_pane = lease.pane(pane).unwrap();
-        projection_pane
-            .update_context(spaceterm_client::pane_channel::PaneContextFacts {
-                presentable: true,
-                focused_pane: true,
-                terminal_input_focus: true,
-            })
-            .unwrap();
         projection_pane
             .publish_content_base(original, stamp.base())
             .unwrap();
@@ -1224,8 +1230,9 @@ async fn authenticated_ipc_terminal_input_pages_and_two_client_takeover_both_maj
         first.output("paste-ok").await;
         assert!(!first.text.contains("must-not-paste"));
         // IME keeps the Focused Pane exception, unlike ordinary keys.
-        first.context(pane, 3, false).await;
-        let ime_fence = fence(first.principal, session, created.control(), 3);
+        let ime_context = original.context().get() + 1;
+        first.context(pane, ime_context, false).await;
+        let ime_fence = fence(first.principal, session, created.control(), ime_context);
         assert_eq!(
             first
                 .effect(
@@ -1248,8 +1255,8 @@ async fn authenticated_ipc_terminal_input_pages_and_two_client_takeover_both_maj
                 .await,
             None
         );
-        first.context(pane, 4, true).await;
-        original = fence(first.principal, session, created.control(), 4);
+        first.context(pane, ime_context + 1, true).await;
+        original = fence(first.principal, session, created.control(), ime_context + 1);
         let mut enter = spaceterm_terminal::KeyInput::text_input("");
         enter.physical_key = spaceterm_terminal::PhysicalKey::Enter;
         enter.logical_key = "enter".into();

@@ -457,7 +457,7 @@ impl Routes<'_> {
                     )
                     .unwrap(),
                     None,
-                    HARNESS_TIMEOUT,
+                    Duration::from_secs(60),
                 )
                 .await
                 .unwrap();
@@ -517,6 +517,8 @@ struct Client {
     text: String,
     content_stamp: Option<QueryStamp>,
     metadata: Vec<RuntimeMetadataSnapshot>,
+    metadata_assembler: spaceterm_protocol::convert::metadata::MetadataAssembler,
+    metadata_fragments: usize,
     base: Option<spaceterm_core::content::ContentBase>,
     row_revisions: BTreeMap<spaceterm_core::content::RowId, u64>,
     mouse_enabled: bool,
@@ -561,6 +563,8 @@ impl Client {
             text: String::new(),
             content_stamp: None,
             metadata: Vec::new(),
+            metadata_assembler: Default::default(),
+            metadata_fragments: 0,
             base: None,
             row_revisions: BTreeMap::new(),
             mouse_enabled: false,
@@ -586,6 +590,7 @@ impl Client {
             .unwrap()
             .unwrap()
             .expect("authenticated response");
+        assert!(bytes.len() <= self.codec.limits().frame_bytes);
         let payload = self.codec.decode(&bytes).unwrap();
         macro_rules! record {
             ($publication:expr, $p:ident) => {{
@@ -653,6 +658,26 @@ impl Client {
                     spaceterm_protocol::convert::metadata::v2::decode_publication(value).unwrap();
                 self.metadata.push(snapshot);
             }
+            Payload::Major1(v1::Message {
+                kind: Some(v1::message::Kind::MetadataFragment(value)),
+            }) => {
+                let fragment =
+                    spaceterm_protocol::convert::metadata::v1::decode_fragment(value).unwrap();
+                self.metadata_fragments += 1;
+                if let Some((_, snapshot)) = self.metadata_assembler.receive(fragment).unwrap() {
+                    self.metadata.push(snapshot);
+                }
+            }
+            Payload::Major2(v2::Message {
+                kind: Some(v2::message::Kind::MetadataFragment(value)),
+            }) => {
+                let fragment =
+                    spaceterm_protocol::convert::metadata::v2::decode_fragment(value).unwrap();
+                self.metadata_fragments += 1;
+                if let Some((_, snapshot)) = self.metadata_assembler.receive(fragment).unwrap() {
+                    self.metadata.push(snapshot);
+                }
+            }
             _ => {}
         }
         payload
@@ -666,11 +691,13 @@ impl Client {
                     kind: Some(
                         v1::message::Kind::ContentPublication(_)
                             | v1::message::Kind::MetadataPublication(_)
+                            | v1::message::Kind::MetadataFragment(_)
                     )
                 }) | Payload::Major2(v2::Message {
                     kind: Some(
                         v2::message::Kind::ContentPublication(_)
                             | v2::message::Kind::MetadataPublication(_)
+                            | v2::message::Kind::MetadataFragment(_)
                     )
                 })
             ) {
@@ -1424,6 +1451,7 @@ async fn handshake_with_limits(
                 spaceterm_protocol::negotiation::CAPABILITY_TERMINAL_STREAMS,
                 spaceterm_protocol::negotiation::CAPABILITY_APPLICATION_MOUSE,
                 spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA,
+                spaceterm_protocol::negotiation::CAPABILITY_RUNTIME_METADATA_FRAGMENTS,
             ],
         },
         Arc::new(Key::new(seed)),
@@ -2233,6 +2261,74 @@ async fn runtime_metadata_title_and_progress_expiry_major_1() {
 #[tokio::test]
 async fn runtime_metadata_title_and_progress_expiry_major_2() {
     metadata_without_content(2).await;
+}
+
+async fn tiny_frame_metadata(major: u32) {
+    let fixture = Fixture::new(major).await;
+    let mut routes = Routes {
+        fixture: &fixture,
+        route: Route::Ipc,
+        wss: None,
+        ssh: None,
+        next_endpoint: 0,
+    };
+    let mut client = Client::connect_with_limits(
+        &mut routes,
+        0,
+        major,
+        spaceterm_protocol::limits::NegotiatedLimits {
+            frame_bytes: 1024,
+            management_bytes: 1024,
+            ..Default::default()
+        },
+    )
+    .await;
+    client.reconcile(&fixture.handle).await;
+    let Outcome::CreatedWithControl(created) = client
+        .command(Command::CreateWorkspace {
+            server: client.stream.server(),
+            source: WorkspaceCreationSource::ServerHome {
+                server: client.stream.server(),
+            },
+            name: NameDraft::Custom(NameText::new("tiny metadata".into()).unwrap()),
+        })
+        .await
+    else {
+        panic!("created workspace")
+    };
+    let grant = created.control().grant();
+    let session = client.start(&fixture.handle, grant).await;
+    let fence = client.fence(session, grant);
+    client.subscribe(fence).await;
+    client
+        .line(
+            fence,
+            r#"printf '\033]0;'; i=0; while [ "$i" -lt 256 ]; do printf '\360\220\220\200'; i=$((i+1)); done; printf '\007'"#,
+        )
+        .await;
+    let title = "\u{10400}".repeat(256);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !client.metadata.iter().any(|snapshot| {
+            snapshot.session() == session && snapshot.parts().title.value.as_ref() == title
+        }) {
+            client.recv().await;
+        }
+    })
+    .await
+    .expect("a bounded title larger than the frame must arrive intact");
+    assert!(client.metadata_fragments >= 2);
+    client.status().await;
+    client.route.close().await;
+    drop(routes);
+    fixture.shutdown().await;
+}
+#[tokio::test]
+async fn runtime_metadata_reassembles_tiny_frames_major_1() {
+    tiny_frame_metadata(1).await;
+}
+#[tokio::test]
+async fn runtime_metadata_reassembles_tiny_frames_major_2() {
+    tiny_frame_metadata(2).await;
 }
 
 async fn authenticated_application_mouse(major: u32) {
