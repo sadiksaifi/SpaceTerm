@@ -500,6 +500,13 @@ pub trait TerminalSessionFactory {
     fn fallback_title(&self) -> String {
         "Terminal".to_owned()
     }
+
+    /// Whether the shell runs in a SpaceTerm Server rather than this application. A server-backed
+    /// Terminal Session supports only screen presentation, keys, and resize, and grants no local
+    /// file, clipboard, or permission authority.
+    fn is_server_backed(&self) -> bool {
+        false
+    }
 }
 
 pub struct TerminalRuntime {
@@ -508,6 +515,7 @@ pub struct TerminalRuntime {
     commands: Option<CommandSender<Command>>,
     worker: Option<JoinHandle<()>>,
     native_pty_close: Option<NativePtyCloseHandle>,
+    cleanup_confirmation: Option<NativePtyCloseHandle>,
     schedule_input: ScheduleInput,
     event_publisher: TerminalEventPublisher,
     clipboard_authority: Arc<ClipboardAuthority>,
@@ -590,6 +598,36 @@ impl TerminalRuntime {
         // Dropping a JoinHandle detaches the worker. It still owns the PTY and reader
         // cleanup, but a close operation must never block its GPUI caller on either thread.
         drop(self.worker.take());
+    }
+
+    /// Headless owners await worker cleanup and require proof that owned process groups ended.
+    pub fn shutdown_and_wait(&mut self, timeout: Duration) -> Result<(), TerminalFailure> {
+        if self.cleanup_confirmation.is_none() {
+            self.cleanup_confirmation = self.native_pty_close.clone();
+        }
+        self.request_shutdown();
+        let deadline = Instant::now() + timeout;
+        if let Some(worker) = &self.worker {
+            while !worker.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if !worker.is_finished() {
+                return Err(TerminalFailure::pty("cleanup-unresolved"));
+            }
+        }
+        if let Some(worker) = self.worker.take()
+            && worker.join().is_err()
+        {
+            return Err(TerminalFailure::pty("cleanup-unresolved"));
+        }
+        if self
+            .cleanup_confirmation
+            .as_ref()
+            .is_some_and(|close| !close.cleanup_confirmed())
+        {
+            return Err(TerminalFailure::pty("cleanup-unresolved"));
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -1052,6 +1090,7 @@ struct TerminalWorkerContext {
     metadata_context: TerminalMetadataContext,
     fallback_title: String,
     terminal_name: &'static str,
+    restricted: bool,
     initial_appearance: TerminalAppearanceUpdate,
 }
 
@@ -1161,6 +1200,7 @@ impl TerminalWorker {
             metadata_context,
             fallback_title,
             terminal_name,
+            restricted,
             local_filesystem,
             initial_appearance,
         } = context;
@@ -1200,6 +1240,15 @@ impl TerminalWorker {
             }
         };
 
+        if restricted && emulator.restrict_client_effects().is_err() {
+            send_session_event(
+                &events,
+                TerminalSessionEvent::Failed(TerminalSessionFailure::Runtime(
+                    TerminalFailure::emulator("restrict-server-terminal"),
+                )),
+            );
+            return;
+        }
         let graphics_commands = output.commands.clone();
         emulator.set_graphics_budget_wakeup(move || {
             let _ = graphics_commands.send(Command::GraphicsBudgetAvailable);

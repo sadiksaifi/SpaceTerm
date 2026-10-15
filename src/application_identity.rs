@@ -108,6 +108,11 @@ impl ApplicationIdentity {
         self.update_source
     }
 
+    /// Whether this is SpaceTerm Development, the only identity offering incomplete server paths.
+    pub(crate) fn is_development(self) -> bool {
+        self == Self::development()
+    }
+
     /// SpaceTerm Development is re-signed ad hoc on every build, so privacy grants would not
     /// persist.
     #[cfg_attr(

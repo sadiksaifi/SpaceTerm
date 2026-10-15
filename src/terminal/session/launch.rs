@@ -39,6 +39,7 @@ struct TerminalSessionLaunch {
     metadata: TerminalMetadataContext,
     fallback_title: String,
     process: TerminalSessionProcess,
+    restricted: bool,
 }
 
 impl TerminalSessionLaunch {
@@ -55,6 +56,7 @@ impl TerminalSessionLaunch {
             machine,
         );
         Self {
+            restricted: false,
             metadata: match &prompt_owner {
                 Some(owner) => metadata.with_prompt_owner(owner.clone()),
                 None => metadata,
@@ -71,6 +73,7 @@ impl TerminalSessionLaunch {
     fn remote(remote: RemoteTerminalLaunchPlan) -> Result<Self, TerminalSessionError> {
         let command = remote.terminal_session_channel.take()?;
         Ok(Self {
+            restricted: false,
             metadata: TerminalMetadataContext::Remote(remote.metadata_context),
             fallback_title: remote.fallback_title,
             process: TerminalSessionProcess::Remote {
@@ -88,6 +91,7 @@ impl TerminalSessionLaunch {
 /// process `chdir` and identity validation.
 pub struct LocalTerminalLaunchPlan {
     working_directory: crate::domain::ValidatedLocalDirectory,
+    restricted: bool,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -163,7 +167,15 @@ impl RemoteTerminalLaunchPlan {
 
 impl LocalTerminalLaunchPlan {
     pub const fn new(working_directory: crate::domain::ValidatedLocalDirectory) -> Self {
-        Self { working_directory }
+        Self {
+            working_directory,
+            restricted: false,
+        }
+    }
+
+    pub fn without_client_effects(mut self) -> Self {
+        self.restricted = true;
+        self
     }
 
     pub const fn working_directory(&self) -> &crate::domain::ValidatedLocalDirectory {
@@ -224,12 +236,16 @@ impl NativeTerminalSessionFactory {
         initial_appearance: TerminalAppearanceUpdate,
     ) -> Result<(TerminalRuntime, TerminalSubscription), TerminalSessionError> {
         let launch = match launch_plan {
-            TerminalLaunchPlan::Local(local) => TerminalSessionLaunch::local(
-                self.launch_planner.clone(),
-                local.working_directory().path(),
-                self.local_machine.clone(),
-                &self.local_filesystem,
-            ),
+            TerminalLaunchPlan::Local(local) => {
+                let mut launch = TerminalSessionLaunch::local(
+                    self.launch_planner.clone(),
+                    local.working_directory().path(),
+                    self.local_machine.clone(),
+                    &self.local_filesystem,
+                );
+                launch.restricted = local.restricted;
+                launch
+            }
             TerminalLaunchPlan::Remote(remote) => TerminalSessionLaunch::remote(*remote)?,
         };
         TerminalRuntime::start_launch(
@@ -308,7 +324,7 @@ impl TerminalRuntime {
                 let terminal_name = prepared.terminal_name();
                 let owner =
                     NativePtyOwner::start(factory.as_ref(), prepared, size, output, close_handle)?;
-                Ok((owner, terminal_name))
+                Ok((owner, terminal_name, launch.restricted))
             },
         )
     }
@@ -339,7 +355,7 @@ impl TerminalRuntime {
             test_terminal_appearance_update(),
             move |size, output, close_handle| {
                 start_native_pty(size, output, close_handle)
-                    .map(|owner| (owner, identity::TERM_FALLBACK))
+                    .map(|owner| (owner, identity::TERM_FALLBACK, false))
             },
         )
         .map(|(runtime, subscription)| (runtime, subscription.events, subscription.accessibility))
@@ -355,9 +371,10 @@ impl TerminalRuntime {
             NativePtySize,
             Arc<dyn NativePtyOutputSink>,
             &NativePtyCloseHandle,
-        )
-            -> Result<(NativePtyOwner, &'static str), NativePtyStartupFailure>
-        + Send
+        ) -> Result<
+            (NativePtyOwner, &'static str, bool),
+            NativePtyStartupFailure,
+        > + Send
         + 'static,
     ) -> Result<(TerminalRuntime, TerminalSubscription), TerminalSessionError> {
         let (command_tx, command_rx) = mpsc::channel();
@@ -385,7 +402,7 @@ impl TerminalRuntime {
             .name("spaceterm-terminal".to_owned())
             .spawn(move || {
                 let _completion = WorkerEventLifetime(worker_events.clone());
-                let (native_pty, terminal_name) = match start_native_pty(
+                let (native_pty, terminal_name, restricted) = match start_native_pty(
                     pty_size(geometry),
                     native_pty_output,
                     &worker_native_pty_close,
@@ -416,6 +433,7 @@ impl TerminalRuntime {
                         metadata_context,
                         fallback_title,
                         terminal_name,
+                        restricted,
                         local_filesystem,
                         initial_appearance,
                     },
@@ -440,6 +458,7 @@ impl TerminalRuntime {
                 commands: Some(command_tx),
                 worker: Some(worker),
                 native_pty_close: Some(native_pty_close),
+                cleanup_confirmation: None,
                 schedule_input,
                 event_publisher: event_publisher.clone(),
                 clipboard_authority,

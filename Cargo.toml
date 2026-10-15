@@ -7,11 +7,12 @@ edition = "2024"
 members = [
     "crates/spaceterm-directories",
     "crates/spaceterm-server",
+    "crates/spaceterm-server-host",
     "crates/spaceterm-ui",
     "third_party/libghostty-vt",
     "third_party/libghostty-vt-sys",
 ]
-default-members = [".", "crates/spaceterm-directories", "crates/spaceterm-server", "crates/spaceterm-ui"]
+default-members = [".", "crates/spaceterm-directories", "crates/spaceterm-server", "crates/spaceterm-server-host", "crates/spaceterm-ui"]
 resolver = "2"
 
 [patch.crates-io]
@@ -40,7 +41,7 @@ desktop = [
     "dep:gpui",
     "dep:gpui_platform",
     "dep:spaceterm-ui",
-    "dep:spaceterm-server",
+    "spaceterm-server/client",
     "dep:image",
     "dep:notify",
     "dep:smallvec",
@@ -102,7 +103,7 @@ smallvec = { version = "=1.15.2", optional = true }
 rustc-hash = { version = "=2.1.3", optional = true }
 spaceterm-directories = { path = "crates/spaceterm-directories" }
 spaceterm-ui = { path = "crates/spaceterm-ui", optional = true }
-spaceterm-server = { path = "crates/spaceterm-server", features = ["client"], optional = true }
+spaceterm-server = { path = "crates/spaceterm-server" }
 thiserror = "2.0.17"
 unicode-bidi = { version = "=0.3.18", optional = true }
 unicode-segmentation = { version = "=1.13.3", optional = true }

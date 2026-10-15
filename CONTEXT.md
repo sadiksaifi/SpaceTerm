@@ -283,3 +283,5 @@ _Avoid_: checkout, working copy
 **Surface Material**: The translucency and neutral shading of a background fill.
 
 **Developer Workbench**: The Development window for previewing appearance and interface controls.
+
+**Development Pane**: The Development window presenting one Terminal Session owned by the local SpaceTerm Server.

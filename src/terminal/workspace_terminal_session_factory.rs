@@ -198,6 +198,28 @@ impl WorkspaceTerminalSessionFactory {
         }
     }
 
+    /// Creates a factory whose server-backed children start in a SpaceTerm Server.
+    ///
+    /// `home_directory` only completes the launch plan the server factory ignores. The factory
+    /// holds no local filesystem authority, so it cannot select or revalidate local directories.
+    #[cfg(feature = "developer-tools")]
+    pub(crate) fn new_server(
+        session_factory: Rc<dyn TerminalSessionFactory>,
+        home_directory: ValidatedLocalDirectory,
+    ) -> Self {
+        debug_assert!(session_factory.is_server_backed());
+        Self {
+            session_factory,
+            pinned_directory: None,
+            worktree_root: None,
+            expected_remote_identity: None,
+            local_filesystem: None,
+            launch_context: WorkspaceTerminalLaunchContext::Local(LocalTerminalLaunchPlan::new(
+                home_directory,
+            )),
+        }
+    }
+
     /// Creates a factory whose children consume channels from one Remote Workspace owner.
     ///
     /// `local_home` is only the local OpenSSH process working directory. The metadata directory is
@@ -291,11 +313,20 @@ impl WorkspaceTerminalSessionFactory {
         }
     }
 
-    pub(crate) const fn local_file_capabilities(&self) -> TerminalLocalFileCapabilities {
+    /// A server-backed Terminal Session's paths name the server's files, so they grant no local
+    /// file authority even when the server runs on this machine.
+    pub(crate) fn local_file_capabilities(&self) -> TerminalLocalFileCapabilities {
         match &self.launch_context {
-            WorkspaceTerminalLaunchContext::Local(_) => TerminalLocalFileCapabilities::Enabled,
-            WorkspaceTerminalLaunchContext::Remote(_) => TerminalLocalFileCapabilities::Disabled,
+            WorkspaceTerminalLaunchContext::Local(_) if !self.is_server_backed() => {
+                TerminalLocalFileCapabilities::Enabled
+            }
+            WorkspaceTerminalLaunchContext::Local(_)
+            | WorkspaceTerminalLaunchContext::Remote(_) => TerminalLocalFileCapabilities::Disabled,
         }
+    }
+
+    pub(crate) fn is_server_backed(&self) -> bool {
+        self.session_factory.is_server_backed()
     }
 
     pub(crate) const fn is_remote(&self) -> bool {

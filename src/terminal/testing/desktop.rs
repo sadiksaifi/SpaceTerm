@@ -341,6 +341,7 @@ pub(crate) struct TestTerminalSessionFactory {
     paste_response: Result<PasteRequestOutcome, String>,
     pending_paste_response: Option<async_channel::Receiver<Result<PasteRequestOutcome, String>>>,
     paste_resolution: Result<PasteResolution, String>,
+    server_backed: bool,
 }
 
 impl TestTerminalSessionFactory {
@@ -355,7 +356,14 @@ impl TestTerminalSessionFactory {
             paste_response: Ok(PasteRequestOutcome::Written),
             pending_paste_response: None,
             paste_resolution: Ok(PasteResolution::Written),
+            server_backed: false,
         }
+    }
+
+    /// Starts Terminal Sessions that report themselves as running in a SpaceTerm Server.
+    pub(crate) fn server_backed(mut self) -> Self {
+        self.server_backed = true;
+        self
     }
 
     pub(crate) fn with_fallback_title(mut self, title: impl Into<String>) -> Self {
@@ -472,6 +480,10 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
 
     fn fallback_title(&self) -> String {
         self.fallback_title.clone()
+    }
+
+    fn is_server_backed(&self) -> bool {
+        self.server_backed
     }
 }
 

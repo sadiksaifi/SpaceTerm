@@ -118,7 +118,7 @@ def package(release_tag=None):
         "--release",
         "--locked",
         "--package",
-        "spaceterm-server",
+        "spaceterm-server-host",
         "--no-default-features",
         binary="spaceterm-server",
         env=packaged_environment(release_tag),

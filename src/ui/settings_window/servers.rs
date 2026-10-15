@@ -13,7 +13,7 @@ use spaceterm_ui::{ProgressRing, ProgressSize, ProgressState};
 
 use super::SettingsWindow;
 use crate::application_identity::ApplicationIdentity;
-use crate::local_server::{LocalServer, ServerError};
+use crate::local_server::{AuthenticatedStatus, LocalServer, ServerError};
 use crate::ui::appearance::ChromeAppearance;
 use crate::ui::sidebar_window::form::{CaptionTone, action_button, badge};
 
@@ -22,6 +22,8 @@ pub(super) const PROGRESS_SELECTOR: &str = "settings-local-server-progress";
 pub(super) const CHECK_SELECTOR: &str = "settings-local-server-check";
 pub(super) const SET_UP_SELECTOR: &str = "settings-local-server-set-up";
 pub(super) const START_SELECTOR: &str = "settings-local-server-start";
+pub(super) const OPEN_DEVELOPMENT_PANE_SELECTOR: &str =
+    "settings-local-server-open-development-pane";
 
 /// The blocking local server operations the section runs on the background executor.
 pub(super) trait LocalServerControl: Send + Sync {
@@ -33,15 +35,11 @@ pub(super) trait LocalServerControl: Send + Sync {
 
 impl LocalServerControl for LocalServer {
     fn refresh(&self) -> Result<ServerConnection, ServerError> {
-        LocalServer::refresh(self).map(|status| ServerConnection {
-            protocol_major: status.protocol_major,
-        })
+        LocalServer::refresh(self).map(ServerConnection::from)
     }
 
     fn setup_and_start(&self) -> Result<ServerConnection, ServerError> {
-        LocalServer::setup_and_start(self).map(|status| ServerConnection {
-            protocol_major: status.protocol_major,
-        })
+        LocalServer::setup_and_start(self).map(ServerConnection::from)
     }
 }
 
@@ -49,6 +47,18 @@ impl LocalServerControl for LocalServer {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ServerConnection {
     pub(super) protocol_major: u16,
+    /// Whether the server said it runs the Development Pane's Terminal Session. A server that
+    /// predates terminal operations authenticates without saying so.
+    pub(super) development_pane: bool,
+}
+
+impl From<AuthenticatedStatus> for ServerConnection {
+    fn from(status: AuthenticatedStatus) -> Self {
+        Self {
+            protocol_major: status.protocol_major,
+            development_pane: status.development_pane,
+        }
+    }
 }
 
 /// The local server a Settings window presents. Every build offers one. `None` hides the Servers
@@ -117,12 +127,18 @@ pub(super) struct LocalServerPresentation {
     pub(super) action: Option<LocalServerAction>,
     /// Whether an action is running. The row shows progress and withholds its action meanwhile.
     pub(super) working: bool,
+    /// Whether the row offers Open Development Pane, which needs an authenticated server that
+    /// runs it.
+    pub(super) development_pane: bool,
 }
 
 /// Owns the offered server, the last status, and the pending operation.
 pub(super) struct LocalServerRow {
     control: Result<Arc<dyn LocalServerControl>, ServerError>,
     status: LocalServerStatus,
+    /// Whether this build offers the Development Pane: SpaceTerm Development with its developer
+    /// tools.
+    offers_development_pane: bool,
     /// Returns the background result to GPUI. Dropping the window drops it, and a late result then
     /// has nowhere to land.
     _operation: Option<Task<()>>,
@@ -133,8 +149,15 @@ impl LocalServerRow {
         Self {
             control,
             status: LocalServerStatus::NotChecked,
+            offers_development_pane: crate::ui::development_pane::offered(),
             _operation: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn offering_development_pane(mut self, offered: bool) -> Self {
+        self.offers_development_pane = offered;
+        self
     }
 
     #[cfg(test)]
@@ -152,6 +175,17 @@ impl LocalServerRow {
         if self.control.is_err() {
             presentation.action = None;
         }
+        // Opening never sets up or starts the server, so it waits for a successful check. A
+        // server that does not run the Development Pane is offered no terminal operation.
+        presentation.development_pane = self.offers_development_pane
+            && self.control.is_ok()
+            && matches!(
+                status,
+                LocalServerStatus::Connected(ServerConnection {
+                    development_pane: true,
+                    ..
+                })
+            );
         presentation
     }
 }
@@ -224,6 +258,7 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
         tone,
         action,
         working,
+        development_pane: false,
     }
 }
 
@@ -272,6 +307,28 @@ fn failure(error: ServerError) -> (&'static str, &'static str, Option<LocalServe
         ServerError::Protocol => (
             "Protocol Error",
             "settings-local-server-state-protocol-error",
+            Some(Action::Check),
+        ),
+        // Terminal Session refusals reach this row only through a check, which another check
+        // answers afresh.
+        ServerError::Controlled => (
+            "In Use",
+            "settings-local-server-state-controlled",
+            Some(Action::Check),
+        ),
+        ServerError::SessionUnavailable | ServerError::StaleControl => (
+            "Unavailable",
+            "settings-local-server-state-session-unavailable",
+            Some(Action::Check),
+        ),
+        ServerError::Unsupported => (
+            "Unsupported",
+            "settings-local-server-state-unsupported",
+            Some(Action::Check),
+        ),
+        ServerError::CleanupUnresolved => (
+            "Cleanup Unresolved",
+            "settings-local-server-state-cleanup-unresolved",
             Some(Action::Check),
         ),
     }
@@ -357,6 +414,14 @@ impl SettingsWindow {
                 },
             )
         });
+        let development_pane = presentation.development_pane.then(|| {
+            action_button(
+                OPEN_DEVELOPMENT_PANE_SELECTOR,
+                "Open Development Pane",
+                true,
+                |_, cx| crate::ui::development_pane::open_or_activate(cx),
+            )
+        });
         div()
             .debug_selector(|| CONTROL_SELECTOR.to_owned())
             .flex()
@@ -365,6 +430,7 @@ impl SettingsWindow {
             .gap(appearance.spacing(8.0))
             .child(state)
             .children(action)
+            .children(development_pane)
             .into_any_element()
     }
 }
@@ -427,8 +493,22 @@ pub(super) mod testing {
         }
     }
 
+    /// A server that runs the Development Pane.
     pub(in crate::ui::settings_window) const fn connected(protocol_major: u16) -> ServerConnection {
-        ServerConnection { protocol_major }
+        ServerConnection {
+            protocol_major,
+            development_pane: true,
+        }
+    }
+
+    /// A server from before terminal operations, which authenticates and offers status only.
+    pub(in crate::ui::settings_window) const fn status_only(
+        protocol_major: u16,
+    ) -> ServerConnection {
+        ServerConnection {
+            protocol_major,
+            development_pane: false,
+        }
     }
 }
 

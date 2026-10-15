@@ -1,4 +1,4 @@
-//! Length-prefixed JSON, bounded to 8 KiB per frame and five seconds per connection.
+//! Length-prefixed JSON with bounded frames and absolute exchange deadlines.
 //! Signatures cover both advertisements, the selected major, both nonces, and both identities.
 use std::io::{Read, Write};
 use std::os::{fd::AsRawFd, unix::net::UnixStream};
@@ -79,9 +79,10 @@ fn verify(public: &[u8; 32], message: &[u8], signature: &[u8]) -> Result<(), Ser
         .map_err(|_| ServerError::AuthenticationRefused)
 }
 
-struct Wire<'a> {
+pub(crate) struct Wire<'a> {
     stream: &'a mut UnixStream,
     deadline: Instant,
+    max_frame: usize,
 }
 impl<'a> Wire<'a> {
     fn new(stream: &'a mut UnixStream) -> Result<Self, ServerError> {
@@ -91,7 +92,14 @@ impl<'a> Wire<'a> {
         Ok(Self {
             stream,
             deadline: Instant::now() + CONNECTION_LIMIT,
+            max_frame: MAX_FRAME,
         })
+    }
+    pub(crate) fn terminal(stream: &'a mut UnixStream) -> Result<Self, ServerError> {
+        let mut wire = Self::new(stream)?;
+        wire.max_frame = crate::pane::MAX_TERMINAL_FRAME;
+        wire.deadline = Instant::now() + Duration::from_secs(10);
+        Ok(wire)
     }
     fn ready(&self, events: libc::c_short) -> Result<(), ServerError> {
         loop {
@@ -146,20 +154,20 @@ impl<'a> Wire<'a> {
         }
         Ok(())
     }
-    fn read<T: DeserializeOwned>(&mut self) -> Result<T, ServerError> {
+    pub(crate) fn read<T: DeserializeOwned>(&mut self) -> Result<T, ServerError> {
         let mut size = [0; 4];
         self.read_exact(&mut size)?;
         let size = u32::from_be_bytes(size) as usize;
-        if size > MAX_FRAME {
+        if size > self.max_frame {
             return Err(ServerError::Protocol);
         }
         let mut bytes = vec![0; size];
         self.read_exact(&mut bytes)?;
         serde_json::from_slice(&bytes).map_err(|_| ServerError::Protocol)
     }
-    fn write(&mut self, value: &impl Serialize) -> Result<(), ServerError> {
+    pub(crate) fn write(&mut self, value: &impl Serialize) -> Result<(), ServerError> {
         let bytes = serde_json::to_vec(value).map_err(|_| ServerError::Protocol)?;
-        if bytes.len() > MAX_FRAME {
+        if bytes.len() > self.max_frame {
             return Err(ServerError::Protocol);
         }
         let frame = [&(bytes.len() as u32).to_be_bytes()[..], &bytes].concat();
@@ -187,11 +195,20 @@ impl<'a> Wire<'a> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn authenticate_server(
     stream: &mut UnixStream,
     server: &Ed25519KeyPair,
     paired: &[[u8; 32]],
 ) -> Result<AuthenticatedStatus, ServerError> {
+    authenticate_server_device(stream, server, paired).map(|(status, _)| status)
+}
+
+pub(crate) fn authenticate_server_device(
+    stream: &mut UnixStream,
+    server: &Ed25519KeyPair,
+    paired: &[[u8; 32]],
+) -> Result<(AuthenticatedStatus, [u8; 32]), ServerError> {
     let mut wire = Wire::new(stream)?;
     let hello: Hello = wire.read()?;
     if hello.versions.is_empty() || hello.versions.len() > 2 || !paired.contains(&hello.device) {
@@ -228,9 +245,13 @@ pub(crate) fn authenticate_server(
             .as_ref()
             .to_vec(),
     })?;
-    Ok(AuthenticatedStatus {
-        protocol_major: selected,
-    })
+    Ok((
+        AuthenticatedStatus {
+            protocol_major: selected,
+            development_pane: false,
+        },
+        hello.device,
+    ))
 }
 
 #[cfg_attr(
@@ -281,6 +302,7 @@ pub(crate) fn authenticate_client(
     )?;
     Ok(AuthenticatedStatus {
         protocol_major: challenge.offer.selected,
+        development_pane: false,
     })
 }
 
@@ -303,10 +325,12 @@ mod tests {
                 (result, thread.join().unwrap()),
                 (
                     Ok(AuthenticatedStatus {
-                        protocol_major: major
+                        protocol_major: major,
+                        development_pane: false
                     }),
                     Ok(AuthenticatedStatus {
-                        protocol_major: major
+                        protocol_major: major,
+                        development_pane: false
                     })
                 )
             );

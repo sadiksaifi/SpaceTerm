@@ -79,7 +79,7 @@ def stage_bundle(executable, server_executable):
 def launch():
     server = build_executable(
         "--package",
-        "spaceterm-server",
+        "spaceterm-server-host",
         "--no-default-features",
         "--locked",
         binary="spaceterm-server",

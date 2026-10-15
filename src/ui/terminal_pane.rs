@@ -335,6 +335,8 @@ struct PaneTerminalSessionLifecycle {
     /// The newest Terminal Metadata from Screens or the Terminal Session's retained snapshot.
     metadata: Option<Arc<crate::terminal::metadata::TerminalMetadataSnapshot>>,
     remote_connection_generation: Option<u64>,
+    /// The Terminal Session takes no input because its Control Connection or server connection is
+    /// lost.
     remote_input_blocked: bool,
     remote_restart_start_pending: bool,
     native_service_session_identity: u64,
@@ -349,8 +351,10 @@ impl PaneTerminalSessionLifecycle {
         prepared_launch: Option<PreparedWorkspaceTerminalLaunch>,
     ) -> Self {
         Self {
+            // A server-backed launch plan names no directory the shell actually starts in.
             current_directory: prepared_launch
                 .as_ref()
+                .filter(|_| !session_factory.is_server_backed())
                 .map(PreparedWorkspaceTerminalLaunch::starting_directory),
             local_file_capabilities: session_factory.local_file_capabilities(),
             session_factory,
@@ -1515,6 +1519,13 @@ impl TerminalPane {
         }
     }
 
+    /// Whether the shell runs in a SpaceTerm Server. Its Terminal Session supports screen
+    /// presentation, keys, and resize only, so the Pane neither offers nor performs Selection,
+    /// Copy, Paste, file drops, Terminal Find, Scrollback, links, or pointer input.
+    fn server_backed(&self) -> bool {
+        self.terminal_session.session_factory.is_server_backed()
+    }
+
     fn terminal_session_available(&self) -> bool {
         self.terminal_session.session.is_some()
             && !self.terminal_session.remote_input_blocked
@@ -1637,6 +1648,37 @@ impl TerminalPane {
             cx.emit(TerminalPaneEvent::CaptionChanged);
         }
         self.sync_repository_status(cx);
+        cx.notify();
+    }
+
+    /// Pauses or resumes input while a server-backed Pane's server connection is interrupted. The
+    /// Terminal Session and its last Screen stay in place, so the screen reads frozen. Input during
+    /// the interruption reaches nothing and is never replayed.
+    #[cfg(feature = "developer-tools")]
+    pub(crate) fn set_server_connection_interrupted(
+        &mut self,
+        interrupted: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.terminal_session.session_factory.is_server_backed()
+            || self.terminal_session.remote_input_blocked == interrupted
+        {
+            return;
+        }
+        let was_available = self.terminal_session_available();
+        self.terminal_session.remote_input_blocked = interrupted;
+        if interrupted {
+            self.reset_hidden_input();
+            self.context_menu = None;
+            self.pressed_button = None;
+            self.selection_copy_pending = false;
+            self.pressed_link = None;
+        }
+        let _ = self.sync_terminal_input_focus(window, cx);
+        if was_available != self.terminal_session_available() {
+            cx.emit(TerminalPaneEvent::CaptionChanged);
+        }
         cx.notify();
     }
 
@@ -2745,6 +2787,11 @@ impl TerminalPane {
         if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
+        // A server-backed Terminal Session takes keys and resize only, so a press just focuses.
+        if self.server_backed() {
+            cx.stop_propagation();
+            return;
+        }
         let Some(button) = pointer_button(event.button) else {
             return;
         };
@@ -2842,6 +2889,9 @@ impl TerminalPane {
             return;
         }
         self.pointer_modifiers = input_modifiers(event.modifiers);
+        if self.server_backed() {
+            return;
+        }
         let dragging = self.pressed_button.is_some();
         let Some(position) = self.surface_position(event.position, dragging) else {
             return;
@@ -2960,6 +3010,9 @@ impl TerminalPane {
     ) {
         if self.context_menu.is_some() {
             cx.stop_propagation();
+            return;
+        }
+        if self.server_backed() {
             return;
         }
         let Some(position) = self.surface_position(event.position, false) else {
@@ -3324,7 +3377,8 @@ impl TerminalPane {
     }
 
     fn context_menu_available(&self) -> bool {
-        matches!(self.pane_state, PaneTerminalState::Running)
+        !self.server_backed()
+            && matches!(self.pane_state, PaneTerminalState::Running)
             && self.product_focus.active_workspace
             && self.product_focus.active_tab
             && self.product_focus.focused_pane
@@ -4802,31 +4856,36 @@ impl Render for TerminalPane {
             .when(active_hovered_link.is_some(), |root| root.cursor_pointer())
             .key_context(key_context)
             .track_focus(&self.focus_handle);
+        // A server-backed Pane registers no handler for an operation its Terminal Session lacks, so
+        // menus and shortcuts present that operation as unavailable.
+        let local_operations = !self.server_backed();
         self.accessibility_element
             .decorate(pane_root)
-            .on_action(cx.listener(Self::copy_selection))
-            .on_action(cx.listener(Self::edit_copy))
-            .on_action(cx.listener(Self::paste_clipboard))
-            .on_action(cx.listener(Self::paste_selection))
-            .on_action(cx.listener(Self::edit_paste))
+            .when(local_operations, |root| {
+                root.on_action(cx.listener(Self::copy_selection))
+                    .on_action(cx.listener(Self::edit_copy))
+                    .on_action(cx.listener(Self::paste_clipboard))
+                    .on_action(cx.listener(Self::paste_selection))
+                    .on_action(cx.listener(Self::edit_paste))
+                    .on_drop(cx.listener(Self::insert_dropped_files))
+                    .on_action(cx.listener(Self::set_up_permission_request))
+                    .on_action(cx.listener(Self::decline_permission_request_action))
+                    .on_action(cx.listener(Self::clear_screen_and_scrollback))
+                    .on_action(cx.listener(Self::scroll_page_up))
+                    .on_action(cx.listener(Self::scroll_page_down))
+                    .on_action(cx.listener(Self::scroll_to_top))
+                    .on_action(cx.listener(Self::scroll_to_bottom))
+                    .on_action(cx.listener(Self::open_find))
+                    .on_action(cx.listener(Self::find_next))
+                    .on_action(cx.listener(Self::find_previous))
+                    .on_action(cx.listener(Self::close_find))
+                    .on_action(cx.listener(Self::show_repository_status))
+            })
             .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::export_diagnostics))
-            .on_drop(cx.listener(Self::insert_dropped_files))
-            .on_action(cx.listener(Self::set_up_permission_request))
-            .on_action(cx.listener(Self::decline_permission_request_action))
             .on_action(cx.listener(Self::increase_font_size))
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
-            .on_action(cx.listener(Self::clear_screen_and_scrollback))
-            .on_action(cx.listener(Self::scroll_page_up))
-            .on_action(cx.listener(Self::scroll_page_down))
-            .on_action(cx.listener(Self::scroll_to_top))
-            .on_action(cx.listener(Self::scroll_to_bottom))
-            .on_action(cx.listener(Self::open_find))
-            .on_action(cx.listener(Self::find_next))
-            .on_action(cx.listener(Self::find_previous))
-            .on_action(cx.listener(Self::close_find))
-            .on_action(cx.listener(Self::show_repository_status))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_key_up(cx.listener(Self::on_key_up))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))

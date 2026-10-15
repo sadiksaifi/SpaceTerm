@@ -80,3 +80,6 @@ pub fn native_pty_factory() -> std::sync::Arc<dyn NativePtyAdapterFactory> {
 pub fn local_filesystem() -> LocalFilesystemAuthority {
     crate::platform::runtime_local_filesystem()
 }
+
+mod server;
+pub use server::DevelopmentPaneHost;
