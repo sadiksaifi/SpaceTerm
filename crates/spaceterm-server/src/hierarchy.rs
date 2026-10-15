@@ -126,6 +126,9 @@ pub struct Tab {
     /// Saved membership, retained even when Git no longer lists the directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<PathBuf>,
+    /// Main Worktree discovery locator for this membership, revalidated after each boot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_repository: Option<PathBuf>,
     pub id: Id,
     pub root_pane: Id,
     pub panes: Vec<Pane>,
@@ -274,6 +277,7 @@ impl State {
                     root_tab: org.tab,
                     tabs: vec![Tab {
                         worktree: None,
+                        worktree_repository: None,
                         id: org.tab,
                         root_pane: org.pane,
                         panes: vec![Pane {
@@ -455,6 +459,7 @@ impl State {
                     root_tab: tab,
                     tabs: vec![Tab {
                         worktree: None,
+                        worktree_repository: None,
                         id: tab,
                         root_pane: pane,
                         panes: vec![Pane {
@@ -500,6 +505,7 @@ impl State {
                 let pane = new_id()?;
                 w.tabs.push(Tab {
                     worktree: None,
+                    worktree_repository: None,
                     id,
                     root_pane: pane,
                     panes: vec![Pane {
@@ -689,6 +695,10 @@ impl State {
             for t in &w.tabs {
                 if t.id == [0; 32]
                     || t.worktree.as_ref().is_some_and(|p| !valid_path(p))
+                    || t.worktree_repository
+                        .as_ref()
+                        .is_some_and(|p| !valid_path(p))
+                    || (t.worktree_repository.is_some() && t.worktree.is_none())
                     || !ids.insert(t.id)
                     || !t.panes.iter().any(|p| p.id == t.root_pane)
                 {

@@ -171,6 +171,72 @@ fn shared_git_reads_publish_external_changes_to_two_clients_and_retain_worktree_
 }
 
 #[test]
+fn a_deleted_sole_worktree_rediscovers_its_repository_after_restart() {
+    use spaceterm_server::{hierarchy::State, repository::WorktreeInventory};
+    let git = GitFixture::new();
+    let tree = git.0.join("linked");
+    git.git(&["worktree", "add", "-b", "feature", tree.to_str().unwrap()]);
+    let mut prototype = host();
+    prototype.directory = tree.clone();
+    let mut host = SharedWorkspaceHost::new(prototype);
+    create_shared(&mut host, 1);
+    let inventory = git_facts(&mut host, &tree, |facts| facts.worktrees.is_some());
+    let saved_tab = inventory.workspaces[0].tabs[0].clone();
+    let mut state = State::empty();
+    state.inventory = inventory;
+    // Exercise the actual retained serialization, with no live repository facts at restore.
+    let bytes = serde_json::to_vec(&state.envelope(&git.0).unwrap()).unwrap();
+    host.shutdown().unwrap();
+    std::fs::remove_dir_all(&tree).unwrap();
+    let mut restored = State::from_legacy(&serde_json::from_slice(&bytes).unwrap());
+    restored.begin_boot([9; 32]);
+    assert!(restored.inventory.repositories.is_none());
+    let mut repositories = super::repositories::ServerRepositories::new([9; 32]);
+    repositories.subscribe([1; 32]);
+    let mut wait_for = |predicate: &dyn Fn(&WorktreeInventory) -> bool| {
+        let until = Instant::now() + Duration::from_secs(12);
+        loop {
+            repositories.update(&mut restored);
+            if repositories.snapshot().directories.iter().any(|facts| {
+                facts.directory == git.0
+                    && facts.failure.is_none()
+                    && facts.worktrees.as_ref().is_some_and(predicate)
+            }) {
+                break;
+            }
+            assert!(
+                Instant::now() < until,
+                "restored repository was not rediscovered"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    wait_for(&|list| {
+        list.worktrees
+            .iter()
+            .any(|record| record.root == tree && record.missing)
+    });
+    let extra = git.0.join("external");
+    git.git(&["worktree", "add", "-b", "external", extra.to_str().unwrap()]);
+    wait_for(&|list| list.worktrees.iter().any(|record| record.root == extra));
+    git.git(&["worktree", "prune"]);
+    wait_for(&|list| {
+        !list.worktrees.iter().any(|record| record.root == tree)
+            && list.worktrees.iter().any(|record| record.root == extra)
+    });
+    assert_eq!(restored.inventory.workspaces.len(), 1);
+    let tabs = &restored.inventory.workspaces[0].tabs;
+    assert_eq!(tabs.len(), 1);
+    assert_eq!(tabs[0].id, saved_tab.id);
+    assert_eq!(tabs[0].root_pane, saved_tab.root_pane);
+    assert_eq!(tabs[0].worktree.as_ref(), Some(&tree));
+    assert_eq!(tabs[0].worktree_repository.as_ref(), Some(&git.0));
+    assert!(tabs[0].panes.iter().all(|pane| pane.creator.is_none()));
+    assert!(!tree.exists());
+    repositories.shutdown();
+}
+
+#[test]
 fn abandoned_server_git_reads_cancel_on_disconnect_and_stop_without_losing_tabs() {
     for stop in [false, true] {
         let git = GitFixture::new();
@@ -290,9 +356,24 @@ fn an_unpinned_root_tab_follows_entering_and_leaving_git_without_moving_other_ta
     );
     assert_eq!(
         tabs.iter()
+            .find(|tab| tab.id == root_id)
+            .unwrap()
+            .worktree_repository,
+        None
+    );
+    assert_eq!(
+        tabs.iter()
             .find(|tab| tab.id == other_id)
             .unwrap()
             .worktree
+            .as_ref(),
+        Some(&git.0)
+    );
+    assert_eq!(
+        tabs.iter()
+            .find(|tab| tab.id == other_id)
+            .unwrap()
+            .worktree_repository
             .as_ref(),
         Some(&git.0)
     );

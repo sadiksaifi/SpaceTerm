@@ -15,8 +15,8 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-// Covers the hierarchy bounds with two 4096-byte paths per Pane, Workspace pins, and 32
-// retained edits, including JSON escaping. Inventory also fits the 16 MiB transport bound.
+// Bound retained hierarchy and edit records independently of live repository snapshots.
+// The authenticated transport also enforces its own 16 MiB frame limit.
 const MAX_RECORD: usize = 12 * 1024 * 1024;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -491,6 +491,7 @@ mod tests {
                 root_tab: [2; 32],
                 tabs: vec![Tab {
                     worktree: None,
+                    worktree_repository: None,
                     id: [2; 32],
                     root_pane: [3; 32],
                     panes: vec![Pane {

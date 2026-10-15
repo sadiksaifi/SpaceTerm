@@ -52,6 +52,18 @@ fn mutate(connection: &mut PaneConnection, mutation: Mutation) -> Result<Id, Box
     connection.exchange(&Request::Acknowledge { sequence })?;
     Ok(target)
 }
+fn close(connection: &mut PaneConnection, target: CloseTarget) -> Result<(), Box<dyn Error>> {
+    let current = inventory(connection)?.0;
+    let confirmation = current.close_confirmation(target).ok_or("close target")?;
+    mutate(
+        connection,
+        Mutation::Close {
+            target,
+            confirmation,
+        },
+    )?;
+    Ok(())
+}
 fn await_facts(
     connection: &mut PaneConnection,
     directory: &Path,
@@ -216,6 +228,41 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     await_facts(&mut first, &linked, changes)?;
     await_facts(&mut second, &linked, changes)?;
+    // Leave only one Tab rooted in the linked Worktree. After it disappears, a fresh host
+    // must use its retained locator rather than another Workspace or a live snapshot.
+    mutate(
+        &mut first,
+        Mutation::PinWorkspace {
+            workspace,
+            version: 1,
+            directory: Some(linked.clone()),
+        },
+    )?;
+    let tab = mutate(&mut first, Mutation::CreateTab { workspace })?;
+    let current = inventory(&mut first)?.0;
+    for other in &current
+        .workspaces
+        .iter()
+        .find(|w| w.id == workspace)
+        .ok_or("Workspace")?
+        .tabs
+    {
+        if other.id != tab {
+            close(
+                &mut first,
+                CloseTarget::Tab {
+                    workspace,
+                    tab: other.id,
+                },
+            )?;
+        }
+    }
+    close(
+        &mut first,
+        CloseTarget::Workspace {
+            workspace: inactive,
+        },
+    )?;
     std::fs::remove_dir_all(&linked)?;
     let missing = |f: &DirectoryFacts| {
         f.worktrees
@@ -248,20 +295,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             .ok_or("retained Tab")?
             .worktree
             .as_ref(),
-        Some(&repository.0)
+        Some(&linked)
     );
-    for workspace in [workspace, inactive] {
-        let current = inventory(&mut first)?.0;
-        let target = CloseTarget::Workspace { workspace };
-        let confirmation = current.close_confirmation(target).ok_or("close target")?;
-        mutate(
-            &mut first,
-            Mutation::Close {
-                target,
-                confirmation,
-            },
-        )?;
-    }
+    assert!(!linked.exists());
+    close(&mut first, CloseTarget::Workspace { workspace })?;
     first.exchange(&Request::Shutdown)?;
     restarted.0.wait()?;
     println!(

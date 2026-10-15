@@ -92,6 +92,9 @@ impl ServerRepositories {
                 if let Some(root) = &tab.worktree {
                     sources.insert(root.clone());
                 }
+                if let Some(locator) = &tab.worktree_repository {
+                    sources.insert(locator.clone());
+                }
             }
             if let Some(directory) = workspace_directory(workspace) {
                 sources.insert(directory.to_owned());
@@ -223,6 +226,21 @@ fn reconcile_membership(state: &mut State, snapshot: &Snapshot) -> bool {
             // Membership belongs to the saved Tab, not its focused Pane or a later cd in any
             // non-Root Tab. Only the unpinned Root Tab follows the Workspace's directory.
             if tab.worktree.is_some() && !(follows_root && tab.id == workspace.root_tab) {
+                // Older Development records gain a locator without changing saved membership.
+                if let Some(main) = snapshot.directories.iter().find_map(|facts| {
+                    let list = facts
+                        .worktrees
+                        .as_ref()
+                        .filter(|_| facts.failure.is_none())?;
+                    list.worktrees
+                        .iter()
+                        .any(|record| Some(&record.root) == tab.worktree.as_ref())
+                        .then_some(&list.main_root)
+                }) && tab.worktree_repository.as_ref() != Some(main)
+                {
+                    tab.worktree_repository = Some(main.clone());
+                    changed = true;
+                }
                 continue;
             }
             // Outside is authoritative only after a successful read. Pending reads and
@@ -242,6 +260,7 @@ fn reconcile_membership(state: &mut State, snapshot: &Snapshot) -> bool {
                     })
             {
                 changed |= tab.worktree.take().is_some();
+                changed |= tab.worktree_repository.take().is_some();
                 continue;
             }
             let current = tab
@@ -255,11 +274,15 @@ fn reconcile_membership(state: &mut State, snapshot: &Snapshot) -> bool {
                         .then_some(workspace_current)
                         .flatten()
                 });
-            if let Some(current) = current
-                && tab.worktree.as_deref() != Some(current)
-            {
-                tab.worktree = Some(current.to_owned());
-                changed = true;
+            if let Some((root, main)) = current {
+                if tab.worktree.as_deref() != Some(root) {
+                    tab.worktree = Some(root.to_owned());
+                    changed = true;
+                }
+                if tab.worktree_repository.as_deref() != Some(main) {
+                    tab.worktree_repository = Some(main.to_owned());
+                    changed = true;
+                }
             }
         }
     }
@@ -268,14 +291,15 @@ fn reconcile_membership(state: &mut State, snapshot: &Snapshot) -> bool {
     }
     changed
 }
-fn current_worktree<'a>(snapshot: &'a Snapshot, directory: &Path) -> Option<&'a Path> {
+fn current_worktree<'a>(snapshot: &'a Snapshot, directory: &Path) -> Option<(&'a Path, &'a Path)> {
     let facts = snapshot
         .directories
         .iter()
         .find(|facts| facts.directory == directory && facts.failure.is_none())?;
     let list = facts.worktrees.as_ref()?;
     let record = list.worktrees.get(list.current?)?;
-    (!record.missing && record.head != WorktreeHead::Bare).then_some(record.root.as_path())
+    (!record.missing && record.head != WorktreeHead::Bare)
+        .then_some((record.root.as_path(), list.main_root.as_path()))
 }
 /// Existing readers already bound their parsers and honor cancellation. This adapter also gives
 /// every server read a deadline, including filters and fsmonitor helpers under account Git config.
