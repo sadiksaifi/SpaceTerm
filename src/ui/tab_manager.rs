@@ -3082,6 +3082,51 @@ impl TabManager {
         cx.notify();
     }
 
+    pub(crate) fn shared_arrangement(
+        &self,
+        cx: &App,
+    ) -> Option<spaceterm_server::client_view::WorkspaceView> {
+        use spaceterm_server::client_view::{TabView, WorkspaceView};
+        let shared = self.shared.as_ref()?;
+        let tabs = self
+            .tabs
+            .iter()
+            .map(|(id, view)| {
+                Some(TabView {
+                    tab: shared.server_tab(id)?,
+                    layout: view.read(cx).shared_layout()?,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(WorkspaceView {
+            workspace: shared.workspace(),
+            tabs,
+        })
+    }
+
+    pub(crate) fn restore_shared_arrangement(
+        &mut self,
+        saved: &spaceterm_server::client_view::WorkspaceView,
+        workspace: &spaceterm_server::hierarchy::Workspace,
+        cx: &mut Context<Self>,
+    ) {
+        let saved = saved.reconcile(workspace);
+        for (position, tab) in saved.tabs.iter().enumerate() {
+            let Some(id) = self
+                .shared
+                .as_ref()
+                .and_then(|shared| shared.local_tab(tab.tab))
+            else {
+                continue;
+            };
+            let _ = self.tabs.move_tab(id, position);
+            if let Some(view) = self.tabs.tab(id) {
+                view.update(cx, |view, cx| view.restore_shared_layout(&tab.layout, cx));
+            }
+        }
+        cx.notify();
+    }
+
     /// Adds the Tabs the server published that this strip does not present yet, then reconciles
     /// each Tab's Panes. A new Tab joins at the end of the strip and never takes the Active Tab.
     pub(crate) fn reconcile_shared(
@@ -3155,14 +3200,20 @@ impl TabManager {
             if let Some(shared) = self.shared.as_mut() {
                 shared.forget(tab_id);
             }
+            let own = removal == super::shared_workspaces::SharedRemoval::OwnClose;
+            let held_keyboard = self
+                .tabs
+                .tab(tab_id)
+                .is_some_and(|view| view.read(cx).holds_keyboard(window, cx));
             // Closing the final Tab closes its Workspace, as an ordinary final close does. Only
             // this client's own close opens the Tab that takes its place.
-            self.close_tab_activating(
-                tab_id,
-                removal == super::shared_workspaces::SharedRemoval::OwnClose,
-                window,
-                cx,
-            );
+            self.close_tab_activating(tab_id, own, window, cx);
+            // Another client's close asks the server for no Pane here, but the keyboard that was
+            // in the Tab it removed still needs a place, so it rests in the Active Tab's Focused
+            // Pane without selecting it. Typing anywhere else stays where it is.
+            if !own && held_keyboard && !self.close_workspace_requested {
+                self.focus(window, cx);
+            }
             removed = true;
         }
         removed
@@ -3283,6 +3334,13 @@ impl TabManager {
         if let Some(shared) = self.shared.as_mut() {
             shared.forget(tab_id);
         }
+    }
+
+    /// Whether the keyboard rests in one of this strip's Tabs or their Panes.
+    pub(crate) fn holds_keyboard(&self, window: &Window, cx: &App) -> bool {
+        self.tabs
+            .iter()
+            .any(|(_, view)| view.read(cx).holds_keyboard(window, cx))
     }
 
     /// The server identity of one shared Tab this strip presents.
