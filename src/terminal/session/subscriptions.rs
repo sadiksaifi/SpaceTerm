@@ -39,7 +39,7 @@ impl TerminalEventPublisher {
         let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
         state.events.close();
         state.events = events.clone();
-        if state.stopped {
+        if state.stopped || state.finished.is_some() {
             if let Some(screen) = &state.screen {
                 let _ = events.try_send(TerminalSessionEvent::Screen(Arc::clone(screen)));
             }
@@ -112,5 +112,36 @@ pub(super) struct WorkerEventLifetime(pub(super) TerminalEventPublisher);
 impl Drop for WorkerEventLifetime {
     fn drop(&mut self) {
         self.0.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replacement_replays_completion_before_worker_teardown_closes_the_publisher() {
+        let (events, _receiver) = async_channel::bounded(2);
+        let publisher = TerminalEventPublisher::from(events);
+        let screen = ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix);
+        publisher
+            .force_send(TerminalSessionEvent::Screen(Arc::clone(&screen)))
+            .unwrap();
+        publisher
+            .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
+            .unwrap();
+
+        // A subscriber can replace its channel after final publication but before worker teardown.
+        let (replacement, _) = publisher.subscribe();
+        publisher.close();
+
+        assert!(
+            matches!(replacement.try_recv(), Ok(TerminalSessionEvent::Screen(actual)) if Arc::ptr_eq(&actual, &screen))
+        );
+        assert!(matches!(
+            replacement.try_recv(),
+            Ok(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
+        ));
+        assert!(replacement.try_recv().is_err());
     }
 }
