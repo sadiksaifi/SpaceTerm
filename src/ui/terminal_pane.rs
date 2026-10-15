@@ -1682,6 +1682,63 @@ impl TerminalPane {
         cx.notify();
     }
 
+    /// Forgets everything a server-backed Pane presented, because another client took control of
+    /// its Terminal Session. The Terminal Session handle stays, so a later grant presents only
+    /// Screens the server publishes after it. The former screen, title, metadata, accessible text,
+    /// and cached frames are gone, and the next measurement supplies dimensions again.
+    #[cfg(feature = "developer-tools")]
+    pub(crate) fn clear_server_presentation(&mut self, cx: &mut Context<Self>) {
+        if !self.server_backed() {
+            return;
+        }
+        let update = crate::terminal::TerminalAppearanceUpdate::new(
+            self.appearance.generation,
+            Arc::clone(&self.appearance.terminal),
+        );
+        let mut cleared =
+            (*ScreenSnapshot::empty_with_appearance(self.file_insertion.paths, &update)).clone();
+        // Keep the accepted generation, so a Screen the server published before this call stays
+        // older than every Screen of a later grant.
+        if let Some(generation) = self.terminal_session.accepted_screen_generation {
+            cleared.generation = generation;
+        }
+        let cleared = Arc::new(cleared);
+        self.screen = Arc::clone(&cleared);
+        self.screen_session_epoch = self.terminal_session.session_epoch;
+        self.last_valid_screen = Arc::clone(&cleared);
+        self.last_valid_screen_session_epoch = self.terminal_session.session_epoch;
+        self.terminal_session.metadata = None;
+        self.accessibility = Arc::new(TerminalAccessibilityModel::from_screen(&cleared));
+        self.pending_accessibility = None;
+        self.pending_accessibility_notifications
+            .insert(AccessibilityNotification::Value);
+        self.pending_accessibility_notifications
+            .insert(AccessibilityNotification::Selection);
+        self.accessibility_needs_presentation = true;
+        self.end_find_state();
+        self.cancel_pending_paste();
+        self.context_menu = None;
+        self.file_preview.dismiss();
+        self.hovered_link = None;
+        self.pressed_link = None;
+        self.pressed_button = None;
+        self.selection_copy_pending = false;
+        self.ime.cancel();
+        self.invalidate_preedit_layout();
+        self.reset_hidden_input();
+        self.evict_presentation_resources(cx);
+        self.last_geometry = None;
+        self.render_lifecycle.reset_session_presentations();
+        let _ = self.render_lifecycle.observe_snapshot(cleared.generation);
+        self.sync_scrollbar(cx);
+        if self.title != self.fallback_title {
+            self.title = self.fallback_title.clone();
+            cx.emit(TerminalPaneEvent::TitleChanged(self.title.clone()));
+        }
+        cx.emit(TerminalPaneEvent::CaptionChanged);
+        cx.notify();
+    }
+
     fn suspend_if_terminal_session_channel_unavailable(&mut self, cx: &mut Context<Self>) -> bool {
         if self
             .terminal_session

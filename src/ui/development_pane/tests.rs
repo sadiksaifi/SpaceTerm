@@ -9,6 +9,7 @@ use gpui::{Modifiers, TestAppContext, VisualTestContext, WeakEntity};
 use super::window::testing::ScriptedConnection;
 use super::window::{
     DevelopmentPaneWindow, END_SESSION_SELECTOR, NOTICE_SELECTOR, RETRY_SELECTOR, STATUS_INTERVAL,
+    TAKE_OVER_SELECTOR, TAKE_OVER_STATUS_SELECTOR, TAKEOVER_SELECTOR, TERMINAL_SELECTOR,
     TERMINAL_TITLE_SELECTOR, WINDOW_TITLE,
 };
 use crate::appearance::Appearance;
@@ -30,6 +31,7 @@ struct OpenPane<'a> {
     window: WeakEntity<DevelopmentPaneWindow>,
     connection: Arc<ScriptedConnection>,
     records: TestTerminalSessionRecords,
+    screen_generation: u64,
     cx: &'a mut VisualTestContext,
 }
 
@@ -70,6 +72,7 @@ fn open_pane(status: DevelopmentPaneStatus, cx: &mut TestAppContext) -> OpenPane
         window: window.downgrade(),
         connection,
         records,
+        screen_generation: 0,
         cx,
     }
 }
@@ -85,6 +88,41 @@ impl OpenPane<'_> {
         self.connection.reconnect();
         self.cx.executor().advance_clock(STATUS_INTERVAL);
         self.cx.run_until_parked();
+    }
+
+    /// Another client takes control of the Pane.
+    fn lose_control(&mut self) {
+        self.connection.lose_control();
+        self.cx.executor().advance_clock(STATUS_INTERVAL);
+        self.cx.run_until_parked();
+    }
+
+    /// The shell publishes a screen with this title, as the server does while this client
+    /// controls the Pane.
+    fn publish_title(&mut self, title: &str) {
+        use crate::terminal::{ScreenSnapshot, TerminalSessionEvent};
+
+        self.screen_generation += 1;
+        let screen = ScreenSnapshot::from_test_parts_at(
+            Arc::from([]),
+            Default::default(),
+            title,
+            self.screen_generation,
+        );
+        self.records
+            .event_sender(1)
+            .expect("the Pane started")
+            .try_send(TerminalSessionEvent::Screen(screen))
+            .expect("the Pane receives its screen");
+        self.cx.run_until_parked();
+    }
+
+    fn resizes(&self) -> usize {
+        self.records
+            .commands()
+            .iter()
+            .filter(|call| matches!(call.command, RecordedCommand::Resize(_)))
+            .count()
     }
 
     fn rendered(&mut self, selector: &'static str) -> bool {
@@ -366,5 +404,318 @@ fn the_keyboard_reaches_retry_and_end_session(cx: &mut TestAppContext) {
     pane.press("cmd-w");
     pane.press("tab");
     pane.press("space");
+    assert_eq!(pane.connection.end_sessions(), 1);
+}
+
+#[gpui::test]
+fn another_client_taking_control_replaces_the_pane_with_the_takeover_screen(
+    cx: &mut TestAppContext,
+) {
+    let mut pane = open_pane(DevelopmentPaneStatus::Connected, cx);
+    pane.publish_title("secret-build");
+    assert!(pane.rendered(TERMINAL_TITLE_SELECTOR));
+    let delivered = pane.keys();
+
+    pane.lose_control();
+
+    assert!(pane.rendered(TAKEOVER_SELECTOR));
+    assert!(pane.rendered(TAKE_OVER_SELECTOR));
+    assert!(
+        !pane.rendered(TERMINAL_SELECTOR),
+        "no part of the Pane paints"
+    );
+    assert!(
+        !pane.rendered(TERMINAL_TITLE_SELECTOR),
+        "the shell's title belongs to the Controlling Client"
+    );
+    assert!(
+        !pane.rendered(NOTICE_SELECTOR),
+        "control moved; nothing failed"
+    );
+    pane.cx.simulate_keystrokes("a enter");
+    assert_eq!(pane.keys(), delivered, "typing reaches no shell");
+    pane.click(END_SESSION_SELECTOR);
+    assert!(!pane.rendered("modal-action-development-pane-end-session-confirm"));
+    assert_eq!(
+        pane.connection.take_overs(),
+        0,
+        "nothing takes control back unasked"
+    );
+    assert_eq!(
+        pane.records.session_count(),
+        1,
+        "the Terminal Session continues"
+    );
+    assert!(!pane.closed());
+}
+
+#[gpui::test]
+fn assistive_technology_reaches_take_over_and_no_terminal_content(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    const TERMINAL_ACTIONS: &str = "Terminal context actions";
+
+    let mut pane = open_pane(DevelopmentPaneStatus::Connected, cx);
+    // The Pane's context actions stand for everything the terminal publishes.
+    assert!(A11yTree::read(pane.cx).find(TERMINAL_ACTIONS).is_some());
+
+    pane.lose_control();
+
+    let tree = A11yTree::read(pane.cx);
+    let screen = tree.node("Controlled by Another Client");
+    assert_eq!(screen["aria"]["role"], "Group");
+    assert!(
+        screen["aria"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("Take Over")),
+        "the screen explains what Take Over does"
+    );
+    assert!(
+        tree.find(TERMINAL_ACTIONS).is_none(),
+        "the Pane leaves the tree"
+    );
+    let take_over = tree.node("Take Over");
+    assert_eq!(take_over["aria"]["role"], "Button");
+    assert!(tree.exposed(take_over));
+    perform(pane.cx, take_over, gpui::accesskit::Action::Click);
+    pane.cx.run_until_parked();
+    assert_eq!(pane.connection.take_overs(), 1);
+
+    let tree = A11yTree::read(pane.cx);
+    let progress = tree.node("Taking Over…");
+    assert_eq!(progress["aria"]["role"], "Status");
+    assert_eq!(tree.node("Take Over")["aria"]["disabled"], true);
+}
+
+#[gpui::test]
+fn the_keyboard_reaches_take_over_but_typing_never_presses_it(cx: &mut TestAppContext) {
+    let mut pane = open_pane(DevelopmentPaneStatus::Connected, cx);
+    pane.lose_control();
+
+    // Someone typing into the shell when control moves keeps typing into nothing.
+    pane.press("space");
+    pane.press("enter");
+    pane.press("x");
+    assert_eq!(pane.connection.take_overs(), 0);
+
+    // End Session waits for control, so Tab passes over it to Take Over.
+    pane.press("tab");
+    pane.press("space");
+    assert_eq!(pane.connection.take_overs(), 1);
+    assert!(
+        pane.rendered(TAKE_OVER_STATUS_SELECTOR),
+        "progress shows at once"
+    );
+
+    // Take Over waits for the server, so pressing again sends nothing more.
+    pane.press("space");
+    pane.press("enter");
+    assert_eq!(pane.connection.take_overs(), 1);
+}
+
+#[gpui::test]
+fn take_over_returns_control_with_a_fresh_screen_only(cx: &mut TestAppContext) {
+    let mut pane = open_pane(DevelopmentPaneStatus::Connected, cx);
+    pane.publish_title("secret-build");
+    pane.lose_control();
+    let resizes = pane.resizes();
+
+    pane.click(TAKE_OVER_SELECTOR);
+    assert_eq!(pane.connection.take_overs(), 1);
+    assert!(pane.rendered(TAKE_OVER_STATUS_SELECTOR));
+    assert!(
+        !pane.rendered(TERMINAL_SELECTOR),
+        "the Pane waits for the server's screen"
+    );
+
+    pane.reconnect();
+
+    assert!(!pane.rendered(TAKEOVER_SELECTOR));
+    assert!(pane.rendered(TERMINAL_SELECTOR));
+    assert!(
+        !pane.rendered(TERMINAL_TITLE_SELECTOR),
+        "the former title never returns"
+    );
+    assert!(
+        pane.resizes() > resizes,
+        "the new Controlling Client supplies its dimensions"
+    );
+    let delivered = pane.keys();
+    pane.cx.simulate_keystrokes("a");
+    assert!(pane.keys() > delivered, "typing reaches the shell again");
+    pane.publish_title("fresh-build");
+    assert!(pane.rendered(TERMINAL_TITLE_SELECTOR));
+    assert_eq!(
+        pane.records.session_count(),
+        1,
+        "the same Terminal Session continues"
+    );
+}
+
+#[gpui::test]
+fn an_unconfirmed_take_over_says_so_and_can_be_tried_again(cx: &mut TestAppContext) {
+    let mut pane = open_pane(DevelopmentPaneStatus::Connected, cx);
+    pane.lose_control();
+    pane.click(TAKE_OVER_SELECTOR);
+
+    // The window reads another Controlling Client on the same connection, with no grant.
+    pane.set(DevelopmentPaneStatus::Takeover);
+
+    assert!(pane.rendered(TAKEOVER_SELECTOR));
+    assert!(
+        pane.rendered(TAKE_OVER_STATUS_SELECTOR),
+        "the missing confirmation is explained"
+    );
+    pane.click(TAKE_OVER_SELECTOR);
+    assert_eq!(pane.connection.take_overs(), 2);
+}
+
+#[gpui::test]
+fn losing_control_again_after_a_granted_take_over_is_not_unconfirmed(cx: &mut TestAppContext) {
+    let mut pane = open_pane(DevelopmentPaneStatus::Connected, cx);
+    pane.lose_control();
+    pane.click(TAKE_OVER_SELECTOR);
+
+    // Control arrives and moves to another client again between two reads.
+    pane.connection.reconnect();
+    pane.lose_control();
+
+    assert!(pane.rendered(TAKEOVER_SELECTOR));
+    assert!(!pane.rendered(TAKE_OVER_STATUS_SELECTOR));
+    assert!(!pane.rendered(TERMINAL_SELECTOR));
+}
+
+#[gpui::test]
+fn the_takeover_screen_stays_through_an_interruption(cx: &mut TestAppContext) {
+    let mut pane = open_pane(DevelopmentPaneStatus::Connected, cx);
+    pane.publish_title("secret-build");
+    pane.lose_control();
+
+    pane.set(DevelopmentPaneStatus::Reconnecting);
+
+    assert!(
+        pane.rendered(TAKEOVER_SELECTOR),
+        "the former screen never returns"
+    );
+    assert!(!pane.rendered(TERMINAL_SELECTOR));
+    assert!(!pane.rendered(TERMINAL_TITLE_SELECTOR));
+    assert!(pane.rendered(NOTICE_SELECTOR));
+    pane.click(TAKE_OVER_SELECTOR);
+    assert_eq!(
+        pane.connection.take_overs(),
+        0,
+        "Take Over waits for the server"
+    );
+    pane.click(RETRY_SELECTOR);
+    assert_eq!(pane.connection.retries(), 1);
+
+    // The server still names another Controlling Client after reconnecting.
+    pane.set(DevelopmentPaneStatus::Takeover);
+    assert!(pane.rendered(TAKEOVER_SELECTOR));
+    assert!(!pane.rendered(NOTICE_SELECTOR));
+    pane.click(TAKE_OVER_SELECTOR);
+    assert_eq!(pane.connection.take_overs(), 1);
+}
+
+#[gpui::test]
+fn losing_the_server_while_another_client_controls_keeps_the_takeover_screen(
+    cx: &mut TestAppContext,
+) {
+    let mut pane = open_pane(DevelopmentPaneStatus::Connected, cx);
+    pane.publish_title("secret-build");
+
+    // The server reports another Controlling Client only as the connection fails.
+    pane.connection
+        .set(DevelopmentPaneStatus::TakeoverReconnecting);
+    pane.cx.executor().advance_clock(STATUS_INTERVAL);
+    pane.cx.run_until_parked();
+
+    assert!(pane.rendered(TAKEOVER_SELECTOR));
+    assert!(!pane.rendered(TERMINAL_SELECTOR));
+    assert!(!pane.rendered(TERMINAL_TITLE_SELECTOR));
+    assert!(pane.rendered(NOTICE_SELECTOR));
+    pane.click(TAKE_OVER_SELECTOR);
+    assert_eq!(
+        pane.connection.take_overs(),
+        0,
+        "Take Over waits for the server"
+    );
+    pane.click(RETRY_SELECTOR);
+    assert_eq!(pane.connection.retries(), 1);
+}
+
+#[gpui::test]
+fn an_interrupted_take_over_says_it_was_not_confirmed(cx: &mut TestAppContext) {
+    let mut pane = open_pane(DevelopmentPaneStatus::Connected, cx);
+    pane.lose_control();
+    pane.click(TAKE_OVER_SELECTOR);
+
+    pane.set(DevelopmentPaneStatus::TakeoverReconnecting);
+    assert!(
+        pane.rendered(TAKE_OVER_STATUS_SELECTOR),
+        "the attempt is not left spinning"
+    );
+    assert!(pane.rendered(NOTICE_SELECTOR));
+
+    pane.set(DevelopmentPaneStatus::Takeover);
+    assert!(pane.rendered(TAKE_OVER_STATUS_SELECTOR));
+    pane.click(TAKE_OVER_SELECTOR);
+    assert_eq!(
+        pane.connection.take_overs(),
+        2,
+        "Take Over is offered again"
+    );
+}
+
+#[gpui::test]
+fn opening_a_pane_another_client_controls_shows_the_takeover_screen(cx: &mut TestAppContext) {
+    let mut pane = open_pane(DevelopmentPaneStatus::Connecting, cx);
+    assert_eq!(
+        pane.records.session_count(),
+        1,
+        "the Pane measured and started"
+    );
+
+    pane.set(DevelopmentPaneStatus::Takeover);
+
+    assert!(pane.rendered(TAKEOVER_SELECTOR));
+    assert!(!pane.rendered(TERMINAL_SELECTOR));
+    pane.cx.simulate_keystrokes("a");
+    assert_eq!(pane.keys(), 0);
+}
+
+#[gpui::test]
+fn an_end_session_approval_never_outlives_control(cx: &mut TestAppContext) {
+    let mut pane = open_pane(DevelopmentPaneStatus::Connected, cx);
+    pane.click(END_SESSION_SELECTOR);
+    assert!(pane.rendered("modal-action-development-pane-end-session-confirm"));
+
+    pane.lose_control();
+    assert!(
+        !pane.rendered("modal-action-development-pane-end-session-confirm"),
+        "the confirmation closes with control"
+    );
+    pane.click(TAKE_OVER_SELECTOR);
+    pane.reconnect();
+    assert!(!pane.rendered("modal-action-development-pane-end-session-confirm"));
+    assert_eq!(pane.connection.end_sessions(), 0);
+
+    // Control moves away and back before the window reads it, then the person confirms.
+    pane.click(END_SESSION_SELECTOR);
+    pane.connection.lose_control();
+    pane.connection.reconnect();
+    pane.click("modal-action-development-pane-end-session-confirm");
+    assert_eq!(
+        pane.connection.end_sessions(),
+        0,
+        "approval given to the former grant never applies"
+    );
+    assert!(!pane.closed());
+
+    // Once the window reads the new grant, End Session asks again.
+    pane.cx.executor().advance_clock(STATUS_INTERVAL);
+    pane.cx.run_until_parked();
+    pane.click(END_SESSION_SELECTOR);
+    pane.click("modal-action-development-pane-end-session-confirm");
     assert_eq!(pane.connection.end_sessions(), 1);
 }
