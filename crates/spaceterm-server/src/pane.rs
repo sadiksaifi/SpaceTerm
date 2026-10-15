@@ -187,7 +187,7 @@ pub enum Refusal {
 impl From<Refusal> for ServerError {
     fn from(value: Refusal) -> Self {
         match value {
-            Refusal::Capacity => Self::Unsupported,
+            Refusal::Capacity => Self::Capacity,
             Refusal::Controlled => Self::Controlled,
             Refusal::Missing => Self::SessionUnavailable,
             Refusal::Stale => Self::StaleControl,

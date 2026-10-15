@@ -685,6 +685,34 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
+    fn opening_the_legacy_pane_cannot_consume_a_shared_edits_operation_identity() {
+        use spaceterm_server::hierarchy::{Mutation, Outcome};
+        let mut host = SharedWorkspaceHost::new(host());
+        let Reply::Inventory { next_sequence, .. } =
+            host.request([1; 32], [1; 32], Request::Inventory)
+        else {
+            panic!()
+        };
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [2; 32],
+                Request::Attach {
+                    create: true,
+                    size: size(),
+                    resume: None,
+                    style: None
+                }
+            ),
+            Reply::Attached { .. }
+        ));
+        assert!(
+            matches!(host.request([1; 32], [1; 32], Request::Mutate { sequence: next_sequence, mutation: Mutation::CreateWorkspace { name: "Explicit creation".into() } }), Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. }))
+        );
+        host.shutdown().unwrap();
+    }
+
+    #[test]
     fn shared_membership_preserves_independent_pane_grants_and_lazy_startup() {
         use spaceterm_server::hierarchy::{Axis, Mutation, Outcome};
         let mut host = SharedWorkspaceHost::new(host());

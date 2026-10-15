@@ -1,6 +1,6 @@
 //! Shared hierarchy ownership composed with the existing fenced Pane runtime.
 use super::*;
-use spaceterm_server::hierarchy::{Id, Mutation, State};
+use spaceterm_server::hierarchy::{Id, State};
 use std::collections::BTreeMap;
 
 pub struct SharedWorkspaceHost {
@@ -271,17 +271,7 @@ impl SharedWorkspaceHost {
     fn legacy_pane(&mut self, device: Id, create: bool) -> Result<Id, Refusal> {
         if self.state.inventory.workspaces.is_empty() && create {
             let mut next = self.state.clone();
-            let seq = next.next_sequence(device);
-            next.apply(
-                device,
-                seq,
-                Mutation::CreateWorkspace {
-                    name: "Development".into(),
-                },
-                &self.prototype.directory,
-                |_| true,
-            )?;
-            next.acknowledge(device, seq)?;
+            next.ensure_first_workspace(device, &self.prototype.directory)?;
             self.commit(next)?;
         }
         self.state

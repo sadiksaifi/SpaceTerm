@@ -50,6 +50,10 @@ pub enum ServerError {
     DirectoryUnavailable,
     #[error("Terminal cleanup could not be confirmed.")]
     CleanupUnresolved,
+    #[error(
+        "The server is waiting for shared edit acknowledgements. Reconnect the other clients to continue."
+    )]
+    Capacity,
 }
 
 /// Runs an explicitly requested local server. No service registration or listener

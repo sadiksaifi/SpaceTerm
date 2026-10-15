@@ -120,6 +120,21 @@ impl State {
             devices: Vec::new(),
         }
     }
+    /// Legacy first-Pane opening has no shared-edit operation identity. It must not retire a
+    /// sequence a concurrent main-window edit has already reserved in its durable journal.
+    pub fn ensure_first_workspace(&mut self, device: Id, directory: &Path) -> Result<(), Refusal> {
+        if self.inventory.workspaces.is_empty() {
+            self.edit(
+                device,
+                &Mutation::CreateWorkspace {
+                    name: "Development".into(),
+                },
+                directory,
+                |_| true,
+            )?;
+        }
+        Ok(())
+    }
     pub fn from_legacy(org: &crate::organization::Organization) -> Self {
         org.shared.as_deref().cloned().unwrap_or_else(|| Self {
             inventory: Inventory {
@@ -227,16 +242,7 @@ impl State {
                 pending: Vec::new(),
             });
         }
-        let outcome = if let Mutation::PinWorkspace {
-            directory: Some(path),
-            ..
-        } = &mutation
-            && (!valid_path(path) || !validate_pin(path))
-        {
-            Outcome::Invalid
-        } else {
-            self.edit(device, &mutation, directory)?
-        };
+        let outcome = self.edit(device, &mutation, directory, validate_pin)?;
         self.devices
             .iter_mut()
             .find(|d| d.device == device)
@@ -270,6 +276,7 @@ impl State {
         device: Id,
         mutation: &Mutation,
         directory: &Path,
+        validate_pin: impl FnOnce(&Path) -> bool,
     ) -> Result<Outcome, Refusal> {
         let new_id = || crate::protocol::random().map_err(|_| Refusal::Failed);
         let valid_name = |name: &str| {
@@ -432,6 +439,11 @@ impl State {
                 };
                 if *version != w.pin_version {
                     return Ok(Outcome::Conflict);
+                }
+                if let Some(path) = directory
+                    && !validate_pin(path)
+                {
+                    return Ok(Outcome::Invalid);
                 }
                 w.pinned_directory.clone_from(directory);
                 w.pin_version += 1;
@@ -771,6 +783,54 @@ mod tests {
             .apply([1; 32], 33, create, "/tmp".as_ref(), |_| true)
             .unwrap();
         assert_eq!(state.inventory.workspaces.len(), 33);
+    }
+
+    #[test]
+    fn stale_pin_preserves_the_conflict_even_if_its_draft_directory_became_unavailable() {
+        let mut state = State::empty();
+        let Outcome::Accepted { target: workspace } = state
+            .apply(
+                [1; 32],
+                1,
+                Mutation::CreateWorkspace {
+                    name: "Build".into(),
+                },
+                "/tmp".as_ref(),
+                |_| true,
+            )
+            .unwrap()
+        else {
+            panic!()
+        };
+        state
+            .apply(
+                [1; 32],
+                2,
+                Mutation::PinWorkspace {
+                    workspace,
+                    version: 0,
+                    directory: Some("/".into()),
+                },
+                "/tmp".as_ref(),
+                |_| true,
+            )
+            .unwrap();
+        assert_eq!(
+            state
+                .apply(
+                    [2; 32],
+                    1,
+                    Mutation::PinWorkspace {
+                        workspace,
+                        version: 0,
+                        directory: Some("/missing".into())
+                    },
+                    "/tmp".as_ref(),
+                    |_| false
+                )
+                .unwrap(),
+            Outcome::Conflict
+        );
     }
 
     #[test]
