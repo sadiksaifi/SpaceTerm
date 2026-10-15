@@ -4837,6 +4837,19 @@ fn screen_snapshots_are_send_and_sync() {
 }
 
 #[test]
+fn restricted_server_runtime_does_not_advertise_clipboard_or_accept_graphics() {
+    let _guard = crate::terminal::graphics::test_lock();
+    let mut emulator = emulator(8, 4);
+    emulator.restrict_client_effects().unwrap();
+    emulator.feed(b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\");
+    assert!(emulator.take_pty_responses().is_empty());
+    emulator.feed(b"\x1b[c");
+    assert_eq!(emulator.take_pty_responses(), b"\x1b[?62;22c");
+    emulator.feed(b"\x1bP+q4d73\x1b\\");
+    assert_eq!(emulator.take_pty_responses(), b"\x1bP0+r4d73\x1b\\");
+}
+
+#[test]
 fn kitty_query_is_truthful_and_precedes_device_attributes() {
     let _guard = crate::terminal::graphics::test_lock();
     let mut emulator = emulator(8, 4);

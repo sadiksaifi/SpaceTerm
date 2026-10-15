@@ -270,7 +270,7 @@ def launch(backend: str | None = None) -> None:
         signal.signal(signum, interrupt)
     server = build_executable(
         "--package",
-        "spaceterm-server",
+        "spaceterm-server-host",
         "--no-default-features",
         "--locked",
         binary="spaceterm-server",

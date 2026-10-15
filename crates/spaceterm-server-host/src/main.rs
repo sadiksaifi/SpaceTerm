@@ -18,6 +18,12 @@ fn run() -> Result<(), spaceterm_server::ServerError> {
         .to_str()
         .ok_or(spaceterm_server::ServerError::Protocol)?;
     if command == "serve" {
+        if identity == "spaceterm-development" {
+            return spaceterm_server::run_local_with_panes(
+                identity,
+                spaceterm::runtime::DevelopmentPaneHost::local()?,
+            );
+        }
         return spaceterm_server::run_local(identity);
     }
     #[cfg(feature = "client")]

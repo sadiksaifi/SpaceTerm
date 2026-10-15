@@ -371,7 +371,7 @@ fn process_groups_in_session(
     if leader.is_some_and(|leader| {
         leader.identity != session.leader || leader.session != session.session
     }) {
-        return Ok(BTreeMap::new());
+        return Err(io::Error::other("shell process ownership is unresolved"));
     }
 
     let mut process_groups = BTreeMap::<_, Vec<_>>::new();
@@ -392,6 +392,48 @@ fn process_groups_in_session(
             .push(observation.identity);
     }
     Ok(process_groups)
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    struct ReusedLeader(ProcessObservation);
+    impl UnixPtyHost for ReusedLeader {
+        fn observe_process(&self, _: i32) -> Option<ProcessObservation> {
+            Some(self.0)
+        }
+        fn process_ids(&self) -> io::Result<Vec<i32>> {
+            Ok(vec![self.0.identity.process])
+        }
+        fn master_read_error(&self, _: &io::Error) -> MasterReadError {
+            MasterReadError::Failure
+        }
+    }
+    #[test]
+    fn a_reused_session_leader_is_unresolved_cleanup() {
+        let leader = ProcessIdentity {
+            process: 123,
+            start: ProcessStart { coarse: 1, fine: 0 },
+        };
+        let host = ReusedLeader(ProcessObservation {
+            identity: ProcessIdentity {
+                start: ProcessStart { coarse: 2, fine: 0 },
+                ..leader
+            },
+            process_group: 123,
+            session: 123,
+        });
+        assert!(
+            process_groups_in_session(
+                &host,
+                &ProcessSessionIdentity {
+                    session: 123,
+                    leader
+                }
+            )
+            .is_err()
+        );
+    }
 }
 
 fn signal_owned_process_group(
@@ -631,12 +673,6 @@ impl SpawnedPty {
                 "failed to force shell process group shutdown: {:?}",
                 error.kind()
             );
-            if let Err(kill_error) = child.kill() {
-                eprintln!(
-                    "failed to terminate shell process after process-group shutdown failed: {:?}",
-                    kill_error.kind()
-                );
-            }
         }
         let forced_deadline = Instant::now() + FORCED_SHUTDOWN_TIMEOUT;
         if !Self::poll_child_until(child, forced_deadline) {
@@ -754,6 +790,13 @@ fn native_exit(exit: ShellExit) -> NativePtyExit {
 }
 
 impl NativePtyTermination for PtyTerminator {
+    fn cleanup_confirmed(&self) -> bool {
+        self.termination
+            .lock_target()
+            .as_mut()
+            .is_none_or(|target| matches!(target.is_alive(), Ok(false)))
+    }
+
     fn request_termination(&self) -> io::Result<()> {
         self.terminate()
     }

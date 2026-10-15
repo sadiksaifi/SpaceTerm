@@ -14,6 +14,36 @@ use std::{
     path::{Path, PathBuf},
 };
 
+static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+extern "C" fn stop_signal(_: libc::c_int) {
+    STOP.store(true, std::sync::atomic::Ordering::Release);
+}
+pub(crate) fn install_shutdown_signals() -> Result<(), ServerError> {
+    STOP.store(false, std::sync::atomic::Ordering::Release);
+    // SAFETY: the handler only stores an atomic flag; libc retains the function pointer.
+    unsafe {
+        if libc::signal(
+            libc::SIGTERM,
+            stop_signal as *const () as libc::sighandler_t,
+        ) == libc::SIG_ERR
+            || libc::signal(libc::SIGINT, stop_signal as *const () as libc::sighandler_t)
+                == libc::SIG_ERR
+        {
+            return Err(ServerError::StartupFailed);
+        }
+        // Desktop background threads can block these signals. Installing a handler does not
+        // change the mask inherited through exec, so the server must unblock its shutdown signals.
+        let mut shutdown: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut shutdown);
+        libc::sigaddset(&mut shutdown, libc::SIGTERM);
+        libc::sigaddset(&mut shutdown, libc::SIGINT);
+        if libc::pthread_sigmask(libc::SIG_UNBLOCK, &shutdown, std::ptr::null_mut()) != 0 {
+            return Err(ServerError::StartupFailed);
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub(crate) struct Paths {
     pub data: PathBuf,
@@ -138,6 +168,13 @@ fn connect_socket(endpoint: &Path) -> Result<UnixStream, SocketUnavailable> {
 }
 
 pub(crate) fn serve(paths: &Paths) -> Result<(), ServerError> {
+    serve_with_panes(paths, None)
+}
+
+pub(crate) fn serve_with_panes(
+    paths: &Paths,
+    panes: Option<Box<dyn crate::pane::PaneService>>,
+) -> Result<(), ServerError> {
     let data = Directory::open(&paths.data, false)?;
     // Verify retained identity before changing any runtime state. Never generate a replacement.
     data.read()?;
@@ -157,10 +194,32 @@ pub(crate) fn serve(paths: &Paths) -> Result<(), ServerError> {
     let listener = UnixListener::bind(&socket).map_err(|_| ServerError::StorageUnavailable)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
         .map_err(|_| ServerError::StorageUnavailable)?;
-    // A bounded synchronous exchange avoids unbounded worker allocation. Every connection has
-    // an absolute five-second deadline; no unauthenticated request can perform an operation.
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let panes = Arc::new(Mutex::new(panes));
+    let workers = Arc::new(AtomicUsize::new(0));
+    listener
+        .set_nonblocking(true)
+        .map_err(|_| ServerError::Protocol)?;
+    let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // The fixed admission limit bounds worker allocation; each frame has an absolute deadline.
     for connection in listener.incoming() {
-        let Ok(mut stream) = connection else { continue };
+        if stopping.load(Ordering::Acquire) || STOP.load(Ordering::Acquire) {
+            break;
+        }
+        let mut stream = match connection {
+            Ok(stream) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+            Err(_) => return Err(ServerError::Protocol),
+        };
+        if workers.load(Ordering::Acquire) >= 8 {
+            continue;
+        }
         if check_peer(&stream).is_err() {
             continue;
         }
@@ -168,7 +227,65 @@ pub(crate) fn serve(paths: &Paths) -> Result<(), ServerError> {
         let Ok(key) = protocol::key(&record.seed) else {
             continue;
         };
-        let _ = protocol::authenticate_server(&mut stream, &key, &record.paired);
+        let panes = Arc::clone(&panes);
+        let workers = Arc::clone(&workers);
+        let stopping = Arc::clone(&stopping);
+        workers.fetch_add(1, Ordering::AcqRel);
+        std::thread::spawn(move || {
+            let _ = (|| -> Result<(), ServerError> {
+                let (_, device) =
+                    protocol::authenticate_server_device(&mut stream, &key, &record.paired)?;
+                let connection = protocol::random()?;
+                let result = (|| {
+                    loop {
+                        if stopping.load(Ordering::Acquire) || STOP.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let mut wire = protocol::Wire::terminal(&mut stream)?;
+                        let request = wire.read()?;
+                        let shutdown = matches!(request, crate::pane::Request::Shutdown);
+                        let (reply, stopped) = {
+                            let mut panes = panes.lock().unwrap_or_else(|e| e.into_inner());
+                            // Admission is fenced under the same lock as final cleanup. A worker
+                            // may have been waiting for its frame or this lock when shutdown began.
+                            if stopping.load(Ordering::Acquire) || STOP.load(Ordering::Acquire) {
+                                return Err(ServerError::NotRunning);
+                            }
+                            let reply = match panes.as_mut() {
+                                Some(panes) => panes.request(device, connection, request),
+                                None if matches!(request, crate::pane::Request::Capabilities) => {
+                                    crate::pane::Reply::Capabilities {
+                                        development_pane: false,
+                                    }
+                                }
+                                None => {
+                                    crate::pane::Reply::Refused(crate::pane::Refusal::Unsupported)
+                                }
+                            };
+                            let stopped = shutdown && matches!(reply, crate::pane::Reply::Closed);
+                            if stopped {
+                                stopping.store(true, Ordering::Release);
+                            }
+                            (reply, stopped)
+                        };
+                        wire.write(&reply)?;
+                        if stopped {
+                            break;
+                        }
+                    }
+                    Ok::<_, ServerError>(())
+                })();
+                if let Some(panes) = panes.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                    panes.disconnected(connection);
+                }
+                result
+            })();
+            workers.fetch_sub(1, Ordering::AcqRel);
+        });
+    }
+    stopping.store(true, Ordering::Release);
+    if let Some(panes) = panes.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        panes.shutdown()?;
     }
     Ok(())
 }
@@ -236,17 +353,33 @@ mod startup_tests {
                 pin,
             }
         }
+        fn start_test(&self, test: &str, block_shutdown: bool) -> ChildGuard {
+            use std::os::unix::process::CommandExt;
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args(["--exact", test, "--ignored"])
+                .env(CHILD_ROOT, &self.root)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            // SAFETY: this child closure uses only async-signal-safe signal-mask operations.
+            unsafe {
+                command.pre_exec(move || {
+                    if block_shutdown {
+                        let mut blocked: libc::sigset_t = std::mem::zeroed();
+                        libc::sigemptyset(&mut blocked);
+                        libc::sigaddset(&mut blocked, libc::SIGTERM);
+                        if libc::sigprocmask(libc::SIG_BLOCK, &blocked, std::ptr::null_mut()) != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                    }
+                    Ok(())
+                });
+            }
+            ChildGuard(command.spawn().unwrap())
+        }
         fn start(&self) -> ChildGuard {
-            ChildGuard(
-                Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", CHILD_TEST, "--ignored"])
-                    .env(CHILD_ROOT, &self.root)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()
-                    .unwrap(),
-            )
+            self.start_test(CHILD_TEST, false)
         }
     }
     impl Drop for Fixture {
@@ -271,6 +404,171 @@ mod startup_tests {
             runtime: root.join("r"),
         });
         assert_eq!(result, Err(ServerError::StorageUnavailable));
+    }
+
+    #[test]
+    #[ignore = "runs only as a child of the server signal test"]
+    fn server_signal_child() {
+        install_shutdown_signals().unwrap();
+        let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
+        serve(&Paths {
+            data: root.join("d"),
+            runtime: root.join("r"),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn shutdown_signal_stops_server_with_an_inherited_blocked_mask() {
+        let fixture = Fixture::new();
+        let mut child = fixture.start_test("host::startup_tests::server_signal_child", true);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut stream = loop {
+            match UnixStream::connect(fixture.paths.socket()) {
+                Ok(stream) => break stream,
+                Err(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(_) => panic!("server did not start"),
+            }
+        };
+        protocol::authenticate_client(&mut stream, &fixture.device, &fixture.pin, &[2, 1]).unwrap();
+        // SAFETY: the guard owns this live child process.
+        assert_eq!(
+            unsafe { libc::kill(child.0.id() as libc::pid_t, libc::SIGTERM) },
+            0
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(exit) = child.0.try_wait().unwrap() {
+                assert!(exit.success(), "server must finish cleanup before exiting");
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "server ignored its shutdown signal"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    #[ignore = "runs only as a child of the server shutdown admission test"]
+    fn server_shutdown_child() {
+        use crate::pane::{PaneService, Reply, Request};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct Service {
+            stopped: bool,
+            late_requests: Arc<AtomicUsize>,
+        }
+        impl PaneService for Service {
+            fn request(&mut self, _: [u8; 32], _: [u8; 32], request: Request) -> Reply {
+                if self.stopped {
+                    self.late_requests.fetch_add(1, Ordering::SeqCst);
+                }
+                if matches!(request, Request::Shutdown) {
+                    self.stopped = true;
+                    Reply::Closed
+                } else {
+                    Reply::Unchanged
+                }
+            }
+            fn disconnected(&mut self, _: [u8; 32]) {}
+            fn shutdown(&mut self) -> Result<(), ServerError> {
+                self.stopped = true;
+                Ok(())
+            }
+        }
+        let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
+        let late_requests = Arc::new(AtomicUsize::new(0));
+        serve_with_panes(
+            &Paths {
+                data: root.join("d"),
+                runtime: root.join("r"),
+            },
+            Some(Box::new(Service {
+                stopped: false,
+                late_requests: Arc::clone(&late_requests),
+            })),
+        )
+        .unwrap();
+        fs::write(root.join("stopped"), []).unwrap();
+        // Keep the library caller alive while the admitted client finishes its partial frame.
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            late_requests.load(Ordering::SeqCst),
+            0,
+            "request reached service after shutdown"
+        );
+    }
+
+    #[test]
+    fn shutdown_refuses_an_attach_already_waiting_for_its_frame() {
+        use crate::pane::{PaneSize, Reply, Request};
+        use std::io::Write;
+        let fixture = Fixture::new();
+        let mut child = fixture.start_test("host::startup_tests::server_shutdown_child", false);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut pending = loop {
+            match UnixStream::connect(fixture.paths.socket()) {
+                Ok(stream) => break stream,
+                Err(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(_) => panic!("server did not start"),
+            }
+        };
+        protocol::authenticate_client(&mut pending, &fixture.device, &fixture.pin, &[2, 1])
+            .unwrap();
+        let body = serde_json::to_vec(&Request::Attach {
+            create: true,
+            size: PaneSize {
+                columns: 80,
+                rows: 24,
+                cell_width: 8,
+                cell_height: 18,
+            },
+            resume: None,
+            style: None,
+        })
+        .unwrap();
+        pending
+            .write_all(&(body.len() as u32).to_be_bytes())
+            .unwrap();
+        // The admitted worker waits on the incomplete frame while another connection shuts down.
+        std::thread::sleep(Duration::from_millis(50));
+        let mut shutdown = UnixStream::connect(fixture.paths.socket()).unwrap();
+        protocol::authenticate_client(&mut shutdown, &fixture.device, &fixture.pin, &[2, 1])
+            .unwrap();
+        let mut wire = protocol::Wire::terminal(&mut shutdown).unwrap();
+        wire.write(&Request::Shutdown).unwrap();
+        assert!(matches!(wire.read::<Reply>().unwrap(), Reply::Closed));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !fixture.root.join("stopped").exists() {
+            assert!(Instant::now() < deadline, "server did not finish shutdown");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = pending.write_all(&body);
+        assert!(
+            protocol::Wire::terminal(&mut pending)
+                .unwrap()
+                .read::<Reply>()
+                .is_err()
+        );
+        loop {
+            if let Some(exit) = child.0.try_wait().unwrap() {
+                assert!(
+                    exit.success(),
+                    "server dispatched an admitted request after shutdown"
+                );
+                break;
+            }
+            assert!(Instant::now() < deadline, "server child did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -320,7 +618,10 @@ mod startup_tests {
         };
         assert_eq!(
             protocol::authenticate_client(&mut stream, &fixture.device, &fixture.pin, &[2, 1]),
-            Ok(crate::AuthenticatedStatus { protocol_major: 2 })
+            Ok(crate::AuthenticatedStatus {
+                protocol_major: 2,
+                development_pane: false
+            })
         );
     }
 

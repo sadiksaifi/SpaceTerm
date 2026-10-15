@@ -214,7 +214,7 @@ pub type RowSnapshot = Arc<[CellSnapshot]>;
 pub struct PresentationGeneration(u64);
 
 impl PresentationGeneration {
-    fn next(self) -> Self {
+    pub(crate) fn next(self) -> Self {
         Self(self.0.saturating_add(1))
     }
 
@@ -705,6 +705,7 @@ pub(crate) struct TerminalEmulator {
     title: Arc<str>,
     metadata: MetadataTracker,
     local_file_capabilities: crate::terminal::metadata::TerminalLocalFileCapabilities,
+    client_effects: bool,
     xtgettcap: XtGetTcapObserver,
     primary_row_cache: Vec<RowSnapshot>,
     alternate_row_cache: Vec<RowSnapshot>,
@@ -1151,6 +1152,7 @@ impl TerminalEmulator {
             title,
             metadata,
             local_file_capabilities,
+            client_effects: true,
             xtgettcap: XtGetTcapObserver::new(terminal_name),
             primary_row_cache: Vec::new(),
             alternate_row_cache: Vec::new(),
@@ -1185,6 +1187,23 @@ impl TerminalEmulator {
         })
     }
 
+    pub(crate) fn restrict_client_effects(&mut self) -> Result<(), Error> {
+        self.client_effects = false;
+        self.xtgettcap.disable_clipboard();
+        self.terminal
+            .set_apc_max_bytes_kitty(Some(0))?
+            .set_glyph_protocol_enabled(false)?;
+        self.terminal.on_device_attributes(|_| {
+            let mut attributes = identity::device_attributes();
+            attributes.primary = libghostty_vt::terminal::PrimaryDeviceAttributes::new(
+                libghostty_vt::terminal::ConformanceLevel::VT220,
+                &[libghostty_vt::terminal::DeviceAttributeFeature::ANSI_COLOR],
+            );
+            Some(attributes)
+        })?;
+        Ok(())
+    }
+
     pub(crate) fn feed(&mut self, bytes: &[u8]) {
         self.feed_at(bytes, Instant::now());
     }
@@ -1207,7 +1226,10 @@ impl TerminalEmulator {
         self.xtgettcap
             .feed(bytes, &mut self.pty_responses.borrow_mut());
         let synchronized_before = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
-        if self.graphics_reservation.is_none() && starts_apc(self.previous_feed_byte, bytes) {
+        if self.client_effects
+            && self.graphics_reservation.is_none()
+            && starts_apc(self.previous_feed_byte, bytes)
+        {
             self.graphics_reservation = Some(GraphicsReservation::default());
         }
         if let Some(reservation) = &mut self.graphics_reservation {

@@ -2,6 +2,7 @@
 #[cfg(feature = "client")]
 mod client;
 mod host;
+pub mod pane;
 mod protocol;
 mod storage;
 
@@ -11,6 +12,7 @@ pub use client::LocalServer;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AuthenticatedStatus {
     pub protocol_major: u16,
+    pub development_pane: bool,
 }
 
 /// Bounded classifications. Native errors and peer-supplied values never cross this boundary.
@@ -34,11 +36,33 @@ pub enum ServerError {
     Protocol,
     #[error("The local server could not start. Reinstall SpaceTerm and try again.")]
     StartupFailed,
+    #[error("This Pane is controlled by another device.")]
+    Controlled,
+    #[error("This Terminal Session is no longer available.")]
+    SessionUnavailable,
+    #[error("This connection no longer controls the Terminal Session.")]
+    StaleControl,
+    #[error("This operation is unavailable for this Development Pane.")]
+    Unsupported,
+    #[error("Terminal cleanup could not be confirmed.")]
+    CleanupUnresolved,
 }
 
 /// Runs an explicitly requested local server. No service registration or listener
 /// is installed by library construction or desktop launch.
 pub fn run_local(identity: &str) -> Result<(), ServerError> {
+    host::install_shutdown_signals()?;
     let paths = host::Paths::for_identity(identity)?;
     host::serve(&paths)
+}
+
+pub fn run_local_with_panes(
+    identity: &str,
+    panes: impl pane::PaneService + 'static,
+) -> Result<(), ServerError> {
+    if identity != "spaceterm-development" {
+        return Err(ServerError::Unsupported);
+    }
+    host::install_shutdown_signals()?;
+    host::serve_with_panes(&host::Paths::for_identity(identity)?, Some(Box::new(panes)))
 }

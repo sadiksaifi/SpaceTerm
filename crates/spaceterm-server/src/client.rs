@@ -66,12 +66,46 @@ impl LocalServer {
     }
     fn authenticate(&self, credential: &Credential) -> Result<AuthenticatedStatus, ServerError> {
         let mut stream = host::connect(&self.paths)?;
+        let mut status = protocol::authenticate_client(
+            &mut stream,
+            &protocol::key(&credential.seed)?,
+            &credential.pin,
+            &[2, 1],
+        )?;
+        let mut connection = crate::pane::PaneConnection { stream };
+        // The status-only server predates optional terminal operations and closes after proof.
+        status.development_pane = matches!(
+            connection.exchange(&crate::pane::Request::Capabilities),
+            Ok(crate::pane::Reply::Capabilities {
+                development_pane: true
+            })
+        );
+        Ok(status)
+    }
+
+    /// Authenticates a terminal transport without setup or implicit Start Server.
+    pub fn connect_pane(&self) -> Result<crate::pane::PaneConnection, ServerError> {
+        if self.identity != "spaceterm-development" {
+            return Err(ServerError::Unsupported);
+        }
+        let credential = self.credential()?.ok_or(ServerError::NotPaired)?;
+        let mut stream = host::connect(&self.paths)?;
         protocol::authenticate_client(
             &mut stream,
             &protocol::key(&credential.seed)?,
             &credential.pin,
             &[2, 1],
-        )
+        )?;
+        let mut connection = crate::pane::PaneConnection { stream };
+        if !matches!(
+            connection.exchange(&crate::pane::Request::Capabilities),
+            Ok(crate::pane::Reply::Capabilities {
+                development_pane: true
+            })
+        ) {
+            return Err(ServerError::Unsupported);
+        }
+        Ok(connection)
     }
     /// Reads the saved native credential and authenticates an existing server. Never starts it.
     pub fn refresh(&self) -> Result<AuthenticatedStatus, ServerError> {

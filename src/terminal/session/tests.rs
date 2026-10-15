@@ -1427,7 +1427,7 @@ fn scripted_output_should_reach_the_terminal_screen() {
     session.shutdown();
     let state = records.wait_for(
         "the scripted Terminal Session owners to be released",
-        |state| state.pty_drops == 1 && state.reader_drops == 1,
+        |state| state.pty_drops == 1 && state.reader_drops == 1 && state.terminator_drops == 1,
     );
     assert_eq!(
         (
@@ -3294,6 +3294,7 @@ fn rapid_resizes_should_queue_one_notification_and_retain_only_the_latest_geomet
         commands: Some(commands),
         worker: None,
         native_pty_close: None,
+        cleanup_confirmation: None,
         schedule_input,
         event_publisher: async_channel::bounded(1).0.into(),
         clipboard_authority: Arc::default(),
@@ -3330,6 +3331,7 @@ fn rapid_find_queries_should_queue_one_notification_and_retain_only_the_latest_q
         commands: Some(commands),
         worker: None,
         native_pty_close: None,
+        cleanup_confirmation: None,
         schedule_input,
         event_publisher: async_channel::bounded(1).0.into(),
         clipboard_authority: Arc::default(),
@@ -3362,6 +3364,7 @@ fn find_close_should_supersede_a_pending_query_update() {
         commands: Some(commands),
         worker: None,
         native_pty_close: None,
+        cleanup_confirmation: None,
         schedule_input,
         event_publisher: async_channel::bounded(1).0.into(),
         clipboard_authority: Arc::default(),
@@ -3866,7 +3869,7 @@ fn repeated_shutdown_should_return_before_a_blocked_reader_finishes() {
     };
     shutdown_thread.join().unwrap();
     let state = records.wait_for("the detached worker to drop its PTY", |state| {
-        state.pty_drops == 1
+        state.pty_drops == 1 && state.terminator_drops == 1
     });
     assert_eq!(
         (
@@ -3924,7 +3927,7 @@ fn drop_should_return_after_termination_fails_with_a_blocked_reader() {
     }
     drop_thread.join().unwrap();
     let state = records.wait_for("the detached worker to drop its PTY", |state| {
-        state.pty_drops == 1
+        state.pty_drops == 1 && state.terminator_drops == 1
     });
     assert_eq!(
         (
@@ -3961,6 +3964,7 @@ fn accessibility_demand_sender_coalesces_native_queries_onto_the_worker_lane() {
         commands: Some(commands),
         worker: None,
         native_pty_close: None,
+        cleanup_confirmation: None,
         schedule_input: schedule_input.clone(),
         event_publisher: async_channel::bounded(1).0.into(),
         clipboard_authority: Arc::default(),
@@ -4051,6 +4055,7 @@ fn accessibility_selection_authority_uses_the_reliable_worker_command_lane() {
         commands: Some(commands),
         worker: None,
         native_pty_close: None,
+        cleanup_confirmation: None,
         schedule_input: ScheduleInput::default(),
         event_publisher: async_channel::bounded(1).0.into(),
         clipboard_authority: Arc::default(),
@@ -4109,6 +4114,7 @@ fn stopped_terminal_session_returns_an_error_for_selection_requests() {
         commands: None,
         worker: None,
         native_pty_close: None,
+        cleanup_confirmation: None,
         schedule_input: ScheduleInput::default(),
         event_publisher: async_channel::bounded(1).0.into(),
         clipboard_authority: Arc::default(),

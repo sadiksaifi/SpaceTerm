@@ -164,6 +164,9 @@ pub enum NativePtyAdapterConstructionFailure {
 
 pub trait NativePtyTermination: Send + Sync {
     fn request_termination(&self) -> io::Result<()>;
+    fn cleanup_confirmed(&self) -> bool {
+        false
+    }
 }
 
 pub struct NativePtyAdapterParts {
@@ -179,10 +182,15 @@ pub struct NativePtyCloseHandle {
 #[derive(Default)]
 struct NativePtyCloseState {
     requested: bool,
+    cleanup_confirmed: bool,
     supervisor: Option<Sender<TerminationSupervisorCommand>>,
 }
 
 impl NativePtyCloseHandle {
+    pub fn cleanup_confirmed(&self) -> bool {
+        self.lock_state().cleanup_confirmed
+    }
+
     pub fn request_close(&self) -> io::Result<()> {
         let supervisor = {
             let mut state = self.lock_state();
@@ -292,6 +300,8 @@ pub struct NativePtyOwner {
     adapter: Option<Box<dyn NativePtyAdapter>>,
     termination_supervisor: Option<NativePtyTerminationSupervisor>,
     reader_thread: Option<JoinHandle<()>>,
+    cleanup_probe: Option<Arc<dyn NativePtyTermination>>,
+    close_state: Weak<Mutex<NativePtyCloseState>>,
 }
 
 impl NativePtyOwner {
@@ -326,6 +336,8 @@ impl NativePtyOwner {
             adapter: Some(parts.adapter),
             termination_supervisor: Some(termination_supervisor),
             reader_thread: Some(reader_thread),
+            cleanup_probe: Some(parts.termination),
+            close_state: Arc::downgrade(&close_handle.state),
         })
     }
 
@@ -374,6 +386,17 @@ impl Drop for NativePtyOwner {
         }
         drop(self.termination_supervisor.take());
         drop(self.adapter.take());
+        let confirmed = self
+            .cleanup_probe
+            .as_ref()
+            .is_some_and(|probe| probe.cleanup_confirmed());
+        drop(self.cleanup_probe.take());
+        if let Some(state) = self.close_state.upgrade() {
+            state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .cleanup_confirmed = confirmed;
+        }
         if let Some(reader_thread) = self.reader_thread.take()
             && reader_thread.join().is_err()
         {

@@ -5864,6 +5864,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "spaceterm-server-host"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "spaceterm",
+ "spaceterm-server",
+]
+
+[[package]]
 name = "spaceterm-ui"
 version = "0.0.0"
 dependencies = [

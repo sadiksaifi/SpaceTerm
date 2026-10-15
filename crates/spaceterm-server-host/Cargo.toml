@@ -1,0 +1,21 @@
+[package]
+name = "spaceterm-server-host"
+publish = false
+edition = "2024"
+
+[features]
+default = []
+client = ["spaceterm-server/client"]
+
+[[example]]
+name = "persistent_pane"
+required-features = ["client"]
+
+[[bin]]
+name = "spaceterm-server"
+path = "src/main.rs"
+
+[dependencies]
+spaceterm = { path = "../..", default-features = false }
+spaceterm-server = { path = "../spaceterm-server" }
+libc = "=0.2.189"

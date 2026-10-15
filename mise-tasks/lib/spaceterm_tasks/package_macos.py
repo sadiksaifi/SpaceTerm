@@ -80,7 +80,7 @@ def package_bundle(release_tag=None):
         "--release",
         "--locked",
         "--package",
-        "spaceterm-server",
+        "spaceterm-server-host",
         "--no-default-features",
         binary="spaceterm-server",
         env=environment,
