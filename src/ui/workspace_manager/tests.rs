@@ -15092,6 +15092,85 @@ fn shared_pane_close_should_ask_the_server_for_that_pane_only(cx: &mut TestAppCo
     );
 }
 
+/// Close in a retained Pane's caption reviews the close without asking the server for that Pane,
+/// so neither Cancel nor the approval starts its shell first. The Pane still takes the keyboard,
+/// and Cancel returns it there.
+#[gpui::test]
+fn shared_caption_close_should_confirm_a_retained_pane_without_starting_it(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::hierarchy::CloseTarget as ServerCloseTarget;
+
+    let (harness, cx) = shared_close_harness(cx);
+    // After a server restart the split Pane is retained without a shell.
+    let retained = [
+        (SHARED_CLOSE_ROOT_PANE, Some([31; 32])),
+        (SHARED_CLOSE_SPLIT_PANE, None),
+    ];
+    harness.publish(
+        shared_close_inventory(
+            2,
+            &[
+                (SHARED_CLOSE_ROOT_TAB, &retained),
+                (SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)]),
+            ],
+        ),
+        cx,
+    );
+    let split = harness.panes.pane(SHARED_CLOSE_SPLIT_PANE);
+    assert_eq!(split.selections(), 0);
+    let close_split = |cx: &mut VisualTestContext| {
+        // The unfocused Pane reveals its controls under the pointer before they take a click.
+        let pane = cx.debug_bounds("pane-surface-2").unwrap();
+        cx.simulate_mouse_move(pane.center(), None, Modifiers::none());
+        crate::ui::settle_hover(cx);
+        click("pane-close-2", cx);
+        redraw(cx);
+    };
+
+    close_split(cx);
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-cancel-keyboard-focus")
+            .is_some()
+    );
+    assert_eq!(
+        split.selections(),
+        0,
+        "reviewing a close must not start the retained shell"
+    );
+
+    click("modal-action-shared-close-cancel", cx);
+    redraw(cx);
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-confirm")
+            .is_none()
+    );
+    assert!(harness.closes().is_empty(), "Cancel ends nothing");
+    assert_eq!(split.selections(), 0, "Cancel leaves no shell started");
+    assert!(
+        shared_close_terminal_is_focused(&harness, cx),
+        "the keyboard returns to the Pane"
+    );
+
+    close_split(cx);
+    click("modal-action-shared-close-confirm", cx);
+    redraw(cx);
+    assert_eq!(
+        harness.closes(),
+        vec![shared_close_mutation(
+            ServerCloseTarget::Pane {
+                workspace: SHARED_CLOSE_WORKSPACE,
+                tab: SHARED_CLOSE_ROOT_TAB,
+                pane: SHARED_CLOSE_SPLIT_PANE,
+            },
+            &[(SHARED_CLOSE_SPLIT_PANE, None)],
+            SharedCloseRemoves::Pane,
+        )],
+        "the approval ends the Pane as it was reviewed"
+    );
+    assert_eq!(split.selections(), 0);
+}
+
 fn shared_close_terminal_is_focused(
     harness: &SharedCloseHarness,
     cx: &mut VisualTestContext,

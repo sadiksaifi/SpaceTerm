@@ -495,6 +495,8 @@ pub(crate) struct TabView {
     pane_bounds: BTreeMap<PaneId, Bounds<Pixels>>,
     /// Where each Pane's surface was drawn, which differs from its place while Panes move.
     pane_surfaces: BTreeMap<PaneId, Bounds<Pixels>>,
+    /// Where each Pane's caption Close control took presses in the last frame.
+    pane_close_controls: BTreeMap<PaneId, gpui::Hitbox>,
     pane_layout_size: Option<PaneSize>,
     /// A Split that waits for the next Pane measurement, because the retained bounds are stale.
     pending_split: Option<(PaneId, SplitAxis)>,
@@ -592,6 +594,7 @@ impl TabView {
             pane_construction,
             pane_bounds: BTreeMap::new(),
             pane_surfaces: BTreeMap::new(),
+            pane_close_controls: BTreeMap::new(),
             pane_layout_size: None,
             pending_split: None,
             split_bounds: BTreeMap::new(),
@@ -1648,6 +1651,7 @@ impl TabView {
                 });
                 self.pane_bounds.remove(&pane_id);
                 self.pane_surfaces.remove(&pane_id);
+                self.pane_close_controls.remove(&pane_id);
                 self.split_bounds.clear();
                 self.pane_titles.remove(&pane_id);
                 self.pane_captions.remove(&pane_id);
@@ -1842,8 +1846,11 @@ impl TabView {
         if self.tab.pane(pane_id).is_none() {
             return;
         }
-        // A caption control acts on its own Pane, which selects it.
-        self.select_shared_pane(pane_id);
+        // A caption control acts on its own Pane, which selects it. Close only asks for
+        // confirmation, so it starts no retained shell before a person approves.
+        if !matches!(action, PaneCaptionAction::Close) {
+            self.select_shared_pane(pane_id);
+        }
         self.focus_pane(pane_id, cx);
         match action {
             PaneCaptionAction::SplitRight => {
@@ -2099,11 +2106,18 @@ impl TabView {
             .overflow_hidden()
             // A moving Pane's surface reaches past its Terminal, so a press there also moves input
             // focus, as a press on the caption does.
-            .capture_any_mouse_down(move |_: &MouseDownEvent, window, cx| {
+            .capture_any_mouse_down(move |event: &MouseDownEvent, window, cx| {
                 let _ = focus_view.update(cx, |view, cx| {
                     // A press is an explicit Pane selection, so a shared Pane asks the server for
-                    // itself. Focus a Pane regains on its own never does.
-                    view.select_shared_pane(pane_id);
+                    // itself. Focus a Pane regains on its own never does, and neither does a press
+                    // on Close, which only asks for confirmation.
+                    let on_close = view
+                        .pane_close_controls
+                        .get(&pane_id)
+                        .is_some_and(|close| close.is_hovered_at(event.position, window));
+                    if !on_close {
+                        view.select_shared_pane(pane_id);
+                    }
                     if view.tab.focused_pane_id() != pane_id {
                         view.focus_pane(pane_id, cx);
                         view.focus(window, cx);
@@ -2719,10 +2733,10 @@ impl TabView {
 
     /// Asks the server for this Pane, which starts or acquires only this Pane.
     ///
-    /// Only an explicit selection reaches here: a press on the Pane, a caption control, keyboard
-    /// Pane navigation, or opening its Tab. Focus a Pane regains on its own, window restoration,
-    /// and membership publication never do, so none of them starts a retained shell. An
-    /// unreachable server is asked for nothing at all.
+    /// Only an explicit selection reaches here: a press on the Pane, a caption control other than
+    /// Close, keyboard Pane navigation, or opening its Tab. Close, focus a Pane regains on its
+    /// own, window restoration, and membership publication never do, so none of them starts a
+    /// retained shell. An unreachable server is asked for nothing at all.
     fn select_shared_pane(&self, pane_id: PaneId) {
         let Some(shared) = self.shared.as_ref().filter(|shared| shared.reachable()) else {
             return;
@@ -3613,6 +3627,7 @@ fn render_pane_caption_content(
             continue;
         }
         let caption_action_available = caption_action_available && unavailable.is_none();
+        let control_view = view.clone();
         let view = view.clone();
         let id = format!("pane-{selector}-{}", pane_id.get());
         let icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
@@ -3643,9 +3658,24 @@ fn render_pane_caption_content(
             });
         });
         controls = if matches!(action, PaneCaptionAction::Close) {
+            // The Pane's surface reads where Close takes presses, so a press there selects
+            // nothing.
+            let close_control = gpui::canvas(
+                move |bounds, window, cx| {
+                    let hitbox = window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal);
+                    let _ = control_view.update(cx, |view, _| {
+                        view.pane_close_controls.insert(pane_id, hitbox);
+                    });
+                },
+                |_, _, _, _| (),
+            )
+            .absolute()
+            .inset_0();
             controls.child(
                 div()
+                    .relative()
                     .ml(-appearance.spacing(PANE_CLOSE_OPTICAL_TRIM))
+                    .child(close_control)
                     .child(button),
             )
         } else {
