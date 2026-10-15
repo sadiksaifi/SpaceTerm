@@ -55,6 +55,7 @@ fn pane(id: Id, source: Option<Id>, axis: Axis) -> Pane {
 
 fn tab(id: Id, panes: Vec<Pane>) -> Tab {
     Tab {
+        worktree: None,
         id,
         root_pane: panes[0].id,
         panes,
@@ -75,6 +76,7 @@ fn inventory(revision: u64, tabs: Vec<Tab>) -> Inventory {
         })
         .collect();
     Inventory {
+        repositories: None,
         revision,
         close: Some(CloseInventory {
             boot: BOOT,
@@ -1501,6 +1503,7 @@ mod edits {
         }
 
         let gone = Inventory {
+            repositories: None,
             revision: 3,
             workspaces: Vec::new(),
             close: None,
@@ -1524,6 +1527,7 @@ mod edits {
         shared.poll();
 
         edits.set_inventory(Inventory {
+            repositories: None,
             revision: 9,
             workspaces: Vec::new(),
             close: None,

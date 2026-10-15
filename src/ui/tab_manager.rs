@@ -3343,6 +3343,90 @@ impl TabManager {
             .any(|(_, view)| view.read(cx).holds_keyboard(window, cx))
     }
 
+    /// Tags each shared Tab with the Worktree the server says it belongs to. The server owns
+    /// membership, so this client only mirrors it; the Tab strip and the Tab Commands then act on
+    /// the Active Worktree's Tabs, as they do in a local Workspace.
+    pub(crate) fn apply_shared_worktrees(
+        &mut self,
+        scope: &dyn Fn(spaceterm_server::hierarchy::Id) -> Option<(WorktreeId, std::path::PathBuf)>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(shared) = self.shared.as_ref() else {
+            return;
+        };
+        let scopes: Vec<_> = self
+            .tabs
+            .iter()
+            .filter_map(|(tab_id, _)| {
+                Some((tab_id, scope(shared.server_tab(tab_id)?).map(|(id, _)| id)))
+            })
+            .collect();
+        // Only the scope changes. A shared Tab's launch policy never takes the server's root,
+        // which names no directory this client may validate or start in.
+        let mut changed = false;
+        for (tab_id, scope) in scopes {
+            if self.tabs.scope_of(tab_id) == Ok(scope) {
+                continue;
+            }
+            if let Err(error) = self.tabs.set_tab_scope(tab_id, scope) {
+                Self::report_tab_error("move", error);
+                continue;
+            }
+            changed = true;
+        }
+        if changed {
+            self.scroll_active_tab_into_view();
+            cx.emit(TabManagerEvent::PresentationChanged);
+            cx.notify();
+        }
+    }
+
+    /// Shows a shared Worktree's most recent Tab, and reports whether it has one. It never opens a
+    /// Tab: the server opens none in a chosen Worktree yet.
+    pub(crate) fn show_shared_worktree(
+        &mut self,
+        id: WorktreeId,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(tab_id) = self.tabs.most_recent_tab_in(Some(id)) else {
+            return false;
+        };
+        self.activate_tab_focusing(tab_id, focus, window, cx);
+        true
+    }
+
+    /// The server Pane a Worktree row describes: the Focused Pane of the Worktree's most recently
+    /// active Tab.
+    pub(crate) fn shared_worktree_pane(
+        &self,
+        id: WorktreeId,
+        cx: &App,
+    ) -> Option<spaceterm_server::hierarchy::Id> {
+        let view = self
+            .tabs
+            .tab(self.tabs.most_recent_tab_in(Some(id))?)?
+            .read(cx);
+        view.shared_server_pane(view.focused_pane_id())
+    }
+
+    /// Presents the Repository Status the server read for every shared Pane in this strip,
+    /// including Tabs outside the Active Worktree.
+    pub(crate) fn present_shared_repositories(
+        &mut self,
+        view: &dyn Fn(spaceterm_server::hierarchy::Id) -> crate::repository_status::RepositoryView,
+        cx: &mut Context<Self>,
+    ) {
+        if self.shared.is_none() {
+            return;
+        }
+        let tabs: Vec<_> = self.tabs.iter().map(|(_, tab)| tab.clone()).collect();
+        for tab in tabs {
+            tab.update(cx, |tab, cx| tab.present_shared_repositories(view, cx));
+        }
+    }
+
     /// The server identity of one shared Tab this strip presents.
     pub(crate) fn shared_server_tab(
         &self,

@@ -235,8 +235,8 @@ impl WorkspaceManager {
         workspace: &WorkspaceEntry<Entity<TabManager>>,
         cx: &App,
     ) -> Option<RowFacts> {
-        // Repository Status for a shared Workspace is read on the owning server, which is not
-        // available yet. The client home scaffold behind its Panes is not its directory.
+        // The owning server reads a shared Workspace's Repository Status. The client home
+        // scaffold behind its Panes is not its directory, so nothing is read for it here.
         if self.is_shared_workspace(workspace.id()) {
             return None;
         }

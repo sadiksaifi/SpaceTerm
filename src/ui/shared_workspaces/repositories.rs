@@ -1,0 +1,453 @@
+//! Git facts a SpaceTerm Server read for the directories its Workspaces show.
+//!
+//! The server reads Repository Status and Worktree inventory on its own machine and publishes them
+//! with its live inventory. It retains none of them. This client presents the facts in the views it
+//! already has and adds only what stays local: its Git Settings and Pull Requests from its own
+//! GitHub CLI.
+//!
+//! Every path here names the server's files. A path is displayed, or compared with other server
+//! values to find the facts for a view; it is never read, opened, or acted on here, even when the
+//! server runs on this machine.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
+
+use spaceterm_server::hierarchy::{Pane, Workspace};
+use spaceterm_server::repository::{DirectoryFacts, Snapshot, WorktreeInventory};
+
+use crate::repository_status::{
+    ChangeState, Freshness, PullRequest, RemoteMachineKey, RepositoryKey, RepositoryMachine,
+    RepositoryRoot, RepositoryStatus, RepositoryStatusPreferences, RepositoryView,
+};
+use crate::ui::repository_status_store::ServerPullRequestKey;
+
+/// The machine every server repository is keyed by. Its root is an opaque spelling rather than a
+/// local path, so no local read or file action can start from it.
+const SERVER_MACHINE: &str = "spaceterm-server";
+
+/// The server's latest Git facts, and when this client first saw each directory's current facts.
+#[derive(Debug, Default)]
+pub(crate) struct SharedRepositories {
+    snapshot: Option<Snapshot>,
+    /// A status reads this as its update time. It changes only when the facts do, so an unchanged
+    /// reading presents an unchanged view.
+    seen: HashMap<PathBuf, Instant>,
+}
+
+/// What this client adds to the server's facts when it presents them.
+pub(crate) struct LocalPresentation<'a> {
+    pub(crate) preferences: RepositoryStatusPreferences,
+    /// Whether this client is connected to the server. Facts kept from before a disconnection are
+    /// presented as last known, because the server may have read newer ones since.
+    pub(crate) connected: bool,
+    /// The cached Pull Request this client's GitHub CLI found for a server branch.
+    pub(crate) pull_request: &'a dyn Fn(&ServerPullRequestKey) -> Option<PullRequest>,
+}
+
+impl SharedRepositories {
+    /// Accepts the server's latest reading, and reports whether it differs from the one
+    /// presented. A new revision can arrive while the organization revision stays the same, and a
+    /// restarted server starts a new revision sequence, so the server boot identifies it too.
+    pub(crate) fn accept(&mut self, snapshot: Option<&Snapshot>, now: Instant) -> bool {
+        let revision = |snapshot: Option<&Snapshot>| {
+            snapshot.map(|snapshot| (snapshot.boot, snapshot.revision))
+        };
+        if revision(self.snapshot.as_ref()) == revision(snapshot) {
+            return false;
+        }
+        let previous = self.snapshot.take();
+        let mut seen = HashMap::new();
+        for facts in snapshot.iter().flat_map(|snapshot| &snapshot.directories) {
+            let Some(repository) = &facts.repository else {
+                continue;
+            };
+            let unchanged = previous
+                .as_ref()
+                .and_then(|previous| find(previous, &facts.directory))
+                .and_then(|previous| previous.repository.as_ref())
+                .is_some_and(|previous| previous == repository);
+            let at = self
+                .seen
+                .get(&facts.directory)
+                .copied()
+                .filter(|_| unchanged)
+                .unwrap_or(now);
+            seen.insert(facts.directory.clone(), at);
+        }
+        self.seen = seen;
+        self.snapshot = snapshot.cloned();
+        true
+    }
+
+    /// The facts the server read for one directory it reported.
+    pub(crate) fn facts(&self, directory: &Path) -> Option<&DirectoryFacts> {
+        find(self.snapshot.as_ref()?, directory)
+    }
+
+    /// The Worktrees of the repository containing one directory, as git on the server lists them.
+    pub(crate) fn worktrees(&self, directory: &Path) -> Option<&WorktreeInventory> {
+        self.facts(directory)?.worktrees.as_ref()
+    }
+
+    /// The Pull Request lookups the presented repositories need, one per branch and upstream.
+    pub(crate) fn pull_request_keys(&self) -> Vec<ServerPullRequestKey> {
+        self.snapshot
+            .iter()
+            .flat_map(|snapshot| &snapshot.directories)
+            .filter_map(|facts| pull_request_key(facts.repository.as_ref()?))
+            .collect()
+    }
+
+    /// What a Pane, sidebar row, or chrome presents for one server directory.
+    ///
+    /// A failed read keeps the last facts, dimmed with the failure; facts without a connection are
+    /// dimmed as last known. A directory outside any repository, and every directory while
+    /// Repository Status is off, presents nothing.
+    pub(crate) fn view(&self, directory: &Path, local: &LocalPresentation<'_>) -> RepositoryView {
+        if !local.preferences.show_repository_status {
+            return RepositoryView::Hidden;
+        }
+        let Some(facts) = self.facts(directory) else {
+            return RepositoryView::Hidden;
+        };
+        let Some(repository) = &facts.repository else {
+            return RepositoryView::Hidden;
+        };
+        let Some(&read_at) = self.seen.get(directory) else {
+            return RepositoryView::Hidden;
+        };
+        let freshness = if facts.failure.is_some() || !local.connected {
+            Freshness::LastKnown { as_of: read_at }
+        } else {
+            Freshness::Current
+        };
+        let pull_request = pull_request_key(repository)
+            .filter(|_| local.preferences.pull_requests_enabled())
+            .and_then(|key| (local.pull_request)(&key));
+        RepositoryView::Repository(Arc::new(RepositoryStatus {
+            key: RepositoryKey {
+                machine: RepositoryMachine::Remote(RemoteMachineKey::new(SERVER_MACHINE)),
+                root: RepositoryRoot::Remote(repository.root.to_string_lossy().into()),
+            },
+            head: repository.head.clone(),
+            commit: repository.commit.clone(),
+            upstream: repository.upstream.clone(),
+            operation: repository.operation,
+            changes: ChangeState::Known(repository.changes.clone()),
+            freshness,
+            read_at,
+            pull_request,
+            read_failure: facts.failure,
+        }))
+    }
+}
+
+fn find<'a>(snapshot: &'a Snapshot, directory: &Path) -> Option<&'a DirectoryFacts> {
+    snapshot
+        .directories
+        .iter()
+        .find(|facts| facts.directory == directory)
+}
+
+/// The lookup one repository's branch needs. The server sends only the parsed query; raw remote
+/// URLs and Git configuration stay on the server.
+fn pull_request_key(
+    repository: &spaceterm_server::repository::Repository,
+) -> Option<ServerPullRequestKey> {
+    Some(ServerPullRequestKey {
+        query: repository.pull_request.clone()?,
+        upstream: repository
+            .upstream
+            .as_ref()
+            .map(|upstream| Arc::clone(&upstream.name)),
+    })
+}
+
+/// The directory a server Pane presents: the last one its shell confirmed, else the one it starts
+/// in.
+pub(crate) fn pane_directory(pane: &Pane) -> &Path {
+    pane.confirmed_directory
+        .as_deref()
+        .unwrap_or(&pane.starting_directory)
+}
+
+/// The directory a server Workspace's row reads: its Pinned Directory, else its Root Pane's.
+pub(crate) fn workspace_directory(workspace: &Workspace) -> Option<&Path> {
+    if let Some(pinned) = &workspace.pinned_directory {
+        return Some(pinned);
+    }
+    workspace
+        .tabs
+        .iter()
+        .find(|tab| tab.id == workspace.root_tab)
+        .and_then(|tab| tab.panes.iter().find(|pane| pane.id == tab.root_pane))
+        .map(pane_directory)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use spaceterm_server::repository::{
+        ChangeSummary, ChangeTotal, GitHubRepository, GitToolStatus, PullRequestQuery, Repository,
+        RepositoryHead, RepositoryReadError,
+    };
+
+    use super::*;
+
+    fn repository(branch: &str) -> Repository {
+        Repository {
+            root: "/srv/app".into(),
+            head: RepositoryHead::Branch(branch.into()),
+            commit: Some("abc1234".into()),
+            upstream: None,
+            operation: None,
+            changes: ChangeSummary {
+                total: ChangeTotal::Exact(2),
+                modified: 2,
+                ..ChangeSummary::default()
+            },
+            pull_request: Some(PullRequestQuery {
+                repository: GitHubRepository {
+                    host: "github.com".into(),
+                    owner: "owner".into(),
+                    name: "app".into(),
+                },
+                head_branch: branch.into(),
+                head_owner: None,
+            }),
+        }
+    }
+
+    fn snapshot(revision: u64, directories: Vec<DirectoryFacts>) -> Snapshot {
+        Snapshot {
+            boot: [1; 32],
+            revision,
+            git: GitToolStatus::Unknown,
+            directories,
+        }
+    }
+
+    fn facts(
+        repository: Option<Repository>,
+        failure: Option<RepositoryReadError>,
+    ) -> DirectoryFacts {
+        DirectoryFacts {
+            directory: "/srv/app/src".into(),
+            repository,
+            worktrees: None,
+            failure,
+        }
+    }
+
+    fn pull_request(number: u32) -> PullRequest {
+        PullRequest {
+            number,
+            title: "Title".into(),
+            draft: false,
+            url: "https://github.com/owner/app/pull/1".into(),
+            head: "feature".into(),
+            base: "main".into(),
+        }
+    }
+
+    fn present(
+        repositories: &SharedRepositories,
+        preferences: RepositoryStatusPreferences,
+        connected: bool,
+    ) -> RepositoryView {
+        let lookup = |_: &ServerPullRequestKey| Some(pull_request(7));
+        repositories.view(
+            Path::new("/srv/app/src"),
+            &LocalPresentation {
+                preferences,
+                connected,
+                pull_request: &lookup,
+            },
+        )
+    }
+
+    fn status(view: &RepositoryView) -> &RepositoryStatus {
+        match view {
+            RepositoryView::Repository(status) => status,
+            RepositoryView::Hidden => panic!("the view should present a repository"),
+        }
+    }
+
+    #[test]
+    fn a_new_revision_or_server_boot_should_present_new_facts_and_a_repeat_should_not() {
+        let mut repositories = SharedRepositories::default();
+        let now = Instant::now();
+        let restarted = Snapshot {
+            boot: [2; 32],
+            ..snapshot(1, vec![facts(Some(repository("feature")), None)])
+        };
+
+        assert!(repositories.accept(
+            Some(&snapshot(1, vec![facts(Some(repository("main")), None)])),
+            now
+        ));
+        assert!(!repositories.accept(
+            Some(&snapshot(1, vec![facts(Some(repository("main")), None)])),
+            now
+        ));
+        // A restarted server's first revision can repeat the former boot's latest one.
+        assert!(repositories.accept(Some(&restarted), now));
+        let view = present(&repositories, RepositoryStatusPreferences::default(), true);
+        assert!(repositories.accept(None, now));
+
+        assert_eq!(
+            status(&view).head,
+            spaceterm_server::repository::RepositoryHead::Branch("feature".into())
+        );
+        assert_eq!(
+            present(&repositories, RepositoryStatusPreferences::default(), true),
+            RepositoryView::Hidden
+        );
+    }
+
+    #[test]
+    fn unchanged_facts_should_keep_their_update_time_and_changed_facts_should_take_a_new_one() {
+        let mut repositories = SharedRepositories::default();
+        let first = Instant::now();
+        let later = first + Duration::from_secs(30);
+        repositories.accept(
+            Some(&snapshot(1, vec![facts(Some(repository("main")), None)])),
+            first,
+        );
+        repositories.accept(
+            Some(&snapshot(2, vec![facts(Some(repository("main")), None)])),
+            later,
+        );
+        let kept = present(&repositories, RepositoryStatusPreferences::default(), true);
+
+        repositories.accept(
+            Some(&snapshot(3, vec![facts(Some(repository("feature")), None)])),
+            later,
+        );
+        let changed = present(&repositories, RepositoryStatusPreferences::default(), true);
+
+        assert_eq!(status(&kept).read_at, first);
+        assert_eq!(status(&changed).read_at, later);
+    }
+
+    #[test]
+    fn a_failed_read_or_a_lost_connection_should_present_the_last_facts_as_last_known() {
+        let mut repositories = SharedRepositories::default();
+        let now = Instant::now();
+        repositories.accept(
+            Some(&snapshot(
+                1,
+                vec![facts(
+                    Some(repository("main")),
+                    Some(RepositoryReadError::TimedOut),
+                )],
+            )),
+            now,
+        );
+        let failed = present(&repositories, RepositoryStatusPreferences::default(), true);
+        repositories.accept(
+            Some(&snapshot(2, vec![facts(Some(repository("main")), None)])),
+            now,
+        );
+        let offline = present(&repositories, RepositoryStatusPreferences::default(), false);
+        let current = present(&repositories, RepositoryStatusPreferences::default(), true);
+
+        assert_eq!(
+            status(&failed).freshness,
+            Freshness::LastKnown { as_of: now }
+        );
+        assert_eq!(
+            status(&failed).read_failure,
+            Some(RepositoryReadError::TimedOut)
+        );
+        assert_eq!(
+            status(&offline).freshness,
+            Freshness::LastKnown { as_of: now }
+        );
+        assert_eq!(status(&offline).read_failure, None);
+        assert_eq!(status(&current).freshness, Freshness::Current);
+    }
+
+    #[test]
+    fn client_settings_should_decide_what_server_facts_present() {
+        let mut repositories = SharedRepositories::default();
+        repositories.accept(
+            Some(&snapshot(1, vec![facts(Some(repository("main")), None)])),
+            Instant::now(),
+        );
+
+        let hidden = present(
+            &repositories,
+            RepositoryStatusPreferences {
+                show_repository_status: false,
+                show_pull_requests: true,
+            },
+            true,
+        );
+        let without_pull_requests = present(
+            &repositories,
+            RepositoryStatusPreferences {
+                show_repository_status: true,
+                show_pull_requests: false,
+            },
+            true,
+        );
+        let with_pull_requests =
+            present(&repositories, RepositoryStatusPreferences::default(), true);
+
+        assert_eq!(hidden, RepositoryView::Hidden);
+        assert_eq!(status(&without_pull_requests).pull_request, None);
+        assert_eq!(
+            status(&with_pull_requests)
+                .pull_request
+                .as_ref()
+                .map(|pull_request| pull_request.number),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn a_server_root_should_never_present_as_a_local_path() {
+        let mut repositories = SharedRepositories::default();
+        repositories.accept(
+            Some(&snapshot(1, vec![facts(Some(repository("main")), None)])),
+            Instant::now(),
+        );
+
+        let view = present(&repositories, RepositoryStatusPreferences::default(), true);
+
+        assert!(matches!(status(&view).key.root, RepositoryRoot::Remote(_)));
+        assert_eq!(status(&view).key.root.display(), "/srv/app");
+    }
+
+    #[test]
+    fn a_directory_outside_a_repository_or_unreported_should_present_nothing() {
+        let mut repositories = SharedRepositories::default();
+        repositories.accept(
+            Some(&snapshot(
+                1,
+                vec![facts(None, Some(RepositoryReadError::Unavailable))],
+            )),
+            Instant::now(),
+        );
+
+        assert_eq!(
+            present(&repositories, RepositoryStatusPreferences::default(), true),
+            RepositoryView::Hidden
+        );
+        assert_eq!(
+            repositories.view(
+                Path::new("/elsewhere"),
+                &LocalPresentation {
+                    preferences: RepositoryStatusPreferences::default(),
+                    connected: true,
+                    pull_request: &|_| None,
+                },
+            ),
+            RepositoryView::Hidden
+        );
+    }
+}

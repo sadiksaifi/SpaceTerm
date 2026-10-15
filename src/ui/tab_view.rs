@@ -2661,6 +2661,27 @@ impl TabView {
         self.shared.as_ref()?.server_pane(pane_id)
     }
 
+    /// Presents the Repository Status the server read for each shared Pane's directory.
+    pub(crate) fn present_shared_repositories(
+        &mut self,
+        view: &dyn Fn(spaceterm_server::hierarchy::Id) -> crate::repository_status::RepositoryView,
+        cx: &mut Context<Self>,
+    ) {
+        let panes: Vec<_> = self
+            .tab
+            .panes_with_ids()
+            .filter_map(|(pane_id, terminal)| {
+                Some((self.shared_server_pane(pane_id)?, terminal.clone()))
+            })
+            .collect();
+        for (server, terminal) in panes {
+            let presented = view(server);
+            terminal.update(cx, |terminal, cx| {
+                terminal.present_server_repository(presented, cx);
+            });
+        }
+    }
+
     /// Whether this Tab presents the server Pane.
     pub(crate) fn holds_shared_pane(&self, server: spaceterm_server::hierarchy::Id) -> bool {
         self.shared
