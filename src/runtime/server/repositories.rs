@@ -36,12 +36,13 @@ pub(super) struct ServerRepositories {
     worker: Option<Worker>,
     next_read: Instant,
 }
-impl Default for ServerRepositories {
-    fn default() -> Self {
+impl ServerRepositories {
+    pub(super) fn new(boot: Id) -> Self {
         Self {
             subscribers: BTreeSet::new(),
             sources: BTreeSet::new(),
             snapshot: Snapshot {
+                boot,
                 revision: 0,
                 git: GitToolStatus::Unknown,
                 directories: Vec::new(),
@@ -65,6 +66,10 @@ impl ServerRepositories {
         if self.subscribers.is_empty() {
             self.stop();
         }
+    }
+    pub(super) fn shutdown(&mut self) {
+        self.subscribers.clear();
+        self.stop();
     }
     fn stop(&mut self) {
         if let Some(worker) = self.worker.take() {
@@ -357,9 +362,11 @@ fn read(
                         return Err(RepositoryReadError::OutputTooLarge);
                     }
                     for record in &mut list.worktrees {
-                        record.missing |= super::local_filesystem()
-                            .validate_directory(&record.root)
-                            .is_err();
+                        record.missing |= matches!(
+                            super::local_filesystem().validate_directory(&record.root),
+                            Err(super::LocalFilesystemError::Missing
+                                | super::LocalFilesystemError::NotDirectory)
+                        );
                     }
                     facts.worktrees = Some(WorktreeInventory {
                         main_root: list.repository.main_root().to_owned(),

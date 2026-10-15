@@ -230,6 +230,8 @@ pub struct WorktreeInventory {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
+    /// Server boot that owns this revision sequence.
+    pub boot: crate::hierarchy::Id,
     pub revision: u64,
     pub git: GitToolStatus,
     pub directories: Vec<DirectoryFacts>,

@@ -19,9 +19,10 @@ impl SharedWorkspaceHost {
     pub(super) fn new(prototype: DevelopmentPaneHost) -> Self {
         let mut state = State::empty();
         state.begin_boot(prototype.boot);
+        let repositories = super::repositories::ServerRepositories::new(prototype.boot);
         Self {
             prototype,
-            repositories: Default::default(),
+            repositories,
             state,
             panes: BTreeMap::new(),
             store: None,
@@ -475,7 +476,7 @@ impl PaneService for SharedWorkspaceHost {
         }
     }
     fn shutdown(&mut self) -> Result<(), ServerError> {
-        self.repositories = Default::default();
+        self.repositories.shutdown();
         self.synchronize()
             .map_err(|_| ServerError::StorageUnavailable)?;
         for host in self.panes.values_mut() {
