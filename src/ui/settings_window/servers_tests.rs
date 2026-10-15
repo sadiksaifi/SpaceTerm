@@ -8,7 +8,7 @@ use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 
 use super::testing::{
     ScriptedServer, ScriptedService, ServiceCall, connected, not_installed, not_running, retained,
-    running, status_only, stopped,
+    running, status_only, stopped, uninstalled,
 };
 use super::{
     CHECK_SELECTOR, CONTROL_SELECTOR, INSTALL_CHOICE_SELECTOR, INSTALL_SELECTOR, InstallChoice,
@@ -523,6 +523,69 @@ fn each_service_state_offers_the_steps_that_apply_to_it() {
 }
 
 #[test]
+fn installing_promises_to_start_the_server_only_when_the_person_has_not_stopped_it() {
+    let presented = |status, installations, working| {
+        present_service(ServiceState {
+            status: Some(status),
+            installations,
+            working,
+            ..ServiceState::default()
+        })
+    };
+    let one = || vec![retained("1.4.0", 'a')];
+    let several = || vec![retained("1.4.0", 'a'), retained("1.5.0", 'b')];
+
+    // A first installation starts the server and keeps it running while the person is logged in.
+    assert_eq!(
+        presented(not_installed(), one(), None).explanation.as_ref(),
+        "Version 1.4.0 (commit aaaaaaa) is verified and ready to install. The server then runs \
+         for your account whenever you\u{2019}re logged in, even after SpaceTerm quits. No \
+         administrator password is needed."
+    );
+    assert_eq!(
+        presented(not_installed(), several(), None)
+            .explanation
+            .as_ref(),
+        "Choose a verified server version from Install. It runs for your account whenever \
+         you\u{2019}re logged in, even after SpaceTerm quits. No administrator password is \
+         needed."
+    );
+    let installing = presented(not_installed(), one(), Some(ServiceAction::Install));
+    assert_eq!(installing.state, "Installing");
+    assert_eq!(
+        installing.explanation.as_ref(),
+        "Installing and starting the server\u{2026}"
+    );
+
+    // A Stop the person chose outlasts Uninstall, and installing again keeps it.
+    for (installations, explanation) in [
+        (
+            one(),
+            "Version 1.4.0 (commit aaaaaaa) is verified and ready to install. You stopped the \
+             server. Installing keeps it stopped until you start it. No administrator password \
+             is needed.",
+        ),
+        (
+            several(),
+            "Choose a verified server version from Install. You stopped the server. Installing \
+             keeps it stopped until you start it. No administrator password is needed.",
+        ),
+    ] {
+        let presentation = presented(uninstalled(), installations, None);
+        assert_eq!(presentation.state, "Not Installed");
+        assert_eq!(presentation.explanation.as_ref(), explanation);
+        assert_eq!(presentation.tone, CaptionTone::Guidance);
+        assert_eq!(presentation.actions, vec![ServiceAction::Install]);
+    }
+    let installing = presented(uninstalled(), one(), Some(ServiceAction::Install));
+    assert_eq!(installing.state, "Installing");
+    assert_eq!(
+        installing.explanation.as_ref(),
+        "Installing the server without starting it\u{2026}"
+    );
+}
+
+#[test]
 fn a_running_process_reads_as_running_even_while_a_stop_is_recorded() {
     let presentation = present_service(ServiceState {
         status: Some(super::ServiceStatus {
@@ -894,9 +957,37 @@ fn uninstall_asks_first_then_offers_install_again(cx: &mut TestAppContext) {
     click_modal(UNINSTALL_CONFIRM_SELECTOR, cx);
 
     assert_eq!(service.changes(), vec![ServiceCall::Uninstall]);
+    let presented = service_presentation(&window, cx);
+    assert_eq!(presented.actions, vec![ServiceAction::Install]);
+    assert!(
+        presented
+            .explanation
+            .contains("Installing keeps it stopped")
+    );
+    assert!(!presented.explanation.contains("logged in"));
+
+    // Installing again keeps the Stop, and the progress says so while it runs.
+    let build = retained("1.4.0", 'a');
+    window.update(cx, |settings, cx| {
+        settings.install_server_service(build.directory.clone(), cx);
+    });
+    assert_eq!(
+        service_presentation(&window, cx).explanation.as_ref(),
+        "Installing the server without starting it\u{2026}"
+    );
+    cx.run_until_parked();
+
+    assert_eq!(
+        service.changes(),
+        vec![
+            ServiceCall::Uninstall,
+            ServiceCall::Install(build.directory)
+        ]
+    );
+    assert!(rendered("settings-server-service-state-stopped", cx));
     assert_eq!(
         service_presentation(&window, cx).actions,
-        vec![ServiceAction::Install]
+        vec![ServiceAction::Start, ServiceAction::Uninstall]
     );
 }
 

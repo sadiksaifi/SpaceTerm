@@ -571,9 +571,15 @@ impl ServiceAction {
         !matches!(self, Self::Check)
     }
 
-    const fn progress(self) -> (&'static str, &'static str) {
+    /// The progress badge and caption. Installing keeps a Stop the person chose, so it starts the
+    /// server only when `stopped` is false.
+    const fn progress(self, stopped: bool) -> (&'static str, &'static str) {
         match self {
             Self::Check => ("Checking", "Reading the service\u{2026}"),
+            Self::Install if stopped => (
+                "Installing",
+                "Installing the server without starting it\u{2026}",
+            ),
             Self::Install => ("Installing", "Installing and starting the server\u{2026}"),
             Self::Start => ("Starting", "Starting the server\u{2026}"),
             Self::Stop => (
@@ -757,6 +763,8 @@ pub(super) struct ServiceState {
 pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
     let guidance = |text: &'static str| (SharedString::new_static(text), CaptionTone::Guidance);
     let phase = state.status.map(ServicePhase::of);
+    // A Stop the person chose outlasts Uninstall, and installing again keeps it.
+    let stopped = state.status.is_some_and(|status| status.stopped);
     let install_choices = if phase == Some(ServicePhase::NotInstalled) {
         InstallChoice::of(&state.installations)
     } else {
@@ -784,6 +792,15 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                              command to keep a signed package for this account, then choose \
                              Check Now.",
                         ),
+                        [only] if stopped => (
+                            SharedString::from(format!(
+                                "{} is verified and ready to install. You stopped the server. \
+                                 Installing keeps it stopped until you start it. No \
+                                 administrator password is needed.",
+                                only.label
+                            )),
+                            CaptionTone::Guidance,
+                        ),
                         [only] => (
                             SharedString::from(format!(
                                 "{} is verified and ready to install. The server then runs for \
@@ -792,6 +809,11 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                                 only.label
                             )),
                             CaptionTone::Guidance,
+                        ),
+                        _ if stopped => guidance(
+                            "Choose a verified server version from Install. You stopped the \
+                             server. Installing keeps it stopped until you start it. No \
+                             administrator password is needed.",
                         ),
                         _ => guidance(
                             "Choose a verified server version from Install. It runs for your \
@@ -846,7 +868,7 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
     };
     let (label, explanation, tone) = match state.working {
         Some(action) => {
-            let (label, explanation) = action.progress();
+            let (label, explanation) = action.progress(stopped);
             (
                 label,
                 SharedString::new_static(explanation),
@@ -1531,7 +1553,8 @@ pub(super) mod testing {
         }
 
         fn uninstall(&self) -> Result<ServiceStatus, ServerError> {
-            self.change(ServiceCall::Uninstall, |_| not_installed())
+            // Uninstalling stops the server first and keeps that Stop, as the service does.
+            self.change(ServiceCall::Uninstall, |_| uninstalled())
         }
     }
 
@@ -1554,6 +1577,14 @@ pub(super) mod testing {
             enabled: false,
             running: false,
             stopped: false,
+        }
+    }
+
+    /// Uninstalled, which records a Stop that installing again keeps.
+    pub(in crate::ui::settings_window) const fn uninstalled() -> ServiceStatus {
+        ServiceStatus {
+            stopped: true,
+            ..not_installed()
         }
     }
 
