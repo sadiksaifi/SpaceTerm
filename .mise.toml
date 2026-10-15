@@ -187,7 +187,7 @@ run = "cargo clippy --all-targets --all-features --locked --no-deps -- -D warnin
 
 [tasks."lint:rust:portable"]
 description = "Lint shared targets without native features"
-run = "cargo clippy --package spaceterm --package spaceterm-directories --all-targets --no-default-features --locked --no-deps -- -D warnings"
+run = "cargo clippy --package spaceterm --package spaceterm-directories --package spaceterm-server --all-targets --no-default-features --locked --no-deps -- -D warnings"
 
 [tasks."lint:python"]
 description = "Lint and type-check the Python task code"
@@ -216,7 +216,7 @@ run = "cargo check --all-targets --all-features --locked"
 
 [tasks."check:portable"]
 description = "Check shared targets without native features"
-run = "cargo check --package spaceterm --package spaceterm-directories --all-targets --no-default-features --locked"
+run = "cargo check --package spaceterm --package spaceterm-directories --package spaceterm-server --all-targets --no-default-features --locked"
 
 [tasks.test]
 description = "Run tests with every feature for the current platform"
@@ -225,7 +225,7 @@ run = "cargo test --all-targets --all-features --locked {{usage.filter | quote}}
 
 [tasks."test:portable"]
 description = "Run shared tests without native features"
-run = "cargo test --package spaceterm --package spaceterm-directories --all-targets --no-default-features --locked"
+run = "cargo test --package spaceterm --package spaceterm-directories --package spaceterm-server --all-targets --no-default-features --locked"
 
 [tasks."test:rustdoc"]
 description = "Compile and test Rust documentation examples"
@@ -375,3 +375,38 @@ run = "tagsmith validate --tag {{usage.tag | quote}} --github-output"
 [tasks."release:notes:preview"]
 description = "Preview release notes for changes since the last release"
 run = "git-cliff --config cliff.toml --unreleased --offline --strip all"
+
+[tasks."server:test"]
+description = "Test local server authentication and private storage"
+run = "cargo test --package spaceterm-server --package spaceterm-directories --all-features --locked"
+
+[tasks."server:check"]
+description = "Check the local server and desktop credential adapters"
+run = [
+    "cargo clippy --package spaceterm-server --all-targets --all-features --locked -- -D warnings",
+    "cargo clippy --package spaceterm-server --all-targets --no-default-features --locked -- -D warnings",
+]
+
+[tasks."server:build"]
+description = "Build the isolated headless Development server"
+run = "cargo build --package spaceterm-server --no-default-features --locked"
+
+[tasks."server:development"]
+description = "Run the Development server explicitly in the foreground after local setup"
+run = "cargo run --package spaceterm-server --no-default-features --locked"
+
+[tasks."server:pair"]
+description = "Explicitly set up, pair, start, and authenticate the local Development server"
+run = "cargo run --package spaceterm-server --features client --locked -- setup"
+
+[tasks."server:status"]
+description = "Read native device credentials and authenticate the existing Development server"
+run = "cargo run --package spaceterm-server --features client --locked -- status"
+
+[tasks."server:dependencies"]
+description = "Show the isolated headless server's production dependencies"
+run = "cargo tree --package spaceterm-server --no-default-features --edges normal,build"
+
+[tasks."server:lock"]
+description = "Refresh local server dependencies without upgrading unrelated packages"
+run = "cargo update --package spaceterm-server --offline"

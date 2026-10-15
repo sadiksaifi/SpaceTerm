@@ -1,0 +1,180 @@
+use crate::{
+    AuthenticatedStatus, ServerError,
+    host::{self, Paths},
+    protocol,
+    storage::Directory,
+};
+use serde::{Deserialize, Serialize};
+use std::{
+    os::unix::process::CommandExt,
+    process::{Command, Stdio},
+    time::{Duration, Instant},
+};
+use zeroize::{Zeroize, Zeroizing};
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Credential {
+    seed: [u8; 32],
+    pin: [u8; 32],
+}
+impl Drop for Credential {
+    fn drop(&mut self) {
+        self.seed.zeroize();
+    }
+}
+
+/// Resolving this handle never reads or writes storage and never starts a process.
+#[derive(Clone)]
+pub struct LocalServer {
+    paths: Paths,
+    identity: String,
+}
+impl LocalServer {
+    pub fn for_identity(directory_name: &str) -> Result<Self, ServerError> {
+        Ok(Self {
+            paths: Paths::for_identity(directory_name)?,
+            identity: directory_name.to_owned(),
+        })
+    }
+    fn entry(&self) -> Result<keyring::Entry, ServerError> {
+        // Explicit native builders exclude keyring's mock backend even when target features change.
+        #[cfg(target_os = "macos")]
+        let builder = keyring::macos::default_credential_builder();
+        #[cfg(target_os = "linux")]
+        let builder = keyring::secret_service::default_credential_builder();
+        let credential = builder
+            .build(
+                None,
+                &format!("io.github.sadiksaifi.{}.local-server", self.identity),
+                "desktop",
+            )
+            .map_err(|_| ServerError::CredentialUnavailable)?;
+        Ok(keyring::Entry::new_with_credential(credential))
+    }
+    fn credential(&self) -> Result<Option<Credential>, ServerError> {
+        match self.entry()?.get_secret() {
+            Ok(bytes) => {
+                let bytes = Zeroizing::new(bytes);
+                serde_json::from_slice(&bytes)
+                    .map(Some)
+                    .map_err(|_| ServerError::CredentialUnavailable)
+            }
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(_) => Err(ServerError::CredentialUnavailable),
+        }
+    }
+    fn authenticate(&self, credential: &Credential) -> Result<AuthenticatedStatus, ServerError> {
+        let mut stream = host::connect(&self.paths)?;
+        protocol::authenticate_client(
+            &mut stream,
+            &protocol::key(&credential.seed)?,
+            &credential.pin,
+            &[2, 1],
+        )
+    }
+    /// Reads the saved native credential and authenticates an existing server. Never starts it.
+    pub fn refresh(&self) -> Result<AuthenticatedStatus, ServerError> {
+        self.authenticate(&self.credential()?.ok_or(ServerError::NotPaired)?)
+    }
+    /// Local owning-account authority is granted only by this explicit setup action.
+    pub fn setup_and_start(&self) -> Result<AuthenticatedStatus, ServerError> {
+        if self.identity != "spaceterm-development" {
+            return Err(ServerError::StartupFailed);
+        }
+        // Locked or unavailable storage is refused before touching server identity.
+        self.credential()?;
+        let data = Directory::open(&self.paths.data, true)?;
+        let _setup = data.lock("setup.lock", false)?;
+        let existing = self.credential()?;
+        // A surviving native pin is evidence of an existing identity. Missing server storage
+        // must not silently replace it during repair.
+        let mut record = if existing.is_some() {
+            data.read().map_err(|error| {
+                if error == ServerError::NotPaired {
+                    ServerError::AuthenticationRefused
+                } else {
+                    error
+                }
+            })?
+        } else {
+            data.read_or_create()?
+        };
+        let pin = protocol::public(&protocol::key(&record.seed)?);
+        let credential = match existing {
+            Some(credential) if credential.pin == pin => credential,
+            Some(_) => return Err(ServerError::AuthenticationRefused),
+            None => {
+                let credential = Credential {
+                    seed: protocol::random()?,
+                    pin,
+                };
+                let bytes = Zeroizing::new(
+                    serde_json::to_vec(&credential)
+                        .map_err(|_| ServerError::CredentialUnavailable)?,
+                );
+                self.entry()?
+                    .set_secret(&bytes)
+                    .map_err(|_| ServerError::CredentialUnavailable)?;
+                // Require a successful native read before publishing paired-device authority.
+                let saved = self
+                    .credential()?
+                    .ok_or(ServerError::CredentialUnavailable)?;
+                if saved.seed != credential.seed || saved.pin != credential.pin {
+                    return Err(ServerError::CredentialUnavailable);
+                }
+                credential
+            }
+        };
+        let device = protocol::public(&protocol::key(&credential.seed)?);
+        if !record.paired.contains(&device) {
+            if record.paired.len() >= 64 {
+                return Err(ServerError::StorageUnavailable);
+            }
+            record.paired.push(device);
+            data.write(&record)?;
+        }
+        match self.authenticate(&credential) {
+            Ok(status) => return Ok(status),
+            Err(ServerError::NotRunning) => {}
+            Err(error) => return Err(error),
+        }
+        // The Development launcher stages this binary beside the desktop executable. No PATH
+        // lookup, shell command, retained service, or remote-provided executable is involved.
+        let executable = std::env::current_exe()
+            .map_err(|_| ServerError::StartupFailed)?
+            .parent()
+            .ok_or(ServerError::StartupFailed)?
+            .join("spaceterm-server");
+        let mut command = Command::new(executable);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // SAFETY: setsid is async-signal-safe and this closure performs no allocation or locking.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+        let mut child = command.spawn().map_err(|_| ServerError::StartupFailed)?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match self.authenticate(&credential) {
+                Ok(status) => return Ok(status),
+                Err(ServerError::NotRunning) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50))
+                }
+                Err(ServerError::NotRunning) => return Err(ServerError::StartupFailed),
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}

@@ -703,3 +703,6 @@ mod tests {
         assert_eq!(format!("{directories:?}"), "AppDirectories(..)");
     }
 }
+
+mod server;
+pub use server::ServerDirectories;
