@@ -179,7 +179,7 @@ impl ServerRepositories {
             let cancellation = SshCancellationToken::default();
             let token = cancellation.clone();
             let sources = self.sources.clone();
-            let (sender, results) = mpsc::sync_channel(MAX_DIRECTORIES);
+            let (sender, results) = mpsc::sync_channel(1);
             if let Ok(handle) = std::thread::Builder::new()
                 .name("spaceterm-server-git".into())
                 .spawn(move || read(sources, token, sender))
@@ -378,8 +378,19 @@ fn read(
             Ok(())
         })();
         facts.failure = result.err();
-        if cancellation.is_cancelled() || sender.send((status, facts)).is_err() {
-            return;
+        let mut publication = (status, facts);
+        loop {
+            if cancellation.is_cancelled() {
+                return;
+            }
+            match sender.try_send(publication) {
+                Ok(()) => break,
+                Err(mpsc::TrySendError::Disconnected(_)) => return,
+                Err(mpsc::TrySendError::Full(pending)) => {
+                    publication = pending;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
         }
     }
 }
