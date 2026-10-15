@@ -776,7 +776,7 @@ mod tests {
                     row.iter()
                         .map(|c| c.text.as_str())
                         .collect::<String>()
-                        .contains(text)
+                        .trim_end() == text
                 })
             {
                 return;
@@ -883,7 +883,7 @@ mod tests {
             &mut host,
             1,
             lease,
-            "printf '\\033]133;A;spaceterm=%s\\007\\033]7;file://localhost/\\007\\033]133;A;spaceterm=%s\\007' \"$SPACETERM_PROMPT_OWNER\" \"$SPACETERM_PROMPT_OWNER\"; printf 'CONFIRMED\\n'",
+            "stty -echo; printf '\\033]7;file://localhost/\\007\\033]133;A;spaceterm=%s\\007' \"$SPACETERM_PROMPT_OWNER\"; printf '\\033[2J\\033[HCONFIRMED\\n'",
         );
         await_text(&mut host, 1, lease, "CONFIRMED");
         host.tick();

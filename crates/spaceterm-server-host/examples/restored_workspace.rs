@@ -113,7 +113,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     command(
         &mut connection,
         original,
-        "stty -echo; cd /; printf '\\033]133;A;spaceterm=%s\\007\\033]7;file://localhost/\\007\\033]133;A;spaceterm=%s\\007' \"$SPACETERM_PROMPT_OWNER\" \"$SPACETERM_PROMPT_OWNER\"; printf '\\033[2J\\033[HOLD-PROGRAM\\n'; sleep 60",
+        "stty -echo; cd /; printf '\\033]7;file://localhost/\\007\\033]133;A;spaceterm=%s\\007' \"$SPACETERM_PROMPT_OWNER\"; printf '\\033[2J\\033[HOLD-PROGRAM\\n'; sleep 60",
     )?;
     await_output(&mut connection, original, "OLD-PROGRAM")?;
     // Allow the background directory publication to complete before forced termination.

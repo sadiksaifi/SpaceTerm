@@ -570,8 +570,12 @@ impl MetadataTracker {
         let Some(directory) = parse_osc7_directory(value, &self.snapshot.context) else {
             return false;
         };
-        let command_running = if self.prompt_owner_seen {
+        if self.snapshot.context.prompt_owner().is_some() {
+            // Integrations send OSC 7 before the first owned prompt. Keep the candidate,
+            // but only a matching Prompt Owner can confirm it for restoration.
             self.owner_reported_directory = Some(Arc::clone(&directory.path));
+        }
+        let command_running = if self.prompt_owner_seen {
             true
         } else {
             let running = self
@@ -1359,7 +1363,6 @@ mod tests {
         tracker.set_reported_directory("file://mac.local/project");
         tracker.apply_semantic_prompt("A", epoch);
         assert_eq!(tracker.snapshot().confirmed_directory, None);
-        tracker.apply_semantic_prompt("A;spaceterm=0f1e", epoch);
         tracker.set_reported_directory("file://mac.local/project");
         tracker.apply_semantic_prompt("A;spaceterm=0f1e", epoch);
         assert_eq!(
