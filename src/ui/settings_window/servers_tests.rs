@@ -9,10 +9,9 @@ use super::testing::{ScriptedServer, connected};
 use super::{
     CHECK_SELECTOR, CONTROL_SELECTOR, LocalServerAction, LocalServerControl,
     LocalServerPresentation, LocalServerStatus, OfferedLocalServer, SET_UP_SELECTOR,
-    START_SELECTOR, offers_local_server, present,
+    START_SELECTOR, present,
 };
 use crate::appearance::Appearance;
-use crate::application_identity::{ApplicationIdentity, testing};
 use crate::local_server::ServerError;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
 use crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform;
@@ -100,20 +99,6 @@ fn presentation(
 
 fn rendered(selector: &'static str, cx: &mut VisualTestContext) -> bool {
     cx.debug_bounds(selector).is_some()
-}
-
-#[test]
-fn only_development_offers_the_local_server() {
-    for identity in testing::all() {
-        assert_eq!(
-            offers_local_server(identity),
-            identity.display_name() == "SpaceTerm Development",
-            "{}",
-            identity.display_name()
-        );
-    }
-    // Tests build as Development, so the running identity offers it.
-    assert!(offers_local_server(ApplicationIdentity::current()));
 }
 
 #[test]

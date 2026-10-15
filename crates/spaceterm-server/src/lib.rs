@@ -1,4 +1,4 @@
-//! Private local SpaceTerm Protocol and explicit Development-server setup.
+//! Private local SpaceTerm Protocol and explicit local server setup.
 #[cfg(feature = "client")]
 mod client;
 mod host;
@@ -32,13 +32,13 @@ pub enum ServerError {
     IncompatibleProtocol,
     #[error("The local server connection did not complete.")]
     Protocol,
-    #[error("The Development server could not start. Rebuild with mise run development.")]
+    #[error("The local server could not start. Reinstall SpaceTerm and try again.")]
     StartupFailed,
 }
 
-/// Runs only an explicitly requested Development server. No service registration or listener
+/// Runs an explicitly requested local server. No service registration or listener
 /// is installed by library construction or desktop launch.
-pub fn run_development() -> Result<(), ServerError> {
-    let paths = host::Paths::for_identity("spaceterm-development")?;
+pub fn run_local(identity: &str) -> Result<(), ServerError> {
+    let paths = host::Paths::for_identity(identity)?;
     host::serve(&paths)
 }

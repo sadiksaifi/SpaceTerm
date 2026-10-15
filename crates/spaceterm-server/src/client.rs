@@ -79,9 +79,6 @@ impl LocalServer {
     }
     /// Local owning-account authority is granted only by this explicit setup action.
     pub fn setup_and_start(&self) -> Result<AuthenticatedStatus, ServerError> {
-        if self.identity != "spaceterm-development" {
-            return Err(ServerError::StartupFailed);
-        }
         // Locked or unavailable storage is refused before touching server identity.
         self.credential()?;
         let data = Directory::open(&self.paths.data, true)?;
@@ -139,7 +136,7 @@ impl LocalServer {
             Err(ServerError::NotRunning) => {}
             Err(error) => return Err(error),
         }
-        // The Development launcher stages this binary beside the desktop executable. No PATH
+        // Each application stages this binary beside the desktop executable. No PATH
         // lookup, shell command, retained service, or remote-provided executable is involved.
         let executable = std::env::current_exe()
             .map_err(|_| ServerError::StartupFailed)?
@@ -148,6 +145,7 @@ impl LocalServer {
             .join("spaceterm-server");
         let mut command = Command::new(executable);
         command
+            .args(["serve", &self.identity])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());

@@ -94,8 +94,9 @@ Path(os.environ["BUILD_RECORD"]).write_text(json.dumps({{
     "packaged": os.environ.get("SPACETERM_PACKAGED"),
     "release_tag": os.environ.get("SPACETERM_RELEASE_TAG"),
 }}))
-print(json.dumps({{"reason": "compiler-artifact", "target": {{"name": "spaceterm"}},
-                  "executable": os.environ["BUILD_EXECUTABLE"]}}))
+binary = sys.argv[sys.argv.index("--bin") + 1]
+print(json.dumps({{"reason": "compiler-artifact", "target": {{"name": binary}},
+                  "executable": os.environ["BUILD_SERVER" if binary == "spaceterm-server" else "BUILD_EXECUTABLE"]}}))
 sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
 """)
         (self.bin / "cargo").chmod(0o755)
@@ -107,7 +108,10 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
             "PYTHONPATH": str(self.root / "mise-tasks/lib"),
             "BUILD_RECORD": str(self.record),
             "BUILD_EXECUTABLE": str(self.artifact),
+            "BUILD_SERVER": str(self.artifact.with_name("spaceterm-server")),
         }
+        self.compile_executable("SpaceTerm Server 0.0.0")
+        self.artifact.rename(self.artifact.with_name("spaceterm-server"))
 
     def compile_executable(self, identity, *definitions):
         self.artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -157,6 +161,7 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         identifier = "io.github.sadiksaifi.spaceterm-preflight"
         for name in (
             "spaceterm-preflight/bin/spaceterm",
+            "spaceterm-preflight/bin/spaceterm-server",
             "spaceterm-preflight/share/spaceterm/THIRD-PARTY-NOTICES.txt",
             "spaceterm-preflight/share/spaceterm/terminfo/x/xterm-spaceterm",
             f"spaceterm-preflight/share/applications/{identifier}.desktop",
@@ -193,6 +198,7 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         members = self.members(self.root / "dist/spaceterm-linux-x86_64.tar.gz")
         self.assertIn("spaceterm/bin/spaceterm", members)
+        self.assertIn("spaceterm/bin/spaceterm-server", members)
         self.assertEqual(json.loads(self.record.read_text())["release_tag"], "v0.0.1")
 
     def test_release_archive_rejects_an_executable_of_another_version(self):

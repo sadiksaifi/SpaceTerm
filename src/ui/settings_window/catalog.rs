@@ -81,7 +81,7 @@ impl SettingsSectionId {
                 "The branch and changes of the repository each terminal pane is in, read with your own Git and GitHub CLI."
             }
             Self::Servers => {
-                "The Development server for your account. Terminal panes still run in SpaceTerm \
+                "The SpaceTerm Server for your account. Terminal panes still run in SpaceTerm \
                  itself."
             }
             Self::Updates => {
@@ -646,7 +646,6 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         keywords: &[
             "server",
             "spaceterm server",
-            "development",
             "headless",
             "pair",
             "pairing",

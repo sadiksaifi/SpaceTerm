@@ -1,9 +1,9 @@
-//! The Servers section: the Development server for this account, this device's pairing with it, and
+//! The Servers section: the SpaceTerm Server for this account, this device's pairing with it, and
 //! its authenticated status. [`crate::local_server`] owns setup, pairing, and authentication.
 //!
-//! Only SpaceTerm Development offers the section while the server is unshipped, so no other build
-//! can set up or start one. Opening Settings asks the server nothing. Presenting the section checks
-//! the saved pairing, and only the person's explicit Set Up or Start sets up or starts a server.
+//! Every build offers the section for its own identity's server. Opening Settings asks the server
+//! nothing. Presenting the section checks the saved pairing, and only the person's explicit Set Up
+//! or Start sets up or starts a server.
 
 use std::sync::Arc;
 
@@ -22,9 +22,6 @@ pub(super) const PROGRESS_SELECTOR: &str = "settings-local-server-progress";
 pub(super) const CHECK_SELECTOR: &str = "settings-local-server-check";
 pub(super) const SET_UP_SELECTOR: &str = "settings-local-server-set-up";
 pub(super) const START_SELECTOR: &str = "settings-local-server-start";
-
-/// The directory name of the only identity that offers the local server.
-const DEVELOPMENT_DIRECTORY_NAME: &str = "spaceterm-development";
 
 /// The blocking local server operations the section runs on the background executor.
 pub(super) trait LocalServerControl: Send + Sync {
@@ -54,22 +51,17 @@ pub(super) struct ServerConnection {
     pub(super) protocol_major: u16,
 }
 
-/// The local server a build offers. `None` hides the Servers section.
+/// The local server a Settings window presents. Every build offers one. `None` hides the Servers
+/// section.
 pub(super) type OfferedLocalServer = Option<Result<Arc<dyn LocalServerControl>, ServerError>>;
-
-/// Whether `identity` offers the local server. Only Development does while it is unshipped.
-pub(super) fn offers_local_server(identity: ApplicationIdentity) -> bool {
-    identity.directory_name() == DEVELOPMENT_DIRECTORY_NAME
-}
 
 /// Resolves the running build's local server. Resolution reads paths only: it sets up, starts,
 /// and reads credentials for nothing.
 pub(super) fn offered_local_server() -> OfferedLocalServer {
-    let identity = ApplicationIdentity::current();
-    offers_local_server(identity).then(|| {
-        LocalServer::for_identity(identity.directory_name())
-            .map(|server| Arc::new(server) as Arc<dyn LocalServerControl>)
-    })
+    Some(
+        LocalServer::for_identity(ApplicationIdentity::current().directory_name())
+            .map(|server| Arc::new(server) as Arc<dyn LocalServerControl>),
+    )
 }
 
 /// The step a person can take from the row.

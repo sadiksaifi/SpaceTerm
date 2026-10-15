@@ -7,21 +7,31 @@ fn main() {
 
 fn run() -> Result<(), spaceterm_server::ServerError> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    if args.is_empty() {
-        return spaceterm_server::run_development();
+    if args == ["--version"] {
+        println!("SpaceTerm Server {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    let [command, identity] = args.as_slice() else {
+        return Err(spaceterm_server::ServerError::Protocol);
+    };
+    let identity = identity
+        .to_str()
+        .ok_or(spaceterm_server::ServerError::Protocol)?;
+    if command == "serve" {
+        return spaceterm_server::run_local(identity);
     }
     #[cfg(feature = "client")]
     {
-        let client = spaceterm_server::LocalServer::for_identity("spaceterm-development")?;
-        let status = if args == ["setup"] {
+        let client = spaceterm_server::LocalServer::for_identity(identity)?;
+        let status = if command == "setup" {
             client.setup_and_start()?
-        } else if args == ["status"] {
+        } else if command == "status" {
             client.refresh()?
         } else {
             return Err(spaceterm_server::ServerError::Protocol);
         };
         println!(
-            "Authenticated local Development server; protocol {}.",
+            "Authenticated local server; protocol {}.",
             status.protocol_major
         );
         Ok(())

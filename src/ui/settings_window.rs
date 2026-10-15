@@ -286,7 +286,7 @@ pub(crate) struct SettingsWindow {
     settings_file: advanced::SettingsFileView,
     /// The Worktree Path Template field, kept so an edit survives re-rendering.
     worktree_location: git::WorktreeLocationField,
-    /// The local server this build offers. `None` omits the Servers section.
+    /// The local server this window presents. `None` omits the Servers section.
     local_server: Option<servers::LocalServerRow>,
 }
 
