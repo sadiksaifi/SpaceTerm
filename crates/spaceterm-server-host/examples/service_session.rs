@@ -16,6 +16,15 @@ fn run() -> Result<(), Box<dyn Error>> {
     let identity = std::env::args()
         .nth(1)
         .ok_or("application identity required")?;
+    let delay = std::env::var("SPACETERM_SERVICE_CHECK_DELAY")
+        .ok()
+        .map(|v| v.parse::<u64>())
+        .transpose()
+        .map_err(|_| "invalid check delay")?
+        .unwrap_or(3);
+    if !(3..=60).contains(&delay) {
+        return Err("invalid check delay".into());
+    }
     let service = Service::for_identity(&identity)?;
     if let Some(installation) = std::env::args_os().nth(2) {
         let status = service.install(std::path::Path::new(&installation))?;
@@ -75,11 +84,14 @@ fn run() -> Result<(), Box<dyn Error>> {
     support::command(
         &mut first,
         lease,
-        "stty -echo; printf '\\033[2J\\033[HBEGIN\\n'; sleep 3; printf '\\nSERVICE-CONTINUED\\n'",
+        &format!(
+            "stty -echo; printf '\\033[2J\\033[HBEGIN\\n'; sleep {delay}; printf '\\nSERVICE-CONTINUED\\n'"
+        ),
     )?;
     support::await_output(&mut first, lease, "BEGIN")?;
     drop(first);
-    std::thread::sleep(Duration::from_secs(4));
+    println!("Client disconnected; the server-owned command is running.");
+    std::thread::sleep(Duration::from_secs(delay + 1));
     let mut second = client.connect_pane()?;
     let Reply::Attached { lease: resumed } = second.exchange(&Request::SelectPane {
         pane,
