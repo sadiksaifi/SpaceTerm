@@ -607,6 +607,15 @@ pub struct ClientJournal {
     record: JournalRecord,
 }
 #[cfg(feature = "client")]
+impl Drop for ClientJournal {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // SAFETY: this guard owns the live lock descriptor. Explicit unlock ends its ownership
+        // even when a concurrent fork inherited a descriptor that has not reached exec yet.
+        unsafe { libc::flock(self._lock.as_raw_fd(), libc::LOCK_UN); }
+    }
+}
+#[cfg(feature = "client")]
 impl ClientJournal {
     pub(crate) fn open(
         directory: crate::storage::Directory,

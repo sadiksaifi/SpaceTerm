@@ -445,8 +445,26 @@ mod tests {
         };
         let mut journal = ClientJournal::open(fixture.open(), [1; 32], [2; 32]).unwrap();
         journal.submit(4, mutation.clone()).unwrap();
+        // A concurrently spawned child can inherit the close-on-exec lock until exec. Closing
+        // the owner's handle must release ownership even while that inherited descriptor lives.
+        let (mut release, gate) = std::os::unix::net::UnixStream::pair().unwrap();
+        // SAFETY: the child uses only read and _exit before terminating, with no Rust cleanup.
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0);
+        if child == 0 {
+            let mut byte = 0_u8;
+            // SAFETY: the inherited descriptor and one-byte writable buffer are live.
+            unsafe {
+                libc::read(gate.as_raw_fd(), (&mut byte as *mut u8).cast(), 1);
+                libc::_exit(0);
+            }
+        }
         drop(journal);
-        let mut journal = ClientJournal::open(fixture.open(), [1; 32], [2; 32]).unwrap();
+        let reopened = ClientJournal::open(fixture.open(), [1; 32], [2; 32]);
+        release.write_all(&[1]).unwrap();
+        // SAFETY: this reaps only the child created above; no other process is signalled.
+        unsafe { libc::waitpid(child, std::ptr::null_mut(), 0); }
+        let mut journal = reopened.unwrap();
         assert_eq!(journal.pending().unwrap().mutation, mutation);
         assert_eq!(journal.pending().unwrap().sequence, 4);
         let result = RetainedOutcome {
@@ -600,8 +618,12 @@ mod tests {
         organization.pinned_directory = Some(fixture.0.clone());
         organization.confirmed_directory = Some("/".into());
         let mut shared = crate::hierarchy::State::from_legacy(&organization);
-        let creation = crate::hierarchy::Mutation::CreateTab { workspace: organization.workspace };
-        let accepted = shared.apply([42; 32], 1, creation.clone(), &fixture.0, |_| true).unwrap();
+        let creation = crate::hierarchy::Mutation::CreateTab {
+            workspace: organization.workspace,
+        };
+        let accepted = shared
+            .apply([42; 32], 1, creation.clone(), &fixture.0, |_| true)
+            .unwrap();
         organization = shared.envelope(&fixture.0).unwrap();
         record.organization = Some(organization.clone());
         let fault = sync_failure::fail_directory(&data.0);
@@ -616,8 +638,14 @@ mod tests {
         assert_eq!(recovered.seed, record.seed);
         assert_eq!(recovered.paired, [[42; 32]]);
         assert!(recovered.organization.as_ref() == Some(&organization));
-        let mut restored = crate::hierarchy::State::from_legacy(recovered.organization.as_ref().unwrap());
-        assert_eq!(restored.apply([42; 32], 1, creation, &fixture.0, |_| true).unwrap(), accepted);
+        let mut restored =
+            crate::hierarchy::State::from_legacy(recovered.organization.as_ref().unwrap());
+        assert_eq!(
+            restored
+                .apply([42; 32], 1, creation, &fixture.0, |_| true)
+                .unwrap(),
+            accepted
+        );
         assert_eq!(restored.inventory.workspaces[0].tabs.len(), 2);
     }
 
