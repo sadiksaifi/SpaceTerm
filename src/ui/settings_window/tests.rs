@@ -383,10 +383,15 @@ fn open_settings_with_capabilities(
             window_drag,
             Default::default(),
             registry,
-            // Every section presents, so the shared layout checks cover Servers too.
-            Some(Ok(super::servers::testing::ScriptedServer::new(Err(
-                crate::local_server::ServerError::NotPaired,
-            )))),
+            // Every section and row presents, so the shared layout checks cover Servers too.
+            Some(super::servers::OfferedServer {
+                connection: Ok(super::servers::testing::ScriptedServer::new(Err(
+                    crate::local_server::ServerError::NotPaired,
+                ))),
+                service: Some(Ok(super::servers::testing::ScriptedService::new(Ok(
+                    super::servers::testing::not_installed(),
+                )))),
+            }),
             window,
             cx,
         )
@@ -2685,6 +2690,7 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::GitHubCli => "settings-row-github-cli-control",
             SettingsRowId::WorktreeLocation => "settings-worktree-location-frame",
             SettingsRowId::LocalServer => "settings-local-server-control",
+            SettingsRowId::ServerService => "settings-server-service-control",
             // The fixture installs no update service, so this row presents no action control.
             SettingsRowId::UpdateStatus => return None,
             SettingsRowId::AutomaticUpdateDownloads => "settings-automatic-update-downloads",
