@@ -1155,7 +1155,7 @@ mod tests {
         );
         DevelopmentPaneHost::new(factory, directory).unwrap()
     }
-    fn size() -> PaneSize {
+    pub(super) fn size() -> PaneSize {
         PaneSize {
             columns: 80,
             rows: 24,
@@ -1178,7 +1178,12 @@ mod tests {
         };
         lease
     }
-    fn command(host: &mut impl PaneService, connection: u8, lease: Lease, text: &str) -> Reply {
+    pub(super) fn command(
+        host: &mut impl PaneService,
+        connection: u8,
+        lease: Lease,
+        text: &str,
+    ) -> Reply {
         let result = host.request(
             [1; 32],
             [connection; 32],
@@ -1217,7 +1222,12 @@ mod tests {
             },
         )
     }
-    fn await_text(host: &mut DevelopmentPaneHost, connection: u8, lease: Lease, text: &str) {
+    pub(super) fn await_text(
+        host: &mut impl PaneService,
+        connection: u8,
+        lease: Lease,
+        text: &str,
+    ) {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if let Reply::Screen(screen) =

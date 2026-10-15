@@ -225,6 +225,25 @@ fn reconcile_membership(state: &mut State, snapshot: &Snapshot) -> bool {
             if tab.worktree.is_some() && !(follows_root && tab.id == workspace.root_tab) {
                 continue;
             }
+            // Outside is authoritative only after a successful read. Pending reads and
+            // unavailable directories preserve the saved membership for recovery.
+            if follows_root
+                && tab.id == workspace.root_tab
+                && tab
+                    .panes
+                    .iter()
+                    .find(|pane| pane.id == tab.root_pane)
+                    .is_some_and(|pane| {
+                        snapshot.directories.iter().any(|facts| {
+                            facts.directory == pane_directory(pane)
+                                && facts.failure.is_none()
+                                && facts.repository.is_none()
+                        })
+                    })
+            {
+                changed |= tab.worktree.take().is_some();
+                continue;
+            }
             let current = tab
                 .panes
                 .iter()

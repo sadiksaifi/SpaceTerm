@@ -1,4 +1,4 @@
-use super::tests::{create_shared, host, shared_inventory};
+use super::tests::{await_text, command, create_shared, host, shared_inventory, size};
 use super::*;
 use std::time::Instant;
 struct GitFixture(std::path::PathBuf);
@@ -224,4 +224,94 @@ fn abandoned_server_git_reads_cancel_on_disconnect_and_stop_without_losing_tabs(
         assert!(!git.0.join(".git/finished").exists());
         host.shutdown().unwrap();
     }
+}
+
+#[test]
+fn an_unpinned_root_tab_follows_entering_and_leaving_git_without_moving_other_tabs() {
+    use spaceterm_server::hierarchy::Mutation;
+    let git = GitFixture::new();
+    let outside = GitFixture::new();
+    std::fs::remove_dir_all(outside.0.join(".git")).unwrap();
+    let mut prototype = host();
+    prototype.directory = git.0.clone();
+    let mut host = SharedWorkspaceHost::new(prototype);
+    let workspace = create_shared(&mut host, 1);
+    git_facts(&mut host, &git.0, |facts| facts.repository.is_some());
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::Mutate {
+                sequence: 2,
+                mutation: Mutation::CreateTab { workspace }
+            }
+        ),
+        Reply::Outcome(_)
+    ));
+    let initial = shared_inventory(&mut host);
+    let root = &initial.workspaces[0].tabs[0];
+    let root_id = root.id;
+    let other_id = initial.workspaces[0].tabs[1].id;
+    assert!(
+        initial.workspaces[0]
+            .tabs
+            .iter()
+            .all(|tab| tab.worktree.as_ref() == Some(&git.0))
+    );
+    let Reply::Attached { lease } = host.request(
+        [1; 32],
+        [1; 32],
+        Request::SelectPane {
+            pane: root.root_pane,
+            explicit: true,
+            size: size(),
+            style: None,
+        },
+    ) else {
+        panic!("Root Pane did not start")
+    };
+    command(
+        &mut host,
+        1,
+        lease,
+        &format!(
+            "stty -echo; cd '{}'; printf '\\033]7;file://localhost%s\\007\\033]133;A;spaceterm=%s\\007' \"$PWD\" \"$SPACETERM_PROMPT_OWNER\"; printf '\\033[2J\\033[HLEFT-REPOSITORY\\n'",
+            outside.0.display()
+        ),
+    );
+    await_text(&mut host, 1, lease, "LEFT-REPOSITORY");
+    let left = git_facts(&mut host, &outside.0, |facts| {
+        facts.failure.is_none() && facts.repository.is_none()
+    });
+    let tabs = &left.workspaces[0].tabs;
+    assert_eq!(
+        tabs.iter().find(|tab| tab.id == root_id).unwrap().worktree,
+        None
+    );
+    assert_eq!(
+        tabs.iter()
+            .find(|tab| tab.id == other_id)
+            .unwrap()
+            .worktree
+            .as_ref(),
+        Some(&git.0)
+    );
+    command(
+        &mut host,
+        1,
+        lease,
+        &format!(
+            "cd '{}'; printf '\\033]7;file://localhost%s\\007\\033]133;A;spaceterm=%s\\007' \"$PWD\" \"$SPACETERM_PROMPT_OWNER\"; printf '\\033[2J\\033[HENTERED-REPOSITORY\\n'",
+            git.0.display()
+        ),
+    );
+    await_text(&mut host, 1, lease, "ENTERED-REPOSITORY");
+    let entered = shared_inventory(&mut host);
+    assert!(
+        entered.workspaces[0]
+            .tabs
+            .iter()
+            .all(|tab| tab.worktree.as_ref() == Some(&git.0))
+    );
+    host.shutdown().unwrap();
 }
