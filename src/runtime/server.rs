@@ -7,6 +7,9 @@ use spaceterm_server::{
 };
 use std::{sync::Arc, time::Duration};
 
+mod shared;
+pub use shared::SharedWorkspaceHost;
+
 pub struct DevelopmentPaneHost {
     boot: [u8; 32],
     pane: Option<OwnedPane>,
@@ -680,6 +683,159 @@ pub(crate) fn decode_key(key: Key) -> Option<KeyInput> {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn opening_the_legacy_pane_cannot_consume_a_shared_edits_operation_identity() {
+        use spaceterm_server::hierarchy::{Mutation, Outcome};
+        let mut host = SharedWorkspaceHost::new(host());
+        let Reply::Inventory { next_sequence, .. } =
+            host.request([1; 32], [1; 32], Request::Inventory)
+        else {
+            panic!()
+        };
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [2; 32],
+                Request::Attach {
+                    create: true,
+                    size: size(),
+                    resume: None,
+                    style: None
+                }
+            ),
+            Reply::Attached { .. }
+        ));
+        assert!(
+            matches!(host.request([1; 32], [1; 32], Request::Mutate { sequence: next_sequence, mutation: Mutation::CreateWorkspace { name: "Explicit creation".into() } }), Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. }))
+        );
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn shared_membership_preserves_independent_pane_grants_and_lazy_startup() {
+        use spaceterm_server::hierarchy::{Axis, Mutation, Outcome};
+        let mut host = SharedWorkspaceHost::new(host());
+        let created = host.request(
+            [1; 32],
+            [1; 32],
+            Request::Mutate {
+                sequence: 1,
+                mutation: Mutation::CreateWorkspace {
+                    name: "Build".into(),
+                },
+            },
+        );
+        assert!(
+            matches!(created, Reply::Outcome(ref o) if matches!(o.outcome, Outcome::Accepted { .. }))
+        );
+        let Reply::Inventory { inventory, .. } = host.request([2; 32], [2; 32], Request::Inventory)
+        else {
+            panic!()
+        };
+        let w = &inventory.workspaces[0];
+        let t = &w.tabs[0];
+        let first = t.root_pane;
+        let request = |pane, explicit| Request::SelectPane {
+            pane,
+            explicit,
+            size: size(),
+            style: None,
+        };
+        assert!(matches!(
+            host.request([1; 32], [1; 32], request(first, false)),
+            Reply::Restored { .. }
+        ));
+        let Reply::Attached { lease: first_lease } =
+            host.request([1; 32], [1; 32], request(first, true))
+        else {
+            panic!()
+        };
+        let Reply::Outcome(second) = host.request(
+            [2; 32],
+            [2; 32],
+            Request::Mutate {
+                sequence: 1,
+                mutation: Mutation::SplitPane {
+                    workspace: w.id,
+                    tab: t.id,
+                    source: first,
+                    axis: Axis::Down,
+                },
+            },
+        ) else {
+            panic!()
+        };
+        let Outcome::Accepted { target: second } = second.outcome else {
+            panic!()
+        };
+        let Reply::Attached {
+            lease: second_lease,
+        } = host.request([2; 32], [2; 32], request(second, true))
+        else {
+            panic!()
+        };
+        // A third client's passive subscription cannot acquire either Pane.
+        assert!(matches!(
+            host.request([3; 32], [3; 32], request(second, false)),
+            Reply::Takeover { .. }
+        ));
+        // Opening another Tab acquires only its explicitly selected Focused Pane.
+        let Reply::Outcome(tab) = host.request(
+            [1; 32],
+            [4; 32],
+            Request::Mutate {
+                sequence: 2,
+                mutation: Mutation::CreateTab { workspace: w.id },
+            },
+        ) else {
+            panic!()
+        };
+        let Outcome::Accepted { target: tab } = tab.outcome else {
+            panic!()
+        };
+        let Reply::Inventory { inventory, .. } = host.request([2; 32], [2; 32], Request::Inventory)
+        else {
+            panic!()
+        };
+        let third = inventory.workspaces[0]
+            .tabs
+            .iter()
+            .find(|t| t.id == tab)
+            .unwrap()
+            .root_pane;
+        assert!(matches!(
+            host.request([2; 32], [2; 32], request(third, false)),
+            Reply::Takeover { .. }
+        ));
+        assert!(matches!(
+            host.request([1; 32], [4; 32], request(third, true)),
+            Reply::Attached { .. }
+        ));
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [1; 32],
+                Request::Resize {
+                    lease: first_lease,
+                    size: size()
+                }
+            ),
+            Reply::Unchanged
+        ));
+        assert!(matches!(
+            host.request(
+                [2; 32],
+                [2; 32],
+                Request::Resize {
+                    lease: second_lease,
+                    size: size()
+                }
+            ),
+            Reply::Unchanged
+        ));
+        host.shutdown().unwrap();
+    }
 
     fn host() -> DevelopmentPaneHost {
         let filesystem = local_filesystem();

@@ -82,4 +82,4 @@ pub fn local_filesystem() -> LocalFilesystemAuthority {
 }
 
 mod server;
-pub use server::DevelopmentPaneHost;
+pub use server::{DevelopmentPaneHost, SharedWorkspaceHost};

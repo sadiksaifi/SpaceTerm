@@ -272,6 +272,7 @@ impl WorkspaceSidebar {
             worktrees,
             creates_worktrees,
             active,
+            shared,
         } = row;
         let row_background = row_background(appearance);
         let emphasized = appearance.active && self.has_visible_focus(window);
@@ -334,12 +335,22 @@ impl WorkspaceSidebar {
         } else {
             crate::ui::workspace_frame::base_surface(&appearance.colors)
         });
+        let shared_status = shared.as_ref().and_then(|shared| shared.status);
         let (detail, detail_color, detail_selector) = if !available {
             (
                 "Directory unavailable".into(),
                 Some(row_colors.warning),
                 Some(format!(
                     "workspace-row-directory-unavailable-{}",
+                    workspace_id.get()
+                )),
+            )
+        } else if let Some(status) = shared_status {
+            (
+                status.into(),
+                Some(row_colors.warning),
+                Some(format!(
+                    "workspace-row-shared-status-{}",
                     workspace_id.get()
                 )),
             )
@@ -386,10 +397,16 @@ impl WorkspaceSidebar {
         } else {
             detail.clone()
         };
-        let accessibility_name = remote_status.map_or_else(
-            || format!("Workspace actions for {name}"),
-            |status| format!("Workspace actions for {name}, connection {status}"),
-        );
+        let accessibility_name = match (shared.as_ref(), remote_status) {
+            (Some(_), _) => match shared_status {
+                Some(status) => {
+                    format!("Workspace actions for {name} on a SpaceTerm Server, {status}")
+                }
+                None => format!("Workspace actions for {name} on a SpaceTerm Server"),
+            },
+            (None, Some(status)) => format!("Workspace actions for {name}, connection {status}"),
+            (None, None) => format!("Workspace actions for {name}"),
+        };
         let rename = self
             .rename
             .as_ref()
@@ -421,6 +438,8 @@ impl WorkspaceSidebar {
         let tooltip_text = format!("{name}\n{tooltip_text}");
         let tooltip_label = if !available {
             "Workspace unavailable"
+        } else if shared.is_some() {
+            "Server Workspace"
         } else if remote_status.is_some() {
             "Remote Workspace connection"
         } else if disclosing {
@@ -663,6 +682,7 @@ impl WorkspaceSidebar {
                     collapsed_worktree,
                     pinned,
                     remote_connection_phase,
+                    shared.as_ref(),
                     presentation,
                 ),
                 target,
@@ -924,7 +944,11 @@ impl WorkspaceSidebar {
         let new_workspace_menu = Menu::new(
             "new-workspace-menu",
             "New Workspace",
-            new_workspace_menu_entries(presentation, remote_disabled),
+            new_workspace_menu_entries(
+                presentation,
+                remote_disabled,
+                self.creates_server_workspaces,
+            ),
         )
         .size(MenuSize::Wide)
         .placement(AnchoredPlacementConfig::new(
@@ -1640,9 +1664,10 @@ fn new_worktree_button(
 fn new_workspace_menu_entries(
     presentation: &crate::desktop_profile::DesktopPresentation,
     remote_disabled: bool,
+    creates_server_workspaces: bool,
 ) -> Vec<MenuEntry<WorkspaceCreation>> {
     let mut entries = Vec::new();
-    for creation in WorkspaceCreation::ALL {
+    for creation in WorkspaceCreation::rows(creates_server_workspaces) {
         if creation.starts_group() {
             entries.push(MenuEntry::separator());
         }
@@ -1670,8 +1695,20 @@ fn workspace_menu_entries(
     active_worktree: Option<(WorktreeId, SharedString, WorktreeRemoval)>,
     pinned: bool,
     remote_connection_phase: Option<RemoteConnectionPhase>,
+    shared: Option<&SharedWorkspaceRow>,
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<MenuEntry<RowMenuCommand>> {
+    // A shared Workspace's New Tab, Rename, and pin commands ask the server, so they wait while
+    // this client is offline or an earlier edit is unanswered. Each waiting command keeps its
+    // place and says why, so no menu offers a step that does nothing.
+    let shared_edits = shared.is_none_or(|shared| shared.edits);
+    let waiting = shared
+        .filter(|shared| !shared.edits)
+        .map(|shared| shared.edits_reason);
+    let new_tab = new_tab && shared_edits;
+    // Worktrees are read and written on the owning server, which is not available yet.
+    let new_worktree = new_worktree && shared.is_none();
+    let active_worktree = active_worktree.filter(|_| shared.is_none());
     let mut entries = Vec::new();
     if new_tab {
         entries.push(new_tab_entry(
@@ -1688,11 +1725,16 @@ fn workspace_menu_entries(
         ));
     }
     entries.push(
-        MenuEntry::action("Rename Workspace", RowMenuCommand::Rename)
-            .icon(|foreground, size| {
-                Icon::new(IconName::Pencil, size, foreground).into_any_element()
-            })
-            .debug_selector("workspace-menu-row-rename"),
+        MenuEntry::action(
+            match waiting {
+                Some(_) => "Rename Workspace Needs the Server",
+                None => "Rename Workspace",
+            },
+            RowMenuCommand::Rename,
+        )
+        .disabled(!shared_edits)
+        .icon(|foreground, size| Icon::new(IconName::Pencil, size, foreground).into_any_element())
+        .debug_selector("workspace-menu-row-rename"),
     );
     entries.push(
         MenuEntry::action(
@@ -1703,6 +1745,7 @@ fn workspace_menu_entries(
             },
             RowMenuCommand::Workspace(WorkspaceMenuCommand::PinDirectory),
         )
+        .disabled(!shared_edits)
         .icon(|foreground, size| Icon::new(IconName::Pin, size, foreground).into_any_element())
         .debug_selector("workspace-menu-row-pin-directory"),
     );
@@ -1712,6 +1755,7 @@ fn workspace_menu_entries(
                 "Unpin Directory",
                 RowMenuCommand::Workspace(WorkspaceMenuCommand::UnpinDirectory),
             )
+            .disabled(!shared_edits)
             .icon(|foreground, size| {
                 Icon::new(IconName::PinOff, size, foreground).into_any_element()
             })
@@ -1747,10 +1791,14 @@ fn workspace_menu_entries(
     }
     entries.push(
         MenuEntry::action(
-            "Close Workspace",
+            match shared {
+                Some(_) => SharedWorkspaceRow::CLOSE_UNAVAILABLE,
+                None => "Close Workspace",
+            },
             RowMenuCommand::Workspace(WorkspaceMenuCommand::Close),
         )
-        .destructive(true)
+        .destructive(shared.is_none())
+        .disabled(shared.is_some())
         .icon(|foreground, size| Icon::new(IconName::X, size, foreground).into_any_element())
         .debug_selector("workspace-menu-row-close"),
     );

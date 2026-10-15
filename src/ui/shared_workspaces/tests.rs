@@ -1,0 +1,1186 @@
+//! Shared server Workspaces driven through the main Workspace interface.
+//!
+//! Every test here goes through the public surfaces a person uses: the Tab strip, the Pane
+//! Caption, the Pane itself, and the server inventory the window reads. None of them reaches into
+//! presentation state, so each one keeps holding as the implementation changes.
+
+use std::path::PathBuf;
+use std::rc::Rc;
+
+use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
+use spaceterm_server::hierarchy::{Axis, Id, Inventory, Mutation, Outcome, Pane, Tab, Workspace};
+
+use super::development::testing::{ScriptedEdits, ScriptedPanes};
+use super::development::{
+    SharedEditSource, SharedEditability, SharedPaneOpener, SharedPaneSessions, SharedRefusalReason,
+    SharedSubmission, SharedTabs, SharedWorkspaceDraft, SharedWorkspaceEdits, SharedWorkspaceFacts,
+    SharedWorkspaceField, SharedWorkspacePlan, SharedWorkspaces,
+};
+use crate::terminal::server_session::DevelopmentPaneStatus;
+use crate::terminal::{TerminalSessionFactory, WorkspaceTerminalSessionFactory};
+use crate::ui::pane_lifecycle::PaneConstruction;
+use crate::ui::tab_manager::TabManager;
+
+const WORKSPACE: Id = [1; 32];
+const ROOT_TAB: Id = [2; 32];
+const ROOT_PANE: Id = [3; 32];
+const SECOND_TAB: Id = [4; 32];
+const SECOND_TAB_PANE: Id = [5; 32];
+const SPLIT_PANE: Id = [6; 32];
+const REPLACEMENT_PANE: Id = [7; 32];
+const SECOND_REPLACEMENT_PANE: Id = [8; 32];
+
+/// The first Workspace a collection owns, which every harness here binds the server Workspace to.
+fn first_workspace_id() -> crate::domain::WorkspaceId {
+    crate::domain::WorkspaceCollection::new_local(
+        crate::terminal::testing::test_local_directory(PathBuf::from("/tmp/spaceterm-shared")),
+        |_, _| (),
+    )
+    .active_workspace_id()
+}
+
+fn pane(id: Id, source: Option<Id>, axis: Axis) -> Pane {
+    Pane {
+        id,
+        source,
+        axis,
+        starting_directory: PathBuf::from("/server/work"),
+        confirmed_directory: None,
+        creator: None,
+    }
+}
+
+fn tab(id: Id, panes: Vec<Pane>) -> Tab {
+    Tab {
+        id,
+        root_pane: panes[0].id,
+        panes,
+    }
+}
+
+/// One server Workspace with one Tab and one Pane.
+fn inventory(revision: u64, tabs: Vec<Tab>) -> Inventory {
+    Inventory {
+        revision,
+        workspaces: vec![Workspace {
+            id: WORKSPACE,
+            name: "Build".to_owned(),
+            name_version: 0,
+            pin_version: 0,
+            pinned_directory: None,
+            root_tab: ROOT_TAB,
+            tabs,
+        }],
+    }
+}
+
+fn root_only() -> Inventory {
+    inventory(
+        1,
+        vec![tab(ROOT_TAB, vec![pane(ROOT_PANE, None, Axis::Right)])],
+    )
+}
+
+struct SharedHarness {
+    manager: Entity<TabManager>,
+    edits: Rc<ScriptedEdits>,
+    panes: Rc<ScriptedPanes>,
+}
+
+/// A Tab strip presenting one server Workspace's Root Tab, as the Workspace Window binds it.
+fn shared_tab_manager(cx: &mut TestAppContext) -> (SharedHarness, &mut VisualTestContext) {
+    cx.update(crate::ui::init)
+        .expect("UI initialization should succeed");
+    let session_factory: Rc<dyn TerminalSessionFactory> =
+        Rc::new(crate::terminal::testing::TestTerminalSessionFactory::new(
+            crate::terminal::testing::TestTerminalSessionRecords::default(),
+        ));
+    let session_factory = WorkspaceTerminalSessionFactory::new_local(
+        session_factory,
+        crate::terminal::testing::test_local_directory(PathBuf::from("/tmp/spaceterm-shared-test")),
+    );
+    let panes = ScriptedPanes::new(session_factory.clone());
+    let sessions = SharedPaneSessions::with_opener(
+        Rc::clone(&panes) as Rc<dyn SharedPaneOpener>,
+        &PaneConstruction::testing(),
+    );
+    let edits = Rc::new(ScriptedEdits::new(Some(root_only())));
+    let source = SharedEditSource::new(Rc::clone(&edits) as Rc<dyn SharedWorkspaceEdits>);
+    let (manager, cx) =
+        cx.add_window_view(|window, cx| TabManager::new(session_factory.clone(), window, cx));
+    cx.update(|window, cx| {
+        window.activate_window();
+        let (_, _, state) = panes
+            .open(ROOT_PANE)
+            .expect("the Root Pane subscription must open");
+        manager.update(cx, |manager, cx| {
+            manager.adopt_shared(
+                SharedTabs::new(source, sessions, WORKSPACE),
+                ROOT_TAB,
+                ROOT_PANE,
+                state,
+                window,
+                cx,
+            );
+            manager.focus(window, cx);
+        });
+    });
+    cx.run_until_parked();
+    (
+        SharedHarness {
+            manager,
+            edits,
+            panes,
+        },
+        cx,
+    )
+}
+
+fn publish(harness: &SharedHarness, inventory: Inventory, cx: &mut VisualTestContext) {
+    let workspace = inventory.workspaces[0].clone();
+    harness.edits.set_inventory(inventory);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.reconcile_shared(&workspace, window, cx);
+        });
+    });
+    cx.run_until_parked();
+}
+
+fn tab_count(harness: &SharedHarness, cx: &mut VisualTestContext) -> usize {
+    harness
+        .manager
+        .read_with(cx, |manager, _| manager.tab_ids().len())
+}
+
+fn pane_count(harness: &SharedHarness, cx: &mut VisualTestContext) -> usize {
+    harness.manager.read_with(cx, |manager, cx| {
+        manager.active_tab_view().read(cx).pane_count()
+    })
+}
+
+/// Lets every Pane read its connection and paints the frame that follows.
+fn settle(_: &SharedHarness, cx: &mut VisualTestContext) {
+    cx.executor()
+        .advance_clock(crate::ui::shared_workspaces::POLL_INTERVAL * 3);
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+}
+
+/// Opens a row's context menu, which leaves the selection and focus where they were.
+fn right_click(selector: &'static str, cx: &mut VisualTestContext) {
+    let position = cx
+        .debug_bounds(selector)
+        .map(|bounds| bounds.center())
+        .unwrap_or_else(|| panic!("{selector} was not rendered"));
+    cx.simulate_mouse_move(position, None, Modifiers::none());
+    cx.simulate_mouse_down(position, gpui::MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(position, gpui::MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+}
+
+fn click(selector: &'static str, cx: &mut VisualTestContext) {
+    let position = cx
+        .debug_bounds(selector)
+        .map(|bounds| bounds.center())
+        .unwrap_or_else(|| panic!("{selector} was not rendered"));
+    cx.simulate_mouse_move(position, None, Modifiers::none());
+    cx.simulate_click(position, Modifiers::none());
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn new_tab_in_a_shared_workspace_should_ask_the_server_and_create_nothing_locally(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = shared_tab_manager(cx);
+    assert_eq!(tab_count(&harness, cx), 1);
+
+    click("create-tab-button", cx);
+
+    assert_eq!(
+        harness.edits.submitted(),
+        vec![Mutation::CreateTab {
+            workspace: WORKSPACE
+        }],
+        "New Tab should ask the server"
+    );
+    assert_eq!(
+        tab_count(&harness, cx),
+        1,
+        "no Tab should appear before the server publishes it"
+    );
+}
+
+#[gpui::test]
+fn a_published_tab_should_join_the_strip_without_taking_the_active_tab(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_tab_manager(cx);
+    let active = harness
+        .manager
+        .read_with(cx, |manager, cx| manager.active_terminal_identity(cx).0);
+
+    publish(
+        &harness,
+        inventory(
+            2,
+            vec![
+                tab(ROOT_TAB, vec![pane(ROOT_PANE, None, Axis::Right)]),
+                tab(SECOND_TAB, vec![pane(SECOND_TAB_PANE, None, Axis::Right)]),
+            ],
+        ),
+        cx,
+    );
+
+    assert_eq!(tab_count(&harness, cx), 2, "the published Tab should join");
+    assert_eq!(
+        harness
+            .manager
+            .read_with(cx, |manager, cx| manager.active_terminal_identity(cx).0),
+        active,
+        "another client's Tab must not take the Active Tab"
+    );
+    assert_eq!(
+        harness.panes.pane(SECOND_TAB_PANE).selections(),
+        0,
+        "presenting a published Tab must not ask the server for its Pane"
+    );
+}
+
+#[gpui::test]
+fn a_published_split_should_join_the_layout_without_taking_focus(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_tab_manager(cx);
+    let focused = harness
+        .manager
+        .read_with(cx, |manager, cx| manager.active_terminal_identity(cx).1);
+
+    publish(
+        &harness,
+        inventory(
+            2,
+            vec![tab(
+                ROOT_TAB,
+                vec![
+                    pane(ROOT_PANE, None, Axis::Right),
+                    pane(SPLIT_PANE, Some(ROOT_PANE), Axis::Down),
+                ],
+            )],
+        ),
+        cx,
+    );
+
+    assert_eq!(
+        pane_count(&harness, cx),
+        2,
+        "the published Pane should join"
+    );
+    assert_eq!(
+        harness
+            .manager
+            .read_with(cx, |manager, cx| manager.active_terminal_identity(cx).1),
+        focused,
+        "another client's Pane must not take the Focused Pane"
+    );
+    assert_eq!(
+        harness.panes.pane(SPLIT_PANE).selections(),
+        0,
+        "presenting a published Pane must not ask the server for it"
+    );
+}
+
+#[gpui::test]
+fn a_split_in_a_shared_workspace_should_ask_the_server_for_the_pane(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_tab_manager(cx);
+
+    click("pane-split-down-1", cx);
+
+    assert_eq!(
+        harness.edits.submitted(),
+        vec![Mutation::SplitPane {
+            workspace: WORKSPACE,
+            tab: ROOT_TAB,
+            source: ROOT_PANE,
+            axis: Axis::Down,
+        }],
+        "Split Down should ask the server"
+    );
+    assert_eq!(
+        pane_count(&harness, cx),
+        1,
+        "no Pane should appear before the server publishes it"
+    );
+}
+
+#[gpui::test]
+fn shared_edits_should_be_unavailable_offline_rather_than_queued(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_tab_manager(cx);
+    harness.edits.set_connected(false);
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+
+    click("create-tab-button", cx);
+    click("pane-split-right-1", cx);
+
+    assert!(
+        harness.edits.submitted().is_empty(),
+        "an offline client should submit nothing and queue nothing"
+    );
+    assert_eq!(tab_count(&harness, cx), 1);
+    assert_eq!(pane_count(&harness, cx), 1);
+}
+
+#[gpui::test]
+fn a_shared_pane_should_refuse_its_own_local_close(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_tab_manager(cx);
+    publish(
+        &harness,
+        inventory(
+            2,
+            vec![tab(
+                ROOT_TAB,
+                vec![
+                    pane(ROOT_PANE, None, Axis::Right),
+                    pane(SPLIT_PANE, Some(ROOT_PANE), Axis::Down),
+                ],
+            )],
+        ),
+        cx,
+    );
+    assert_eq!(pane_count(&harness, cx), 2);
+
+    click("pane-close-1", cx);
+
+    assert_eq!(
+        pane_count(&harness, cx),
+        2,
+        "closing a shared Pane needs every client's confirmation, so it closes none locally"
+    );
+}
+
+#[gpui::test]
+fn removed_membership_should_leave_no_desktop_owned_remains(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_tab_manager(cx);
+    publish(
+        &harness,
+        inventory(
+            2,
+            vec![
+                tab(ROOT_TAB, vec![pane(ROOT_PANE, None, Axis::Right)]),
+                tab(SECOND_TAB, vec![pane(SECOND_TAB_PANE, None, Axis::Right)]),
+            ],
+        ),
+        cx,
+    );
+    assert_eq!(tab_count(&harness, cx), 2);
+
+    // The second Tab's Pane never connected, so only the published membership can remove it.
+    publish(
+        &harness,
+        inventory(
+            3,
+            vec![tab(ROOT_TAB, vec![pane(ROOT_PANE, None, Axis::Right)])],
+        ),
+        cx,
+    );
+
+    assert_eq!(
+        tab_count(&harness, cx),
+        1,
+        "a Tab the server removed should leave the strip"
+    );
+}
+
+#[gpui::test]
+fn a_publication_that_replaces_every_known_pane_should_keep_the_tab(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_tab_manager(cx);
+    assert_eq!(pane_count(&harness, cx), 1);
+
+    // Between two readings the server split the Root Pane twice and the Root Pane's shell exited.
+    // Removing it first names no Pane the replacements were split from, so the server clears
+    // their creation links and the Tab would lose every Pane it has.
+    publish(
+        &harness,
+        inventory(
+            2,
+            vec![tab(
+                ROOT_TAB,
+                vec![
+                    pane(REPLACEMENT_PANE, None, Axis::Right),
+                    pane(SECOND_REPLACEMENT_PANE, None, Axis::Down),
+                ],
+            )],
+        ),
+        cx,
+    );
+
+    assert_eq!(tab_count(&harness, cx), 1, "the server's Tab should remain");
+    assert_eq!(
+        pane_count(&harness, cx),
+        2,
+        "both published Panes should take their place beside this client's own Root Pane"
+    );
+}
+
+#[gpui::test]
+fn a_shared_pane_whose_shell_exits_should_keep_its_place_until_the_server_publishes(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = shared_tab_manager(cx);
+
+    // The Terminal Session ends before the next reading of the inventory. The server may have
+    // created a Pane this client has not seen, so membership waits for what the server publishes.
+    harness
+        .panes
+        .pane(ROOT_PANE)
+        .set(DevelopmentPaneStatus::Ended);
+    cx.update(|_, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.exit_shared_pane_for_test(cx);
+        });
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        tab_count(&harness, cx),
+        1,
+        "an exit this client heard first must not close a Tab the server still has"
+    );
+    assert_eq!(pane_count(&harness, cx), 1);
+
+    publish(
+        &harness,
+        inventory(
+            2,
+            vec![tab(
+                ROOT_TAB,
+                vec![pane(REPLACEMENT_PANE, None, Axis::Right)],
+            )],
+        ),
+        cx,
+    );
+
+    assert_eq!(
+        pane_count(&harness, cx),
+        1,
+        "the published inventory replaces the Pane that ended"
+    );
+    assert_eq!(tab_count(&harness, cx), 1);
+}
+
+#[gpui::test]
+fn focus_a_shared_pane_regains_should_not_ask_the_server_for_it(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_tab_manager(cx);
+    let selections = harness.panes.pane(ROOT_PANE).selections();
+
+    // Window restoration refocuses the Pane's terminal, which notifies the Tab the same way a
+    // person's click does. Only the click is an explicit selection.
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.focus(window, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        harness.panes.pane(ROOT_PANE).selections(),
+        selections,
+        "focus the Pane regains must not start a retained shell"
+    );
+}
+
+#[gpui::test]
+fn opening_a_shared_workspace_should_ask_the_server_for_its_focused_pane(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_tab_manager(cx);
+    publish(
+        &harness,
+        inventory(
+            2,
+            vec![tab(
+                ROOT_TAB,
+                vec![
+                    pane(ROOT_PANE, None, Axis::Right),
+                    pane(SPLIT_PANE, Some(ROOT_PANE), Axis::Down),
+                ],
+            )],
+        ),
+        cx,
+    );
+    assert_eq!(harness.panes.pane(ROOT_PANE).selections(), 0);
+    assert_eq!(harness.panes.pane(SPLIT_PANE).selections(), 0);
+
+    // Opening this Workspace from the sidebar or the switcher hands it the window the Workspace
+    // before it had, which is an explicit opening of its Active Tab.
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.deactivate(cx);
+            manager.activate(window, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        harness.panes.pane(ROOT_PANE).selections(),
+        1,
+        "opening a Workspace should ask the server for its Focused Pane once"
+    );
+    assert_eq!(
+        harness.panes.pane(SPLIT_PANE).selections(),
+        0,
+        "it should ask for no other Pane"
+    );
+}
+
+#[gpui::test]
+fn an_explicit_pane_press_should_ask_the_server_for_that_pane(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_tab_manager(cx);
+    publish(
+        &harness,
+        inventory(
+            2,
+            vec![tab(
+                ROOT_TAB,
+                vec![
+                    pane(ROOT_PANE, None, Axis::Right),
+                    pane(SPLIT_PANE, Some(ROOT_PANE), Axis::Down),
+                ],
+            )],
+        ),
+        cx,
+    );
+    assert_eq!(harness.panes.pane(SPLIT_PANE).selections(), 0);
+
+    click("pane-surface-2", cx);
+
+    assert_eq!(
+        harness.panes.pane(SPLIT_PANE).selections(),
+        1,
+        "a press on a Pane should ask the server for that Pane"
+    );
+    assert_eq!(
+        harness.panes.pane(ROOT_PANE).selections(),
+        0,
+        "it should ask for no other Pane"
+    );
+}
+
+#[gpui::test]
+fn an_offline_client_should_ask_the_server_for_no_pane(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_tab_manager(cx);
+    publish(
+        &harness,
+        inventory(
+            2,
+            vec![tab(
+                ROOT_TAB,
+                vec![
+                    pane(ROOT_PANE, None, Axis::Right),
+                    pane(SPLIT_PANE, Some(ROOT_PANE), Axis::Down),
+                ],
+            )],
+        ),
+        cx,
+    );
+    harness.edits.set_connected(false);
+
+    click("pane-surface-2", cx);
+
+    assert_eq!(
+        harness.panes.pane(SPLIT_PANE).selections(),
+        0,
+        "an unreachable server is asked for nothing, including a retained shell"
+    );
+}
+
+#[gpui::test]
+fn a_takeover_screen_should_replace_the_pane_and_offer_take_over(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_tab_manager(cx);
+    harness
+        .panes
+        .pane(ROOT_PANE)
+        .set(DevelopmentPaneStatus::Takeover);
+    settle(&harness, cx);
+
+    assert!(
+        cx.debug_bounds("shared-pane-takeover-1").is_some(),
+        "another client's control should replace the Pane with its screen"
+    );
+
+    click("shared-pane-take-over-1", cx);
+
+    assert_eq!(
+        harness.panes.pane(ROOT_PANE).take_overs(),
+        1,
+        "Take Over should ask the server once"
+    );
+}
+
+#[gpui::test]
+fn an_interrupted_shared_pane_should_offer_retry_until_its_screen_returns(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_tab_manager(cx);
+    harness
+        .panes
+        .pane(ROOT_PANE)
+        .set(DevelopmentPaneStatus::Reconnecting);
+    settle(&harness, cx);
+
+    assert!(
+        cx.debug_bounds("shared-pane-notice-1").is_some(),
+        "an interruption should say so over the Pane's frozen screen"
+    );
+
+    click("shared-pane-retry-1", cx);
+
+    assert_eq!(
+        harness.panes.pane(ROOT_PANE).retries(),
+        1,
+        "Retry should ask for a connection attempt now"
+    );
+
+    harness.panes.pane(ROOT_PANE).reconnect();
+    settle(&harness, cx);
+
+    assert!(
+        cx.debug_bounds("shared-pane-notice-1").is_none(),
+        "the notice should leave once the server publishes this client's screens again"
+    );
+}
+
+#[gpui::test]
+fn a_restored_pane_should_offer_start_new_shell_without_starting_one(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_tab_manager(cx);
+    harness
+        .panes
+        .pane(ROOT_PANE)
+        .set(DevelopmentPaneStatus::Restored);
+    settle(&harness, cx);
+
+    assert!(
+        cx.debug_bounds("shared-pane-restored-1").is_some(),
+        "a Pane retained across a server restart should show its own screen"
+    );
+    assert_eq!(
+        harness.panes.pane(ROOT_PANE).restored_starts(),
+        0,
+        "rendering the screen must not start a shell"
+    );
+
+    click("shared-pane-start-shell-1", cx);
+
+    assert_eq!(
+        harness.panes.pane(ROOT_PANE).restored_starts(),
+        1,
+        "Start New Shell should ask the server once"
+    );
+}
+
+/// The edit state a person reads, independent of any window.
+mod edits {
+    use super::*;
+    use crate::domain::WorkspaceId;
+    use crate::ui::pane_lifecycle::PaneConstruction;
+
+    fn shared(inventory: Option<Inventory>) -> (SharedWorkspaces, Rc<ScriptedEdits>) {
+        let edits = Rc::new(ScriptedEdits::new(inventory));
+        let source = SharedEditSource::new(Rc::clone(&edits) as Rc<dyn SharedWorkspaceEdits>);
+        let session_factory: Rc<dyn TerminalSessionFactory> =
+            Rc::new(crate::terminal::testing::TestTerminalSessionFactory::new(
+                crate::terminal::testing::TestTerminalSessionRecords::default(),
+            ));
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            session_factory,
+            crate::terminal::testing::test_local_directory(PathBuf::from("/tmp/spaceterm-shared")),
+        );
+        let sessions = SharedPaneSessions::with_opener(
+            ScriptedPanes::new(session_factory) as Rc<dyn SharedPaneOpener>,
+            &PaneConstruction::testing(),
+        );
+        (SharedWorkspaces::new(source, sessions), edits)
+    }
+
+    fn renamed(name: &str, version: u64) -> Inventory {
+        let mut inventory = root_only();
+        inventory.revision = 2;
+        inventory.workspaces[0].name = name.to_owned();
+        inventory.workspaces[0].name_version = version;
+        inventory
+    }
+
+    /// The local Workspace a test binds the server Workspace to.
+    fn local() -> WorkspaceId {
+        first_workspace_id()
+    }
+
+    fn bind(shared: &mut SharedWorkspaces, inventory: &Inventory) {
+        shared.register(
+            local(),
+            SharedWorkspaceFacts::from_server(&inventory.workspaces[0]),
+        );
+    }
+
+    #[test]
+    fn an_offline_client_should_refuse_a_shared_edit_without_submitting_it() {
+        let (mut shared, edits) = shared(Some(root_only()));
+        bind(&mut shared, &root_only());
+        edits.set_connected(false);
+
+        assert_eq!(shared.editability(), SharedEditability::Offline);
+        assert_eq!(
+            shared.rename(local(), "Logs".to_owned(), Some(0)),
+            SharedSubmission::Refused(SharedRefusalReason::Offline)
+        );
+        assert!(edits.submitted().is_empty());
+    }
+
+    #[test]
+    fn a_client_waiting_for_an_answer_should_refuse_another_shared_edit() {
+        let (mut shared, edits) = shared(Some(root_only()));
+        bind(&mut shared, &root_only());
+
+        assert_eq!(
+            shared.rename(local(), "Logs".to_owned(), Some(0)),
+            SharedSubmission::Submitted
+        );
+        assert_eq!(shared.editability(), SharedEditability::Pending);
+        assert_eq!(
+            shared.rename(local(), "Notes".to_owned(), Some(0)),
+            SharedSubmission::Refused(SharedRefusalReason::Pending)
+        );
+        assert_eq!(edits.submitted().len(), 1, "only the first edit is sent");
+    }
+
+    #[test]
+    fn a_conflicting_rename_should_keep_the_draft_and_name_the_value_from_the_same_snapshot() {
+        let (mut shared, edits) = shared(Some(root_only()));
+        bind(&mut shared, &root_only());
+        shared.rename(local(), "Mine".to_owned(), Some(0));
+
+        // Another client's rename reached the server first, so this answer and the inventory that
+        // carries its value arrive together.
+        edits.set_inventory(renamed("Theirs", 1));
+        edits.answer(Outcome::Conflict);
+        let poll = shared.poll();
+
+        let conflict = shared.take_conflict().expect("the draft should be kept");
+        assert_eq!(conflict.workspace, local());
+        assert_eq!(conflict.field, SharedWorkspaceField::Name);
+        assert_eq!(
+            conflict.draft,
+            SharedWorkspaceDraft::Name("Mine".to_owned())
+        );
+        assert_eq!(
+            conflict.authoritative.to_string(),
+            "Theirs",
+            "the conflict should name the value the server holds in the same snapshot"
+        );
+        assert!(poll.accepted.is_none(), "a refused edit opens nothing");
+    }
+
+    #[test]
+    fn an_answer_must_reach_the_ui_before_another_edit_can_replace_it() {
+        let (mut shared, edits) = shared(Some(root_only()));
+        bind(&mut shared, &root_only());
+        shared.rename(local(), "Mine".to_owned(), Some(0));
+        edits.set_inventory(renamed("Theirs", 1));
+        edits.answer(Outcome::Conflict);
+
+        assert_eq!(
+            shared.create_workspace("Logs".to_owned()),
+            SharedSubmission::Refused(SharedRefusalReason::Pending),
+            "a second submission must not erase a conflict before the window reads it"
+        );
+        shared.poll();
+        assert_eq!(
+            shared.take_conflict().expect("unread conflict").draft,
+            SharedWorkspaceDraft::Name("Mine".to_owned())
+        );
+        assert_eq!(
+            shared.create_workspace("Logs".to_owned()),
+            SharedSubmission::Submitted
+        );
+    }
+
+    #[test]
+    fn asking_again_after_reviewing_a_conflict_should_use_the_version_it_reviewed() {
+        let (mut shared, edits) = shared(Some(root_only()));
+        bind(&mut shared, &root_only());
+        shared.rename(local(), "Mine".to_owned(), Some(0));
+        edits.set_inventory(renamed("Theirs", 1));
+        edits.answer(Outcome::Conflict);
+        let poll = shared.poll();
+        bind(&mut shared, poll.inventory.as_ref().expect("inventory"));
+        let conflict = shared.take_conflict().expect("conflict");
+
+        // The dialog still shows "Theirs" while another accepted edit arrives.
+        let mut newer = renamed("Latest", 2);
+        newer.revision = 3;
+        edits.set_inventory(newer);
+        let poll = shared.poll();
+        bind(
+            &mut shared,
+            poll.inventory.as_ref().expect("newer inventory"),
+        );
+
+        assert_eq!(shared.ask_again(&conflict), SharedSubmission::Submitted);
+
+        assert_eq!(
+            edits.submitted().last(),
+            Some(&Mutation::RenameWorkspace {
+                workspace: WORKSPACE,
+                version: 1,
+                name: "Mine".to_owned(),
+            }),
+            "a person who read the server's value beside their draft asks again at that value"
+        );
+    }
+
+    #[test]
+    fn a_conflict_recovered_before_any_binding_should_keep_its_draft_until_the_projection() {
+        // A relaunch finds a retained answer this process never submitted, and no local Workspace
+        // exists yet.
+        let (mut shared, edits) = shared(Some(root_only()));
+        edits.submit_for_recovery(Mutation::RenameWorkspace {
+            workspace: WORKSPACE,
+            version: 0,
+            name: "Recovered".to_owned(),
+        });
+        edits.set_inventory(renamed("Theirs", 1));
+        edits.answer(Outcome::Conflict);
+
+        let poll = shared.poll();
+        assert!(
+            shared.take_conflict().is_none(),
+            "the draft waits rather than resolving to an unknown Workspace"
+        );
+        bind(&mut shared, poll.inventory.as_ref().expect("inventory"));
+
+        let conflict = shared
+            .take_conflict()
+            .expect("the recovered draft should survive the projection");
+        assert_eq!(
+            conflict.draft,
+            SharedWorkspaceDraft::Name("Recovered".to_owned())
+        );
+        assert_eq!(conflict.authoritative.to_string(), "Theirs");
+    }
+
+    #[test]
+    fn an_answer_recovered_from_an_earlier_run_should_open_nothing() {
+        let (mut shared, edits) = shared(Some(root_only()));
+        bind(&mut shared, &root_only());
+        edits.submit_for_recovery(Mutation::CreateTab {
+            workspace: WORKSPACE,
+        });
+        edits.answer(Outcome::Accepted { target: SECOND_TAB });
+
+        let poll = shared.poll();
+
+        assert!(
+            poll.accepted.is_none(),
+            "nobody asked for this in this session, so nothing opens"
+        );
+    }
+
+    #[test]
+    fn an_accepted_creation_this_client_asked_for_should_open_once() {
+        let (mut shared, edits) = shared(Some(root_only()));
+        bind(&mut shared, &root_only());
+        shared.create_workspace("Logs".to_owned());
+        edits.answer(Outcome::Accepted { target: WORKSPACE });
+
+        let accepted = shared.poll().accepted.expect("the creator opens its own");
+        assert_eq!(accepted.target, WORKSPACE);
+        assert!(
+            matches!(accepted.mutation, Mutation::CreateWorkspace { .. }),
+            "the acceptance should name the edit it answers"
+        );
+        assert!(
+            shared.poll().accepted.is_none(),
+            "one answer opens its creation once"
+        );
+    }
+
+    #[test]
+    fn a_draft_started_before_a_publication_should_submit_the_version_it_began_with() {
+        let (mut shared, edits) = shared(Some(root_only()));
+        bind(&mut shared, &root_only());
+        // A person starts editing the name while the Workspace sits at name version 0.
+        let draft = shared.facts(local()).expect("facts").name_version;
+
+        // Another client's rename reaches the server while that draft is still open, and this
+        // client reads it.
+        edits.set_inventory(renamed("Theirs", 1));
+        let poll = shared.poll();
+        bind(&mut shared, poll.inventory.as_ref().expect("inventory"));
+
+        shared.rename(local(), "Mine".to_owned(), Some(draft));
+
+        assert_eq!(
+            edits.submitted().last(),
+            Some(&Mutation::RenameWorkspace {
+                workspace: WORKSPACE,
+                version: 0,
+                name: "Mine".to_owned(),
+            }),
+            "the draft must stay fenced to the version it began at, so the server refuses it \
+             instead of overwriting the other client"
+        );
+    }
+
+    #[test]
+    fn a_pin_chooser_opened_before_a_publication_should_submit_the_version_it_opened_at() {
+        let (mut shared, edits) = shared(Some(root_only()));
+        bind(&mut shared, &root_only());
+        // A person opens the chooser while the Workspace sits at pin version 0.
+        let draft = shared.pin_version(local()).expect("pin version");
+
+        let mut published = root_only();
+        published.revision = 2;
+        published.workspaces[0].pinned_directory = Some(PathBuf::from("/server/theirs"));
+        published.workspaces[0].pin_version = 1;
+        edits.set_inventory(published);
+        let poll = shared.poll();
+        bind(&mut shared, poll.inventory.as_ref().expect("inventory"));
+
+        shared.pin(local(), Some(PathBuf::from("/server/mine")), Some(draft));
+
+        assert_eq!(
+            edits.submitted().last(),
+            Some(&Mutation::PinWorkspace {
+                workspace: WORKSPACE,
+                version: 0,
+                directory: Some(PathBuf::from("/server/mine")),
+            }),
+            "the chooser's draft must stay fenced to the pin version it opened at"
+        );
+    }
+
+    #[test]
+    fn a_draft_started_after_a_publication_should_submit_the_version_it_can_see() {
+        let (mut shared, edits) = shared(Some(root_only()));
+        bind(&mut shared, &root_only());
+        edits.set_inventory(renamed("Theirs", 1));
+        let poll = shared.poll();
+        bind(&mut shared, poll.inventory.as_ref().expect("inventory"));
+
+        // The person starts editing after reading the published name.
+        let draft = shared.facts(local()).expect("facts").name_version;
+        shared.rename(local(), "Mine".to_owned(), Some(draft));
+
+        assert_eq!(
+            edits.submitted().last(),
+            Some(&Mutation::RenameWorkspace {
+                workspace: WORKSPACE,
+                version: 1,
+                name: "Mine".to_owned(),
+            }),
+            "a draft started on the published value is fenced to that value"
+        );
+    }
+
+    #[test]
+    fn a_plan_should_create_update_and_remove_against_the_published_inventory() {
+        let (mut shared, _) = shared(Some(root_only()));
+        let plan = shared.plan(&root_only());
+        assert!(matches!(
+            plan.as_slice(),
+            [SharedWorkspacePlan::Create { .. }]
+        ));
+
+        bind(&mut shared, &root_only());
+        let plan = shared.plan(&renamed("Theirs", 1));
+        match plan.as_slice() {
+            [
+                SharedWorkspacePlan::Update {
+                    local: bound,
+                    facts,
+                },
+            ] => {
+                assert_eq!(*bound, local());
+                assert_eq!(facts.name, "Theirs");
+            }
+            other => panic!("expected one update, got {} steps", other.len()),
+        }
+
+        let gone = Inventory {
+            revision: 3,
+            workspaces: Vec::new(),
+        };
+        assert!(matches!(
+            shared.plan(&gone).as_slice(),
+            [SharedWorkspacePlan::Removed { local: bound }] if *bound == local()
+        ));
+    }
+
+    #[test]
+    fn a_waiting_draft_for_a_removed_workspace_should_report_the_removal() {
+        let (mut shared, edits) = shared(Some(root_only()));
+        edits.submit_for_recovery(Mutation::RenameWorkspace {
+            workspace: WORKSPACE,
+            version: 0,
+            name: "Recovered".to_owned(),
+        });
+        edits.set_inventory(renamed("Theirs", 1));
+        edits.answer(Outcome::Conflict);
+        shared.poll();
+
+        edits.set_inventory(Inventory {
+            revision: 9,
+            workspaces: Vec::new(),
+        });
+        shared.poll();
+
+        assert!(shared.take_conflict().is_none());
+        assert!(
+            shared.take_refusal().is_some(),
+            "a draft whose Workspace is gone reports the removal instead of waiting"
+        );
+    }
+}
+
+/// The draft a person types, and the field version it stays fenced to.
+mod draft {
+    use std::cell::RefCell;
+
+    use super::*;
+    use crate::ui::workspace_sidebar::{
+        SharedWorkspaceRow, SidebarEvent, WorkspaceRowViewModel, WorkspaceSidebar,
+    };
+
+    /// One shared Workspace row at `name_version`, as the Workspace Window publishes it.
+    fn row(name: &str, name_version: u64) -> WorkspaceRowViewModel {
+        WorkspaceRowViewModel {
+            workspace_id: first_workspace_id(),
+            name: name.to_owned().into(),
+            path: "~/work".into(),
+            machine: None,
+            tooltip: "Server: /server/work".into(),
+            pinned: false,
+            remote_connection_phase: None,
+            available: true,
+            repository: None,
+            worktrees: None,
+            creates_worktrees: false,
+            active: true,
+            shared: Some(SharedWorkspaceRow {
+                name_version,
+                edits: true,
+                edits_reason: "",
+                status: None,
+            }),
+        }
+    }
+
+    type Renames = Rc<RefCell<Vec<SidebarEvent>>>;
+
+    fn sidebar(
+        cx: &mut TestAppContext,
+    ) -> (Entity<WorkspaceSidebar>, Renames, &mut VisualTestContext) {
+        cx.update(crate::ui::init)
+            .expect("UI initialization should succeed");
+        let (sidebar, cx) =
+            cx.add_window_view(|window, cx| WorkspaceSidebar::new(true, window, cx));
+        let events: Renames = Rc::new(RefCell::new(Vec::new()));
+        let collected = Rc::clone(&events);
+        cx.update(|window, cx| {
+            window.activate_window();
+            cx.subscribe(&sidebar, move |_, event: &SidebarEvent, _| {
+                collected.borrow_mut().push(event.clone());
+            })
+            .detach();
+        });
+        cx.run_until_parked();
+        (sidebar, events, cx)
+    }
+
+    fn publish(
+        sidebar: &Entity<WorkspaceSidebar>,
+        row: WorkspaceRowViewModel,
+        cx: &mut VisualTestContext,
+    ) {
+        cx.update(|_, cx| {
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.set_rows(vec![row], None, true, cx)
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    fn submitted_rename(events: &Renames) -> (String, Option<u64>) {
+        events
+            .borrow()
+            .iter()
+            .find_map(|event| match event {
+                SidebarEvent::Rename { name, version, .. } => Some((name.clone(), *version)),
+                _ => None,
+            })
+            .expect("the inline editor should have submitted its draft")
+    }
+
+    #[gpui::test]
+    fn a_rename_published_while_the_editor_is_open_should_not_overwrite_it(
+        cx: &mut TestAppContext,
+    ) {
+        let (sidebar, events, cx) = sidebar(cx);
+        publish(&sidebar, row("Build", 0), cx);
+
+        right_click("workspace-row-1-active", cx);
+        click("workspace-menu-row-rename", cx);
+        assert!(
+            cx.debug_bounds("workspace-rename-input").is_some(),
+            "the inline editor should be open on the row"
+        );
+
+        // Another client renames the Workspace while this draft is still being typed.
+        publish(&sidebar, row("Theirs", 1), cx);
+        cx.simulate_keystrokes("cmd-a M i n e enter");
+        cx.run_until_parked();
+
+        assert_eq!(
+            submitted_rename(&events),
+            ("Mine".to_owned(), Some(0)),
+            "the draft should carry the version the editor opened on, so the server refuses it \
+             instead of overwriting the other client"
+        );
+    }
+
+    #[gpui::test]
+    fn a_rename_started_after_a_publication_should_carry_the_published_version(
+        cx: &mut TestAppContext,
+    ) {
+        let (sidebar, events, cx) = sidebar(cx);
+        publish(&sidebar, row("Build", 0), cx);
+        publish(&sidebar, row("Theirs", 1), cx);
+
+        right_click("workspace-row-1-active", cx);
+        click("workspace-menu-row-rename", cx);
+        cx.simulate_keystrokes("cmd-a M i n e enter");
+        cx.run_until_parked();
+
+        assert_eq!(
+            submitted_rename(&events),
+            ("Mine".to_owned(), Some(1)),
+            "a draft started on the published name is fenced to that name"
+        );
+    }
+
+    #[gpui::test]
+    fn a_rename_of_a_workspace_this_window_owns_should_carry_no_shared_version(
+        cx: &mut TestAppContext,
+    ) {
+        let (sidebar, events, cx) = sidebar(cx);
+        let mut own = row("Build", 0);
+        own.shared = None;
+        publish(&sidebar, own, cx);
+
+        right_click("workspace-row-1-active", cx);
+        click("workspace-menu-row-rename", cx);
+        cx.simulate_keystrokes("cmd-a M i n e enter");
+        cx.run_until_parked();
+
+        assert_eq!(
+            submitted_rename(&events),
+            ("Mine".to_owned(), None),
+            "a Workspace this window owns has no server version to fence"
+        );
+    }
+}

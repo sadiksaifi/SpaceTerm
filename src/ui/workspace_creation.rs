@@ -16,16 +16,29 @@ pub(crate) enum WorkspaceCreation {
     OpenLocalDirectory,
     /// A Remote Workspace pinned to a directory chosen after connecting.
     OpenRemoteDirectory,
+    /// A Workspace the adopted SpaceTerm Server owns and every connected client presents. The row
+    /// appears only while a Workspace Window presents that server's Workspaces.
+    Server,
 }
 
 impl WorkspaceCreation {
-    /// Every creation row in presentation order.
+    /// Every client-owned creation row in presentation order.
     pub(crate) const ALL: [Self; 4] = [
         Self::Local,
         Self::Remote,
         Self::OpenLocalDirectory,
         Self::OpenRemoteDirectory,
     ];
+
+    /// The creation rows one surface offers. The server row joins them only while a Workspace
+    /// Window presents an adopted server's Workspaces.
+    pub(crate) fn rows(server: bool) -> Vec<Self> {
+        let mut rows = Self::ALL.to_vec();
+        if server {
+            rows.push(Self::Server);
+        }
+        rows
+    }
 
     /// The row label. Open rows end in an ellipsis because a chooser opens before creation.
     pub(crate) const fn label(self) -> &'static str {
@@ -34,6 +47,7 @@ impl WorkspaceCreation {
             Self::Remote => "Remote Workspace",
             Self::OpenLocalDirectory => "Open Local Directory…",
             Self::OpenRemoteDirectory => "Open Remote Directory…",
+            Self::Server => "Server Workspace",
         }
     }
 
@@ -43,6 +57,7 @@ impl WorkspaceCreation {
             Self::Remote => CustomIconName::GlobePlus,
             Self::OpenLocalDirectory => CustomIconName::FolderBadgePlus,
             Self::OpenRemoteDirectory => CustomIconName::FolderBadgeGlobe,
+            Self::Server => CustomIconName::RectangleStackBadgePlus,
         }
     }
 
@@ -50,9 +65,9 @@ impl WorkspaceCreation {
         matches!(self, Self::Remote | Self::OpenRemoteDirectory)
     }
 
-    /// Whether the row begins the Open group, separated from the New rows above it.
+    /// Whether the row begins a group, separated from the rows above it.
     pub(crate) const fn starts_group(self) -> bool {
-        matches!(self, Self::OpenLocalDirectory)
+        matches!(self, Self::OpenLocalDirectory | Self::Server)
     }
 
     /// The row's stable selector suffix, shared by both surfaces.
@@ -62,19 +77,22 @@ impl WorkspaceCreation {
             Self::Remote => "create-remote",
             Self::OpenLocalDirectory => "open-local-directory",
             Self::OpenRemoteDirectory => "open-remote-directory",
+            Self::Server => "create-server",
         }
     }
 
+    /// The row's Shortcut. The server row is no Command, so it has none.
     pub(crate) fn shortcut(self, presentation: &DesktopPresentation) -> Option<SharedString> {
-        presentation.shortcut(self.action().as_ref())
+        presentation.shortcut(self.action()?.as_ref())
     }
 
-    fn action(self) -> Box<dyn Action> {
+    fn action(self) -> Option<Box<dyn Action>> {
         match self {
-            Self::Local => Box::new(super::NewWorkspace),
-            Self::Remote => Box::new(super::NewRemoteWorkspace),
-            Self::OpenLocalDirectory => Box::new(super::OpenLocalDirectory),
-            Self::OpenRemoteDirectory => Box::new(super::OpenRemoteDirectory),
+            Self::Local => Some(Box::new(super::NewWorkspace)),
+            Self::Remote => Some(Box::new(super::NewRemoteWorkspace)),
+            Self::OpenLocalDirectory => Some(Box::new(super::OpenLocalDirectory)),
+            Self::OpenRemoteDirectory => Some(Box::new(super::OpenRemoteDirectory)),
+            Self::Server => None,
         }
     }
 }

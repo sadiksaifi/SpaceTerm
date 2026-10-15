@@ -154,3 +154,5 @@ pub(crate) struct TerminalSessionChannelUnavailable;
 
 #[cfg(feature = "developer-tools")]
 pub(crate) mod server_session;
+#[cfg(feature = "developer-tools")]
+pub(crate) mod shared_workspace;

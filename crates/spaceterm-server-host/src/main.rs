@@ -21,7 +21,7 @@ fn run() -> Result<(), spaceterm_server::ServerError> {
         if identity == "spaceterm-development" {
             return spaceterm_server::run_local_with_panes(
                 identity,
-                spaceterm::runtime::DevelopmentPaneHost::local()?,
+                spaceterm::runtime::SharedWorkspaceHost::local()?,
             );
         }
         return spaceterm_server::run_local(identity);

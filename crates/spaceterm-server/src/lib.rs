@@ -1,6 +1,7 @@
 //! Private local SpaceTerm Protocol and explicit local server setup.
 #[cfg(feature = "client")]
 mod client;
+pub mod hierarchy;
 mod host;
 pub mod organization;
 pub mod pane;
@@ -49,6 +50,10 @@ pub enum ServerError {
     DirectoryUnavailable,
     #[error("Terminal cleanup could not be confirmed.")]
     CleanupUnresolved,
+    #[error(
+        "The server is waiting for shared edit acknowledgements. Reconnect the other clients to continue."
+    )]
+    Capacity,
 }
 
 /// Runs an explicitly requested local server. No service registration or listener

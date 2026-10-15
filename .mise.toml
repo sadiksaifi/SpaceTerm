@@ -214,6 +214,10 @@ run = "cog verify --ignore-merge-commits --file {{usage.file | quote}}"
 description = "Check every target and feature"
 run = "cargo check --all-targets --all-features --locked"
 
+[tasks."check:desktop"]
+description = "Check the desktop without Development tools"
+run = "cargo check --package spaceterm --lib --bins --no-default-features --features desktop --locked"
+
 [tasks."check:portable"]
 description = "Check shared targets without native features"
 run = "cargo check --package spaceterm --package spaceterm-directories --package spaceterm-server --all-targets --no-default-features --locked"
@@ -439,3 +443,15 @@ run = [
   "cargo run --package spaceterm-server-host --features client --example restored_workspace --locked -- 1",
   "cargo run --package spaceterm-server-host --features client --example restored_workspace --locked -- 2",
 ]
+
+[tasks."server:shared:smoke"]
+description = "Exercise shared edits, independent Pane control, lost outcomes and restart through both protocol majors"
+run = [
+  "cargo build --package spaceterm-server-host --features client --examples --bins --locked",
+  "cargo run --package spaceterm-server-host --features client --example shared_workspaces --locked -- 1",
+  "cargo run --package spaceterm-server-host --features client --example shared_workspaces --locked -- 2",
+]
+
+[tasks."server:shared:desktop:test"]
+description = "Test shared Workspace integration and server Pane presentation in the main app"
+run = "cargo test --package spaceterm --lib --all-features --locked -- shared server_pane"

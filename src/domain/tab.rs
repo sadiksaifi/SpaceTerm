@@ -386,6 +386,30 @@ impl<T> Tab<T> {
         Ok(new_pane_id)
     }
 
+    /// Reconciles server membership regardless of local screen size. Unlike a local split,
+    /// another client's creation must preserve this client's focus, zoom, and surviving layout.
+    #[cfg(any(feature = "developer-tools", test))]
+    pub(crate) fn insert_shared_pane(
+        &mut self,
+        source: PaneId,
+        axis: SplitAxis,
+        create_pane: impl FnOnce(PaneId) -> T,
+    ) -> Result<PaneId, PaneError> {
+        let (pane_id, split_id, next_pane_id, next_split_id) = self.next_split_ids()?;
+        let root = self
+            .root
+            .with_split(source, pane_id, split_id, PaneEdge::trailing(axis))
+            .ok_or(PaneError::PaneNotFound(source))?;
+        let pane = create_pane(pane_id);
+        self.root = root;
+        self.panes.insert(pane_id, pane);
+        self.next_pane_id = next_pane_id;
+        self.next_split_id = next_split_id;
+        // The new Pane joins history without becoming the most recent focus.
+        self.focus_history.insert(0, pane_id);
+        Ok(pane_id)
+    }
+
     /// Moves a Pane beside `target_pane_id`, splitting the target so the Pane takes `edge`, and
     /// reports whether the arrangement changed.
     ///
@@ -1058,6 +1082,22 @@ mod tests {
         )
         .unwrap();
         tab
+    }
+
+    #[test]
+    fn shared_insertion_preserves_focus_zoom_and_server_root() {
+        let mut tab = four_pane_tab();
+        let focused = tab.focused_pane_id();
+        let root = tab.root_pane_id();
+        tab.toggle_zoom();
+        let zoom = tab.zoom_state();
+        let added = tab
+            .insert_shared_pane(PaneId::new(1), SplitAxis::Horizontal, |_| ())
+            .unwrap();
+        assert!(tab.pane(added).is_some());
+        assert_eq!(tab.focused_pane_id(), focused);
+        assert_eq!(tab.zoom_state(), zoom);
+        assert_eq!(tab.root_pane_id(), root);
     }
 
     fn topology(tree: PaneTreeRef<'_>) -> String {

@@ -15,7 +15,9 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-const MAX_RECORD: usize = 32768;
+// Covers the hierarchy bounds with two 4096-byte paths per Pane, Workspace pins, and 32
+// retained edits, including JSON escaping. Inventory also fits the 16 MiB transport bound.
+const MAX_RECORD: usize = 12 * 1024 * 1024;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Record {
@@ -246,6 +248,44 @@ impl Directory {
         let bytes = Zeroizing::new(
             serde_json::to_vec(record).map_err(|_| ServerError::StorageUnavailable)?,
         );
+        self.write_bytes(c"identity.json", &bytes)
+    }
+    #[cfg(feature = "client")]
+    pub(crate) fn read_json<T: serde::de::DeserializeOwned>(
+        &self,
+        name: &str,
+    ) -> Result<Option<T>, ServerError> {
+        let file = match self.file(name, false) {
+            Ok(file) => file,
+            Err(ServerError::NotPaired) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let mut bytes = Vec::new();
+        (&file)
+            .take((MAX_RECORD + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| ServerError::StorageUnavailable)?;
+        if bytes.len() > MAX_RECORD {
+            return Err(ServerError::UnsafeStorage);
+        }
+        let value = serde_json::from_slice(&bytes).map_err(|_| ServerError::UnsafeStorage)?;
+        file.sync_all()
+            .and_then(|()| self.0.sync_all())
+            .map_err(|_| ServerError::StorageUnavailable)?;
+        Ok(Some(value))
+    }
+    #[cfg(feature = "client")]
+    pub(crate) fn write_json<T: Serialize>(
+        &self,
+        name: &std::ffi::CStr,
+        value: &T,
+    ) -> Result<(), ServerError> {
+        self.write_bytes(
+            name,
+            &serde_json::to_vec(value).map_err(|_| ServerError::StorageUnavailable)?,
+        )
+    }
+    fn write_bytes(&self, destination: &std::ffi::CStr, bytes: &[u8]) -> Result<(), ServerError> {
         if bytes.len() > MAX_RECORD {
             return Err(ServerError::StorageUnavailable);
         }
@@ -273,7 +313,7 @@ impl Directory {
         // SAFETY: successful openat transferred ownership of this descriptor.
         let mut file = unsafe { File::from_raw_fd(fd) };
         let result = (|| {
-            file.write_all(&bytes)
+            file.write_all(bytes)
                 .and_then(|()| file.sync_all())
                 .map_err(|_| ServerError::StorageUnavailable)?;
             // SAFETY: both names are single components relative to the same live directory.
@@ -282,7 +322,7 @@ impl Directory {
                     self.0.as_raw_fd(),
                     c_name.as_ptr(),
                     self.0.as_raw_fd(),
-                    c"identity.json".as_ptr(),
+                    destination.as_ptr(),
                 )
             } != 0
             {
@@ -394,6 +434,97 @@ mod tests {
         let restored = reopened.read().unwrap();
         assert_eq!(serde_json::to_value(&restored).unwrap(), value);
     }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn pending_edits_and_validated_conflict_drafts_survive_client_reopen() {
+        use crate::hierarchy::{ClientJournal, Mutation, Outcome, RetainedOutcome};
+        let fixture = Fixture::new();
+        let mutation = Mutation::RenameWorkspace {
+            workspace: [3; 32],
+            version: 7,
+            name: "Draft".into(),
+        };
+        let mut journal = ClientJournal::open(fixture.open(), [1; 32], [2; 32]).unwrap();
+        journal.submit(4, mutation.clone()).unwrap();
+        // A concurrently spawned child can inherit the close-on-exec lock until exec. Closing
+        // the owner's handle must release ownership even while that inherited descriptor lives.
+        let (mut release, gate) = std::os::unix::net::UnixStream::pair().unwrap();
+        // SAFETY: the child uses only read and _exit before terminating, with no Rust cleanup.
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0);
+        if child == 0 {
+            let mut byte = 0_u8;
+            // SAFETY: the inherited descriptor and one-byte writable buffer are live.
+            unsafe {
+                libc::read(gate.as_raw_fd(), (&mut byte as *mut u8).cast(), 1);
+                libc::_exit(0);
+            }
+        }
+        drop(journal);
+        let reopened = ClientJournal::open(fixture.open(), [1; 32], [2; 32]);
+        release.write_all(&[1]).unwrap();
+        // SAFETY: this reaps only the child created above; no other process is signalled.
+        unsafe {
+            libc::waitpid(child, std::ptr::null_mut(), 0);
+        }
+        let mut journal = reopened.unwrap();
+        assert_eq!(journal.pending().unwrap().mutation, mutation);
+        assert_eq!(journal.pending().unwrap().sequence, 4);
+        let result = RetainedOutcome {
+            sequence: 4,
+            mutation: mutation.clone(),
+            outcome: Outcome::Conflict,
+        };
+        assert_eq!(
+            journal.complete(RetainedOutcome {
+                sequence: 5,
+                ..result.clone()
+            }),
+            Err(ServerError::Protocol)
+        );
+        journal.complete(result.clone()).unwrap();
+        drop(journal);
+        let mut journal = ClientJournal::open(fixture.open(), [1; 32], [2; 32]).unwrap();
+        assert_eq!(journal.pending().unwrap().result.as_ref(), Some(&result));
+        journal.retire().unwrap();
+        drop(journal);
+        let journal = ClientJournal::open(fixture.open(), [1; 32], [2; 32]).unwrap();
+        assert!(journal.pending().is_none());
+        assert_eq!(journal.last(), Some(&result));
+        drop(journal);
+        assert!(matches!(
+            ClientJournal::open(fixture.open(), [9; 32], [2; 32]),
+            Err(ServerError::AuthenticationRefused)
+        ));
+    }
+
+    #[cfg(all(feature = "client", target_os = "linux"))]
+    #[test]
+    fn uncertain_edit_journal_cannot_resume_until_its_actual_outcome_is_synchronized() {
+        use crate::hierarchy::{ClientJournal, Mutation};
+        let fixture = Fixture::new();
+        let data = fixture.open();
+        let mut journal = ClientJournal::open(fixture.open(), [1; 32], [2; 32]).unwrap();
+        let fault = sync_failure::fail_directory(&data.0);
+        assert_eq!(
+            journal.submit(
+                1,
+                Mutation::CreateWorkspace {
+                    name: "Draft".into()
+                }
+            ),
+            Err(ServerError::StorageUnavailable)
+        );
+        drop(journal);
+        assert!(matches!(
+            ClientJournal::open(fixture.open(), [1; 32], [2; 32]),
+            Err(ServerError::StorageUnavailable)
+        ));
+        drop(fault);
+        let journal = ClientJournal::open(fixture.open(), [1; 32], [2; 32]).unwrap();
+        assert_eq!(journal.pending().unwrap().sequence, 1);
+    }
     #[test]
     fn corrupt_identity_is_preserved_instead_of_replaced() {
         let fixture = Fixture::new();
@@ -490,6 +621,14 @@ mod tests {
         organization.name = "Retained work".into();
         organization.pinned_directory = Some(fixture.0.clone());
         organization.confirmed_directory = Some("/".into());
+        let mut shared = crate::hierarchy::State::from_legacy(&organization);
+        let creation = crate::hierarchy::Mutation::CreateTab {
+            workspace: organization.workspace,
+        };
+        let accepted = shared
+            .apply([42; 32], 1, creation.clone(), &fixture.0, |_| true)
+            .unwrap();
+        organization = shared.envelope(&fixture.0).unwrap();
         record.organization = Some(organization.clone());
         let fault = sync_failure::fail_directory(&data.0);
         assert_eq!(data.write(&record), Err(ServerError::StorageUnavailable));
@@ -503,6 +642,15 @@ mod tests {
         assert_eq!(recovered.seed, record.seed);
         assert_eq!(recovered.paired, [[42; 32]]);
         assert!(recovered.organization.as_ref() == Some(&organization));
+        let mut restored =
+            crate::hierarchy::State::from_legacy(recovered.organization.as_ref().unwrap());
+        assert_eq!(
+            restored
+                .apply([42; 32], 1, creation, &fixture.0, |_| true)
+                .unwrap(),
+            accepted
+        );
+        assert_eq!(restored.inventory.workspaces[0].tabs.len(), 2);
     }
 
     #[cfg(target_os = "linux")]

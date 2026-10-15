@@ -1,63 +1,12 @@
 //! Real-host server restart exercise. Requires an idle Development server and native credentials.
+#[path = "support/lifecycle.rs"]
+mod lifecycle;
 mod support;
+use lifecycle::{Server, connect, require_idle, size};
 use spaceterm_server::{LocalServer, ServerError, pane::*};
-use std::{
-    error::Error,
-    process::{Child, Command, Stdio},
-    time::{Duration, Instant},
-};
+use std::{error::Error, time::Duration};
 use support::{attach, await_output, command};
 
-struct Server(Child);
-impl Server {
-    fn start() -> Result<Self, Box<dyn Error>> {
-        let executable = std::env::current_exe()?
-            .parent()
-            .ok_or("example directory")?
-            .parent()
-            .ok_or("build directory")?
-            .join("spaceterm-server");
-        Ok(Self(
-            Command::new(executable)
-                .args(["serve", "spaceterm-development"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()?,
-        ))
-    }
-    fn kill(&mut self) -> Result<(), Box<dyn Error>> {
-        self.0.kill()?;
-        self.0.wait()?;
-        Ok(())
-    }
-}
-impl Drop for Server {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-fn connect(server: &LocalServer) -> Result<PaneConnection, Box<dyn Error>> {
-    let until = Instant::now() + Duration::from_secs(8);
-    loop {
-        match server.connect_pane() {
-            Ok(connection) => return Ok(connection),
-            Err(ServerError::NotRunning) if Instant::now() < until => {
-                std::thread::sleep(Duration::from_millis(50))
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-}
-fn size() -> PaneSize {
-    PaneSize {
-        columns: 80,
-        rows: 24,
-        cell_width: 8,
-        cell_height: 18,
-    }
-}
 fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(target_os = "linux")]
     if std::env::args().nth(1).as_deref() == Some("--fault-server") {
@@ -73,24 +22,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let major = std::env::args().nth(1).unwrap_or("2".into()).parse()?;
     let name = std::env::var("SPACETERM_DEVELOPMENT_CLIENT").unwrap_or("restore-smoke".into());
     let client = LocalServer::for_development_client(&name, major)?;
-    // Detect a live listener before pairing, including when this test device has no credential.
-    // The runtime endpoint depends on UID and build identity, independently of the home path.
-    // SAFETY: geteuid has no preconditions.
-    let uid = unsafe { libc::geteuid() };
-    let directories = spaceterm_directories::ServerDirectories::for_account(
-        std::path::Path::new("/"),
-        uid,
-        "spaceterm-development",
-    )?;
-    if std::os::unix::net::UnixStream::connect(directories.runtime.join("s")).is_ok() {
-        return Err("Stop the idle Development server before this exercise.".into());
-    }
-    // Refuse to interrupt somebody else's running server or mutate retained work.
-    match client.refresh() {
-        Err(ServerError::NotRunning | ServerError::NotPaired) => {}
-        Ok(_) => return Err("Stop the idle Development server before this exercise.".into()),
-        Err(error) => return Err(error.into()),
-    }
+    require_idle(&client)?;
     // Setup locates its sibling binary. Stage the built host beside this example, including
     // when Cargo uses a shared target directory outside the working tree.
     let directory = std::env::current_exe()?
@@ -204,6 +136,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(target_os = "linux")]
 mod faults {
     use super::*;
+    use std::process::{Command, Stdio};
     use std::{
         path::PathBuf,
         sync::{
