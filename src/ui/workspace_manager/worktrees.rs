@@ -115,9 +115,12 @@ impl WorkspaceManager {
         let Some(store) = InstalledWorktrees::store(cx) else {
             return;
         };
+        // Worktrees of a shared Workspace are listed and written on the owning server, which is
+        // not available yet, so none are read for it here.
         let wanted: BTreeMap<WorkspaceId, PathBuf> = self
             .workspaces
             .iter()
+            .filter(|workspace| !self.is_shared_workspace(workspace.id()))
             .filter_map(|workspace| Some((workspace.id(), self.worktree_directory(workspace, cx)?)))
             .collect();
         let gone: Vec<WorkspaceId> = self

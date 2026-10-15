@@ -68,6 +68,30 @@ use spaceterm_ui::{
     ResizeInputSource, Tooltip,
 };
 
+/// One Tab's shared server Panes, when a SpaceTerm Server owns the Tab. A build without the
+/// developer tools has no shared Workspaces, so the binding is uninhabited and always absent.
+#[cfg(feature = "developer-tools")]
+type SharedPaneBinding = super::shared_workspaces::SharedPanes;
+#[cfg(not(feature = "developer-tools"))]
+type SharedPaneBinding = std::convert::Infallible;
+
+/// What a shared server Pane presents in place of, and over, its terminal.
+#[derive(Default)]
+struct SharedPaneSurface {
+    /// The screen that replaces the Pane outright, so nothing of a former shell paints.
+    screen: Option<AnyElement>,
+    /// The interruption notice over the Pane.
+    notice: Option<AnyElement>,
+}
+
+/// What a shared server Pane's caption controls offer. A split goes to the server, so it waits
+/// while this client is offline or an edit is unanswered; closing is not available yet.
+#[derive(Clone, Copy)]
+struct SharedCaptionControls {
+    split: bool,
+    split_reason: Option<&'static str>,
+}
+
 /// The empty base surface between Split Panes, which every Pane Layout calculation reserves.
 fn pane_gap(cx: &App) -> f32 {
     f32::from(
@@ -497,6 +521,10 @@ pub(crate) struct TabView {
     remote_lifecycle: RemoteHierarchyLifecycle,
     /// The Tab's own focus in the Tab bar, where assistive technology can rest on it.
     tab_focus: FocusHandle,
+    /// The server Tab this Tab presents, when a SpaceTerm Server owns it.
+    shared: Option<SharedPaneBinding>,
+    /// Reads every shared Pane's connection status while the Tab lives.
+    _shared_status: Option<gpui::Task<()>>,
 }
 
 impl TabView {
@@ -584,6 +612,8 @@ impl TabView {
             close_tab_requested: false,
             remote_lifecycle: RemoteHierarchyLifecycle::default(),
             tab_focus: cx.focus_handle(),
+            shared: None,
+            _shared_status: None,
         }
     }
 
@@ -630,6 +660,13 @@ impl TabView {
                         tab_id: view.tab.id(),
                     });
                     cx.notify();
+                }
+                // A Pane whose Terminal Session the server owns keeps its place: the published
+                // inventory owns shared membership, and an exit this client hears first could
+                // otherwise close a Tab the server has already refilled. A Pane of this client's
+                // own closes with its shell, as it always has.
+                TerminalPaneEvent::Exited if view.holds_shared_pane_locally(pane_id) => {
+                    view.release_shared_pane(pane_id, window, cx);
                 }
                 TerminalPaneEvent::Exited => view.close_pane(pane_id, window, cx),
             },
@@ -822,8 +859,14 @@ impl TabView {
         self.tab.zoom_state()
     }
 
+    /// Opens this Tab for a person, which is an explicit selection of its Focused Pane.
+    ///
+    /// Only that Pane is asked for: every other Pane of this Tab keeps the grant it already has,
+    /// or none. Restoring an Active Tab while publishing membership uses
+    /// [`Self::activate_without_focus`], which asks the server for nothing.
     pub(crate) fn activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.activate_without_focus(cx);
+        self.select_shared_pane(self.tab.focused_pane_id());
         self.focus(window, cx);
     }
 
@@ -1103,6 +1146,7 @@ impl TabView {
             eprintln!("failed to focus Pane: {error}");
             return;
         }
+
         self.sync_terminal_focus(cx);
         cx.emit(TabViewEvent::PresentationChanged {
             tab_id: self.tab.id(),
@@ -1128,6 +1172,8 @@ impl TabView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Moving the keyboard to a Pane is an explicit selection of it.
+        self.select_shared_pane(pane_id);
         self.sync_terminal_focus(cx);
         cx.emit(TabViewEvent::PresentationChanged {
             tab_id: self.tab.id(),
@@ -1161,6 +1207,13 @@ impl TabView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A shared Pane Layout belongs to the server. Splitting asks the server, and the new Pane
+        // arrives with the published membership rather than appearing here first.
+        #[cfg(feature = "developer-tools")]
+        if self.shared.is_some() {
+            self.split_shared(target_pane_id, axis, window, cx);
+            return;
+        }
         if self.remote_lifecycle.disconnected_generation().is_some() {
             cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
             return;
@@ -1362,6 +1415,7 @@ impl TabView {
                 zoomed: false,
                 attention,
                 has_multiple_panes: true,
+                shared: self.shared_caption_controls(pane_id),
             },
             card_width,
             1.0,
@@ -1538,6 +1592,11 @@ impl TabView {
     }
 
     fn request_close_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
+        // Closing a shared Pane needs confirmation across every client, which the server path
+        // does not support yet. The Pane offers no local close instead.
+        if self.shared.is_some() {
+            return;
+        }
         if self.close_tab_requested || self.tab.pane(pane_id).is_none() {
             return;
         }
@@ -1587,6 +1646,7 @@ impl TabView {
                 self.pane_titles.remove(&pane_id);
                 self.pane_captions.remove(&pane_id);
                 self.pane_attention.remove(&pane_id);
+                self.forget_shared_pane(pane_id);
                 self.sync_terminal_focus(cx);
                 cx.emit(TabViewEvent::PresentationChanged {
                     tab_id: self.tab.id(),
@@ -1776,6 +1836,8 @@ impl TabView {
         if self.tab.pane(pane_id).is_none() {
             return;
         }
+        // A caption control acts on its own Pane, which selects it.
+        self.select_shared_pane(pane_id);
         self.focus_pane(pane_id, cx);
         match action {
             PaneCaptionAction::SplitRight => {
@@ -1962,6 +2024,7 @@ impl TabView {
                 .into_any_element();
         };
         let focused = self.tab.focused_pane_id() == pane_id;
+        let shared_surface = self.shared_pane_surface(pane_id, &view, cx);
         let has_multiple_panes = self.tab.pane_count() > 1;
         let zoomed = matches!(self.tab.zoom_state(), ZoomState::Zoomed(_));
         let text = self
@@ -2032,6 +2095,9 @@ impl TabView {
             // focus, as a press on the caption does.
             .capture_any_mouse_down(move |_: &MouseDownEvent, window, cx| {
                 let _ = focus_view.update(cx, |view, cx| {
+                    // A press is an explicit Pane selection, so a shared Pane asks the server for
+                    // itself. Focus a Pane regains on its own never does.
+                    view.select_shared_pane(pane_id);
                     if view.tab.focused_pane_id() != pane_id {
                         view.focus_pane(pane_id, cx);
                         view.focus(window, cx);
@@ -2068,6 +2134,7 @@ impl TabView {
                     zoomed,
                     attention,
                     has_multiple_panes,
+                    shared: self.shared_caption_controls(pane_id),
                 },
                 controls_reveal,
                 view.clone(),
@@ -2075,13 +2142,20 @@ impl TabView {
             ))
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
                     .mr(-(inset.left + inset.right))
                     .mb(-(inset.top + inset.bottom))
                     .overflow_hidden()
-                    .child(terminal),
+                    // A shared Pane's screen replaces its terminal outright, so no Screen, title,
+                    // or accessible text of a former shell paints behind it.
+                    .map(|body| match shared_surface.screen {
+                        Some(screen) => body.child(screen),
+                        None => body.child(terminal),
+                    })
+                    .children(shared_surface.notice),
             )
             .child(render_pane_corner_surface(pane_id, frame, appearance))
             // The hairline paints last so the caption, Terminal and corner mask never cover it.
@@ -2235,6 +2309,655 @@ impl TabView {
             ))
             .child(resize_target)
             .into_any_element()
+    }
+}
+
+/// Shared server Panes: how this Tab presents one server Tab's Panes, submits its edits, and
+/// refuses the operations the server path does not support yet.
+#[cfg(not(feature = "developer-tools"))]
+impl TabView {
+    const fn shared_pane_surface(
+        &self,
+        _: PaneId,
+        _: &gpui::WeakEntity<Self>,
+        _: &App,
+    ) -> SharedPaneSurface {
+        SharedPaneSurface {
+            screen: None,
+            notice: None,
+        }
+    }
+
+    const fn shared_caption_controls(&self, _: PaneId) -> Option<SharedCaptionControls> {
+        None
+    }
+
+    const fn select_shared_pane(&self, _: PaneId) {}
+
+    const fn forget_shared_pane(&mut self, _: PaneId) {}
+
+    const fn holds_shared_pane_locally(&self, _: PaneId) -> bool {
+        false
+    }
+
+    const fn release_shared_pane(&mut self, _: PaneId, _: &mut Window, _: &mut Context<Self>) {}
+}
+
+#[cfg(feature = "developer-tools")]
+impl TabView {
+    /// Presents one server Tab in this Tab. The Pane this Tab already owns becomes the server's
+    /// Root Pane, and every later Pane arrives with the server's published membership.
+    pub(crate) fn adopt_shared(
+        &mut self,
+        mut shared: super::shared_workspaces::SharedPanes,
+        root_pane: spaceterm_server::hierarchy::Id,
+        root_state: std::sync::Arc<dyn crate::ui::server_pane::ServerPaneConnection>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        shared.register(
+            self.tab.root_pane_id(),
+            root_pane,
+            root_state,
+            cx.focus_handle(),
+        );
+        self.shared = Some(shared);
+        self._shared_status = Some(cx.spawn_in(window, async move |view, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(super::shared_workspaces::POLL_INTERVAL)
+                    .await;
+                if view
+                    .update_in(cx, |view, window, cx| view.sync_shared_panes(window, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
+        self.sync_shared_panes(window, cx);
+    }
+
+    /// Adds the Panes the server published that this Tab does not present yet.
+    ///
+    /// Each Pane takes its place beside the Pane it was split from, in this client's own layout.
+    /// The arrangement that survives, the Focused Pane, and the Zoomed Pane all stay as they are,
+    /// because another client's creation is membership and not a view change here.
+    pub(crate) fn reconcile_shared(
+        &mut self,
+        server_tab: &spaceterm_server::hierarchy::Tab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use spaceterm_server::hierarchy::Axis;
+
+        if self.shared.is_none() {
+            return false;
+        }
+        // Every Pane the server published joins before any Pane it removed leaves. One poll can
+        // carry both a creation and the removal of what it was created beside, and a Tab that
+        // lost its last known Pane first would lose the Panes that replaced it.
+        let mut changed = false;
+        for pane in &server_tab.panes {
+            let Some(shared) = self.shared.as_ref() else {
+                break;
+            };
+            if shared.holds(pane.id) {
+                continue;
+            }
+            // The Pane this one was split from may already be gone, and the server clears the
+            // link when it removes a Pane. The arrangement is this client's own, so a Pane with
+            // no source it still presents takes its place beside this Tab's Root Pane.
+            let source = pane
+                .source
+                .and_then(|source| shared.local_pane(source))
+                .unwrap_or_else(|| self.tab.root_pane_id());
+            let Some((session_factory, prepared_launch, state)) = shared.sessions().open(pane.id)
+            else {
+                continue;
+            };
+            let pane_construction = shared.sessions().panes().clone();
+            let axis = match pane.axis {
+                Axis::Right => SplitAxis::Horizontal,
+                Axis::Down => SplitAxis::Vertical,
+            };
+            let inserted = self.tab.insert_shared_pane(source, axis, |pane_id| {
+                Self::create_terminal(
+                    pane_id,
+                    session_factory,
+                    prepared_launch,
+                    pane_construction,
+                    window,
+                    cx,
+                )
+            });
+            match inserted {
+                Ok(pane_id) => {
+                    if let Some(shared) = self.shared.as_mut() {
+                        shared.register(pane_id, pane.id, state, cx.focus_handle());
+                    }
+                    self.finish_shared_insertion(pane_id, cx);
+                    changed = true;
+                }
+                Err(error) => eprintln!("failed to present a shared Pane: {error}"),
+            }
+        }
+        changed |= self.remove_absent_shared_panes(server_tab, window, cx);
+        if changed {
+            self.sync_shared_panes(window, cx);
+        }
+        changed
+    }
+
+    /// Removes the Panes the server no longer has.
+    ///
+    /// The server already removed them, so this is not a close a person asked for. An inactive
+    /// Pane may never have connected, so membership alone decides this rather than a Terminal
+    /// Session reporting its own end.
+    fn remove_absent_shared_panes(
+        &mut self,
+        server_tab: &spaceterm_server::hierarchy::Tab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(shared) = self.shared.as_ref() else {
+            return false;
+        };
+        let absent: Vec<PaneId> = shared
+            .pane_ids()
+            .into_iter()
+            .filter(|&pane_id| {
+                shared
+                    .server_pane(pane_id)
+                    .is_some_and(|server| !server_tab.panes.iter().any(|pane| pane.id == server))
+            })
+            .collect();
+        let mut removed = false;
+        for pane_id in absent {
+            self.forget_shared_pane(pane_id);
+            // Closing the final Pane closes its Tab, as an ordinary final close does.
+            self.close_pane(pane_id, window, cx);
+            removed = true;
+        }
+        removed
+    }
+
+    /// Delivers the Focused Pane's exit, as its Terminal Session does when the server ends it.
+    #[cfg(test)]
+    pub(crate) fn exit_focused_pane_for_test(&mut self, cx: &mut Context<Self>) {
+        let pane_id = self.tab.focused_pane_id();
+        if let Some(terminal) = self.tab.pane(pane_id).cloned() {
+            terminal.update(cx, |_, cx| cx.emit(TerminalPaneEvent::Exited));
+        }
+    }
+
+    /// Whether a SpaceTerm Server owns the Pane's Terminal Session, so the published inventory
+    /// owns whether the Pane keeps its place.
+    fn holds_shared_pane_locally(&self, pane_id: PaneId) -> bool {
+        self.shared
+            .as_ref()
+            .is_some_and(|shared| shared.server_pane(pane_id).is_some())
+    }
+
+    /// The server ended a shared Pane's Terminal Session.
+    ///
+    /// The Pane keeps its place until the server publishes an inventory without it, so a Tab this
+    /// client has not caught up with never closes from membership it no longer knows. Its screen
+    /// and title belonged to the shell that ended, so nothing of them paints meanwhile.
+    fn release_shared_pane(
+        &mut self,
+        pane_id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(terminal) = self.tab.pane(pane_id).cloned() else {
+            return;
+        };
+        terminal.update(cx, |terminal, cx| {
+            terminal.set_server_connection_interrupted(true, window, cx);
+            terminal.clear_server_presentation(cx);
+        });
+        cx.emit(TabViewEvent::PresentationChanged {
+            tab_id: self.tab.id(),
+        });
+        cx.notify();
+    }
+
+    /// Whether this Tab presents the server Pane.
+    pub(crate) fn holds_shared_pane(&self, server: spaceterm_server::hierarchy::Id) -> bool {
+        self.shared
+            .as_ref()
+            .is_some_and(|shared| shared.holds(server))
+    }
+
+    /// Focuses the Pane one accepted split of this client's own created, and asks the server for
+    /// it. Only the client that asked for the split does this.
+    pub(crate) fn focus_shared_pane_explicitly(
+        &mut self,
+        server: spaceterm_server::hierarchy::Id,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pane_id) = self
+            .shared
+            .as_ref()
+            .and_then(|shared| shared.local_pane(server))
+        else {
+            return;
+        };
+        self.select_shared_pane(pane_id);
+        self.focus_pane(pane_id, cx);
+        if let Some(terminal) = self.tab.pane(pane_id) {
+            terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
+        }
+    }
+
+    /// The bookkeeping a Pane needs once it joins the layout, without taking focus or zoom from
+    /// the Pane a person is working in.
+    fn finish_shared_insertion(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
+        self.advance_native_service_hierarchy_generation(cx);
+        self.pane_layout_revision += 1;
+        self.pane_motion.expect_change();
+        if let Some(terminal) = self.tab.pane(pane_id) {
+            self.pane_titles.insert(pane_id, terminal.read(cx).title());
+            self.pane_captions
+                .insert(pane_id, PaneCaptionText::from_terminal(terminal.read(cx)));
+        }
+        self.pane_attention.insert(pane_id, 0);
+        self.split_bounds.clear();
+        self.sync_terminal_focus(cx);
+        cx.emit(TabViewEvent::PresentationChanged {
+            tab_id: self.tab.id(),
+        });
+        cx.notify();
+    }
+
+    /// Asks the server to split a shared Pane. A refusal changes nothing and is never queued.
+    fn split_shared(
+        &mut self,
+        source: PaneId,
+        axis: SplitAxis,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use super::shared_workspaces::SharedSubmission;
+        use spaceterm_server::hierarchy::Axis;
+
+        let Some(shared) = self.shared.as_ref() else {
+            return;
+        };
+        let axis = match axis {
+            SplitAxis::Horizontal => Axis::Right,
+            SplitAxis::Vertical => Axis::Down,
+        };
+        if let SharedSubmission::Refused(reason) = shared.split(source, axis) {
+            self.report_shared_refusal("create a Pane", reason, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Explains a shared edit the client could not submit. Nothing was sent, and nothing waits.
+    fn report_shared_refusal(
+        &self,
+        operation: &str,
+        reason: super::shared_workspaces::SharedRefusalReason,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let detail = format!(
+            "SpaceTerm did not {operation} in this shared Workspace. {}",
+            reason.explanation()
+        );
+        let _ = Alert::new(
+            ModalId::new("shared-pane-edit-unavailable"),
+            "Shared change unavailable",
+            "Shared Change Unavailable",
+            detail,
+            vec![ModalAction::new(
+                (),
+                "OK",
+                ModalActionRole::Cancel,
+                "shared-pane-edit-unavailable-ok",
+            )],
+        )
+        .intent(AlertIntent::Warning)
+        .present(window, cx, |_, _| {});
+    }
+
+    /// Reads every shared Pane's connection and presents what changed.
+    fn sync_shared_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pane_ids) = self
+            .shared
+            .as_ref()
+            .map(super::shared_workspaces::SharedPanes::pane_ids)
+        else {
+            return;
+        };
+        let mut changed = false;
+        for pane_id in pane_ids {
+            let Some(sync) = self
+                .shared
+                .as_mut()
+                .and_then(|shared| shared.view_mut(pane_id))
+                .map(crate::ui::server_pane::ServerPaneView::sync)
+            else {
+                continue;
+            };
+            if !sync.changed {
+                continue;
+            }
+            changed = true;
+            self.apply_shared_sync(pane_id, sync, window, cx);
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn apply_shared_sync(
+        &mut self,
+        pane_id: PaneId,
+        sync: crate::ui::server_pane::ServerPaneSync,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(terminal) = self.tab.pane(pane_id).cloned() else {
+            return;
+        };
+        terminal.update(cx, |terminal, cx| {
+            terminal.set_server_connection_interrupted(sync.interrupted, window, cx);
+            if sync.clear_presentation {
+                terminal.clear_server_presentation(cx);
+            }
+        });
+        if !self.active || self.tab.focused_pane_id() != pane_id {
+            return;
+        }
+        let screen = self
+            .shared
+            .as_ref()
+            .and_then(|shared| shared.view(pane_id))
+            .and_then(crate::ui::server_pane::ServerPaneView::screen);
+        match screen {
+            // Focus rests on the screen, so typing meant for a former shell reaches nothing and
+            // never takes control back by accident. Tab from here reaches the screen's action.
+            Some(_) if sync.entering_screen => {
+                if let Some(focus) = self
+                    .shared
+                    .as_ref()
+                    .and_then(|shared| shared.screen_focus(pane_id))
+                {
+                    focus.focus(window, cx);
+                }
+            }
+            // The server publishes this client's screens again, so typing returns to the Pane.
+            None if !sync.interrupted => {
+                terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
+            }
+            _ => {}
+        }
+    }
+
+    /// Asks the server for this Pane, which starts or acquires only this Pane.
+    ///
+    /// Only an explicit selection reaches here: a press on the Pane, a caption control, keyboard
+    /// Pane navigation, or opening its Tab. Focus a Pane regains on its own, window restoration,
+    /// and membership publication never do, so none of them starts a retained shell. An
+    /// unreachable server is asked for nothing at all.
+    fn select_shared_pane(&self, pane_id: PaneId) {
+        let Some(shared) = self.shared.as_ref().filter(|shared| shared.reachable()) else {
+            return;
+        };
+        if let Some(view) = shared.view(pane_id) {
+            view.select();
+        }
+    }
+
+    fn forget_shared_pane(&mut self, pane_id: PaneId) {
+        if let Some(shared) = self.shared.as_mut() {
+            shared.forget(pane_id);
+        }
+    }
+
+    fn shared_caption_controls(&self, pane_id: PaneId) -> Option<SharedCaptionControls> {
+        let shared = self.shared.as_ref()?;
+        shared.server_pane(pane_id)?;
+        let editability = shared.editability();
+        Some(SharedCaptionControls {
+            split: editability.available(),
+            split_reason: Some(editability.explanation()),
+        })
+    }
+
+    /// What replaces and overlays a shared Pane: the screen for a Pane this client cannot present
+    /// authoritatively, and the notice for an interruption over a frozen screen.
+    fn shared_pane_surface(
+        &self,
+        pane_id: PaneId,
+        view: &gpui::WeakEntity<Self>,
+        cx: &App,
+    ) -> SharedPaneSurface {
+        use crate::ui::server_pane::{self, ServerPaneScreen};
+        use spaceterm_ui::Button;
+
+        let Some(pane) = self.shared.as_ref().and_then(|shared| shared.view(pane_id)) else {
+            return SharedPaneSurface::default();
+        };
+        let selector = |suffix: &str| {
+            gpui::SharedString::from(format!("shared-pane-{suffix}-{}", pane_id.get()))
+        };
+        let screen_focus = self
+            .shared
+            .as_ref()
+            .and_then(|shared| shared.screen_focus(pane_id))
+            .cloned();
+        let screen = pane.screen().map(|screen| match screen {
+            ServerPaneScreen::Takeover {
+                taking_over,
+                unconfirmed,
+                offered,
+                ended,
+            } => {
+                let status = if taking_over {
+                    Some(server_pane::progress_status(
+                        selector("take-over-status"),
+                        selector("take-over-progress"),
+                        server_pane::TAKING_OVER.into(),
+                        cx,
+                    ))
+                } else if unconfirmed {
+                    Some(server_pane::note_status(
+                        selector("take-over-status"),
+                        server_pane::TAKE_OVER_UNCONFIRMED.into(),
+                        cx,
+                    ))
+                } else {
+                    None
+                };
+                let (title, detail) = if ended {
+                    (
+                        server_pane::SESSION_ENDED_TITLE,
+                        server_pane::SESSION_ENDED_DETAIL,
+                    )
+                } else if offered || taking_over {
+                    (server_pane::TAKEOVER_TITLE, server_pane::TAKEOVER_DETAIL)
+                } else {
+                    // SpaceTerm stopped reconnecting, so the screen claims nothing about the shell.
+                    (
+                        server_pane::TAKEOVER_TITLE,
+                        server_pane::TAKEOVER_FAILED_DETAIL,
+                    )
+                };
+                // The Session already ended, so nothing here can take it over.
+                let action = (!ended).then(|| {
+                    let owner = view.clone();
+                    Button::new(selector("take-over"), "Take Over")
+                        .variant(ButtonVariant::Primary)
+                        .size(ButtonSize::Regular)
+                        .disabled(!offered)
+                        .tab_stop(true)
+                        .accessibility_description(
+                            "Moves typing and this Pane's size to this SpaceTerm.",
+                        )
+                        .debug_selector(selector("take-over"))
+                        .on_activate(move |_, window, cx| {
+                            let _ = owner.update(cx, |view, cx| {
+                                view.take_over_shared_pane(pane_id, window, cx);
+                            });
+                        })
+                });
+                server_pane::render_screen(
+                    selector("takeover"),
+                    title.into(),
+                    detail.into(),
+                    // Losing control and the end of a Session both happen without any action
+                    // here, so assistive technology announces them.
+                    true,
+                    action,
+                    status,
+                    cx,
+                )
+            }
+            ServerPaneScreen::Restored {
+                starting,
+                unconfirmed,
+                offered,
+            } => {
+                let status = if starting {
+                    Some(server_pane::progress_status(
+                        selector("start-shell-status"),
+                        selector("start-shell-progress"),
+                        server_pane::STARTING_SHELL.into(),
+                        cx,
+                    ))
+                } else if unconfirmed {
+                    Some(server_pane::note_status(
+                        selector("start-shell-status"),
+                        server_pane::START_SHELL_UNCONFIRMED.into(),
+                        cx,
+                    ))
+                } else {
+                    None
+                };
+                let owner = view.clone();
+                let action = Button::new(selector("start-shell"), "Start New Shell")
+                    .variant(ButtonVariant::Primary)
+                    .size(ButtonSize::Regular)
+                    .disabled(!offered)
+                    .tab_stop(true)
+                    .accessibility_description(
+                        "Starts a new shell on the server in this Pane's last directory.",
+                    )
+                    .debug_selector(selector("start-shell"))
+                    .on_activate(move |_, window, cx| {
+                        let _ = owner.update(cx, |view, cx| {
+                            view.start_shared_shell(pane_id, window, cx);
+                        });
+                    });
+                server_pane::render_screen(
+                    selector("restored"),
+                    server_pane::RESTORED_TITLE.into(),
+                    server_pane::RESTORED_DETAIL.into(),
+                    true,
+                    Some(action),
+                    status,
+                    cx,
+                )
+            }
+            // Repairing the directory belongs to directory repair, which is not available yet, so
+            // the screen names no directory and offers no action.
+            ServerPaneScreen::DirectoryUnavailable => server_pane::render_screen(
+                selector("directory-unavailable"),
+                server_pane::DIRECTORY_UNAVAILABLE_TITLE.into(),
+                server_pane::DIRECTORY_UNAVAILABLE_DETAIL.into(),
+                true,
+                None,
+                None,
+                cx,
+            ),
+        });
+        // The screen rests on its own focus, so plain Tab the terminal never took reaches its
+        // action while terminal input is paused.
+        let screen = screen.map(|screen| {
+            let surface = div()
+                .id(selector("screen"))
+                .absolute()
+                .inset_0()
+                .child(screen);
+            match &screen_focus {
+                Some(focus) => {
+                    server_pane::with_tab_traversal(surface.track_focus(focus)).into_any_element()
+                }
+                None => surface.into_any_element(),
+            }
+        });
+        let notice = pane.notice().map(|(title, detail, intent)| {
+            let retry = pane.can_retry().then(|| {
+                let owner = view.clone();
+                server_pane::retry_button(selector("retry"), move |_, cx| {
+                    let _ = owner.update(cx, |view, cx| view.retry_shared_pane(pane_id, cx));
+                })
+            });
+            server_pane::render_notice(selector("notice"), title, detail, intent, retry, cx)
+        });
+        SharedPaneSurface { screen, notice }
+    }
+
+    fn take_over_shared_pane(
+        &mut self,
+        pane_id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sync) = self
+            .shared
+            .as_mut()
+            .and_then(|shared| shared.view_mut(pane_id))
+            .map(crate::ui::server_pane::ServerPaneView::take_over)
+        else {
+            return;
+        };
+        // Take Over waits disabled while the server answers, and a disabled control gives up
+        // focus. The screen keeps it, so the keyboard stays where the action was.
+        self.focus_shared_screen(pane_id, window, cx);
+        self.apply_shared_sync(pane_id, sync, window, cx);
+        cx.notify();
+    }
+
+    fn start_shared_shell(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sync) = self
+            .shared
+            .as_mut()
+            .and_then(|shared| shared.view_mut(pane_id))
+            .map(crate::ui::server_pane::ServerPaneView::start_shell)
+        else {
+            return;
+        };
+        self.focus_shared_screen(pane_id, window, cx);
+        self.apply_shared_sync(pane_id, sync, window, cx);
+        cx.notify();
+    }
+
+    fn retry_shared_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
+        if self
+            .shared
+            .as_mut()
+            .and_then(|shared| shared.view_mut(pane_id))
+            .map(crate::ui::server_pane::ServerPaneView::retry)
+            .is_some()
+        {
+            cx.notify();
+        }
+    }
+
+    fn focus_shared_screen(&self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(focus) = self
+            .shared
+            .as_ref()
+            .and_then(|shared| shared.screen_focus(pane_id))
+        {
+            focus.focus(window, cx);
+        }
     }
 }
 
@@ -2589,6 +3312,8 @@ struct PaneCaption {
     zoomed: bool,
     attention: bool,
     has_multiple_panes: bool,
+    /// Present when a SpaceTerm Server owns the Pane, which changes what its controls offer.
+    shared: Option<SharedCaptionControls>,
 }
 
 fn render_pane_caption(
@@ -2710,6 +3435,7 @@ fn render_pane_caption_content(
         zoomed,
         attention,
         has_multiple_panes,
+        shared,
     } = caption;
     let color = paint.foreground;
     let button_paint = |value: crate::appearance::SemanticPaint| {
@@ -2796,6 +3522,13 @@ fn render_pane_caption_content(
         .flex()
         .items_center()
         .justify_end();
+    // A shared Pane's split asks the server, so it waits while this client is offline or an
+    // earlier edit is unanswered. Closing one needs confirmation across every client, which the
+    // server path does not support yet, so the control says so rather than closing locally.
+    let split_unavailable =
+        shared.and_then(|shared| (!shared.split).then_some(shared.split_reason));
+    let close_unavailable =
+        shared.map(|_| Some("Closing a Pane that a SpaceTerm Server owns is not available yet."));
     let actions = [
         (
             PaneCaptionAction::SplitRight,
@@ -2804,6 +3537,7 @@ fn render_pane_caption_content(
             IconName::Columns2,
             presentation.shortcut(&SplitRight),
             layout.show_splits,
+            split_unavailable,
         ),
         (
             PaneCaptionAction::SplitDown,
@@ -2812,6 +3546,7 @@ fn render_pane_caption_content(
             IconName::Rows2,
             presentation.shortcut(&SplitDown),
             layout.show_splits,
+            split_unavailable,
         ),
         (
             PaneCaptionAction::ToggleZoom,
@@ -2824,6 +3559,7 @@ fn render_pane_caption_content(
             },
             presentation.shortcut(&TogglePaneZoom),
             has_multiple_panes,
+            None,
         ),
         (
             PaneCaptionAction::Close,
@@ -2832,12 +3568,14 @@ fn render_pane_caption_content(
             IconName::X,
             presentation.shortcut(&ClosePane),
             has_multiple_panes,
+            close_unavailable,
         ),
     ];
-    for (action, selector, name, icon, shortcut, visible) in actions {
+    for (action, selector, name, icon, shortcut, visible, unavailable) in actions {
         if !visible {
             continue;
         }
+        let caption_action_available = caption_action_available && unavailable.is_none();
         let view = view.clone();
         let id = format!("pane-{selector}-{}", pane_id.get());
         let icon_size = appearance.icons.metrics(IconRole::Control).glyph_size;
@@ -2848,6 +3586,9 @@ fn render_pane_caption_content(
         )
         .variant(ButtonVariant::Bare)
         .disabled(!caption_action_available)
+        .when_some(unavailable.flatten(), |button, reason| {
+            button.accessibility_description(reason)
+        })
         .contextual_style(control_style, gpui_color(paint.focus))
         .size(ButtonSize::Compact)
         .preserve_ancestor_hover()

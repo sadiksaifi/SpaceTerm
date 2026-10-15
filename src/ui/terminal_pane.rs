@@ -169,7 +169,7 @@ impl DeliveredKeyPresses {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub(super) enum StatusIntent {
+pub(crate) enum StatusIntent {
     #[default]
     Information,
     Success,
@@ -182,7 +182,7 @@ impl StatusIntent {
     pub(super) const ALL: [Self; 4] =
         [Self::Information, Self::Success, Self::Warning, Self::Error];
 
-    pub(super) const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Information => "Information",
             Self::Success => "Success",
@@ -192,7 +192,7 @@ impl StatusIntent {
     }
 
     /// The intent's semantic color among `colors`.
-    pub(super) const fn color(self, colors: &crate::appearance::ChromeColors) -> Color {
+    pub(crate) const fn color(self, colors: &crate::appearance::ChromeColors) -> Color {
         match self {
             Self::Information => colors.info,
             Self::Success => colors.success,
@@ -202,7 +202,7 @@ impl StatusIntent {
     }
 
     /// The glyph that leads a notice of this intent.
-    pub(super) const fn glyph(self, differentiate_without_color: bool) -> IconName {
+    pub(crate) const fn glyph(self, differentiate_without_color: bool) -> IconName {
         match self {
             Self::Information => IconName::Info,
             Self::Success => IconName::Check,

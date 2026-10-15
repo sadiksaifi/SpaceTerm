@@ -24,6 +24,7 @@ pub(super) const SET_UP_SELECTOR: &str = "settings-local-server-set-up";
 pub(super) const START_SELECTOR: &str = "settings-local-server-start";
 pub(super) const OPEN_DEVELOPMENT_PANE_SELECTOR: &str =
     "settings-local-server-open-development-pane";
+pub(super) const SHARED_WORKSPACES_SELECTOR: &str = "settings-local-server-shared-workspaces";
 
 /// The blocking local server operations the section runs on the background executor.
 pub(super) trait LocalServerControl: Send + Sync {
@@ -130,6 +131,52 @@ pub(super) struct LocalServerPresentation {
     /// Whether the row offers Open Development Pane, which needs an authenticated server that
     /// runs it.
     pub(super) development_pane: bool,
+    /// Whether the row offers Use Shared Workspaces, which presents this server's Workspaces in
+    /// the Workspace Window beside the Workspaces the desktop owns.
+    pub(super) shared_workspaces: bool,
+}
+
+/// Which of the server's two terminal surfaces a device may open now.
+///
+/// One device holds one authenticated connection per Pane. Two surfaces presenting the same Pane
+/// would rebind its lease and fence each other into reconnecting, so only one is offered at a
+/// time. Shared Workspaces are the ordinary route; the Development Pane window stays as a single
+/// Pane for diagnosis.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ServerSurfaces {
+    pub(super) shared_workspaces: bool,
+    pub(super) development_pane: bool,
+}
+
+impl ServerSurfaces {
+    const SHARED_HOLDS: &'static str = "A Workspace Window is presenting this server's Workspaces. One device holds one \
+         connection per Pane.";
+    const DEVELOPMENT_PANE_HOLDS: &'static str = "The Development Pane window is presenting a Pane this server owns. Close it to present \
+         this server's Workspaces instead.";
+
+    /// What each surface offers, given which one is open.
+    pub(super) fn resolve(shared_adopted: bool, development_pane_open: bool) -> Self {
+        Self {
+            shared_workspaces: !development_pane_open,
+            development_pane: !shared_adopted,
+        }
+    }
+
+    pub(super) const fn shared_workspaces_reason(self) -> Option<&'static str> {
+        if self.shared_workspaces {
+            None
+        } else {
+            Some(Self::DEVELOPMENT_PANE_HOLDS)
+        }
+    }
+
+    pub(super) const fn development_pane_reason(self) -> Option<&'static str> {
+        if self.development_pane {
+            None
+        } else {
+            Some(Self::SHARED_HOLDS)
+        }
+    }
 }
 
 /// Owns the offered server, the last status, and the pending operation.
@@ -139,6 +186,8 @@ pub(super) struct LocalServerRow {
     /// Whether this build offers the Development Pane: SpaceTerm Development with its developer
     /// tools.
     offers_development_pane: bool,
+    /// Whether this build offers shared server Workspaces in the Workspace Window.
+    offers_shared_workspaces: bool,
     /// Returns the background result to GPUI. Dropping the window drops it, and a late result then
     /// has nowhere to land.
     _operation: Option<Task<()>>,
@@ -150,6 +199,7 @@ impl LocalServerRow {
             control,
             status: LocalServerStatus::NotChecked,
             offers_development_pane: crate::ui::development_pane::offered(),
+            offers_shared_workspaces: crate::ui::shared_workspaces::offered(),
             _operation: None,
         }
     }
@@ -157,6 +207,7 @@ impl LocalServerRow {
     #[cfg(test)]
     pub(super) fn offering_development_pane(mut self, offered: bool) -> Self {
         self.offers_development_pane = offered;
+        self.offers_shared_workspaces = offered;
         self
     }
 
@@ -186,6 +237,10 @@ impl LocalServerRow {
                     ..
                 })
             );
+        // Presenting the server's Workspaces reads its inventory, so it waits for the same
+        // successful check. The Workspace Window keeps the Workspaces it already owns.
+        presentation.shared_workspaces =
+            self.offers_shared_workspaces && presentation.development_pane;
         presentation
     }
 }
@@ -259,6 +314,7 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
         action,
         working,
         development_pane: false,
+        shared_workspaces: false,
     }
 }
 
@@ -334,6 +390,13 @@ fn failure(error: ServerError) -> (&'static str, &'static str, Option<LocalServe
         ServerError::CleanupUnresolved => (
             "Cleanup Unresolved",
             "settings-local-server-state-cleanup-unresolved",
+            Some(Action::Check),
+        ),
+        // The server is holding shared edit outcomes for clients that have not acknowledged
+        // them. Another check reports whether they have since.
+        ServerError::Capacity => (
+            "At Capacity",
+            "settings-local-server-state-capacity",
             Some(Action::Check),
         ),
     }
@@ -419,13 +482,33 @@ impl SettingsWindow {
                 },
             )
         });
+        let surfaces = ServerSurfaces::resolve(
+            crate::ui::shared_workspaces::adopted(cx),
+            crate::ui::development_pane::is_open(cx),
+        );
         let development_pane = presentation.development_pane.then(|| {
             action_button(
                 OPEN_DEVELOPMENT_PANE_SELECTOR,
                 "Open Development Pane",
-                true,
+                surfaces.development_pane,
                 |_, cx| crate::ui::development_pane::open_or_activate(cx),
             )
+            .when_some(surfaces.development_pane_reason(), |button, reason| {
+                button.accessibility_description(reason)
+            })
+        });
+        // Presenting the server's Workspaces adds them to the Workspace Window's sidebar. The
+        // Workspaces, Tabs, Panes, and Terminal Sessions the desktop owns are left untouched.
+        let shared_workspaces = presentation.shared_workspaces.then(|| {
+            action_button(
+                SHARED_WORKSPACES_SELECTOR,
+                "Use Shared Workspaces",
+                surfaces.shared_workspaces,
+                |_, cx| crate::ui::shared_workspaces::adopt(cx),
+            )
+            .when_some(surfaces.shared_workspaces_reason(), |button, reason| {
+                button.accessibility_description(reason)
+            })
         });
         div()
             .debug_selector(|| CONTROL_SELECTOR.to_owned())
@@ -436,6 +519,7 @@ impl SettingsWindow {
             .child(state)
             .children(action)
             .children(development_pane)
+            .children(shared_workspaces)
             .into_any_element()
     }
 }

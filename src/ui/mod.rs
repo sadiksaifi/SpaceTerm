@@ -24,9 +24,12 @@ pub(crate) mod remote_workspace_flow;
 mod render_lifecycle;
 pub(crate) mod repository_status_store;
 mod selection_chip;
+#[cfg(feature = "developer-tools")]
+pub(crate) mod server_pane;
 pub(crate) mod settings_file;
 pub(crate) mod settings_recovery;
 pub(crate) mod settings_window;
+pub(crate) mod shared_workspaces;
 mod sidebar_motion;
 mod sidebar_window;
 mod ssh_host_form;

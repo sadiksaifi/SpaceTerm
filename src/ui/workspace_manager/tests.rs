@@ -14137,3 +14137,116 @@ fn an_expanded_workspace_group_released_below_the_list_should_land_at_its_end(
         "the lifted Workspace row, held at the list's end at {copy:?}, must land there"
     );
 }
+
+/// The pin version a shared Workspace's chooser opened at, carried through the completion route
+/// the Directory Picker and System Directory Selection share.
+#[gpui::test]
+fn a_shared_pin_chosen_while_another_client_pins_should_submit_the_version_it_opened_at(
+    cx: &mut TestAppContext,
+) {
+    use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
+    use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+    use spaceterm_server::hierarchy::{Axis, Inventory, Mutation, Pane, Tab, Workspace};
+
+    const SERVER_WORKSPACE: [u8; 32] = [1; 32];
+    const SERVER_TAB: [u8; 32] = [2; 32];
+    const SERVER_PANE: [u8; 32] = [3; 32];
+
+    // One server Workspace at `pin_version`, with the Pinned Directory it published.
+    let published = |revision: u64, pin_version: u64, pinned: Option<PathBuf>| Inventory {
+        revision,
+        workspaces: vec![Workspace {
+            id: SERVER_WORKSPACE,
+            name: "Build".to_owned(),
+            name_version: 0,
+            pin_version,
+            pinned_directory: pinned,
+            root_tab: SERVER_TAB,
+            tabs: vec![Tab {
+                id: SERVER_TAB,
+                root_pane: SERVER_PANE,
+                panes: vec![Pane {
+                    id: SERVER_PANE,
+                    source: None,
+                    axis: Axis::Right,
+                    starting_directory: PathBuf::from("/server/work"),
+                    confirmed_directory: None,
+                    creator: None,
+                }],
+            }],
+        }],
+    };
+
+    let chosen = temporary_directory("shared-pin-draft");
+    fs::create_dir_all(&chosen).unwrap();
+    let (manager, _records, cx) =
+        workspace_manager_with_directory_selection([Ok(Some(chosen.clone()))], cx);
+    let edits = Rc::new(ScriptedEdits::new(Some(published(1, 0, None))));
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            let session_factory = WorkspaceTerminalSessionFactory::new_local(
+                Rc::new(TestTerminalSessionFactory::new(
+                    TestTerminalSessionRecords::default(),
+                )),
+                crate::terminal::testing::test_local_directory(std::env::temp_dir()),
+            );
+            manager.present_shared_workspaces(
+                SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
+                SharedPaneSessions::with_opener(
+                    ScriptedPanes::new(session_factory) as Rc<_>,
+                    &PaneConstruction::testing(),
+                ),
+                window,
+                cx,
+            );
+            manager.sync_shared_workspaces(window, cx);
+        });
+    });
+    cx.run_until_parked();
+    let shared_workspace_id = manager
+        .read_with(cx, |manager, _| {
+            manager
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.id())
+                .find(|id| manager.is_shared_workspace(*id))
+        })
+        .expect("the published Workspace should join the sidebar");
+
+    // The person opens the chooser while the Workspace sits at pin version 0, and asks for the
+    // system chooser from it.
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.choose_pin_directory(shared_workspace_id, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.choose_local_pin_directory(
+                PinTarget::Workspace(shared_workspace_id),
+                window,
+                cx,
+            );
+        });
+    });
+
+    // Another client pins the Workspace while that chooser is still open, and this client reads
+    // the publication before the chooser finishes.
+    edits.set_inventory(published(2, 1, Some(PathBuf::from("/server/theirs"))));
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| manager.sync_shared_workspaces(window, cx));
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        edits.submitted().last(),
+        Some(&Mutation::PinWorkspace {
+            workspace: SERVER_WORKSPACE,
+            version: 0,
+            directory: Some(chosen),
+        }),
+        "the chooser's draft must stay fenced to the pin version it opened at, so the server \
+         refuses it instead of overwriting the other client"
+    );
+}

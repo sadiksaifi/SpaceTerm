@@ -60,6 +60,10 @@ pub(super) enum SidebarEvent {
     Rename {
         workspace_id: WorkspaceId,
         name: String,
+        /// The name version the draft began at, for a Workspace a SpaceTerm Server owns. The
+        /// draft keeps it so a rename published while the editor was open conflicts instead of
+        /// being silently overwritten.
+        version: Option<u64>,
     },
     Move {
         workspace_id: WorkspaceId,
@@ -132,6 +136,8 @@ enum RowMenuCommand {
 struct WorkspaceRenameState {
     workspace_id: WorkspaceId,
     initial_value: String,
+    /// The name version the row showed when editing began, kept for a shared Workspace.
+    version: Option<u64>,
     input: Entity<TextInput>,
     focus_handle: FocusHandle,
     context_menu_open: bool,
@@ -156,6 +162,36 @@ pub(super) struct WorkspaceRowViewModel {
     /// The Workspace reads a local repository, so it can create Worktrees.
     pub(super) creates_worktrees: bool,
     pub(super) active: bool,
+    /// Present when a SpaceTerm Server owns the Workspace, which changes what its row offers.
+    pub(super) shared: Option<SharedWorkspaceRow>,
+}
+
+/// Names a shared Workspace's origin wherever the sidebar and the Tab strip describe it.
+pub(super) const SERVER_WORKSPACE_BADGE: &str = "Server";
+
+/// What a shared server Workspace's row presents and offers.
+///
+/// A shared edit goes to the server, so Rename and the pin commands wait while this client is
+/// offline or an earlier edit is unanswered. Closing a shared Workspace needs confirmation across
+/// every client, and its Worktrees and Repository Status are read on the owning server; neither is
+/// available yet, so the row offers neither in place of a local fallback.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct SharedWorkspaceRow {
+    /// The name version the server published, which a rename draft keeps from the moment it
+    /// begins.
+    pub(super) name_version: u64,
+    /// Whether a shared edit can be asked for now.
+    pub(super) edits: bool,
+    /// Why a shared edit is unavailable, for a disabled command and its row status.
+    pub(super) edits_reason: &'static str,
+    /// The short status line 2 shows in place of the directory while an edit waits or the server
+    /// is unreachable.
+    pub(super) status: Option<&'static str>,
+}
+
+impl SharedWorkspaceRow {
+    const CLOSE_UNAVAILABLE: &'static str =
+        "Closing a Workspace that a SpaceTerm Server owns is not available yet.";
 }
 
 impl WorkspaceRowViewModel {
@@ -256,6 +292,9 @@ struct DraggedWorkspace {
 pub(super) struct WorkspaceSidebar {
     rows: Vec<WorkspaceRowViewModel>,
     remote_unavailable: Option<String>,
+    /// Whether this Workspace Window presents an adopted server's Workspaces, which offers one
+    /// more creation row.
+    creates_server_workspaces: bool,
     layout: SidebarLayout,
     scroll_handle: ScrollHandle,
     /// Each row's top and bottom within its Workspace group, as last painted. A group is one
@@ -330,6 +369,7 @@ impl WorkspaceSidebar {
         Self {
             rows: Vec::new(),
             remote_unavailable: None,
+            creates_server_workspaces: false,
             layout: SidebarLayout {
                 visible,
                 width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
@@ -579,6 +619,9 @@ impl WorkspaceSidebar {
                 self.rename = Some(WorkspaceRenameState {
                     workspace_id,
                     initial_value: input.read(cx).value().to_owned(),
+                    // The draft is fenced to the value it opened on, so a rename another client
+                    // publishes meanwhile is a conflict rather than something to overwrite.
+                    version: workspace.shared.as_ref().map(|shared| shared.name_version),
                     focus_handle: input.read(cx).focus_handle(),
                     input,
                     context_menu_open: false,
@@ -625,12 +668,14 @@ impl WorkspaceSidebar {
             return;
         }
         let workspace_id = rename.workspace_id;
+        let version = rename.version;
         if let Some(value) = value
             && value.trim() != rename.initial_value
         {
             cx.emit(SidebarEvent::Rename {
                 workspace_id,
                 name: value,
+                version,
             });
         }
         let return_to_sidebar = rename.return_to_sidebar;
@@ -696,10 +741,12 @@ impl WorkspaceSidebar {
         &mut self,
         rows: Vec<WorkspaceRowViewModel>,
         remote_unavailable: Option<String>,
+        creates_server_workspaces: bool,
         cx: &mut Context<Self>,
     ) {
         self.rows = rows;
         self.remote_unavailable = remote_unavailable;
+        self.creates_server_workspaces = creates_server_workspaces;
         if self
             .cursor
             .is_some_and(|cursor| !self.visible_keys().iter().any(|(key, _)| *key == cursor))

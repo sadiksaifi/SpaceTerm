@@ -235,6 +235,11 @@ impl WorkspaceManager {
         workspace: &WorkspaceEntry<Entity<TabManager>>,
         cx: &App,
     ) -> Option<RowFacts> {
+        // Repository Status for a shared Workspace is read on the owning server, which is not
+        // available yet. The client home scaffold behind its Panes is not its directory.
+        if self.is_shared_workspace(workspace.id()) {
+            return None;
+        }
         let (machine, directory) = self.row_source(workspace, cx)?;
         let connected = workspace
             .remote_connection_state()

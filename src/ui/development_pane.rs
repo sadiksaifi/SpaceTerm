@@ -16,8 +16,18 @@ pub(crate) fn offered() -> bool {
 #[cfg(not(feature = "developer-tools"))]
 pub(crate) fn open_or_activate(_: &mut gpui::App) {}
 
+/// Whether a Development Pane window is presenting a server-owned Pane right now.
+///
+/// One device holds one authenticated connection per Pane, so the main Workspace Window's shared
+/// Workspaces and this window must never subscribe to the same server Pane at once: each
+/// subscription would rebind the Pane's lease and fence the other into reconnecting.
+#[cfg(not(feature = "developer-tools"))]
+pub(crate) fn is_open(_: &gpui::App) -> bool {
+    false
+}
+
 #[cfg(feature = "developer-tools")]
-pub(crate) use window::{DevelopmentPaneComposition, open_or_activate};
+pub(crate) use window::{DevelopmentPaneComposition, is_open, open_or_activate};
 
 #[cfg(feature = "developer-tools")]
 mod window {
@@ -28,32 +38,32 @@ mod window {
 
     use gpui::prelude::*;
     use gpui::{
-        AnyElement, App, Bounds, Edges, Entity, FocusHandle, Global, Pixels, SharedString,
-        Stateful, Task, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowKind,
-        WindowOptions, div, px, size,
+        AnyElement, App, Bounds, Edges, Entity, FocusHandle, Global, SharedString, Task,
+        TitlebarOptions, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions, div, px,
+        size,
     };
     use spaceterm_ui::{
         Alert, AlertIntent, AlertOutcome, Button, ButtonSize, ButtonVariant, ClientWindowControls,
-        FloatingRole, Icon, ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole,
-        ModalId, ModalLayer, ModalPresentationHandle, ProgressRing, ProgressSize, ProgressState,
-        WindowControlSide,
+        ModalAction, ModalActionEmphasis, ModalActionIntent, ModalActionRole, ModalId, ModalLayer,
+        ModalPresentationHandle, ProgressRing, ProgressSize, ProgressState, WindowControlSide,
     };
 
     use super::super::appearance::{ChromeAppearance, gpui_color};
     use super::super::appearance_runtime::{self, WindowAppearanceOwner, WindowTrafficLightOwner};
-    use super::super::chrome_icons::IconRole;
     use super::super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
     use super::super::pane_lifecycle::{PaneConstruction, PaneLifecycleDependencies};
+    use super::super::server_pane::{
+        self, DIRECTORY_UNAVAILABLE_DETAIL, DIRECTORY_UNAVAILABLE_TITLE, Dormant, RESTORED_DETAIL,
+        RESTORED_TITLE, SESSION_ENDED_DETAIL, SESSION_ENDED_TITLE, START_SHELL_UNCONFIRMED,
+        STARTING_SHELL, TAKE_OVER_UNCONFIRMED, TAKEOVER_DETAIL, TAKEOVER_FAILED_DETAIL,
+        TAKEOVER_TITLE, TAKING_OVER, UnavailableTerminalAccessibility, with_tab_traversal,
+    };
     use super::super::sidebar_window::WindowMovement;
     use super::super::terminal_pane::StatusIntent;
     use super::super::{ClosePane, TerminalPane, TerminalPaneEvent};
     use crate::application_identity::ApplicationIdentity;
     use crate::local_server::{LocalServer, ServerError};
     use crate::platform::local_filesystem::LocalFilesystemAuthority;
-    use crate::platform::terminal_accessibility::{
-        TerminalAccessibilityAdapter, TerminalAccessibilityAdapterFactory,
-        TerminalAccessibilityUpdate,
-    };
     use crate::platform::window_movement::{
         OperatingSystemWindowDragPlatform, WindowMovementFactory,
     };
@@ -61,10 +71,7 @@ mod window {
     use crate::terminal::server_session::{
         DevelopmentPaneState, DevelopmentPaneStatus, DevelopmentServerSessionFactory,
     };
-    use crate::terminal::{
-        AccessibilityNotifications, TerminalAccessibilityModel, TerminalKeyInputAdapterFactory,
-        WorkspaceTerminalSessionFactory,
-    };
+    use crate::terminal::{TerminalKeyInputAdapterFactory, WorkspaceTerminalSessionFactory};
 
     pub(super) const WINDOW_TITLE: &str = "Development Pane";
     /// The key context the window publishes around its Pane.
@@ -88,24 +95,6 @@ mod window {
     const CLOSE_WINDOW_SELECTOR: &str = "development-pane-close-window";
     const CONFIRM_SELECTOR: &str = "development-pane-end-session-confirm";
     const CANCEL_SELECTOR: &str = "development-pane-end-session-cancel";
-
-    const TAKEOVER_TITLE: &str = "Controlled by Another Client";
-    const TAKEOVER_DETAIL: &str = "Take Over to type and resize here. The shell keeps running.";
-    const TAKEOVER_FAILED_DETAIL: &str = "Take Over is available once SpaceTerm connects again.";
-    const SESSION_ENDED_TITLE: &str = "Session Ended";
-    const SESSION_ENDED_DETAIL: &str =
-        "This Terminal Session is no longer available on the server.";
-    const TAKING_OVER: &str = "Taking Over…";
-    const TAKE_OVER_UNCONFIRMED: &str = "Take Over was not confirmed.";
-    const RESTORED_TITLE: &str = "Server Restarted";
-    const RESTORED_DETAIL: &str = "Programs that were running in this Pane ended when the server \
-                                   stopped. Start a new shell to keep working here.";
-    const DIRECTORY_UNAVAILABLE_TITLE: &str = "Directory Unavailable";
-    const DIRECTORY_UNAVAILABLE_DETAIL: &str = "This Pane's directory is no longer available on \
-                                                the server, so no shell started. Programs that \
-                                                were running here ended when the server stopped.";
-    const STARTING_SHELL: &str = "Starting Shell…";
-    const START_SHELL_UNCONFIRMED: &str = "Starting the shell was not confirmed.";
 
     /// What the window needs from the server connection behind its Pane.
     pub(crate) trait DevelopmentPaneConnection {
@@ -202,11 +191,25 @@ mod window {
             .then_some(handle)
     }
 
+    /// Whether a Development Pane window is open.
+    pub(crate) fn is_open(cx: &App) -> bool {
+        open_window(cx).is_some()
+    }
+
     /// Opens the Development Pane, or activates it when it is already open. Opening asks the
     /// server to resume its Development Pane's Terminal Session, or to start one once the Pane has
     /// measured its size. It never sets up or starts the server.
     pub(crate) fn open_or_activate(cx: &mut App) {
         if !super::offered() {
+            return;
+        }
+        // A Workspace Window already presents this server's Panes, and one device holds one
+        // connection per Pane. Opening a second presentation would fence the first.
+        if super::super::shared_workspaces::adopted(cx) {
+            eprintln!(
+                "the Development Pane is unavailable because a Workspace Window presents this \
+                 server's Workspaces"
+            );
             return;
         }
         if let Some(existing) = open_window(cx) {
@@ -285,16 +288,6 @@ mod window {
                 },
                 cx,
             )
-    }
-
-    /// Why the Pane has no shell after the server restarted. The screen naming it replaces the
-    /// Pane, because the programs it showed ended with the server.
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Dormant {
-        /// The Pane waits for a person to start a fresh shell.
-        Restored,
-        /// The server refused to start a shell, because the Pane's directory is unavailable.
-        DirectoryUnavailable,
     }
 
     /// The window's single Pane, its server connection, and the End Session request.
@@ -914,94 +907,18 @@ mod window {
                 ),
                 _ => return None,
             };
-            let appearance = super::super::appearance::shared_chrome(cx);
-            let shell = spaceterm_ui::floating_surface_theme(cx).shell(FloatingRole::Notice);
-            let floating_colors = &appearance.floating_colors;
-            let intent_color = intent.color(&appearance.floating_control_colors);
-            let icon = intent.glyph(appearance.capabilities.differentiate_without_color);
-            let icon_size = appearance.icons.metrics(IconRole::Status).glyph_size;
             let owner = cx.weak_entity();
-            let description = format!("{title} {detail}");
-            Some(
-                shell
-                    .mount(
-                        div()
-                            .id(NOTICE_SELECTOR)
-                            .role(gpui::accesskit::Role::Status)
-                            .aria_label(title.clone())
-                            .aria_description(description)
-                            .debug_selector(|| NOTICE_SELECTOR.to_owned())
-                            .absolute()
-                            .right(appearance.spacing(12.0))
-                            .bottom(appearance.spacing(12.0))
-                            .w(appearance.spacing(300.0))
-                            .max_w(gpui::relative(0.94))
-                            .text_color(gpui_color(floating_colors.text))
-                            .chrome_text(appearance.typography.style(TextRole::Body))
-                            .flex()
-                            .flex_row()
-                            .child(
-                                div()
-                                    .w(shell.hairline() * 2.0)
-                                    .flex_shrink_0()
-                                    .bg(gpui_color(intent_color)),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .px(appearance.spacing(10.0))
-                                    .py(appearance.spacing(8.0))
-                                    .flex()
-                                    .flex_col()
-                                    .gap(appearance.spacing(4.0))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap(appearance.spacing(8.0))
-                                            .child(Icon::new(
-                                                icon,
-                                                icon_size,
-                                                gpui_color(intent_color),
-                                            ))
-                                            .child(
-                                                div()
-                                                    .chrome_text(
-                                                        appearance
-                                                            .typography
-                                                            .style(TextRole::BodyEmphasis),
-                                                    )
-                                                    .child(title),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .whitespace_normal()
-                                            .chrome_text(
-                                                appearance.typography.style(TextRole::Secondary),
-                                            )
-                                            .text_color(gpui_color(floating_colors.text_muted))
-                                            .child(detail),
-                                    )
-                                    .child(
-                                        div().child(
-                                            Button::new(RETRY_SELECTOR, "Retry")
-                                                .variant(ButtonVariant::Link)
-                                                .size(ButtonSize::Compact)
-                                                .tab_stop(true)
-                                                .debug_selector(RETRY_SELECTOR)
-                                                .on_activate(move |_, _, cx| {
-                                                    let _ = owner.update(cx, |pane_window, cx| {
-                                                        pane_window.retry(cx);
-                                                    });
-                                                }),
-                                        ),
-                                    ),
-                            ),
-                    )
-                    .into_any_element(),
-            )
+            let retry = server_pane::retry_button(RETRY_SELECTOR.into(), move |_, cx| {
+                let _ = owner.update(cx, |pane_window, cx| pane_window.retry(cx));
+            });
+            Some(server_pane::render_notice(
+                NOTICE_SELECTOR.into(),
+                title,
+                detail,
+                intent,
+                Some(retry),
+                cx,
+            ))
         }
 
         fn render_surface(
@@ -1090,16 +1007,16 @@ mod window {
                 _ => (TAKEOVER_TITLE, TAKEOVER_DETAIL),
             };
             let status = if self.status == DevelopmentPaneStatus::TakingOver {
-                Some(Self::progress_status(
-                    TAKE_OVER_STATUS_SELECTOR,
-                    "development-pane-take-over-progress",
-                    TAKING_OVER,
+                Some(server_pane::progress_status(
+                    TAKE_OVER_STATUS_SELECTOR.into(),
+                    "development-pane-take-over-progress".into(),
+                    TAKING_OVER.into(),
                     cx,
                 ))
             } else if self.take_over_unconfirmed && !session_ended {
-                Some(Self::note_status(
-                    TAKE_OVER_STATUS_SELECTOR,
-                    TAKE_OVER_UNCONFIRMED,
+                Some(server_pane::note_status(
+                    TAKE_OVER_STATUS_SELECTOR.into(),
+                    TAKE_OVER_UNCONFIRMED.into(),
                     cx,
                 ))
             } else {
@@ -1123,12 +1040,12 @@ mod window {
                     })
             };
             // Assistive technology announces the end, which happens without any action here.
-            Self::render_screen(
-                TAKEOVER_SELECTOR,
-                title,
-                detail,
+            server_pane::render_screen(
+                TAKEOVER_SELECTOR.into(),
+                title.into(),
+                detail.into(),
                 session_ended,
-                action,
+                Some(action),
                 status,
                 cx,
             )
@@ -1144,12 +1061,14 @@ mod window {
             if dormant == Dormant::DirectoryUnavailable {
                 // Retry and Choose Directory belong to directory repair, so only closing remains.
                 // The screen names no directory.
-                return Self::render_screen(
-                    RESTORED_SELECTOR,
-                    DIRECTORY_UNAVAILABLE_TITLE,
-                    DIRECTORY_UNAVAILABLE_DETAIL,
+                return server_pane::render_screen(
+                    RESTORED_SELECTOR.into(),
+                    DIRECTORY_UNAVAILABLE_TITLE.into(),
+                    DIRECTORY_UNAVAILABLE_DETAIL.into(),
                     true,
-                    close_window_button("Closes this window. The Pane stays on the server."),
+                    Some(close_window_button(
+                        "Closes this window. The Pane stays on the server.",
+                    )),
                     None,
                     cx,
                 );
@@ -1160,16 +1079,16 @@ mod window {
                     DevelopmentPaneStatus::Restored | DevelopmentPaneStatus::Connecting
                 );
             let status = if starting {
-                Some(Self::progress_status(
-                    START_SHELL_STATUS_SELECTOR,
-                    "development-pane-start-shell-progress",
-                    STARTING_SHELL,
+                Some(server_pane::progress_status(
+                    START_SHELL_STATUS_SELECTOR.into(),
+                    "development-pane-start-shell-progress".into(),
+                    STARTING_SHELL.into(),
                     cx,
                 ))
             } else if self.start_unconfirmed {
-                Some(Self::note_status(
-                    START_SHELL_STATUS_SELECTOR,
-                    START_SHELL_UNCONFIRMED,
+                Some(server_pane::note_status(
+                    START_SHELL_STATUS_SELECTOR.into(),
+                    START_SHELL_UNCONFIRMED.into(),
                     cx,
                 ))
             } else {
@@ -1192,132 +1111,15 @@ mod window {
                 });
             // The server restart happens without any action here, so assistive technology
             // announces it.
-            Self::render_screen(
-                RESTORED_SELECTOR,
-                RESTORED_TITLE,
-                RESTORED_DETAIL,
+            server_pane::render_screen(
+                RESTORED_SELECTOR.into(),
+                RESTORED_TITLE.into(),
+                RESTORED_DETAIL.into(),
                 true,
-                action,
+                Some(action),
                 status,
                 cx,
             )
-        }
-
-        /// A centered screen replacing the Pane: a title, its detail, one action, and a status
-        /// slot under the action.
-        fn render_screen(
-            selector: &'static str,
-            title: &'static str,
-            detail: &'static str,
-            announce: bool,
-            action: Button,
-            status: Option<AnyElement>,
-            cx: &mut gpui::Context<Self>,
-        ) -> AnyElement {
-            let appearance = super::super::appearance::shared_chrome(cx);
-            // The configured terminal background, never one the shell chose.
-            let surface =
-                appearance.pane_surface(appearance_runtime::current(cx).terminal.colors.background);
-            div()
-                .id(selector)
-                .role(gpui::accesskit::Role::Group)
-                .aria_label(title)
-                .aria_description(detail)
-                .debug_selector(|| selector.to_owned())
-                .absolute()
-                .inset_0()
-                .bg(gpui_color(surface))
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(appearance.spacing(12.0))
-                .px(appearance.spacing(24.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .gap(appearance.spacing(4.0))
-                        .max_w(appearance.spacing(360.0))
-                        .text_center()
-                        .child(
-                            div()
-                                .chrome_text(appearance.typography.style(TextRole::Section))
-                                .text_color(gpui_color(appearance.colors.text))
-                                .child(title),
-                        )
-                        .child(
-                            div()
-                                .id(format!("{selector}-detail"))
-                                .when(announce, |detail_text| {
-                                    detail_text
-                                        .role(gpui::accesskit::Role::Status)
-                                        .aria_label(detail)
-                                })
-                                .whitespace_normal()
-                                .chrome_text(appearance.typography.style(TextRole::Secondary))
-                                .text_color(gpui_color(appearance.colors.text_secondary))
-                                .child(detail),
-                        ),
-                )
-                .child(action)
-                // The slot keeps its height, so the action stays put while its status changes.
-                .child(
-                    div()
-                        .h(appearance.spacing(20.0))
-                        .flex()
-                        .items_center()
-                        .children(status),
-                )
-                .into_any_element()
-        }
-
-        /// An action's progress, read by assistive technology as one status.
-        fn progress_status(
-            selector: &'static str,
-            progress_id: &'static str,
-            label: &'static str,
-            cx: &mut gpui::Context<Self>,
-        ) -> AnyElement {
-            let appearance = super::super::appearance::shared_chrome(cx);
-            div()
-                .id(selector)
-                .role(gpui::accesskit::Role::Status)
-                .aria_label(label)
-                .debug_selector(|| selector.to_owned())
-                .flex()
-                .items_center()
-                .gap(appearance.spacing(6.0))
-                .child(
-                    ProgressRing::new(progress_id, label, ProgressState::Indeterminate)
-                        .size(ProgressSize::Compact),
-                )
-                .child(
-                    div()
-                        .chrome_text(appearance.typography.style(TextRole::Secondary))
-                        .text_color(gpui_color(appearance.colors.text_secondary))
-                        .child(label),
-                )
-                .into_any_element()
-        }
-
-        /// An action's outcome as plain text, read by assistive technology as one status.
-        fn note_status(
-            selector: &'static str,
-            label: &'static str,
-            cx: &mut gpui::Context<Self>,
-        ) -> AnyElement {
-            let appearance = super::super::appearance::shared_chrome(cx);
-            div()
-                .id(selector)
-                .role(gpui::accesskit::Role::Status)
-                .aria_label(label)
-                .debug_selector(|| selector.to_owned())
-                .chrome_text(appearance.typography.style(TextRole::Secondary))
-                .text_color(gpui_color(appearance.colors.text_secondary))
-                .child(label)
-                .into_any_element()
         }
     }
 
@@ -1332,29 +1134,6 @@ mod window {
             .on_activate(|_, window, _| window.remove_window())
     }
 
-    /// Plain Tab the Pane did not take moves focus, so the window's actions stay reachable from
-    /// the keyboard while terminal input is paused.
-    fn with_tab_traversal(surface: Stateful<gpui::Div>) -> Stateful<gpui::Div> {
-        surface.on_key_down(|event: &gpui::KeyDownEvent, window, cx| {
-            let modifiers = event.keystroke.modifiers;
-            if event.keystroke.key != "tab"
-                || modifiers.control
-                || modifiers.alt
-                || modifiers.platform
-                || modifiers.function
-            {
-                return;
-            }
-            if modifiers.shift {
-                window.focus_prev(cx);
-            } else {
-                window.focus_next(cx);
-            }
-            window.prevent_default();
-            cx.stop_propagation();
-        })
-    }
-
     impl Render for DevelopmentPaneWindow {
         fn render(
             &mut self,
@@ -1363,39 +1142,6 @@ mod window {
         ) -> impl IntoElement {
             let activity = super::super::appearance::window_activity(window);
             activity.mount(activity.with_scope(|| self.render_surface(window, cx)))
-        }
-    }
-
-    /// Publishes the Pane as one labeled terminal without text until server-backed Terminal
-    /// Sessions supply accessible content.
-    struct UnavailableTerminalAccessibility;
-
-    impl TerminalAccessibilityAdapterFactory for UnavailableTerminalAccessibility {
-        fn create(
-            &self,
-            _: &Window,
-            _: TerminalAccessibilityModel,
-            _: &crate::appearance::ResolvedFontDescriptor,
-            _: Pixels,
-        ) -> Box<dyn TerminalAccessibilityAdapter> {
-            Box::new(UnavailableTerminalAccessibility)
-        }
-    }
-
-    impl TerminalAccessibilityAdapter for UnavailableTerminalAccessibility {
-        fn set_hierarchy(&mut self, _: bool) {}
-
-        fn update(&mut self, _: TerminalAccessibilityUpdate<'_>) -> AccessibilityNotifications {
-            AccessibilityNotifications::default()
-        }
-
-        fn decorate(&self, pane: Stateful<gpui::Div>) -> Stateful<gpui::Div> {
-            pane.role(gpui::accesskit::Role::Group)
-                .aria_label("Terminal")
-                .aria_description(
-                    "Terminal text is not yet available to assistive technologies in the \
-                     Development Pane.",
-                )
         }
     }
 

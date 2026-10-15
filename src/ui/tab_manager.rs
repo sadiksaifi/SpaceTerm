@@ -397,6 +397,27 @@ struct DraggedTab {
     owner: gpui::EntityId,
 }
 
+/// One shared server Workspace's Tabs, when a SpaceTerm Server owns the Workspace. A build
+/// without the developer tools has no shared Workspaces, so the binding is uninhabited.
+#[cfg(feature = "developer-tools")]
+type SharedTabBinding = super::shared_workspaces::SharedTabs;
+#[cfg(not(feature = "developer-tools"))]
+type SharedTabBinding = std::convert::Infallible;
+
+/// What a shared server Workspace's Tab strip offers. Creating a Tab and splitting a Pane ask the
+/// server, so they wait while this client is offline or an earlier edit is unanswered. Closing a
+/// shared Tab needs confirmation across every client, which the server path does not support yet.
+#[derive(Clone, Copy)]
+struct SharedStripControls {
+    edits: bool,
+    edits_reason: &'static str,
+}
+
+impl SharedStripControls {
+    const CLOSE_UNAVAILABLE: &'static str =
+        "Closing a Tab that a SpaceTerm Server owns is not available yet.";
+}
+
 pub(crate) struct TabManager {
     tabs: TabCollection<Entity<TabView>>,
     session_factory: WorkspaceTerminalSessionFactory,
@@ -420,6 +441,8 @@ pub(crate) struct TabManager {
     tab_bar_scroll_handle: ScrollHandle,
     close_workspace_requested: bool,
     remote_lifecycle: RemoteHierarchyLifecycle,
+    /// The server Workspace this Tab strip presents, when a SpaceTerm Server owns it.
+    shared: Option<SharedTabBinding>,
     #[cfg(test)]
     rendered_window_active: bool,
     #[cfg(test)]
@@ -509,6 +532,7 @@ impl TabManager {
             tab_bar_scroll_handle: ScrollHandle::new(),
             close_workspace_requested: false,
             remote_lifecycle: RemoteHierarchyLifecycle::default(),
+            shared: None,
             #[cfg(test)]
             rendered_window_active: window.is_window_active(),
             #[cfg(test)]
@@ -1266,6 +1290,13 @@ impl TabManager {
     }
 
     pub(crate) fn create_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A shared Workspace's Tabs belong to the server. Creating one asks the server, and the
+        // Tab appears here with the published membership rather than appearing locally first.
+        #[cfg(feature = "developer-tools")]
+        if self.shared.is_some() {
+            self.request_shared_tab(window, cx);
+            return;
+        }
         if self.remote_lifecycle.disconnected_generation().is_some() {
             cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
             return;
@@ -1656,6 +1687,19 @@ impl TabManager {
     }
 
     fn close_tab(&mut self, tab_id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_tab_activating(tab_id, true, window, cx);
+    }
+
+    /// Closes a Tab. `activate_next` opens the Tab that takes its place for the person, which
+    /// selects that Tab's Focused Pane; a close the server published passes `false`, because
+    /// nobody asked for a Pane there.
+    fn close_tab_activating(
+        &mut self,
+        tab_id: TabId,
+        activate_next: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.close_workspace_requested {
             return;
         }
@@ -1672,8 +1716,10 @@ impl TabManager {
                 payload.update(cx, |view, cx| view.close_all(cx));
                 if was_active {
                     let active_tab = self.tabs.active_tab().clone();
-                    if self.active {
+                    if self.active && activate_next {
                         active_tab.update(cx, |view, cx| view.activate(window, cx));
+                    } else if self.active {
+                        active_tab.update(cx, |view, cx| view.activate_without_focus(cx));
                     } else {
                         active_tab.update(cx, |view, cx| view.deactivate(cx));
                     }
@@ -1686,6 +1732,7 @@ impl TabManager {
                 if self.tab_menu == Some(tab_id) {
                     self.tab_menu = None;
                 }
+                self.forget_shared_tab(tab_id);
                 self.sync_terminal_focus_blocker(cx);
                 debug_assert_eq!(active_tab_id, self.tabs.active_tab_id());
                 // Closing another Tab leaves the bar where it was scrolled.
@@ -1709,6 +1756,11 @@ impl TabManager {
     }
 
     fn request_close_tab(&mut self, tab_id: TabId, cx: &mut Context<Self>) {
+        // Closing a shared Tab needs confirmation across every client, which the server path does
+        // not support yet, so the Tab offers no local close instead.
+        if self.shared.is_some() {
+            return;
+        }
         if self.close_workspace_requested || self.tabs.tab(tab_id).is_none() {
             return;
         }
@@ -1771,6 +1823,15 @@ impl TabManager {
         // A menu opened before a disconnect still offers Split; refuse before changing the Tab.
         if self.remote_lifecycle.disconnected_generation().is_some() {
             cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
+            return;
+        }
+        // A shared split needs no measured Pane, because the server decides the membership and
+        // this client inserts the Pane beside its source in its own layout.
+        if self.shared.is_some() {
+            if self.activate_tab(tab_id, window, cx) {
+                let view = self.tabs.active_tab().clone();
+                view.update(cx, |view, cx| view.split_focused(axis, window, cx));
+            }
             return;
         }
         let was_active = self.tabs.active_tab_id() == tab_id;
@@ -1874,6 +1935,7 @@ impl TabManager {
                 under_pointer: true,
             },
             &presentation,
+            self.shared_strip_controls(),
             manager,
             appearance,
             window,
@@ -1904,6 +1966,7 @@ impl TabManager {
         role: TabItemRole,
         hover: TabHover,
         presentation: &TabChromePresentation,
+        shared: Option<SharedStripControls>,
         manager: gpui::WeakEntity<Self>,
         appearance: &super::appearance::ChromeAppearance,
         window: &Window,
@@ -1933,7 +1996,9 @@ impl TabManager {
         // Native activation can precede dispatch of an accepts-first-mouse event. Retain whether
         // this action was visible in the pre-activation frame so a hidden inactive-Tab control
         // cannot close its Tab through a stale hitbox. The selected Tab remains available.
-        let close_action_available = active || appearance.active;
+        // A shared Tab offers no close, so its control explains the operation rather than
+        // closing the Tab only in this client.
+        let close_action_available = (active || appearance.active) && shared.is_none();
         let status = presentation.tab_status(active, under_pointer, &appearance.colors);
         let status_host = presentation.tab_surface(active, under_pointer);
         let close_button_size = cx
@@ -2011,6 +2076,9 @@ impl TabManager {
             )
             .variant(ButtonVariant::Ghost)
             .disabled(!close_action_available)
+            .when(shared.is_some(), |button| {
+                button.accessibility_description(SharedStripControls::CLOSE_UNAVAILABLE)
+            })
             .accept_first_mouse(active)
             .contextual_style(
                 control_style,
@@ -2140,6 +2208,7 @@ impl TabManager {
         let active_tab_id = self.tabs.active_tab_id();
         // A disconnected Remote Workspace cannot start the Terminal Session a new Pane needs.
         let child_launch_available = self.remote_lifecycle.disconnected_generation().is_none();
+        let shared_strip = self.shared_strip_controls();
         let desktop_presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let background = presentation.background;
         let create_icon_size = appearance.icons.metrics(IconRole::Chrome).glyph_size;
@@ -2245,6 +2314,7 @@ impl TabManager {
                     TabItemRole::InBar,
                     hover,
                     presentation,
+                    shared_strip,
                     manager.clone(),
                     appearance,
                     window,
@@ -2278,6 +2348,7 @@ impl TabManager {
                             index == 0,
                             index == last_index,
                             child_launch_available,
+                            shared_strip,
                             desktop_presentation,
                         ),
                     )
@@ -2321,6 +2392,12 @@ impl TabManager {
 
         let drag_manager = manager.clone();
         let create_manager = manager.clone();
+        // A shared Workspace's New Tab asks the server, so it waits while this client is offline
+        // or an earlier edit is unanswered.
+        let create_tab_available = shared_strip.is_none_or(|shared| shared.edits);
+        let create_tab_unavailable = shared_strip
+            .filter(|shared| !shared.edits)
+            .map(|shared| shared.edits_reason);
         #[cfg(test)]
         let rendered_create_tab_icon = Rc::clone(&self.rendered_create_tab_icon);
         // The window paints its own edge over the top of the bar, so the Tabs and the create
@@ -2371,6 +2448,10 @@ impl TabManager {
                             gpui_color(title_bar_control_focus_ring(appearance)),
                         )
                         .size(ButtonSize::Regular)
+                        .disabled(!create_tab_available)
+                        .when_some(create_tab_unavailable, |button, reason| {
+                            button.accessibility_description(reason)
+                        })
                         .debug_selector("create-tab-button")
                         .tooltip(
                             Tooltip::new("create-tab-tooltip", "Create Tab")
@@ -2958,13 +3039,275 @@ fn render_tab_identity(
 
 /// Every Tab command carries a symbol, so all labels share the icon column. A Shortcut acts on
 /// the Active Tab, so only the Active Tab's menu advertises one.
+/// Shared server Workspaces: how this Tab strip presents one server Workspace's Tabs and submits
+/// their edits.
+#[cfg(not(feature = "developer-tools"))]
+impl TabManager {
+    const fn shared_strip_controls(&self) -> Option<SharedStripControls> {
+        None
+    }
+
+    const fn forget_shared_tab(&mut self, _: TabId) {}
+}
+
+#[cfg(feature = "developer-tools")]
+impl TabManager {
+    /// Presents one server Workspace in this Tab strip. The Tab this strip already owns becomes
+    /// the server's Root Tab, and every later Tab arrives with the published membership.
+    pub(crate) fn adopt_shared(
+        &mut self,
+        mut shared: super::shared_workspaces::SharedTabs,
+        root_tab: spaceterm_server::hierarchy::Id,
+        root_pane: spaceterm_server::hierarchy::Id,
+        root_state: std::sync::Arc<dyn crate::ui::server_pane::ServerPaneConnection>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let root_tab_id = self.tabs.root_tab_id();
+        shared.register(root_tab_id, root_tab);
+        let panes = super::shared_workspaces::SharedPanes::new(
+            shared.edits(),
+            shared.sessions().clone(),
+            shared.workspace(),
+            root_tab,
+        );
+        let view = self.tabs.root_tab().clone();
+        view.update(cx, |view, cx| {
+            view.adopt_shared(panes, root_pane, root_state, window, cx);
+        });
+        self.shared = Some(shared);
+        cx.notify();
+    }
+
+    /// Adds the Tabs the server published that this strip does not present yet, then reconciles
+    /// each Tab's Panes. A new Tab joins at the end of the strip and never takes the Active Tab.
+    pub(crate) fn reconcile_shared(
+        &mut self,
+        workspace: &spaceterm_server::hierarchy::Workspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.shared.is_none() {
+            return false;
+        }
+        // Every Tab the server published joins before any Tab it removed leaves, so one poll
+        // carrying both never closes this Workspace through membership it has not applied yet.
+        let mut changed = false;
+        for tab in &workspace.tabs {
+            let tab_id = match self
+                .shared
+                .as_ref()
+                .and_then(|shared| shared.local_tab(tab.id))
+            {
+                Some(tab_id) => tab_id,
+                None => match self.create_shared_tab(tab, window, cx) {
+                    Some(tab_id) => {
+                        changed = true;
+                        tab_id
+                    }
+                    None => continue,
+                },
+            };
+            let Some(view) = self.tabs.tab(tab_id).cloned() else {
+                continue;
+            };
+            changed |= view.update(cx, |view, cx| view.reconcile_shared(tab, window, cx));
+        }
+        changed |= self.remove_absent_shared_tabs(workspace, window, cx);
+        if changed {
+            cx.emit(TabManagerEvent::PresentationChanged);
+            cx.notify();
+        }
+        changed
+    }
+
+    /// Removes the Tabs the server no longer has.
+    ///
+    /// The server already removed them, so this is not a close a person asked for and needs no
+    /// confirmation. An inactive Tab's Panes may never have connected, so membership alone
+    /// decides this rather than a Terminal Session reporting its own end.
+    fn remove_absent_shared_tabs(
+        &mut self,
+        workspace: &spaceterm_server::hierarchy::Workspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(shared) = self.shared.as_ref() else {
+            return false;
+        };
+        let absent: Vec<TabId> = self
+            .tabs
+            .iter()
+            .map(|(tab_id, _)| tab_id)
+            .filter(|&tab_id| {
+                shared
+                    .server_tab(tab_id)
+                    .is_some_and(|server| !workspace.tabs.iter().any(|tab| tab.id == server))
+            })
+            .collect();
+        let mut removed = false;
+        for tab_id in absent {
+            if let Some(shared) = self.shared.as_mut() {
+                shared.forget(tab_id);
+            }
+            // Closing the final Tab closes its Workspace, as an ordinary final close does.
+            self.close_tab_activating(tab_id, false, window, cx);
+            removed = true;
+        }
+        removed
+    }
+
+    /// Activates the Tab or focuses the Pane one accepted creation of this client's own made.
+    pub(crate) fn open_accepted_shared(
+        &mut self,
+        target: spaceterm_server::hierarchy::Id,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(shared) = self.shared.as_ref() else {
+            return;
+        };
+        if let Some(tab_id) = shared.local_tab(target) {
+            self.activate_tab(tab_id, window, cx);
+            return;
+        }
+        // A split's new Pane belongs to a Tab this strip already presents.
+        let holder = self
+            .tabs
+            .iter()
+            .find(|(_, view)| view.read(cx).holds_shared_pane(target))
+            .map(|(tab_id, view)| (tab_id, view.clone()));
+        if let Some((tab_id, view)) = holder {
+            if !self.activate_tab(tab_id, window, cx) {
+                return;
+            }
+            view.update(cx, |view, cx| {
+                view.focus_shared_pane_explicitly(target, window, cx);
+            });
+        }
+    }
+
+    /// Presents one server Tab this client has not seen before. It appends to the strip and keeps
+    /// the Tab a person is working in active, because another client's creation is membership and
+    /// not a view change here.
+    fn create_shared_tab(
+        &mut self,
+        tab: &spaceterm_server::hierarchy::Tab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<TabId> {
+        let shared = self.shared.as_ref()?;
+        let workspace = shared.workspace();
+        let edits = shared.edits();
+        let sessions = shared.sessions().clone();
+        let (session_factory, prepared_launch, state) = sessions.open(tab.root_pane)?;
+        let pane_construction = sessions.panes().clone();
+        let active_tab_id = self.tabs.active_tab_id();
+        let created = self.tabs.create_tab_in(None, |tab_id| {
+            Self::create_tab_view(
+                tab_id,
+                session_factory,
+                prepared_launch,
+                pane_construction,
+                window,
+                cx,
+            )
+        });
+        let tab_id = match created {
+            Ok(tab_id) => tab_id,
+            Err(error) => {
+                Self::report_tab_error("present a shared", error);
+                return None;
+            }
+        };
+        // Creating a Tab activates it. The Active Tab is this client's own view state, so it
+        // returns to where a person left it. Restoring it is not a Pane selection, so it asks the
+        // server for nothing: a publication must never start a retained shell.
+        if let Err(error) = self.tabs.activate_tab(active_tab_id) {
+            Self::report_tab_error("restore the Active", error);
+        }
+        let view = self.tabs.tab(tab_id)?.clone();
+        let panes = super::shared_workspaces::SharedPanes::new(edits, sessions, workspace, tab.id);
+        view.update(cx, |view, cx| {
+            view.deactivate(cx);
+            view.adopt_shared(panes, tab.root_pane, state, window, cx);
+        });
+        self.shared.as_mut()?.register(tab_id, tab.id);
+        self.sync_terminal_focus_blocker(cx);
+        Some(tab_id)
+    }
+
+    /// Asks the server for another Tab in this shared Workspace.
+    fn request_shared_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use super::shared_workspaces::SharedSubmission;
+
+        let Some(shared) = self.shared.as_ref() else {
+            return;
+        };
+        self.tab_selector_pressed = None;
+        if let SharedSubmission::Refused(reason) = shared.create_tab() {
+            let detail = format!(
+                "SpaceTerm did not create a Tab in this shared Workspace. {}",
+                reason.explanation()
+            );
+            let _ = Alert::new(
+                ModalId::new("shared-tab-unavailable"),
+                "Shared change unavailable",
+                "Shared Change Unavailable",
+                detail,
+                vec![ModalAction::new(
+                    (),
+                    "OK",
+                    ModalActionRole::Cancel,
+                    "shared-tab-unavailable-ok",
+                )],
+            )
+            .intent(AlertIntent::Warning)
+            .present(window, cx, |_, _| {});
+        }
+        cx.notify();
+    }
+
+    fn forget_shared_tab(&mut self, tab_id: TabId) {
+        if let Some(shared) = self.shared.as_mut() {
+            shared.forget(tab_id);
+        }
+    }
+
+    /// Delivers the Active Tab's Focused Pane exit, as its Terminal Session does when the server
+    /// ends it.
+    #[cfg(test)]
+    pub(crate) fn exit_shared_pane_for_test(&mut self, cx: &mut Context<Self>) {
+        self.tabs
+            .active_tab()
+            .clone()
+            .update(cx, |view, cx| view.exit_focused_pane_for_test(cx));
+    }
+
+    fn shared_strip_controls(&self) -> Option<SharedStripControls> {
+        let editability = self.shared.as_ref()?.editability();
+        Some(SharedStripControls {
+            edits: editability.available(),
+            edits_reason: editability.explanation(),
+        })
+    }
+}
+
 fn tab_menu_entries(
     active: bool,
     first: bool,
     last: bool,
     child_launch_available: bool,
+    shared: Option<SharedStripControls>,
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<MenuEntry<TabMenuCommand>> {
+    // A shared Workspace's creations wait for the server, and its Tab close is unavailable. Each
+    // entry says so in place of its label, so no menu offers a step that does nothing.
+    let shared_edits = shared.is_none_or(|shared| shared.edits);
+    let child_launch_available = child_launch_available && shared_edits;
+    let waiting = shared
+        .filter(|shared| !shared.edits)
+        .map(|shared| shared.edits_reason);
     let with_shortcut =
         |entry: MenuEntry<TabMenuCommand>, action: &dyn gpui::Action| match presentation
             .shortcut(action)
@@ -2975,7 +3318,13 @@ fn tab_menu_entries(
         };
     vec![
         with_shortcut(
-            MenuEntry::action("New Tab", TabMenuCommand::NewTab),
+            MenuEntry::action(
+                match waiting {
+                    Some(_) => "New Tab Needs the Server",
+                    None => "New Tab",
+                },
+                TabMenuCommand::NewTab,
+            ),
             &CreateTab,
         )
         .icon(|foreground, size| {
@@ -3019,10 +3368,18 @@ fn tab_menu_entries(
         .debug_selector("tab-menu-row-move-right"),
         MenuEntry::separator(),
         with_shortcut(
-            MenuEntry::action("Close Tab", TabMenuCommand::Close),
+            MenuEntry::action(
+                if shared.is_some() {
+                    "Close Tab Unavailable on a Server"
+                } else {
+                    "Close Tab"
+                },
+                TabMenuCommand::Close,
+            ),
             &CloseTab,
         )
-        .destructive(true)
+        .destructive(shared.is_none())
+        .disabled(shared.is_some())
         .icon(|foreground, size| Icon::new(IconName::X, size, foreground).into_any_element())
         .debug_selector("tab-menu-row-close"),
     ]
