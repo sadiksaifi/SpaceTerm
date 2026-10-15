@@ -8,16 +8,21 @@ mod runtime;
 use crate::{ServerError, host::Paths, storage::Directory};
 use serde::{Deserialize, Serialize};
 use std::{
-    ffi::{CString, OsString},
+    ffi::CString,
     fs::File,
-    io::{Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::{ffi::OsStrExt, fs::MetadataExt},
     },
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     time::{Duration, Instant},
+};
+
+#[cfg(target_os = "macos")]
+use std::{
+    ffi::OsString,
+    io::{Read, Write},
+    process::{Command, Stdio},
 };
 
 /// The retained policy and the service manager's current process observation.
@@ -574,6 +579,7 @@ fn lock_directory(directory: &File) -> Result<(), ServerError> {
     }
     Ok(())
 }
+#[cfg(target_os = "macos")]
 fn command(program: &str, args: &[OsString]) -> Result<Vec<u8>, ServerError> {
     let mut child = Command::new(program)
         .args(args)
