@@ -1,18 +1,38 @@
 //! Authenticated shared edits, replay, independent Pane control, and forced restart on both majors.
 #[path = "support/lifecycle.rs"]
+#[expect(
+    dead_code,
+    reason = "Shared edits use the multiplexed transport instead of the legacy connection helper."
+)]
 mod lifecycle;
 #[expect(
     dead_code,
     reason = "The shared-Pane exercise does not use the legacy attach helper."
 )]
 mod support;
-use lifecycle::{Server, connect, require_idle, size};
+use lifecycle::{Server, require_idle, size};
 use spaceterm_server::{
     LocalServer, ServerError,
     hierarchy::{Axis, Id, Inventory, Mutation, Outcome},
     pane::*,
 };
-use std::{error::Error, time::Duration};
+use std::{
+    error::Error,
+    time::{Duration, Instant},
+};
+
+fn connect(server: &LocalServer) -> Result<PaneConnection, Box<dyn Error>> {
+    let until = Instant::now() + Duration::from_secs(8);
+    loop {
+        match server.connect_shared_pane() {
+            Ok(connection) => return Ok(connection),
+            Err(ServerError::NotRunning) if Instant::now() < until => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
 
 fn inventory(connection: &mut PaneConnection) -> Result<(Inventory, u64), Box<dyn Error>> {
     let Reply::Inventory {
