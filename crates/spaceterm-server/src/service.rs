@@ -1,7 +1,8 @@
 //! Explicit account service installation and lifecycle. Discovery never starts a service.
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(target_os = "macos")]
 mod registration;
 mod runtime;
 
@@ -18,12 +19,18 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(target_os = "macos")]
 use std::{
     ffi::OsString,
     io::{Read, Write},
     process::{Command, Stdio},
 };
+
+/// The OS authorization surface selected by an explicit local action.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LingerAuthorization {
+    Terminal,
+    Desktop,
+}
 
 /// The retained policy and the service manager's current process observation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -77,29 +84,30 @@ trait Supervisor: Send + Sync {
     fn disable(&self) -> Result<(), ServerError>;
     fn uninstall(&self, runtime: &Path) -> Result<(), ServerError>;
     fn running(&self) -> Result<bool, ServerError>;
+    fn enable_linger(&self, _authorization: LingerAuthorization) -> Result<(), ServerError> {
+        Err(ServerError::Unsupported)
+    }
 }
 
 impl Service {
     pub fn for_identity(identity: &str) -> Result<Self, ServerError> {
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = identity;
-            Err(ServerError::Unsupported)
-        }
+        let paths = Paths::for_identity(identity)?;
         #[cfg(target_os = "macos")]
-        {
-            let paths = Paths::for_identity(identity)?;
-            let supervisor = std::sync::Arc::new(macos::LaunchAgent::new(&paths, identity)?);
-            Ok(Self::new(paths, identity.to_owned(), supervisor))
-        }
+        let supervisor = std::sync::Arc::new(macos::LaunchAgent::new(&paths, identity)?);
+        #[cfg(target_os = "linux")]
+        let supervisor = std::sync::Arc::new(linux::UserService::new(&paths, identity)?);
+        Ok(Self::new(paths, identity.to_owned(), supervisor))
     }
-    #[cfg(any(target_os = "macos", test))]
     fn new(paths: Paths, identity: String, supervisor: std::sync::Arc<dyn Supervisor>) -> Self {
         Self {
             paths,
             identity,
             supervisor,
         }
+    }
+    /// Explicitly authorize Linux boot startup for this account. This does not start a server.
+    pub fn enable_linger(&self, authorization: LingerAuthorization) -> Result<(), ServerError> {
+        self.supervisor.enable_linger(authorization)
     }
     pub fn status(&self) -> Result<ServiceStatus, ServerError> {
         let Some((_, state)) = self.read()? else {
@@ -229,7 +237,7 @@ impl Service {
         self.start_locked(&data, &mut state, true)?;
         self.snapshot(&state)
     }
-    #[cfg(all(feature = "client", target_os = "macos"))]
+    #[cfg(feature = "client")]
     pub(crate) fn start_if_enabled(&self) -> Result<(), ServerError> {
         let (data, _) = self.read()?.ok_or(ServerError::NotInstalled)?;
         let _operation = data.lock("service.lock", false)?;
@@ -253,6 +261,7 @@ impl Service {
             return Err(ServerError::Stopped);
         }
         if self.supervisor.running()? {
+            self.supervisor.prepare_start()?;
             return if state.stopped {
                 Err(ServerError::CleanupUnresolved)
             } else {
@@ -606,10 +615,13 @@ fn lock_directory(directory: &File) -> Result<(), ServerError> {
     }
     Ok(())
 }
-#[cfg(target_os = "macos")]
 fn command(program: &str, args: &[OsString]) -> Result<Vec<u8>, ServerError> {
-    let mut child = Command::new(program)
-        .args(args)
+    let mut prepared = Command::new(program);
+    prepared.args(args);
+    execute(&mut prepared)
+}
+fn execute(prepared: &mut Command) -> Result<Vec<u8>, ServerError> {
+    let mut child = prepared
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -766,7 +778,7 @@ mod tests {
         assert_eq!(reopened.read().unwrap().seed, seed);
         assert!(Service::state(&reopened).unwrap().unwrap().stopped);
     }
-    #[cfg(all(feature = "client", target_os = "macos"))]
+    #[cfg(feature = "client")]
     #[test]
     fn connection_setup_cannot_restart_a_durably_stopped_service() {
         let fixture = Fixture::new();
@@ -784,7 +796,6 @@ mod tests {
                 .stopped
         );
     }
-    #[cfg(target_os = "macos")]
     #[test]
     fn service_definition_publication_reuses_exact_bytes_and_preserves_changed_entries() {
         let fixture = Fixture::new();

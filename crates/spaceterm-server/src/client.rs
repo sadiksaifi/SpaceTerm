@@ -182,7 +182,6 @@ impl LocalServer {
     pub fn setup_and_start(&self) -> Result<AuthenticatedStatus, ServerError> {
         crate::service::check_start(&self.paths)?;
         self.pair()?;
-        #[cfg(target_os = "macos")]
         if crate::service::Service::for_identity(&self.identity)?
             .status()?
             .installed

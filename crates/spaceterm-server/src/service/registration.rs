@@ -1,5 +1,6 @@
 //! Publish a service definition without replacing foreign or changed entries.
 use super::*;
+use std::os::unix::fs::DirBuilderExt;
 
 pub(super) struct Registration {
     pub directory: PathBuf,
@@ -10,7 +11,11 @@ impl Registration {
         self.directory.join(&self.name)
     }
     pub fn install(&self, expected: &[u8]) -> Result<(), ServerError> {
-        std::fs::create_dir_all(&self.directory).map_err(|_| ServerError::StorageUnavailable)?;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&self.directory)
+            .map_err(|_| ServerError::StorageUnavailable)?;
         let directory = owned_directory(&self.directory)?;
         if exists(&directory, &self.name)? {
             return self.validate(&directory, expected).map(|_| ());

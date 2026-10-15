@@ -11,7 +11,7 @@ fn run() -> Result<(), spaceterm_server::ServerError> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args == ["--help"] {
         println!(
-            "SpaceTerm Server\n\nserve IDENTITY\nservice-status IDENTITY\nservice-install IDENTITY RETAINED_INSTALLATION\nservice-start IDENTITY\nservice-stop IDENTITY\nservice-restart IDENTITY\nservice-uninstall IDENTITY\n\nService controls use this executable\'s compiled application identity. Stop and uninstall retain identity, pairings and Workspace organization."
+            "SpaceTerm Server\n\nserve IDENTITY\nservice-status IDENTITY\nservice-enable-linger IDENTITY\nservice-install IDENTITY RETAINED_INSTALLATION\nservice-start IDENTITY\nservice-stop IDENTITY\nservice-restart IDENTITY\nservice-uninstall IDENTITY\n\nService controls use this executable\'s compiled application identity. Stop and uninstall retain identity, pairings and Workspace organization."
         );
         return Ok(());
     }
@@ -65,6 +65,13 @@ fn run() -> Result<(), spaceterm_server::ServerError> {
         );
     } else if let Some(action) = command.to_str().and_then(|v| v.strip_prefix("service-")) {
         let service = spaceterm_server::service::Service::for_identity(identity)?;
+        if action == "enable-linger" {
+            service.enable_linger(spaceterm_server::service::LingerAuthorization::Terminal)?;
+            println!(
+                "Boot startup authorized for this account. Install or Start the server explicitly."
+            );
+            return Ok(());
+        }
         let status = match action {
             "status" => service.status()?,
             "start" => service.start()?,
