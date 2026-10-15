@@ -107,8 +107,9 @@ mod window {
         /// Asks the server to make this client the Controlling Client. From Takeover, the status
         /// reads TakingOver once this returns.
         fn take_over(&self);
-        /// Asks the server to end the Terminal Session.
-        fn end_session(&self);
+        /// Asks the server to end the Terminal Session on behalf of the connection generation the
+        /// person approved it on. A request for any other generation ends nothing.
+        fn end_session(&self, generation: u64);
     }
 
     impl DevelopmentPaneConnection for DevelopmentPaneState {
@@ -128,8 +129,8 @@ mod window {
             DevelopmentPaneState::take_over(self);
         }
 
-        fn end_session(&self) {
-            DevelopmentPaneState::close(self);
+        fn end_session(&self, generation: u64) {
+            DevelopmentPaneState::close(self, generation);
         }
     }
 
@@ -611,9 +612,11 @@ mod window {
                 && self.connection.connection_generation() == generation
             {
                 // Recorded before sending, so a reconnection that races the request settles it
-                // rather than leaving it awaiting an answer that never comes.
+                // rather than leaving it awaiting an answer that never comes. The request carries
+                // the approved generation, so a connection that arrives after this check ends
+                // nothing.
                 self.end_request = Some(generation);
-                self.connection.end_session();
+                self.connection.end_session(generation);
             }
             self.focus_content(window, cx);
             cx.notify();
@@ -1151,7 +1154,7 @@ mod window {
     #[cfg(test)]
     pub(super) mod testing {
         use std::sync::Mutex;
-        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
         use super::{DevelopmentPaneConnection, DevelopmentPaneStatus};
 
@@ -1160,9 +1163,10 @@ mod window {
         pub(in crate::ui::development_pane) struct ScriptedConnection {
             status: Mutex<DevelopmentPaneStatus>,
             generation: AtomicU64,
+            reconnect_after_next_read: AtomicBool,
             retries: AtomicUsize,
             take_overs: AtomicUsize,
-            end_sessions: AtomicUsize,
+            end_session_generations: Mutex<Vec<u64>>,
         }
 
         impl ScriptedConnection {
@@ -1170,9 +1174,10 @@ mod window {
                 Self {
                     status: Mutex::new(status),
                     generation: AtomicU64::new(0),
+                    reconnect_after_next_read: AtomicBool::new(false),
                     retries: AtomicUsize::new(0),
                     take_overs: AtomicUsize::new(0),
-                    end_sessions: AtomicUsize::new(0),
+                    end_session_generations: Mutex::new(Vec::new()),
                 }
             }
 
@@ -1193,6 +1198,16 @@ mod window {
                 self.set(DevelopmentPaneStatus::Takeover);
             }
 
+            /// A new connection reaches the Session right after the window next reads the
+            /// generation, before the window acts on what it read.
+            pub(in crate::ui::development_pane) fn reconnect_after_next_read(&self) {
+                self.reconnect_after_next_read.store(true, Ordering::SeqCst);
+            }
+
+            pub(in crate::ui::development_pane) fn generation(&self) -> u64 {
+                self.generation.load(Ordering::SeqCst)
+            }
+
             pub(in crate::ui::development_pane) fn take_overs(&self) -> usize {
                 self.take_overs.load(Ordering::SeqCst)
             }
@@ -1202,7 +1217,15 @@ mod window {
             }
 
             pub(in crate::ui::development_pane) fn end_sessions(&self) -> usize {
-                self.end_sessions.load(Ordering::SeqCst)
+                self.end_session_generations().len()
+            }
+
+            /// The connection generation each End Session request carried, in order.
+            pub(in crate::ui::development_pane) fn end_session_generations(&self) -> Vec<u64> {
+                self.end_session_generations
+                    .lock()
+                    .expect("end sessions")
+                    .clone()
             }
         }
 
@@ -1212,7 +1235,11 @@ mod window {
             }
 
             fn connection_generation(&self) -> u64 {
-                self.generation.load(Ordering::SeqCst)
+                let generation = self.generation.load(Ordering::SeqCst);
+                if self.reconnect_after_next_read.swap(false, Ordering::SeqCst) {
+                    self.reconnect();
+                }
+                generation
             }
 
             fn retry(&self) {
@@ -1227,8 +1254,11 @@ mod window {
                 }
             }
 
-            fn end_session(&self) {
-                self.end_sessions.fetch_add(1, Ordering::SeqCst);
+            fn end_session(&self, generation: u64) {
+                self.end_session_generations
+                    .lock()
+                    .expect("end sessions")
+                    .push(generation);
             }
         }
     }

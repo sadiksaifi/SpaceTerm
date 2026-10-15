@@ -71,13 +71,10 @@ impl DevelopmentPaneState {
         self.connected_epoch.store(epoch, Ordering::Release);
         epoch
     }
-    pub(crate) fn close(&self) {
-        let epoch = self.epoch.load(Ordering::Acquire);
-        if self.status() == DevelopmentPaneStatus::Connected {
-            self.close.store(epoch, Ordering::Release);
-        } else {
-            self.set(DevelopmentPaneStatus::Failed(ServerError::NotRunning));
-        }
+    pub(crate) fn close(&self, approved_generation: u64) {
+        // The worker compares this exact approval with its active epoch. A reconnect
+        // between the UI's check and this submission must never retag the request.
+        self.close.store(approved_generation, Ordering::Release);
     }
     fn connection_failed(&self, error: ServerError, has_takeover: bool) -> bool {
         let retryable = matches!(
@@ -688,6 +685,20 @@ fn decode_screen(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn end_session_approval_cannot_transfer_to_a_new_connection() {
+        let state = DevelopmentPaneState::new();
+        let approved = state.invalidate();
+        state.set(DevelopmentPaneStatus::Connected);
+        let reconnected = state.invalidate();
+        state.set(DevelopmentPaneStatus::Connected);
+        state.close(approved);
+        assert_ne!(state.close.swap(0, Ordering::AcqRel), reconnected);
+        assert_eq!(state.status(), DevelopmentPaneStatus::Connected);
+        state.close(reconnected);
+        assert_eq!(state.close.swap(0, Ordering::AcqRel), reconnected);
+    }
 
     #[test]
     fn an_ended_session_is_a_permanent_failure_after_control_loss() {

@@ -243,7 +243,11 @@ fn end_session_asks_first_and_waits_for_the_server(cx: &mut TestAppContext) {
 
     pane.click(END_SESSION_SELECTOR);
     pane.click("modal-action-development-pane-end-session-confirm");
-    assert_eq!(pane.connection.end_sessions(), 1);
+    assert_eq!(
+        pane.connection.end_session_generations(),
+        vec![0],
+        "the request carries the approved connection generation"
+    );
     assert!(
         pane.rendered("development-pane-status"),
         "the window stays while the server ends the session"
@@ -310,7 +314,32 @@ fn an_interrupted_end_session_is_offered_again_once_the_session_proves_running(
     assert!(pane.rendered("modal-action-development-pane-end-session-confirm"));
     assert_eq!(pane.connection.end_sessions(), 2, "End Session asks first");
     pane.click("modal-action-development-pane-end-session-confirm");
-    assert_eq!(pane.connection.end_sessions(), 3);
+    assert_eq!(
+        pane.connection.end_session_generations(),
+        vec![0, 1, 2],
+        "each request carries the generation it was approved on"
+    );
+}
+
+#[gpui::test]
+fn an_end_session_approval_never_reaches_a_connection_that_arrives_while_it_is_sent(
+    cx: &mut TestAppContext,
+) {
+    let mut pane = open_pane(DevelopmentPaneStatus::Connected, cx);
+    pane.click(END_SESSION_SELECTOR);
+    let approved = pane.connection.generation();
+
+    // A new connection reaches the Session after the window validated the approval and before
+    // the request leaves it.
+    pane.connection.reconnect_after_next_read();
+    pane.click("modal-action-development-pane-end-session-confirm");
+
+    assert_ne!(pane.connection.generation(), approved);
+    assert_eq!(
+        pane.connection.end_session_generations(),
+        vec![approved],
+        "the request names the approved generation, so the new connection ends nothing"
+    );
 }
 
 #[gpui::test]
@@ -717,7 +746,11 @@ fn an_end_session_approval_never_outlives_control(cx: &mut TestAppContext) {
     pane.cx.run_until_parked();
     pane.click(END_SESSION_SELECTOR);
     pane.click("modal-action-development-pane-end-session-confirm");
-    assert_eq!(pane.connection.end_sessions(), 1);
+    assert_eq!(
+        pane.connection.end_session_generations(),
+        vec![pane.connection.generation()],
+        "only the current grant's approval reaches the server"
+    );
 }
 
 #[gpui::test]
