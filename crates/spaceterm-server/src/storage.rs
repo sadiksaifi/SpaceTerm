@@ -192,10 +192,12 @@ impl Directory {
         }
         Ok(file)
     }
+    /// Validate and synchronize retained state before setup or authentication accepts it.
     pub fn read(&self) -> Result<Record, ServerError> {
         let file = self.file("identity.json", false)?;
         let mut bytes = Zeroizing::new(Vec::new());
-        file.take((MAX_RECORD + 1) as u64)
+        (&file)
+            .take((MAX_RECORD + 1) as u64)
             .read_to_end(&mut bytes)
             .map_err(|_| ServerError::StorageUnavailable)?;
         if bytes.len() > MAX_RECORD {
@@ -206,6 +208,11 @@ impl Directory {
         if record.paired.len() > 64 {
             return Err(ServerError::UnsafeStorage);
         }
+        // A previous publication may have renamed successfully but failed to sync its directory.
+        // Visible bytes alone do not confirm durability, including after reopening the store.
+        file.sync_all()
+            .and_then(|()| self.0.sync_all())
+            .map_err(|_| ServerError::StorageUnavailable)?;
         Ok(record)
     }
     #[cfg(any(feature = "client", test))]
@@ -407,5 +414,81 @@ mod tests {
             .map(|thread| thread.join().unwrap())
             .collect();
         assert!(keys.iter().all(|key| *key == keys[0]));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn uncertain_pairing_stays_unavailable_until_synchronization_recovers() {
+        let fixture = Fixture::new();
+        let data = fixture.open();
+        let _lock = data.lock("setup.lock", false).unwrap();
+        let mut record = data.read_or_create().unwrap();
+        record.paired.push([42; 32]);
+
+        let fault = sync_failure::fail_directory(&data.0);
+        assert_eq!(data.write(&record), Err(ServerError::StorageUnavailable));
+        // The rename succeeded. Recovery must confirm durability, not just parse visible bytes.
+        let visible: Record =
+            serde_json::from_slice(&fs::read(fixture.0.join("identity.json")).unwrap()).unwrap();
+        assert_eq!(visible.paired, [[42; 32]]);
+        let reopened = fixture.open();
+        assert!(matches!(
+            reopened.read(),
+            Err(ServerError::StorageUnavailable)
+        ));
+        assert!(matches!(
+            reopened.read_or_create(),
+            Err(ServerError::StorageUnavailable)
+        ));
+
+        drop(fault);
+        let recovered = reopened.read_or_create().unwrap();
+        assert_eq!(recovered.seed, record.seed);
+        assert_eq!(recovered.paired, [[42; 32]]);
+    }
+
+    // Interpose only the native syscall in the Linux test executable. Production storage has
+    // no fault switch, and other threads and directories keep using the real filesystem.
+    #[cfg(target_os = "linux")]
+    mod sync_failure {
+        use super::*;
+        use std::cell::Cell;
+
+        std::thread_local! {
+            static DIRECTORY: Cell<Option<(u64, u64)>> = const { Cell::new(None) };
+        }
+
+        pub(super) struct Failure;
+
+        pub(super) fn fail_directory(directory: &File) -> Failure {
+            let metadata = directory.metadata().unwrap();
+            DIRECTORY.set(Some((metadata.dev(), metadata.ino())));
+            Failure
+        }
+
+        impl Drop for Failure {
+            fn drop(&mut self) {
+                DIRECTORY.set(None);
+            }
+        }
+
+        #[unsafe(export_name = "fsync")]
+        extern "C" fn fsync_with_failure(fd: libc::c_int) -> libc::c_int {
+            // SAFETY: stat is writable and retained throughout fstat.
+            let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
+            // SAFETY: fstat accepts any descriptor, reporting invalid ones without dereferencing it.
+            if unsafe { libc::fstat(fd, &mut metadata) } == 0
+                && DIRECTORY
+                    .try_with(|target| target.get() == Some((metadata.st_dev, metadata.st_ino)))
+                    .unwrap_or(false)
+            {
+                // SAFETY: __errno_location returns this thread's writable errno pointer.
+                unsafe { *libc::__errno_location() = libc::EIO };
+                return -1;
+            }
+            // SAFETY: the fsync syscall takes exactly one descriptor. Bypass this override to
+            // preserve the native operation for every other directory and thread.
+            unsafe { libc::syscall(libc::SYS_fsync, fd) as libc::c_int }
+        }
     }
 }
