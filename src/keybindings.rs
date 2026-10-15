@@ -85,7 +85,7 @@ commands! {
     NewWorktree => ("new_worktree", "New Worktree", Workspace, Application, crate::ui::NewWorktree),
     NextWorktree => ("next_worktree", "Next Worktree", Workspace, Workspace, crate::ui::NextWorktree),
     PreviousWorktree => ("previous_worktree", "Previous Worktree", Workspace, Workspace, crate::ui::PreviousWorktree),
-    CloseWorkspace => ("close_workspace", "Close Workspace", Workspace, Application, crate::ui::CloseWorkspace),
+    CloseWorkspace => ("close_workspace", "Kill Workspace", Workspace, Application, crate::ui::CloseWorkspace),
     ActivateWorkspace1 => ("activate_workspace1", "Workspace 1", Workspace, Workspace, crate::ui::ActivateWorkspace1),
     ActivateWorkspace2 => ("activate_workspace2", "Workspace 2", Workspace, Workspace, crate::ui::ActivateWorkspace2),
     ActivateWorkspace3 => ("activate_workspace3", "Workspace 3", Workspace, Workspace, crate::ui::ActivateWorkspace3),

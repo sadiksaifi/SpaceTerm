@@ -428,7 +428,7 @@ fn the_keyboard_reaches_retry_and_end_session(cx: &mut TestAppContext) {
     pane.set(DevelopmentPaneStatus::Connected);
     pane.press("tab");
     assert!(pane.keys() > 0, "the shell takes Tab once connected");
-    pane.press("cmd-w");
+    pane.press("cmd-alt-w");
     assert!(pane.rendered("modal-action-development-pane-end-session-confirm"));
     pane.press("escape");
     assert!(!pane.rendered("modal-action-development-pane-end-session-confirm"));
@@ -436,10 +436,10 @@ fn the_keyboard_reaches_retry_and_end_session(cx: &mut TestAppContext) {
     assert!(!pane.closed());
 
     // The confirmation starts on Cancel, so Return keeps the shell and Tab reaches End Session.
-    pane.press("cmd-w");
+    pane.press("cmd-alt-w");
     pane.press("enter");
     assert_eq!(pane.connection.end_sessions(), 0, "Return keeps the shell");
-    pane.press("cmd-w");
+    pane.press("cmd-alt-w");
     pane.press("tab");
     pane.press("space");
     assert_eq!(pane.connection.end_sessions(), 1);
@@ -839,7 +839,7 @@ fn close_pane_closes_the_window_once_the_session_ended(cx: &mut TestAppContext) 
     ));
 
     // Close Pane acts on key down, so the window is gone before the key comes back up.
-    pane.cx.simulate_keystrokes("cmd-w");
+    pane.cx.simulate_keystrokes("cmd-alt-w");
     pane.cx.run_until_parked();
 
     assert!(pane.closed());
@@ -1160,7 +1160,7 @@ fn close_pane_closes_the_window_while_no_shell_runs(cx: &mut TestAppContext) {
     let pane = open_pane(DevelopmentPaneStatus::Restored, cx);
 
     // Close Pane acts on key down, so the window is gone before the key comes back up.
-    pane.cx.simulate_keystrokes("cmd-w");
+    pane.cx.simulate_keystrokes("cmd-alt-w");
     pane.cx.run_until_parked();
 
     assert!(pane.closed());

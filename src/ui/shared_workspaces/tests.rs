@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
-use spaceterm_server::hierarchy::{Axis, Id, Inventory, Mutation, Outcome, Pane, Tab, Workspace};
+use spaceterm_server::hierarchy::{
+    Axis, CloseInventory, ConfirmedPane, Id, Inventory, Mutation, Outcome, Pane, Tab, Workspace,
+};
 
 use super::development::testing::{ScriptedEdits, ScriptedPanes};
 use super::development::{
@@ -58,10 +60,25 @@ fn tab(id: Id, panes: Vec<Pane>) -> Tab {
     }
 }
 
-/// One server Workspace with one Tab and one Pane.
+/// The server boot every published close fact here belongs to.
+const BOOT: Id = [9; 32];
+
+/// One server Workspace with `tabs`, whose Panes have no running shell yet.
 fn inventory(revision: u64, tabs: Vec<Tab>) -> Inventory {
+    let sessions = tabs
+        .iter()
+        .flat_map(|tab| &tab.panes)
+        .map(|pane| ConfirmedPane {
+            id: pane.id,
+            session: None,
+        })
+        .collect();
     Inventory {
         revision,
+        close: Some(CloseInventory {
+            boot: BOOT,
+            sessions,
+        }),
         workspaces: vec![Workspace {
             id: WORKSPACE,
             name: "Build".to_owned(),
@@ -141,7 +158,12 @@ fn publish(harness: &SharedHarness, inventory: Inventory, cx: &mut VisualTestCon
     harness.edits.set_inventory(inventory);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.reconcile_shared(&workspace, window, cx);
+            manager.reconcile_shared(
+                &workspace,
+                super::development::SharedRemoval::Published,
+                window,
+                cx,
+            );
         });
     });
     cx.run_until_parked();
@@ -1004,6 +1026,7 @@ mod edits {
         let gone = Inventory {
             revision: 3,
             workspaces: Vec::new(),
+            close: None,
         };
         assert!(matches!(
             shared.plan(&gone).as_slice(),
@@ -1026,6 +1049,7 @@ mod edits {
         edits.set_inventory(Inventory {
             revision: 9,
             workspaces: Vec::new(),
+            close: None,
         });
         shared.poll();
 
@@ -1034,6 +1058,335 @@ mod edits {
             shared.take_refusal().is_some(),
             "a draft whose Workspace is gone reports the removal instead of waiting"
         );
+    }
+}
+
+/// What a shared close confirmation captures, says, and asks the server to end.
+mod close {
+    use super::*;
+    use crate::close_confirmation::CloseTarget as LocalCloseTarget;
+    use crate::domain::TabId;
+    use crate::ui::pane_lifecycle::PaneConstruction;
+    use crate::ui::shared_workspaces::{SharedCloseState, SharedCloseUnavailable};
+    use spaceterm_server::hierarchy::{CloseConfirmation, CloseTarget};
+
+    fn shared(inventory: Inventory) -> (SharedWorkspaces, Rc<ScriptedEdits>) {
+        let edits = Rc::new(ScriptedEdits::new(Some(inventory)));
+        let source = SharedEditSource::new(Rc::clone(&edits) as Rc<dyn SharedWorkspaceEdits>);
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            Rc::new(crate::terminal::testing::TestTerminalSessionFactory::new(
+                crate::terminal::testing::TestTerminalSessionRecords::default(),
+            )),
+            crate::terminal::testing::test_local_directory(PathBuf::from("/tmp/spaceterm-shared")),
+        );
+        let sessions = SharedPaneSessions::with_opener(
+            ScriptedPanes::new(session_factory) as Rc<dyn SharedPaneOpener>,
+            &PaneConstruction::testing(),
+        );
+        let mut shared = SharedWorkspaces::new(source, sessions);
+        shared.poll();
+        (shared, edits)
+    }
+
+    /// A Root Tab split in two, beside a second Tab.
+    fn split_beside_second_tab() -> Inventory {
+        inventory(
+            2,
+            vec![
+                tab(
+                    ROOT_TAB,
+                    vec![
+                        pane(ROOT_PANE, None, Axis::Right),
+                        pane(SPLIT_PANE, Some(ROOT_PANE), Axis::Down),
+                    ],
+                ),
+                tab(SECOND_TAB, vec![pane(SECOND_TAB_PANE, None, Axis::Right)]),
+            ],
+        )
+    }
+
+    fn with_session(mut inventory: Inventory, pane: Id, session: Id) -> Inventory {
+        let facts = inventory.close.as_mut().expect("close facts");
+        for confirmed in &mut facts.sessions {
+            if confirmed.id == pane {
+                confirmed.session = Some(session);
+            }
+        }
+        inventory
+    }
+
+    const ROOT_TAB_TARGET: CloseTarget = CloseTarget::Tab {
+        workspace: WORKSPACE,
+        tab: ROOT_TAB,
+    };
+
+    fn local_tab() -> LocalCloseTarget {
+        LocalCloseTarget::Tab {
+            workspace_id: first_workspace_id(),
+            tab_id: TabId::new(1),
+        }
+    }
+
+    #[test]
+    fn a_confirmed_close_should_ask_the_server_to_end_exactly_what_it_showed() {
+        let published = with_session(split_beside_second_tab(), SPLIT_PANE, [40; 32]);
+        let (mut shared, edits) = shared(published.clone());
+
+        let approval = shared
+            .close_approval(ROOT_TAB_TARGET)
+            .expect("the published Tab can be reviewed");
+        assert_eq!(shared.close_state(&approval), SharedCloseState::Current);
+        assert_eq!(
+            shared.close(approval, local_tab()),
+            SharedSubmission::Submitted
+        );
+
+        assert_eq!(
+            edits.submitted(),
+            vec![Mutation::Close {
+                target: ROOT_TAB_TARGET,
+                confirmation: CloseConfirmation {
+                    boot: BOOT,
+                    panes: vec![
+                        ConfirmedPane {
+                            id: ROOT_PANE,
+                            session: None,
+                        },
+                        ConfirmedPane {
+                            id: SPLIT_PANE,
+                            session: Some([40; 32]),
+                        },
+                    ],
+                    removes_tab: true,
+                    removes_workspace: false,
+                },
+            }],
+            "the request names both Panes and the Session the person saw, and nothing in the \
+             second Tab"
+        );
+    }
+
+    #[test]
+    fn a_session_that_starts_after_the_review_should_make_it_stale_without_a_new_revision() {
+        let (mut shared, edits) = shared(split_beside_second_tab());
+        let approval = shared
+            .close_approval(ROOT_TAB_TARGET)
+            .expect("the published Tab can be reviewed");
+
+        // Another client starts the restored shell. Membership and its revision stay the same.
+        edits.set_inventory(with_session(split_beside_second_tab(), ROOT_PANE, [41; 32]));
+        shared.poll();
+
+        assert_eq!(shared.close_state(&approval), SharedCloseState::Changed);
+        assert!(edits.submitted().is_empty());
+    }
+
+    /// Another client closes the split beside the reviewed Pane. The Pane and its Session stay
+    /// the same, but closing it now also closes its Tab, which the person never reviewed.
+    #[test]
+    fn a_sibling_close_that_makes_the_pane_its_tabs_last_should_require_a_fresh_review() {
+        const ROOT_PANE_TARGET: CloseTarget = CloseTarget::Pane {
+            workspace: WORKSPACE,
+            tab: ROOT_TAB,
+            pane: ROOT_PANE,
+        };
+        let (mut shared, edits) = shared(split_beside_second_tab());
+        let approval = shared
+            .close_approval(ROOT_PANE_TARGET)
+            .expect("the published Pane can be reviewed");
+        assert!(
+            approval
+                .message()
+                .starts_with("The Pane closes for every client.")
+        );
+
+        edits.set_inventory(inventory(
+            3,
+            vec![
+                tab(ROOT_TAB, vec![pane(ROOT_PANE, None, Axis::Right)]),
+                tab(SECOND_TAB, vec![pane(SECOND_TAB_PANE, None, Axis::Right)]),
+            ],
+        ));
+        shared.poll();
+
+        assert_eq!(
+            shared.close_state(&approval),
+            SharedCloseState::Changed,
+            "the reviewed close no longer says its Tab closes too"
+        );
+        let fresh = shared
+            .close_approval(ROOT_PANE_TARGET)
+            .expect("the Pane can be reviewed again");
+        assert!(
+            fresh.message().starts_with(
+                "This is the only Pane in its Tab, so the Tab closes for every client."
+            )
+        );
+        assert_eq!(fresh.detail(), None, "the Workspace keeps its second Tab");
+        assert!(edits.submitted().is_empty());
+    }
+
+    #[test]
+    fn a_target_another_client_removed_should_be_missing_rather_than_changed() {
+        let (mut shared, edits) = shared(split_beside_second_tab());
+        let approval = shared
+            .close_approval(ROOT_TAB_TARGET)
+            .expect("the published Tab can be reviewed");
+
+        edits.set_inventory(inventory(
+            3,
+            vec![tab(
+                SECOND_TAB,
+                vec![pane(SECOND_TAB_PANE, None, Axis::Right)],
+            )],
+        ));
+        shared.poll();
+
+        assert_eq!(shared.close_state(&approval), SharedCloseState::Missing);
+        assert_eq!(
+            shared.close_approval(ROOT_TAB_TARGET),
+            Err(SharedCloseUnavailable::Missing)
+        );
+    }
+
+    #[test]
+    fn a_close_without_reported_sessions_should_not_be_offered_for_review() {
+        let mut unreported = split_beside_second_tab();
+        unreported.close = None;
+        let (shared, _) = shared(unreported);
+
+        assert_eq!(
+            shared.close_approval(ROOT_TAB_TARGET),
+            Err(SharedCloseUnavailable::Unreported),
+            "a person cannot approve Sessions the server has not reported"
+        );
+    }
+
+    #[test]
+    fn an_offline_client_should_offer_no_close_review() {
+        let (shared, edits) = shared(split_beside_second_tab());
+        edits.set_connected(false);
+
+        assert_eq!(
+            shared.close_approval(ROOT_TAB_TARGET),
+            Err(SharedCloseUnavailable::Edits(SharedRefusalReason::Offline))
+        );
+    }
+
+    #[test]
+    fn a_stale_answer_should_name_the_local_target_only_for_the_client_that_asked() {
+        let (mut asked, edits) = shared(split_beside_second_tab());
+        let approval = asked
+            .close_approval(ROOT_TAB_TARGET)
+            .expect("the published Tab can be reviewed");
+        asked.close(approval, local_tab());
+        edits.answer(Outcome::StaleConfirmation);
+        asked.poll();
+
+        assert_eq!(
+            asked.take_stale_close(),
+            Some((ROOT_TAB_TARGET, Some(local_tab())))
+        );
+        assert_eq!(asked.take_stale_close(), None, "one answer is read once");
+        assert_eq!(
+            edits.submitted().len(),
+            1,
+            "a stale approval is never retried on its own"
+        );
+
+        // An answer recovered after a relaunch belongs to no review this process opened.
+        let (mut recovered, edits) = shared(split_beside_second_tab());
+        edits.submit_for_recovery(Mutation::Close {
+            target: ROOT_TAB_TARGET,
+            confirmation: CloseConfirmation {
+                boot: BOOT,
+                panes: Vec::new(),
+                removes_tab: true,
+                removes_workspace: false,
+            },
+        });
+        edits.answer(Outcome::StaleConfirmation);
+        recovered.poll();
+        assert_eq!(recovered.take_stale_close(), Some((ROOT_TAB_TARGET, None)));
+    }
+
+    #[test]
+    fn each_confirmation_should_state_what_ends_for_every_client() {
+        // Both Root Tab Panes run a shell; the second Tab's Pane has not started one yet.
+        let published = with_session(
+            with_session(split_beside_second_tab(), ROOT_PANE, [40; 32]),
+            SPLIT_PANE,
+            [41; 32],
+        );
+        let (shared, _) = shared(published);
+        let tab = shared
+            .close_approval(ROOT_TAB_TARGET)
+            .expect("the published Tab can be reviewed");
+        assert_eq!(
+            tab.message(),
+            "The Tab and its 2 Panes close for every client. This ends 2 Terminal Sessions for \
+             every client, including in Panes another client controls, and stops their running \
+             commands."
+        );
+        assert_eq!(tab.detail(), None, "the Workspace keeps its second Tab");
+
+        let unstarted = shared
+            .close_approval(CloseTarget::Pane {
+                workspace: WORKSPACE,
+                tab: SECOND_TAB,
+                pane: SECOND_TAB_PANE,
+            })
+            .expect("the published Pane can be reviewed");
+        assert_eq!(
+            unstarted.message(),
+            "This is the only Pane in its Tab, so the Tab closes for every client. No shell is \
+             running there, so no Terminal Session ends.",
+            "a retained Pane without a shell ends no Session"
+        );
+
+        let kill = shared
+            .close_approval(CloseTarget::Workspace {
+                workspace: WORKSPACE,
+            })
+            .expect("the published Workspace can be reviewed");
+        assert_eq!(kill.title(), "Kill Workspace \u{201C}Build\u{201D}?");
+        assert_eq!(kill.confirm_label(), "Kill Workspace");
+        assert_eq!(
+            kill.message(),
+            "Its Tabs and Panes are permanently removed for every client. This ends 2 Terminal \
+             Sessions for every client, including in Panes another client controls, and stops \
+             their running commands.",
+            "Kill counts live Sessions, not Panes"
+        );
+        assert!(
+            kill.detail()
+                .is_some_and(|detail| detail.contains("Git Worktree directories stay on disk"))
+        );
+    }
+
+    #[test]
+    fn closing_a_workspaces_only_pane_should_say_the_workspace_is_removed() {
+        let (shared, _) = shared(with_session(root_only(), ROOT_PANE, [42; 32]));
+        let only = shared
+            .close_approval(CloseTarget::Pane {
+                workspace: WORKSPACE,
+                tab: ROOT_TAB,
+                pane: ROOT_PANE,
+            })
+            .expect("the published Pane can be reviewed");
+
+        assert_eq!(
+            only.title(),
+            "Close Pane?",
+            "Close Pane keeps its own meaning"
+        );
+        assert_eq!(
+            only.message(),
+            "This is the only Pane in \u{201C}Build\u{201D}, so the Workspace is permanently \
+             removed for every client. This ends 1 Terminal Session for every client, including \
+             on a client that controls its Pane, and stops its running commands."
+        );
+        assert!(only.detail().is_some());
     }
 }
 

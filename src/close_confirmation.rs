@@ -20,7 +20,7 @@ impl CloseScope {
             Self::Pane => "Close Pane?",
             Self::Tab => "Close Tab?",
             Self::Worktree => "Close Tabs?",
-            Self::Workspace => "Close Workspace?",
+            Self::Workspace => "Kill Workspace?",
             Self::Window => "Close Window?",
         }
     }
@@ -30,7 +30,7 @@ impl CloseScope {
             Self::Pane => "Close Pane",
             Self::Tab => "Close Tab",
             Self::Worktree => "Close Tabs",
-            Self::Workspace => "Close Workspace",
+            Self::Workspace => "Kill Workspace",
             Self::Window => "Close Window",
         }
     }
@@ -285,11 +285,25 @@ impl CloseConfirmation {
         confirmed: bool,
         hierarchy: &CloseHierarchy,
     ) -> Option<CloseTarget> {
+        (self.settle_approval(generation, target, confirmed)
+            && hierarchy.requires_confirmation(target).is_some())
+        .then_some(target)
+    }
+
+    /// Ends the pending confirmation for `target`, returning whether a person approved it. A
+    /// SpaceTerm Server owns a shared target, so the server rather than the local hierarchy
+    /// decides whether what was approved still exists.
+    pub(crate) fn settle_approval(
+        &mut self,
+        generation: u64,
+        target: CloseTarget,
+        confirmed: bool,
+    ) -> bool {
         if self.pending != Some(PendingCloseConfirmation { generation, target }) {
-            return None;
+            return false;
         }
         self.pending = None;
-        (confirmed && hierarchy.requires_confirmation(target).is_some()).then_some(target)
+        confirmed
     }
 
     pub(crate) fn presentation_failed(&mut self, generation: u64) {

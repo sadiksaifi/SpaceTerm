@@ -13,7 +13,7 @@ mod support;
 use lifecycle::{Server, require_idle, size};
 use spaceterm_server::{
     LocalServer, ServerError,
-    hierarchy::{Axis, Id, Inventory, Mutation, Outcome},
+    hierarchy::{Axis, CloseTarget, Id, Inventory, Mutation, Outcome},
     pane::*,
 };
 use std::{
@@ -219,14 +219,127 @@ fn main() -> Result<(), Box<dyn Error>> {
     assert_eq!(saved, replayed);
     assert_eq!(inventory(&mut first)?.0, before);
     first.exchange(&Request::Acknowledge { sequence })?;
-    // Cleanup only the exact Panes this exercise created. Shared close UI remains #546.
-    let panes: Vec<_> = w.tabs.iter().flat_map(|t| &t.panes).map(|p| p.id).collect();
-    for pane in panes {
-        let Reply::Attached { lease } = select(&mut first, pane, true)? else {
-            return Err("cleanup first use".into());
-        };
-        first.exchange(&Request::Close { lease })?;
-    }
+    let later_tab = w.tabs[1].id;
+    let later_pane = w.tabs[1].root_pane;
+    let tab_target = CloseTarget::Tab { workspace, tab };
+    let stale = before.close_confirmation(tab_target).ok_or("close facts")?;
+    let Reply::Attached { lease } = select(&mut first, pane, true)? else {
+        return Err("restored first use".into());
+    };
+    let mut second = connect(&b)?;
+    let (_, sequence) = inventory(&mut second)?;
+    assert!(matches!(second.exchange(&Request::Mutate {
+        sequence, mutation: Mutation::Close { target: tab_target, confirmation: stale }
+    })?, Reply::Outcome(o) if o.outcome == Outcome::StaleConfirmation));
+    second.exchange(&Request::Acknowledge { sequence })?;
+    let Reply::Attached { .. } = select(&mut second, split, true)? else {
+        return Err("second restored first use".into());
+    };
+    // Close another client's Root Pane without taking it over. The surviving split is the Root.
+    close(
+        &mut second,
+        CloseTarget::Pane {
+            workspace,
+            tab,
+            pane,
+        },
+    )?;
+    let current = inventory(&mut first)?.0;
+    let w = current
+        .workspaces
+        .iter()
+        .find(|w| w.id == workspace)
+        .ok_or("surviving Workspace")?;
+    assert_eq!(w.tabs[0].root_pane, split);
+    assert!(matches!(
+        first.exchange(&Request::Poll { lease }),
+        Err(ServerError::SessionUnavailable)
+    ));
+    // Close the other client's Tab, preserving the later Tab and promoting it to Root.
+    close(&mut first, tab_target)?;
+    let current = inventory(&mut second)?.0;
+    let w = current
+        .workspaces
+        .iter()
+        .find(|w| w.id == workspace)
+        .ok_or("surviving Tab")?;
+    assert_eq!(w.root_tab, later_tab);
+    let Reply::Attached { .. } = select(&mut second, later_pane, true)? else {
+        return Err("last Tab first use".into());
+    };
+    let survivor = mutate(
+        &mut first,
+        Mutation::CreateWorkspace {
+            name: "Survivor".into(),
+        },
+    )?;
+    let current = inventory(&mut first)?.0;
+    let survivor_pane = current
+        .workspaces
+        .iter()
+        .find(|w| w.id == survivor)
+        .ok_or("survivor")?
+        .tabs[0]
+        .root_pane;
+    let Reply::Attached {
+        lease: survivor_lease,
+    } = select(&mut first, survivor_pane, true)?
+    else {
+        return Err("survivor first use".into());
+    };
+    // Pin to a real disposable Git Worktree and verify that deletion never reaches its files.
+    let repository = Repository::new(major)?;
+    mutate(
+        &mut first,
+        Mutation::PinWorkspace {
+            workspace,
+            version: 2,
+            directory: Some(repository.worktree()),
+        },
+    )?;
+    let current = inventory(&mut first)?.0;
+    let target = CloseTarget::Workspace { workspace };
+    let confirmation = current
+        .close_confirmation(target)
+        .ok_or("Kill confirmation")?;
+    let (_, sequence) = inventory(&mut first)?;
+    let kill = Mutation::Close {
+        target,
+        confirmation,
+    };
+    first.exchange(&Request::Mutate {
+        sequence,
+        mutation: kill.clone(),
+    })?;
+    // Lose the acknowledgement, reconnect, and replay across a forced restart with the original
+    // authority. The deleted Workspace stays absent and the retained outcome remains identical.
+    first.exchange(&Request::Resize {
+        lease: survivor_lease,
+        size: size(),
+    })?;
+    drop(first);
+    drop(second);
+    host.kill()?;
+    let mut host = Server::start()?;
+    let mut first = connect(&a)?;
+    let Reply::Outcome(saved) = first.exchange(&Request::Resolve { sequence })? else {
+        return Err("Kill outcome".into());
+    };
+    let Reply::Outcome(replayed) = first.exchange(&Request::Mutate {
+        sequence,
+        mutation: kill,
+    })?
+    else {
+        return Err("Kill replay".into());
+    };
+    assert_eq!(saved, replayed);
+    assert_eq!(saved.outcome, Outcome::Accepted { target: workspace });
+    first.exchange(&Request::Acknowledge { sequence })?;
+    assert_eq!(
+        std::fs::read(repository.worktree().join("keep"))?,
+        b"repository contents"
+    );
+    assert!(repository.worktree().join(".git").is_file());
     assert!(
         !inventory(&mut first)?
             .0
@@ -234,10 +347,91 @@ fn main() -> Result<(), Box<dyn Error>> {
             .iter()
             .any(|w| w.id == workspace)
     );
+    assert!(
+        inventory(&mut first)?
+            .0
+            .workspaces
+            .iter()
+            .any(|w| w.id == survivor)
+    );
+    let (_, sequence) = inventory(&mut first)?;
+    assert!(
+        matches!(first.exchange(&Request::Mutate { sequence, mutation: Mutation::CreateTab { workspace } })?, Reply::Outcome(o) if o.outcome == Outcome::Missing)
+    );
+    first.exchange(&Request::Acknowledge { sequence })?;
+    assert!(matches!(
+        select(&mut first, later_pane, true),
+        Err(ServerError::SessionUnavailable)
+    ));
+    close(
+        &mut first,
+        CloseTarget::Workspace {
+            workspace: survivor,
+        },
+    )?;
     first.exchange(&Request::Shutdown)?;
     host.0.wait()?;
     println!(
-        "Shared creation, publication, conflicts, replay, independent control, Roots, defaults and restart passed on protocol {major}."
+        "Shared edits, exact close, cross-client Kill, Root succession, lost replies, restart and Git Worktree preservation passed on protocol {major}."
     );
     Ok(())
+}
+
+fn close(connection: &mut PaneConnection, target: CloseTarget) -> Result<Id, Box<dyn Error>> {
+    let current = inventory(connection)?.0;
+    let confirmation = current.close_confirmation(target).ok_or("close target")?;
+    mutate(
+        connection,
+        Mutation::Close {
+            target,
+            confirmation,
+        },
+    )
+}
+
+struct Repository(std::path::PathBuf);
+impl Repository {
+    fn new(major: u16) -> Result<Self, Box<dyn Error>> {
+        use std::process::{Command, Stdio};
+        let root =
+            std::env::temp_dir().join(format!("spaceterm-close-{}-{major}", std::process::id()));
+        std::fs::create_dir(&root)?;
+        let repository = Self(root);
+        for args in [
+            vec!["init", "--quiet"],
+            vec![
+                "-c",
+                "user.name=SpaceTerm test",
+                "-c",
+                "user.email=test@invalid",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "fixture",
+            ],
+            vec!["worktree", "add", "--quiet", "-b", "close-test", "worktree"],
+        ] {
+            if !Command::new("git")
+                .args(args)
+                .current_dir(&repository.0)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()?
+                .success()
+            {
+                return Err("repository fixture".into());
+            }
+        }
+        std::fs::write(repository.worktree().join("keep"), b"repository contents")?;
+        Ok(repository)
+    }
+    fn worktree(&self) -> std::path::PathBuf {
+        self.0.join("worktree")
+    }
+}
+impl Drop for Repository {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }

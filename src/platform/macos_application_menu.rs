@@ -92,7 +92,7 @@ const MENU_ITEM_ICONS: &[MenuItemIcon] = &[
     MenuItemIcon {
         menu: "File",
         submenu: None,
-        item: "Close Workspace",
+        item: "Kill Workspace",
         symbol: "rectangle.portrait.and.arrow.right",
     },
     MenuItemIcon {
@@ -923,7 +923,7 @@ mod tests {
                 "|",
                 "Close Pane",
                 "Close Tab",
-                "Close Workspace",
+                "Kill Workspace",
                 "|",
                 "Export Terminal Diagnostics…",
             ]

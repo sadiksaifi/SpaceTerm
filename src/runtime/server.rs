@@ -684,6 +684,289 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
+    fn shared_inventory(host: &mut SharedWorkspaceHost) -> spaceterm_server::hierarchy::Inventory {
+        let Reply::Inventory { inventory, .. } = host.request([2; 32], [2; 32], Request::Inventory)
+        else {
+            panic!("inventory unavailable")
+        };
+        inventory
+    }
+
+    fn create_shared(host: &mut SharedWorkspaceHost, sequence: u64) -> [u8; 32] {
+        use spaceterm_server::hierarchy::{Mutation, Outcome};
+        let Reply::Outcome(result) = host.request(
+            [1; 32],
+            [1; 32],
+            Request::Mutate {
+                sequence,
+                mutation: Mutation::CreateWorkspace {
+                    name: "Build".into(),
+                },
+            },
+        ) else {
+            panic!("creation unavailable")
+        };
+        let Outcome::Accepted { target } = result.outcome else {
+            panic!("creation refused")
+        };
+        target
+    }
+
+    #[test]
+    fn shared_kill_ends_another_controllers_work_and_replays_without_touching_survivors() {
+        use spaceterm_server::hierarchy::{CloseTarget, Mutation, Outcome};
+        let mut host = SharedWorkspaceHost::new(host());
+        let workspace = create_shared(&mut host, 1);
+        let other = create_shared(&mut host, 2);
+        let inventory = shared_inventory(&mut host);
+        let pane = inventory.workspaces[0].tabs[0].root_pane;
+        let other_pane = inventory.workspaces[1].tabs[0].root_pane;
+        let start = |pane| Request::SelectPane {
+            pane,
+            explicit: true,
+            size: size(),
+            style: None,
+        };
+        let Reply::Attached { lease } = host.request([1; 32], [1; 32], start(pane)) else {
+            panic!()
+        };
+        let Reply::Attached { lease: survivor } = host.request([1; 32], [1; 32], start(other_pane))
+        else {
+            panic!()
+        };
+        let target = CloseTarget::Workspace { workspace };
+        let confirmation = shared_inventory(&mut host)
+            .close_confirmation(target)
+            .expect("server supplies close authority");
+        let close = Mutation::Close {
+            target,
+            confirmation,
+        };
+        for _ in 0..2 {
+            let reply = host.request(
+                [2; 32],
+                [2; 32],
+                Request::Mutate {
+                    sequence: 1,
+                    mutation: close.clone(),
+                },
+            );
+            assert!(
+                matches!(reply, Reply::Outcome(result) if result.outcome == Outcome::Accepted { target: workspace })
+            );
+        }
+        assert!(matches!(
+            host.request([1; 32], [1; 32], Request::Poll { lease }),
+            Reply::Refused(Refusal::Missing)
+        ));
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [1; 32],
+                Request::Resize {
+                    lease: survivor,
+                    size: size()
+                }
+            ),
+            Reply::Unchanged
+        ));
+        let inventory = shared_inventory(&mut host);
+        assert_eq!(inventory.workspaces.len(), 1);
+        assert_eq!(inventory.workspaces[0].id, other);
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn shared_close_rejects_a_session_started_after_confirmation_but_allows_takeover() {
+        use spaceterm_server::hierarchy::{CloseTarget, Mutation, Outcome};
+        let mut host = SharedWorkspaceHost::new(host());
+        let workspace = create_shared(&mut host, 1);
+        let initial = shared_inventory(&mut host);
+        let tab = initial.workspaces[0].root_tab;
+        let pane = initial.workspaces[0].tabs[0].root_pane;
+        let target = CloseTarget::Tab { workspace, tab };
+        let stale = initial.close_confirmation(target).unwrap();
+        let Reply::Attached { lease } = host.request(
+            [1; 32],
+            [1; 32],
+            Request::SelectPane {
+                pane,
+                explicit: true,
+                size: size(),
+                style: None,
+            },
+        ) else {
+            panic!()
+        };
+        assert!(
+            matches!(host.request([2; 32], [2; 32], Request::Mutate { sequence: 1, mutation: Mutation::Close { target, confirmation: stale } }), Reply::Outcome(o) if o.outcome == Outcome::StaleConfirmation)
+        );
+        let confirmation = shared_inventory(&mut host)
+            .close_confirmation(target)
+            .unwrap();
+        assert!(matches!(
+            host.request(
+                [3; 32],
+                [3; 32],
+                Request::TakeOver {
+                    target: lease.into(),
+                    size: size(),
+                    style: None
+                }
+            ),
+            Reply::Attached { .. }
+        ));
+        assert!(
+            matches!(host.request([2; 32], [2; 32], Request::Mutate { sequence: 2, mutation: Mutation::Close { target, confirmation } }), Reply::Outcome(o) if o.outcome == Outcome::Accepted { target: tab })
+        );
+        assert!(shared_inventory(&mut host).workspaces.is_empty());
+    }
+
+    #[test]
+    fn shared_close_rejects_membership_changes_and_confirmations_from_another_boot() {
+        use spaceterm_server::hierarchy::{CloseTarget, Mutation, Outcome};
+        let mut host = SharedWorkspaceHost::new(host());
+        let workspace = create_shared(&mut host, 1);
+        let target = CloseTarget::Workspace { workspace };
+        let confirmation = shared_inventory(&mut host)
+            .close_confirmation(target)
+            .unwrap();
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::Mutate {
+                sequence: 2,
+                mutation: Mutation::CreateTab { workspace },
+            },
+        );
+        assert!(
+            matches!(host.request([2; 32], [2; 32], Request::Mutate { sequence: 1, mutation: Mutation::Close { target, confirmation } }), Reply::Outcome(o) if o.outcome == Outcome::StaleConfirmation)
+        );
+        let mut confirmation = shared_inventory(&mut host)
+            .close_confirmation(target)
+            .unwrap();
+        confirmation.boot = [0; 32];
+        assert!(
+            matches!(host.request([2; 32], [2; 32], Request::Mutate { sequence: 2, mutation: Mutation::Close { target, confirmation } }), Reply::Outcome(o) if o.outcome == Outcome::StaleConfirmation)
+        );
+        assert_eq!(shared_inventory(&mut host).workspaces[0].tabs.len(), 2);
+    }
+
+    #[test]
+    fn shared_close_rejects_new_ancestor_deletion_after_a_sibling_closes() {
+        use spaceterm_server::hierarchy::{Axis, CloseTarget, Mutation, Outcome};
+        for close_pane in [true, false] {
+            let mut host = SharedWorkspaceHost::new(host());
+            let workspace = create_shared(&mut host, 1);
+            let initial = shared_inventory(&mut host);
+            let tab = initial.workspaces[0].root_tab;
+            let pane = initial.workspaces[0].tabs[0].root_pane;
+            let mutation = if close_pane {
+                Mutation::SplitPane {
+                    workspace,
+                    tab,
+                    source: pane,
+                    axis: Axis::Down,
+                }
+            } else {
+                Mutation::CreateTab { workspace }
+            };
+            let Reply::Outcome(result) = host.request(
+                [1; 32],
+                [1; 32],
+                Request::Mutate {
+                    sequence: 2,
+                    mutation,
+                },
+            ) else {
+                panic!()
+            };
+            let Outcome::Accepted { target: sibling } = result.outcome else {
+                panic!()
+            };
+            let target = if close_pane {
+                CloseTarget::Pane {
+                    workspace,
+                    tab,
+                    pane,
+                }
+            } else {
+                CloseTarget::Tab { workspace, tab }
+            };
+            let sibling = if close_pane {
+                CloseTarget::Pane {
+                    workspace,
+                    tab,
+                    pane: sibling,
+                }
+            } else {
+                CloseTarget::Tab {
+                    workspace,
+                    tab: sibling,
+                }
+            };
+            let inventory = shared_inventory(&mut host);
+            let approval = inventory.close_confirmation(target).unwrap();
+            let sibling_confirmation = inventory.close_confirmation(sibling).unwrap();
+            assert!(matches!(host.request(
+                [2; 32], [2; 32], Request::Mutate { sequence: 1, mutation: Mutation::Close {
+                    target: sibling, confirmation: sibling_confirmation,
+                } },
+            ), Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. })));
+            assert!(matches!(host.request(
+                [3; 32], [3; 32], Request::Mutate { sequence: 1, mutation: Mutation::Close {
+                    target, confirmation: approval,
+                } },
+            ), Reply::Outcome(result) if result.outcome == Outcome::StaleConfirmation));
+            let remaining = shared_inventory(&mut host);
+            assert_eq!(remaining.workspaces[0].id, workspace);
+            let confirmation = remaining.close_confirmation(target).unwrap();
+            assert!(matches!(host.request(
+                [3; 32], [3; 32], Request::Mutate { sequence: 2, mutation: Mutation::Close {
+                    target, confirmation,
+                } },
+            ), Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. })));
+            assert!(shared_inventory(&mut host).workspaces.is_empty());
+        }
+    }
+
+    #[test]
+    fn shared_session_reset_retains_membership_but_ordinary_final_shell_exit_removes_it() {
+        let mut host = SharedWorkspaceHost::new(host());
+        create_shared(&mut host, 1);
+        let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+        let select = |explicit| Request::SelectPane {
+            pane,
+            explicit,
+            size: size(),
+            style: None,
+        };
+        let Reply::Attached { lease: old } = host.request([1; 32], [1; 32], select(true)) else {
+            panic!()
+        };
+        host.shutdown().unwrap();
+        assert_eq!(
+            shared_inventory(&mut host).workspaces[0].tabs[0].root_pane,
+            pane
+        );
+        assert!(matches!(
+            host.request([1; 32], [1; 32], select(false)),
+            Reply::Restored { .. }
+        ));
+        let Reply::Attached { lease } = host.request([1; 32], [1; 32], select(true)) else {
+            panic!()
+        };
+        assert_ne!(lease.session, old.session);
+        let reply = command(&mut host, 1, lease, "exit\n");
+        assert!(matches!(reply, Reply::Unchanged));
+        let until = Instant::now() + Duration::from_secs(3);
+        while !shared_inventory(&mut host).workspaces.is_empty() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(shared_inventory(&mut host).workspaces.is_empty());
+        host.shutdown().unwrap();
+    }
+
     #[test]
     fn opening_the_legacy_pane_cannot_consume_a_shared_edits_operation_identity() {
         use spaceterm_server::hierarchy::{Mutation, Outcome};
@@ -884,7 +1167,7 @@ mod tests {
         };
         lease
     }
-    fn command(host: &mut DevelopmentPaneHost, connection: u8, lease: Lease, text: &str) -> Reply {
+    fn command(host: &mut impl PaneService, connection: u8, lease: Lease, text: &str) -> Reply {
         let result = host.request(
             [1; 32],
             [connection; 32],

@@ -1465,6 +1465,41 @@ fn compact_warning_keeps_content_and_safe_actions_visible_together(cx: &mut Test
     );
 }
 
+/// Visible Alert detail is part of what a person reads before deciding, so assistive technology
+/// reads it too, after the message and inside the Alert.
+#[gpui::test]
+fn alert_detail_is_published_as_text_after_the_message(cx: &mut TestAppContext) {
+    use crate::a11y_testing::A11yTree;
+
+    install_test_catalogs(cx);
+    let window = cx.update(|cx| {
+        cx.open_window(WindowOptions::default(), |_, cx| {
+            cx.new(|_| CompactWarningFixture { presentation: None })
+        })
+        .unwrap_or_else(|error| panic!("compact warning window failed: {error}"))
+    });
+    let root = window.root(cx).expect("compact warning root should exist");
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| root.update(cx, |root, cx| root.present(window, cx)));
+    cx.run_until_parked();
+
+    let tree = A11yTree::read(&mut cx);
+    let alert = tree.node("Warning Alert preview");
+    let detail = tree.text("You can safely cancel this preview. No settings are changed.");
+    let reading = tree.descendants(alert);
+    let position = |node| {
+        reading
+            .iter()
+            .position(|candidate| std::ptr::eq(*candidate, node))
+            .expect("the node should be inside the Alert")
+    };
+    assert!(tree.exposed(detail));
+    assert!(
+        position(tree.text("The existing workspace settings will be replaced.")) < position(detail),
+        "the detail follows the message"
+    );
+}
+
 #[gpui::test]
 fn critical_alert_renders_bounded_semantic_treatment_without_accessory(cx: &mut TestAppContext) {
     let window = open_alert_intent_window(cx, super::super::AlertIntent::Critical);

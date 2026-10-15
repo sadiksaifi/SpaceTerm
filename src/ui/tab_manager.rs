@@ -404,18 +404,13 @@ type SharedTabBinding = super::shared_workspaces::SharedTabs;
 #[cfg(not(feature = "developer-tools"))]
 type SharedTabBinding = std::convert::Infallible;
 
-/// What a shared server Workspace's Tab strip offers. Creating a Tab and splitting a Pane ask the
-/// server, so they wait while this client is offline or an earlier edit is unanswered. Closing a
-/// shared Tab needs confirmation across every client, which the server path does not support yet.
+/// What a shared server Workspace's Tab strip offers. Creating a Tab, splitting a Pane, and
+/// closing a Tab ask the server, so they wait while this client is offline or an earlier edit is
+/// unanswered.
 #[derive(Clone, Copy)]
 struct SharedStripControls {
     edits: bool,
     edits_reason: &'static str,
-}
-
-impl SharedStripControls {
-    const CLOSE_UNAVAILABLE: &'static str =
-        "Closing a Tab that a SpaceTerm Server owns is not available yet.";
 }
 
 pub(crate) struct TabManager {
@@ -1764,11 +1759,8 @@ impl TabManager {
     }
 
     fn request_close_tab(&mut self, tab_id: TabId, cx: &mut Context<Self>) {
-        // Closing a shared Tab needs confirmation across every client, which the server path does
-        // not support yet, so the Tab offers no local close instead.
-        if self.shared.is_some() {
-            return;
-        }
+        // A shared Tab's close goes up to the Workspace Window, which asks the server after Close
+        // Confirmation. Nothing here closes it locally.
         if self.close_workspace_requested || self.tabs.tab(tab_id).is_none() {
             return;
         }
@@ -2004,9 +1996,12 @@ impl TabManager {
         // Native activation can precede dispatch of an accepts-first-mouse event. Retain whether
         // this action was visible in the pre-activation frame so a hidden inactive-Tab control
         // cannot close its Tab through a stale hitbox. The selected Tab remains available.
-        // A shared Tab offers no close, so its control explains the operation rather than
-        // closing the Tab only in this client.
-        let close_action_available = (active || appearance.active) && shared.is_none();
+        // A shared Tab's close asks the server, so its control waits, and says why, while this
+        // client cannot ask.
+        let shared_close_reason = shared
+            .filter(|shared| !shared.edits)
+            .map(|shared| shared.edits_reason);
+        let close_action_available = (active || appearance.active) && shared_close_reason.is_none();
         let status = presentation.tab_status(active, under_pointer, &appearance.colors);
         let status_host = presentation.tab_surface(active, under_pointer);
         let close_button_size = cx
@@ -2084,8 +2079,8 @@ impl TabManager {
             )
             .variant(ButtonVariant::Ghost)
             .disabled(!close_action_available)
-            .when(shared.is_some(), |button| {
-                button.accessibility_description(SharedStripControls::CLOSE_UNAVAILABLE)
+            .when_some(shared_close_reason, |button, reason| {
+                button.accessibility_description(reason)
             })
             .accept_first_mouse(active)
             .contextual_style(
@@ -3092,6 +3087,7 @@ impl TabManager {
     pub(crate) fn reconcile_shared(
         &mut self,
         workspace: &spaceterm_server::hierarchy::Workspace,
+        removal: super::shared_workspaces::SharedRemoval,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -3121,7 +3117,7 @@ impl TabManager {
             };
             changed |= view.update(cx, |view, cx| view.reconcile_shared(tab, window, cx));
         }
-        changed |= self.remove_absent_shared_tabs(workspace, window, cx);
+        changed |= self.remove_absent_shared_tabs(workspace, removal, window, cx);
         if changed {
             cx.emit(TabManagerEvent::PresentationChanged);
             cx.notify();
@@ -3131,12 +3127,13 @@ impl TabManager {
 
     /// Removes the Tabs the server no longer has.
     ///
-    /// The server already removed them, so this is not a close a person asked for and needs no
-    /// confirmation. An inactive Tab's Panes may never have connected, so membership alone
-    /// decides this rather than a Terminal Session reporting its own end.
+    /// The server already removed them, so this needs no confirmation here. An inactive Tab's
+    /// Panes may never have connected, so membership alone decides this rather than a Terminal
+    /// Session reporting its own end.
     fn remove_absent_shared_tabs(
         &mut self,
         workspace: &spaceterm_server::hierarchy::Workspace,
+        removal: super::shared_workspaces::SharedRemoval,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -3158,8 +3155,14 @@ impl TabManager {
             if let Some(shared) = self.shared.as_mut() {
                 shared.forget(tab_id);
             }
-            // Closing the final Tab closes its Workspace, as an ordinary final close does.
-            self.close_tab_activating(tab_id, false, window, cx);
+            // Closing the final Tab closes its Workspace, as an ordinary final close does. Only
+            // this client's own close opens the Tab that takes its place.
+            self.close_tab_activating(
+                tab_id,
+                removal == super::shared_workspaces::SharedRemoval::OwnClose,
+                window,
+                cx,
+            );
             removed = true;
         }
         removed
@@ -3282,6 +3285,24 @@ impl TabManager {
         }
     }
 
+    /// The server identity of one shared Tab this strip presents.
+    pub(crate) fn shared_server_tab(
+        &self,
+        tab_id: TabId,
+    ) -> Option<spaceterm_server::hierarchy::Id> {
+        self.shared.as_ref()?.server_tab(tab_id)
+    }
+
+    /// The server identity of one shared Pane in one of this strip's Tabs.
+    pub(crate) fn shared_server_pane(
+        &self,
+        tab_id: TabId,
+        pane_id: PaneId,
+        cx: &App,
+    ) -> Option<spaceterm_server::hierarchy::Id> {
+        self.tabs.tab(tab_id)?.read(cx).shared_server_pane(pane_id)
+    }
+
     /// Delivers the Active Tab's Focused Pane exit, as its Terminal Session does when the server
     /// ends it.
     #[cfg(test)]
@@ -3309,8 +3330,8 @@ fn tab_menu_entries(
     shared: Option<SharedStripControls>,
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<MenuEntry<TabMenuCommand>> {
-    // A shared Workspace's creations wait for the server, and its Tab close is unavailable. Each
-    // entry says so in place of its label, so no menu offers a step that does nothing.
+    // A shared Workspace's creations and Tab close wait for the server. Each entry says so in
+    // place of its label, so no menu offers a step that does nothing.
     let shared_edits = shared.is_none_or(|shared| shared.edits);
     let child_launch_available = child_launch_available && shared_edits;
     let waiting = shared
@@ -3377,17 +3398,16 @@ fn tab_menu_entries(
         MenuEntry::separator(),
         with_shortcut(
             MenuEntry::action(
-                if shared.is_some() {
-                    "Close Tab Unavailable on a Server"
-                } else {
-                    "Close Tab"
+                match waiting {
+                    Some(_) => "Close Tab Needs the Server",
+                    None => "Close Tab",
                 },
                 TabMenuCommand::Close,
             ),
             &CloseTab,
         )
-        .destructive(shared.is_none())
-        .disabled(shared.is_some())
+        .destructive(shared_edits)
+        .disabled(!shared_edits)
         .icon(|foreground, size| Icon::new(IconName::X, size, foreground).into_any_element())
         .debug_selector("tab-menu-row-close"),
     ]
@@ -5723,7 +5743,7 @@ mod tests {
         });
         cx.run_until_parked();
         let split_title = tab_title(cx);
-        cx.simulate_keystrokes("cmd-w");
+        cx.simulate_keystrokes("cmd-alt-w");
         cx.run_until_parked();
         let restored_title = tab_title(cx);
 
@@ -5860,7 +5880,7 @@ mod tests {
         assert!(cx.debug_bounds("tab-account-1").is_none());
 
         // A single-Pane Tab carries the same mark as the Pane Caption under it.
-        cx.simulate_keystrokes("cmd-w");
+        cx.simulate_keystrokes("cmd-alt-w");
         cx.run_until_parked();
         manager.update(cx, |manager, cx| {
             manager.tabs.active_tab().update(cx, |view, cx| {
@@ -8378,12 +8398,14 @@ mod tests {
     }
 
     #[gpui::test]
-    fn command_w_should_close_only_the_focused_pane_when_the_tab_is_split(cx: &mut TestAppContext) {
+    fn option_command_w_should_close_only_the_focused_pane_when_the_tab_is_split(
+        cx: &mut TestAppContext,
+    ) {
         let (manager, records, cx) = tab_manager(cx);
         cx.simulate_keystrokes("cmd-d");
         cx.run_until_parked();
 
-        cx.simulate_keystrokes("cmd-w");
+        cx.simulate_keystrokes("cmd-alt-w");
         cx.run_until_parked();
 
         let state = manager.read_with(cx, |manager, cx| {
@@ -8397,11 +8419,13 @@ mod tests {
     }
 
     #[gpui::test]
-    fn command_w_should_close_the_active_tab_when_its_last_pane_closes(cx: &mut TestAppContext) {
+    fn option_command_w_should_close_the_active_tab_when_its_last_pane_closes(
+        cx: &mut TestAppContext,
+    ) {
         let (manager, records, cx) = tab_manager(cx);
         click("create-tab-button", cx);
 
-        cx.simulate_keystrokes("cmd-w");
+        cx.simulate_keystrokes("cmd-alt-w");
         cx.run_until_parked();
 
         let state = manager.read_with(cx, |manager, _| {

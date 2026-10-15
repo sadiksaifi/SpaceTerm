@@ -147,8 +147,8 @@ fn menu_reinstalls_only_when_the_resolved_keymap_changes(cx: &mut TestAppContext
         apply(&KeybindingPreferences::default(), cx);
         assert_eq!(menu.installs(), 1);
 
-        // Close Workspace is already Unassigned by default.
-        let same = serde_json::from_str(r#"{"close_workspace":null}"#).unwrap();
+        // New Worktree is already Unassigned by default.
+        let same = serde_json::from_str(r#"{"new_worktree":null}"#).unwrap();
         apply(&same, cx);
         assert_eq!(menu.installs(), 1);
 

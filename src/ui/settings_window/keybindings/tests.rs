@@ -451,7 +451,7 @@ fn a_bound_chord_while_recording_is_recorded_instead_of_closing_settings(cx: &mu
         retained(&window, Command::NewWorkspace, cx),
         Some(Some(shortcut("cmd-w")))
     );
-    assert_eq!(retained(&window, Command::ClosePane, cx), Some(None));
+    assert_eq!(retained(&window, Command::CloseWorkspace, cx), Some(None));
 }
 
 #[gpui::test]
@@ -490,7 +490,7 @@ fn delete_unassigns_and_the_row_reset_restores_the_default(cx: &mut TestAppConte
 #[gpui::test]
 fn an_override_reserved_here_is_explained_and_its_default_stays_active(cx: &mut TestAppContext) {
     let (window, cx) = open_keybindings(
-        with_keybindings(r#"{"create_tab":"ctrl-c","close_workspace":"cmd-q"}"#),
+        with_keybindings(r#"{"create_tab":"ctrl-c","new_worktree":"cmd-q"}"#),
         cx,
     );
 
@@ -509,9 +509,9 @@ fn an_override_reserved_here_is_explained_and_its_default_stays_active(cx: &mut 
             .cloned()),
         Some(shortcut("cmd-t"))
     );
-    // Close Workspace has no default to fall back to.
+    // New Worktree has no default to fall back to.
     assert_eq!(
-        description(&window, Command::CloseWorkspace, cx),
+        description(&window, Command::NewWorktree, cx),
         Some(ShortcutDescription {
             text: "Primary+Q is reserved by Operating System for Quit here and isn't active."
                 .into(),
@@ -524,7 +524,7 @@ fn an_override_reserved_here_is_explained_and_its_default_stays_active(cx: &mut 
         Some(Some(shortcut("ctrl-c")))
     );
     assert_eq!(
-        retained(&window, Command::CloseWorkspace, cx),
+        retained(&window, Command::NewWorktree, cx),
         Some(Some(shortcut("cmd-q")))
     );
     // Focus scrolls the row, which sits below the first screen of Commands, into view.
@@ -536,19 +536,19 @@ fn an_override_reserved_here_is_explained_and_its_default_stays_active(cx: &mut 
 
 #[gpui::test]
 fn a_displaced_default_is_explained_and_its_reset_reclaims_it(cx: &mut TestAppContext) {
-    let (window, cx) = open_keybindings(with_keybindings(r#"{"close_workspace":"cmd-n"}"#), cx);
+    let (window, cx) = open_keybindings(with_keybindings(r#"{"new_worktree":"cmd-n"}"#), cx);
 
     assert_eq!(
         description(&window, Command::NewWorkspace, cx),
         Some(ShortcutDescription {
-            text: "Its default shortcut is assigned to Close Workspace.".into(),
+            text: "Its default shortcut is assigned to New Worktree.".into(),
             tone: CaptionTone::Warning,
         })
     );
     click("settings-row-shortcut-new-workspace-reset", cx);
 
     assert_eq!(retained(&window, Command::NewWorkspace, cx), None);
-    assert_eq!(retained(&window, Command::CloseWorkspace, cx), None);
+    assert_eq!(retained(&window, Command::NewWorktree, cx), None);
     assert_eq!(description(&window, Command::NewWorkspace, cx), None);
 }
 
@@ -709,7 +709,7 @@ fn searching_by_shortcut_captures_a_chord_that_closes_the_window(cx: &mut TestAp
     cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
 
-    assert_eq!(found(&window, cx), vec![Command::ClosePane]);
+    assert_eq!(found(&window, cx), vec![Command::CloseWorkspace]);
     assert!(cx.debug_bounds("settings-window-surface").is_some());
 }
 

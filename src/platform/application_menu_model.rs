@@ -75,7 +75,7 @@ pub(crate) fn file_menu() -> Menu {
             MenuItem::separator(),
             MenuItem::action("Close Pane", ClosePane),
             MenuItem::action("Close Tab", CloseTab),
-            MenuItem::action("Close Workspace", CloseWorkspace),
+            MenuItem::action("Kill Workspace", CloseWorkspace),
             MenuItem::separator(),
             MenuItem::action("Export Terminal Diagnostics…", ExportTerminalDiagnostics),
         ],

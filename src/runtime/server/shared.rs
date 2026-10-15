@@ -1,6 +1,6 @@
 //! Shared hierarchy ownership composed with the existing fenced Pane runtime.
 use super::*;
-use spaceterm_server::hierarchy::{Id, State};
+use spaceterm_server::hierarchy::{CloseInventory, ConfirmedPane, Id, Inventory, State};
 use std::collections::BTreeMap;
 
 pub struct SharedWorkspaceHost {
@@ -25,7 +25,9 @@ impl SharedWorkspaceHost {
             uncertain: false,
         }
     }
-    fn commit(&mut self, next: State) -> Result<(), Refusal> {
+    fn commit(&mut self, mut next: State) -> Result<(), Refusal> {
+        // Runtime facts authorize an in-memory comparison, never a later recovery read.
+        next.inventory.close = None;
         if let Some(store) = &self.store {
             let envelope = next
                 .envelope(&self.prototype.directory)
@@ -56,6 +58,13 @@ impl SharedWorkspaceHost {
     }
     fn synchronize(&mut self) -> Result<(), Refusal> {
         self.recover()?;
+        // Durable deletion is the cleanup intent. An uncertain commit is read back before any
+        // process is stopped, and an incomplete stop blocks replies and new work until resolved.
+        for (id, host) in &mut self.panes {
+            if self.state.pane(*id).is_none() && host.pane.as_ref().is_some_and(|p| !p.ended) {
+                host.shutdown().map_err(|_| Refusal::CleanupUnresolved)?;
+            }
+        }
         let mut next = self.state.clone();
         for (id, host) in &mut self.panes {
             host.retain_directory()?;
@@ -74,6 +83,28 @@ impl SharedWorkspaceHost {
         // Keep an exited runtime until its controller has observed its final screen.
         self.panes.retain(|_, h| h.pane.is_some());
         Ok(())
+    }
+    fn inventory(&self) -> Inventory {
+        let mut inventory = self.state.inventory.clone();
+        let sessions = inventory
+            .workspaces
+            .iter()
+            .flat_map(|w| &w.tabs)
+            .flat_map(|t| &t.panes)
+            .map(|pane| ConfirmedPane {
+                id: pane.id,
+                session: self
+                    .panes
+                    .get(&pane.id)
+                    .and_then(|host| host.pane.as_ref())
+                    .map(|pane| pane.lease.session),
+            })
+            .collect();
+        inventory.close = Some(CloseInventory {
+            boot: self.prototype.boot,
+            sessions,
+        });
+        inventory
     }
     fn pane_host(&mut self, id: Id) -> Result<&mut DevelopmentPaneHost, Refusal> {
         let (w, t, p) = self.state.pane(id).ok_or(Refusal::Missing)?;
@@ -133,7 +164,7 @@ impl SharedWorkspaceHost {
                 pane_takeover: true,
             }),
             Request::Inventory => Ok(Reply::Inventory {
-                inventory: self.state.inventory.clone(),
+                inventory: self.inventory(),
                 next_sequence: self.state.next_sequence(device),
             }),
             Request::Mutate { sequence, mutation } => {
@@ -147,6 +178,7 @@ impl SharedWorkspaceHost {
                     };
                 }
                 let mut next = self.state.clone();
+                next.inventory = self.inventory();
                 next.apply(
                     device,
                     sequence,
@@ -159,6 +191,7 @@ impl SharedWorkspaceHost {
                     .ok_or(Refusal::Failed)?
                     .clone();
                 self.commit(next)?;
+                self.synchronize()?;
                 Ok(Reply::Outcome(outcome))
             }
             Request::Resolve { sequence } => Ok(Reply::Outcome(
