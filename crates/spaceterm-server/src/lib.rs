@@ -71,9 +71,6 @@ pub fn run_local_with_panes(
     identity: &str,
     panes: impl pane::PaneService + 'static,
 ) -> Result<(), ServerError> {
-    if identity != "spaceterm-development" {
-        return Err(ServerError::Unsupported);
-    }
     host::install_shutdown_signals()?;
     host::serve_with_panes(&host::Paths::for_identity(identity)?, Some(Box::new(panes)))
 }

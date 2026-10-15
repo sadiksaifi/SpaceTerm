@@ -10,73 +10,8 @@
 //! text; it grants no local file action. Creating and removing a shared Worktree, and opening a
 //! Tab in a chosen one, stay unavailable until the server offers them.
 
-#[cfg(feature = "developer-tools")]
 pub(super) use development::SharedWorkspaceRepositories;
 
-#[cfg(not(feature = "developer-tools"))]
-mod unavailable {
-    use gpui::{App, Context, Window};
-
-    use super::super::WorkspaceManager;
-    use crate::domain::{WorkspaceId, WorktreeId};
-    use crate::repository_status::presentation::SidebarBadge;
-    use crate::ui::workspace_sidebar::WorktreeSection;
-
-    /// A build without shared Workspaces presents no server facts.
-    impl WorkspaceManager {
-        pub(in crate::ui::workspace_manager) const fn shared_sidebar_badge(
-            &self,
-            _: WorkspaceId,
-            _: &App,
-        ) -> Option<SidebarBadge> {
-            None
-        }
-
-        pub(in crate::ui::workspace_manager) const fn shared_chip_line(
-            &self,
-            _: WorkspaceId,
-            _: &App,
-        ) -> Option<String> {
-            None
-        }
-
-        pub(in crate::ui::workspace_manager) const fn shared_worktree_section(
-            &self,
-            _: WorkspaceId,
-            _: &App,
-        ) -> Option<WorktreeSection> {
-            None
-        }
-
-        pub(in crate::ui::workspace_manager) const fn set_shared_worktrees_expanded(
-            &mut self,
-            _: WorkspaceId,
-            _: bool,
-        ) {
-        }
-
-        pub(in crate::ui::workspace_manager) const fn open_shared_worktree(
-            &mut self,
-            _: WorkspaceId,
-            _: WorktreeId,
-            _: bool,
-            _: &mut Window,
-            _: &mut Context<Self>,
-        ) -> Option<bool> {
-            None
-        }
-
-        pub(in crate::ui::workspace_manager) const fn shared_worktree_root(
-            &self,
-            _: WorkspaceId,
-            _: WorktreeId,
-        ) -> Option<std::path::PathBuf> {
-            None
-        }
-    }
-}
-
-#[cfg(feature = "developer-tools")]
 mod development {
     use std::collections::{BTreeMap, HashMap};
     use std::path::{Path, PathBuf};

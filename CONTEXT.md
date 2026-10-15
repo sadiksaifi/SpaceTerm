@@ -284,4 +284,4 @@ _Avoid_: checkout, working copy
 
 **Developer Workbench**: The Development window for previewing appearance and interface controls.
 
-**Development Pane**: The Development window presenting one Terminal Session owned by the local SpaceTerm Server.
+**Development Pane**: The window presenting one Terminal Session owned by the local SpaceTerm Server.

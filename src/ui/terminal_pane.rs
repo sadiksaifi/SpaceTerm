@@ -1547,7 +1547,6 @@ impl TerminalPane {
 
     /// Whether the keyboard rests in the Pane's terminal itself. Terminal Find and the Pane's
     /// other keyboard owners sit inside the Pane and answer `false`.
-    #[cfg(any(test, feature = "developer-tools"))]
     pub(crate) fn is_focused(&self, window: &Window) -> bool {
         self.focus_handle.is_focused(window)
     }
@@ -1656,7 +1655,6 @@ impl TerminalPane {
     /// Pauses or resumes input while a server-backed Pane's server connection is interrupted. The
     /// Terminal Session and its last Screen stay in place, so the screen reads frozen. Input during
     /// the interruption reaches nothing and is never replayed.
-    #[cfg(feature = "developer-tools")]
     pub(crate) fn set_server_connection_interrupted(
         &mut self,
         interrupted: bool,
@@ -1688,7 +1686,6 @@ impl TerminalPane {
     /// its Terminal Session. The Terminal Session handle stays, so a later grant presents only
     /// Screens the server publishes after it. The former screen, title, metadata, accessible text,
     /// and cached frames are gone, and the next measurement supplies dimensions again.
-    #[cfg(feature = "developer-tools")]
     pub(crate) fn clear_server_presentation(&mut self, cx: &mut Context<Self>) {
         if !self.server_backed() {
             return;

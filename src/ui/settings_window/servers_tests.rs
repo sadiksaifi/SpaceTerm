@@ -357,20 +357,10 @@ fn a_build_without_a_local_server_omits_the_servers_section(cx: &mut TestAppCont
     assert!(!rendered(ROW_SELECTOR, cx));
 }
 
-fn offer_development_pane(window: &gpui::Entity<SettingsWindow>, cx: &mut VisualTestContext) {
-    window.update(cx, |settings, _| {
-        settings.local_server = settings
-            .local_server
-            .take()
-            .map(|row| row.offering_development_pane(true));
-    });
-}
-
 #[gpui::test]
 fn the_development_pane_waits_for_an_authenticated_server(cx: &mut TestAppContext) {
     let server = ScriptedServer::new(Err(ServerError::NotRunning));
     let (window, cx) = open_settings(offered(&server), cx);
-    offer_development_pane(&window, cx);
     click(NAVIGATION_SELECTOR, cx);
 
     // Opening never starts the server, so Start stays the step until a check authenticates.
@@ -384,29 +374,10 @@ fn the_development_pane_waits_for_an_authenticated_server(cx: &mut TestAppContex
 }
 
 #[gpui::test]
-fn a_build_without_the_development_pane_never_offers_it(cx: &mut TestAppContext) {
-    let server = ScriptedServer::new(Ok(connected(2)));
-    let (window, cx) = open_settings(offered(&server), cx);
-    window.update(cx, |settings, _| {
-        settings.local_server = settings
-            .local_server
-            .take()
-            .map(|row| row.offering_development_pane(false));
-    });
-
-    click(NAVIGATION_SELECTOR, cx);
-
-    assert!(rendered("settings-local-server-state-connected", cx));
-    assert!(!presentation(&window, cx).development_pane);
-    assert!(!rendered(OPEN_DEVELOPMENT_PANE_SELECTOR, cx));
-}
-
-#[gpui::test]
 fn a_server_without_the_development_pane_is_offered_no_terminal(cx: &mut TestAppContext) {
     // A server from before terminal operations authenticates but never says it runs the Pane.
     let server = ScriptedServer::new(Ok(status_only(2)));
     let (window, cx) = open_settings(offered(&server), cx);
-    offer_development_pane(&window, cx);
 
     click(NAVIGATION_SELECTOR, cx);
 

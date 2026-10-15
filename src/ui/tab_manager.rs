@@ -397,12 +397,8 @@ struct DraggedTab {
     owner: gpui::EntityId,
 }
 
-/// One shared server Workspace's Tabs, when a SpaceTerm Server owns the Workspace. A build
-/// without the developer tools has no shared Workspaces, so the binding is uninhabited.
-#[cfg(feature = "developer-tools")]
+/// One shared server Workspace's Tabs, when a SpaceTerm Server owns the Workspace.
 type SharedTabBinding = super::shared_workspaces::SharedTabs;
-#[cfg(not(feature = "developer-tools"))]
-type SharedTabBinding = std::convert::Infallible;
 
 /// What a shared server Workspace's Tab strip offers. Creating a Tab, splitting a Pane, and
 /// closing a Tab ask the server, so they wait while this client is offline or an earlier edit is
@@ -1295,7 +1291,6 @@ impl TabManager {
     pub(crate) fn create_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A shared Workspace's Tabs belong to the server. Creating one asks the server, and the
         // Tab appears here with the published membership rather than appearing locally first.
-        #[cfg(feature = "developer-tools")]
         if self.shared.is_some() {
             self.request_shared_tab(window, cx);
             return;
@@ -3044,16 +3039,6 @@ fn render_tab_identity(
 /// the Active Tab, so only the Active Tab's menu advertises one.
 /// Shared server Workspaces: how this Tab strip presents one server Workspace's Tabs and submits
 /// their edits.
-#[cfg(not(feature = "developer-tools"))]
-impl TabManager {
-    const fn shared_strip_controls(&self) -> Option<SharedStripControls> {
-        None
-    }
-
-    const fn forget_shared_tab(&mut self, _: TabId) {}
-}
-
-#[cfg(feature = "developer-tools")]
 impl TabManager {
     /// Presents one server Workspace in this Tab strip. The Tab this strip already owns becomes
     /// the server's Root Tab, and every later Tab arrives with the published membership.

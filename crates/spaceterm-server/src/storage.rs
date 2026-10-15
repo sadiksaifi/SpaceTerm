@@ -432,14 +432,19 @@ mod tests {
             (&view, &ClientView::default())
         );
         drop(client);
-        assert!(matches!(
-            ClientViewStore::open(Directory::open(&first, false).unwrap(), [7; 32], [9; 32]),
-            Err(ServerError::AuthenticationRefused)
-        ));
-        assert!(matches!(
-            ClientViewStore::open(Directory::open(&first, false).unwrap(), [8; 32], [10; 32]),
-            Err(ServerError::AuthenticationRefused)
-        ));
+        // Rejected credentials must release the writer slot for the next attempt.
+        assert_eq!(
+            ClientViewStore::open(Directory::open(&first, false).unwrap(), [7; 32], [9; 32]).err(),
+            Some(ServerError::AuthenticationRefused)
+        );
+        assert_eq!(
+            ClientViewStore::open(Directory::open(&first, false).unwrap(), [8; 32], [10; 32]).err(),
+            Some(ServerError::AuthenticationRefused)
+        );
+        let reopened =
+            ClientViewStore::open(Directory::open(&first, false).unwrap(), [8; 32], [9; 32])
+                .unwrap();
+        assert_eq!(reopened.view(), &view);
         assert_eq!(
             fs::metadata(first.join("view.json")).unwrap().mode() & 0o7777,
             0o600

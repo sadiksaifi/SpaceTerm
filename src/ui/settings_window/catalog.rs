@@ -80,15 +80,11 @@ impl SettingsSectionId {
             Self::Git => {
                 "The branch and changes of the repository each terminal pane is in, read with your own Git and GitHub CLI."
             }
-            Self::Servers if crate::ui::development_pane::offered() => {
+            Self::Servers => {
                 "The SpaceTerm Server for your account. Use Shared Workspaces presents the \
                  server's Workspaces beside your own, running their terminals in the server while \
                  your own keep running theirs in SpaceTerm. The Development Pane window presents \
                  a single server Pane instead."
-            }
-            Self::Servers => {
-                "The SpaceTerm Server for your account. Terminal panes still run in SpaceTerm \
-                 itself."
             }
             Self::Updates => {
                 "SpaceTerm keeps itself current in the background and asks before it restarts."

@@ -187,7 +187,7 @@ run = "cargo clippy --all-targets --all-features --locked --no-deps -- -D warnin
 
 [tasks."lint:rust:portable"]
 description = "Lint shared targets without native features"
-run = "cargo clippy --package spaceterm --package spaceterm-directories --package spaceterm-server --all-targets --no-default-features --locked --no-deps -- -D warnings"
+run = "cargo clippy --package spaceterm --package spaceterm-directories --package spaceterm-server --package spaceterm-server-host --all-targets --no-default-features --locked --no-deps -- -D warnings"
 
 [tasks."lint:python"]
 description = "Lint and type-check the Python task code"
@@ -220,7 +220,7 @@ run = "cargo check --package spaceterm --lib --bins --no-default-features --feat
 
 [tasks."check:portable"]
 description = "Check shared targets without native features"
-run = "cargo check --package spaceterm --package spaceterm-directories --package spaceterm-server --all-targets --no-default-features --locked"
+run = "cargo check --package spaceterm --package spaceterm-directories --package spaceterm-server --package spaceterm-server-host --all-targets --no-default-features --locked"
 
 [tasks.test]
 description = "Run tests with every feature for the current platform"
@@ -229,7 +229,7 @@ run = "cargo test --all-targets --all-features --locked {{usage.filter | quote}}
 
 [tasks."test:portable"]
 description = "Run shared tests without native features"
-run = "cargo test --package spaceterm --package spaceterm-directories --package spaceterm-server --all-targets --no-default-features --locked"
+run = "cargo test --package spaceterm --package spaceterm-directories --package spaceterm-server --package spaceterm-server-host --all-targets --no-default-features --locked"
 
 [tasks."test:rustdoc"]
 description = "Compile and test Rust documentation examples"
@@ -382,7 +382,7 @@ run = "git-cliff --config cliff.toml --unreleased --offline --strip all"
 
 [tasks."server:test"]
 description = "Test local server authentication and private storage"
-run = "cargo test --package spaceterm-server --package spaceterm-directories --all-features --locked"
+run = "cargo test --package spaceterm-server --package spaceterm-server-host --package spaceterm-directories --all-features --locked"
 
 [tasks."server:check"]
 description = "Check the local server and desktop credential adapters"
@@ -463,3 +463,7 @@ run = [
   "cargo run --package spaceterm-server-host --features client --example repository_reads --locked -- 1",
   "cargo run --package spaceterm-server-host --features client --example repository_reads --locked -- 2",
 ]
+
+[tasks."server:test:host"]
+description = "Test the headless executable's build isolation"
+run = "cargo test --package spaceterm-server-host --no-default-features --locked"

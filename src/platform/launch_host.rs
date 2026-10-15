@@ -48,10 +48,11 @@ fn running_executable_of(image: &Path) -> Option<PathBuf> {
 #[cfg(target_os = "macos")]
 fn installed_resource_root(executable: &Path) -> Option<PathBuf> {
     let macos = executable.parent()?;
-    if macos.file_name()? != "MacOS" {
-        return None;
+    match macos.file_name()?.to_str()? {
+        "MacOS" => Some(macos.parent()?.join("Resources")),
+        "bin" => Some(macos.parent()?.join("share/spaceterm")),
+        _ => None,
     }
-    Some(macos.parent()?.join("Resources"))
 }
 
 /// `<prefix>/bin/spaceterm` reads `<prefix>/share/spaceterm`.
@@ -338,8 +339,8 @@ mod tests {
             ))
         );
         assert_eq!(
-            installed_resource_root(Path::new("/usr/local/bin/spaceterm")),
-            None
+            installed_resource_root(Path::new("/usr/local/bin/spaceterm-server")),
+            Some(PathBuf::from("/usr/local/share/spaceterm"))
         );
         assert!(!shell_integration_supported(Path::new("/bin/bash")));
     }

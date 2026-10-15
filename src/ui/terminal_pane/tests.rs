@@ -1578,7 +1578,6 @@ fn accessibility_models_are_applied_only_with_their_matching_screen_generation(
     });
 }
 
-#[cfg(feature = "developer-tools")]
 #[gpui::test]
 fn clearing_a_server_presentation_forgets_the_former_screen_and_text(cx: &mut TestAppContext) {
     cx.update(crate::ui::init)

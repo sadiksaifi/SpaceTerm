@@ -127,7 +127,6 @@ pub(super) enum WorktreeRemoval {
     /// The repository the Workspace reads doesn't list the Worktree, so only its Tabs remain.
     Unlisted,
     /// A SpaceTerm Server owns the Worktree, and removing it there is not available yet.
-    #[cfg(feature = "developer-tools")]
     Server,
 }
 

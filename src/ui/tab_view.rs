@@ -68,12 +68,8 @@ use spaceterm_ui::{
     ResizeInputSource, Tooltip,
 };
 
-/// One Tab's shared server Panes, when a SpaceTerm Server owns the Tab. A build without the
-/// developer tools has no shared Workspaces, so the binding is uninhabited and always absent.
-#[cfg(feature = "developer-tools")]
+/// One Tab's shared server Panes, when a SpaceTerm Server owns the Tab.
 type SharedPaneBinding = super::shared_workspaces::SharedPanes;
-#[cfg(not(feature = "developer-tools"))]
-type SharedPaneBinding = std::convert::Infallible;
 
 /// What a shared server Pane presents in place of, and over, its terminal.
 #[derive(Default)]
@@ -1221,7 +1217,6 @@ impl TabView {
     ) {
         // A shared Pane Layout belongs to the server. Splitting asks the server, and the new Pane
         // arrives with the published membership rather than appearing here first.
-        #[cfg(feature = "developer-tools")]
         if self.shared.is_some() {
             self.split_shared(target_pane_id, axis, window, cx);
             return;
@@ -2348,37 +2343,6 @@ impl TabView {
 
 /// Shared server Panes: how this Tab presents one server Tab's Panes, submits its edits, and
 /// refuses the operations the server path does not support yet.
-#[cfg(not(feature = "developer-tools"))]
-impl TabView {
-    const fn shared_pane_surface(
-        &self,
-        _: PaneId,
-        _: &gpui::WeakEntity<Self>,
-        _: &App,
-    ) -> SharedPaneSurface {
-        SharedPaneSurface {
-            screen: None,
-            notice: None,
-        }
-    }
-
-    const fn shared_caption_controls(&self, _: PaneId) -> Option<SharedCaptionControls> {
-        None
-    }
-
-    const fn select_shared_pane(&self, _: PaneId) {}
-
-    const fn forget_shared_pane(&mut self, _: PaneId) {}
-
-    /// Without developer tools no SpaceTerm Server owns a Pane here.
-    const fn holds_shared_pane_locally(&self, _: PaneId) -> bool {
-        self.shared.is_some()
-    }
-
-    const fn release_shared_pane(&mut self, _: PaneId, _: &mut Window, _: &mut Context<Self>) {}
-}
-
-#[cfg(feature = "developer-tools")]
 impl TabView {
     pub(crate) fn shared_layout(&self) -> Option<spaceterm_server::client_view::Layout> {
         use spaceterm_server::client_view::{Layout, LayoutNode};

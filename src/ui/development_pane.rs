@@ -1,35 +1,12 @@
-//! The Development Pane: a SpaceTerm Development window presenting one Terminal Session that the
-//! local SpaceTerm Server owns.
+//! The Development Pane: a window presenting one Terminal Session that the local SpaceTerm Server
+//! owns.
 //!
 //! The window stays outside every Workspace, so production Panes, quit confirmation, and Workspace
 //! state never see it. Closing the window or quitting SpaceTerm detaches and leaves the shell
 //! running. Only End Session, or Close Pane inside the window, ends the shell.
 
-use crate::application_identity::ApplicationIdentity;
-
-/// Whether this build offers the Development Pane. Only SpaceTerm Development with its developer
-/// tools does.
-pub(crate) fn offered() -> bool {
-    cfg!(feature = "developer-tools") && ApplicationIdentity::current().is_development()
-}
-
-#[cfg(not(feature = "developer-tools"))]
-pub(crate) fn open_or_activate(_: &mut gpui::App) {}
-
-/// Whether a Development Pane window is presenting a server-owned Pane right now.
-///
-/// One device holds one authenticated connection per Pane, so the main Workspace Window's shared
-/// Workspaces and this window must never subscribe to the same server Pane at once: each
-/// subscription would rebind the Pane's lease and fence the other into reconnecting.
-#[cfg(not(feature = "developer-tools"))]
-pub(crate) fn is_open(_: &gpui::App) -> bool {
-    false
-}
-
-#[cfg(feature = "developer-tools")]
 pub(crate) use window::{DevelopmentPaneComposition, is_open, open_or_activate};
 
-#[cfg(feature = "developer-tools")]
 mod window {
     use std::path::PathBuf;
     use std::rc::Rc;
@@ -191,7 +168,11 @@ mod window {
             .then_some(handle)
     }
 
-    /// Whether a Development Pane window is open.
+    /// Whether a Development Pane window is presenting a server-owned Pane right now.
+    ///
+    /// One device holds one authenticated connection per Pane, so the main Workspace Window's
+    /// shared Workspaces and this window must never subscribe to the same server Pane at once:
+    /// each subscription would rebind the Pane's lease and fence the other into reconnecting.
     pub(crate) fn is_open(cx: &App) -> bool {
         open_window(cx).is_some()
     }
@@ -200,9 +181,6 @@ mod window {
     /// server to resume its Development Pane's Terminal Session, or to start one once the Pane has
     /// measured its size. It never sets up or starts the server.
     pub(crate) fn open_or_activate(cx: &mut App) {
-        if !super::offered() {
-            return;
-        }
         // A Workspace Window already presents this server's Panes, and one device holds one
         // connection per Pane. Opening a second presentation would fence the first.
         if super::super::shared_workspaces::adopted(cx) {
@@ -1270,6 +1248,6 @@ mod window {
     }
 }
 
-#[cfg(all(test, feature = "developer-tools"))]
+#[cfg(test)]
 #[path = "development_pane/tests.rs"]
 mod tests;

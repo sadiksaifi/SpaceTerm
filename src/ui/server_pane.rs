@@ -315,12 +315,10 @@ impl TerminalAccessibilityAdapter for UnavailableTerminalAccessibility {
     }
 }
 
-#[cfg(feature = "developer-tools")]
 pub(crate) use connection::{
     ServerPaneConnection, ServerPaneScreen, ServerPaneSync, ServerPaneView,
 };
 
-#[cfg(feature = "developer-tools")]
 mod connection {
     use std::sync::Arc;
 

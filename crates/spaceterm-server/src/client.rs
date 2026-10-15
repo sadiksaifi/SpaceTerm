@@ -75,22 +75,20 @@ impl LocalServer {
         )
     }
     pub fn for_identity(directory_name: &str) -> Result<Self, ServerError> {
-        // Development may run two independent desktop clients against one private server.
-        // Each uses native credential storage and explicit local pairing, never a secret file.
+        // Explicit test clients use native credential storage and local pairing in every
+        // application identity, never a fallback secret file.
         let mut account = "desktop".to_owned();
         let mut versions = vec![2, 1];
-        if directory_name == "spaceterm-development" {
-            if let Some(client) = std::env::var_os("SPACETERM_DEVELOPMENT_CLIENT") {
-                let client = client.to_str().ok_or(ServerError::Unsupported)?;
-                account = development_account(client)?;
-            }
-            if let Some(major) = std::env::var_os("SPACETERM_DEVELOPMENT_PROTOCOL_MAJOR") {
-                versions = match major.to_str() {
-                    Some("1") => vec![1],
-                    Some("2") => vec![2],
-                    _ => return Err(ServerError::IncompatibleProtocol),
-                };
-            }
+        if let Some(client) = std::env::var_os("SPACETERM_DEVELOPMENT_CLIENT") {
+            let client = client.to_str().ok_or(ServerError::Unsupported)?;
+            account = development_account(client)?;
+        }
+        if let Some(major) = std::env::var_os("SPACETERM_DEVELOPMENT_PROTOCOL_MAJOR") {
+            versions = match major.to_str() {
+                Some("1") => vec![1],
+                Some("2") => vec![2],
+                _ => return Err(ServerError::IncompatibleProtocol),
+            };
         }
         Ok(Self {
             paths: Paths::for_identity(directory_name)?,
@@ -160,9 +158,6 @@ impl LocalServer {
 
     /// Authenticates a terminal transport without setup or implicit Start Server.
     pub fn connect_pane(&self) -> Result<crate::pane::PaneConnection, ServerError> {
-        if self.identity != "spaceterm-development" {
-            return Err(ServerError::Unsupported);
-        }
         let credential = self.credential()?.ok_or(ServerError::NotPaired)?;
         let mut stream = host::connect(&self.paths)?;
         protocol::authenticate_client(
