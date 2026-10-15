@@ -32,8 +32,26 @@ pub struct LocalServer {
     account: String,
     versions: Vec<u16>,
     shared_pane: std::sync::Arc<crate::pane::SharedPaneConnection>,
+    attachments:
+        std::sync::Arc<std::sync::OnceLock<Result<crate::attachments::Attachments, ServerError>>>,
 }
 impl LocalServer {
+    /// One durable attachment writer shared by the inventory and all Pane subscriptions.
+    pub fn attachments(&self) -> Result<crate::attachments::Attachments, ServerError> {
+        self.attachments
+            .get_or_init(|| {
+                let credential = self.credential()?.ok_or(ServerError::NotPaired)?;
+                let directory =
+                    Directory::open(&self.paths.data.join("clients").join(&self.account), true)?;
+                crate::attachments::Attachments::open(
+                    directory,
+                    credential.pin,
+                    protocol::public(&protocol::key(&credential.seed)?),
+                )
+            })
+            .clone()
+    }
+
     /// A single worker owns the journal lock for this exact native device credential and pin.
     pub fn shared_journal(&self) -> Result<crate::hierarchy::ClientJournal, ServerError> {
         let credential = self.credential()?.ok_or(ServerError::NotPaired)?;
@@ -80,6 +98,7 @@ impl LocalServer {
             account,
             versions,
             shared_pane: std::sync::Arc::default(),
+            attachments: std::sync::Arc::default(),
         })
     }
     /// Independent Development desktop identity, retained only in native credential storage.

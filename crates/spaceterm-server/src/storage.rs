@@ -472,6 +472,85 @@ mod tests {
             b"incomplete document"
         );
     }
+    #[cfg(feature = "client")]
+    #[test]
+    fn detached_attachments_and_unacknowledged_releases_survive_reopen_without_settings() {
+        use crate::attachments::Attachments;
+        use crate::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
+        let fixture = Fixture::new();
+        let inventory = Inventory {
+            revision: 1,
+            close: None,
+            workspaces: vec![Workspace {
+                id: [1; 32],
+                name: "work".into(),
+                name_version: 0,
+                pin_version: 0,
+                pinned_directory: None,
+                root_tab: [2; 32],
+                tabs: vec![Tab {
+                    id: [2; 32],
+                    root_pane: [3; 32],
+                    panes: vec![Pane {
+                        id: [3; 32],
+                        source: None,
+                        axis: Axis::Right,
+                        starting_directory: "/tmp".into(),
+                        confirmed_directory: None,
+                        creator: None,
+                    }],
+                }],
+            }],
+        };
+        let original = {
+            let choices = Attachments::open(fixture.open(), [8; 32], [9; 32]).unwrap();
+            choices.reconcile(&inventory).unwrap();
+            let permit = choices.permit([3; 32]).unwrap();
+            choices.detach([1; 32]).unwrap();
+            assert!(!permit.active());
+            assert!(
+                Attachments::open(fixture.open(), [8; 32], [9; 32]).is_err(),
+                "one writer"
+            );
+            permit.attachment()
+        };
+        let choices = Attachments::open(fixture.open(), [8; 32], [9; 32]).unwrap();
+        choices.reconcile(&inventory).unwrap();
+        assert!(!choices.is_attached([1; 32]));
+        assert_eq!(choices.pending(), vec![original]);
+        choices.attach([1; 32]).unwrap();
+        let later = choices.permit([3; 32]).unwrap().attachment();
+        assert!(later.generation > original.generation);
+        choices.released(original).unwrap();
+        assert!(choices.is_attached([1; 32]));
+        drop(choices);
+        assert!(matches!(
+            Attachments::open(fixture.open(), [7; 32], [9; 32]),
+            Err(ServerError::AuthenticationRefused)
+        ));
+        assert!(matches!(
+            Attachments::open(fixture.open(), [8; 32], [10; 32]),
+            Err(ServerError::AuthenticationRefused)
+        ));
+        assert_eq!(
+            fs::metadata(fixture.0.join("attachments.json"))
+                .unwrap()
+                .mode()
+                & 0o7777,
+            0o600
+        );
+        assert!(!fixture.0.join("settings.json").exists());
+        fs::write(fixture.0.join("attachments.json"), b"incomplete document").unwrap();
+        assert!(matches!(
+            Attachments::open(fixture.open(), [8; 32], [9; 32]),
+            Err(ServerError::UnsafeStorage)
+        ));
+        assert_eq!(
+            fs::read(fixture.0.join("attachments.json")).unwrap(),
+            b"incomplete document"
+        );
+    }
+
     #[test]
     fn repeated_setup_retains_identity_and_paired_devices_with_private_modes() {
         let fixture = Fixture::new();

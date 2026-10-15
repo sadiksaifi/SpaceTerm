@@ -9,6 +9,7 @@ pub struct SharedWorkspaceHost {
     panes: BTreeMap<Id, DevelopmentPaneHost>,
     store: Option<OrganizationStore>,
     uncertain: bool,
+    attachment_generations: BTreeMap<(Id, Id), (u64, u64)>,
 }
 impl SharedWorkspaceHost {
     pub fn local() -> Result<Self, ServerError> {
@@ -23,6 +24,7 @@ impl SharedWorkspaceHost {
             panes: BTreeMap::new(),
             store: None,
             uncertain: false,
+            attachment_generations: BTreeMap::new(),
         }
     }
     fn commit(&mut self, mut next: State) -> Result<(), Refusal> {
@@ -82,6 +84,13 @@ impl SharedWorkspaceHost {
         }
         // Keep an exited runtime until its controller has observed its final screen.
         self.panes.retain(|_, h| h.pane.is_some());
+        self.attachment_generations.retain(|(_, workspace), _| {
+            self.state
+                .inventory
+                .workspaces
+                .iter()
+                .any(|w| w.id == *workspace)
+        });
         Ok(())
     }
     fn inventory(&self) -> Inventory {
@@ -159,6 +168,119 @@ impl SharedWorkspaceHost {
     fn handle(&mut self, device: Id, connection: Id, request: Request) -> Result<Reply, Refusal> {
         self.synchronize()?;
         match request {
+            Request::ClaimPane {
+                attachment,
+                pane: id,
+                claim,
+                size,
+                style,
+            } => {
+                let workspace = self.state.pane(id).ok_or(Refusal::Missing)?.0.id;
+                if workspace != attachment.workspace || attachment.generation == 0 {
+                    return Err(Refusal::Stale);
+                }
+                let generations = self
+                    .attachment_generations
+                    .entry((device, workspace))
+                    .or_default();
+                if attachment.generation < generations.0 || attachment.generation <= generations.1 {
+                    return Err(Refusal::Stale);
+                }
+                generations.0 = attachment.generation;
+                let host = self.pane_host(id)?;
+                // A new attachment observes an old grant without resuming it. Selection can only
+                // acquire unclaimed work; Take Over remains explicit.
+                if matches!(claim, AttachmentClaim::Select { explicit: false })
+                    && let Some(pane) = &host.pane
+                    && pane.device == Some(device)
+                    && pane.attachment_generation != Some(attachment.generation)
+                {
+                    return Ok(Reply::Takeover {
+                        target: pane.lease.into(),
+                    });
+                }
+                let reply = match claim {
+                    AttachmentClaim::Select { explicit } => {
+                        self.select(device, connection, id, explicit, size, style)?
+                    }
+                    AttachmentClaim::Start { server } => {
+                        if server != self.prototype.boot {
+                            return Err(Refusal::Stale);
+                        }
+                        self.select(device, connection, id, true, size, style)?
+                    }
+                    AttachmentClaim::TakeOver { target } => {
+                        let host = self.pane_host(id)?;
+                        if let Some(pane) = &host.pane {
+                            if PaneTarget::from(pane.lease) != target {
+                                return Err(Refusal::Stale);
+                            }
+                            host.handle(
+                                device,
+                                connection,
+                                Request::TakeOver {
+                                    target,
+                                    size,
+                                    style,
+                                },
+                            )?
+                        } else {
+                            if target.server != host.boot || target.session != id {
+                                return Err(Refusal::Stale);
+                            }
+                            Reply::Attached {
+                                lease: host.start(device, connection, size, style)?,
+                            }
+                        }
+                    }
+                };
+                if matches!(reply, Reply::Attached { .. }) {
+                    self.pane_host(id)?
+                        .pane
+                        .as_mut()
+                        .ok_or(Refusal::Missing)?
+                        .attachment_generation = Some(attachment.generation);
+                }
+                Ok(reply)
+            }
+            Request::ReleaseAttachment { attachment } => {
+                // Deletion or restart already ended the original grants. Never restore membership.
+                if !self
+                    .state
+                    .inventory
+                    .workspaces
+                    .iter()
+                    .any(|w| w.id == attachment.workspace)
+                {
+                    return Ok(Reply::Unchanged);
+                }
+                if attachment.generation == 0 {
+                    return Err(Refusal::Stale);
+                }
+                let generations = self
+                    .attachment_generations
+                    .entry((device, attachment.workspace))
+                    .or_default();
+                generations.1 = generations.1.max(attachment.generation);
+                for (id, host) in &mut self.panes {
+                    if self
+                        .state
+                        .pane(*id)
+                        .is_some_and(|(w, _, _)| w.id == attachment.workspace)
+                        && let Some(pane) = &mut host.pane
+                        && pane.device == Some(device)
+                        && pane
+                            .attachment_generation
+                            .is_some_and(|generation| generation <= attachment.generation)
+                    {
+                        pane.lease.control = nonce().map_err(|_| Refusal::Failed)?;
+                        pane.device = None;
+                        pane.connected = false;
+                        pane.attachment_generation = None;
+                    }
+                }
+                Ok(Reply::Unchanged)
+            }
             Request::Capabilities => Ok(Reply::Capabilities {
                 development_pane: true,
                 pane_takeover: true,

@@ -1,4 +1,5 @@
 //! Private local SpaceTerm Protocol and explicit local server setup.
+pub mod attachments;
 #[cfg(feature = "client")]
 mod client;
 pub mod client_view;
