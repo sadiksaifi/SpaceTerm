@@ -2,6 +2,8 @@
 
 import io
 import json
+import shutil
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -9,6 +11,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from spaceterm_tasks import TaskError, release, server_package
+from spaceterm_tasks.package_linux import write_archive
+from spaceterm_tasks.packaging import NOTICES, SHELL_INTEGRATION, TERMINFO
 
 
 class ServerArchiveTests(unittest.TestCase):
@@ -92,6 +96,35 @@ class ServerArchiveTests(unittest.TestCase):
         self.archive_with([entry, entry])
         with self.assertRaises(TaskError):
             self.unpack()
+
+    def test_signed_package_with_missing_or_extra_resources_is_refused(self):
+        tree = self.root / "server"
+        (tree / "bin").mkdir(parents=True)
+        (tree / "bin/spaceterm-server").write_bytes(b"never executed")
+        (tree / "bin/spaceterm-server").chmod(0o755)
+        (tree / "build.json").write_text(json.dumps(self.info))
+        resources = tree / "share/spaceterm"
+        shutil.copytree(SHELL_INTEGRATION, resources / "shell-integration")
+        shutil.copyfile(NOTICES, resources / NOTICES.name)
+        subprocess.run(
+            ["tic", "-x", "-o", str(resources / "terminfo"), str(TERMINFO)],
+            check=True,
+            capture_output=True,
+        )
+        missing = resources / "shell-integration/zsh/.zshenv"
+        saved = missing.read_bytes()
+        missing.unlink()
+        for extra in (False, True):
+            if extra:
+                missing.write_bytes(saved)
+                (resources / "unexpected").mkdir()
+            write_archive(tree, self.archive)
+            release.sign_ed25519(self.seed, self.archive, self.signature)
+            with tempfile.TemporaryDirectory(dir=self.root) as temporary:
+                with self.assertRaisesRegex(TaskError, "supported layout"):
+                    server_package.verified_copy(
+                        self.archive, self.signature, Path(temporary), self.info
+                    )
 
     def test_signed_malformed_build_document_is_refused(self):
         for payload in [b"null", b"[]", b"{}", b"invalid", b'{"schema":1,"schema":2}']:
