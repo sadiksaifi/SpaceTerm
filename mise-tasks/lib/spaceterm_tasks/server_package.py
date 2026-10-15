@@ -167,6 +167,15 @@ def verify_tree(tree, expected):
         "share/spaceterm/THIRD-PARTY-NOTICES.txt",
     }:
         raise TaskError("the server resources do not match the supported layout")
+    directories = {str(path.relative_to(tree)) for path in tree.rglob("*") if path.is_dir()}
+    required_directories = {
+        str(parent)
+        for name in files
+        for parent in PurePosixPath(name).parents
+        if str(parent) != "."
+    }
+    if directories != required_directories:
+        raise TaskError("the server directories do not match the supported layout")
     executable = tree / "bin/spaceterm-server"
     if expected["target"] != host_target():
         raise TaskError("the server target cannot run on this host")
@@ -276,6 +285,16 @@ def install(archive, signature, expected):
                 if path.is_file():
                     with path.open("rb") as source:
                         os.fsync(source.fileno())
+            for path in sorted(
+                [tree, *(p for p in tree.rglob("*") if p.is_dir())],
+                key=lambda p: len(p.parts),
+                reverse=True,
+            ):
+                nested = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    os.fsync(nested)
+                finally:
+                    os.close(nested)
             os.rename(tree, destination)
             os.fsync(descriptor)
     finally:
