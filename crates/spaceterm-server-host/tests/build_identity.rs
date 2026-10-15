@@ -11,6 +11,15 @@ fn server_reports_its_compiled_identity_and_refuses_other_namespaces() {
     assert!(output.status.success());
     let info: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(info["identity"], env!("SPACETERM_SERVER_IDENTITY"));
+    let head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert!(head.status.success());
+    assert_eq!(
+        info["commit"],
+        String::from_utf8(head.stdout).unwrap().trim()
+    );
     for identity in ["spaceterm", "spaceterm-preflight", "spaceterm-development"] {
         if identity != env!("SPACETERM_SERVER_IDENTITY") {
             assert!(

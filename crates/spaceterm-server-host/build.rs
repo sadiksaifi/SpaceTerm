@@ -2,7 +2,10 @@
 mod identity;
 
 fn main() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = std::path::PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("Cargo supplies the manifest directory"),
+    )
+    .join("../..");
     for input in ["SPACETERM_PACKAGED", "SPACETERM_RELEASE_TAG"] {
         println!("cargo:rerun-if-env-changed={input}");
     }
