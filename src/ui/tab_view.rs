@@ -866,6 +866,15 @@ impl TabView {
     /// [`Self::activate_without_focus`], which asks the server for nothing.
     pub(crate) fn activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.activate_without_focus(cx);
+        self.open_focused_pane(window, cx);
+    }
+
+    /// Opens this Tab's Focused Pane for a person, leaving the focus branch its Workspace owns
+    /// where that Workspace set it.
+    ///
+    /// A Tab strip whose Workspace opens reaches here instead of [`Self::activate`], because the
+    /// Workspace decides the focus branch for every one of its Tabs.
+    pub(crate) fn open_focused_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.select_shared_pane(self.tab.focused_pane_id());
         self.focus(window, cx);
     }

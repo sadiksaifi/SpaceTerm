@@ -642,9 +642,17 @@ impl TabManager {
             .native_service_target(origin)
     }
 
+    /// Opens this Workspace's Tabs for a person, which is an explicit opening of its Active Tab
+    /// and so an explicit selection of that Tab's Focused Pane.
+    ///
+    /// Only that Pane is asked for: every other Pane keeps the grant it already has, or none.
+    /// Restoring an Active Workspace while publishing membership, or while a person's focus stays
+    /// in the sidebar, uses [`Self::activate_without_focus`], which asks the server for nothing.
     pub(crate) fn activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.activate_without_focus(cx);
-        self.focus(window, cx);
+        self.tabs
+            .active_tab()
+            .update(cx, |view, cx| view.open_focused_pane(window, cx));
     }
 
     pub(crate) fn activate_without_focus(&mut self, cx: &mut Context<Self>) {

@@ -489,6 +489,48 @@ fn focus_a_shared_pane_regains_should_not_ask_the_server_for_it(cx: &mut TestApp
 }
 
 #[gpui::test]
+fn opening_a_shared_workspace_should_ask_the_server_for_its_focused_pane(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_tab_manager(cx);
+    publish(
+        &harness,
+        inventory(
+            2,
+            vec![tab(
+                ROOT_TAB,
+                vec![
+                    pane(ROOT_PANE, None, Axis::Right),
+                    pane(SPLIT_PANE, Some(ROOT_PANE), Axis::Down),
+                ],
+            )],
+        ),
+        cx,
+    );
+    assert_eq!(harness.panes.pane(ROOT_PANE).selections(), 0);
+    assert_eq!(harness.panes.pane(SPLIT_PANE).selections(), 0);
+
+    // Opening this Workspace from the sidebar or the switcher hands it the window the Workspace
+    // before it had, which is an explicit opening of its Active Tab.
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.deactivate(cx);
+            manager.activate(window, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        harness.panes.pane(ROOT_PANE).selections(),
+        1,
+        "opening a Workspace should ask the server for its Focused Pane once"
+    );
+    assert_eq!(
+        harness.panes.pane(SPLIT_PANE).selections(),
+        0,
+        "it should ask for no other Pane"
+    );
+}
+
+#[gpui::test]
 fn an_explicit_pane_press_should_ask_the_server_for_that_pane(cx: &mut TestAppContext) {
     let (harness, cx) = shared_tab_manager(cx);
     publish(
