@@ -214,6 +214,10 @@ run = "cog verify --ignore-merge-commits --file {{usage.file | quote}}"
 description = "Check every target and feature"
 run = "cargo check --all-targets --all-features --locked"
 
+[tasks."check:desktop"]
+description = "Check the desktop without Development tools"
+run = "cargo check --package spaceterm --lib --bins --no-default-features --features desktop --locked"
+
 [tasks."check:portable"]
 description = "Check shared targets without native features"
 run = "cargo check --package spaceterm --package spaceterm-directories --package spaceterm-server --all-targets --no-default-features --locked"
