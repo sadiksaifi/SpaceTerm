@@ -25,10 +25,14 @@ pub(crate) struct DevelopmentPaneState {
     retry: AtomicBool,
     close: AtomicBool,
     epoch: AtomicU64,
+    connected_epoch: AtomicU64,
 }
 impl DevelopmentPaneState {
     pub(crate) fn status(&self) -> DevelopmentPaneStatus {
         *self.status.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    pub(crate) fn connection_generation(&self) -> u64 {
+        self.connected_epoch.load(Ordering::Acquire)
     }
     pub(crate) fn retry(&self) {
         self.retry.store(true, Ordering::Release);
@@ -55,6 +59,7 @@ impl DevelopmentServerSessionFactory {
             retry: AtomicBool::new(false),
             close: AtomicBool::new(false),
             epoch: AtomicU64::new(0),
+            connected_epoch: AtomicU64::new(0),
         });
         (
             Self {
@@ -217,6 +222,7 @@ fn present(
                             &appearance.lock().unwrap_or_else(|e| e.into_inner()),
                         )?;
                         let _ = events.force_send(TerminalSessionEvent::Screen(screen));
+                        state.connected_epoch.store(epoch, Ordering::Release);
                         state.set(DevelopmentPaneStatus::Connected);
                     }
                     Reply::Ended => {

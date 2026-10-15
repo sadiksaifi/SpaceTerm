@@ -83,6 +83,9 @@ mod window {
     /// What the window needs from the server connection behind its Pane.
     pub(crate) trait DevelopmentPaneConnection {
         fn status(&self) -> DevelopmentPaneStatus;
+        /// Identifies the connection that last supplied an authoritative screen. It changes only
+        /// when a new connection reaches the Session, and it outlives any status the window misses.
+        fn connection_generation(&self) -> u64;
         /// Asks for a reconnection attempt now instead of at the next automatic one.
         fn retry(&self);
         /// Asks the server to end the Terminal Session.
@@ -92,6 +95,10 @@ mod window {
     impl DevelopmentPaneConnection for DevelopmentPaneState {
         fn status(&self) -> DevelopmentPaneStatus {
             DevelopmentPaneState::status(self)
+        }
+
+        fn connection_generation(&self) -> u64 {
+            DevelopmentPaneState::connection_generation(self)
         }
 
         fn retry(&self) {
@@ -242,8 +249,9 @@ mod window {
         terminal: Entity<TerminalPane>,
         connection: Arc<dyn DevelopmentPaneConnection>,
         status: DevelopmentPaneStatus,
-        /// End Session was confirmed and awaits the server's answer.
-        ending: bool,
+        /// The connection generation that carried a confirmed End Session request still awaiting
+        /// the server's answer. A connection drops an unanswered request and never resends it.
+        end_request: Option<u64>,
         /// An End Session confirmation is open.
         confirming: bool,
         focus_handle: FocusHandle,
@@ -323,7 +331,7 @@ mod window {
                 terminal,
                 status: connection.status(),
                 connection,
-                ending: false,
+                end_request: None,
                 confirming: false,
                 focus_handle,
                 window_appearance,
@@ -337,11 +345,20 @@ mod window {
 
         /// Reads the connection's status and presents any change.
         fn sync_status(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+            // Status first, because a connection publishes its generation before it reports
+            // Connected.
             let status = self.connection.status();
-            if status == self.status {
+            let generation = self.connection.connection_generation();
+            // A later connection reached the Session, so it still runs, even when the window
+            // missed the interruption between two reads.
+            let superseded = self.end_request.is_some_and(|sent| sent != generation);
+            if status == self.status && !superseded {
                 return;
             }
             self.status = status;
+            if superseded {
+                self.end_request = None;
+            }
             self.apply_status(window, cx);
         }
 
@@ -352,7 +369,7 @@ mod window {
             }
             // A refused End Session leaves the shell running, so the action is offered again.
             if matches!(self.status, DevelopmentPaneStatus::Failed(_)) {
-                self.ending = false;
+                self.end_request = None;
             }
             let interrupted = self.status != DevelopmentPaneStatus::Connected;
             self.terminal.update(cx, |terminal, cx| {
@@ -378,7 +395,9 @@ mod window {
         }
 
         fn can_end_session(&self) -> bool {
-            self.status == DevelopmentPaneStatus::Connected && !self.ending && !self.confirming
+            self.status == DevelopmentPaneStatus::Connected
+                && self.end_request.is_none()
+                && !self.confirming
         }
 
         /// Close Pane in this window ends the shell, as it does for a Workspace Pane. Closing the
@@ -443,7 +462,9 @@ mod window {
             self.confirming = false;
             // The connection may have changed while the confirmation was open.
             if confirmed && self.status == DevelopmentPaneStatus::Connected {
-                self.ending = true;
+                // Read before sending, so a reconnection that races the request settles it
+                // rather than leaving it awaiting an answer that never comes.
+                self.end_request = Some(self.connection.connection_generation());
                 self.connection.end_session();
             }
             self.terminal
@@ -454,7 +475,7 @@ mod window {
         /// The header's progress, read by assistive technology as one status. An interruption
         /// reports through its notice instead.
         fn progress_label(&self) -> Option<&'static str> {
-            if self.ending {
+            if self.end_request.is_some() && self.status == DevelopmentPaneStatus::Connected {
                 return Some("Ending Session…");
             }
             (self.status == DevelopmentPaneStatus::Connecting).then_some("Connecting…")
@@ -589,9 +610,12 @@ mod window {
             let (title, detail, intent) = match self.status {
                 DevelopmentPaneStatus::Reconnecting => (
                     SharedString::new_static("Reconnecting…"),
-                    SharedString::new_static(
-                        "Typing is paused and is not sent. The shell keeps running on the server.",
-                    ),
+                    SharedString::new_static(if self.end_request.is_some() {
+                        "End Session was interrupted and is not sent again. Typing is paused and \
+                         is not sent."
+                    } else {
+                        "Typing is paused and is not sent. The shell keeps running on the server."
+                    }),
                     StatusIntent::Warning,
                 ),
                 DevelopmentPaneStatus::Failed(error) => (
@@ -816,13 +840,15 @@ mod window {
     #[cfg(test)]
     pub(super) mod testing {
         use std::sync::Mutex;
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
         use super::{DevelopmentPaneConnection, DevelopmentPaneStatus};
 
-        /// A connection whose status the test sets and whose requests it counts.
+        /// A connection whose status and reconnections the test sets and whose requests it
+        /// counts.
         pub(in crate::ui::development_pane) struct ScriptedConnection {
             status: Mutex<DevelopmentPaneStatus>,
+            generation: AtomicU64,
             retries: AtomicUsize,
             end_sessions: AtomicUsize,
         }
@@ -831,6 +857,7 @@ mod window {
             pub(in crate::ui::development_pane) fn new(status: DevelopmentPaneStatus) -> Self {
                 Self {
                     status: Mutex::new(status),
+                    generation: AtomicU64::new(0),
                     retries: AtomicUsize::new(0),
                     end_sessions: AtomicUsize::new(0),
                 }
@@ -838,6 +865,12 @@ mod window {
 
             pub(in crate::ui::development_pane) fn set(&self, status: DevelopmentPaneStatus) {
                 *self.status.lock().expect("status") = status;
+            }
+
+            /// A new connection reaches the Session and supplies its screen.
+            pub(in crate::ui::development_pane) fn reconnect(&self) {
+                self.generation.fetch_add(1, Ordering::SeqCst);
+                self.set(DevelopmentPaneStatus::Connected);
             }
 
             pub(in crate::ui::development_pane) fn retries(&self) -> usize {
@@ -852,6 +885,10 @@ mod window {
         impl DevelopmentPaneConnection for ScriptedConnection {
             fn status(&self) -> DevelopmentPaneStatus {
                 *self.status.lock().expect("status")
+            }
+
+            fn connection_generation(&self) -> u64 {
+                self.generation.load(Ordering::SeqCst)
             }
 
             fn retry(&self) {

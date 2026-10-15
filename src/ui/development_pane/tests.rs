@@ -81,6 +81,12 @@ impl OpenPane<'_> {
         self.cx.run_until_parked();
     }
 
+    fn reconnect(&mut self) {
+        self.connection.reconnect();
+        self.cx.executor().advance_clock(STATUS_INTERVAL);
+        self.cx.run_until_parked();
+    }
+
     fn rendered(&mut self, selector: &'static str) -> bool {
         self.cx.debug_bounds(selector).is_some()
     }
@@ -209,6 +215,64 @@ fn end_session_asks_first_and_waits_for_the_server(cx: &mut TestAppContext) {
 
     pane.set(DevelopmentPaneStatus::Ended);
     assert!(pane.closed(), "the window closes once the session ended");
+}
+
+#[gpui::test]
+fn an_interrupted_end_session_is_offered_again_once_the_session_proves_running(
+    cx: &mut TestAppContext,
+) {
+    let mut pane = open_pane(DevelopmentPaneStatus::Connected, cx);
+    pane.click(END_SESSION_SELECTOR);
+    pane.click("modal-action-development-pane-end-session-confirm");
+    assert_eq!(pane.connection.end_sessions(), 1);
+
+    // Polls on the same connection keep waiting for the server's answer.
+    pane.set(DevelopmentPaneStatus::Connected);
+    assert!(pane.rendered("development-pane-status"));
+    pane.click(END_SESSION_SELECTOR);
+    assert!(!pane.rendered("modal-action-development-pane-end-session-confirm"));
+
+    // The connection drops before the server answers, and the connection never resends Close.
+    pane.set(DevelopmentPaneStatus::Reconnecting);
+    assert!(pane.rendered(NOTICE_SELECTOR));
+    assert!(
+        !pane.rendered("development-pane-status"),
+        "nothing claims the Session is still ending"
+    );
+
+    // Reconnection to a running Session settles the request without replaying it.
+    pane.reconnect();
+    assert!(!pane.rendered(NOTICE_SELECTOR));
+    assert!(!pane.rendered("development-pane-status"));
+    assert_eq!(
+        pane.connection.end_sessions(),
+        1,
+        "reconnection replays nothing"
+    );
+    pane.cx.simulate_keystrokes("a");
+    assert!(pane.keys() > 0, "the Pane takes input again");
+    assert!(!pane.closed());
+
+    // Ending still asks first, then reaches the server once.
+    pane.click(END_SESSION_SELECTOR);
+    assert!(pane.rendered("modal-action-development-pane-end-session-confirm"));
+    assert_eq!(pane.connection.end_sessions(), 1, "End Session asks first");
+    pane.click("modal-action-development-pane-end-session-confirm");
+    assert_eq!(pane.connection.end_sessions(), 2);
+    assert!(pane.rendered("development-pane-status"));
+
+    // A busy window can miss the interruption when reconnection completes between two polls.
+    pane.connection.set(DevelopmentPaneStatus::Reconnecting);
+    pane.reconnect();
+    assert!(
+        !pane.rendered("development-pane-status"),
+        "the new connection proves the Session still runs"
+    );
+    pane.click(END_SESSION_SELECTOR);
+    assert!(pane.rendered("modal-action-development-pane-end-session-confirm"));
+    assert_eq!(pane.connection.end_sessions(), 2, "End Session asks first");
+    pane.click("modal-action-development-pane-end-session-confirm");
+    assert_eq!(pane.connection.end_sessions(), 3);
 }
 
 #[gpui::test]
