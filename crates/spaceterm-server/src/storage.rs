@@ -599,6 +599,10 @@ mod tests {
         organization.name = "Retained work".into();
         organization.pinned_directory = Some(fixture.0.clone());
         organization.confirmed_directory = Some("/".into());
+        let mut shared = crate::hierarchy::State::from_legacy(&organization);
+        let creation = crate::hierarchy::Mutation::CreateTab { workspace: organization.workspace };
+        let accepted = shared.apply([42; 32], 1, creation.clone(), &fixture.0, |_| true).unwrap();
+        organization = shared.envelope(&fixture.0).unwrap();
         record.organization = Some(organization.clone());
         let fault = sync_failure::fail_directory(&data.0);
         assert_eq!(data.write(&record), Err(ServerError::StorageUnavailable));
@@ -612,6 +616,9 @@ mod tests {
         assert_eq!(recovered.seed, record.seed);
         assert_eq!(recovered.paired, [[42; 32]]);
         assert!(recovered.organization.as_ref() == Some(&organization));
+        let mut restored = crate::hierarchy::State::from_legacy(recovered.organization.as_ref().unwrap());
+        assert_eq!(restored.apply([42; 32], 1, creation, &fixture.0, |_| true).unwrap(), accepted);
+        assert_eq!(restored.inventory.workspaces[0].tabs.len(), 2);
     }
 
     #[cfg(target_os = "linux")]

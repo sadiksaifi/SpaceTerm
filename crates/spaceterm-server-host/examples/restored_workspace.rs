@@ -154,7 +154,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 mod faults {
     use super::*;
     use std::process::{Command, Stdio};
-    use std::time::Instant;
     use std::{
         path::PathBuf,
         sync::{
