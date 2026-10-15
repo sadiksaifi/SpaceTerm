@@ -13,7 +13,7 @@ pub struct DevelopmentPaneHost {
     directory: ValidatedLocalDirectory,
 }
 struct OwnedPane {
-    device: [u8; 32],
+    device: Option<[u8; 32]>,
     lease: Lease,
     connected: bool,
     runtime: TerminalRuntime,
@@ -98,7 +98,7 @@ impl DevelopmentPaneHost {
         let subscription = runtime.subscribe();
         // No focus grant: OSC 52 and native requests have no eligible client in this slice.
         self.pane = Some(OwnedPane {
-            device,
+            device: Some(device),
             lease,
             connected: true,
             runtime,
@@ -111,6 +111,37 @@ impl DevelopmentPaneHost {
         });
         Ok(lease)
     }
+    fn select(
+        &mut self,
+        device: [u8; 32],
+        connection: [u8; 32],
+        create: bool,
+        size: PaneSize,
+        resume: Option<PaneTarget>,
+        style: Option<PresentationStyle>,
+    ) -> Result<Reply, Refusal> {
+        size.validate().map_err(|_| Refusal::Unsupported)?;
+        self.reconcile_selection()?;
+        if let Some(pane) = &mut self.pane {
+            let target = PaneTarget::from(pane.lease);
+            if resume.is_some_and(|old| old != target) {
+                return Err(Refusal::Stale);
+            }
+            if pane.device.is_some_and(|owner| owner != device)
+                || (pane.device.is_none() && resume.is_some())
+            {
+                return Ok(Reply::Takeover { target });
+            }
+            return pane.claim(device, connection, size, style, pane.device.is_none());
+        }
+        // A reconnect must never create a replacement Session after a lost launch reply.
+        if !create || resume.is_some() {
+            return Err(Refusal::Missing);
+        }
+        self.start(device, connection, size, style)
+            .map(|lease| Reply::Attached { lease })
+            .map_err(|_| Refusal::Failed)
+    }
     fn handle(
         &mut self,
         device: [u8; 32],
@@ -120,47 +151,58 @@ impl DevelopmentPaneHost {
         if matches!(request, Request::Capabilities) {
             return Ok(Reply::Capabilities {
                 development_pane: true,
+                pane_takeover: true,
             });
         }
-        if let Request::Attach {
-            create,
-            size,
-            resume,
-            style,
-        } = request
-        {
-            size.validate().map_err(|_| Refusal::Unsupported)?;
-            if let Some(pane) = &mut self.pane {
-                if pane.device != device {
-                    return Err(Refusal::Controlled);
-                }
-                if resume.is_some_and(|old| {
-                    (old.server, old.session, old.control)
+        match request {
+            Request::Attach {
+                create,
+                size,
+                resume,
+                style,
+            } => {
+                // Legacy clients cannot render a Takeover Screen or request takeover.
+                if let (Some(pane), Some(old)) = (&self.pane, resume)
+                    && (old.server, old.session, old.control)
                         != (pane.lease.server, pane.lease.session, pane.lease.control)
-                }) {
+                {
                     return Err(Refusal::Stale);
                 }
-                // Reconnection never starts a replacement shell, even after ordinary exit.
-                pane.lease.connection = connection;
-                pane.connected = true;
-                pane.sent = None;
-                pane.runtime.resize(geometry(size));
-                if style.is_some() {
-                    pane.appearance_generation += 1;
-                    pane.runtime.update_appearance(
-                        appearance(style, pane.appearance_generation)
-                            .map_err(|_| Refusal::Failed)?,
-                    );
+                let reply = self.select(
+                    device,
+                    connection,
+                    create,
+                    size,
+                    resume.map(Into::into),
+                    style,
+                )?;
+                return if matches!(reply, Reply::Takeover { .. }) {
+                    Err(Refusal::Controlled)
+                } else {
+                    Ok(reply)
+                };
+            }
+            Request::Select {
+                create,
+                size,
+                resume,
+                style,
+            } => {
+                return self.select(device, connection, create, size, resume, style);
+            }
+            Request::TakeOver {
+                target,
+                size,
+                style,
+            } => {
+                self.reconcile_selection()?;
+                let pane = self.pane.as_mut().ok_or(Refusal::Missing)?;
+                if PaneTarget::from(pane.lease) != target {
+                    return Err(Refusal::Stale);
                 }
-                return Ok(Reply::Attached { lease: pane.lease });
+                return pane.claim(device, connection, size, style, true);
             }
-            if !create {
-                return Err(Refusal::Missing);
-            }
-            return self
-                .start(device, connection, size, style)
-                .map(|lease| Reply::Attached { lease })
-                .map_err(|_| Refusal::Failed);
+            _ => {}
         }
         if matches!(request, Request::Shutdown) {
             self.shutdown().map_err(|_| Refusal::CleanupUnresolved)?;
@@ -172,10 +214,11 @@ impl DevelopmentPaneHost {
             | Request::Key { lease, .. }
             | Request::Resize { lease, .. }
             | Request::Close { lease }
-            | Request::Style { lease, .. } => lease,
+            | Request::Style { lease, .. }
+            | Request::Release { lease } => lease,
             _ => return Err(Refusal::Unsupported),
         };
-        if device != pane.device
+        if Some(device) != pane.device
             || connection != pane.lease.connection
             || *lease != pane.lease
             || !pane.connected
@@ -228,6 +271,12 @@ impl DevelopmentPaneHost {
                 );
                 Ok(Reply::Unchanged)
             }
+            Request::Release { .. } => {
+                pane.lease.control = nonce().map_err(|_| Refusal::Failed)?;
+                pane.device = None;
+                pane.connected = false;
+                Ok(Reply::Unchanged)
+            }
             Request::Close { .. } => {
                 pane.runtime
                     .shutdown_and_wait(Duration::from_secs(5))
@@ -237,6 +286,24 @@ impl DevelopmentPaneHost {
             }
             _ => Err(Refusal::Unsupported),
         }
+    }
+
+    fn reconcile_selection(&mut self) -> Result<(), Refusal> {
+        let Some(pane) = &mut self.pane else {
+            return Ok(());
+        };
+        // A waiting client has no lease to Poll. Observe lifecycle events before offering
+        // control, even when the previous controller has disconnected.
+        pane.drain();
+        if pane.ended {
+            pane.runtime
+                .shutdown_and_wait(Duration::from_secs(5))
+                .map_err(|_| Refusal::CleanupUnresolved)?;
+            self.pane = None;
+        } else if pane.failed {
+            return Err(Refusal::Failed);
+        }
+        Ok(())
     }
 }
 impl PaneService for DevelopmentPaneHost {
@@ -263,6 +330,37 @@ impl PaneService for DevelopmentPaneHost {
     }
 }
 impl OwnedPane {
+    fn claim(
+        &mut self,
+        device: [u8; 32],
+        connection: [u8; 32],
+        size: PaneSize,
+        style: Option<PresentationStyle>,
+        transfer: bool,
+    ) -> Result<Reply, Refusal> {
+        size.validate().map_err(|_| Refusal::Unsupported)?;
+        let control = if transfer {
+            nonce().map_err(|_| Refusal::Failed)?
+        } else {
+            self.lease.control
+        };
+        let appearance = if style.is_some() {
+            Some(appearance(style, self.appearance_generation + 1).map_err(|_| Refusal::Failed)?)
+        } else {
+            None
+        };
+        self.device = Some(device);
+        self.lease.control = control;
+        self.lease.connection = connection;
+        self.connected = true;
+        self.sent = None;
+        self.runtime.resize(geometry(size));
+        if let Some(appearance) = appearance {
+            self.appearance_generation += 1;
+            self.runtime.update_appearance(appearance);
+        }
+        Ok(Reply::Attached { lease: self.lease })
+    }
     fn drain(&mut self) {
         while let Ok(event) = self.subscription.events.try_recv() {
             match event {
@@ -539,6 +637,154 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+    fn select(host: &mut DevelopmentPaneHost, device: u8, connection: u8) -> Reply {
+        host.request(
+            [device; 32],
+            [connection; 32],
+            Request::Select {
+                create: true,
+                size: size(),
+                resume: None,
+                style: None,
+            },
+        )
+    }
+
+    #[test]
+    fn takeover_preserves_work_and_rejects_former_controller_operations() {
+        let mut host = host();
+        let original = attach(&mut host, 2, true);
+        command(
+            &mut host,
+            2,
+            original,
+            "stty -echo; printf '\\033[2J\\033[HSTARTED\\n'; sleep 1; printf 'CONTINUED\\n'\n",
+        );
+        await_text(&mut host, 2, original, "STARTED");
+        host.disconnected([2; 32]);
+        let Reply::Takeover { target } = select(&mut host, 9, 9) else {
+            panic!("selection must not replace a disconnected controller");
+        };
+        let Reply::Attached { lease: transferred } = host.request(
+            [9; 32],
+            [9; 32],
+            Request::TakeOver {
+                target,
+                size: PaneSize {
+                    columns: 90,
+                    ..size()
+                },
+                style: None,
+            },
+        ) else {
+            panic!("explicit takeover must transfer control");
+        };
+        assert_eq!(original.session, transferred.session);
+        assert_ne!(original.control, transferred.control);
+        for request in [
+            Request::Poll { lease: original },
+            Request::Resize {
+                lease: original,
+                size: size(),
+            },
+            Request::Close { lease: original },
+            Request::Release { lease: original },
+        ] {
+            assert!(matches!(
+                host.request([1; 32], [2; 32], request),
+                Reply::Refused(Refusal::Stale)
+            ));
+        }
+        assert!(matches!(
+            command(&mut host, 2, original, "printf 'STALE'\n"),
+            Reply::Refused(Refusal::Stale)
+        ));
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [3; 32],
+                Request::Select {
+                    create: false,
+                    size: size(),
+                    resume: Some(original.into()),
+                    style: None,
+                }
+            ),
+            Reply::Takeover { .. }
+        ));
+        // Take it back explicitly, keeping the running command and the same Session.
+        let Reply::Attached { lease: returned } = host.request(
+            [1; 32],
+            [3; 32],
+            Request::TakeOver {
+                target,
+                size: size(),
+                style: None,
+            },
+        ) else {
+            panic!("take back");
+        };
+        assert_eq!(original.session, returned.session);
+        await_text(&mut host, 3, returned, "CONTINUED");
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn released_control_has_one_selection_winner_and_never_resumes_old_grants() {
+        let mut host = host();
+        let original = attach(&mut host, 2, true);
+        assert!(matches!(
+            host.request([1; 32], [2; 32], Request::Release { lease: original }),
+            Reply::Unchanged
+        ));
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [3; 32],
+                Request::Select {
+                    create: false,
+                    size: size(),
+                    resume: Some(original.into()),
+                    style: None,
+                }
+            ),
+            Reply::Takeover { .. }
+        ));
+        let host = Arc::new(std::sync::Mutex::new(host));
+        let start = Arc::new(std::sync::Barrier::new(3));
+        let workers = [(9, 9), (8, 8)].map(|(device, connection)| {
+            let host = Arc::clone(&host);
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                select(&mut host.lock().unwrap(), device, connection)
+            })
+        });
+        start.wait();
+        let replies = workers.map(|worker| worker.join().unwrap());
+        assert_eq!(
+            replies
+                .iter()
+                .filter(|reply| matches!(reply, Reply::Attached { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            replies
+                .iter()
+                .filter(|reply| matches!(reply, Reply::Takeover { .. }))
+                .count(),
+            1
+        );
+        let mut host = host.lock().unwrap();
+        assert!(matches!(select(&mut host, 1, 3), Reply::Takeover { .. }));
+        assert!(matches!(
+            host.request([1; 32], [2; 32], Request::Poll { lease: original }),
+            Reply::Refused(Refusal::Stale)
+        ));
+        host.shutdown().unwrap();
+    }
+
     #[test]
     fn reconnect_keeps_running_work_and_fences_the_old_connection() {
         let mut host = host();
@@ -666,6 +912,57 @@ mod tests {
             "stty -echo; printf '\\033[2J\\033[HLIVE\\n'; stty size\n",
         );
         await_text(&mut host, 2, live, "24 80");
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_waiting_client_observes_exit_without_the_controller_polling() {
+        let mut host = host();
+        let lease = attach(&mut host, 2, true);
+        command(
+            &mut host,
+            2,
+            lease,
+            "stty -echo; printf 'EXITING\\n'; sleep 0.2; exit\n",
+        );
+        await_text(&mut host, 2, lease, "EXITING");
+        host.disconnected([2; 32]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let reply = host.request(
+                [9; 32],
+                [9; 32],
+                Request::Select {
+                    create: false,
+                    size: size(),
+                    resume: Some(lease.into()),
+                    style: None,
+                },
+            );
+            if matches!(reply, Reply::Refused(Refusal::Missing)) {
+                break;
+            }
+            assert!(matches!(reply, Reply::Takeover { .. }));
+            assert!(
+                Instant::now() < deadline,
+                "an exited shell still offers takeover"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(matches!(
+            host.request(
+                [9; 32],
+                [9; 32],
+                Request::TakeOver {
+                    target: lease.into(),
+                    size: size(),
+                    style: None,
+                }
+            ),
+            Reply::Refused(Refusal::Missing)
+        ));
+        let replacement = attach(&mut host, 3, true);
+        assert_ne!(replacement.session, lease.session);
         host.shutdown().unwrap();
     }
 

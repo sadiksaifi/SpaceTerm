@@ -16,6 +16,10 @@ use std::{
 pub(crate) enum DevelopmentPaneStatus {
     Connecting,
     Connected,
+    Takeover,
+    TakeoverReconnecting,
+    TakeoverFailed(ServerError),
+    TakingOver,
     Reconnecting,
     Ended,
     Failed(ServerError),
@@ -23,11 +27,23 @@ pub(crate) enum DevelopmentPaneStatus {
 pub(crate) struct DevelopmentPaneState {
     status: Mutex<DevelopmentPaneStatus>,
     retry: AtomicBool,
-    close: AtomicBool,
+    take_over: AtomicBool,
+    close: AtomicU64,
     epoch: AtomicU64,
     connected_epoch: AtomicU64,
 }
 impl DevelopmentPaneState {
+    fn new() -> Self {
+        Self {
+            status: Mutex::new(DevelopmentPaneStatus::Connecting),
+            retry: AtomicBool::new(false),
+            take_over: AtomicBool::new(false),
+            close: AtomicU64::new(0),
+            epoch: AtomicU64::new(0),
+            connected_epoch: AtomicU64::new(0),
+        }
+    }
+
     pub(crate) fn status(&self) -> DevelopmentPaneStatus {
         *self.status.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -37,12 +53,52 @@ impl DevelopmentPaneState {
     pub(crate) fn retry(&self) {
         self.retry.store(true, Ordering::Release);
     }
-    pub(crate) fn close(&self) {
-        if self.status() == DevelopmentPaneStatus::Connected {
-            self.close.store(true, Ordering::Release);
-        } else {
-            self.set(DevelopmentPaneStatus::Failed(ServerError::NotRunning));
+    pub(crate) fn take_over(&self) {
+        let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        if *status == DevelopmentPaneStatus::Takeover {
+            *status = DevelopmentPaneStatus::TakingOver;
+            self.take_over.store(true, Ordering::Release);
+            self.retry.store(true, Ordering::Release);
         }
+    }
+    fn invalidate(&self) -> u64 {
+        let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        if *status == DevelopmentPaneStatus::Connected {
+            *status = DevelopmentPaneStatus::Reconnecting;
+        }
+        self.close.store(0, Ordering::Release);
+        let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        self.connected_epoch.store(epoch, Ordering::Release);
+        epoch
+    }
+    pub(crate) fn close(&self, approved_generation: u64) {
+        // The worker compares this exact approval with its active epoch. A reconnect
+        // between the UI's check and this submission must never retag the request.
+        self.close.store(approved_generation, Ordering::Release);
+    }
+    fn connection_failed(&self, error: ServerError, has_takeover: bool) -> bool {
+        let retryable = matches!(
+            error,
+            ServerError::Protocol
+                | ServerError::NotRunning
+                | ServerError::StaleControl
+                | ServerError::Controlled
+        );
+        {
+            let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+            // A click accepted before this interruption is never replayed after it.
+            self.take_over.store(false, Ordering::Release);
+            *status = if has_takeover && retryable {
+                DevelopmentPaneStatus::TakeoverReconnecting
+            } else if has_takeover {
+                DevelopmentPaneStatus::TakeoverFailed(error)
+            } else if retryable {
+                DevelopmentPaneStatus::Reconnecting
+            } else {
+                DevelopmentPaneStatus::Failed(error)
+            };
+        }
+        retryable
     }
     fn set(&self, status: DevelopmentPaneStatus) {
         *self.status.lock().unwrap_or_else(|e| e.into_inner()) = status;
@@ -54,13 +110,7 @@ pub(crate) struct DevelopmentServerSessionFactory {
 }
 impl DevelopmentServerSessionFactory {
     pub(crate) fn new(server: LocalServer) -> (Self, Arc<DevelopmentPaneState>) {
-        let state = Arc::new(DevelopmentPaneState {
-            status: Mutex::new(DevelopmentPaneStatus::Connecting),
-            retry: AtomicBool::new(false),
-            close: AtomicBool::new(false),
-            epoch: AtomicU64::new(0),
-            connected_epoch: AtomicU64::new(0),
-        });
+        let state = Arc::new(DevelopmentPaneState::new());
         (
             Self {
                 server,
@@ -90,11 +140,9 @@ impl Drop for PresentationHandle {
 }
 impl PresentationHandle {
     fn send(&self, input: Input) {
+        let epoch = self.state.epoch.load(Ordering::Acquire);
         if self.state.status() == DevelopmentPaneStatus::Connected
-            && self
-                .input
-                .try_send((self.state.epoch.load(Ordering::Acquire), input))
-                .is_err()
+            && self.input.try_send((epoch, input)).is_err()
         {
             self.state.epoch.fetch_add(1, Ordering::AcqRel);
             self.state.set(DevelopmentPaneStatus::Reconnecting);
@@ -174,33 +222,89 @@ fn present(
 ) {
     let mut create = true;
     let mut expected_session: Option<Lease> = None;
+    let mut expected_target: Option<pane::PaneTarget> = None;
     let mut generation = PresentationGeneration::default();
+    let mut takeover = false;
     while alive.load(Ordering::Acquire) {
         state.retry.store(false, Ordering::Release);
         let connected = (|| {
             let mut connection = server.connect_pane()?;
             let intent = create;
             create = false;
-            let Reply::Attached { lease } = connection.exchange(&Request::Attach {
-                create: intent,
-                size: *size.lock().unwrap_or_else(|e| e.into_inner()),
-                resume: expected_session,
-                style: Some(encode_style(
-                    &appearance.lock().unwrap_or_else(|e| e.into_inner()),
-                )),
-            })?
-            else {
+            let measured = *size.lock().unwrap_or_else(|e| e.into_inner());
+            let style = Some(encode_style(
+                &appearance.lock().unwrap_or_else(|e| e.into_inner()),
+            ));
+            let request = if connection.supports_takeover() {
+                Request::Select {
+                    create: intent,
+                    size: measured,
+                    resume: expected_target,
+                    style,
+                }
+            } else {
+                Request::Attach {
+                    create: intent,
+                    size: measured,
+                    resume: expected_session,
+                    style,
+                }
+            };
+            let mut reply = connection.exchange(&request).map_err(|error| match error {
+                ServerError::Controlled => ServerError::Unsupported,
+                ServerError::StaleControl => ServerError::SessionUnavailable,
+                other => other,
+            })?;
+            while let Reply::Takeover { target } = reply {
+                if expected_target.is_some_and(|old| old != target) {
+                    return Err(ServerError::SessionUnavailable);
+                }
+                expected_target = Some(target);
+                if !takeover {
+                    takeover = true;
+                    state.invalidate();
+                    while input.try_recv().is_ok() {}
+                    // Erase cached terminal presentation before the window replaces its surface.
+                    clear_presentation(&events, &mut generation, &appearance);
+                }
+                {
+                    let mut status = state.status.lock().unwrap_or_else(|e| e.into_inner());
+                    if *status != DevelopmentPaneStatus::TakingOver {
+                        *status = DevelopmentPaneStatus::Takeover;
+                    }
+                }
+                if !alive.load(Ordering::Acquire) {
+                    return Ok(());
+                }
+                if state.take_over.swap(false, Ordering::AcqRel) {
+                    state.set(DevelopmentPaneStatus::TakingOver);
+                    reply = connection.exchange(&Request::TakeOver {
+                        target,
+                        size: *size.lock().unwrap_or_else(|e| e.into_inner()),
+                        style: Some(encode_style(
+                            &appearance.lock().unwrap_or_else(|e| e.into_inner()),
+                        )),
+                    })?;
+                } else {
+                    std::thread::sleep(Duration::from_millis(100));
+                    reply = connection.exchange(&Request::Select {
+                        create: false,
+                        size: *size.lock().unwrap_or_else(|e| e.into_inner()),
+                        resume: Some(target),
+                        style: None,
+                    })?;
+                }
+            }
+            let Reply::Attached { lease } = reply else {
                 return Err(ServerError::Protocol);
             };
-            if expected_session.is_some_and(|old| {
-                (old.server, old.session, old.control)
-                    != (lease.server, lease.session, lease.control)
-            }) {
-                return Err(ServerError::StaleControl);
+            if expected_target.is_some_and(|old| old != lease.into()) {
+                return Err(ServerError::SessionUnavailable);
             }
             expected_session = Some(lease);
+            expected_target = Some(lease.into());
             // Authenticate and receive the authoritative screen before enabling input.
-            let epoch = state.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+            let epoch = state.invalidate();
             while input.try_recv().is_ok() {}
             loop {
                 if !alive.load(Ordering::Acquire) {
@@ -223,6 +327,7 @@ fn present(
                         )?;
                         let _ = events.force_send(TerminalSessionEvent::Screen(screen));
                         state.connected_epoch.store(epoch, Ordering::Release);
+                        takeover = false;
                         state.set(DevelopmentPaneStatus::Connected);
                     }
                     Reply::Ended => {
@@ -234,7 +339,7 @@ fn present(
                     Reply::Unchanged => {}
                     _ => return Err(ServerError::Protocol),
                 }
-                if state.close.swap(false, Ordering::AcqRel) {
+                if state.close.swap(0, Ordering::AcqRel) == epoch {
                     if !matches!(
                         connection.exchange(&Request::Close { lease })?,
                         Reply::Closed
@@ -270,15 +375,15 @@ fn present(
         match connected {
             Ok(()) => return,
             Err(error) => {
-                state.epoch.fetch_add(1, Ordering::AcqRel);
+                if !takeover {
+                    state.invalidate();
+                }
                 while input.try_recv().is_ok() {}
-                state.close.store(false, Ordering::Release);
-                let retryable = matches!(error, ServerError::Protocol | ServerError::NotRunning);
-                state.set(if retryable {
-                    DevelopmentPaneStatus::Reconnecting
-                } else {
-                    DevelopmentPaneStatus::Failed(error)
-                });
+                if matches!(error, ServerError::StaleControl | ServerError::Controlled) {
+                    takeover = true;
+                    clear_presentation(&events, &mut generation, &appearance);
+                }
+                let retryable = state.connection_failed(error, takeover);
                 let mut ticks = 0;
                 while alive.load(Ordering::Acquire) && !state.retry.swap(false, Ordering::AcqRel) {
                     if retryable && ticks >= 20 {
@@ -290,6 +395,21 @@ fn present(
             }
         }
     }
+}
+
+fn clear_presentation(
+    events: &async_channel::Sender<TerminalSessionEvent>,
+    generation: &mut PresentationGeneration,
+    appearance: &Mutex<TerminalAppearanceUpdate>,
+) {
+    *generation = generation.next();
+    let mut empty = (*ScreenSnapshot::empty_with_appearance(
+        crate::local_path::LocalPathSemantics::Posix,
+        &appearance.lock().unwrap_or_else(|e| e.into_inner()),
+    ))
+    .clone();
+    empty.generation = *generation;
+    let _ = events.force_send(TerminalSessionEvent::Screen(Arc::new(empty)));
 }
 
 fn encode_modifiers(m: InputModifiers) -> u16 {
@@ -565,6 +685,39 @@ fn decode_screen(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn end_session_approval_cannot_transfer_to_a_new_connection() {
+        let state = DevelopmentPaneState::new();
+        let approved = state.invalidate();
+        state.set(DevelopmentPaneStatus::Connected);
+        let reconnected = state.invalidate();
+        state.set(DevelopmentPaneStatus::Connected);
+        state.close(approved);
+        assert_ne!(state.close.swap(0, Ordering::AcqRel), reconnected);
+        assert_eq!(state.status(), DevelopmentPaneStatus::Connected);
+        state.close(reconnected);
+        assert_eq!(state.close.swap(0, Ordering::AcqRel), reconnected);
+    }
+
+    #[test]
+    fn an_ended_session_is_a_permanent_failure_after_control_loss() {
+        let state = DevelopmentPaneState::new();
+        state.set(DevelopmentPaneStatus::Takeover);
+        assert!(!state.connection_failed(ServerError::SessionUnavailable, true));
+        assert_eq!(
+            state.status(),
+            DevelopmentPaneStatus::TakeoverFailed(ServerError::SessionUnavailable)
+        );
+    }
+
+    #[test]
+    fn a_transport_outage_keeps_the_takeover_screen_reconnecting() {
+        let state = DevelopmentPaneState::new();
+        state.set(DevelopmentPaneStatus::Takeover);
+        assert!(state.connection_failed(ServerError::NotRunning, true));
+        assert_eq!(state.status(), DevelopmentPaneStatus::TakeoverReconnecting);
+    }
 
     #[test]
     fn screen_reconciliation_keeps_program_colors_and_projects_client_defaults() {

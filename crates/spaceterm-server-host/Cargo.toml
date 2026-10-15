@@ -11,6 +11,10 @@ client = ["spaceterm-server/client"]
 name = "persistent_pane"
 required-features = ["client"]
 
+[[example]]
+name = "pane_takeover"
+required-features = ["client"]
+
 [[bin]]
 name = "spaceterm-server"
 path = "src/main.rs"

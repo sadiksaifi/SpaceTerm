@@ -1578,6 +1578,50 @@ fn accessibility_models_are_applied_only_with_their_matching_screen_generation(
     });
 }
 
+#[cfg(feature = "developer-tools")]
+#[gpui::test]
+fn clearing_a_server_presentation_forgets_the_former_screen_and_text(cx: &mut TestAppContext) {
+    cx.update(crate::ui::init)
+        .expect("UI initialization should succeed");
+    let session_factory = WorkspaceTerminalSessionFactory::new_server(
+        Rc::new(
+            TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+                .server_backed()
+                .with_fallback_title("Development Pane"),
+        ),
+        test_local_directory(PathBuf::from("/tmp/spaceterm-terminal-pane-test")),
+    );
+    let (pane, cx) =
+        cx.add_window_view(|window, cx| TerminalPane::new(session_factory, window, cx));
+    let former = text_screen(5, &["secret"]);
+    pane.update(cx, |pane, cx| {
+        assert!(pane.handle_event(TerminalSessionEvent::Screen(Arc::clone(&former)), cx));
+        let epoch = pane.terminal_session.session_epoch;
+        pane.handle_session_accessibility(
+            epoch,
+            Arc::new(TerminalAccessibilityModel::from_screen(&former)),
+        );
+        pane.record_successfully_presented_screen(Arc::clone(&former));
+        assert!(pane.accessibility.text().contains("secret"));
+        assert_eq!(pane.title().as_ref(), "text preflight");
+
+        pane.clear_server_presentation(cx);
+
+        assert!(pane.screen.rows.is_empty());
+        assert!(pane.last_valid_screen.rows.is_empty());
+        assert!(pane.accessibility.text().is_empty());
+        assert_eq!(pane.title().as_ref(), "Development Pane");
+        assert!(
+            !pane.handle_event(
+                TerminalSessionEvent::Screen(text_screen(5, &["secret"])),
+                cx
+            ),
+            "a Screen from before the takeover stays stale"
+        );
+        assert!(pane.handle_event(TerminalSessionEvent::Screen(text_screen(6, &["fresh"])), cx));
+    });
+}
+
 fn accessibility_model(index: usize) -> Arc<TerminalAccessibilityModel> {
     Arc::new(TerminalAccessibilityModel::new(
         vec![crate::terminal::AccessibilityLine::new(
