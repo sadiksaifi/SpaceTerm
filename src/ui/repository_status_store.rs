@@ -385,7 +385,6 @@ impl RepositoryStatusStore {
     }
 
     /// The cached Pull Request for a branch a SpaceTerm Server reads. Reading never looks up.
-    #[cfg(feature = "developer-tools")]
     pub(crate) fn server_pull_request(&self, key: &ServerPullRequestKey) -> Option<PullRequest> {
         if !self.server_pull_requests_enabled(self.server_github_cli) {
             return None;
@@ -398,7 +397,6 @@ impl RepositoryStatusStore {
     /// Follows the branches SpaceTerm Servers' views present now. A branch seen for the first time
     /// is looked up once with this client's GitHub CLI; one no view presents is forgotten. Lookups
     /// run again only when the window activates, as they do for local repositories.
-    #[cfg(feature = "developer-tools")]
     pub(crate) fn follow_server_pull_requests(
         &mut self,
         wanted: impl IntoIterator<Item = ServerPullRequestKey>,
@@ -510,7 +508,6 @@ impl RepositoryStatusStore {
 
     /// The Git Settings this client presents repository facts with, including facts a SpaceTerm
     /// Server read.
-    #[cfg(feature = "developer-tools")]
     pub(crate) const fn preferences(&self) -> RepositoryStatusPreferences {
         self.preferences
     }
@@ -943,7 +940,7 @@ fn remote_probe(
     remote_probe_outcome(reader.probe(&remote, cancellation)?, directory)
 }
 
-#[cfg(all(test, feature = "developer-tools"))]
+#[cfg(test)]
 mod server_pull_request_tests {
     use std::sync::Mutex;
 

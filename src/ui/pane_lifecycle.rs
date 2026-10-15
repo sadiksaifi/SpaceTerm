@@ -74,7 +74,6 @@ impl PaneConstruction {
     ///
     /// A server-backed Pane takes one that publishes no shell text, because reading server-owned
     /// terminal content with assistive technology is not available yet.
-    #[cfg(feature = "developer-tools")]
     pub(crate) fn with_accessibility(
         &self,
         accessibility: Rc<dyn TerminalAccessibilityAdapterFactory>,

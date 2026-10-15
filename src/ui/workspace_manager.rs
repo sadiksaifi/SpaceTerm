@@ -285,19 +285,11 @@ enum LocalPinSelection {
     Failed,
 }
 
-/// The server Workspaces a Workspace Window presents beside its own. A build without the
-/// developer tools has no shared Workspaces, so the binding is uninhabited and always absent.
-#[cfg(feature = "developer-tools")]
+/// The server Workspaces a Workspace Window presents beside its own.
 type SharedWorkspaceBinding = super::shared_workspaces::SharedWorkspaces;
-#[cfg(not(feature = "developer-tools"))]
-type SharedWorkspaceBinding = std::convert::Infallible;
 
-/// The server identity of a detached Workspace the Workspace Switcher offers. A build without the
-/// developer tools presents no server Workspaces, so it never offers one.
-#[cfg(feature = "developer-tools")]
+/// The server identity of a detached Workspace the Workspace Switcher offers.
 type DetachedWorkspace = spaceterm_server::hierarchy::Id;
-#[cfg(not(feature = "developer-tools"))]
-type DetachedWorkspace = std::convert::Infallible;
 
 /// What one Workspace Switcher result chooses.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -305,13 +297,6 @@ enum SwitcherChoice {
     /// A Workspace this window presents, which choosing activates.
     Presented(WorkspaceId),
     /// A server Workspace this client has detached, which choosing attaches and activates.
-    #[cfg_attr(
-        not(feature = "developer-tools"),
-        expect(
-            dead_code,
-            reason = "only the developer tools present server Workspaces"
-        )
-    )]
     Detached(DetachedWorkspace),
 }
 
@@ -345,7 +330,6 @@ pub(crate) struct WorkspaceManager {
     close_confirmation: CloseConfirmation,
     sidebar_repositories: repository::SidebarRepositories,
     sidebar_worktrees: worktrees::SidebarWorktrees,
-    #[cfg(feature = "developer-tools")]
     shared_repositories: shared_repositories::SharedWorkspaceRepositories,
     /// The adopted SpaceTerm Server's Workspaces, their edit state, and the answers still to
     /// present. Adopting adds them beside this window's own Workspaces and changes none of them.
@@ -435,7 +419,6 @@ impl WorkspaceManager {
         {
             let _ = workspaces.set_directory_unavailable(workspace_id, reason);
         }
-        #[cfg(feature = "developer-tools")]
         cx.on_app_quit(|manager, cx| {
             manager.save_shared_arrangements(cx);
             if let Some(shared) = manager.shared.as_mut() {
@@ -447,7 +430,6 @@ impl WorkspaceManager {
         cx.on_release(|manager, cx| {
             manager.release_sidebar_repositories(cx);
             manager.release_sidebar_worktrees(cx);
-            #[cfg(feature = "developer-tools")]
             manager.save_shared_arrangements(cx);
         })
         .detach();
@@ -524,7 +506,6 @@ impl WorkspaceManager {
             close_confirmation: CloseConfirmation::default(),
             sidebar_repositories: repository::SidebarRepositories::default(),
             sidebar_worktrees: worktrees::SidebarWorktrees::default(),
-            #[cfg(feature = "developer-tools")]
             shared_repositories: shared_repositories::SharedWorkspaceRepositories::default(),
             shared: None,
             _shared_poll: None,
@@ -3878,78 +3859,8 @@ struct SharedRowFacts {
 
 /// Shared server Workspaces: adopting them, presenting what the server publishes, submitting the
 /// edits a person asks for, and refusing the operations the server path does not support yet.
-#[cfg(not(feature = "developer-tools"))]
 impl WorkspaceManager {
-    pub(super) const fn is_shared_workspace(&self, _: WorkspaceId) -> bool {
-        false
-    }
-
-    const fn shared_pin_version(&self, _: WorkspaceId) -> Option<u64> {
-        None
-    }
-
-    const fn shared_row_facts(&self, _: WorkspaceId) -> Option<SharedRowFacts> {
-        None
-    }
-
-    const fn rename_shared_workspace(
-        &mut self,
-        _: WorkspaceId,
-        _: &str,
-        _: Option<u64>,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> bool {
-        false
-    }
-
-    const fn pin_shared_workspace(
-        &mut self,
-        _: WorkspaceId,
-        _: Option<&PinnedDirectory>,
-        _: Option<u64>,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> Option<bool> {
-        None
-    }
-
-    const fn request_shared_close(
-        &mut self,
-        _: CloseTarget,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) -> bool {
-        false
-    }
-
-    fn create_shared_workspace(&mut self, _: String, _: &mut Window, _: &mut Context<Self>) {}
-
-    const fn detached_switcher_items(&self) -> Vec<ComboBoxItem<SwitcherChoice>> {
-        Vec::new()
-    }
-
-    fn attach_detached_workspace(
-        &mut self,
-        server: DetachedWorkspace,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) {
-        match server {}
-    }
-
-    fn detach_shared_workspace(&mut self, _: WorkspaceId, _: &mut Window, _: &mut Context<Self>) {}
-
-    /// Whether the server holding detached Workspaces is reachable. Without one there is nothing
-    /// to reach.
-    const fn shared_reachable(&self) -> bool {
-        true
-    }
-}
-
-#[cfg(feature = "developer-tools")]
-impl WorkspaceManager {
-    /// Presents the local Development server's Workspaces beside this window's own.
+    /// Presents the local SpaceTerm Server's Workspaces beside this window's own.
     ///
     /// Adopting changes nothing a person is working in: the Workspaces this window owns keep their
     /// Tabs, Panes, and Terminal Sessions, and the Active Workspace stays where it was. Production
@@ -4002,7 +3913,7 @@ impl WorkspaceManager {
 
     /// Presents the Workspaces one shared edit channel publishes.
     ///
-    /// The server this reaches is chosen by construction, so the local Development server and a
+    /// The server this reaches is chosen by construction, so the local SpaceTerm Server and a
     /// scripted one follow the same path through this window.
     pub(crate) fn present_shared_workspaces(
         &mut self,
@@ -5254,15 +5165,12 @@ impl WorkspaceManager {
 }
 
 /// What a detached Workspace's Workspace Switcher result says beneath its name.
-#[cfg(feature = "developer-tools")]
 const DETACHED_DESCRIPTION: &str = "Detached";
 /// The same result while this client cannot change its attachments.
-#[cfg(feature = "developer-tools")]
 const DETACHED_UNAVAILABLE_DESCRIPTION: &str =
     "Detached. Attaching is unavailable until SpaceTerm reopens.";
 
 /// A detached Workspace's Workspace Switcher result, named by its server identity's leading bytes.
-#[cfg(feature = "developer-tools")]
 fn detached_switcher_selector(server: spaceterm_server::hierarchy::Id) -> String {
     let prefix: String = server[..4]
         .iter()
@@ -5272,14 +5180,12 @@ fn detached_switcher_selector(server: spaceterm_server::hierarchy::Id) -> String
 }
 
 /// Which attachment change a person asked for.
-#[cfg(feature = "developer-tools")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AttachmentChange {
     Attach,
     Detach,
 }
 
-#[cfg(feature = "developer-tools")]
 impl AttachmentChange {
     /// The accessibility label, title, and detail of a failed or unconfirmed change.
     const fn failure(
@@ -5320,17 +5226,11 @@ impl AttachmentChange {
     }
 }
 
-#[cfg(feature = "developer-tools")]
 const SHARED_CLOSE_CONFIRM_SELECTOR: &str = "shared-close-confirm";
-#[cfg(feature = "developer-tools")]
 const SHARED_CLOSE_CANCEL_SELECTOR: &str = "shared-close-cancel";
-#[cfg(feature = "developer-tools")]
 const SHARED_CLOSE_REVIEW_SELECTOR: &str = "shared-close-review";
-#[cfg(feature = "developer-tools")]
 const SHARED_CLOSE_DISMISS_SELECTOR: &str = "shared-close-dismiss";
-#[cfg(feature = "developer-tools")]
 const SHARED_CONFLICT_RETRY_SELECTOR: &str = "shared-workspace-conflict-retry";
-#[cfg(feature = "developer-tools")]
 const SHARED_CONFLICT_KEEP_SELECTOR: &str = "shared-workspace-conflict-keep";
 
 impl Drop for WorkspaceManager {

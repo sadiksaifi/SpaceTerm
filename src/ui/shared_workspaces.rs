@@ -22,27 +22,8 @@
 //! to the desktop: repairing a Pane's directory, creating and removing Worktrees, opening a Tab in
 //! a chosen Worktree, reading shell content with assistive technology, and paste.
 
-use crate::application_identity::ApplicationIdentity;
-
-/// Whether this build can present shared server Workspaces. Only SpaceTerm Development with its
-/// developer tools can, because the Workspaces belong to the local Development server.
-pub(crate) fn offered() -> bool {
-    cfg!(feature = "developer-tools") && ApplicationIdentity::current().is_development()
-}
-
-/// Asks the front Workspace Window to present the server's shared Workspaces beside its own.
-#[cfg(not(feature = "developer-tools"))]
-pub(crate) fn adopt(_: &mut gpui::App) {}
-
-/// Whether a Workspace Window already presents this device's shared Workspaces.
-#[cfg(not(feature = "developer-tools"))]
-pub(crate) fn adopted(_: &gpui::App) -> bool {
-    false
-}
-
-#[cfg(all(test, feature = "developer-tools"))]
+#[cfg(test)]
 pub(crate) use development::testing;
-#[cfg(feature = "developer-tools")]
 pub(crate) use development::{
     POLL_INTERVAL, SharedAcceptance, SharedAttachmentFailure, SharedCloseApproval,
     SharedCloseReview, SharedCloseState, SharedCloseUnavailable, SharedEditSource,
@@ -52,19 +33,16 @@ pub(crate) use development::{
     shared_close_changed_title,
 };
 
-#[cfg(feature = "developer-tools")]
 #[path = "shared_workspaces/repositories.rs"]
 mod repositories;
-#[cfg(feature = "developer-tools")]
 pub(crate) use repositories::{
     LocalPresentation, SharedRepositories, pane_directory, workspace_directory,
 };
 
-#[cfg(all(test, feature = "developer-tools"))]
+#[cfg(test)]
 #[path = "shared_workspaces/tests.rs"]
 mod tests;
 
-#[cfg(feature = "developer-tools")]
 mod development {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -121,9 +99,6 @@ mod development {
     /// Presents the server's shared Workspaces in a Workspace Window, or activates the window
     /// already presenting them.
     pub(crate) fn adopt(cx: &mut App) {
-        if !super::offered() {
-            return;
-        }
         if let Some(existing) = host(cx) {
             cx.defer(move |cx| {
                 let _ = existing.update(cx, |_, window, _| window.activate_window());

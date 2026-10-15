@@ -999,7 +999,6 @@ pub(crate) fn initialize_application(
     }
     #[cfg(feature = "developer-tools")]
     crate::ui::developer_workbench::configure_window_chrome(Rc::clone(&host.window_movement), cx);
-    #[cfg(feature = "developer-tools")]
     cx.set_global(
         crate::ui::development_pane::DevelopmentPaneComposition::new(
             Rc::clone(&host.adapters.key_input),

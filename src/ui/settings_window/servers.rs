@@ -183,11 +183,6 @@ impl ServerSurfaces {
 pub(super) struct LocalServerRow {
     control: Result<Arc<dyn LocalServerControl>, ServerError>,
     status: LocalServerStatus,
-    /// Whether this build offers the Development Pane: SpaceTerm Development with its developer
-    /// tools.
-    offers_development_pane: bool,
-    /// Whether this build offers shared server Workspaces in the Workspace Window.
-    offers_shared_workspaces: bool,
     /// Returns the background result to GPUI. Dropping the window drops it, and a late result then
     /// has nowhere to land.
     _operation: Option<Task<()>>,
@@ -198,17 +193,8 @@ impl LocalServerRow {
         Self {
             control,
             status: LocalServerStatus::NotChecked,
-            offers_development_pane: crate::ui::development_pane::offered(),
-            offers_shared_workspaces: crate::ui::shared_workspaces::offered(),
             _operation: None,
         }
-    }
-
-    #[cfg(test)]
-    pub(super) fn offering_development_pane(mut self, offered: bool) -> Self {
-        self.offers_development_pane = offered;
-        self.offers_shared_workspaces = offered;
-        self
     }
 
     #[cfg(test)]
@@ -228,8 +214,7 @@ impl LocalServerRow {
         }
         // Opening never sets up or starts the server, so it waits for a successful check. A
         // server that does not run the Development Pane is offered no terminal operation.
-        presentation.development_pane = self.offers_development_pane
-            && self.control.is_ok()
+        presentation.development_pane = self.control.is_ok()
             && matches!(
                 status,
                 LocalServerStatus::Connected(ServerConnection {
@@ -239,8 +224,7 @@ impl LocalServerRow {
             );
         // Presenting the server's Workspaces reads its inventory, so it waits for the same
         // successful check. The Workspace Window keeps the Workspaces it already owns.
-        presentation.shared_workspaces =
-            self.offers_shared_workspaces && presentation.development_pane;
+        presentation.shared_workspaces = presentation.development_pane;
         presentation
     }
 }

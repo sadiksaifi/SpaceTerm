@@ -202,7 +202,7 @@ impl WorkspaceTerminalSessionFactory {
     ///
     /// `home_directory` only completes the launch plan the server factory ignores. The factory
     /// holds no local filesystem authority, so it cannot select or revalidate local directories.
-    #[cfg(feature = "developer-tools")]
+    #[cfg(feature = "desktop")]
     pub(crate) fn new_server(
         session_factory: Rc<dyn TerminalSessionFactory>,
         home_directory: ValidatedLocalDirectory,

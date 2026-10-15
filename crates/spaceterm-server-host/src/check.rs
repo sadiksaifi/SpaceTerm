@@ -23,7 +23,11 @@ pub fn resources() -> Result<PathBuf, ServerError> {
     if root.join("shell-integration/VERSION").is_file() && root.join("terminfo").is_dir() {
         return Ok(root);
     }
-    if env!("SPACETERM_SERVER_IDENTITY") == "spaceterm-development" {
+    if env!("SPACETERM_SERVER_IDENTITY") == "spaceterm-development"
+        && !directory
+            .file_name()
+            .is_some_and(|name| name == "bin" || name == "MacOS")
+    {
         return Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets"));
     }
     Err(ServerError::StartupFailed)

@@ -388,7 +388,7 @@ run = "cargo test --package spaceterm-server --package spaceterm-server-host --p
 description = "Check the local server and desktop credential adapters"
 run = [
     "cargo clippy --package spaceterm-server --all-targets --all-features --locked -- -D warnings",
-    "cargo clippy --package spaceterm-server --package spaceterm-server-host --all-targets --no-default-features --locked -- -D warnings",
+    "cargo clippy --package spaceterm-server --all-targets --no-default-features --locked -- -D warnings",
     "cargo clippy --package spaceterm-server-host --all-targets --all-features --locked --no-deps -- -D warnings",
     "cargo clippy --package spaceterm-server-host --all-targets --no-default-features --locked --no-deps -- -D warnings",
 ]

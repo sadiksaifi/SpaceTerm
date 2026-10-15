@@ -9,7 +9,6 @@ pub(crate) mod chrome_icons;
 mod chrome_semantic_pairs;
 mod chrome_state;
 pub(crate) mod chrome_typography;
-#[cfg(feature = "developer-tools")]
 mod client_view_state;
 mod control_theme;
 #[cfg(feature = "developer-tools")]
@@ -26,7 +25,6 @@ pub(crate) mod remote_workspace_flow;
 mod render_lifecycle;
 pub(crate) mod repository_status_store;
 mod selection_chip;
-#[cfg(feature = "developer-tools")]
 pub(crate) mod server_pane;
 pub(crate) mod settings_file;
 pub(crate) mod settings_recovery;

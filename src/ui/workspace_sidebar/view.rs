@@ -1584,7 +1584,6 @@ fn remove_worktree_entry<A: Clone>(
         WorktreeRemoval::Main => Some("Main Worktree Can\u{2019}t Be Removed"),
         WorktreeRemoval::Locked => Some("Locked Worktree Can\u{2019}t Be Removed"),
         WorktreeRemoval::HoldsPinnedDirectory => Some("Unpin the Directory to Remove"),
-        #[cfg(feature = "developer-tools")]
         WorktreeRemoval::Server => Some("Server Worktree Can\u{2019}t Be Removed Here"),
         WorktreeRemoval::Unlisted => return None,
     };

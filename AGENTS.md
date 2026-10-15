@@ -11,7 +11,7 @@ A native desktop terminal multiplexer for macOS and Linux, coming soon for Windo
 
 ## Architecture
 
-- The native application owns production Workspace and Terminal Session lifecycles. The local Development server owns its retained Workspaces, Tabs, Panes, and Terminal Sessions.
+- The native application owns production Workspace and Terminal Session lifecycles. Each explicitly started local SpaceTerm Server owns its retained Workspaces, Tabs, Panes, and Terminal Sessions.
 - Put behavior, invariants, and cleanup in deep modules with narrow interfaces. Expose intentional operations and typed recoverable failures.
 - Keep product policy portable. Reach frameworks, external systems, and operating system capabilities through narrow adapters chosen by constructor injection. Add a boundary only for durable replaceability or locality.
 - Use Apple's Human Interface Guidelines for macOS 27 as the UI design baseline.

@@ -1,4 +1,4 @@
-//! Background persistence for the Development client's arrangements, outside Settings.
+//! Background persistence for this client's arrangements of shared Workspaces, outside Settings.
 use spaceterm_server::client_view::ClientView;
 use spaceterm_server::{LocalServer, ServerError};
 use std::sync::{Arc, Mutex};

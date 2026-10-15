@@ -176,7 +176,6 @@ impl TerminalPane {
 
     /// Presents the Repository Status a SpaceTerm Server read for this Pane's directory. A
     /// server-backed Pane never reads git here, so this is the only way its status changes.
-    #[cfg(feature = "developer-tools")]
     pub(crate) fn present_server_repository(
         &mut self,
         view: RepositoryView,

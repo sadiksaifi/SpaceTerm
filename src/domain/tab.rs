@@ -210,7 +210,7 @@ pub(crate) enum PaneNodeRef<'a> {
 }
 
 /// A complete replacement of presentation geometry, independent of root and focus ownership.
-#[cfg(any(feature = "developer-tools", test))]
+#[cfg(any(feature = "desktop", test))]
 pub(crate) enum PaneArrangement {
     Pane(PaneId),
     Split {
@@ -293,7 +293,7 @@ impl<T> Tab<T> {
     }
 
     /// Restore geometry only when it names every current Pane exactly once.
-    #[cfg(any(feature = "developer-tools", test))]
+    #[cfg(any(feature = "desktop", test))]
     pub(crate) fn restore_arrangement(
         &mut self,
         arrangement: PaneArrangement,
@@ -450,7 +450,7 @@ impl<T> Tab<T> {
 
     /// Reconciles server membership regardless of local screen size. Unlike a local split,
     /// another client's creation must preserve this client's focus, zoom, and surviving layout.
-    #[cfg(any(feature = "developer-tools", test))]
+    #[cfg(any(feature = "desktop", test))]
     pub(crate) fn insert_shared_pane(
         &mut self,
         source: PaneId,

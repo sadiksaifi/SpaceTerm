@@ -152,7 +152,7 @@ pub(crate) use pointer_input::{
 /// No hierarchy mutation may occur after this error and before a fresh revalidation succeeds.
 pub(crate) struct TerminalSessionChannelUnavailable;
 
-#[cfg(feature = "developer-tools")]
+#[cfg(feature = "desktop")]
 pub(crate) mod server_session;
-#[cfg(feature = "developer-tools")]
+#[cfg(feature = "desktop")]
 pub(crate) mod shared_workspace;
