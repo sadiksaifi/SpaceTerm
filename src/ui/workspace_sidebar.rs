@@ -171,10 +171,10 @@ pub(super) const SERVER_WORKSPACE_BADGE: &str = "Server";
 
 /// What a shared server Workspace's row presents and offers.
 ///
-/// A shared edit goes to the server, so Rename and the pin commands wait while this client is
-/// offline or an earlier edit is unanswered. Closing a shared Workspace needs confirmation across
-/// every client, and its Worktrees and Repository Status are read on the owning server; neither is
-/// available yet, so the row offers neither in place of a local fallback.
+/// A shared edit goes to the server, so Rename, the pin commands, and Kill Workspace wait while
+/// this client is offline or an earlier edit is unanswered. Its Worktrees and Repository Status
+/// are read on the owning server, which is not available yet, so the row offers neither in place
+/// of a local fallback.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct SharedWorkspaceRow {
     /// The name version the server published, which a rename draft keeps from the moment it
@@ -187,11 +187,6 @@ pub(super) struct SharedWorkspaceRow {
     /// The short status line 2 shows in place of the directory while an edit waits or the server
     /// is unreachable.
     pub(super) status: Option<&'static str>,
-}
-
-impl SharedWorkspaceRow {
-    const CLOSE_UNAVAILABLE: &'static str =
-        "Closing a Workspace that a SpaceTerm Server owns is not available yet.";
 }
 
 impl WorkspaceRowViewModel {

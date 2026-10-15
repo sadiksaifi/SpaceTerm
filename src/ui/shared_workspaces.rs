@@ -10,10 +10,14 @@
 //! membership. The server's answer is authoritative, a refused edit keeps the draft a person
 //! typed, and an offline client offers no shared edit at all rather than queueing one.
 //!
+//! Closing a shared Pane or Tab, and Kill Workspace, end Terminal Sessions for every client. Each
+//! one asks the server to end exactly the Panes and Sessions a person reviewed, so a confirmation
+//! that another client's change made stale ends nothing.
+//!
 //! Operations the server path does not support yet stay unavailable here rather than falling back
-//! to the desktop: closing a shared Tab or Workspace, repairing a Pane's directory, Repository
-//! Status and Worktrees, reading shell content with assistive technology, paste, attaching and
-//! detaching, and retaining a client's own arrangement.
+//! to the desktop: repairing a Pane's directory, Repository Status and Worktrees, reading shell
+//! content with assistive technology, paste, attaching and detaching, and retaining a client's
+//! own arrangement.
 
 use crate::application_identity::ApplicationIdentity;
 
@@ -37,10 +41,11 @@ pub(crate) fn adopted(_: &gpui::App) -> bool {
 pub(crate) use development::testing;
 #[cfg(feature = "developer-tools")]
 pub(crate) use development::{
-    POLL_INTERVAL, SharedAcceptance, SharedEditSource, SharedPaneSessions, SharedPanes,
-    SharedRefusal, SharedRefusalReason, SharedSubmission, SharedTabs, SharedWorkspaceConflict,
+    POLL_INTERVAL, SharedAcceptance, SharedCloseApproval, SharedCloseReview, SharedCloseState,
+    SharedCloseUnavailable, SharedEditSource, SharedPaneSessions, SharedPanes, SharedRefusal,
+    SharedRefusalReason, SharedRemoval, SharedSubmission, SharedTabs, SharedWorkspaceConflict,
     SharedWorkspaceFacts, SharedWorkspaceHost, SharedWorkspacePlan, SharedWorkspaces, adopt,
-    adopted,
+    adopted, shared_close_changed_title,
 };
 
 #[cfg(all(test, feature = "developer-tools"))]
@@ -56,9 +61,11 @@ mod development {
 
     use gpui::{App, SharedString};
     use spaceterm_server::hierarchy::{
-        Axis, Id, Inventory, Mutation, Outcome, RetainedOutcome, Workspace as ServerWorkspace,
+        Axis, CloseConfirmation as ServerCloseConfirmation, CloseTarget as ServerCloseTarget, Id,
+        Inventory, Mutation, Outcome, RetainedOutcome, Workspace as ServerWorkspace,
     };
 
+    use crate::close_confirmation::CloseTarget;
     use crate::domain::{PaneId, TabId, ValidatedLocalDirectory, WorkspaceId};
     use crate::local_server::LocalServer;
     use crate::terminal::server_session::DevelopmentServerSessionFactory;
@@ -720,6 +727,15 @@ mod development {
         /// A refused same-field edit waiting for the local Workspace that presents its target.
         conflict: Option<PendingConflict>,
         refusal: Option<SharedRefusal>,
+        /// The inventory the server published last, including the live Session facts a close
+        /// confirmation reads. Those facts can change without a new membership revision.
+        latest: Option<Inventory>,
+        /// The close confirmation a person is reviewing now.
+        review: Option<SharedCloseReview>,
+        /// The close this process submitted, and the local target a fresh review would reopen.
+        submitted_close: Option<(ServerCloseTarget, CloseTarget)>,
+        /// A close the server refused because what it would end changed after the confirmation.
+        stale_close: Option<ServerCloseTarget>,
     }
 
     /// A refused same-field edit whose draft is kept until this client can name the Workspace it
@@ -747,6 +763,10 @@ mod development {
                 consumed: None,
                 conflict: None,
                 refusal: None,
+                latest: None,
+                review: None,
+                submitted_close: None,
+                stale_close: None,
             }
         }
 
@@ -760,6 +780,110 @@ mod development {
 
         pub(crate) fn editability(&self) -> SharedEditability {
             self.edits.editability()
+        }
+
+        /// Captures what closing `target` ends, as the server reported it last. The capture is
+        /// what a person reviews and what a confirmed close submits; nothing rebuilds it later.
+        pub(crate) fn close_approval(
+            &self,
+            target: ServerCloseTarget,
+        ) -> Result<SharedCloseApproval, SharedCloseUnavailable> {
+            let editability = self.editability();
+            if !editability.available() {
+                return Err(SharedCloseUnavailable::Edits(editability.into()));
+            }
+            let inventory = self
+                .latest
+                .as_ref()
+                .ok_or(SharedCloseUnavailable::Unreported)?;
+            let workspace = target_workspace(inventory, target)
+                .filter(|_| target_exists(inventory, target))
+                .ok_or(SharedCloseUnavailable::Missing)?;
+            // Membership exists, so a missing confirmation means the server has not reported the
+            // live Sessions a person would be approving.
+            let confirmation = inventory
+                .close_confirmation(target)
+                .ok_or(SharedCloseUnavailable::Unreported)?;
+            let scope = match target {
+                ServerCloseTarget::Pane { tab, .. } => SharedCloseScope::Pane {
+                    removes_tab: workspace
+                        .tabs
+                        .iter()
+                        .find(|candidate| candidate.id == tab)
+                        .is_some_and(|tab| tab.panes.len() == 1),
+                },
+                ServerCloseTarget::Tab { .. } => SharedCloseScope::Tab,
+                ServerCloseTarget::Workspace { .. } => SharedCloseScope::Workspace,
+            };
+            let workspace_panes: usize = workspace.tabs.iter().map(|tab| tab.panes.len()).sum();
+            Ok(SharedCloseApproval {
+                target,
+                scope,
+                workspace: workspace.name.clone(),
+                // The server removes a Workspace once nothing in it remains.
+                removes_workspace: confirmation.panes.len() == workspace_panes,
+                confirmation,
+            })
+        }
+
+        /// Whether what an approval would end is still exactly what the server reports now.
+        pub(crate) fn close_state(&self, approval: &SharedCloseApproval) -> SharedCloseState {
+            let Some(inventory) = self.latest.as_ref() else {
+                return SharedCloseState::Changed;
+            };
+            if !target_exists(inventory, approval.target) {
+                return SharedCloseState::Missing;
+            }
+            match inventory.close_confirmation(approval.target) {
+                Some(current) if current == approval.confirmation => SharedCloseState::Current,
+                _ => SharedCloseState::Changed,
+            }
+        }
+
+        /// Asks the server to end exactly what a person approved. `local` is the target a fresh
+        /// review reopens if the server finds the approval stale.
+        pub(crate) fn close(
+            &mut self,
+            approval: SharedCloseApproval,
+            local: CloseTarget,
+        ) -> SharedSubmission {
+            let target = approval.target;
+            let submission = self.ask(Mutation::Close {
+                target,
+                confirmation: approval.confirmation,
+            });
+            if submission == SharedSubmission::Submitted {
+                self.submitted_close = Some((target, local));
+            }
+            submission
+        }
+
+        /// A close the server refused as stale, once, with the local target this process asked
+        /// to close when it is the one that asked. A recovered answer names no local target.
+        pub(crate) fn take_stale_close(
+            &mut self,
+        ) -> Option<(ServerCloseTarget, Option<CloseTarget>)> {
+            let target = self.stale_close.take()?;
+            let local = self
+                .submitted_close
+                .take()
+                .filter(|(submitted, _)| *submitted == target)
+                .map(|(_, local)| local);
+            Some((target, local))
+        }
+
+        pub(crate) const fn review(&self) -> Option<&SharedCloseReview> {
+            self.review.as_ref()
+        }
+
+        pub(crate) fn begin_review(&mut self, review: SharedCloseReview) {
+            self.review = Some(review);
+        }
+
+        /// Ends the review with `generation`, returning it once.
+        pub(crate) fn end_review(&mut self, generation: u64) -> Option<SharedCloseReview> {
+            self.review
+                .take_if(|review| review.generation == generation)
         }
 
         pub(crate) fn facts(&self, workspace: WorkspaceId) -> Option<&SharedWorkspaceFacts> {
@@ -828,6 +952,11 @@ mod development {
                 self.settle(outcome, snapshot.inventory.as_ref(), own, &mut poll);
                 poll.changed = true;
             }
+            // Live Session facts change without a membership revision, so the latest reading is
+            // kept whether or not membership changed.
+            if snapshot.inventory.is_some() && self.latest != snapshot.inventory {
+                self.latest.clone_from(&snapshot.inventory);
+            }
             if let Some(inventory) = snapshot
                 .inventory
                 .filter(|inventory| self.revision != Some(inventory.revision))
@@ -877,6 +1006,13 @@ mod development {
                 Outcome::Missing => self.refusal = Some(SharedRefusal::Missing),
                 Outcome::Invalid => self.refusal = Some(SharedRefusal::Invalid),
                 Outcome::Limit => self.refusal = Some(SharedRefusal::Limit),
+                // What the close would end changed after a person approved it. Ending the new
+                // Sessions needs a fresh review, so nothing asks again on its own.
+                Outcome::StaleConfirmation => {
+                    if let Mutation::Close { target, .. } = &outcome.mutation {
+                        self.stale_close = Some(*target);
+                    }
+                }
             }
         }
 
@@ -915,6 +1051,8 @@ mod development {
                 Mutation::CreateWorkspace { .. }
                 | Mutation::CreateTab { .. }
                 | Mutation::SplitPane { .. } => None,
+                // A stale close is answered with its own outcome rather than a field conflict.
+                Mutation::Close { .. } => None,
             }
         }
 
@@ -1018,9 +1156,206 @@ mod development {
                 self.pending = true;
                 self.conflict = None;
                 self.refusal = None;
+                self.stale_close = None;
+                self.submitted_close = None;
             }
             submission
         }
+    }
+
+    fn target_workspace(
+        inventory: &Inventory,
+        target: ServerCloseTarget,
+    ) -> Option<&ServerWorkspace> {
+        let workspace = match target {
+            ServerCloseTarget::Pane { workspace, .. }
+            | ServerCloseTarget::Tab { workspace, .. }
+            | ServerCloseTarget::Workspace { workspace } => workspace,
+        };
+        inventory
+            .workspaces
+            .iter()
+            .find(|candidate| candidate.id == workspace)
+    }
+
+    /// Whether the server still has the Workspace, Tab, or Pane a close names.
+    fn target_exists(inventory: &Inventory, target: ServerCloseTarget) -> bool {
+        target_workspace(inventory, target).is_some_and(|workspace| {
+            let tab = |id: Id| workspace.tabs.iter().find(|tab| tab.id == id);
+            match target {
+                ServerCloseTarget::Workspace { .. } => true,
+                ServerCloseTarget::Tab { tab: id, .. } => tab(id).is_some(),
+                ServerCloseTarget::Pane { tab: id, pane, .. } => {
+                    tab(id).is_some_and(|tab| tab.panes.iter().any(|p| p.id == pane))
+                }
+            }
+        })
+    }
+
+    /// What closing one shared target ends, captured from the server's report when the
+    /// confirmation opened. The server ends these Panes and Sessions only if they are still
+    /// exactly what it holds, whichever client controls them.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub(crate) struct SharedCloseApproval {
+        target: ServerCloseTarget,
+        confirmation: ServerCloseConfirmation,
+        scope: SharedCloseScope,
+        /// The Workspace's name as the server published it.
+        workspace: String,
+        /// Whether nothing of the Workspace remains afterwards, so the server removes it.
+        removes_workspace: bool,
+    }
+
+    /// Which close a person asked for, and for a Pane, whether its Tab goes with it.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum SharedCloseScope {
+        Pane { removes_tab: bool },
+        Tab,
+        Workspace,
+    }
+
+    impl SharedCloseApproval {
+        /// The live Terminal Sessions the close ends. A retained Pane whose shell has not
+        /// started yet has none.
+        fn sessions(&self) -> usize {
+            self.confirmation
+                .panes
+                .iter()
+                .filter(|pane| pane.session.is_some())
+                .count()
+        }
+
+        pub(crate) fn title(&self) -> String {
+            match self.scope {
+                SharedCloseScope::Pane { .. } => "Close Pane?".to_owned(),
+                SharedCloseScope::Tab => "Close Tab?".to_owned(),
+                SharedCloseScope::Workspace => {
+                    format!("Kill Workspace \u{201C}{}\u{201D}?", self.workspace)
+                }
+            }
+        }
+
+        pub(crate) const fn confirm_label(&self) -> &'static str {
+            match self.scope {
+                SharedCloseScope::Pane { .. } => "Close Pane",
+                SharedCloseScope::Tab => "Close Tab",
+                SharedCloseScope::Workspace => "Kill Workspace",
+            }
+        }
+
+        /// What closes, what ends, and for whom. Every client loses these Panes and Sessions,
+        /// including a client that controls one of the Panes.
+        pub(crate) fn message(&self) -> String {
+            let panes = self.confirmation.panes.len();
+            let removal = match self.scope {
+                SharedCloseScope::Workspace => {
+                    "Its Tabs and Panes are permanently removed for every client.".to_owned()
+                }
+                _ if self.removes_workspace => format!(
+                    "This is the only {} in \u{201C}{}\u{201D}, so the Workspace is permanently \
+                     removed for every client.",
+                    if self.scope == SharedCloseScope::Tab {
+                        "Tab"
+                    } else {
+                        "Pane"
+                    },
+                    self.workspace
+                ),
+                SharedCloseScope::Pane { removes_tab: true } => {
+                    "This is the only Pane in its Tab, so the Tab closes for every client."
+                        .to_owned()
+                }
+                SharedCloseScope::Pane { .. } => "The Pane closes for every client.".to_owned(),
+                SharedCloseScope::Tab => match panes {
+                    1 => "The Tab and its Pane close for every client.".to_owned(),
+                    count => format!("The Tab and its {count} Panes close for every client."),
+                },
+            };
+            let sessions = match self.sessions() {
+                0 => "No shell is running there, so no Terminal Session ends.".to_owned(),
+                1 => "This ends 1 Terminal Session for every client, including on a client that \
+                      controls its Pane, and stops its running commands."
+                    .to_owned(),
+                count => format!(
+                    "This ends {count} Terminal Sessions for every client, including in Panes \
+                     another client controls, and stops their running commands."
+                ),
+            };
+            format!("{removal} {sessions}")
+        }
+
+        /// What a removed Workspace leaves behind, when the close removes one.
+        pub(crate) fn detail(&self) -> Option<&'static str> {
+            self.removes_workspace.then_some(
+                "Other Workspaces keep running. Repository files and Git Worktree directories \
+                 stay on disk. Neither a server restart nor another client can bring this \
+                 Workspace back.",
+            )
+        }
+
+        /// The title of the notice that replaces a confirmation another client made stale.
+        pub(crate) const fn changed_title(&self) -> &'static str {
+            shared_close_changed_title(self.target)
+        }
+
+        /// The title of the notice that replaces a confirmation whose target another client
+        /// already removed.
+        pub(crate) const fn missing_title(&self) -> &'static str {
+            match self.scope {
+                SharedCloseScope::Pane { .. } => "Pane Already Closed",
+                SharedCloseScope::Tab => "Tab Already Closed",
+                SharedCloseScope::Workspace => "Workspace Already Removed",
+            }
+        }
+    }
+
+    /// The title of the notice that says a close ended nothing because what it would end changed
+    /// after the confirmation opened.
+    pub(crate) const fn shared_close_changed_title(target: ServerCloseTarget) -> &'static str {
+        match target {
+            ServerCloseTarget::Pane { .. } => "Pane Changed on Another Client",
+            ServerCloseTarget::Tab { .. } => "Tab Changed on Another Client",
+            ServerCloseTarget::Workspace { .. } => "Workspace Changed on Another Client",
+        }
+    }
+
+    /// Why a shared close cannot be reviewed now. Nothing was sent.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum SharedCloseUnavailable {
+        Edits(SharedRefusalReason),
+        /// The server no longer has the target.
+        Missing,
+        /// The server has not reported the live Sessions the close would end, so a person cannot
+        /// see what they would approve.
+        Unreported,
+    }
+
+    /// Whether an approval still names exactly what the server holds.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum SharedCloseState {
+        Current,
+        /// A Pane joined or left, or a Session started or ended, after the confirmation opened.
+        Changed,
+        /// Another client already removed the target.
+        Missing,
+    }
+
+    /// One shared close confirmation on screen: its Close Confirmation generation, the local
+    /// target it closes, what it approves, and the presentation another client's change replaces.
+    pub(crate) struct SharedCloseReview {
+        pub(crate) generation: u64,
+        pub(crate) target: CloseTarget,
+        pub(crate) approval: SharedCloseApproval,
+        pub(crate) presentation: Option<spaceterm_ui::ModalPresentationHandle>,
+    }
+
+    /// Why this window removes what the server no longer has. Only this client's own accepted
+    /// close moves the keyboard to what remains, as a local close does; another client's change
+    /// never does.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum SharedRemoval {
+        Published,
+        OwnClose,
     }
 
     /// What one inventory reading changed.

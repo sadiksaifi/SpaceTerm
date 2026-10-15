@@ -60,7 +60,11 @@ pub(crate) fn profile(
             Command::PreviousWorktree,
             Some(DefaultBinding::new("alt-cmd-[", &[])),
         ),
-        (Command::CloseWorkspace, None),
+        // Cmd+W asks to Kill Workspace, so ClosePane takes the neighboring Option chord.
+        (
+            Command::CloseWorkspace,
+            Some(DefaultBinding::new("cmd-w", &[])),
+        ),
         (
             Command::ActivateWorkspace1,
             Some(DefaultBinding::new("ctrl-1", &[])),
@@ -148,7 +152,10 @@ pub(crate) fn profile(
         ),
         (Command::MoveTabRight, None),
         (Command::MoveTabLeft, None),
-        (Command::ClosePane, Some(DefaultBinding::new("cmd-w", &[]))),
+        (
+            Command::ClosePane,
+            Some(DefaultBinding::new("cmd-alt-w", &[])),
+        ),
         (Command::SplitRight, Some(DefaultBinding::new("cmd-d", &[]))),
         (
             Command::SplitDown,
@@ -364,4 +371,37 @@ fn control_bindings() -> Vec<KeyBinding> {
             Some(crate::ui::about_window::ABOUT_KEY_CONTEXT),
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::keybindings::{Command, KeybindingPreferences, KeybindingState, Shortcut};
+
+    fn resolve(preferences: &str) -> crate::keybindings::ResolvedKeymap {
+        let preferences: KeybindingPreferences = serde_json::from_str(preferences).unwrap();
+        super::profile(crate::platform::keyboard_layout::testing::us(), Vec::new())
+            .unwrap()
+            .resolve(&preferences)
+    }
+
+    #[test]
+    fn retained_overrides_keep_their_shortcuts_over_the_new_defaults() {
+        let cmd_w = Shortcut::parse("cmd-w").unwrap();
+
+        let resolved = resolve(r#"{"close_pane":"cmd-w"}"#);
+        assert_eq!(resolved.owner(&cmd_w), Some(Command::ClosePane));
+        assert_eq!(
+            resolved.state(Command::CloseWorkspace),
+            KeybindingState::Displaced {
+                by: Command::ClosePane
+            }
+        );
+
+        let resolved = resolve(r#"{"close_workspace":null}"#);
+        assert_eq!(resolved.owner(&cmd_w), None);
+        assert_eq!(
+            resolved.state(Command::CloseWorkspace),
+            KeybindingState::Unassigned
+        );
+    }
 }

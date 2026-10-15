@@ -5213,7 +5213,7 @@ fn risky_pane_close_should_follow_keyboard_focus_and_confirm_once(cx: &mut TestA
         (1, 2)
     );
 
-    cx.simulate_keystrokes("cmd-w");
+    cx.simulate_keystrokes("cmd-alt-w");
     cx.run_until_parked();
     let first_pending = manager.read_with(cx, |manager, _| {
         manager
@@ -5221,7 +5221,7 @@ fn risky_pane_close_should_follow_keyboard_focus_and_confirm_once(cx: &mut TestA
             .pending()
             .expect("risky close should present one confirmation")
     });
-    cx.simulate_keystrokes("cmd-w");
+    cx.simulate_keystrokes("cmd-alt-w");
     cx.run_until_parked();
 
     assert_eq!(
@@ -5314,7 +5314,7 @@ fn prompt_metadata_should_close_a_pane_without_confirmation(cx: &mut TestAppCont
         .unwrap();
     cx.run_until_parked();
 
-    cx.simulate_keystrokes("cmd-w");
+    cx.simulate_keystrokes("cmd-alt-w");
     cx.run_until_parked();
 
     assert!(manager.read_with(cx, |manager, _| {
@@ -5325,6 +5325,55 @@ fn prompt_metadata_should_close_a_pane_without_confirmation(cx: &mut TestAppCont
         (1, 1)
     );
     assert_eq!(records.dropped_session_ids(), vec![2]);
+}
+
+/// Cmd+W asks to Kill Workspace, which confirms even when no Pane is running work.
+#[gpui::test]
+fn command_w_should_confirm_kill_workspace_even_when_its_panes_are_idle(cx: &mut TestAppContext) {
+    let (manager, records, cx) = workspace_manager(cx);
+    redraw(cx);
+    let mut metadata = crate::terminal::metadata::MetadataTracker::new(
+        crate::local_path::LocalPathSemantics::Posix,
+        "/Users/test",
+        "zsh",
+        Default::default(),
+        Instant::now(),
+    );
+    assert!(metadata.apply_semantic_prompt("A", Instant::now()));
+    let mut screen =
+        (*crate::terminal::ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix))
+            .clone();
+    screen.metadata = metadata.snapshot();
+    records
+        .event_sender(1)
+        .expect("the Workspace's Terminal Session was not started")
+        .try_send(TerminalSessionEvent::Screen(Arc::new(screen)))
+        .unwrap();
+    cx.run_until_parked();
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+
+    cx.simulate_keystrokes("cmd-w");
+    redraw(cx);
+
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .close_confirmation
+            .pending()
+            .map(|pending| pending.target)),
+        Some(CloseTarget::Workspace(workspace_id))
+    );
+    assert!(
+        cx.debug_bounds("modal-action-close-confirmation-cancel-keyboard-focus")
+            .is_some()
+    );
+    assert!(records.dropped_session_ids().is_empty());
+    click("modal-action-close-confirmation-confirm", cx);
+    redraw(cx);
+    assert_eq!(records.dropped_session_ids(), vec![1]);
+    assert_ne!(
+        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        workspace_id
+    );
 }
 
 #[gpui::test]
@@ -9272,14 +9321,14 @@ fn tab_shortcuts_should_create_and_activate_tabs_while_sidebar_is_focused(cx: &m
 }
 
 #[gpui::test]
-fn command_w_from_sidebar_should_close_the_globally_final_operating_system_window(
+fn close_pane_shortcut_from_sidebar_should_close_the_globally_final_operating_system_window(
     cx: &mut TestAppContext,
 ) {
     let (manager, records, cx) = workspace_manager(cx);
 
     cx.simulate_keystrokes("cmd-shift-e");
     cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-w");
+    cx.simulate_keystrokes("cmd-alt-w");
     cx.run_until_parked();
     click("modal-action-close-confirmation-confirm", cx);
 
@@ -13545,7 +13594,7 @@ fn row_menus_should_place_their_destructive_commands_below_the_divider(cx: &mut 
     assert_eq!(
         (worktree_menu, workspace_menu),
         ((0.0, true), (true, 0.0)),
-        "Close Tabs stays in the first group; Remove Worktree and Close Workspace sit together \
+        "Close Tabs stays in the first group; Remove Worktree and Kill Workspace sit together \
          below the divider"
     );
 }
@@ -14155,6 +14204,7 @@ fn a_shared_pin_chosen_while_another_client_pins_should_submit_the_version_it_op
     // One server Workspace at `pin_version`, with the Pinned Directory it published.
     let published = |revision: u64, pin_version: u64, pinned: Option<PathBuf>| Inventory {
         revision,
+        close: None,
         workspaces: vec![Workspace {
             id: SERVER_WORKSPACE,
             name: "Build".to_owned(),
@@ -14277,6 +14327,7 @@ fn shared_pane_harness(cx: &mut TestAppContext) -> (SharedPaneHarness, &mut Visu
     cx.run_until_parked();
     let published = Inventory {
         revision: 1,
+        close: None,
         workspaces: vec![Workspace {
             id: SHARED_FOCUS_WORKSPACE,
             name: "Build".to_owned(),
@@ -14469,4 +14520,631 @@ fn a_shared_pane_takeover_should_take_focus_only_from_the_pane_that_held_it(
         cx.debug_bounds("shared-pane-takeover-1").is_some(),
         "the screen should still replace the Pane it took over"
     );
+}
+
+/// A shared Workspace whose Root Tab is split in two beside a second Tab, presented in this window
+/// with the scripted server that answers its edits.
+struct SharedCloseHarness {
+    manager: Entity<WorkspaceManager>,
+    edits: Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
+    panes: Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
+}
+
+const SHARED_CLOSE_WORKSPACE: [u8; 32] = [21; 32];
+const SHARED_CLOSE_ROOT_TAB: [u8; 32] = [22; 32];
+const SHARED_CLOSE_ROOT_PANE: [u8; 32] = [23; 32];
+const SHARED_CLOSE_SPLIT_PANE: [u8; 32] = [24; 32];
+const SHARED_CLOSE_SECOND_TAB: [u8; 32] = [25; 32];
+const SHARED_CLOSE_SECOND_PANE: [u8; 32] = [26; 32];
+const SHARED_CLOSE_NEW_PANE: [u8; 32] = [27; 32];
+const SHARED_CLOSE_BOOT: [u8; 32] = [29; 32];
+
+/// One published Pane and the live Session it presents, if a shell runs.
+type SharedClosePane = ([u8; 32], Option<[u8; 32]>);
+
+/// The published inventory: each Tab and its Panes, with every Pane's live Session.
+fn shared_close_inventory(
+    revision: u64,
+    tabs: &[([u8; 32], &[SharedClosePane])],
+) -> spaceterm_server::hierarchy::Inventory {
+    use spaceterm_server::hierarchy::{
+        Axis, CloseInventory, ConfirmedPane, Inventory, Pane, Tab, Workspace,
+    };
+
+    let pane = |id: [u8; 32], source: Option<[u8; 32]>| Pane {
+        id,
+        source,
+        axis: Axis::Right,
+        starting_directory: PathBuf::from("/server/work"),
+        confirmed_directory: None,
+        creator: None,
+    };
+    let workspace_tabs = tabs
+        .iter()
+        .map(|(tab, panes)| Tab {
+            id: *tab,
+            root_pane: panes[0].0,
+            panes: panes
+                .iter()
+                .enumerate()
+                .map(|(index, (id, _))| pane(*id, (index > 0).then_some(panes[0].0)))
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    Inventory {
+        revision,
+        close: Some(CloseInventory {
+            boot: SHARED_CLOSE_BOOT,
+            sessions: tabs
+                .iter()
+                .flat_map(|(_, panes)| panes.iter())
+                .map(|(id, session)| ConfirmedPane {
+                    id: *id,
+                    session: *session,
+                })
+                .collect(),
+        }),
+        workspaces: vec![Workspace {
+            id: SHARED_CLOSE_WORKSPACE,
+            name: "Build".to_owned(),
+            name_version: 0,
+            pin_version: 0,
+            pinned_directory: None,
+            root_tab: tabs[0].0,
+            tabs: workspace_tabs,
+        }],
+    }
+}
+
+fn shared_close_published() -> spaceterm_server::hierarchy::Inventory {
+    shared_close_inventory(
+        1,
+        &[
+            (
+                SHARED_CLOSE_ROOT_TAB,
+                &[
+                    (SHARED_CLOSE_ROOT_PANE, Some([31; 32])),
+                    (SHARED_CLOSE_SPLIT_PANE, Some([32; 32])),
+                ],
+            ),
+            (SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)]),
+        ],
+    )
+}
+
+/// Opens the shared Workspace from the sidebar so its Root Pane holds the keyboard.
+fn shared_close_harness(cx: &mut TestAppContext) -> (SharedCloseHarness, &mut VisualTestContext) {
+    use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
+    use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    let edits = Rc::new(ScriptedEdits::new(Some(shared_close_published())));
+    let panes = ScriptedPanes::new(WorkspaceTerminalSessionFactory::new_local(
+        Rc::new(TestTerminalSessionFactory::new(
+            TestTerminalSessionRecords::default(),
+        )),
+        crate::terminal::testing::test_local_directory(std::env::temp_dir()),
+    ));
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.present_shared_workspaces(
+                SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
+                SharedPaneSessions::with_opener(
+                    Rc::clone(&panes) as Rc<_>,
+                    &PaneConstruction::testing(),
+                ),
+                window,
+                cx,
+            );
+            manager.sync_shared_workspaces(window, cx);
+        });
+    });
+    cx.run_until_parked();
+    let harness = SharedCloseHarness {
+        manager,
+        edits,
+        panes,
+    };
+    harness.panes.pane(SHARED_CLOSE_ROOT_PANE).reconnect();
+    settle_shared_panes(cx);
+    click("workspace-row-2-inactive", cx);
+    (harness, cx)
+}
+
+impl SharedCloseHarness {
+    /// The server publishes `inventory`, and the window reads it.
+    fn publish(
+        &self,
+        inventory: spaceterm_server::hierarchy::Inventory,
+        cx: &mut VisualTestContext,
+    ) {
+        self.edits.set_inventory(inventory);
+        self.sync(cx);
+    }
+
+    fn sync(&self, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            self.manager
+                .update(cx, |manager, cx| manager.sync_shared_workspaces(window, cx));
+        });
+        redraw(cx);
+    }
+
+    fn closes(&self) -> Vec<spaceterm_server::hierarchy::Mutation> {
+        self.edits
+            .submitted()
+            .into_iter()
+            .filter(|mutation| {
+                matches!(
+                    mutation,
+                    spaceterm_server::hierarchy::Mutation::Close { .. }
+                )
+            })
+            .collect()
+    }
+
+    fn shared_rows(&self, cx: &mut VisualTestContext) -> usize {
+        self.manager.read_with(cx, |manager, _| {
+            manager
+                .workspaces
+                .iter()
+                .filter(|workspace| manager.is_shared_workspace(workspace.id()))
+                .count()
+        })
+    }
+}
+
+fn shared_close_mutation(
+    target: spaceterm_server::hierarchy::CloseTarget,
+    panes: &[SharedClosePane],
+) -> spaceterm_server::hierarchy::Mutation {
+    use spaceterm_server::hierarchy::{CloseConfirmation, ConfirmedPane, Mutation};
+
+    Mutation::Close {
+        target,
+        confirmation: CloseConfirmation {
+            boot: SHARED_CLOSE_BOOT,
+            panes: panes
+                .iter()
+                .map(|(id, session)| ConfirmedPane {
+                    id: *id,
+                    session: *session,
+                })
+                .collect(),
+        },
+    }
+}
+
+/// Kill Workspace on a shared Workspace asks its server. Its confirmation starts on
+/// Cancel, and confirming asks the server to end every Pane and Session it showed; the Workspace
+/// leaves this window only when the server publishes its removal.
+#[gpui::test]
+fn shared_kill_workspace_should_confirm_then_end_exactly_what_it_showed_for_every_client(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::hierarchy::{CloseTarget as ServerCloseTarget, Inventory, Outcome};
+
+    let (harness, cx) = shared_close_harness(cx);
+    right_click("workspace-row-2-active", cx);
+    click("workspace-menu-row-close", cx);
+    redraw(cx);
+
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-cancel-keyboard-focus")
+            .is_some(),
+        "a destructive confirmation should start on Cancel"
+    );
+    assert!(
+        harness.closes().is_empty(),
+        "nothing ends before confirmation"
+    );
+
+    click("modal-action-shared-close-confirm", cx);
+    redraw(cx);
+    assert_eq!(
+        harness.closes(),
+        vec![shared_close_mutation(
+            ServerCloseTarget::Workspace {
+                workspace: SHARED_CLOSE_WORKSPACE,
+            },
+            &[
+                (SHARED_CLOSE_ROOT_PANE, Some([31; 32])),
+                (SHARED_CLOSE_SPLIT_PANE, Some([32; 32])),
+                (SHARED_CLOSE_SECOND_PANE, None),
+            ],
+        )]
+    );
+    assert_eq!(
+        harness.shared_rows(cx),
+        1,
+        "the Workspace stays until the server publishes its removal"
+    );
+
+    harness.edits.answer(Outcome::Accepted {
+        target: SHARED_CLOSE_WORKSPACE,
+    });
+    harness.publish(
+        Inventory {
+            revision: 2,
+            workspaces: Vec::new(),
+            close: None,
+        },
+        cx,
+    );
+    assert_eq!(harness.shared_rows(cx), 0);
+    assert!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.workspaces.len())
+            == 1,
+        "this window keeps its own Workspace"
+    );
+    assert!(
+        shared_close_terminal_is_focused(&harness, cx),
+        "the Workspace that takes its place takes the keyboard, as a local close does"
+    );
+}
+
+/// Cmd+W runs the retained close_workspace Command, which opens Kill Workspace on a shared
+/// Workspace rather than Close Pane.
+#[gpui::test]
+fn shared_command_w_should_open_kill_workspace(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_close_harness(cx);
+
+    cx.simulate_keystrokes("cmd-w");
+    redraw(cx);
+
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-confirm")
+            .is_some()
+    );
+    assert!(matches!(
+        harness.manager.read_with(cx, |manager, _| manager
+            .close_confirmation
+            .pending()
+            .map(|pending| pending.target)),
+        Some(CloseTarget::Workspace(_))
+    ));
+    click("modal-action-shared-close-cancel", cx);
+    redraw(cx);
+    assert!(harness.closes().is_empty(), "Cancel ends nothing");
+    assert_eq!(harness.shared_rows(cx), 1);
+}
+
+/// Closing a Tab ends Panes another client controls without taking them over first.
+#[gpui::test]
+fn shared_tab_close_should_end_panes_another_client_controls_without_taking_over(
+    cx: &mut TestAppContext,
+) {
+    use crate::terminal::server_session::DevelopmentPaneStatus;
+    use spaceterm_server::hierarchy::CloseTarget as ServerCloseTarget;
+
+    let (harness, cx) = shared_close_harness(cx);
+    harness
+        .panes
+        .pane(SHARED_CLOSE_ROOT_PANE)
+        .set(DevelopmentPaneStatus::Takeover);
+    settle_shared_panes(cx);
+
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
+    click("modal-action-shared-close-confirm", cx);
+    redraw(cx);
+
+    assert_eq!(
+        harness.closes(),
+        vec![shared_close_mutation(
+            ServerCloseTarget::Tab {
+                workspace: SHARED_CLOSE_WORKSPACE,
+                tab: SHARED_CLOSE_ROOT_TAB,
+            },
+            &[
+                (SHARED_CLOSE_ROOT_PANE, Some([31; 32])),
+                (SHARED_CLOSE_SPLIT_PANE, Some([32; 32])),
+            ],
+        )]
+    );
+    assert_eq!(
+        harness.panes.pane(SHARED_CLOSE_ROOT_PANE).take_overs(),
+        0,
+        "closing needs no control of the Pane"
+    );
+}
+
+/// Another client's change while the confirmation is open withdraws it, ends nothing, and Review
+/// opens a fresh confirmation of what the server holds now.
+#[gpui::test]
+fn shared_close_made_stale_by_another_client_should_end_nothing_until_reviewed_again(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::hierarchy::CloseTarget as ServerCloseTarget;
+
+    let (harness, cx) = shared_close_harness(cx);
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-confirm")
+            .is_some()
+    );
+
+    // Another client splits the Tab while this confirmation is open.
+    let grown = [
+        (SHARED_CLOSE_ROOT_PANE, Some([31; 32])),
+        (SHARED_CLOSE_SPLIT_PANE, Some([32; 32])),
+        (SHARED_CLOSE_NEW_PANE, None),
+    ];
+    harness.publish(
+        shared_close_inventory(
+            2,
+            &[
+                (SHARED_CLOSE_ROOT_TAB, &grown),
+                (SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)]),
+            ],
+        ),
+        cx,
+    );
+
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-confirm")
+            .is_none(),
+        "the stale confirmation is withdrawn"
+    );
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-review")
+            .is_some()
+    );
+    assert!(harness.closes().is_empty(), "a stale approval ends nothing");
+
+    click("modal-action-shared-close-review", cx);
+    redraw(cx);
+    click("modal-action-shared-close-confirm", cx);
+    redraw(cx);
+    assert_eq!(
+        harness.closes(),
+        vec![shared_close_mutation(
+            ServerCloseTarget::Tab {
+                workspace: SHARED_CLOSE_WORKSPACE,
+                tab: SHARED_CLOSE_ROOT_TAB,
+            },
+            &grown,
+        )],
+        "the fresh review approves the Pane the other client added"
+    );
+}
+
+/// The server refuses an approval that went stale before it arrived. Nothing ends, nothing asks
+/// again on its own, and Review stays a person's choice.
+#[gpui::test]
+fn shared_close_stale_answer_should_offer_review_without_retrying(cx: &mut TestAppContext) {
+    use spaceterm_server::hierarchy::Outcome;
+
+    let (harness, cx) = shared_close_harness(cx);
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
+    click("modal-action-shared-close-confirm", cx);
+    redraw(cx);
+    assert_eq!(harness.closes().len(), 1);
+
+    harness.edits.answer(Outcome::StaleConfirmation);
+    harness.sync(cx);
+
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-review")
+            .is_some()
+    );
+    assert_eq!(
+        harness.closes().len(),
+        1,
+        "a stale approval is never retried"
+    );
+    assert_eq!(harness.shared_rows(cx), 1);
+    click("modal-action-shared-close-dismiss", cx);
+    redraw(cx);
+    assert_eq!(harness.closes().len(), 1);
+}
+
+/// A Tab another client closes while this confirmation is open is gone, so the confirmation says
+/// so instead of asking for anything.
+#[gpui::test]
+fn shared_close_of_a_target_another_client_closed_should_be_withdrawn(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_close_harness(cx);
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
+
+    harness.publish(
+        shared_close_inventory(
+            2,
+            &[(SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)])],
+        ),
+        cx,
+    );
+
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-confirm")
+            .is_none()
+    );
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-review")
+            .is_none()
+    );
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-dismiss")
+            .is_some()
+    );
+    assert!(harness.closes().is_empty());
+}
+
+/// An offline client offers no shared close and keeps nothing for later.
+#[gpui::test]
+fn shared_close_offline_should_close_nothing_and_say_why(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_close_harness(cx);
+    harness.edits.set_connected(false);
+    harness.sync(cx);
+
+    cx.dispatch_action(crate::ui::ClosePane);
+    redraw(cx);
+
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-confirm")
+            .is_none()
+    );
+    assert!(
+        cx.debug_bounds("modal-action-shared-workspace-unavailable-ok")
+            .is_some()
+    );
+    harness.edits.set_connected(true);
+    harness.sync(cx);
+    assert!(
+        harness.closes().is_empty(),
+        "nothing was queued while offline"
+    );
+}
+
+/// Close Pane on a split Pane closes that Pane only, after confirmation.
+#[gpui::test]
+fn shared_pane_close_should_ask_the_server_for_that_pane_only(cx: &mut TestAppContext) {
+    use spaceterm_server::hierarchy::CloseTarget as ServerCloseTarget;
+
+    let (harness, cx) = shared_close_harness(cx);
+    cx.dispatch_action(crate::ui::ClosePane);
+    redraw(cx);
+    click("modal-action-shared-close-confirm", cx);
+    redraw(cx);
+
+    assert_eq!(
+        harness.closes(),
+        vec![shared_close_mutation(
+            ServerCloseTarget::Pane {
+                workspace: SHARED_CLOSE_WORKSPACE,
+                tab: SHARED_CLOSE_ROOT_TAB,
+                pane: SHARED_CLOSE_ROOT_PANE,
+            },
+            &[(SHARED_CLOSE_ROOT_PANE, Some([31; 32]))],
+        )]
+    );
+}
+
+fn shared_close_terminal_is_focused(
+    harness: &SharedCloseHarness,
+    cx: &mut VisualTestContext,
+) -> bool {
+    cx.update(|window, cx| {
+        harness
+            .manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_is_focused(window, cx)
+    })
+}
+
+fn shared_close_counts(harness: &SharedCloseHarness, cx: &mut VisualTestContext) -> (usize, usize) {
+    harness.manager.read_with(cx, |manager, cx| {
+        manager
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .aggregate_counts(cx)
+    })
+}
+
+/// The Close Pane Shortcut opens the shared confirmation on Cancel, and Escape cancels it,
+/// ending nothing and returning the keyboard to the Pane.
+#[gpui::test]
+fn shared_close_pane_shortcut_should_confirm_and_escape_should_cancel(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_close_harness(cx);
+    assert!(shared_close_terminal_is_focused(&harness, cx));
+
+    cx.simulate_keystrokes("cmd-alt-w");
+    redraw(cx);
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-cancel-keyboard-focus")
+            .is_some()
+    );
+
+    cx.simulate_keystrokes("escape");
+    redraw(cx);
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-confirm")
+            .is_none()
+    );
+    assert!(harness.closes().is_empty(), "Escape ends nothing");
+    assert_eq!(shared_close_counts(&harness, cx), (2, 3));
+    assert!(
+        shared_close_terminal_is_focused(&harness, cx),
+        "the keyboard returns to the Pane"
+    );
+}
+
+/// Closing a Tab changes this window only when the server publishes it. The surviving Tab takes
+/// the keyboard, and closing the final Tab removes the Workspace once the server removes it.
+#[gpui::test]
+fn shared_tab_closes_should_reconcile_through_publication_down_to_the_final_tab(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::hierarchy::{CloseTarget as ServerCloseTarget, Inventory, Outcome};
+
+    let (harness, cx) = shared_close_harness(cx);
+    harness.panes.pane(SHARED_CLOSE_SECOND_PANE).reconnect();
+    settle_shared_panes(cx);
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
+    click("modal-action-shared-close-confirm", cx);
+    redraw(cx);
+    assert_eq!(
+        shared_close_counts(&harness, cx),
+        (2, 3),
+        "nothing closes before the server publishes"
+    );
+
+    harness.edits.answer(Outcome::Accepted {
+        target: SHARED_CLOSE_ROOT_TAB,
+    });
+    harness.publish(
+        shared_close_inventory(
+            2,
+            &[(SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)])],
+        ),
+        cx,
+    );
+    assert_eq!(shared_close_counts(&harness, cx), (1, 1));
+    assert_eq!(harness.shared_rows(cx), 1);
+    redraw(cx);
+    assert!(
+        shared_close_terminal_is_focused(&harness, cx),
+        "the surviving Tab's Pane takes the keyboard after this client's own close"
+    );
+
+    // The final Tab's close is its Workspace's removal.
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
+    click("modal-action-shared-close-confirm", cx);
+    redraw(cx);
+    assert_eq!(
+        harness.closes().last(),
+        Some(&shared_close_mutation(
+            ServerCloseTarget::Tab {
+                workspace: SHARED_CLOSE_WORKSPACE,
+                tab: SHARED_CLOSE_SECOND_TAB,
+            },
+            &[(SHARED_CLOSE_SECOND_PANE, None)],
+        ))
+    );
+    harness.edits.answer(Outcome::Accepted {
+        target: SHARED_CLOSE_SECOND_TAB,
+    });
+    harness.publish(
+        Inventory {
+            revision: 3,
+            workspaces: Vec::new(),
+            close: None,
+        },
+        cx,
+    );
+    assert_eq!(harness.shared_rows(cx), 0);
 }

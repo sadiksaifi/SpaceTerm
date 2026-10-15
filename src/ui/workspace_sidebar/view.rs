@@ -1790,15 +1790,14 @@ fn workspace_menu_entries(
         entries.push(entry);
     }
     entries.push(
+        // Kill Workspace ends every Pane in the Workspace after a confirmation. A shared
+        // Workspace's kill asks its server, so it waits while this client cannot ask.
         MenuEntry::action(
-            match shared {
-                Some(_) => SharedWorkspaceRow::CLOSE_UNAVAILABLE,
-                None => "Close Workspace",
-            },
+            "Kill Workspace",
             RowMenuCommand::Workspace(WorkspaceMenuCommand::Close),
         )
-        .destructive(shared.is_none())
-        .disabled(shared.is_some())
+        .destructive(shared_edits)
+        .disabled(!shared_edits)
         .icon(|foreground, size| Icon::new(IconName::X, size, foreground).into_any_element())
         .debug_selector("workspace-menu-row-close"),
     );

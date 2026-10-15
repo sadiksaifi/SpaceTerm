@@ -832,6 +832,9 @@ fn render_body(
                             let detail_selector = detail_selector.clone();
                             content.child(
                                 div()
+                                    .id(("modal-alert-detail", snapshot.presentation.value()))
+                                    .role(accesskit::Role::Label)
+                                    .aria_value(detail.clone())
                                     .debug_selector(move || detail_selector.clone())
                                     .mt(metrics.action_gap / 2.0)
                                     .text_size(metrics.detail_size)

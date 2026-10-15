@@ -395,8 +395,8 @@ mod tests {
     #[gpui::test]
     fn desktop_profile_should_preserve_macos_shortcuts_and_wording(cx: &mut gpui::TestAppContext) {
         use crate::ui::{
-            ClosePane, CloseTab, CreateTab, NewWorkspace, SplitDown, SplitRight, SwitchWorkspace,
-            TogglePaneZoom,
+            ClosePane, CloseTab, CloseWorkspace, CreateTab, NewWorkspace, SplitDown, SplitRight,
+            SwitchWorkspace, TogglePaneZoom,
         };
 
         cx.update(|cx| {
@@ -451,8 +451,12 @@ mod tests {
                 presentation.shortcut(&TogglePaneZoom).as_deref(),
                 Some("⇧⌘↩")
             );
-            assert_eq!(presentation.shortcut(&ClosePane).as_deref(), Some("⌘W"));
+            assert_eq!(presentation.shortcut(&ClosePane).as_deref(), Some("⌥⌘W"));
             assert_eq!(presentation.shortcut(&CloseTab).as_deref(), Some("⇧⌘W"));
+            assert_eq!(
+                presentation.shortcut(&CloseWorkspace).as_deref(),
+                Some("⌘W")
+            );
             #[cfg(feature = "developer-tools")]
             assert_eq!(
                 presentation

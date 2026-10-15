@@ -84,12 +84,12 @@ struct SharedPaneSurface {
     notice: Option<AnyElement>,
 }
 
-/// What a shared server Pane's caption controls offer. A split goes to the server, so it waits
-/// while this client is offline or an edit is unanswered; closing is not available yet.
+/// What a shared server Pane's caption controls offer. A split or a close goes to the server, so
+/// each waits while this client is offline or an edit is unanswered.
 #[derive(Clone, Copy)]
 struct SharedCaptionControls {
-    split: bool,
-    split_reason: Option<&'static str>,
+    edits: bool,
+    edits_reason: Option<&'static str>,
 }
 
 /// The empty base surface between Split Panes, which every Pane Layout calculation reserves.
@@ -1601,11 +1601,8 @@ impl TabView {
     }
 
     fn request_close_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
-        // Closing a shared Pane needs confirmation across every client, which the server path
-        // does not support yet. The Pane offers no local close instead.
-        if self.shared.is_some() {
-            return;
-        }
+        // A shared Pane's close goes up to the Workspace Window, which asks the server after Close
+        // Confirmation. Nothing here closes it locally.
         if self.close_tab_requested || self.tab.pane(pane_id).is_none() {
             return;
         }
@@ -2345,8 +2342,9 @@ impl TabView {
 
     const fn forget_shared_pane(&mut self, _: PaneId) {}
 
+    /// Without developer tools no SpaceTerm Server owns a Pane here.
     const fn holds_shared_pane_locally(&self, _: PaneId) -> bool {
-        false
+        self.shared.is_some()
     }
 
     const fn release_shared_pane(&mut self, _: PaneId, _: &mut Window, _: &mut Context<Self>) {}
@@ -2530,6 +2528,14 @@ impl TabView {
             tab_id: self.tab.id(),
         });
         cx.notify();
+    }
+
+    /// The server identity of one shared Pane this Tab presents.
+    pub(crate) fn shared_server_pane(
+        &self,
+        pane_id: PaneId,
+    ) -> Option<spaceterm_server::hierarchy::Id> {
+        self.shared.as_ref()?.server_pane(pane_id)
     }
 
     /// Whether this Tab presents the server Pane.
@@ -2737,8 +2743,8 @@ impl TabView {
         shared.server_pane(pane_id)?;
         let editability = shared.editability();
         Some(SharedCaptionControls {
-            split: editability.available(),
-            split_reason: Some(editability.explanation()),
+            edits: editability.available(),
+            edits_reason: Some(editability.explanation()),
         })
     }
 
@@ -3555,13 +3561,11 @@ fn render_pane_caption_content(
         .flex()
         .items_center()
         .justify_end();
-    // A shared Pane's split asks the server, so it waits while this client is offline or an
-    // earlier edit is unanswered. Closing one needs confirmation across every client, which the
-    // server path does not support yet, so the control says so rather than closing locally.
+    // A shared Pane's split and close ask the server, so they wait while this client is offline
+    // or an earlier edit is unanswered.
     let split_unavailable =
-        shared.and_then(|shared| (!shared.split).then_some(shared.split_reason));
-    let close_unavailable =
-        shared.map(|_| Some("Closing a Pane that a SpaceTerm Server owns is not available yet."));
+        shared.and_then(|shared| (!shared.edits).then_some(shared.edits_reason));
+    let close_unavailable = split_unavailable;
     let actions = [
         (
             PaneCaptionAction::SplitRight,

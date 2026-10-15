@@ -343,7 +343,8 @@ mod tests {
             ("cmd-o", OpenLocalDirectory.name()),
             ("cmd-shift-o", OpenRemoteDirectory.name()),
             ("cmd-t", CreateTab.name()),
-            ("cmd-w", ClosePane.name()),
+            ("cmd-w", CloseWorkspace.name()),
+            ("cmd-alt-w", ClosePane.name()),
             ("cmd-shift-w", CloseTab.name()),
         ];
         let actual = cx.update(|cx| {

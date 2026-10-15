@@ -53,7 +53,8 @@ use super::{
 };
 use crate::appearance::Color;
 use crate::close_confirmation::{
-    ApplicationCloseFacts, ApplicationPaneFacts, CloseConfirmation, CloseHierarchy, CloseTarget,
+    ApplicationCloseFacts, ApplicationPaneFacts, CloseConfirmation, CloseHierarchy, CloseScope,
+    CloseTarget,
 };
 use crate::directory_selection::SystemDirectorySelection;
 use crate::domain::{
@@ -2506,10 +2507,9 @@ impl WorkspaceManager {
     }
 
     fn request_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
-        // Closing a Workspace a SpaceTerm Server owns, and the Kill Workspace it implies, need
-        // confirmation across every client. The server path does not support that yet, so the
-        // Workspace offers no local close in its place.
-        if self.shared_workspace_close_refused(target, window, cx) {
+        // A SpaceTerm Server owns a shared Workspace's Tabs, Panes, and Sessions, so closing one
+        // asks the server to end them for every client. Nothing closes only here.
+        if self.request_shared_close(target, window, cx) {
             return;
         }
         if self.close_confirmation.pending().is_some() {
@@ -2519,7 +2519,9 @@ impl WorkspaceManager {
         else {
             return;
         };
-        if !requires_confirmation {
+        // Kill Workspace ends every Pane in the Workspace at once, so it always asks first. A
+        // smaller close asks only when it would stop running work.
+        if !requires_confirmation && target.scope() != CloseScope::Workspace {
             self.commit_close_target(target, window, cx);
             return;
         }
@@ -2542,11 +2544,18 @@ impl WorkspaceManager {
         let scope = target.scope();
         let count = self.close_hierarchy(cx).affected_pane_count(target);
         let noun = if count == 1 { "Pane" } else { "Panes" };
+        let message = match scope {
+            CloseScope::Workspace => format!(
+                "Kill this Workspace and close its {count} {noun}? Running commands in these \
+                 Panes will stop."
+            ),
+            _ => format!("Close {count} {noun}? Running commands in these Panes will stop."),
+        };
         let result = Alert::new(
             ModalId::new("close-confirmation"),
             scope.title(),
             scope.title(),
-            format!("Close {count} {noun}? Running commands in these Panes will stop."),
+            message,
             vec![
                 ModalAction::new(
                     CloseConfirmationAction::Confirm,
@@ -3798,8 +3807,8 @@ impl WorkspaceManager {
         None
     }
 
-    const fn shared_workspace_close_refused(
-        &self,
+    const fn request_shared_close(
+        &mut self,
         _: CloseTarget,
         _: &mut Window,
         _: &mut Context<Self>,
@@ -3906,8 +3915,19 @@ impl WorkspaceManager {
         else {
             return;
         };
+        // The removal that answers this client's own close takes the keyboard to what remains.
+        let removal = if poll.accepted.as_ref().is_some_and(|accepted| {
+            matches!(
+                accepted.mutation,
+                spaceterm_server::hierarchy::Mutation::Close { .. }
+            )
+        }) {
+            super::shared_workspaces::SharedRemoval::OwnClose
+        } else {
+            super::shared_workspaces::SharedRemoval::Published
+        };
         if let Some(inventory) = poll.inventory {
-            self.apply_shared_inventory(&inventory, window, cx);
+            self.apply_shared_inventory(&inventory, removal, window, cx);
         }
         // The client that asked for a creation opens it, once, after the server published it.
         if let Some(accepted) = poll.accepted {
@@ -3927,6 +3947,14 @@ impl WorkspaceManager {
         {
             Self::present_shared_refusal(refusal, window, cx);
         }
+        if let Some((server_target, local)) = self
+            .shared
+            .as_mut()
+            .and_then(super::shared_workspaces::SharedWorkspaces::take_stale_close)
+        {
+            self.present_stale_shared_close(server_target, local, window, cx);
+        }
+        self.revalidate_shared_close(window, cx);
         if poll.changed {
             cx.notify();
         }
@@ -3937,6 +3965,7 @@ impl WorkspaceManager {
     fn apply_shared_inventory(
         &mut self,
         inventory: &spaceterm_server::hierarchy::Inventory,
+        removal: super::shared_workspaces::SharedRemoval,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3985,7 +4014,7 @@ impl WorkspaceManager {
                         .map(|entry| entry.payload().clone())
                     {
                         manager.update(cx, |manager, cx| {
-                            manager.reconcile_shared(workspace, window, cx);
+                            manager.reconcile_shared(workspace, removal, window, cx);
                         });
                     }
                 }
@@ -3993,7 +4022,7 @@ impl WorkspaceManager {
                 // it behind would turn server data into desktop-owned work, and an inactive
                 // Pane's connection may never report its own end.
                 SharedWorkspacePlan::Removed { local } => {
-                    self.remove_shared_workspace(local, window, cx);
+                    self.remove_shared_workspace(local, removal, window, cx);
                 }
             }
         }
@@ -4106,7 +4135,12 @@ impl WorkspaceManager {
             .map(|entry| entry.payload().clone())
         {
             manager.update(cx, |manager, cx| {
-                manager.reconcile_shared(workspace, window, cx);
+                manager.reconcile_shared(
+                    workspace,
+                    super::shared_workspaces::SharedRemoval::Published,
+                    window,
+                    cx,
+                );
             });
         }
         cx.notify();
@@ -4209,14 +4243,20 @@ impl WorkspaceManager {
         Some(submission == SharedSubmission::Submitted)
     }
 
-    /// Whether a close request names a shared Workspace, which the server path cannot confirm
-    /// across its clients yet.
-    fn shared_workspace_close_refused(
-        &self,
+    /// Asks to close a Pane, Tab, or Workspace a SpaceTerm Server owns, returning whether the
+    /// target is shared.
+    ///
+    /// The close ends Terminal Sessions for every client, including Panes another client
+    /// controls, so it always opens a Close Confirmation. The confirmation captures exactly which
+    /// Panes and Sessions the server reports; a confirmed close asks the server to end only those.
+    fn request_shared_close(
+        &mut self,
         target: CloseTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        use super::shared_workspaces::{SharedCloseReview, SharedCloseUnavailable};
+
         let workspace_id = match target {
             CloseTarget::Workspace(workspace_id)
             | CloseTarget::Tab { workspace_id, .. }
@@ -4224,20 +4264,346 @@ impl WorkspaceManager {
             | CloseTarget::Worktree { workspace_id, .. } => workspace_id,
             CloseTarget::Window => return false,
         };
-        if !self
-            .shared
-            .as_ref()
-            .is_some_and(|shared| shared.is_shared(workspace_id))
-        {
+        if !self.is_shared_workspace(workspace_id) {
             return false;
         }
-        Self::show_shared_unavailable(
-            "Closing a Workspace, Tab, or Pane that a SpaceTerm Server owns needs confirmation on \
-             every connected client, which is not available yet. The work stays on the server.",
+        if self.close_confirmation.pending().is_some() {
+            return true;
+        }
+        let Some(server_target) = self.shared_close_target(target, cx) else {
+            // A shared Workspace lists no Worktrees, and a Tab or Pane this window cannot name on
+            // the server has already left it.
+            return true;
+        };
+        let Some(shared) = self.shared.as_ref() else {
+            return true;
+        };
+        let approval = match shared.close_approval(server_target) {
+            Ok(approval) => approval,
+            Err(SharedCloseUnavailable::Edits(reason)) => {
+                Self::show_shared_refusal(Self::shared_close_operation(target), reason, window, cx);
+                return true;
+            }
+            Err(SharedCloseUnavailable::Missing) => {
+                Self::present_shared_refusal(
+                    super::shared_workspaces::SharedRefusal::Missing,
+                    window,
+                    cx,
+                );
+                return true;
+            }
+            Err(SharedCloseUnavailable::Unreported) => {
+                Self::show_shared_unavailable(
+                    "The server has not reported which Terminal Sessions this would end yet, so \
+                     SpaceTerm cannot show what you would approve. Nothing was closed.",
+                    window,
+                    cx,
+                );
+                return true;
+            }
+        };
+        let Some(window_handle) = window.window_handle().downcast::<Self>() else {
+            return true;
+        };
+        let Some(generation) = self.close_confirmation.begin(target) else {
+            return true;
+        };
+        let mut alert = Alert::new(
+            ModalId::new("shared-close-confirmation"),
+            approval.title(),
+            approval.title(),
+            approval.message(),
+            vec![
+                ModalAction::new(
+                    CloseConfirmationAction::Confirm,
+                    approval.confirm_label(),
+                    ModalActionRole::Affirmative,
+                    SHARED_CLOSE_CONFIRM_SELECTOR,
+                )
+                .with_intent(ModalActionIntent::Destructive)
+                .with_emphasis(ModalActionEmphasis::Prominent),
+                ModalAction::new(
+                    CloseConfirmationAction::Cancel,
+                    "Cancel",
+                    ModalActionRole::Cancel,
+                    SHARED_CLOSE_CANCEL_SELECTOR,
+                ),
+            ],
+        )
+        .intent(AlertIntent::Critical);
+        if let Some(detail) = approval.detail() {
+            alert = alert.detail(detail);
+        }
+        let presented = alert.present(window, cx, move |outcome, cx| {
+            let confirmed = matches!(
+                outcome,
+                AlertOutcome::Activated {
+                    action_id: CloseConfirmationAction::Confirm,
+                    ..
+                }
+            );
+            let _ = window_handle.update(cx, |manager, window, cx| {
+                manager.settle_shared_close(generation, target, confirmed, window, cx);
+            });
+        });
+        match presented {
+            Ok(presentation) => {
+                if let Some(shared) = self.shared.as_mut() {
+                    shared.begin_review(SharedCloseReview {
+                        generation,
+                        target,
+                        approval,
+                        presentation: Some(presentation),
+                    });
+                }
+            }
+            Err(error) => {
+                self.close_confirmation.presentation_failed(generation);
+                eprintln!("failed to present the shared close confirmation: {error}");
+            }
+        }
+        true
+    }
+
+    /// What a refused shared close says it did not do.
+    const fn shared_close_operation(target: CloseTarget) -> &'static str {
+        match target {
+            CloseTarget::Pane { .. } => "close the Pane",
+            CloseTarget::Tab { .. } => "close the Tab",
+            _ => "kill the Workspace",
+        }
+    }
+
+    /// The server identities a local close target names, read from this window's own map.
+    fn shared_close_target(
+        &self,
+        target: CloseTarget,
+        cx: &App,
+    ) -> Option<spaceterm_server::hierarchy::CloseTarget> {
+        use spaceterm_server::hierarchy::CloseTarget as ServerCloseTarget;
+
+        let shared = self.shared.as_ref()?;
+        let tab_manager = |workspace_id| {
+            self.workspaces
+                .workspace(workspace_id)
+                .map(|entry| entry.payload().read(cx))
+        };
+        match target {
+            CloseTarget::Workspace(workspace_id) => Some(ServerCloseTarget::Workspace {
+                workspace: shared.facts(workspace_id)?.server,
+            }),
+            CloseTarget::Tab {
+                workspace_id,
+                tab_id,
+            } => Some(ServerCloseTarget::Tab {
+                workspace: shared.facts(workspace_id)?.server,
+                tab: tab_manager(workspace_id)?.shared_server_tab(tab_id)?,
+            }),
+            CloseTarget::Pane {
+                workspace_id,
+                tab_id,
+                pane_id,
+            } => {
+                let manager = tab_manager(workspace_id)?;
+                Some(ServerCloseTarget::Pane {
+                    workspace: shared.facts(workspace_id)?.server,
+                    tab: manager.shared_server_tab(tab_id)?,
+                    pane: manager.shared_server_pane(tab_id, pane_id, cx)?,
+                })
+            }
+            CloseTarget::Worktree { .. } | CloseTarget::Window => None,
+        }
+    }
+
+    /// Settles a shared close confirmation. A confirmed close asks the server to end exactly what
+    /// the confirmation showed, and only while that is still what this client last read.
+    fn settle_shared_close(
+        &mut self,
+        generation: u64,
+        target: CloseTarget,
+        confirmed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use super::shared_workspaces::{SharedCloseState, SharedSubmission};
+
+        let review = self
+            .shared
+            .as_mut()
+            .and_then(|shared| shared.end_review(generation));
+        if !self
+            .close_confirmation
+            .settle_approval(generation, target, confirmed)
+        {
+            return;
+        }
+        let (Some(review), Some(shared)) = (review, self.shared.as_mut()) else {
+            return;
+        };
+        match shared.close_state(&review.approval) {
+            SharedCloseState::Current => {
+                if let SharedSubmission::Refused(reason) =
+                    shared.close(review.approval, review.target)
+                {
+                    Self::show_shared_refusal(
+                        Self::shared_close_operation(target),
+                        reason,
+                        window,
+                        cx,
+                    );
+                }
+            }
+            SharedCloseState::Changed => {
+                Self::present_shared_close_changed(
+                    review.approval.changed_title(),
+                    Some(target),
+                    window,
+                    cx,
+                );
+            }
+            SharedCloseState::Missing => {
+                Self::present_shared_close_missing(&review.approval, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Withdraws a shared close confirmation that another client's change made stale, and says
+    /// why. The person never approves Sessions or Panes they were not shown.
+    fn revalidate_shared_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use super::shared_workspaces::SharedCloseState;
+
+        let Some(shared) = self.shared.as_mut() else {
+            return;
+        };
+        let Some((generation, state)) = shared
+            .review()
+            .map(|review| (review.generation, shared.close_state(&review.approval)))
+            .filter(|(_, state)| *state != SharedCloseState::Current)
+        else {
+            return;
+        };
+        let Some(review) = shared.end_review(generation) else {
+            return;
+        };
+        // The pending confirmation ends here, so its own deferred answer settles nothing.
+        self.close_confirmation.presentation_failed(generation);
+        if let Some(presentation) = review.presentation.as_ref() {
+            let _ = presentation.dismiss(window, cx);
+        }
+        match state {
+            SharedCloseState::Missing => {
+                Self::present_shared_close_missing(&review.approval, window, cx);
+            }
+            _ => Self::present_shared_close_changed(
+                review.approval.changed_title(),
+                Some(review.target),
+                window,
+                cx,
+            ),
+        }
+    }
+
+    /// Explains that what a close would end changed after it was approved or shown, so nothing
+    /// was closed. Review opens a fresh confirmation of what the server holds now; nothing asks
+    /// again on its own.
+    fn present_shared_close_changed(
+        title: &'static str,
+        target: Option<CloseTarget>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let message = "A Pane was added or removed, or a Terminal Session started or ended, \
+                       after the confirmation opened. Nothing was closed.";
+        let mut actions = Vec::new();
+        if target.is_some() {
+            actions.push(
+                ModalAction::new(
+                    true,
+                    "Review",
+                    ModalActionRole::Affirmative,
+                    SHARED_CLOSE_REVIEW_SELECTOR,
+                )
+                .with_emphasis(ModalActionEmphasis::Prominent),
+            );
+        }
+        actions.push(ModalAction::new(
+            false,
+            if target.is_some() { "Cancel" } else { "OK" },
+            ModalActionRole::Cancel,
+            SHARED_CLOSE_DISMISS_SELECTOR,
+        ));
+        let manager = cx.weak_entity();
+        let window_handle = window.window_handle();
+        let result = Alert::new(
+            ModalId::new("shared-close-changed"),
+            title,
+            title,
+            message,
+            actions,
+        )
+        .intent(AlertIntent::Warning)
+        .present(window, cx, move |outcome, cx| {
+            let reviewed = matches!(
+                outcome,
+                AlertOutcome::Activated {
+                    action_id: true,
+                    ..
+                }
+            );
+            let Some(target) = target.filter(|_| reviewed) else {
+                return;
+            };
+            let _ = window_handle.update(cx, |_, window, cx| {
+                let _ = manager.update(cx, |manager, cx| {
+                    manager.request_close(target, window, cx);
+                });
+            });
+        });
+        if let Err(error) = result {
+            eprintln!("failed to present the changed shared close: {error}");
+        }
+    }
+
+    /// Presents a close the server refused because what it would end changed first. Review is
+    /// offered only to the process that asked, and only while its target is still here.
+    fn present_stale_shared_close(
+        &mut self,
+        server_target: spaceterm_server::hierarchy::CloseTarget,
+        local: Option<CloseTarget>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let local =
+            local.filter(|local| self.shared_close_target(*local, cx) == Some(server_target));
+        Self::present_shared_close_changed(
+            super::shared_workspaces::shared_close_changed_title(server_target),
+            local,
             window,
             cx,
         );
-        true
+    }
+
+    /// Explains that another client already removed what a close confirmation named.
+    fn present_shared_close_missing(
+        approval: &super::shared_workspaces::SharedCloseApproval,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = Alert::new(
+            ModalId::new("shared-close-missing"),
+            approval.missing_title(),
+            approval.missing_title(),
+            "Another client removed it while the confirmation was open. Nothing else changed.",
+            vec![ModalAction::new(
+                (),
+                "OK",
+                ModalActionRole::Cancel,
+                SHARED_CLOSE_DISMISS_SELECTOR,
+            )],
+        )
+        .intent(AlertIntent::Informational)
+        .present(window, cx, |_, _| {});
     }
 
     /// Presents a refused same-field edit: the server's value, the draft it rejected, and the
@@ -4426,18 +4792,20 @@ impl WorkspaceManager {
             }
             // A rename or a pin changes no membership, so there is nothing to open.
             Mutation::RenameWorkspace { .. } | Mutation::PinWorkspace { .. } => {}
+            // The published removal already moved the keyboard to what remains.
+            Mutation::Close { .. } => {}
         }
     }
 
     /// Removes a Workspace the server no longer has.
     ///
-    /// The server already removed it, so this is not a close a person asked for and needs no
-    /// confirmation. It ends nothing on the server: closing the local Panes drops their
-    /// subscriptions. The collection keeps its invariants, replacing a final Workspace with a
-    /// Local one this window owns.
+    /// The server already removed it, so this needs no confirmation here. It ends nothing on the
+    /// server: closing the local Panes drops their subscriptions. The collection keeps its
+    /// invariants, replacing a final Workspace with a Local one this window owns.
     fn remove_shared_workspace(
         &mut self,
         workspace_id: WorkspaceId,
+        removal: super::shared_workspaces::SharedRemoval,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -4445,9 +4813,15 @@ impl WorkspaceManager {
             shared.forget(workspace_id);
         }
         self.pending_final_tab_closes.remove(&workspace_id);
-        // Opening whatever takes its place would select that Workspace's Focused Pane, and a
-        // publication is nobody's request for a Pane.
-        self.close_workspace_activating(workspace_id, false, window, cx);
+        // Opening whatever takes its place selects that Workspace's Focused Pane. Another
+        // client's publication is nobody's request for a Pane; this client's own Kill Workspace
+        // is, as a local close is.
+        self.close_workspace_activating(
+            workspace_id,
+            removal == super::shared_workspaces::SharedRemoval::OwnClose,
+            window,
+            cx,
+        );
     }
 
     /// The pin version a shared Workspace shows now, which its chooser keeps while it is open.
@@ -4472,6 +4846,14 @@ impl WorkspaceManager {
     }
 }
 
+#[cfg(feature = "developer-tools")]
+const SHARED_CLOSE_CONFIRM_SELECTOR: &str = "shared-close-confirm";
+#[cfg(feature = "developer-tools")]
+const SHARED_CLOSE_CANCEL_SELECTOR: &str = "shared-close-cancel";
+#[cfg(feature = "developer-tools")]
+const SHARED_CLOSE_REVIEW_SELECTOR: &str = "shared-close-review";
+#[cfg(feature = "developer-tools")]
+const SHARED_CLOSE_DISMISS_SELECTOR: &str = "shared-close-dismiss";
 #[cfg(feature = "developer-tools")]
 const SHARED_CONFLICT_RETRY_SELECTOR: &str = "shared-workspace-conflict-retry";
 #[cfg(feature = "developer-tools")]
