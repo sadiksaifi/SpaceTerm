@@ -853,6 +853,43 @@ mod tests {
     }
 
     #[test]
+    fn shared_session_reset_retains_membership_but_ordinary_final_shell_exit_removes_it() {
+        let mut host = SharedWorkspaceHost::new(host());
+        create_shared(&mut host, 1);
+        let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+        let select = |explicit| Request::SelectPane {
+            pane,
+            explicit,
+            size: size(),
+            style: None,
+        };
+        let Reply::Attached { lease: old } = host.request([1; 32], [1; 32], select(true)) else {
+            panic!()
+        };
+        host.shutdown().unwrap();
+        assert_eq!(
+            shared_inventory(&mut host).workspaces[0].tabs[0].root_pane,
+            pane
+        );
+        assert!(matches!(
+            host.request([1; 32], [1; 32], select(false)),
+            Reply::Restored { .. }
+        ));
+        let Reply::Attached { lease } = host.request([1; 32], [1; 32], select(true)) else {
+            panic!()
+        };
+        assert_ne!(lease.session, old.session);
+        let reply = command(&mut host, 1, lease, "exit\n");
+        assert!(matches!(reply, Reply::Unchanged));
+        let until = Instant::now() + Duration::from_secs(3);
+        while !shared_inventory(&mut host).workspaces.is_empty() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(shared_inventory(&mut host).workspaces.is_empty());
+        host.shutdown().unwrap();
+    }
+
+    #[test]
     fn opening_the_legacy_pane_cannot_consume_a_shared_edits_operation_identity() {
         use spaceterm_server::hierarchy::{Mutation, Outcome};
         let mut host = SharedWorkspaceHost::new(host());
@@ -1052,7 +1089,7 @@ mod tests {
         };
         lease
     }
-    fn command(host: &mut DevelopmentPaneHost, connection: u8, lease: Lease, text: &str) -> Reply {
+    fn command(host: &mut impl PaneService, connection: u8, lease: Lease, text: &str) -> Reply {
         let result = host.request(
             [1; 32],
             [connection; 32],
