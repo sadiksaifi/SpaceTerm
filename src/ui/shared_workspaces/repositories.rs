@@ -87,8 +87,24 @@ impl SharedRepositories {
     }
 
     /// The Worktrees of the repository containing one directory, as git on the server lists them.
+    ///
+    /// A failed read keeps the directory's last listing, which a removed Worktree would keep
+    /// forever. Another directory in the same repository that the server still reads lists its
+    /// current Worktrees instead; the first by path is chosen so every reading picks the same one.
     pub(crate) fn worktrees(&self, directory: &Path) -> Option<&WorktreeInventory> {
-        self.facts(directory)?.worktrees.as_ref()
+        let facts = self.facts(directory)?;
+        let last = facts.worktrees.as_ref()?;
+        if facts.failure.is_none() {
+            return Some(last);
+        }
+        self.snapshot
+            .iter()
+            .flat_map(|snapshot| &snapshot.directories)
+            .filter(|sibling| sibling.failure.is_none())
+            .filter_map(|sibling| Some((&sibling.directory, sibling.worktrees.as_ref()?)))
+            .filter(|(_, inventory)| inventory.main_root == last.main_root)
+            .min_by_key(|(directory, _)| *directory)
+            .map_or(Some(last), |(_, current)| Some(current))
     }
 
     /// The Pull Request lookups the presented repositories need, one per branch and upstream.
@@ -192,7 +208,7 @@ mod tests {
 
     use spaceterm_server::repository::{
         ChangeSummary, ChangeTotal, GitHubRepository, GitToolStatus, PullRequestQuery, Repository,
-        RepositoryHead, RepositoryReadError,
+        RepositoryHead, RepositoryReadError, WorktreeHead, WorktreeRecord,
     };
 
     use super::*;
@@ -421,6 +437,70 @@ mod tests {
 
         assert!(matches!(status(&view).key.root, RepositoryRoot::Remote(_)));
         assert_eq!(status(&view).key.root.display(), "/srv/app");
+    }
+
+    fn listing(directory: &str, main_root: &str, listed: &[&str]) -> DirectoryFacts {
+        DirectoryFacts {
+            directory: directory.into(),
+            worktrees: Some(WorktreeInventory {
+                main_root: main_root.into(),
+                current: None,
+                worktrees: listed
+                    .iter()
+                    .map(|root| WorktreeRecord {
+                        root: root.into(),
+                        head: WorktreeHead::Branch("main".into()),
+                        locked: false,
+                        missing: false,
+                    })
+                    .collect(),
+            }),
+            ..facts(Some(repository("main")), None)
+        }
+    }
+
+    fn listed(repositories: &SharedRepositories, directory: &str) -> Vec<PathBuf> {
+        repositories
+            .worktrees(Path::new(directory))
+            .expect("the directory has a listing")
+            .worktrees
+            .iter()
+            .map(|record| record.root.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_failed_directory_should_list_the_worktrees_a_surviving_sibling_reads() {
+        let failed = DirectoryFacts {
+            failure: Some(RepositoryReadError::Unavailable),
+            ..listing("/srv/app-gone", "/srv/app", &["/srv/app", "/srv/app-gone"])
+        };
+        let siblings = [
+            listing("/srv/app-b", "/srv/app", &["/srv/app", "/srv/app-b"]),
+            listing("/srv/app-a", "/srv/app", &["/srv/app", "/srv/app-a"]),
+            listing("/srv/other", "/srv/other", &["/srv/other"]),
+        ];
+        let mut forward = SharedRepositories::default();
+        let mut reversed = SharedRepositories::default();
+        let mut alone = SharedRepositories::default();
+        let mut directories = vec![failed.clone()];
+        directories.extend(siblings.iter().cloned());
+        forward.accept(Some(&snapshot(1, directories.clone())), Instant::now());
+        directories.reverse();
+        reversed.accept(Some(&snapshot(1, directories)), Instant::now());
+        alone.accept(
+            Some(&snapshot(1, vec![failed, siblings[2].clone()])),
+            Instant::now(),
+        );
+
+        let chosen = [PathBuf::from("/srv/app"), PathBuf::from("/srv/app-a")];
+        assert_eq!(listed(&forward, "/srv/app-gone"), chosen);
+        assert_eq!(listed(&reversed, "/srv/app-gone"), chosen);
+        assert_eq!(
+            listed(&alone, "/srv/app-gone"),
+            [PathBuf::from("/srv/app"), PathBuf::from("/srv/app-gone")],
+            "with no surviving sibling, the last listing stays"
+        );
     }
 
     #[test]

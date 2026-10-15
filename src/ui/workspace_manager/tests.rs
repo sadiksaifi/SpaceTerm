@@ -15909,7 +15909,8 @@ mod shared_repositories {
     use spaceterm_server::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
     use spaceterm_server::repository::{
         ChangeSummary, ChangeTotal, DirectoryFacts, GitToolStatus, Repository, RepositoryHead,
-        Snapshot, ToolVersion, WorktreeHead, WorktreeInventory, WorktreeRecord,
+        RepositoryReadError, Snapshot, ToolVersion, WorktreeHead, WorktreeInventory,
+        WorktreeRecord,
     };
 
     use super::*;
@@ -15924,6 +15925,7 @@ mod shared_repositories {
     const FEATURE_PANE: [u8; 32] = [25; 32];
     const MAIN_ROOT: &str = "/srv/app";
     const FEATURE_ROOT: &str = "/srv/app-feature";
+    const EXTRA_ROOT: &str = "/srv/app-extra";
 
     fn pane(id: [u8; 32], directory: &str) -> Pane {
         Pane {
@@ -16019,6 +16021,17 @@ mod shared_repositories {
         }
     }
 
+    /// The server's inventory when the Workspace's Root Tab is in the feature Worktree, with the
+    /// Git facts it read at `revision`.
+    fn rooted_in_feature(revision: u64, directories: Vec<DirectoryFacts>) -> Inventory {
+        let mut inventory = published(revision, "main", true);
+        inventory.workspaces[0].root_tab = FEATURE_TAB;
+        if let Some(snapshot) = &mut inventory.repositories {
+            snapshot.directories = directories;
+        }
+        inventory
+    }
+
     struct Harness {
         manager: Entity<WorkspaceManager>,
         edits: Rc<ScriptedEdits>,
@@ -16063,9 +16076,9 @@ mod shared_repositories {
         }
     }
 
-    fn harness(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+    fn harness(cx: &mut TestAppContext, initial: Inventory) -> (Harness, &mut VisualTestContext) {
         let (manager, _records, cx) = workspace_manager(cx);
-        let edits = Rc::new(ScriptedEdits::new(Some(published(1, "main", true))));
+        let edits = Rc::new(ScriptedEdits::new(Some(initial)));
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             Rc::new(
                 TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
@@ -16111,7 +16124,7 @@ mod shared_repositories {
     /// row and every Pane even though its organization revision never changes.
     #[gpui::test]
     fn an_inactive_shared_workspace_should_present_each_new_git_reading(cx: &mut TestAppContext) {
-        let (harness, cx) = harness(cx);
+        let (harness, cx) = harness(cx, published(1, "main", true));
         let first_badge = harness
             .row(cx)
             .repository
@@ -16154,7 +16167,7 @@ mod shared_repositories {
     fn shared_worktree_rows_should_follow_server_membership_and_offer_no_writes(
         cx: &mut TestAppContext,
     ) {
-        let (harness, cx) = harness(cx);
+        let (harness, cx) = harness(cx, published(1, "main", true));
         let section = harness
             .row(cx)
             .worktrees
@@ -16179,27 +16192,148 @@ mod shared_repositories {
     }
 
     /// A Worktree removed outside SpaceTerm keeps its row while the server keeps its Tab there.
-    /// Nothing asks the server to recreate it, and its row opens only the Tab it has.
+    /// When it was the Workspace's own directory, the server's failed read of it keeps its last
+    /// facts, and the rows follow what git lists from a surviving Worktree: the removal, later
+    /// additions, and a prune. Nothing asks the server to recreate it, and its row opens only the
+    /// Tab it has.
     #[gpui::test]
     fn an_externally_removed_shared_worktree_should_stay_missing_with_its_tab(
         cx: &mut TestAppContext,
     ) {
-        let (harness, cx) = harness(cx);
+        let both = [
+            record(MAIN_ROOT, "main", false),
+            record(FEATURE_ROOT, "feature", false),
+        ];
+        let (harness, cx) = harness(
+            cx,
+            rooted_in_feature(
+                1,
+                vec![
+                    facts(MAIN_ROOT, "main", &both),
+                    facts(FEATURE_ROOT, "feature", &both),
+                ],
+            ),
+        );
+        // The server keeps the removed directory's last facts, including its former listing.
+        let removed_source = DirectoryFacts {
+            failure: Some(RepositoryReadError::Unavailable),
+            ..facts(FEATURE_ROOT, "feature", &both)
+        };
+        let rows = |cx: &mut VisualTestContext| {
+            harness
+                .row(cx)
+                .worktrees
+                .expect("the Workspace lists its Worktrees")
+                .rows()
+                .map(|row| (row.name.to_string(), row.missing, row.has_tabs))
+                .collect::<Vec<_>>()
+        };
+        let feature_row = |cx: &mut VisualTestContext| {
+            harness
+                .row(cx)
+                .worktrees
+                .and_then(|section| {
+                    section
+                        .rows()
+                        .find(|row| row.name.as_ref() == "app-feature")
+                        .cloned()
+                })
+                .expect("the removed Worktree keeps its row")
+        };
 
-        harness.publish(published(2, "main", false), cx);
-        let section = harness
+        harness.publish(
+            rooted_in_feature(
+                2,
+                vec![
+                    facts(
+                        MAIN_ROOT,
+                        "main",
+                        &[
+                            record(MAIN_ROOT, "main", false),
+                            record(FEATURE_ROOT, "feature", true),
+                        ],
+                    ),
+                    removed_source.clone(),
+                ],
+            ),
+            cx,
+        );
+        let after_removal = rows(cx);
+        let badge = harness
             .row(cx)
-            .worktrees
-            .expect("the removed Worktree still has a Tab");
-        let removed = section
-            .rows()
-            .find(|row| row.name.as_ref() == "app-feature")
-            .cloned()
-            .expect("the removed Worktree keeps its row");
+            .repository
+            .map(|badge| badge.text().to_owned());
+        harness.publish(
+            rooted_in_feature(
+                3,
+                vec![
+                    facts(
+                        MAIN_ROOT,
+                        "main",
+                        &[
+                            record(MAIN_ROOT, "main", false),
+                            record(FEATURE_ROOT, "feature", true),
+                            record(EXTRA_ROOT, "extra", false),
+                        ],
+                    ),
+                    removed_source.clone(),
+                ],
+            ),
+            cx,
+        );
+        let after_addition = rows(cx);
+        harness.publish(
+            rooted_in_feature(
+                4,
+                vec![
+                    facts(
+                        MAIN_ROOT,
+                        "main",
+                        &[
+                            record(MAIN_ROOT, "main", false),
+                            record(EXTRA_ROOT, "extra", false),
+                        ],
+                    ),
+                    removed_source,
+                ],
+            ),
+            cx,
+        );
+        let after_prune = rows(cx);
+        let pruned = feature_row(cx);
 
-        assert!(removed.missing);
-        assert!(removed.has_tabs && removed.openable() && !removed.opens_tabs());
-        assert_eq!(removed.removal, WorktreeRemoval::Unlisted);
+        assert_eq!(
+            after_removal,
+            vec![
+                ("app".to_owned(), false, true),
+                ("app-feature".to_owned(), true, true),
+            ],
+            "a surviving Worktree's listing marks the Workspace's own Worktree Missing"
+        );
+        assert_eq!(
+            badge.as_deref(),
+            Some("feature"),
+            "the row keeps the removed directory's last Repository Status"
+        );
+        assert_eq!(
+            after_addition,
+            vec![
+                ("app".to_owned(), false, true),
+                ("app-feature".to_owned(), true, true),
+                ("app-extra".to_owned(), false, false),
+            ],
+            "a Worktree added outside SpaceTerm joins the rows"
+        );
+        assert_eq!(
+            after_prune
+                .iter()
+                .find(|(name, ..)| name == "app-extra")
+                .cloned(),
+            Some(("app-extra".to_owned(), false, false))
+        );
+        assert!(pruned.missing);
+        assert!(pruned.has_tabs && pruned.openable() && !pruned.opens_tabs());
+        assert_eq!(pruned.removal, WorktreeRemoval::Unlisted);
         assert_eq!(harness.edits.submitted(), Vec::new());
     }
 
@@ -16208,7 +16342,7 @@ mod shared_repositories {
     fn activating_a_shared_worktree_should_show_its_tab_without_asking_the_server(
         cx: &mut TestAppContext,
     ) {
-        let (harness, cx) = harness(cx);
+        let (harness, cx) = harness(cx, published(1, "main", true));
         let feature = harness
             .row(cx)
             .worktrees
