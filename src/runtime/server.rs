@@ -84,6 +84,9 @@ impl DevelopmentPaneHost {
         })
     }
     fn retain(&mut self, organization: Option<Organization>) -> Result<(), Refusal> {
+        if self.organization == organization && !self.uncertain {
+            return Ok(());
+        }
         if let Some(store) = &self.store
             && store.write(organization.as_ref()).is_err()
         {
@@ -359,10 +362,7 @@ impl DevelopmentPaneHost {
                     return Err(Refusal::Failed);
                 }
                 if pane.ended {
-                    pane.runtime
-                        .shutdown_and_wait(Duration::from_secs(5))
-                        .map_err(|_| Refusal::CleanupUnresolved)?;
-                    self.retain(None)?;
+                    self.retire_exited()?;
                     self.pane = None;
                     Ok(Reply::Ended)
                 } else {
@@ -411,18 +411,27 @@ impl DevelopmentPaneHost {
         }
     }
 
-    fn reconcile_selection(&mut self) -> Result<(), Refusal> {
+    fn retire_exited(&mut self) -> Result<(), Refusal> {
         let Some(pane) = &mut self.pane else {
             return Ok(());
         };
-        // A waiting client has no lease to Poll. Observe lifecycle events before offering
-        // control, even when the previous controller has disconnected.
         pane.drain();
         if pane.ended {
             pane.runtime
                 .shutdown_and_wait(Duration::from_secs(5))
                 .map_err(|_| Refusal::CleanupUnresolved)?;
+            // Ordinary exit closes the final Pane even without a subscribed client. Keep its
+            // final screen until the controller polls, but never retain it across a restart.
             self.retain(None)?;
+        }
+        Ok(())
+    }
+    fn reconcile_selection(&mut self) -> Result<(), Refusal> {
+        self.retire_exited()?;
+        let Some(pane) = &self.pane else {
+            return Ok(());
+        };
+        if pane.ended {
             self.pane = None;
         } else if pane.failed {
             return Err(Refusal::Failed);
@@ -437,8 +446,8 @@ impl PaneService for DevelopmentPaneHost {
         Ok(())
     }
     fn tick(&mut self) {
-        if self.recover().is_ok() {
-            let _ = self.retain_directory();
+        if self.recover().is_ok() && self.retain_directory().is_ok() {
+            let _ = self.retire_exited();
         }
     }
     fn request(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Reply {
@@ -847,6 +856,23 @@ mod tests {
         ));
         assert!(host.pane.is_none());
         assert!(host.organization.as_ref() == Some(&organization));
+    }
+
+    #[test]
+    fn ordinary_exit_retires_organization_without_a_connected_client() {
+        let mut host = host();
+        let lease = attach(&mut host, 1, true);
+        command(&mut host, 1, lease, "exit");
+        host.disconnected([1; 32]);
+        let until = Instant::now() + Duration::from_secs(3);
+        while host.organization.is_some() && Instant::now() < until {
+            host.tick();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            host.organization.is_none(),
+            "ordinary exit closes the final Pane even without a client polling"
+        );
     }
 
     #[test]
