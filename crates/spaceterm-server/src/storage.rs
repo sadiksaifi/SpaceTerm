@@ -15,7 +15,9 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-const MAX_RECORD: usize = 4 * 1024 * 1024;
+// Covers the hierarchy bounds with two 4096-byte paths per Pane, Workspace pins, and 32
+// retained edits, including JSON escaping. Inventory also fits the 16 MiB transport bound.
+const MAX_RECORD: usize = 12 * 1024 * 1024;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Record {
@@ -463,7 +465,9 @@ mod tests {
         let reopened = ClientJournal::open(fixture.open(), [1; 32], [2; 32]);
         release.write_all(&[1]).unwrap();
         // SAFETY: this reaps only the child created above; no other process is signalled.
-        unsafe { libc::waitpid(child, std::ptr::null_mut(), 0); }
+        unsafe {
+            libc::waitpid(child, std::ptr::null_mut(), 0);
+        }
         let mut journal = reopened.unwrap();
         assert_eq!(journal.pending().unwrap().mutation, mutation);
         assert_eq!(journal.pending().unwrap().sequence, 4);

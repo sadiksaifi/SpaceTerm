@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 pub type Id = [u8; 32];
 pub const MAX_WORKSPACES: usize = 64;
-pub const MAX_TABS: usize = 256;
-pub const MAX_PANES: usize = 512;
+pub const MAX_TABS: usize = 128;
+pub const MAX_PANES: usize = 128;
 const MAX_OUTCOMES: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,7 +127,9 @@ impl State {
         if self.creator_boot != Some(boot) {
             for w in &mut self.inventory.workspaces {
                 for t in &mut w.tabs {
-                    for p in &mut t.panes { p.creator = None; }
+                    for p in &mut t.panes {
+                        p.creator = None;
+                    }
                 }
             }
             self.creator_boot = Some(boot);
@@ -626,7 +628,9 @@ impl Drop for ClientJournal {
         use std::os::fd::AsRawFd;
         // SAFETY: this guard owns the live lock descriptor. Explicit unlock ends its ownership
         // even when a concurrent fork inherited a descriptor that has not reached exec yet.
-        unsafe { libc::flock(self._lock.as_raw_fd(), libc::LOCK_UN); }
+        unsafe {
+            libc::flock(self._lock.as_raw_fd(), libc::LOCK_UN);
+        }
     }
 }
 #[cfg(feature = "client")]
@@ -860,15 +864,30 @@ mod tests {
     fn recovery_preserves_creator_reservations_only_in_the_boot_that_created_them() {
         let mut state = State::empty();
         state.begin_boot([7; 32]);
-        state.apply([1; 32], 1, Mutation::CreateWorkspace { name: "Build".into() }, "/tmp".as_ref(), |_| true).unwrap();
+        state
+            .apply(
+                [1; 32],
+                1,
+                Mutation::CreateWorkspace {
+                    name: "Build".into(),
+                },
+                "/tmp".as_ref(),
+                |_| true,
+            )
+            .unwrap();
         let bytes = serde_json::to_vec(&state).unwrap();
         let mut same_boot: State = serde_json::from_slice(&bytes).unwrap();
         same_boot.begin_boot([7; 32]);
-        assert_eq!(same_boot.inventory.workspaces[0].tabs[0].panes[0].creator, Some([1; 32]));
+        assert_eq!(
+            same_boot.inventory.workspaces[0].tabs[0].panes[0].creator,
+            Some([1; 32])
+        );
         let mut next_boot: State = serde_json::from_slice(&bytes).unwrap();
         next_boot.begin_boot([8; 32]);
-        assert_eq!(next_boot.inventory.workspaces[0].tabs[0].panes[0].creator, None);
-
+        assert_eq!(
+            next_boot.inventory.workspaces[0].tabs[0].panes[0].creator,
+            None
+        );
     }
 
     #[test]
