@@ -9,6 +9,8 @@ use std::path::PathBuf;
 #[serde(deny_unknown_fields)]
 pub struct Organization {
     pub version: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared: Option<Box<crate::hierarchy::State>>,
     pub workspace: [u8; 32],
     pub tab: [u8; 32],
     pub pane: [u8; 32],
@@ -21,6 +23,7 @@ impl Organization {
     pub fn first(starting_directory: PathBuf) -> Result<Self, ServerError> {
         let value = Self {
             version: 1,
+            shared: None,
             workspace: crate::protocol::random()?,
             tab: crate::protocol::random()?,
             pane: crate::protocol::random()?,
@@ -60,6 +63,9 @@ impl Organization {
                 .is_some_and(|p| !path_valid(p))
         {
             return Err(ServerError::UnsafeStorage);
+        }
+        if let Some(state) = &self.shared {
+            state.validate()?;
         }
         Ok(())
     }

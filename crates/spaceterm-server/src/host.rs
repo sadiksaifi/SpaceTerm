@@ -226,7 +226,7 @@ pub(crate) fn serve_with_panes(
             }
             Err(_) => return Err(ServerError::Protocol),
         };
-        if workers.load(Ordering::Acquire) >= 8 {
+        if workers.load(Ordering::Acquire) >= 64 {
             continue;
         }
         if check_peer(&stream).is_err() {

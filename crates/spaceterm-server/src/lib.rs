@@ -1,6 +1,7 @@
 //! Private local SpaceTerm Protocol and explicit local server setup.
 #[cfg(feature = "client")]
 mod client;
+pub mod hierarchy;
 mod host;
 pub mod organization;
 pub mod pane;

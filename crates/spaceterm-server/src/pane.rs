@@ -75,6 +75,23 @@ pub struct PresentationStyle {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
     Capabilities,
+    Inventory,
+    Mutate {
+        sequence: u64,
+        mutation: crate::hierarchy::Mutation,
+    },
+    Resolve {
+        sequence: u64,
+    },
+    Acknowledge {
+        sequence: u64,
+    },
+    SelectPane {
+        pane: crate::hierarchy::Id,
+        explicit: bool,
+        size: PaneSize,
+        style: Option<PresentationStyle>,
+    },
     Attach {
         create: bool,
         size: PaneSize,
@@ -126,6 +143,11 @@ pub enum Request {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Reply {
+    Inventory {
+        inventory: crate::hierarchy::Inventory,
+        next_sequence: u64,
+    },
+    Outcome(crate::hierarchy::RetainedOutcome),
     Capabilities {
         development_pane: bool,
         #[serde(default)]
@@ -160,10 +182,12 @@ pub enum Refusal {
     CleanupUnresolved,
     DirectoryUnavailable,
     StorageUnavailable,
+    Capacity,
 }
 impl From<Refusal> for ServerError {
     fn from(value: Refusal) -> Self {
         match value {
+            Refusal::Capacity => Self::Unsupported,
             Refusal::Controlled => Self::Controlled,
             Refusal::Missing => Self::SessionUnavailable,
             Refusal::Stale => Self::StaleControl,

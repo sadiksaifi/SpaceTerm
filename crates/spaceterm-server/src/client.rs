@@ -33,6 +33,17 @@ pub struct LocalServer {
     versions: Vec<u16>,
 }
 impl LocalServer {
+    /// A single worker owns the journal lock for this exact native device credential and pin.
+    pub fn shared_journal(&self) -> Result<crate::hierarchy::ClientJournal, ServerError> {
+        let credential = self.credential()?.ok_or(ServerError::NotPaired)?;
+        let directory =
+            Directory::open(&self.paths.data.join("clients").join(&self.account), true)?;
+        crate::hierarchy::ClientJournal::open(
+            directory,
+            credential.pin,
+            protocol::public(&protocol::key(&credential.seed)?),
+        )
+    }
     pub fn for_identity(directory_name: &str) -> Result<Self, ServerError> {
         // Development may run two independent desktop clients against one private server.
         // Each uses native credential storage and explicit local pairing, never a secret file.

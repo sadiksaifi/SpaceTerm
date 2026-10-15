@@ -28,5 +28,9 @@ libc = "=0.2.189"
 name = "restored_workspace"
 required-features = ["client"]
 
+[[example]]
+name = "shared_workspaces"
+required-features = ["client"]
+
 [dev-dependencies]
 spaceterm-directories = { path = "../spaceterm-directories" }
