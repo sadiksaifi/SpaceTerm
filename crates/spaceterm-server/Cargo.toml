@@ -9,6 +9,9 @@ default = []
 client = ["dep:keyring"]
 
 [dependencies]
+base64 = "=0.22.1"
+flate2 = "=1.1.10"
+tar = { version = "=0.4.46", default-features = false }
 libc = "=0.2.189"
 ring = "=0.17.14"
 serde = { version = "1.0", features = ["derive", "rc"] }

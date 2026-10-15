@@ -145,12 +145,12 @@ pub(crate) fn connect(paths: &Paths) -> Result<UnixStream, ServerError> {
 }
 
 #[derive(Clone, Copy)]
-enum SocketUnavailable {
+pub(crate) enum SocketUnavailable {
     Refused,
     Unavailable,
 }
 
-fn connect_socket(endpoint: &Path) -> Result<UnixStream, SocketUnavailable> {
+pub(crate) fn connect_socket(endpoint: &Path) -> Result<UnixStream, SocketUnavailable> {
     let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
         .map_err(|_| SocketUnavailable::Unavailable)?;
     let address = socket2::SockAddr::unix(endpoint).map_err(|_| SocketUnavailable::Unavailable)?;
@@ -175,11 +175,13 @@ pub(crate) fn serve_with_panes(
     paths: &Paths,
     mut panes: Option<Box<dyn crate::pane::PaneService>>,
 ) -> Result<(), ServerError> {
+    crate::service::check_start(paths)?;
     let data = Directory::open(&paths.data, false)?;
     // Verify retained identity before changing any runtime state. Never generate a replacement.
     data.read()?;
     let runtime = Directory::open(&paths.runtime, true)?;
     let _lock = runtime.lock("server.lock", true)?;
+    crate::service::check_start(paths)?;
     if let Some(panes) = panes.as_mut() {
         panes.restore(crate::organization::OrganizationStore(Directory::open(
             &paths.data,
@@ -200,6 +202,10 @@ pub(crate) fn serve_with_panes(
     let listener = UnixListener::bind(&socket).map_err(|_| ServerError::StorageUnavailable)?;
     fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
         .map_err(|_| ServerError::StorageUnavailable)?;
+    let socket_identity = runtime
+        .socket_identity(c"s")?
+        .ok_or(ServerError::UnsafeStorage)?;
+    let mut connections: Vec<(std::thread::JoinHandle<()>, UnixStream)> = Vec::new();
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -239,8 +245,11 @@ pub(crate) fn serve_with_panes(
         let panes = Arc::clone(&panes);
         let workers = Arc::clone(&workers);
         let stopping = Arc::clone(&stopping);
+        let service_paths = paths.clone();
         workers.fetch_add(1, Ordering::AcqRel);
-        std::thread::spawn(move || {
+        connections.retain(|(worker, _)| !worker.is_finished());
+        let cancellation = stream.try_clone().map_err(|_| ServerError::Protocol)?;
+        let handle = std::thread::spawn(move || {
             let _ = (|| -> Result<(), ServerError> {
                 let (_, device) =
                     protocol::authenticate_server_device(&mut stream, &key, &record.paired)?;
@@ -253,6 +262,9 @@ pub(crate) fn serve_with_panes(
                         let mut wire = protocol::Wire::terminal(&mut stream)?;
                         let request = wire.read()?;
                         let shutdown = matches!(request, crate::pane::Request::Shutdown);
+                        if shutdown {
+                            crate::service::retain_stop(&service_paths)?;
+                        }
                         let (reply, stopped) = {
                             let mut panes = panes.lock().unwrap_or_else(|e| e.into_inner());
                             // Admission is fenced under the same lock as final cleanup. A worker
@@ -292,11 +304,21 @@ pub(crate) fn serve_with_panes(
             })();
             workers.fetch_sub(1, Ordering::AcqRel);
         });
+        connections.push((handle, cancellation));
     }
     stopping.store(true, Ordering::Release);
+    drop(listener);
+    for (_, stream) in &connections {
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+    }
+    for (worker, _) in connections {
+        let _ = worker.join();
+    }
     if let Some(panes) = panes.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         panes.shutdown()?;
     }
+    runtime.verify_path(&paths.runtime)?;
+    runtime.remove_socket(c"s", socket_identity)?;
     Ok(())
 }
 
@@ -443,6 +465,7 @@ mod startup_tests {
             }
         };
         protocol::authenticate_client(&mut stream, &fixture.device, &fixture.pin, &[2, 1]).unwrap();
+        let mut idle = UnixStream::connect(fixture.paths.socket()).unwrap();
         // SAFETY: the guard owns this live child process.
         assert_eq!(
             unsafe { libc::kill(child.0.id() as libc::pid_t, libc::SIGTERM) },
@@ -452,6 +475,12 @@ mod startup_tests {
         loop {
             if let Some(exit) = child.0.try_wait().unwrap() {
                 assert!(exit.success(), "server must finish cleanup before exiting");
+                assert!(
+                    !fixture.paths.socket().exists(),
+                    "successful shutdown must remove its endpoint"
+                );
+                use std::io::Read;
+                assert_eq!(idle.read(&mut [0]).unwrap(), 0, "idle admission must close");
                 break;
             }
             assert!(

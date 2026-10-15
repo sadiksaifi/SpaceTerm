@@ -467,3 +467,16 @@ run = [
 [tasks."server:test:host"]
 description = "Test the headless executable's build isolation"
 run = "cargo test --package spaceterm-server-host --no-default-features --locked"
+
+[tasks."server:service"]
+description = "Explicitly control this build's account server service"
+usage = '''
+arg "<action>" help="status, install, start, stop, restart, or uninstall"
+arg "[installation]" help="Verified retained installation directory for install"
+'''
+run = "cargo run --package spaceterm-server-host --no-default-features --locked -- service-{{usage.action}} spaceterm-development {% if usage.installation %}{{usage.installation | quote}}{% endif %}"
+
+[tasks."server:service:session:macos"]
+description = "Verify authenticated Session survival and durable Stop on an installed macOS server"
+usage = 'arg "<identity>" help="Installed application identity"'
+run = "cargo run --package spaceterm-server-host --features client --example service_session --locked -- {{usage.identity | quote}}"

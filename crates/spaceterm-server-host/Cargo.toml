@@ -39,3 +39,7 @@ required-features = ["client"]
 
 [dev-dependencies]
 spaceterm-directories = { path = "../spaceterm-directories" }
+
+[[example]]
+name = "service_session"
+required-features = ["client"]

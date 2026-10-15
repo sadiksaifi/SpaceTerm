@@ -1,0 +1,128 @@
+//! Native service evidence through the desktop's authenticated transport and credential facility.
+#[expect(
+    dead_code,
+    reason = "Service evidence uses shared hierarchy instead of legacy Attach."
+)]
+mod support;
+use spaceterm_server::{
+    LocalServer, ServerError,
+    hierarchy::{Mutation, Outcome},
+    pane::*,
+    service::Service,
+};
+use std::{error::Error, time::Duration};
+
+fn run() -> Result<(), Box<dyn Error>> {
+    let identity = std::env::args()
+        .nth(1)
+        .ok_or("application identity required")?;
+    let service = Service::for_identity(&identity)?;
+    let client = LocalServer::for_identity(&identity)?;
+    client.pair()?;
+    let mut first = client.connect_pane()?;
+    let Reply::Inventory { next_sequence, .. } = first.exchange(&Request::Inventory)? else {
+        return Err("inventory unavailable".into());
+    };
+    let Reply::Outcome(outcome) = first.exchange(&Request::Mutate {
+        sequence: next_sequence,
+        mutation: Mutation::CreateWorkspace {
+            name: "Service lifecycle check".into(),
+        },
+    })?
+    else {
+        return Err("creation unavailable".into());
+    };
+    let Outcome::Accepted { target } = outcome.outcome else {
+        return Err("creation refused".into());
+    };
+    first.exchange(&Request::Acknowledge {
+        sequence: next_sequence,
+    })?;
+    let Reply::Inventory { inventory, .. } = first.exchange(&Request::Inventory)? else {
+        return Err("inventory unavailable".into());
+    };
+    let pane = inventory
+        .workspaces
+        .iter()
+        .find(|v| v.id == target)
+        .ok_or("workspace unavailable")?
+        .tabs[0]
+        .root_pane;
+    let size = PaneSize {
+        columns: 100,
+        rows: 30,
+        cell_width: 8,
+        cell_height: 18,
+    };
+    let Reply::Attached { lease } = first.exchange(&Request::SelectPane {
+        pane,
+        explicit: true,
+        size,
+        style: None,
+    })?
+    else {
+        return Err("selection refused".into());
+    };
+    support::command(
+        &mut first,
+        lease,
+        "stty -echo; printf '\\033[2J\\033[HBEGIN\\n'; sleep 3; printf '\\nSERVICE-CONTINUED\\n'",
+    )?;
+    support::await_output(&mut first, lease, "BEGIN")?;
+    drop(first);
+    std::thread::sleep(Duration::from_secs(4));
+    let mut second = client.connect_pane()?;
+    let Reply::Attached { lease: resumed } = second.exchange(&Request::SelectPane {
+        pane,
+        explicit: true,
+        size,
+        style: None,
+    })?
+    else {
+        return Err("reattachment refused".into());
+    };
+    if (lease.server, lease.session) != (resumed.server, resumed.session) {
+        return Err("session was replaced".into());
+    }
+    support::await_output(&mut second, resumed, "SERVICE-CONTINUED")?;
+    println!("Authenticated native reattachment preserved the service-owned running command.");
+    #[cfg(target_os = "macos")]
+    {
+        support::command(
+            &mut second,
+            resumed,
+            "command -v git >/dev/null && command -v open >/dev/null && command -v pbcopy >/dev/null && command -v pbpaste >/dev/null && test -S \"$SSH_AUTH_SOCK\" && printf '\\nNATIVE-TOOLS-OK\\n'",
+        )?;
+        support::await_output(&mut second, resumed, "NATIVE-TOOLS-OK")?;
+        println!("Service-launched shell resolved native tools and the login agent socket.");
+    }
+    service.stop()?;
+    if !matches!(client.setup_and_start(), Err(ServerError::Stopped)) {
+        return Err("setup reversed Stop".into());
+    }
+    if !service.status()?.stopped {
+        return Err("Stop intent was lost".into());
+    }
+    service.start()?;
+    let mut fresh = client.connect_pane()?;
+    let Reply::Restored { .. } = fresh.exchange(&Request::SelectPane {
+        pane,
+        explicit: false,
+        size,
+        style: None,
+    })?
+    else {
+        return Err("restart did not retain lazy organization".into());
+    };
+    service.stop()?;
+    println!(
+        "Stop survived client setup; explicit Start retained organization without restarting shells."
+    );
+    Ok(())
+}
+fn main() {
+    if run().is_err() {
+        eprintln!("Native service lifecycle check did not complete.");
+        std::process::exit(1);
+    }
+}

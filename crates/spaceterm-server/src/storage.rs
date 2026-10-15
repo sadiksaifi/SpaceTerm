@@ -224,7 +224,6 @@ impl Directory {
             .map_err(|_| ServerError::StorageUnavailable)?;
         Ok(record)
     }
-    #[cfg(any(feature = "client", test))]
     pub fn read_or_create(&self) -> Result<Record, ServerError> {
         match self.read() {
             Ok(record) => Ok(record),
@@ -250,7 +249,6 @@ impl Directory {
         );
         self.write_bytes(c"identity.json", &bytes)
     }
-    #[cfg(feature = "client")]
     pub(crate) fn read_json<T: serde::de::DeserializeOwned>(
         &self,
         name: &str,
@@ -274,7 +272,6 @@ impl Directory {
             .map_err(|_| ServerError::StorageUnavailable)?;
         Ok(Some(value))
     }
-    #[cfg(feature = "client")]
     pub(crate) fn write_json<T: Serialize>(
         &self,
         name: &std::ffi::CStr,
