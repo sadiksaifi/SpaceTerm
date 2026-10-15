@@ -30,6 +30,7 @@ fn open_updates(cx: &mut TestAppContext) -> (Entity<SettingsWindow>, &mut Visual
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
             Default::default(),
             None,
+            None,
             window,
             cx,
         )

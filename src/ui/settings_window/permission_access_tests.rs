@@ -64,6 +64,7 @@ fn open_settings(
                 permission_setup,
             },
             None,
+            None,
             window,
             cx,
         )

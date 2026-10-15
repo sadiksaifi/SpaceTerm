@@ -379,7 +379,17 @@ fn open_settings_with_capabilities(
         crate::ui::init(cx).expect("UI initialization should succeed");
     });
     let (window, cx) = cx.add_window_view(|window, cx| {
-        SettingsWindow::new_with_capabilities(window_drag, Default::default(), registry, window, cx)
+        SettingsWindow::new_with_capabilities(
+            window_drag,
+            Default::default(),
+            registry,
+            // Every section presents, so the shared layout checks cover Servers too.
+            Some(Ok(super::servers::testing::ScriptedServer::new(Err(
+                crate::local_server::ServerError::NotPaired,
+            )))),
+            window,
+            cx,
+        )
     });
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
@@ -422,6 +432,7 @@ pub(super) fn select_section(section: SettingsSectionId, cx: &mut VisualTestCont
         SettingsSectionId::Keybindings => "settings-navigation-settings-section-keybindings",
         SettingsSectionId::Privacy => "settings-navigation-settings-section-privacy",
         SettingsSectionId::Git => "settings-navigation-settings-section-git",
+        SettingsSectionId::Servers => "settings-navigation-settings-section-servers",
         SettingsSectionId::Updates => "settings-navigation-settings-section-updates",
         SettingsSectionId::Advanced => "settings-navigation-settings-section-advanced",
     };
@@ -2673,6 +2684,7 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::GitTool => "settings-row-git-tool-control",
             SettingsRowId::GitHubCli => "settings-row-github-cli-control",
             SettingsRowId::WorktreeLocation => "settings-worktree-location-frame",
+            SettingsRowId::LocalServer => "settings-local-server-control",
             // The fixture installs no update service, so this row presents no action control.
             SettingsRowId::UpdateStatus => return None,
             SettingsRowId::AutomaticUpdateDownloads => "settings-automatic-update-downloads",

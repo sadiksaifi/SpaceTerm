@@ -90,3 +90,6 @@ mod local_path;
 
 /// Terminal runtime contracts shared by graphical and headless hosts.
 pub mod runtime;
+
+#[cfg(feature = "desktop")]
+pub(crate) use spaceterm_server as local_server;

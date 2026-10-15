@@ -51,6 +51,7 @@ fn open_keybindings_on(
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
             Default::default(),
             None,
+            None,
             window,
             cx,
         )

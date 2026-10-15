@@ -22,7 +22,8 @@ ICON_DOCUMENT = ROOT / ICON_DOCUMENT
 FAKE_CARGO = """import json, pathlib, sys
 arguments = sys.argv[1:]
 assert arguments[0] == "build" and "--locked" in arguments and "--features" not in arguments
-executable = pathlib.Path.cwd() / "target" / "debug" / "spaceterm"
+binary = arguments[arguments.index("--bin") + 1]
+executable = pathlib.Path.cwd() / "target" / "debug" / binary
 executable.parent.mkdir(parents=True, exist_ok=True)
 executable.write_text(
     "#!/bin/sh\\n"
@@ -32,7 +33,7 @@ executable.write_text(
     "printf '%s\\\\n' \\"$0\\" \\"${SPACETERM_DEVELOPER_WORKBENCH:-}\\" \\"$#\\" \\"$@\\" > \\"$SPACETERM_TEST_RECORD\\"\\n"
 )
 executable.chmod(0o755)
-print(json.dumps({"reason": "compiler-artifact", "target": {"name": "spaceterm"},
+print(json.dumps({"reason": "compiler-artifact", "target": {"name": binary},
                   "executable": str(executable)}))
 """
 

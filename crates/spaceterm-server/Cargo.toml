@@ -1,0 +1,24 @@
+[package]
+name = "spaceterm-server"
+publish = false
+edition = "2024"
+
+[features]
+default = []
+client = ["dep:keyring"]
+
+[dependencies]
+libc = "=0.2.189"
+ring = "=0.17.14"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+socket2 = "=0.6.5"
+spaceterm-directories = { path = "../spaceterm-directories" }
+thiserror = "2.0.17"
+zeroize = "=1.9.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "=3.6.3", optional = true, features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "=3.6.3", optional = true, features = ["async-secret-service", "async-io", "crypto-rust"] }
