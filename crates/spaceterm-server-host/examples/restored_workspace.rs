@@ -228,9 +228,9 @@ mod faults {
             unsafe { libc::syscall(libc::SYS_fsync, fd) as libc::c_int }
         }
     }
-    pub fn exercise(
-        client: &LocalServer,
-    ) -> Result<([u8; 32], [u8; 32], [u8; 32]), Box<dyn Error>> {
+    type OrganizationIds = ([u8; 32], [u8; 32], [u8; 32]);
+
+    pub fn exercise(client: &LocalServer) -> Result<OrganizationIds, Box<dyn Error>> {
         let root = std::env::temp_dir().join(format!(
             "spaceterm-533-faults-{}-{}",
             std::process::id(),
