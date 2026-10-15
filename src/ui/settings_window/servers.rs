@@ -3,8 +3,9 @@
 //! [`crate::local_server`] owns setup, pairing, authentication, and the service.
 //!
 //! Every build offers the section for its own identity's server. Opening Settings asks the server
-//! nothing. Presenting the section checks the saved pairing and reads the service, and only the
-//! person's explicit Set Up, Install, Start, Stop, Restart, or Uninstall changes either.
+//! nothing. Presenting the section checks the saved pairing, reads the service, and lists the
+//! verified server builds it could install. Only the person's explicit Set Up, Install, Start,
+//! Stop, Restart, or Uninstall changes either.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,13 +13,13 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, ElementId, SharedString, Task, Window, accesskit, div};
 use spaceterm_ui::{
-    Alert, AlertIntent, AlertOutcome, Button, ModalAction, ModalActionEmphasis, ModalActionIntent,
-    ModalActionRole, ModalId, ProgressRing, ProgressSize, ProgressState,
+    Alert, AlertIntent, AlertOutcome, Button, Menu, MenuEntry, ModalAction, ModalActionEmphasis,
+    ModalActionIntent, ModalActionRole, ModalId, ProgressRing, ProgressSize, ProgressState,
 };
 
 use super::SettingsWindow;
 use crate::application_identity::ApplicationIdentity;
-use crate::local_server::service::{Service, ServiceStatus};
+use crate::local_server::service::{RetainedInstallation, Service, ServiceStatus};
 use crate::local_server::{AuthenticatedStatus, LocalServer, ServerError};
 use crate::ui::appearance::ChromeAppearance;
 use crate::ui::sidebar_window::form::{CaptionTone, action_button, badge};
@@ -73,6 +74,8 @@ impl From<AuthenticatedStatus> for ServerConnection {
 pub(super) trait ServerServiceControl: Send + Sync {
     /// Reads the service. Never installs, starts, or stops anything.
     fn status(&self) -> Result<ServiceStatus, ServerError>;
+    /// Lists the verified server builds kept for this account. Never installs or starts anything.
+    fn retained_installations(&self) -> Result<Vec<RetainedInstallation>, ServerError>;
     /// Installs the service from a verified retained server installation, keeping an approved
     /// runtime the service already uses.
     fn install(&self, installation: &Path) -> Result<ServiceStatus, ServerError>;
@@ -87,6 +90,10 @@ pub(super) trait ServerServiceControl: Send + Sync {
 impl ServerServiceControl for Service {
     fn status(&self) -> Result<ServiceStatus, ServerError> {
         Service::status(self)
+    }
+
+    fn retained_installations(&self) -> Result<Vec<RetainedInstallation>, ServerError> {
+        Service::retained_installations(self)
     }
 
     fn install(&self, installation: &Path) -> Result<ServiceStatus, ServerError> {
@@ -485,6 +492,8 @@ pub(super) const SERVICE_CONTROL_SELECTOR: &str = "settings-server-service-contr
 pub(super) const SERVICE_PROGRESS_SELECTOR: &str = "settings-server-service-progress";
 pub(super) const SERVICE_CHECK_SELECTOR: &str = "settings-server-service-check";
 pub(super) const INSTALL_SELECTOR: &str = "settings-server-service-install";
+/// Prefixes each build in Install's menu, followed by its position.
+pub(super) const INSTALL_CHOICE_SELECTOR: &str = "settings-server-service-install-choice";
 pub(super) const START_SERVICE_SELECTOR: &str = "settings-server-service-start";
 pub(super) const STOP_SELECTOR: &str = "settings-server-service-stop";
 pub(super) const RESTART_SELECTOR: &str = "settings-server-service-restart";
@@ -501,7 +510,8 @@ pub(super) const UNINSTALL_CANCEL_SELECTOR: &str = "settings-server-uninstall-ca
 pub(super) enum ServiceAction {
     /// Reads the service again.
     Check,
-    /// Asks for a verified server installation, then installs and starts the service.
+    /// Installs and starts the service from a verified server build the person names. With several
+    /// builds, the step is a menu of them.
     Install,
     Start,
     Stop,
@@ -510,12 +520,11 @@ pub(super) enum ServiceAction {
 }
 
 impl ServiceAction {
-    /// The button label. Install asks for an installation first, so it ends with an ellipsis.
-    /// Start and Stop use the names the person knows the actions by.
+    /// The button label. Start and Stop use the names the person knows the actions by.
     pub(super) const fn label(self) -> &'static str {
         match self {
             Self::Check => "Check Now",
-            Self::Install => "Install\u{2026}",
+            Self::Install => "Install",
             Self::Start => "Start Server",
             Self::Stop => "Stop Server",
             Self::Restart => "Restart Server",
@@ -546,14 +555,14 @@ impl ServiceAction {
         }
     }
 
-    /// What the button does beyond its name, for assistive technology.
+    /// What the button does beyond its name, for assistive technology. Install names its build
+    /// where the row renders it.
     const fn consequence(self) -> Option<&'static str> {
         match self {
             Self::Stop => Some("Ends the server's Terminal Sessions. SpaceTerm asks first."),
             Self::Restart => Some("Ends the server's Terminal Sessions. SpaceTerm asks first."),
             Self::Uninstall => Some("Removes the service. SpaceTerm asks first."),
-            Self::Install => Some("Asks for a verified server installation."),
-            Self::Check | Self::Start => None,
+            Self::Check | Self::Install | Self::Start => None,
         }
     }
 
@@ -682,17 +691,64 @@ pub(super) struct ServicePresentation {
     pub(super) tone: CaptionTone,
     /// The steps the row offers, in order.
     pub(super) actions: Vec<ServiceAction>,
+    /// The builds Install offers while the service is not installed. Install is a button for one
+    /// build and a menu for several.
+    pub(super) install_choices: Vec<InstallChoice>,
     /// The action awaiting its result. The row shows progress and withholds its steps meanwhile.
     pub(super) working: Option<ServiceAction>,
 }
 
+/// A verified server build Install can install, named by its version and source commit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct InstallChoice {
+    pub(super) label: SharedString,
+    directory: PathBuf,
+}
+
+impl InstallChoice {
+    /// Names each build by version and abbreviated commit. Two builds of one commit and version
+    /// also name their package, so no two choices read alike.
+    pub(super) fn of(installations: &[RetainedInstallation]) -> Vec<Self> {
+        let named = |installation: &RetainedInstallation| {
+            let commit = installation.commit.get(..7).unwrap_or(&installation.commit);
+            format!("Version {} (commit {commit}", installation.version)
+        };
+        installations
+            .iter()
+            .map(|installation| {
+                let name = named(installation);
+                let ambiguous = installations
+                    .iter()
+                    .filter(|other| named(other) == name)
+                    .count()
+                    > 1;
+                let package = installation
+                    .directory
+                    .file_name()
+                    .and_then(|digest| digest.to_str())
+                    .and_then(|digest| digest.get(..8));
+                let label = match package {
+                    Some(package) if ambiguous => format!("{name}, package {package})"),
+                    _ => format!("{name})"),
+                };
+                Self {
+                    label: label.into(),
+                    directory: installation.directory.clone(),
+                }
+            })
+            .collect()
+    }
+}
+
 /// What the service row last learned and what it is doing.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct ServiceState {
     /// The last status read. `None` until the first read succeeds, or after a read failed.
     pub(super) status: Option<ServiceStatus>,
     /// Why the last read or operation failed, until the next action.
     pub(super) failure: Option<ServerError>,
+    /// The verified builds found with the last status read that showed no installed service.
+    pub(super) installations: Vec<RetainedInstallation>,
     pub(super) working: Option<ServiceAction>,
 }
 
@@ -701,6 +757,11 @@ pub(super) struct ServiceState {
 pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
     let guidance = |text: &'static str| (SharedString::new_static(text), CaptionTone::Guidance);
     let phase = state.status.map(ServicePhase::of);
+    let install_choices = if phase == Some(ServicePhase::NotInstalled) {
+        InstallChoice::of(&state.installations)
+    } else {
+        Vec::new()
+    };
     let (badge, state_selector, (explanation, tone)) = match (phase, state.failure) {
         (None, None) => (
             "Not Checked",
@@ -717,11 +778,27 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                 ServicePhase::NotInstalled => (
                     "Not Installed",
                     "settings-server-service-state-not-installed",
-                    guidance(
-                        "Installing runs the server for your account whenever you\u{2019}re \
-                         logged in, even after SpaceTerm quits. No administrator password is \
-                         needed.",
-                    ),
+                    match install_choices.as_slice() {
+                        [] => guidance(
+                            "No verified server package is available. Use the server installer \
+                             command to keep a signed package for this account, then choose \
+                             Check Now.",
+                        ),
+                        [only] => (
+                            SharedString::from(format!(
+                                "{} is verified and ready to install. The server then runs for \
+                                 your account whenever you\u{2019}re logged in, even after \
+                                 SpaceTerm quits. No administrator password is needed.",
+                                only.label
+                            )),
+                            CaptionTone::Guidance,
+                        ),
+                        _ => guidance(
+                            "Choose a verified server version from Install. It runs for your \
+                             account whenever you\u{2019}re logged in, even after SpaceTerm \
+                             quits. No administrator password is needed.",
+                        ),
+                    },
                 ),
                 ServicePhase::Running => (
                     "Running",
@@ -760,6 +837,13 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
         || vec![ServiceAction::Check],
         |phase| phase.actions().to_vec(),
     );
+    // Without a verified build, Install has nothing to install. Another check finds a build the
+    // person has since kept.
+    let actions = if phase == Some(ServicePhase::NotInstalled) && install_choices.is_empty() {
+        vec![ServiceAction::Check]
+    } else {
+        actions
+    };
     let (label, explanation, tone) = match state.working {
         Some(action) => {
             let (label, explanation) = action.progress();
@@ -777,6 +861,7 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
         explanation,
         tone,
         actions,
+        install_choices,
         working: state.working,
     }
 }
@@ -785,8 +870,6 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
 pub(super) struct ServerServiceRow {
     control: Result<Arc<dyn ServerServiceControl>, ServerError>,
     state: ServiceState,
-    /// Whether the installation chooser is open, so a second Install waits for it.
-    choosing: bool,
     /// Returns the background result to GPUI. Dropping the window drops it.
     _operation: Option<Task<()>>,
 }
@@ -796,7 +879,6 @@ impl ServerServiceRow {
         Self {
             control,
             state: ServiceState::default(),
-            choosing: false,
             _operation: None,
         }
     }
@@ -812,17 +894,15 @@ impl ServerServiceRow {
                 presentation.actions.clear();
                 presentation
             }
-            Ok(_) => present_service(self.state),
+            Ok(_) => present_service(self.state.clone()),
         }
     }
 
     /// Whether an operation that changes the service is running.
     fn changing(&self) -> bool {
-        self.choosing
-            || self
-                .state
-                .working
-                .is_some_and(ServiceAction::changes_service)
+        self.state
+            .working
+            .is_some_and(ServiceAction::changes_service)
     }
 }
 
@@ -894,7 +974,6 @@ impl SettingsWindow {
         let connection_working = self.local_server_working();
         self.server_service.as_ref().is_some_and(|row| {
             row.control.is_ok()
-                && !row.choosing
                 && row.state.working.is_none()
                 && !(action.changes_service() && connection_working)
         })
@@ -912,8 +991,9 @@ impl SettingsWindow {
         self.run_server_service(ServiceAction::Check, cx);
     }
 
-    /// Runs one action from the service row. Install asks for an installation first; Stop,
-    /// Restart, and Uninstall ask for confirmation first, so they need a window.
+    /// Runs one action from the service row. Install installs the one verified build the row
+    /// names; several builds are chosen from Install's menu instead. Stop, Restart, and Uninstall
+    /// ask for confirmation first, so they need a window.
     pub(super) fn request_server_service(
         &mut self,
         action: ServiceAction,
@@ -925,7 +1005,15 @@ impl SettingsWindow {
         }
         match action {
             ServiceAction::Check | ServiceAction::Start => self.run_server_service(action, cx),
-            ServiceAction::Install => self.choose_service_installation(cx),
+            ServiceAction::Install => {
+                let choices = self
+                    .server_service_presentation()
+                    .map(|presentation| presentation.install_choices)
+                    .unwrap_or_default();
+                if let [only] = choices.as_slice() {
+                    self.install_server_service(only.directory.clone(), cx);
+                }
+            }
             ServiceAction::Stop | ServiceAction::Restart | ServiceAction::Uninstall => {
                 self.confirm_server_service(action, window, cx);
             }
@@ -939,14 +1027,24 @@ impl SettingsWindow {
         self.run_service_operation(action, None, cx);
     }
 
-    /// Installs from the installation the person chose.
+    /// Installs the build the person chose. Only a build the last read verified and listed is
+    /// installed, so a choice from a menu the row has since replaced does nothing.
     pub(super) fn install_server_service(&mut self, installation: PathBuf, cx: &mut Context<Self>) {
-        self.run_service_operation(ServiceAction::Install, Some(installation), cx);
+        let listed = self.server_service.as_ref().is_some_and(|row| {
+            row.state
+                .installations
+                .iter()
+                .any(|listed| listed.directory == installation)
+        });
+        if listed {
+            self.run_service_operation(ServiceAction::Install, Some(installation), cx);
+        }
     }
 
     /// Runs one service operation on the background executor, then reads the service again when
-    /// the operation failed, so the row presents the status that is true afterwards. Only one runs
-    /// at a time, and a change waits for the connection row to finish.
+    /// the operation failed, so the row presents the status that is true afterwards. While no
+    /// service is installed, it also lists the verified builds Install can offer. Only one runs at
+    /// a time, and a change waits for the connection row to finish.
     fn run_service_operation(
         &mut self,
         action: ServiceAction,
@@ -975,21 +1073,32 @@ impl SettingsWindow {
                 (ServiceAction::Restart, _) => control.restart(),
                 (ServiceAction::Uninstall, _) => control.uninstall(),
             };
-            match outcome {
+            let (status, failure) = match outcome {
                 Ok(status) => (Some(status), None),
                 Err(error) if action == ServiceAction::Check => (None, Some(error)),
                 Err(error) => (control.status().ok(), Some(error)),
+            };
+            // Listing verifies each build and never installs or starts one. An installed service
+            // offers no Install, so it lists nothing.
+            let (installations, failure) = match status {
+                Some(status) if !status.installed => match control.retained_installations() {
+                    Ok(installations) => (installations, failure),
+                    Err(error) => (Vec::new(), failure.or(Some(error))),
+                },
+                _ => (Vec::new(), failure),
+            };
+            ServiceState {
+                status,
+                failure,
+                installations,
+                working: None,
             }
         });
         row._operation = Some(cx.spawn(async move |settings, cx| {
-            let (status, failure) = result.await;
+            let state = result.await;
             let _ = settings.update(cx, |settings, cx| {
                 if let Some(row) = &mut settings.server_service {
-                    row.state = ServiceState {
-                        status,
-                        failure,
-                        working: None,
-                    };
+                    row.state = state;
                 }
                 // A change starts, stops, or replaces the server the connection row authenticates
                 // with, so the connection is checked afresh.
@@ -999,41 +1108,6 @@ impl SettingsWindow {
                 cx.notify();
             });
         }));
-        cx.notify();
-    }
-
-    /// Asks the system chooser for a verified server installation, then installs from it.
-    /// Cancelling changes nothing.
-    fn choose_service_installation(&mut self, cx: &mut Context<Self>) {
-        if !self.server_service_ready(ServiceAction::Install) {
-            return;
-        }
-        let Some(row) = &mut self.server_service else {
-            return;
-        };
-        row.choosing = true;
-        let selection = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Install".into()),
-        });
-        cx.spawn(async move |settings, cx| {
-            let chosen = match selection.await {
-                Ok(Ok(Some(paths))) => paths.into_iter().next(),
-                _ => None,
-            };
-            let _ = settings.update(cx, |settings, cx| {
-                if let Some(row) = &mut settings.server_service {
-                    row.choosing = false;
-                }
-                if let Some(installation) = chosen {
-                    settings.install_server_service(installation, cx);
-                }
-                cx.notify();
-            });
-        })
-        .detach();
         cx.notify();
     }
 
@@ -1130,14 +1204,42 @@ impl SettingsWindow {
         // and the leading slot keeps it as Stop gives way to Start. A step taken meanwhile is
         // ignored, and the status says why.
         let owner = cx.weak_entity();
+        let install_choices = presentation.install_choices;
         let actions = presentation.actions.iter().map(|&action| {
             let owner = owner.clone();
+            // Several verified builds make Install a menu of them, so the person names the build
+            // before anything is installed.
+            if action == ServiceAction::Install && install_choices.len() > 1 {
+                let entries = install_choices
+                    .iter()
+                    .enumerate()
+                    .map(|(index, choice)| {
+                        MenuEntry::action(choice.label.clone(), choice.directory.clone())
+                            .debug_selector(format!("{INSTALL_CHOICE_SELECTOR}-{index}"))
+                    })
+                    .collect();
+                return Menu::new(ElementId::from(action.slot()), action.label(), entries)
+                    .debug_selector(action.selector())
+                    .on_activate(move |activation, _, cx| {
+                        let installation = activation.action().clone();
+                        let _ = owner.update(cx, |settings, cx| {
+                            settings.install_server_service(installation, cx);
+                        });
+                    })
+                    .into_any_element();
+            }
+            let consequence = match (action, install_choices.as_slice()) {
+                (ServiceAction::Install, [only]) => {
+                    Some(SharedString::from(format!("Installs {}.", only.label)))
+                }
+                _ => action.consequence().map(SharedString::new_static),
+            };
             Button::new(ElementId::from(action.slot()), action.label())
                 .variant(spaceterm_ui::ButtonVariant::Outline)
                 .size(spaceterm_ui::ButtonSize::Regular)
                 .tab_stop(true)
                 .debug_selector(action.selector())
-                .when_some(action.consequence(), |button, consequence| {
+                .when_some(consequence, |button, consequence| {
                     button.accessibility_description(consequence)
                 })
                 .on_activate(move |_, window, cx| {
@@ -1145,6 +1247,7 @@ impl SettingsWindow {
                         settings.request_server_service(action, window, cx);
                     });
                 })
+                .into_any_element()
         });
         div()
             .debug_selector(|| SERVICE_CONTROL_SELECTOR.to_owned())
@@ -1251,7 +1354,7 @@ pub(super) mod testing {
 
     use super::{LocalServerControl, ServerConnection, ServerServiceControl};
     use crate::local_server::ServerError;
-    use crate::local_server::service::ServiceStatus;
+    use crate::local_server::service::{RetainedInstallation, ServiceStatus};
 
     /// A server whose answers the test sets and whose operations it counts.
     pub(in crate::ui::settings_window) struct ScriptedServer {
@@ -1312,6 +1415,7 @@ pub(super) mod testing {
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub(in crate::ui::settings_window) enum ServiceCall {
         Status,
+        RetainedInstallations,
         Install(PathBuf),
         Start,
         Stop,
@@ -1323,6 +1427,8 @@ pub(super) mod testing {
     /// and records every operation.
     pub(in crate::ui::settings_window) struct ScriptedService {
         status: Mutex<Result<ServiceStatus, ServerError>>,
+        /// The verified builds the service lists, or why it cannot.
+        installations: Mutex<Result<Vec<RetainedInstallation>, ServerError>>,
         /// The refusal the next changing operation returns, leaving the status unchanged.
         refusal: Mutex<Option<ServerError>>,
         calls: Mutex<Vec<ServiceCall>>,
@@ -1334,9 +1440,17 @@ pub(super) mod testing {
         ) -> Arc<Self> {
             Arc::new(Self {
                 status: Mutex::new(status),
+                installations: Mutex::new(Ok(vec![retained("1.4.0", 'a')])),
                 refusal: Mutex::new(None),
                 calls: Mutex::new(Vec::new()),
             })
+        }
+
+        pub(in crate::ui::settings_window) fn keep(
+            &self,
+            installations: Result<Vec<RetainedInstallation>, ServerError>,
+        ) {
+            *self.installations.lock().expect("installations") = installations;
         }
 
         pub(in crate::ui::settings_window) fn refuse_next(&self, error: ServerError) {
@@ -1347,11 +1461,16 @@ pub(super) mod testing {
             self.calls.lock().expect("calls").clone()
         }
 
-        /// The operations that changed or tried to change the service, without status reads.
+        /// The operations that changed or tried to change the service, without reads.
         pub(in crate::ui::settings_window) fn changes(&self) -> Vec<ServiceCall> {
             self.calls()
                 .into_iter()
-                .filter(|call| *call != ServiceCall::Status)
+                .filter(|call| {
+                    !matches!(
+                        call,
+                        ServiceCall::Status | ServiceCall::RetainedInstallations
+                    )
+                })
                 .collect()
         }
 
@@ -1375,6 +1494,14 @@ pub(super) mod testing {
         fn status(&self) -> Result<ServiceStatus, ServerError> {
             self.calls.lock().expect("calls").push(ServiceCall::Status);
             *self.status.lock().expect("status")
+        }
+
+        fn retained_installations(&self) -> Result<Vec<RetainedInstallation>, ServerError> {
+            self.calls
+                .lock()
+                .expect("calls")
+                .push(ServiceCall::RetainedInstallations);
+            self.installations.lock().expect("installations").clone()
         }
 
         fn install(&self, installation: &Path) -> Result<ServiceStatus, ServerError> {
@@ -1405,6 +1532,19 @@ pub(super) mod testing {
 
         fn uninstall(&self) -> Result<ServiceStatus, ServerError> {
             self.change(ServiceCall::Uninstall, |_| not_installed())
+        }
+    }
+
+    /// A verified build kept for this account, whose 40-digit commit repeats `digit`.
+    pub(in crate::ui::settings_window) fn retained(
+        version: &str,
+        digit: char,
+    ) -> RetainedInstallation {
+        let digest: String = std::iter::repeat_n(digit, 64).collect();
+        RetainedInstallation {
+            directory: PathBuf::from("/retained/server/installations").join(digest),
+            version: version.to_owned(),
+            commit: std::iter::repeat_n(digit, 40).collect(),
         }
     }
 

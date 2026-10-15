@@ -172,15 +172,23 @@ pub(crate) fn serve(paths: &Paths) -> Result<(), ServerError> {
 
 pub(crate) fn serve_with_panes(
     paths: &Paths,
-    mut panes: Option<Box<dyn crate::pane::PaneService>>,
+    panes: Option<Box<dyn crate::pane::PaneService>>,
 ) -> Result<(), ServerError> {
-    crate::service::check_start(paths)?;
+    serve_runtime(paths, panes, false)
+}
+
+pub(crate) fn serve_runtime(
+    paths: &Paths,
+    mut panes: Option<Box<dyn crate::pane::PaneService>>,
+    supervised: bool,
+) -> Result<(), ServerError> {
+    crate::service::check_runtime(paths, supervised)?;
     let data = Directory::open(&paths.data, false)?;
     // Verify retained identity before changing any runtime state. Never generate a replacement.
     data.read()?;
     let runtime = Directory::open(&paths.runtime, true)?;
     let _lock = runtime.lock("server.lock", true)?;
-    crate::service::check_start(paths)?;
+    crate::service::check_runtime(paths, supervised)?;
     if let Some(panes) = panes.as_mut() {
         panes.restore(crate::organization::OrganizationStore(Directory::open(
             &paths.data,

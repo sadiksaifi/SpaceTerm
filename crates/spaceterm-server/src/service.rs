@@ -395,6 +395,21 @@ pub(crate) fn check_start(paths: &Paths) -> Result<(), ServerError> {
     Ok(())
 }
 
+pub(crate) fn check_runtime(paths: &Paths, supervised: bool) -> Result<(), ServerError> {
+    check_start(paths)?;
+    if !supervised {
+        let data = match Directory::open(&paths.data, false) {
+            Ok(data) => data,
+            Err(ServerError::NotPaired) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if Service::state(&data)?.is_some_and(|v| v.installed) {
+            return Err(ServerError::RuntimeUnavailable);
+        }
+    }
+    Ok(())
+}
+
 /// Run only the approved artifact. An interrupted same-boot run remains unresolved cleanup.
 /// Reboot proves the previous boot's processes ended; ordinary client launches grant no recovery.
 pub fn run(
@@ -414,6 +429,7 @@ pub fn run(
         return Err(ServerError::RuntimeUnavailable);
     }
     runtime::verify(&service.runtime(&state), identity)?;
+    crate::host::install_shutdown_signals()?;
     let run = Run {
         boot: boot()?,
         token: crate::protocol::random()?,
@@ -421,7 +437,7 @@ pub fn run(
     state.run = Some(run.clone());
     data.write_json(c"service.json", &state)?;
     drop(intent);
-    match crate::run_local_with_panes(identity, panes) {
+    match crate::host::serve_runtime(&service.paths, Some(Box::new(panes)), true) {
         Ok(()) | Err(ServerError::Stopped) => {}
         Err(error) => return Err(error),
     }
@@ -723,6 +739,15 @@ mod tests {
                 .unwrap()
                 .is_symlink()
         );
+    }
+    #[test]
+    fn foreground_start_cannot_bypass_the_approved_service_runtime() {
+        let fixture = Fixture::new();
+        assert_eq!(
+            crate::host::serve(&fixture.paths),
+            Err(ServerError::RuntimeUnavailable)
+        );
+        assert!(!fixture.paths.socket().exists());
     }
     #[test]
     fn unavailable_policy_is_never_treated_as_missing_installation() {

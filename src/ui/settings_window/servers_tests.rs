@@ -7,18 +7,18 @@ use std::sync::Arc;
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 
 use super::testing::{
-    ScriptedServer, ScriptedService, ServiceCall, connected, not_installed, not_running, running,
-    status_only, stopped,
+    ScriptedServer, ScriptedService, ServiceCall, connected, not_installed, not_running, retained,
+    running, status_only, stopped,
 };
 use super::{
-    CHECK_SELECTOR, CONTROL_SELECTOR, INSTALL_SELECTOR, LocalServerAction, LocalServerControl,
-    LocalServerPresentation, LocalServerStatus, OPEN_DEVELOPMENT_PANE_SELECTOR, OfferedLocalServer,
-    OfferedServer, RESTART_CANCEL_SELECTOR, RESTART_CONFIRM_SELECTOR, RESTART_SELECTOR,
-    SERVICE_CHECK_SELECTOR, SERVICE_CONTROL_SELECTOR, SET_UP_SELECTOR, START_SELECTOR,
-    START_SERVICE_SELECTOR, STOP_CANCEL_SELECTOR, STOP_CONFIRM_SELECTOR, STOP_SELECTOR,
-    ServerServiceControl, ServiceAction, ServiceConfirmation, ServicePresentation, ServiceState,
-    UNINSTALL_CANCEL_SELECTOR, UNINSTALL_CONFIRM_SELECTOR, UNINSTALL_SELECTOR, present,
-    present_service,
+    CHECK_SELECTOR, CONTROL_SELECTOR, INSTALL_CHOICE_SELECTOR, INSTALL_SELECTOR, InstallChoice,
+    LocalServerAction, LocalServerControl, LocalServerPresentation, LocalServerStatus,
+    OPEN_DEVELOPMENT_PANE_SELECTOR, OfferedLocalServer, OfferedServer, RESTART_CANCEL_SELECTOR,
+    RESTART_CONFIRM_SELECTOR, RESTART_SELECTOR, SERVICE_CHECK_SELECTOR, SERVICE_CONTROL_SELECTOR,
+    SET_UP_SELECTOR, START_SELECTOR, START_SERVICE_SELECTOR, STOP_CANCEL_SELECTOR,
+    STOP_CONFIRM_SELECTOR, STOP_SELECTOR, ServerServiceControl, ServiceAction, ServiceConfirmation,
+    ServicePresentation, ServiceState, UNINSTALL_CANCEL_SELECTOR, UNINSTALL_CONFIRM_SELECTOR,
+    UNINSTALL_SELECTOR, present, present_service,
 };
 use crate::appearance::Appearance;
 use crate::local_server::ServerError;
@@ -479,6 +479,7 @@ fn each_service_state_offers_the_steps_that_apply_to_it() {
     let presented = |status| {
         present_service(ServiceState {
             status: Some(status),
+            installations: vec![retained("1.4.0", 'a')],
             ..ServiceState::default()
         })
     };
@@ -540,7 +541,7 @@ fn a_refused_operation_explains_itself_beside_the_status_read_after_it() {
     let presentation = present_service(ServiceState {
         status: Some(running()),
         failure: Some(ServerError::CleanupUnresolved),
-        working: None,
+        ..ServiceState::default()
     });
 
     assert_eq!(presentation.state, "Running");
@@ -557,7 +558,7 @@ fn an_unreadable_service_offers_only_another_check() {
     let presentation = present_service(ServiceState {
         status: None,
         failure: Some(ServerError::ServiceUnavailable),
-        working: None,
+        ..ServiceState::default()
     });
 
     assert_eq!(presentation.state, "Unknown");
@@ -595,7 +596,12 @@ fn presenting_servers_reads_the_service_without_changing_it(cx: &mut TestAppCont
 
     click(NAVIGATION_SELECTOR, cx);
 
-    assert_eq!(service.calls(), vec![ServiceCall::Status]);
+    // Listing verified builds is a read: it installs and starts nothing.
+    assert_eq!(
+        service.calls(),
+        vec![ServiceCall::Status, ServiceCall::RetainedInstallations]
+    );
+    assert!(service.changes().is_empty());
     for selector in [
         SERVICE_ROW_SELECTOR,
         SERVICE_CONTROL_SELECTOR,
@@ -635,39 +641,161 @@ fn a_platform_without_a_service_omits_its_row(cx: &mut TestAppContext) {
     assert!(!rendered(SERVICE_ROW_SELECTOR, cx));
 }
 
+#[test]
+fn install_names_each_verified_build_by_version_and_commit() {
+    let first = retained("1.4.0", 'a');
+    let second = retained("1.5.0", 'b');
+    let choices = InstallChoice::of(&[first.clone(), second]);
+    let labels: Vec<_> = choices.iter().map(|choice| choice.label.as_ref()).collect();
+    assert_eq!(
+        labels,
+        [
+            "Version 1.4.0 (commit aaaaaaa)",
+            "Version 1.5.0 (commit bbbbbbb)"
+        ]
+    );
+
+    // Two packages of one version and commit also name their package, so they read apart.
+    let mut rebuilt = first.clone();
+    rebuilt.directory = rebuilt.directory.with_file_name("c".repeat(64));
+    let choices = InstallChoice::of(&[first, rebuilt]);
+    let labels: Vec<_> = choices.iter().map(|choice| choice.label.as_ref()).collect();
+    assert_eq!(
+        labels,
+        [
+            "Version 1.4.0 (commit aaaaaaa, package aaaaaaaa)",
+            "Version 1.4.0 (commit aaaaaaa, package cccccccc)",
+        ]
+    );
+}
+
+#[test]
+fn without_a_verified_build_the_row_explains_how_to_keep_one_and_offers_another_check() {
+    let presentation = present_service(ServiceState {
+        status: Some(not_installed()),
+        ..ServiceState::default()
+    });
+
+    assert_eq!(presentation.state, "Not Installed");
+    assert_eq!(presentation.actions, vec![ServiceAction::Check]);
+    assert!(presentation.install_choices.is_empty());
+    assert_eq!(presentation.tone, CaptionTone::Guidance);
+    assert!(
+        presentation
+            .explanation
+            .contains("Use the server installer command to keep a signed package")
+    );
+}
+
 #[gpui::test]
-fn install_asks_for_an_installation_and_cancelling_changes_nothing(cx: &mut TestAppContext) {
-    let (_window, _server, service, cx) = open_servers_with_service(Ok(not_installed()), cx);
+fn one_verified_build_installs_from_install_and_checks_the_connection(cx: &mut TestAppContext) {
+    let (window, server, service, cx) = open_servers_with_service(Ok(not_installed()), cx);
+    let build = retained("1.4.0", 'a');
+    let presented = service_presentation(&window, cx);
+    assert!(
+        presented
+            .explanation
+            .starts_with("Version 1.4.0 (commit aaaaaaa) is verified and ready to install.")
+    );
+    let checks = server.refreshes();
 
     click(INSTALL_SELECTOR, cx);
-    assert!(cx.did_prompt_for_paths());
-    cx.simulate_path_prompt_response(|options| {
-        assert!(options.directories && !options.files && !options.multiple);
-        None
+
+    assert!(!cx.did_prompt_for_paths(), "Install asks for no folder");
+    assert_eq!(
+        service.changes(),
+        vec![ServiceCall::Install(build.directory)]
+    );
+    assert!(rendered("settings-server-service-state-running", cx));
+    assert_eq!(service_presentation(&window, cx).state, "Running");
+    assert_eq!(server.refreshes(), checks + 1);
+}
+
+#[gpui::test]
+fn several_verified_builds_are_chosen_from_installs_menu(cx: &mut TestAppContext) {
+    let server = ScriptedServer::new(Ok(connected(2)));
+    let service = ScriptedService::new(Ok(not_installed()));
+    let chosen = retained("1.5.0", 'b');
+    service.keep(Ok(vec![retained("1.4.0", 'a'), chosen.clone()]));
+    let (window, cx) = open_settings(offered_with_service(&server, &service), cx);
+    click(NAVIGATION_SELECTOR, cx);
+    assert!(
+        service_presentation(&window, cx)
+            .explanation
+            .starts_with("Choose a verified server version from Install.")
+    );
+
+    click(INSTALL_SELECTOR, cx);
+    assert!(
+        service.changes().is_empty(),
+        "opening the menu installs nothing"
+    );
+    assert!(!cx.did_prompt_for_paths(), "Install asks for no folder");
+    let second = Box::leak(format!("{INSTALL_CHOICE_SELECTOR}-1").into_boxed_str());
+    click(second, cx);
+
+    assert_eq!(
+        service.changes(),
+        vec![ServiceCall::Install(chosen.directory)]
+    );
+    assert_eq!(service_presentation(&window, cx).state, "Running");
+}
+
+#[gpui::test]
+fn a_build_kept_after_the_row_was_read_is_offered_after_another_check(cx: &mut TestAppContext) {
+    let server = ScriptedServer::new(Ok(connected(2)));
+    let service = ScriptedService::new(Ok(not_installed()));
+    service.keep(Ok(Vec::new()));
+    let (window, cx) = open_settings(offered_with_service(&server, &service), cx);
+    click(NAVIGATION_SELECTOR, cx);
+    assert!(!rendered(INSTALL_SELECTOR, cx));
+    assert_eq!(
+        service_presentation(&window, cx).actions,
+        vec![ServiceAction::Check]
+    );
+
+    service.keep(Ok(vec![retained("1.4.0", 'a')]));
+    click(SERVICE_CHECK_SELECTOR, cx);
+
+    assert!(rendered(INSTALL_SELECTOR, cx));
+    assert!(service.changes().is_empty());
+}
+
+#[gpui::test]
+fn an_unreadable_build_store_explains_itself_and_offers_another_check(cx: &mut TestAppContext) {
+    let server = ScriptedServer::new(Ok(connected(2)));
+    let service = ScriptedService::new(Ok(not_installed()));
+    service.keep(Err(ServerError::StorageUnavailable));
+    let (window, cx) = open_settings(offered_with_service(&server, &service), cx);
+    click(NAVIGATION_SELECTOR, cx);
+
+    let presented = service_presentation(&window, cx);
+    assert_eq!(presented.state, "Not Installed");
+    assert_eq!(presented.tone, CaptionTone::Error);
+    assert_eq!(
+        presented.explanation.as_ref(),
+        ServerError::StorageUnavailable.to_string()
+    );
+    assert_eq!(presented.actions, vec![ServiceAction::Check]);
+}
+
+#[gpui::test]
+fn an_installed_service_lists_no_builds(cx: &mut TestAppContext) {
+    let (_window, _server, service, _cx) = open_servers_with_service(Ok(running()), cx);
+
+    assert_eq!(service.calls(), vec![ServiceCall::Status]);
+}
+
+#[gpui::test]
+fn only_a_listed_build_is_installed(cx: &mut TestAppContext) {
+    let (window, _server, service, cx) = open_servers_with_service(Ok(not_installed()), cx);
+
+    window.update(cx, |settings, cx| {
+        settings.install_server_service(PathBuf::from("/elsewhere"), cx);
     });
     cx.run_until_parked();
 
     assert!(service.changes().is_empty());
-    assert!(rendered("settings-server-service-state-not-installed", cx));
-}
-
-#[gpui::test]
-fn installing_from_the_chosen_installation_starts_the_server_and_checks_the_connection(
-    cx: &mut TestAppContext,
-) {
-    let (window, server, service, cx) = open_servers_with_service(Ok(not_installed()), cx);
-    let installation = PathBuf::from("/retained/server/installations/digest");
-    let checks = server.refreshes();
-
-    click(INSTALL_SELECTOR, cx);
-    let chosen = installation.clone();
-    cx.simulate_path_prompt_response(move |_| Some(vec![chosen]));
-    cx.run_until_parked();
-
-    assert_eq!(service.changes(), vec![ServiceCall::Install(installation)]);
-    assert!(rendered("settings-server-service-state-running", cx));
-    assert_eq!(service_presentation(&window, cx).state, "Running");
-    assert_eq!(server.refreshes(), checks + 1);
 }
 
 #[gpui::test]
@@ -676,8 +804,6 @@ fn a_refused_installation_explains_itself_and_offers_install_again(cx: &mut Test
     service.refuse_next(ServerError::RuntimeUnavailable);
 
     click(INSTALL_SELECTOR, cx);
-    cx.simulate_path_prompt_response(|_| Some(vec![PathBuf::from("/elsewhere")]));
-    cx.run_until_parked();
 
     let presented = service_presentation(&window, cx);
     assert_eq!(presented.state, "Not Installed");
@@ -886,6 +1012,20 @@ fn assistive_technology_hears_the_service_state_and_what_each_step_does(cx: &mut
     cx.run_until_parked();
     assert!(service.changes().is_empty());
     assert_eq!(service_presentation(&window, cx).state, "Running");
+}
+
+#[gpui::test]
+fn assistive_technology_hears_which_build_install_installs(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (_window, _server, _service, cx) = open_servers_with_service(Ok(not_installed()), cx);
+    let install = A11yTree::read(cx).node("Install").clone();
+
+    assert_eq!(install["aria"]["role"], "Button");
+    assert_eq!(
+        install["aria"]["description"],
+        "Installs Version 1.4.0 (commit aaaaaaa)."
+    );
 }
 
 #[gpui::test]

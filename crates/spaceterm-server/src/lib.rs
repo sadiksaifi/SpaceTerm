@@ -32,7 +32,7 @@ pub enum ServerError {
     NotInstalled,
     #[error("The local server was stopped. Use Start Server to start it again.")]
     Stopped,
-    #[error("Select a verified retained server installation for this application identity.")]
+    #[error("This server package could not be verified for this application identity.")]
     RuntimeUnavailable,
     #[error("Administrator authorization is required to enable linger for this account.")]
     AuthorizationRequired,
