@@ -1545,7 +1545,9 @@ impl TerminalPane {
         }
     }
 
-    #[cfg(test)]
+    /// Whether the keyboard rests in the Pane's terminal itself. Terminal Find and the Pane's
+    /// other keyboard owners sit inside the Pane and answer `false`.
+    #[cfg(any(test, feature = "developer-tools"))]
     pub(crate) fn is_focused(&self, window: &Window) -> bool {
         self.focus_handle.is_focused(window)
     }

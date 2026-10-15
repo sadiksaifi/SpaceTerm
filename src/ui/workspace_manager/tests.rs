@@ -14250,3 +14250,223 @@ fn a_shared_pin_chosen_while_another_client_pins_should_submit_the_version_it_op
          refuses it instead of overwriting the other client"
     );
 }
+
+/// A shared server Workspace presented in this window, with the server Pane its scripted
+/// connection drives. Its Panes reach the same presentation the local Development server's do.
+struct SharedPaneHarness {
+    manager: Entity<WorkspaceManager>,
+    panes: Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
+}
+
+const SHARED_FOCUS_WORKSPACE: [u8; 32] = [11; 32];
+const SHARED_FOCUS_TAB: [u8; 32] = [12; 32];
+const SHARED_FOCUS_PANE: [u8; 32] = [13; 32];
+
+/// The Workspace the sidebar lists second, which is the shared one every harness here publishes.
+const SHARED_WORKSPACE_ROW: WorkspaceId = WorkspaceId::new(2);
+
+/// One connected shared Workspace, opened from the sidebar so its Pane is the Focused Pane of the
+/// Active Workspace and holds the keyboard.
+fn shared_pane_harness(cx: &mut TestAppContext) -> (SharedPaneHarness, &mut VisualTestContext) {
+    use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
+    use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+    use spaceterm_server::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    let published = Inventory {
+        revision: 1,
+        workspaces: vec![Workspace {
+            id: SHARED_FOCUS_WORKSPACE,
+            name: "Build".to_owned(),
+            name_version: 0,
+            pin_version: 0,
+            pinned_directory: None,
+            root_tab: SHARED_FOCUS_TAB,
+            tabs: vec![Tab {
+                id: SHARED_FOCUS_TAB,
+                root_pane: SHARED_FOCUS_PANE,
+                panes: vec![Pane {
+                    id: SHARED_FOCUS_PANE,
+                    source: None,
+                    axis: Axis::Right,
+                    starting_directory: PathBuf::from("/server/work"),
+                    confirmed_directory: None,
+                    creator: None,
+                }],
+            }],
+        }],
+    };
+    let edits = Rc::new(ScriptedEdits::new(Some(published)));
+    let session_factory = WorkspaceTerminalSessionFactory::new_local(
+        Rc::new(TestTerminalSessionFactory::new(
+            TestTerminalSessionRecords::default(),
+        )),
+        crate::terminal::testing::test_local_directory(std::env::temp_dir()),
+    );
+    let panes = ScriptedPanes::new(session_factory);
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.present_shared_workspaces(
+                SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
+                SharedPaneSessions::with_opener(
+                    Rc::clone(&panes) as Rc<_>,
+                    &PaneConstruction::testing(),
+                ),
+                window,
+                cx,
+            );
+            manager.sync_shared_workspaces(window, cx);
+        });
+    });
+    cx.run_until_parked();
+    let harness = SharedPaneHarness { manager, panes };
+    assert!(
+        harness.manager.read_with(cx, |manager, _| manager
+            .is_shared_workspace(SHARED_WORKSPACE_ROW)),
+        "the published Workspace should join the sidebar as the second row"
+    );
+    // The server reaches the Pane and publishes this client's screen, as a fresh connection does.
+    harness.panes.pane(SHARED_FOCUS_PANE).reconnect();
+    settle_shared_panes(cx);
+    // Opening the Workspace from the sidebar focuses its Focused Pane, as it does for any other.
+    click("workspace-row-2-inactive", cx);
+    assert!(
+        shared_terminal_is_focused(&harness, cx),
+        "opening the shared Workspace should leave the keyboard in its Pane"
+    );
+    (harness, cx)
+}
+
+/// Lets every shared Pane read its connection and paints the frame that follows.
+fn settle_shared_panes(cx: &mut VisualTestContext) {
+    cx.executor()
+        .advance_clock(crate::ui::shared_workspaces::POLL_INTERVAL * 3);
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+}
+
+fn shared_terminal_is_focused(harness: &SharedPaneHarness, cx: &mut VisualTestContext) -> bool {
+    cx.update(|window, cx| {
+        harness
+            .manager
+            .read(cx)
+            .workspaces
+            .active_workspace()
+            .payload()
+            .read(cx)
+            .focused_terminal_is_focused(window, cx)
+    })
+}
+
+fn sidebar_rename_is_focused(harness: &SharedPaneHarness, cx: &mut VisualTestContext) -> bool {
+    cx.update(|window, cx| {
+        harness
+            .manager
+            .read(cx)
+            .sidebar
+            .read(cx)
+            .rename_is_focused(window)
+    })
+}
+
+/// Starts the inline rename of the Workspace the sidebar lists first, which the shared Workspace
+/// is not, so the keyboard sits in an editor outside the Pane.
+fn start_sidebar_rename(harness: &SharedPaneHarness, cx: &mut VisualTestContext) {
+    right_click("workspace-row-1-inactive", cx);
+    click("workspace-menu-row-rename", cx);
+    assert!(
+        sidebar_rename_is_focused(harness, cx),
+        "the inline rename should hold the keyboard"
+    );
+}
+
+/// A reconnection is server news rather than a person's action, so it returns the keyboard only to
+/// the Pane that already held it.
+#[gpui::test]
+fn a_shared_pane_reconnection_should_return_focus_only_to_the_pane_that_held_it(
+    cx: &mut TestAppContext,
+) {
+    use crate::terminal::server_session::DevelopmentPaneStatus;
+
+    let (harness, cx) = shared_pane_harness(cx);
+    let pane = harness.panes.pane(SHARED_FOCUS_PANE);
+    start_sidebar_rename(&harness, cx);
+
+    pane.set(DevelopmentPaneStatus::Reconnecting);
+    settle_shared_panes(cx);
+    pane.reconnect();
+    settle_shared_panes(cx);
+
+    assert!(
+        sidebar_rename_is_focused(&harness, cx),
+        "a reconnection must leave the keyboard in the editor a person is typing in"
+    );
+    assert!(
+        !shared_terminal_is_focused(&harness, cx),
+        "a reconnection must not pull focus into the Pane's terminal"
+    );
+
+    // The Pane a person left the keyboard in gets it back, so typing returns to the shell.
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    click("workspace-row-2-active", cx);
+    assert!(shared_terminal_is_focused(&harness, cx));
+    pane.set(DevelopmentPaneStatus::Reconnecting);
+    settle_shared_panes(cx);
+    pane.reconnect();
+    settle_shared_panes(cx);
+
+    assert!(
+        shared_terminal_is_focused(&harness, cx),
+        "the Pane that held the keyboard should keep it once its screens return"
+    );
+}
+
+/// Another client's takeover replaces the Pane, so the keyboard leaves its terminal for the screen
+/// that explains the change, and nothing else loses the keyboard.
+#[gpui::test]
+fn a_shared_pane_takeover_should_take_focus_only_from_the_pane_that_held_it(
+    cx: &mut TestAppContext,
+) {
+    use crate::terminal::server_session::DevelopmentPaneStatus;
+
+    let (harness, cx) = shared_pane_harness(cx);
+    let pane = harness.panes.pane(SHARED_FOCUS_PANE);
+
+    pane.set(DevelopmentPaneStatus::Takeover);
+    settle_shared_panes(cx);
+
+    assert!(
+        cx.debug_bounds("shared-pane-takeover-1").is_some(),
+        "another client's control should replace the Pane with its screen"
+    );
+    assert!(
+        !shared_terminal_is_focused(&harness, cx),
+        "typing must not reach a shell this client no longer controls"
+    );
+
+    // Control returns, so the screen hands the keyboard back to the terminal it replaced.
+    pane.reconnect();
+    settle_shared_panes(cx);
+    assert!(
+        shared_terminal_is_focused(&harness, cx),
+        "the Pane should take the keyboard back from the screen it replaced"
+    );
+
+    // The same takeover while a person types in the sidebar leaves that editor alone.
+    start_sidebar_rename(&harness, cx);
+    pane.set(DevelopmentPaneStatus::Takeover);
+    settle_shared_panes(cx);
+
+    assert!(
+        sidebar_rename_is_focused(&harness, cx),
+        "another client's takeover must not pull the keyboard out of the rename editor"
+    );
+    assert!(
+        cx.debug_bounds("shared-pane-takeover-1").is_some(),
+        "the screen should still replace the Pane it took over"
+    );
+}

@@ -2673,13 +2673,17 @@ impl TabView {
         let Some(terminal) = self.tab.pane(pane_id).cloned() else {
             return;
         };
+        // Read the keyboard's owner before the presentation moves, because only the focus this
+        // Pane already holds moves with it. A sidebar rename, the Workspace Switcher, and
+        // Terminal Find keep the keys a person is typing, whatever the server publishes here.
+        let pane_holds_focus = self.shared_pane_holds_focus(pane_id, &terminal, window, cx);
         terminal.update(cx, |terminal, cx| {
             terminal.set_server_connection_interrupted(sync.interrupted, window, cx);
             if sync.clear_presentation {
                 terminal.clear_server_presentation(cx);
             }
         });
-        if !self.active || self.tab.focused_pane_id() != pane_id {
+        if !self.active || self.tab.focused_pane_id() != pane_id || !pane_holds_focus {
             return;
         }
         let screen = self
@@ -2957,6 +2961,26 @@ impl TabView {
         {
             cx.notify();
         }
+    }
+
+    /// Whether the keyboard rests in this shared Pane: in its terminal, or anywhere in the screen
+    /// replacing it, including that screen's action.
+    ///
+    /// Terminal Find sits inside the Pane and owns the keyboard itself, so it does not count. Only
+    /// what the Pane presents in place of a shell may hand focus on, and only to the Pane.
+    fn shared_pane_holds_focus(
+        &self,
+        pane_id: PaneId,
+        terminal: &Entity<TerminalPane>,
+        window: &Window,
+        cx: &App,
+    ) -> bool {
+        terminal.read(cx).is_focused(window)
+            || self
+                .shared
+                .as_ref()
+                .and_then(|shared| shared.screen_focus(pane_id))
+                .is_some_and(|focus| focus.contains_focused(window, cx))
     }
 
     fn focus_shared_screen(&self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
