@@ -2,7 +2,7 @@
 #[path = "support/lifecycle.rs"]
 mod lifecycle;
 mod support;
-use lifecycle::{Server, connect, size};
+use lifecycle::{Server, connect, require_idle, size};
 use spaceterm_server::{LocalServer, ServerError, pane::*};
 use std::{error::Error, time::Duration};
 use support::{attach, await_output, command};
@@ -22,24 +22,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let major = std::env::args().nth(1).unwrap_or("2".into()).parse()?;
     let name = std::env::var("SPACETERM_DEVELOPMENT_CLIENT").unwrap_or("restore-smoke".into());
     let client = LocalServer::for_development_client(&name, major)?;
-    // Detect a live listener before pairing, including when this test device has no credential.
-    // The runtime endpoint depends on UID and build identity, independently of the home path.
-    // SAFETY: geteuid has no preconditions.
-    let uid = unsafe { libc::geteuid() };
-    let directories = spaceterm_directories::ServerDirectories::for_account(
-        std::path::Path::new("/"),
-        uid,
-        "spaceterm-development",
-    )?;
-    if std::os::unix::net::UnixStream::connect(directories.runtime.join("s")).is_ok() {
-        return Err("Stop the idle Development server before this exercise.".into());
-    }
-    // Refuse to interrupt somebody else's running server or mutate retained work.
-    match client.refresh() {
-        Err(ServerError::NotRunning | ServerError::NotPaired) => {}
-        Ok(_) => return Err("Stop the idle Development server before this exercise.".into()),
-        Err(error) => return Err(error.into()),
-    }
+    require_idle(&client)?;
     // Setup locates its sibling binary. Stage the built host beside this example, including
     // when Cargo uses a shared target directory outside the working tree.
     let directory = std::env::current_exe()?

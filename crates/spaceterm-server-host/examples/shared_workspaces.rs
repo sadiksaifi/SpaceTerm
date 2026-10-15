@@ -6,7 +6,7 @@ mod lifecycle;
     reason = "The shared-Pane exercise does not use the legacy attach helper."
 )]
 mod support;
-use lifecycle::{Server, connect, size};
+use lifecycle::{Server, connect, require_idle, size};
 use spaceterm_server::{
     LocalServer, ServerError,
     hierarchy::{Axis, Id, Inventory, Mutation, Outcome},
@@ -48,12 +48,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let major = std::env::args().nth(1).unwrap_or("2".into()).parse()?;
     let a = LocalServer::for_development_client("shared-smoke-a", major)?;
     let b = LocalServer::for_development_client("shared-smoke-b", major)?;
-    // Preserve existing running work. This exercise owns every process it terminates.
-    match a.refresh() {
-        Err(ServerError::NotRunning | ServerError::NotPaired) => {}
-        Ok(_) => return Err("Stop the Development server before this exercise.".into()),
-        Err(error) => return Err(error.into()),
-    }
+    require_idle(&a)?;
     let directory = std::env::current_exe()?
         .parent()
         .ok_or("example directory")?

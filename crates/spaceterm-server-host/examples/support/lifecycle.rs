@@ -5,6 +5,24 @@ use std::{
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
+
+pub fn require_idle(client: &LocalServer) -> Result<(), Box<dyn Error>> {
+    // Checking the listener first also protects running work when the test has no pairing yet.
+    // SAFETY: geteuid has no preconditions.
+    let directories = spaceterm_directories::ServerDirectories::for_account(
+        std::path::Path::new("/"),
+        unsafe { libc::geteuid() },
+        "spaceterm-development",
+    )?;
+    if std::os::unix::net::UnixStream::connect(directories.runtime.join("s")).is_ok() {
+        return Err("Stop the Development server before this exercise.".into());
+    }
+    match client.refresh() {
+        Err(ServerError::NotRunning | ServerError::NotPaired) => Ok(()),
+        Ok(_) => Err("Stop the Development server before this exercise.".into()),
+        Err(error) => Err(error.into()),
+    }
+}
 pub struct Server(pub Child);
 impl Server {
     pub fn start() -> Result<Self, Box<dyn Error>> {
