@@ -244,9 +244,14 @@ pub(crate) fn serve_with_panes(
                         let mut wire = protocol::Wire::terminal(&mut stream)?;
                         let request = wire.read()?;
                         let shutdown = matches!(request, crate::pane::Request::Shutdown);
-                        let reply = {
+                        let (reply, stopped) = {
                             let mut panes = panes.lock().unwrap_or_else(|e| e.into_inner());
-                            match panes.as_mut() {
+                            // Admission is fenced under the same lock as final cleanup. A worker
+                            // may have been waiting for its frame or this lock when shutdown began.
+                            if stopping.load(Ordering::Acquire) || STOP.load(Ordering::Acquire) {
+                                return Err(ServerError::NotRunning);
+                            }
+                            let reply = match panes.as_mut() {
                                 Some(panes) => panes.request(device, connection, request),
                                 None if matches!(request, crate::pane::Request::Capabilities) => {
                                     crate::pane::Reply::Capabilities {
@@ -256,12 +261,13 @@ pub(crate) fn serve_with_panes(
                                 None => {
                                     crate::pane::Reply::Refused(crate::pane::Refusal::Unsupported)
                                 }
+                            };
+                            let stopped = shutdown && matches!(reply, crate::pane::Reply::Closed);
+                            if stopped {
+                                stopping.store(true, Ordering::Release);
                             }
+                            (reply, stopped)
                         };
-                        let stopped = shutdown && matches!(reply, crate::pane::Reply::Closed);
-                        if stopped {
-                            stopping.store(true, Ordering::Release);
-                        }
                         wire.write(&reply)?;
                         if stopped {
                             break;
@@ -277,6 +283,7 @@ pub(crate) fn serve_with_panes(
             workers.fetch_sub(1, Ordering::AcqRel);
         });
     }
+    stopping.store(true, Ordering::Release);
     if let Some(panes) = panes.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         panes.shutdown()?;
     }
@@ -441,6 +448,125 @@ mod startup_tests {
                 Instant::now() < deadline,
                 "server ignored its shutdown signal"
             );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    #[ignore = "runs only as a child of the server shutdown admission test"]
+    fn server_shutdown_child() {
+        use crate::pane::{PaneService, Reply, Request};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct Service {
+            stopped: bool,
+            late_requests: Arc<AtomicUsize>,
+        }
+        impl PaneService for Service {
+            fn request(&mut self, _: [u8; 32], _: [u8; 32], request: Request) -> Reply {
+                if self.stopped {
+                    self.late_requests.fetch_add(1, Ordering::SeqCst);
+                }
+                if matches!(request, Request::Shutdown) {
+                    self.stopped = true;
+                    Reply::Closed
+                } else {
+                    Reply::Unchanged
+                }
+            }
+            fn disconnected(&mut self, _: [u8; 32]) {}
+            fn shutdown(&mut self) -> Result<(), ServerError> {
+                self.stopped = true;
+                Ok(())
+            }
+        }
+        let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
+        let late_requests = Arc::new(AtomicUsize::new(0));
+        serve_with_panes(
+            &Paths {
+                data: root.join("d"),
+                runtime: root.join("r"),
+            },
+            Some(Box::new(Service {
+                stopped: false,
+                late_requests: Arc::clone(&late_requests),
+            })),
+        )
+        .unwrap();
+        fs::write(root.join("stopped"), []).unwrap();
+        // Keep the library caller alive while the admitted client finishes its partial frame.
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            late_requests.load(Ordering::SeqCst),
+            0,
+            "request reached service after shutdown"
+        );
+    }
+
+    #[test]
+    fn shutdown_refuses_an_attach_already_waiting_for_its_frame() {
+        use crate::pane::{PaneSize, Reply, Request};
+        use std::io::Write;
+        let fixture = Fixture::new();
+        let mut child = fixture.start_test("host::startup_tests::server_shutdown_child", false);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut pending = loop {
+            match UnixStream::connect(fixture.paths.socket()) {
+                Ok(stream) => break stream,
+                Err(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(_) => panic!("server did not start"),
+            }
+        };
+        protocol::authenticate_client(&mut pending, &fixture.device, &fixture.pin, &[2, 1])
+            .unwrap();
+        let body = serde_json::to_vec(&Request::Attach {
+            create: true,
+            size: PaneSize {
+                columns: 80,
+                rows: 24,
+                cell_width: 8,
+                cell_height: 18,
+            },
+            resume: None,
+            style: None,
+        })
+        .unwrap();
+        pending
+            .write_all(&(body.len() as u32).to_be_bytes())
+            .unwrap();
+        // The admitted worker waits on the incomplete frame while another connection shuts down.
+        std::thread::sleep(Duration::from_millis(50));
+        let mut shutdown = UnixStream::connect(fixture.paths.socket()).unwrap();
+        protocol::authenticate_client(&mut shutdown, &fixture.device, &fixture.pin, &[2, 1])
+            .unwrap();
+        let mut wire = protocol::Wire::terminal(&mut shutdown).unwrap();
+        wire.write(&Request::Shutdown).unwrap();
+        assert!(matches!(wire.read::<Reply>().unwrap(), Reply::Closed));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !fixture.root.join("stopped").exists() {
+            assert!(Instant::now() < deadline, "server did not finish shutdown");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = pending.write_all(&body);
+        assert!(
+            protocol::Wire::terminal(&mut pending)
+                .unwrap()
+                .read::<Reply>()
+                .is_err()
+        );
+        loop {
+            if let Some(exit) = child.0.try_wait().unwrap() {
+                assert!(
+                    exit.success(),
+                    "server dispatched an admitted request after shutdown"
+                );
+                break;
+            }
+            assert!(Instant::now() < deadline, "server child did not finish");
             std::thread::sleep(Duration::from_millis(10));
         }
     }
