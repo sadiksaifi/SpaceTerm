@@ -45,6 +45,17 @@ impl LocalServer {
             protocol::public(&protocol::key(&credential.seed)?),
         )
     }
+    /// Opens this paired client's private arrangement without contacting or starting the server.
+    pub fn client_view_store(&self) -> Result<crate::client_view::ClientViewStore, ServerError> {
+        let credential = self.credential()?.ok_or(ServerError::NotPaired)?;
+        let directory =
+            Directory::open(&self.paths.data.join("clients").join(&self.account), true)?;
+        crate::client_view::ClientViewStore::open(
+            directory,
+            credential.pin,
+            protocol::public(&protocol::key(&credential.seed)?),
+        )
+    }
     pub fn for_identity(directory_name: &str) -> Result<Self, ServerError> {
         // Development may run two independent desktop clients against one private server.
         // Each uses native credential storage and explicit local pairing, never a secret file.

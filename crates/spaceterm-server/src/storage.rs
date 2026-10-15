@@ -390,6 +390,88 @@ mod tests {
             let _ = fs::remove_dir_all(&self.0);
         }
     }
+    #[cfg(feature = "client")]
+    #[test]
+    fn personal_arrangements_survive_reopen_and_remain_fenced_to_each_client_and_server() {
+        use crate::client_view::{
+            ClientView, ClientViewStore, Layout, LayoutNode, TabView, WorkspaceView,
+        };
+        let fixture = Fixture::new();
+        let _directory = fixture.open();
+        let first = fixture.0.join("first");
+        let second = fixture.0.join("second");
+        let view = ClientView {
+            workspaces: vec![WorkspaceView {
+                workspace: [1; 32],
+                tabs: vec![TabView {
+                    tab: [2; 32],
+                    layout: Layout {
+                        nodes: vec![LayoutNode::Pane([3; 32])],
+                    },
+                }],
+            }],
+        };
+        let mut client =
+            ClientViewStore::open(Directory::open(&first, true).unwrap(), [8; 32], [9; 32])
+                .unwrap();
+        client.save(view.clone()).unwrap();
+        assert!(
+            ClientViewStore::open(Directory::open(&first, false).unwrap(), [8; 32], [9; 32])
+                .is_err(),
+            "one writer per desktop"
+        );
+        drop(client);
+        let client =
+            ClientViewStore::open(Directory::open(&first, false).unwrap(), [8; 32], [9; 32])
+                .unwrap();
+        let other =
+            ClientViewStore::open(Directory::open(&second, true).unwrap(), [8; 32], [10; 32])
+                .unwrap();
+        assert_eq!(
+            (client.view(), other.view()),
+            (&view, &ClientView::default())
+        );
+        drop(client);
+        assert!(matches!(
+            ClientViewStore::open(Directory::open(&first, false).unwrap(), [7; 32], [9; 32]),
+            Err(ServerError::AuthenticationRefused)
+        ));
+        assert!(matches!(
+            ClientViewStore::open(Directory::open(&first, false).unwrap(), [8; 32], [10; 32]),
+            Err(ServerError::AuthenticationRefused)
+        ));
+        assert_eq!(
+            fs::metadata(first.join("view.json")).unwrap().mode() & 0o7777,
+            0o600
+        );
+        assert!(!fixture.0.join("settings.json").exists());
+    }
+    #[cfg(feature = "client")]
+    #[test]
+    fn unreadable_client_views_are_preserved_instead_of_replaced_with_defaults() {
+        use crate::client_view::{ClientView, ClientViewStore, WorkspaceView};
+        let fixture = Fixture::new();
+        let directory = fixture.open();
+        let mut store = ClientViewStore::open(directory, [1; 32], [2; 32]).unwrap();
+        store
+            .save(ClientView {
+                workspaces: vec![WorkspaceView {
+                    workspace: [3; 32],
+                    tabs: Vec::new(),
+                }],
+            })
+            .unwrap();
+        drop(store);
+        fs::write(fixture.0.join("view.json"), b"incomplete document").unwrap();
+        assert!(matches!(
+            ClientViewStore::open(fixture.open(), [1; 32], [2; 32]),
+            Err(ServerError::UnsafeStorage)
+        ));
+        assert_eq!(
+            fs::read(fixture.0.join("view.json")).unwrap(),
+            b"incomplete document"
+        );
+    }
     #[test]
     fn repeated_setup_retains_identity_and_paired_devices_with_private_modes() {
         let fixture = Fixture::new();
