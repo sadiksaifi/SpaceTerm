@@ -14,6 +14,80 @@ const MAX_OUTCOMES: usize = 32;
 pub struct Inventory {
     pub revision: u64,
     pub workspaces: Vec<Workspace>,
+    /// Live facts accompany publication only; retained organization never supplies authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close: Option<CloseInventory>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CloseTarget {
+    Pane { workspace: Id, tab: Id, pane: Id },
+    Tab { workspace: Id, tab: Id },
+    Workspace { workspace: Id },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfirmedPane {
+    pub id: Id,
+    pub session: Option<Id>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloseInventory {
+    pub boot: Id,
+    pub sessions: Vec<ConfirmedPane>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloseConfirmation {
+    pub boot: Id,
+    pub panes: Vec<ConfirmedPane>,
+}
+
+impl Inventory {
+    pub fn close_confirmation(&self, target: CloseTarget) -> Option<CloseConfirmation> {
+        let live = self.close.as_ref()?;
+        let ids = self.close_panes(target)?;
+        let panes = ids
+            .into_iter()
+            .map(|id| live.sessions.iter().find(|p| p.id == id).cloned())
+            .collect::<Option<Vec<_>>>()?;
+        Some(CloseConfirmation {
+            boot: live.boot,
+            panes,
+        })
+    }
+
+    fn close_panes(&self, target: CloseTarget) -> Option<Vec<Id>> {
+        let workspace = match target {
+            CloseTarget::Pane { workspace, .. }
+            | CloseTarget::Tab { workspace, .. }
+            | CloseTarget::Workspace { workspace } => workspace,
+        };
+        let w = self.workspaces.iter().find(|w| w.id == workspace)?;
+        match target {
+            CloseTarget::Workspace { .. } => {
+                Some(w.tabs.iter().flat_map(|t| &t.panes).map(|p| p.id).collect())
+            }
+            CloseTarget::Tab { tab, .. } => Some(
+                w.tabs
+                    .iter()
+                    .find(|t| t.id == tab)?
+                    .panes
+                    .iter()
+                    .map(|p| p.id)
+                    .collect(),
+            ),
+            CloseTarget::Pane { tab, pane, .. } => w
+                .tabs
+                .iter()
+                .find(|t| t.id == tab)?
+                .panes
+                .iter()
+                .any(|p| p.id == pane)
+                .then_some(vec![pane]),
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Workspace {
@@ -48,6 +122,10 @@ pub enum Axis {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mutation {
+    Close {
+        target: CloseTarget,
+        confirmation: CloseConfirmation,
+    },
     CreateWorkspace {
         name: String,
     },
@@ -74,6 +152,9 @@ pub enum Mutation {
 impl Mutation {
     pub fn is_bounded(&self) -> bool {
         match self {
+            Self::Close { confirmation, .. } => {
+                !confirmation.panes.is_empty() && confirmation.panes.len() <= MAX_PANES
+            }
             Self::CreateWorkspace { name } | Self::RenameWorkspace { name, .. } => {
                 name.len() <= 256
             }
@@ -92,6 +173,7 @@ pub enum Outcome {
     Missing,
     Invalid,
     Limit,
+    StaleConfirmation,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetainedOutcome {
@@ -118,6 +200,7 @@ impl State {
             inventory: Inventory {
                 revision: 0,
                 workspaces: Vec::new(),
+                close: None,
             },
             devices: Vec::new(),
             creator_boot: None,
@@ -154,6 +237,7 @@ impl State {
         org.shared.as_deref().cloned().unwrap_or_else(|| Self {
             inventory: Inventory {
                 revision: 0,
+                close: None,
                 workspaces: vec![Workspace {
                     id: org.workspace,
                     name: org.name.clone(),
@@ -299,6 +383,25 @@ impl State {
             !name.trim().is_empty() && name.len() <= 256 && !name.chars().any(char::is_control)
         };
         let target = match mutation {
+            Mutation::Close {
+                target,
+                confirmation,
+            } => {
+                let Some(ids) = self.inventory.close_panes(*target) else {
+                    return Ok(Outcome::Missing);
+                };
+                if self.inventory.close_confirmation(*target).as_ref() != Some(confirmation) {
+                    return Ok(Outcome::StaleConfirmation);
+                }
+                for id in ids {
+                    self.remove_pane(id);
+                }
+                match target {
+                    CloseTarget::Pane { pane, .. } => *pane,
+                    CloseTarget::Tab { tab, .. } => *tab,
+                    CloseTarget::Workspace { workspace } => *workspace,
+                }
+            }
             Mutation::CreateWorkspace { name } => {
                 if !valid_name(name) {
                     return Ok(Outcome::Invalid);
@@ -709,6 +812,67 @@ impl ClientJournal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn confirmed_close_promotes_roots_and_replay_cannot_remove_later_work() {
+        let mut state = State::empty();
+        state
+            .apply(
+                [1; 32],
+                1,
+                Mutation::CreateWorkspace {
+                    name: "Build".into(),
+                },
+                "/tmp".as_ref(),
+                |_| true,
+            )
+            .unwrap();
+        let workspace = state.inventory.workspaces[0].id;
+        let tab = state.inventory.workspaces[0].root_tab;
+        state
+            .apply(
+                [1; 32],
+                2,
+                Mutation::CreateTab { workspace },
+                "/tmp".as_ref(),
+                |_| true,
+            )
+            .unwrap();
+        let survivor = state.inventory.workspaces[0].tabs[1].id;
+        let pane = state.inventory.workspaces[0].tabs[0].root_pane;
+        state.inventory.close = Some(CloseInventory {
+            boot: [9; 32],
+            sessions: vec![ConfirmedPane {
+                id: pane,
+                session: None,
+            }],
+        });
+        let close = Mutation::Close {
+            target: CloseTarget::Tab { workspace, tab },
+            confirmation: CloseConfirmation {
+                boot: [9; 32],
+                panes: vec![ConfirmedPane {
+                    id: pane,
+                    session: None,
+                }],
+            },
+        };
+        assert_eq!(
+            state
+                .apply([2; 32], 1, close.clone(), "/tmp".as_ref(), |_| true)
+                .unwrap(),
+            Outcome::Accepted { target: tab }
+        );
+        assert_eq!(state.inventory.workspaces[0].root_tab, survivor);
+        assert_eq!(state.inventory.workspaces[0].tabs.len(), 1);
+        assert_eq!(
+            state
+                .apply([2; 32], 1, close, "/tmp".as_ref(), |_| true)
+                .unwrap(),
+            Outcome::Accepted { target: tab }
+        );
+        assert_eq!(state.inventory.workspaces[0].tabs.len(), 1);
+    }
 
     #[test]
     fn conflicting_rename_preserves_draft_and_independent_creation_does_not_conflict() {
