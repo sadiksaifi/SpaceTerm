@@ -75,22 +75,20 @@ impl LocalServer {
         )
     }
     pub fn for_identity(directory_name: &str) -> Result<Self, ServerError> {
-        // Development may run two independent desktop clients against one private server.
-        // Each uses native credential storage and explicit local pairing, never a secret file.
+        // Explicit test clients use native credential storage and local pairing in every
+        // application identity, never a fallback secret file.
         let mut account = "desktop".to_owned();
         let mut versions = vec![2, 1];
-        if directory_name == "spaceterm-development" {
-            if let Some(client) = std::env::var_os("SPACETERM_DEVELOPMENT_CLIENT") {
-                let client = client.to_str().ok_or(ServerError::Unsupported)?;
-                account = development_account(client)?;
-            }
-            if let Some(major) = std::env::var_os("SPACETERM_DEVELOPMENT_PROTOCOL_MAJOR") {
-                versions = match major.to_str() {
-                    Some("1") => vec![1],
-                    Some("2") => vec![2],
-                    _ => return Err(ServerError::IncompatibleProtocol),
-                };
-            }
+        if let Some(client) = std::env::var_os("SPACETERM_DEVELOPMENT_CLIENT") {
+            let client = client.to_str().ok_or(ServerError::Unsupported)?;
+            account = development_account(client)?;
+        }
+        if let Some(major) = std::env::var_os("SPACETERM_DEVELOPMENT_PROTOCOL_MAJOR") {
+            versions = match major.to_str() {
+                Some("1") => vec![1],
+                Some("2") => vec![2],
+                _ => return Err(ServerError::IncompatibleProtocol),
+            };
         }
         Ok(Self {
             paths: Paths::for_identity(directory_name)?,
