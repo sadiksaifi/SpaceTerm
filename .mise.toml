@@ -424,3 +424,10 @@ run = "cargo run --package spaceterm-server-host --features client --example per
 [tasks."server:pane:shutdown:smoke"]
 description = "Verify authenticated Development server shutdown terminates its running Pane"
 run = "cargo run --package spaceterm-server-host --features client --example persistent_pane --locked -- --shutdown"
+
+[tasks."server:pane:takeover:smoke"]
+description = "Verify two paired Development clients transfer control through both protocol majors"
+run = [
+  "cargo run --package spaceterm-server-host --features client --example pane_takeover --locked -- 1",
+  "cargo run --package spaceterm-server-host --features client --example pane_takeover --locked -- 2",
+]

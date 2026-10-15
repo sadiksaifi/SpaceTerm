@@ -29,13 +29,44 @@ impl Drop for Credential {
 pub struct LocalServer {
     paths: Paths,
     identity: String,
+    account: String,
+    versions: Vec<u16>,
 }
 impl LocalServer {
     pub fn for_identity(directory_name: &str) -> Result<Self, ServerError> {
+        // Development may run two independent desktop clients against one private server.
+        // Each uses native credential storage and explicit local pairing, never a secret file.
+        let mut account = "desktop".to_owned();
+        let mut versions = vec![2, 1];
+        if directory_name == "spaceterm-development" {
+            if let Some(client) = std::env::var_os("SPACETERM_DEVELOPMENT_CLIENT") {
+                let client = client.to_str().ok_or(ServerError::Unsupported)?;
+                account = development_account(client)?;
+            }
+            if let Some(major) = std::env::var_os("SPACETERM_DEVELOPMENT_PROTOCOL_MAJOR") {
+                versions = match major.to_str() {
+                    Some("1") => vec![1],
+                    Some("2") => vec![2],
+                    _ => return Err(ServerError::IncompatibleProtocol),
+                };
+            }
+        }
         Ok(Self {
             paths: Paths::for_identity(directory_name)?,
             identity: directory_name.to_owned(),
+            account,
+            versions,
         })
+    }
+    /// Independent Development desktop identity, retained only in native credential storage.
+    pub fn for_development_client(name: &str, protocol_major: u16) -> Result<Self, ServerError> {
+        let mut server = Self::for_identity("spaceterm-development")?;
+        server.account = development_account(name)?;
+        server.versions = match protocol_major {
+            1 | 2 => vec![protocol_major],
+            _ => return Err(ServerError::IncompatibleProtocol),
+        };
+        Ok(server)
     }
     fn entry(&self) -> Result<keyring::Entry, ServerError> {
         // Explicit native builders exclude keyring's mock backend even when target features change.
@@ -47,7 +78,7 @@ impl LocalServer {
             .build(
                 None,
                 &format!("io.github.sadiksaifi.{}.local-server", self.identity),
-                "desktop",
+                &self.account,
             )
             .map_err(|_| ServerError::CredentialUnavailable)?;
         Ok(keyring::Entry::new_with_credential(credential))
@@ -70,14 +101,18 @@ impl LocalServer {
             &mut stream,
             &protocol::key(&credential.seed)?,
             &credential.pin,
-            &[2, 1],
+            &self.versions,
         )?;
-        let mut connection = crate::pane::PaneConnection { stream };
+        let mut connection = crate::pane::PaneConnection {
+            stream,
+            takeover: false,
+        };
         // The status-only server predates optional terminal operations and closes after proof.
         status.development_pane = matches!(
             connection.exchange(&crate::pane::Request::Capabilities),
             Ok(crate::pane::Reply::Capabilities {
-                development_pane: true
+                development_pane: true,
+                ..
             })
         );
         Ok(status)
@@ -94,17 +129,20 @@ impl LocalServer {
             &mut stream,
             &protocol::key(&credential.seed)?,
             &credential.pin,
-            &[2, 1],
+            &self.versions,
         )?;
-        let mut connection = crate::pane::PaneConnection { stream };
-        if !matches!(
-            connection.exchange(&crate::pane::Request::Capabilities),
-            Ok(crate::pane::Reply::Capabilities {
-                development_pane: true
-            })
-        ) {
+        let mut connection = crate::pane::PaneConnection {
+            stream,
+            takeover: false,
+        };
+        let crate::pane::Reply::Capabilities {
+            development_pane: true,
+            pane_takeover,
+        } = connection.exchange(&crate::pane::Request::Capabilities)?
+        else {
             return Err(ServerError::Unsupported);
-        }
+        };
+        connection.takeover = pane_takeover;
         Ok(connection)
     }
     /// Reads the saved native credential and authenticates an existing server. Never starts it.
@@ -209,4 +247,14 @@ impl LocalServer {
             }
         }
     }
+}
+
+fn development_account(name: &str) -> Result<String, ServerError> {
+    if name.is_empty()
+        || name.len() > 32
+        || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+    {
+        return Err(ServerError::Unsupported);
+    }
+    Ok(format!("desktop-{name}"))
 }

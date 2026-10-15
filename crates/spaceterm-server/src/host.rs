@@ -256,6 +256,7 @@ pub(crate) fn serve_with_panes(
                                 None if matches!(request, crate::pane::Request::Capabilities) => {
                                     crate::pane::Reply::Capabilities {
                                         development_pane: false,
+                                        pane_takeover: false,
                                     }
                                 }
                                 None => {

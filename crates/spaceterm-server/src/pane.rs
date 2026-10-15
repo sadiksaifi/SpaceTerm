@@ -34,6 +34,21 @@ pub struct Lease {
     pub connection: [u8; 32],
 }
 
+/// Identifies a running Pane without granting access to its terminal content.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneTarget {
+    pub server: [u8; 32],
+    pub session: [u8; 32],
+}
+impl From<Lease> for PaneTarget {
+    fn from(lease: Lease) -> Self {
+        Self {
+            server: lease.server,
+            session: lease.session,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Key {
     pub physical: u32,
@@ -66,6 +81,21 @@ pub enum Request {
         resume: Option<Lease>,
         style: Option<PresentationStyle>,
     },
+    /// Selection acquires an unclaimed Pane, but never takes it from another client.
+    Select {
+        create: bool,
+        size: PaneSize,
+        resume: Option<PaneTarget>,
+        style: Option<PresentationStyle>,
+    },
+    TakeOver {
+        target: PaneTarget,
+        size: PaneSize,
+        style: Option<PresentationStyle>,
+    },
+    Release {
+        lease: Lease,
+    },
     Poll {
         lease: Lease,
     },
@@ -89,8 +119,17 @@ pub enum Request {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Reply {
-    Capabilities { development_pane: bool },
-    Attached { lease: Lease },
+    Capabilities {
+        development_pane: bool,
+        #[serde(default)]
+        pane_takeover: bool,
+    },
+    Takeover {
+        target: PaneTarget,
+    },
+    Attached {
+        lease: Lease,
+    },
     Screen(Box<Screen>),
     Unchanged,
     Ended,
@@ -167,9 +206,13 @@ pub trait PaneService: Send {
 #[cfg(feature = "client")]
 pub struct PaneConnection {
     pub(crate) stream: std::os::unix::net::UnixStream,
+    pub(crate) takeover: bool,
 }
 #[cfg(feature = "client")]
 impl PaneConnection {
+    pub fn supports_takeover(&self) -> bool {
+        self.takeover
+    }
     pub fn exchange(&mut self, request: &Request) -> Result<Reply, ServerError> {
         let mut wire = crate::protocol::Wire::terminal(&mut self.stream)?;
         wire.write(request)?;
