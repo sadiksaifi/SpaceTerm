@@ -379,51 +379,14 @@ mod rejection_tests {
         }
     }
     #[test]
-    fn refuses_tampered_advertisements_and_signed_downgrades() {
-        for tamper in [true, false] {
-            let (mut client, mut server) = UnixStream::pair().unwrap();
-            let server_key = key(&random().unwrap()).unwrap();
-            let pin = public(&server_key);
-            let device = key(&random().unwrap()).unwrap();
-            let thread = std::thread::spawn(move || {
-                let mut wire = Wire::new(&mut server).unwrap();
-                let hello: Hello = wire.read().unwrap();
-                let mut offer = Offer {
-                    versions: vec![2, 1],
-                    selected: if tamper { 2 } else { 1 },
-                    server: public(&server_key),
-                    nonce: random().unwrap(),
-                };
-                let proof = server_key
-                    .sign(&message(
-                        b"server",
-                        &transcript(&hello, &offer).unwrap(),
-                        &[],
-                    ))
-                    .as_ref()
-                    .to_vec();
-                if tamper {
-                    offer.versions = vec![1];
-                }
-                wire.write(&Challenge { offer, proof }).unwrap();
-            });
-            assert_eq!(
-                authenticate_client(&mut client, &device, &pin, &[2, 1]),
-                Err(ServerError::AuthenticationRefused)
-            );
-            thread.join().unwrap();
-        }
-    }
-    #[test]
-    fn changing_client_versions_in_transit_invalidates_server_proof() {
+    fn refuses_signed_downgrades_from_the_newest_shared_major() {
         let (mut client, mut server) = UnixStream::pair().unwrap();
         let server_key = key(&random().unwrap()).unwrap();
         let pin = public(&server_key);
         let device = key(&random().unwrap()).unwrap();
         let thread = std::thread::spawn(move || {
             let mut wire = Wire::new(&mut server).unwrap();
-            let mut hello: Hello = wire.read().unwrap();
-            hello.versions = vec![1];
+            let hello: Hello = wire.read().unwrap();
             let offer = Offer {
                 versions: vec![2, 1],
                 selected: 1,
@@ -445,6 +408,78 @@ mod rejection_tests {
             Err(ServerError::AuthenticationRefused)
         );
         thread.join().unwrap();
+    }
+    #[test]
+    fn tampered_server_advertisements_are_refused_with_a_valid_selection() {
+        for major in [1, 2] {
+            let (mut client, mut server) = UnixStream::pair().unwrap();
+            let server_key = key(&random().unwrap()).unwrap();
+            let pin = public(&server_key);
+            let device = key(&random().unwrap()).unwrap();
+            let thread = std::thread::spawn(move || {
+                let mut wire = Wire::new(&mut server).unwrap();
+                let hello: Hello = wire.read().unwrap();
+                let mut offer = Offer {
+                    versions: vec![2, 1],
+                    selected: major,
+                    server: public(&server_key),
+                    nonce: random().unwrap(),
+                };
+                let proof = server_key
+                    .sign(&message(
+                        b"server",
+                        &transcript(&hello, &offer).unwrap(),
+                        &[],
+                    ))
+                    .as_ref()
+                    .to_vec();
+                // Keep the selected newest intersection valid, so only transcript verification
+                // can reject the changed advertisement.
+                offer.versions = vec![major, 0];
+                assert_eq!(negotiate(&hello.versions, &offer.versions), Some(major));
+                wire.write(&Challenge { offer, proof }).unwrap();
+            });
+            assert_eq!(
+                authenticate_client(&mut client, &device, &pin, &[major]),
+                Err(ServerError::AuthenticationRefused)
+            );
+            thread.join().unwrap();
+        }
+    }
+    #[test]
+    fn tampered_client_advertisements_are_refused_with_a_valid_selection() {
+        for major in [1, 2] {
+            let (mut client, mut server) = UnixStream::pair().unwrap();
+            let server_key = key(&random().unwrap()).unwrap();
+            let pin = public(&server_key);
+            let device = key(&random().unwrap()).unwrap();
+            let thread = std::thread::spawn(move || {
+                let mut wire = Wire::new(&mut server).unwrap();
+                let mut hello: Hello = wire.read().unwrap();
+                hello.versions = vec![major, 0];
+                let offer = Offer {
+                    versions: vec![2, 1],
+                    selected: major,
+                    server: public(&server_key),
+                    nonce: random().unwrap(),
+                };
+                assert_eq!(negotiate(&hello.versions, &offer.versions), Some(major));
+                let proof = server_key
+                    .sign(&message(
+                        b"server",
+                        &transcript(&hello, &offer).unwrap(),
+                        &[],
+                    ))
+                    .as_ref()
+                    .to_vec();
+                wire.write(&Challenge { offer, proof }).unwrap();
+            });
+            assert_eq!(
+                authenticate_client(&mut client, &device, &pin, &[major]),
+                Err(ServerError::AuthenticationRefused)
+            );
+            thread.join().unwrap();
+        }
     }
     #[test]
     fn incompatible_versions_are_refused_after_authenticating_advertisements() {
