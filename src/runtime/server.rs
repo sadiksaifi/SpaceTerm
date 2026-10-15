@@ -7,6 +7,10 @@ use spaceterm_server::{
 };
 use std::{sync::Arc, time::Duration};
 
+mod repositories;
+#[cfg(test)]
+#[path = "server/repository_tests.rs"]
+mod repository_tests;
 mod shared;
 pub use shared::SharedWorkspaceHost;
 
@@ -689,7 +693,9 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
-    fn shared_inventory(host: &mut SharedWorkspaceHost) -> spaceterm_server::hierarchy::Inventory {
+    pub(super) fn shared_inventory(
+        host: &mut SharedWorkspaceHost,
+    ) -> spaceterm_server::hierarchy::Inventory {
         let Reply::Inventory { inventory, .. } = host.request([2; 32], [2; 32], Request::Inventory)
         else {
             panic!("inventory unavailable")
@@ -697,7 +703,7 @@ mod tests {
         inventory
     }
 
-    fn create_shared(host: &mut SharedWorkspaceHost, sequence: u64) -> [u8; 32] {
+    pub(super) fn create_shared(host: &mut SharedWorkspaceHost, sequence: u64) -> [u8; 32] {
         use spaceterm_server::hierarchy::{Mutation, Outcome};
         let Reply::Outcome(result) = host.request(
             [1; 32],
@@ -1125,7 +1131,7 @@ mod tests {
         host.shutdown().unwrap();
     }
 
-    fn host() -> DevelopmentPaneHost {
+    pub(super) fn host() -> DevelopmentPaneHost {
         let filesystem = local_filesystem();
         let directory = filesystem
             .validate_directory(&std::env::temp_dir())
@@ -1149,7 +1155,7 @@ mod tests {
         );
         DevelopmentPaneHost::new(factory, directory).unwrap()
     }
-    fn size() -> PaneSize {
+    pub(super) fn size() -> PaneSize {
         PaneSize {
             columns: 80,
             rows: 24,
@@ -1172,7 +1178,12 @@ mod tests {
         };
         lease
     }
-    fn command(host: &mut impl PaneService, connection: u8, lease: Lease, text: &str) -> Reply {
+    pub(super) fn command(
+        host: &mut impl PaneService,
+        connection: u8,
+        lease: Lease,
+        text: &str,
+    ) -> Reply {
         let result = host.request(
             [1; 32],
             [connection; 32],
@@ -1211,7 +1222,12 @@ mod tests {
             },
         )
     }
-    fn await_text(host: &mut DevelopmentPaneHost, connection: u8, lease: Lease, text: &str) {
+    pub(super) fn await_text(
+        host: &mut impl PaneService,
+        connection: u8,
+        lease: Lease,
+        text: &str,
+    ) {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if let Reply::Screen(screen) =

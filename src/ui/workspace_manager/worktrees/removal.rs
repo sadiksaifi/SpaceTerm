@@ -67,12 +67,15 @@ impl WorkspaceManager {
         worktree_id: WorktreeId,
         cx: &mut App,
     ) {
+        // A shared Worktree's root is the server's path, copied as text and nothing more.
         let Some(root) = self
             .sidebar_worktrees
             .workspaces
             .get(&workspace_id)
             .and_then(|worktrees| worktrees.registry.key(worktree_id))
-            .map(|key| key.root().display().to_string())
+            .map(|key| key.root().to_path_buf())
+            .or_else(|| self.shared_worktree_root(workspace_id, worktree_id))
+            .map(|root| root.display().to_string())
         else {
             return;
         };

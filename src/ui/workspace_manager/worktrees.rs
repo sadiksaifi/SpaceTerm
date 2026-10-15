@@ -115,8 +115,7 @@ impl WorkspaceManager {
         let Some(store) = InstalledWorktrees::store(cx) else {
             return;
         };
-        // Worktrees of a shared Workspace are listed and written on the owning server, which is
-        // not available yet, so none are read for it here.
+        // The owning server lists a shared Workspace's Worktrees, so none are read for it here.
         let wanted: BTreeMap<WorkspaceId, PathBuf> = self
             .workspaces
             .iter()
@@ -193,6 +192,11 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if let Some(opened) =
+            self.open_shared_worktree(workspace_id, worktree_id, focus, window, cx)
+        {
+            return opened;
+        }
         let Some(worktrees) = self.sidebar_worktrees.workspaces.get(&workspace_id) else {
             return false;
         };
@@ -235,6 +239,10 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        // A shared Workspace's server opens no Tab in a chosen Worktree yet.
+        if self.is_shared_workspace(workspace_id) {
+            return false;
+        }
         let had_tabs = self.worktree_has_tabs(workspace_id, worktree_id, cx);
         if !self.open_worktree(workspace_id, worktree_id, true, window, cx) {
             return false;
@@ -389,6 +397,7 @@ impl WorkspaceManager {
     }
 
     pub(super) fn set_worktrees_expanded(&mut self, workspace_id: WorkspaceId, expanded: bool) {
+        self.set_shared_worktrees_expanded(workspace_id, expanded);
         if let Some(worktrees) = self.sidebar_worktrees.workspaces.get_mut(&workspace_id) {
             worktrees.expanded = Some(expanded);
         }
@@ -406,6 +415,9 @@ impl WorkspaceManager {
         workspace_id: WorkspaceId,
         cx: &App,
     ) -> Option<WorktreeSection> {
+        if self.is_shared_workspace(workspace_id) {
+            return self.shared_worktree_section(workspace_id, cx);
+        }
         let worktrees = self.sidebar_worktrees.workspaces.get(&workspace_id)?;
         let manager = self.workspaces.workspace(workspace_id)?.payload().read(cx);
         let counts = manager.worktree_tab_counts();
@@ -479,6 +491,7 @@ impl WorkspaceManager {
                 locked: record.locked,
                 missing: missing || record.missing,
                 removal,
+                shared: false,
             }
         };
         let mut groups = Vec::new();
@@ -729,7 +742,7 @@ impl WorkspaceManager {
 }
 
 /// A directory's last component, or the whole path for a root.
-fn directory_name(directory: &std::path::Path) -> SharedString {
+pub(super) fn directory_name(directory: &std::path::Path) -> SharedString {
     directory
         .file_name()
         .map_or_else(

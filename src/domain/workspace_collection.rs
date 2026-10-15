@@ -814,7 +814,7 @@ impl<T> WorkspaceCollection<T> {
     /// Workspace, until a later creation presents one. A removed Active Workspace passes
     /// activation to the Workspace that takes its place in the order.
     #[cfg_attr(
-        not(feature = "developer-tools"),
+        all(not(feature = "developer-tools"), not(test)),
         expect(
             dead_code,
             reason = "only Detach Workspace removes without a replacement"

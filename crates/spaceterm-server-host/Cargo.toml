@@ -32,5 +32,9 @@ required-features = ["client"]
 name = "shared_workspaces"
 required-features = ["client"]
 
+[[example]]
+name = "repository_reads"
+required-features = ["client"]
+
 [dev-dependencies]
 spaceterm-directories = { path = "../spaceterm-directories" }

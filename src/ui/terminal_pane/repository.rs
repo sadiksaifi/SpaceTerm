@@ -174,6 +174,22 @@ impl TerminalPane {
         cx.notify();
     }
 
+    /// Presents the Repository Status a SpaceTerm Server read for this Pane's directory. A
+    /// server-backed Pane never reads git here, so this is the only way its status changes.
+    #[cfg(feature = "developer-tools")]
+    pub(crate) fn present_server_repository(
+        &mut self,
+        view: RepositoryView,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.server_backed() || self.repository_status.view == view {
+            return;
+        }
+        self.repository_status.view = view;
+        cx.emit(TerminalPaneEvent::CaptionChanged);
+        cx.notify();
+    }
+
     #[cfg(test)]
     pub(super) fn present_repository_view(&mut self, view: RepositoryView, cx: &mut Context<Self>) {
         self.repository_status.view = view;
@@ -285,8 +301,12 @@ impl TerminalPane {
         }
     }
 
-    /// The facts to report, or `None` before the Pane knows a directory.
+    /// The facts to report, or `None` before the Pane knows a directory. A server-backed Pane has
+    /// none: its directory names the server's files, and the server reads their status.
     fn repository_facts(&self) -> Option<PaneRepositoryFacts> {
+        if self.server_backed() {
+            return None;
+        }
         let metadata = self.terminal_session.metadata.as_deref()?;
         let stale = metadata.freshness == MetadataFreshness::Stale;
         // Stale facts keep the last directory: the Interest stops and presents it as last known.

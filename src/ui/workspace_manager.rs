@@ -345,6 +345,8 @@ pub(crate) struct WorkspaceManager {
     close_confirmation: CloseConfirmation,
     sidebar_repositories: repository::SidebarRepositories,
     sidebar_worktrees: worktrees::SidebarWorktrees,
+    #[cfg(feature = "developer-tools")]
+    shared_repositories: shared_repositories::SharedWorkspaceRepositories,
     /// The adopted SpaceTerm Server's Workspaces, their edit state, and the answers still to
     /// present. Adopting adds them beside this window's own Workspaces and changes none of them.
     shared: Option<SharedWorkspaceBinding>,
@@ -522,6 +524,8 @@ impl WorkspaceManager {
             close_confirmation: CloseConfirmation::default(),
             sidebar_repositories: repository::SidebarRepositories::default(),
             sidebar_worktrees: worktrees::SidebarWorktrees::default(),
+            #[cfg(feature = "developer-tools")]
+            shared_repositories: shared_repositories::SharedWorkspaceRepositories::default(),
             shared: None,
             _shared_poll: None,
             empty_focus: cx.focus_handle(),
@@ -3379,20 +3383,16 @@ impl WorkspaceManager {
                 status: None,
             };
         };
-        // A shared Workspace's Worktrees and pin live on the owning server. Its Worktrees are
-        // not available yet, and its pin is whatever the server last published.
+        // A shared Workspace's Worktrees and pin live on the owning server, which lists the
+        // Worktrees and publishes the pin.
         let shared = self.shared_row_facts(workspace_id);
         WorkspaceChromeIdentity {
-            worktree: shared
-                .is_none()
-                .then(|| self.worktree_section(workspace_id, cx))
-                .flatten()
-                .and_then(|section| {
-                    section
-                        .rows()
-                        .find(|row| row.active)
-                        .map(|row| row.name.to_string())
-                }),
+            worktree: self.worktree_section(workspace_id, cx).and_then(|section| {
+                section
+                    .rows()
+                    .find(|row| row.active)
+                    .map(|row| row.name.to_string())
+            }),
             pinned: shared.as_ref().map_or_else(
                 || workspace.pinned_directory().is_some(),
                 |shared| shared.pinned,
@@ -3444,13 +3444,13 @@ impl WorkspaceManager {
                 .unwrap_or_else(|| path.clone()),
         };
 
-        // Repository Status is read on the owning server, which is not available yet.
-        let repository = shared
-            .is_none()
-            .then(|| self.chip_repository_line(workspace.id(), cx))
-            .flatten()
-            .map(|line| format!("\n{line}"))
-            .unwrap_or_default();
+        // A shared Workspace's Repository Status is what the owning server read.
+        let repository = match &shared {
+            Some(_) => self.shared_chip_line(workspace.id(), cx),
+            None => self.chip_repository_line(workspace.id(), cx),
+        }
+        .map(|line| format!("\n{line}"))
+        .unwrap_or_default();
         Some((
             self.chrome_identity(workspace.id(), cx),
             Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
@@ -3787,14 +3787,32 @@ impl WorkspaceManager {
                 };
                 let mut path: gpui::SharedString = path.into();
                 let mut tooltip = tooltip;
-                let mut repository = self.sidebar_badge(workspace.id(), cx);
+                // A shared Workspace's directory, pin, Worktrees, and Repository Status all live
+                // on the owning server. The row shows what the server read and published; this
+                // client reads none of it.
+                let shared = self.shared_row_facts(workspace.id());
+                let mut repository = match &shared {
+                    Some(shared) => {
+                        path =
+                            compact_home_path(&shared.directory, &self.local_home_directory_path)
+                                .into();
+                        tooltip =
+                            format!("{SERVER_WORKSPACE_BADGE}: {}", shared.directory.display());
+                        self.shared_sidebar_badge(workspace.id(), cx)
+                    }
+                    None => self.sidebar_badge(workspace.id(), cx),
+                };
                 let worktrees = self.worktree_section(workspace.id(), cx);
                 // A disclosing row describes the Workspace. Its directory and branch belong to
                 // its Worktrees, and a collapsed row shows its Active Worktree's.
                 if let Some(section) = worktrees.as_ref().filter(|_| available) {
-                    let pinned = workspace
-                        .local_display_directory()
-                        .filter(|_| workspace.pinned_directory().is_some());
+                    let pinned = match &shared {
+                        Some(shared) => shared.pinned.then(|| shared.directory.clone()),
+                        None => workspace
+                            .local_display_directory()
+                            .filter(|_| workspace.pinned_directory().is_some())
+                            .map(std::path::Path::to_path_buf),
+                    };
                     let active = section
                         .rows()
                         .find(|worktree| worktree.active)
@@ -3813,18 +3831,10 @@ impl WorkspaceManager {
                     if let Some(pinned) = pinned {
                         tooltip.push_str(&format!("\nPinned Directory: {}", pinned.display()));
                     }
+                    if shared.is_some() {
+                        tooltip = format!("{SERVER_WORKSPACE_BADGE}\n{tooltip}");
+                    }
                 }
-                // A shared Workspace's directory, pin, Worktrees, and Repository Status all live
-                // on the owning server. The row shows the server's directory and offers none of
-                // the reads this client cannot make.
-                let shared = self.shared_row_facts(workspace.id());
-                if let Some(shared) = &shared {
-                    path = compact_home_path(&shared.directory, &self.local_home_directory_path)
-                        .into();
-                    tooltip = format!("{SERVER_WORKSPACE_BADGE}: {}", shared.directory.display());
-                    repository = None;
-                }
-                let worktrees = worktrees.filter(|_| shared.is_none());
                 WorkspaceRowViewModel {
                     workspace_id: workspace.id(),
                     name: workspace.name().to_owned().into(),
@@ -4007,6 +4017,7 @@ impl WorkspaceManager {
             return;
         }
         self.shared = Some(SharedWorkspaces::new(edits, sessions));
+        self.follow_shared_pull_requests(cx);
         if let Some(handle) = window.window_handle().downcast::<Self>() {
             cx.set_global(super::shared_workspaces::SharedWorkspaceHost(handle));
         }
@@ -4087,8 +4098,10 @@ impl WorkspaceManager {
         self.revalidate_shared_close(window, cx);
         self.save_shared_arrangements(cx);
         self.report_client_view_error(window, cx);
+        // Membership, connection, and Git facts all decide what each view presents, including
+        // Workspaces nobody is looking at.
         if poll.changed {
-            cx.notify();
+            self.present_shared_repositories(cx);
         }
     }
 
@@ -5014,6 +5027,12 @@ impl WorkspaceManager {
         let shared = self.shared.as_ref()?;
         let facts = shared.facts(workspace_id)?;
         let editability = shared.editability();
+        // A Pane's confirmed directory changes without a membership revision, so the row reads
+        // the latest inventory.
+        let directory = shared
+            .server_workspace(workspace_id)
+            .and_then(super::shared_workspaces::workspace_directory)
+            .unwrap_or_else(|| facts.displayed_directory());
         Some(SharedRowFacts {
             row: super::workspace_sidebar::SharedWorkspaceRow {
                 name_version: facts.name_version,
@@ -5022,7 +5041,7 @@ impl WorkspaceManager {
                 status: editability.status(),
                 detaches: shared.attachments_changeable(),
             },
-            directory: facts.displayed_directory().to_owned(),
+            directory: directory.to_owned(),
             pinned: facts.pinned(),
         })
     }
@@ -5751,6 +5770,7 @@ impl WorkspaceManager {
 mod empty;
 #[path = "workspace_manager/repository.rs"]
 mod repository;
+mod shared_repositories;
 mod worktrees;
 
 #[cfg(test)]

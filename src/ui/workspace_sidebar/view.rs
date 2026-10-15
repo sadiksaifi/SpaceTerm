@@ -1307,7 +1307,10 @@ impl WorkspaceSidebar {
         text_appearance.colors = row_colors.clone();
         let text_id = worktree_text_id(workspace_id, worktree_id);
         let selector = format!("worktree-row-{}-{worktree_id}", workspace_id.get());
-        let head = if worktree.detached {
+        // A Worktree whose head this client never saw listed names no branch.
+        let head = if worktree.label.is_empty() {
+            String::new()
+        } else if worktree.detached {
             format!("Detached at {}", worktree.label)
         } else {
             format!("Branch {}", worktree.label)
@@ -1327,10 +1330,12 @@ impl WorkspaceSidebar {
         let description = std::iter::once(head.as_str())
             .chain(std::iter::once(worktree.directory_tooltip.as_ref()))
             .chain(states.iter().copied())
+            .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
             .join(", ");
         let tooltip_detail = std::iter::once(worktree.name.as_ref())
             .chain([head.as_str(), worktree.directory_tooltip.as_ref()])
+            .filter(|part| !part.is_empty())
             .chain(
                 states
                     .iter()
@@ -1503,14 +1508,15 @@ impl WorkspaceSidebar {
                 "worktree-menu-row-new-tab",
                 presentation,
             )
-            .disabled(!openable),
+            .disabled(!worktree.opens_tabs()),
             MenuEntry::action("Copy Path", WorktreeMenuCommand::CopyPath)
                 .icon(|foreground, size| {
                     Icon::new(IconName::Copy, size, foreground).into_any_element()
                 })
                 .debug_selector("worktree-menu-row-copy-path"),
+            // A shared Worktree's Tabs close one at a time, each with its own confirmation.
             MenuEntry::action("Close Tabs", WorktreeMenuCommand::CloseTabs)
-                .disabled(!worktree.has_tabs)
+                .disabled(!worktree.has_tabs || worktree.shared)
                 .icon(|foreground, size| {
                     Icon::new(IconName::X, size, foreground).into_any_element()
                 })
@@ -1578,6 +1584,8 @@ fn remove_worktree_entry<A: Clone>(
         WorktreeRemoval::Main => Some("Main Worktree Can\u{2019}t Be Removed"),
         WorktreeRemoval::Locked => Some("Locked Worktree Can\u{2019}t Be Removed"),
         WorktreeRemoval::HoldsPinnedDirectory => Some("Unpin the Directory to Remove"),
+        #[cfg(feature = "developer-tools")]
+        WorktreeRemoval::Server => Some("Server Worktree Can\u{2019}t Be Removed Here"),
         WorktreeRemoval::Unlisted => return None,
     };
     let label = match (reason, name) {

@@ -335,6 +335,7 @@ mod tests {
     use crate::hierarchy::{Axis, Pane, Tab, Workspace};
     pub(super) fn inventory() -> Inventory {
         Inventory {
+            repositories: None,
             revision: 1,
             close: None,
             workspaces: vec![Workspace {
@@ -345,6 +346,8 @@ mod tests {
                 pinned_directory: None,
                 root_tab: [2; 32],
                 tabs: vec![Tab {
+                    worktree: None,
+                    worktree_repository: None,
                     id: [2; 32],
                     root_pane: [3; 32],
                     panes: vec![Pane {

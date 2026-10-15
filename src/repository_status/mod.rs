@@ -96,52 +96,6 @@ pub(crate) struct RepositoryKey {
     pub(crate) root: RepositoryRoot,
 }
 
-/// What `HEAD` names.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum RepositoryHead {
-    Branch(Arc<str>),
-    /// A detached `HEAD`, carrying the abbreviated commit id.
-    Detached(Arc<str>),
-    /// A branch with no commits yet.
-    Unborn(Arc<str>),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Divergence {
-    pub(crate) ahead: u32,
-    pub(crate) behind: u32,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Upstream {
-    /// The upstream's short name, such as `origin/main`.
-    pub(crate) name: Arc<str>,
-    /// `None` when the configured upstream no longer exists.
-    pub(crate) divergence: Option<Divergence>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct OperationStep {
-    pub(crate) current: u32,
-    pub(crate) total: u32,
-}
-
-/// An unfinished multi-step git operation, in Starship's `git_state` precedence order.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RepositoryOperation {
-    Rebasing {
-        step: Option<OperationStep>,
-    },
-    /// `git am`.
-    Applying {
-        step: Option<OperationStep>,
-    },
-    Merging,
-    Reverting,
-    CherryPicking,
-    Bisecting,
-}
-
 /// Raw presence and contents of the operation marker files in a git directory.
 ///
 /// Contents are at most [`MAXIMUM_MARKER_BYTES`] and are parsed, never displayed.
@@ -175,53 +129,6 @@ pub(crate) struct ApplyMarkers {
 /// The largest operation marker file content read.
 pub(crate) const MAXIMUM_MARKER_BYTES: usize = 32;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ChangeKind {
-    Staged,
-    Modified,
-    Deleted,
-    Renamed,
-    Conflicted,
-    Untracked,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ChangeEntry {
-    pub(crate) kind: ChangeKind,
-    /// Repository-relative path, sanitized for display.
-    pub(crate) path: Arc<str>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ChangeTotal {
-    Exact(u32),
-    /// The output was truncated after this many records.
-    AtLeast(u32),
-}
-
-impl Default for ChangeTotal {
-    fn default() -> Self {
-        Self::Exact(0)
-    }
-}
-
-/// Changed paths by kind. A path counts once in `total` and once per kind it has.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ChangeSummary {
-    pub(crate) total: ChangeTotal,
-    pub(crate) staged: u32,
-    pub(crate) modified: u32,
-    pub(crate) deleted: u32,
-    pub(crate) renamed: u32,
-    pub(crate) conflicted: u32,
-    pub(crate) untracked: u32,
-    /// The first [`MAXIMUM_CHANGE_ENTRIES`] records, in git's order.
-    pub(crate) entries: Vec<ChangeEntry>,
-}
-
-/// The most changed paths retained for the Repository Status popover.
-pub(crate) const MAXIMUM_CHANGE_ENTRIES: usize = 20;
-
 /// `# branch.*` headers from `git status --porcelain=v2 --branch`.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct StatusHeaders {
@@ -238,14 +145,6 @@ pub(crate) struct StatusHeaders {
 pub(crate) struct PorcelainSummary {
     pub(crate) headers: StatusHeaders,
     pub(crate) changes: ChangeSummary,
-}
-
-/// Whether a read may use Git's built-in fsmonitor daemon.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum FsmonitorPolicy {
-    #[default]
-    Disabled,
-    Builtin,
 }
 
 /// The repository configuration Repository Status and Pull Request lookup need.
@@ -287,25 +186,6 @@ pub(crate) enum ProbeOutcome {
     Repository(Box<ProbedRepository>),
 }
 
-#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
-/// Content-free Repository Status read failure.
-pub(crate) enum RepositoryReadError {
-    #[error("git is unavailable")]
-    ToolMissing,
-    #[error("the repository could not be read")]
-    Unavailable,
-    #[error("the repository read exceeded its deadline")]
-    TimedOut,
-    #[error("the repository read was cancelled")]
-    Cancelled,
-    #[error("the repository read exceeded its output limit")]
-    OutputTooLarge,
-    #[error("the repository read returned an invalid response")]
-    InvalidResponse,
-    #[error("the Control Connection is unavailable")]
-    ConnectionUnavailable,
-}
-
 /// An open or draft GitHub pull request for a branch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PullRequest {
@@ -317,21 +197,6 @@ pub(crate) struct PullRequest {
     pub(crate) url: Arc<str>,
     pub(crate) head: Arc<str>,
     pub(crate) base: Arc<str>,
-}
-
-/// A GitHub repository named by a remote URL: the Pull Request lookup's `--repo` target.
-#[derive(Clone, Eq, Hash, PartialEq)]
-pub(crate) struct GitHubRepository {
-    /// Lowercase host name, such as `github.com` or an Enterprise host.
-    pub(crate) host: Arc<str>,
-    pub(crate) owner: Arc<str>,
-    pub(crate) name: Arc<str>,
-}
-
-impl fmt::Debug for GitHubRepository {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("GitHubRepository(<redacted>)")
-    }
 }
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
@@ -349,28 +214,12 @@ pub(crate) enum PullRequestError {
     Cancelled,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) struct ToolVersion {
-    pub(crate) major: u16,
-    pub(crate) minor: u16,
-    pub(crate) patch: u16,
-}
-
 /// The oldest git with `--no-optional-locks`.
 pub(crate) const MINIMUM_GIT_VERSION: ToolVersion = ToolVersion {
     major: 2,
     minor: 15,
     patch: 0,
 };
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum GitToolStatus {
-    #[default]
-    Unknown,
-    Ready(ToolVersion),
-    TooOld(ToolVersion),
-    NotFound,
-}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum GitHubCliStatus {
@@ -614,3 +463,9 @@ pub(crate) trait RemoteRepositoryReader: Send + Sync + 'static {
         cancellation: &SshCancellationToken,
     ) -> Result<RemoteRepositoryCount, RepositoryReadError>;
 }
+
+pub(crate) use spaceterm_server::repository::{
+    ChangeEntry, ChangeKind, ChangeSummary, ChangeTotal, Divergence, FsmonitorPolicy,
+    GitHubRepository, GitToolStatus, MAXIMUM_CHANGE_ENTRIES, OperationStep, RepositoryHead,
+    RepositoryOperation, RepositoryReadError, ToolVersion, Upstream,
+};

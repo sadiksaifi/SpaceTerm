@@ -5,38 +5,7 @@ use std::path::PathBuf;
 use crate::repository_status::RepositoryReadError;
 use crate::repository_status::discovery::SHORT_COMMIT_LENGTH;
 
-/// What a Worktree has checked out.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum WorktreeHead {
-    /// A branch's short name, such as `feature/login`.
-    Branch(String),
-    /// A detached commit's short object name.
-    Detached(String),
-    /// A bare repository has no work tree and no checkout.
-    Bare,
-}
-
-/// One entry of `git worktree list`.
-#[derive(Clone, Eq, PartialEq)]
-pub(crate) struct WorktreeRecord {
-    /// The work tree root as git reports it.
-    pub(crate) root: PathBuf,
-    pub(crate) head: WorktreeHead,
-    pub(crate) locked: bool,
-    /// Git reports the work tree as prunable: its directory no longer exists.
-    pub(crate) missing: bool,
-}
-
-impl std::fmt::Debug for WorktreeRecord {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("WorktreeRecord")
-            .field("root", &"<redacted>")
-            .field("locked", &self.locked)
-            .field("missing", &self.missing)
-            .finish_non_exhaustive()
-    }
-}
+pub(crate) use spaceterm_server::repository::{WorktreeHead, WorktreeRecord};
 
 /// Parses porcelain records separated by `separator`: NUL with `-z`, else newline.
 ///

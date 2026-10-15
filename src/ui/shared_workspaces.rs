@@ -14,9 +14,13 @@
 //! one asks the server to end exactly the Panes and Sessions a person reviewed, so a confirmation
 //! that another client's change made stale ends nothing.
 //!
+//! The server reads Repository Status and Worktree inventory for every directory its Workspaces
+//! show, so inactive Workspaces stay current too. This client adds its own Git Settings and Pull
+//! Requests from its own GitHub CLI, and never reads git for a shared Workspace itself.
+//!
 //! Operations the server path does not support yet stay unavailable here rather than falling back
-//! to the desktop: repairing a Pane's directory, Repository Status and Worktrees, reading shell
-//! content with assistive technology, and paste.
+//! to the desktop: repairing a Pane's directory, creating and removing Worktrees, opening a Tab in
+//! a chosen Worktree, reading shell content with assistive technology, and paste.
 
 use crate::application_identity::ApplicationIdentity;
 
@@ -46,6 +50,14 @@ pub(crate) use development::{
     SharedSubmission, SharedTabs, SharedWorkspaceConflict, SharedWorkspaceFacts,
     SharedWorkspaceHost, SharedWorkspacePlan, SharedWorkspaces, adopt, adopted,
     shared_close_changed_title,
+};
+
+#[cfg(feature = "developer-tools")]
+#[path = "shared_workspaces/repositories.rs"]
+mod repositories;
+#[cfg(feature = "developer-tools")]
+pub(crate) use repositories::{
+    LocalPresentation, SharedRepositories, pane_directory, workspace_directory,
 };
 
 #[cfg(all(test, feature = "developer-tools"))]
@@ -832,6 +844,8 @@ mod development {
         /// The inventory the server published last, including the live Session facts a close
         /// confirmation reads. Those facts can change without a new membership revision.
         latest: Option<Inventory>,
+        /// The Git facts the server read with its latest inventory.
+        repositories: super::SharedRepositories,
         /// The close confirmation a person is reviewing now.
         review: Option<SharedCloseReview>,
         /// The close this process submitted, and the local target a fresh review would reopen.
@@ -872,6 +886,7 @@ mod development {
                 conflict: None,
                 refusal: None,
                 latest: None,
+                repositories: super::SharedRepositories::default(),
                 review: None,
                 submitted_close: None,
                 stale_close: None,
@@ -900,6 +915,28 @@ mod development {
         }
         pub(crate) fn latest_inventory(&self) -> Option<&Inventory> {
             self.latest.as_ref()
+        }
+
+        /// The Git facts the server read for the directories its Workspaces show.
+        pub(crate) const fn repositories(&self) -> &super::SharedRepositories {
+            &self.repositories
+        }
+
+        /// Whether this client is connected to the server now.
+        pub(crate) const fn connected(&self) -> bool {
+            self.connected
+        }
+
+        /// The server Workspace one local Workspace presents, as the server published it last.
+        /// Live facts such as a Pane's confirmed directory can change without a membership
+        /// revision, so this reads the latest inventory rather than the applied one.
+        pub(crate) fn server_workspace(&self, local: WorkspaceId) -> Option<&ServerWorkspace> {
+            let server = self.facts(local)?.server;
+            self.latest
+                .as_ref()?
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.id == server)
         }
         pub(crate) fn attachments_changeable(&self) -> bool {
             self.attachments.changeable()
@@ -1216,10 +1253,22 @@ mod development {
                 self.settle(outcome, snapshot.inventory.as_ref(), own, &mut poll);
                 poll.changed = true;
             }
-            // Live Session facts change without a membership revision, so the latest reading is
-            // kept whether or not membership changed.
+            // Live Session facts and Pane directories change without a membership revision, so
+            // the latest reading is kept whether or not membership changed, and repaints the rows
+            // that read it.
             if snapshot.inventory.is_some() && self.latest != snapshot.inventory {
                 self.latest.clone_from(&snapshot.inventory);
+                poll.changed = true;
+            }
+            // Git facts carry their own revision, so a new reading reaches every view even when
+            // membership is unchanged. Facts kept from before a disconnection stay presented as
+            // last known.
+            if let Some(inventory) = &snapshot.inventory
+                && self
+                    .repositories
+                    .accept(inventory.repositories.as_ref(), std::time::Instant::now())
+            {
+                poll.changed = true;
             }
             if let Some(inventory) = snapshot
                 .inventory

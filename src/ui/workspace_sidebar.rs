@@ -126,6 +126,9 @@ pub(super) enum WorktreeRemoval {
     HoldsPinnedDirectory,
     /// The repository the Workspace reads doesn't list the Worktree, so only its Tabs remain.
     Unlisted,
+    /// A SpaceTerm Server owns the Worktree, and removing it there is not available yet.
+    #[cfg(feature = "developer-tools")]
+    Server,
 }
 
 #[derive(Clone, Copy)]
@@ -175,9 +178,8 @@ pub(super) const SERVER_WORKSPACE_BADGE: &str = "Server";
 /// What a shared server Workspace's row presents and offers.
 ///
 /// A shared edit goes to the server, so Rename, the pin commands, and Kill Workspace wait while
-/// this client is offline or an earlier edit is unanswered. Its Worktrees and Repository Status
-/// are read on the owning server, which is not available yet, so the row offers neither in place
-/// of a local fallback.
+/// this client is offline or an earlier edit is unanswered. Its Repository Status and Worktrees
+/// are what the owning server read; creating and removing Worktrees there is not available yet.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct SharedWorkspaceRow {
     /// The name version the server published, which a rename draft keeps from the moment it
@@ -254,12 +256,21 @@ pub(super) struct WorktreeRowViewModel {
     /// Git no longer has the Worktree's directory.
     pub(super) missing: bool,
     pub(super) removal: WorktreeRemoval,
+    /// A SpaceTerm Server lists the Worktree and owns its Tabs. The row shows and switches to its
+    /// Tabs, and asks the server for nothing it cannot do yet: a Tab in a chosen Worktree, or
+    /// closing a Worktree's Tabs together.
+    pub(super) shared: bool,
 }
 
 impl WorktreeRowViewModel {
     /// Whether activating the row shows Tabs: an existing Tab, or a first Tab in its directory.
     pub(super) fn openable(&self) -> bool {
-        self.has_tabs || !self.missing
+        self.has_tabs || (!self.missing && !self.shared)
+    }
+
+    /// Whether the row offers New Tab: a Tab in this Worktree's directory.
+    pub(super) fn opens_tabs(&self) -> bool {
+        self.openable() && !self.shared
     }
 }
 

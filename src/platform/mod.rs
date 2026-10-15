@@ -345,8 +345,7 @@ pub(crate) mod testing;
 pub(crate) mod native_main_thread_tests;
 
 #[cfg(target_os = "macos")]
-#[cfg(feature = "desktop")]
-mod macos_repository_tools;
+pub(crate) mod macos_repository_tools;
 #[cfg(target_os = "macos")]
 #[cfg(feature = "desktop")]
 mod macos_reserved_shortcuts;
@@ -415,13 +414,11 @@ mod unix_pty;
 pub(crate) mod unix_pty;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-#[cfg(feature = "desktop")]
 pub(crate) mod repository_marker_reader;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[cfg(feature = "desktop")]
 mod repository_status_host;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-#[cfg(feature = "desktop")]
 pub(crate) mod unix_repository_program;
 
 #[cfg(all(any(target_os = "macos", target_os = "linux"), not(test)))]
@@ -561,8 +558,7 @@ mod linux_peer_credentials;
 mod linux_pty_host;
 
 #[cfg(target_os = "linux")]
-#[cfg(feature = "desktop")]
-mod linux_repository_tools;
+pub(crate) mod linux_repository_tools;
 
 #[cfg(target_os = "linux")]
 #[cfg(feature = "desktop")]
