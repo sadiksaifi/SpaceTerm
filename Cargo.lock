@@ -5869,6 +5869,7 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "spaceterm",
+ "spaceterm-directories",
  "spaceterm-server",
 ]
 

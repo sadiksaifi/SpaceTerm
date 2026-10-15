@@ -173,13 +173,19 @@ pub(crate) fn serve(paths: &Paths) -> Result<(), ServerError> {
 
 pub(crate) fn serve_with_panes(
     paths: &Paths,
-    panes: Option<Box<dyn crate::pane::PaneService>>,
+    mut panes: Option<Box<dyn crate::pane::PaneService>>,
 ) -> Result<(), ServerError> {
     let data = Directory::open(&paths.data, false)?;
     // Verify retained identity before changing any runtime state. Never generate a replacement.
     data.read()?;
     let runtime = Directory::open(&paths.runtime, true)?;
     let _lock = runtime.lock("server.lock", true)?;
+    if let Some(panes) = panes.as_mut() {
+        panes.restore(crate::organization::OrganizationStore(Directory::open(
+            &paths.data,
+            false,
+        )?))?;
+    }
     let socket = paths.socket();
     if let Some(identity) = runtime.socket_identity(c"s")? {
         runtime.verify_path(&paths.runtime)?;
@@ -212,6 +218,9 @@ pub(crate) fn serve_with_panes(
         let mut stream = match connection {
             Ok(stream) => stream,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if let Some(panes) = panes.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                    panes.tick();
+                }
                 std::thread::sleep(std::time::Duration::from_millis(10));
                 continue;
             }

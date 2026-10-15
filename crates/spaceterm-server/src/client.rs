@@ -203,6 +203,9 @@ impl LocalServer {
             record.paired.push(device);
             data.write(&record)?;
         }
+        // Runtime restoration and directory publication use this same retained record.
+        // Release setup serialization before waiting for the server to admit a connection.
+        drop(_setup);
         match self.authenticate(&credential) {
             Ok(status) => return Ok(status),
             Err(ServerError::NotRunning) => {}

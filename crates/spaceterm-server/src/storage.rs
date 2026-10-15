@@ -1,9 +1,7 @@
 //! Descriptor-relative private storage. No symlinks, unsafe modes, or foreign owners are repaired.
 use crate::ServerError;
-#[cfg(any(feature = "client", test))]
 use crate::protocol;
 use serde::{Deserialize, Serialize};
-#[cfg(any(feature = "client", test))]
 use std::io::Write;
 use std::{
     ffi::CString,
@@ -17,12 +15,14 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-const MAX_RECORD: usize = 8192;
+const MAX_RECORD: usize = 32768;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Record {
     pub seed: [u8; 32],
     pub paired: Vec<[u8; 32]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization: Option<crate::organization::Organization>,
 }
 impl Drop for Record {
     fn drop(&mut self) {
@@ -56,6 +56,10 @@ impl Directory {
             if create {
                 // SAFETY: directory descriptor and NUL-terminated component are live.
                 let result = unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o700) };
+                if result == 0 {
+                    dir.sync_all()
+                        .map_err(|_| ServerError::StorageUnavailable)?;
+                }
                 if result != 0
                     && std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists
                 {
@@ -208,6 +212,9 @@ impl Directory {
         if record.paired.len() > 64 {
             return Err(ServerError::UnsafeStorage);
         }
+        if let Some(value) = &record.organization {
+            value.validate()?;
+        }
         // A previous publication may have renamed successfully but failed to sync its directory.
         // Visible bytes alone do not confirm durability, including after reopening the store.
         file.sync_all()
@@ -223,6 +230,7 @@ impl Directory {
                 let record = Record {
                     seed: protocol::random()?,
                     paired: Vec::new(),
+                    organization: None,
                 };
                 self.write(&record)?;
                 Ok(record)
@@ -231,8 +239,10 @@ impl Directory {
         }
     }
     /// Caller holds setup.lock. Publish once after fsync so crashes never truncate the old identity.
-    #[cfg(any(feature = "client", test))]
     pub fn write(&self, record: &Record) -> Result<(), ServerError> {
+        if let Some(value) = &record.organization {
+            value.validate()?;
+        }
         let bytes = Zeroizing::new(
             serde_json::to_vec(record).map_err(|_| ServerError::StorageUnavailable)?,
         );
@@ -364,6 +374,27 @@ mod tests {
         );
     }
     #[test]
+    fn organization_is_retained_with_identity_and_pairing() {
+        let fixture = Fixture::new();
+        let data = fixture.open();
+        let _lock = data.lock("setup.lock", false).unwrap();
+        let original = data.read_or_create().unwrap();
+        let mut value = serde_json::to_value(&original).unwrap();
+        value["organization"] = serde_json::json!({
+            "version": 1, "workspace": vec![1; 32], "tab": vec![2; 32], "pane": vec![3; 32],
+            "name": "Development", "pinned_directory": null,
+            "starting_directory": "/tmp", "confirmed_directory": null
+        });
+        std::fs::write(
+            fixture.0.join("identity.json"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        let reopened = fixture.open();
+        let restored = reopened.read().unwrap();
+        assert_eq!(serde_json::to_value(&restored).unwrap(), value);
+    }
+    #[test]
     fn corrupt_identity_is_preserved_instead_of_replaced() {
         let fixture = Fixture::new();
         let data = fixture.open();
@@ -447,6 +478,56 @@ mod tests {
         assert_eq!(recovered.paired, [[42; 32]]);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn uncertain_organization_publication_blocks_recovery_until_synced() {
+        let fixture = Fixture::new();
+        let data = fixture.open();
+        let _lock = data.lock("setup.lock", false).unwrap();
+        let mut record = data.read_or_create().unwrap();
+        record.paired.push([42; 32]);
+        let mut organization = crate::organization::Organization::first(fixture.0.clone()).unwrap();
+        organization.name = "Retained work".into();
+        organization.pinned_directory = Some(fixture.0.clone());
+        organization.confirmed_directory = Some("/".into());
+        record.organization = Some(organization.clone());
+        let fault = sync_failure::fail_directory(&data.0);
+        assert_eq!(data.write(&record), Err(ServerError::StorageUnavailable));
+        let reopened = fixture.open();
+        assert!(matches!(
+            reopened.read(),
+            Err(ServerError::StorageUnavailable)
+        ));
+        drop(fault);
+        let recovered = reopened.read_or_create().unwrap();
+        assert_eq!(recovered.seed, record.seed);
+        assert_eq!(recovered.paired, [[42; 32]]);
+        assert!(recovered.organization.as_ref() == Some(&organization));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_failed_pending_write_preserves_the_previous_organization() {
+        let fixture = Fixture::new();
+        let data = fixture.open();
+        let _lock = data.lock("setup.lock", false).unwrap();
+        let mut record = data.read_or_create().unwrap();
+        let original = crate::organization::Organization::first(fixture.0.clone()).unwrap();
+        record.organization = Some(original.clone());
+        data.write(&record).unwrap();
+        record.organization.as_mut().unwrap().name = "Uncommitted".into();
+        let fault = sync_failure::fail_files();
+        assert_eq!(data.write(&record), Err(ServerError::StorageUnavailable));
+        assert!(matches!(
+            fixture.open().read(),
+            Err(ServerError::StorageUnavailable)
+        ));
+        drop(fault);
+        let recovered = fixture.open().read_or_create().unwrap();
+        assert!(recovered.organization.as_ref() == Some(&original));
+        assert_eq!(recovered.seed, record.seed);
+    }
+
     // Interpose only the native syscall in the Linux test executable. Production storage has
     // no fault switch, and other threads and directories keep using the real filesystem.
     #[cfg(target_os = "linux")]
@@ -456,6 +537,7 @@ mod tests {
 
         std::thread_local! {
             static DIRECTORY: Cell<Option<(u64, u64)>> = const { Cell::new(None) };
+            static FILES: Cell<bool> = const { Cell::new(false) };
         }
 
         pub(super) struct Failure;
@@ -466,9 +548,15 @@ mod tests {
             Failure
         }
 
+        pub(super) fn fail_files() -> Failure {
+            FILES.set(true);
+            Failure
+        }
+
         impl Drop for Failure {
             fn drop(&mut self) {
                 DIRECTORY.set(None);
+                FILES.set(false);
             }
         }
 
@@ -478,9 +566,11 @@ mod tests {
             let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
             // SAFETY: fstat accepts any descriptor, reporting invalid ones without dereferencing it.
             if unsafe { libc::fstat(fd, &mut metadata) } == 0
-                && DIRECTORY
+                && (DIRECTORY
                     .try_with(|target| target.get() == Some((metadata.st_dev, metadata.st_ino)))
                     .unwrap_or(false)
+                    || (metadata.st_mode & libc::S_IFMT == libc::S_IFREG
+                        && FILES.try_with(|flag| flag.get()).unwrap_or(false)))
             {
                 // SAFETY: __errno_location returns this thread's writable errno pointer.
                 unsafe { *libc::__errno_location() = libc::EIO };

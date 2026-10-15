@@ -1,5 +1,6 @@
-//! One explicitly launched Development Pane. Organization and client-native effects are absent.
+//! The first retained Development Workspace and its independently owned live Terminal Session.
 use super::*;
+use spaceterm_server::organization::{Organization, OrganizationStore};
 use spaceterm_server::{
     ServerError,
     pane::{self, *},
@@ -10,7 +11,10 @@ pub struct DevelopmentPaneHost {
     boot: [u8; 32],
     pane: Option<OwnedPane>,
     factory: NativeTerminalSessionFactory,
-    directory: ValidatedLocalDirectory,
+    directory: std::path::PathBuf,
+    organization: Option<Organization>,
+    store: Option<OrganizationStore>,
+    uncertain: bool,
 }
 struct OwnedPane {
     device: Option<[u8; 32]>,
@@ -38,27 +42,26 @@ impl DevelopmentPaneHost {
             boot: nonce()?,
             pane: None,
             factory,
-            directory,
+            directory: directory.path().to_owned(),
+            organization: None,
+            store: None,
+            uncertain: false,
         })
     }
     /// Native composition for the explicitly launched local Development host.
     pub fn local() -> Result<Self, ServerError> {
         let filesystem = local_filesystem();
-        let directory = filesystem
-            .validate_directory(
-                &crate::platform::app_directories::AppDirectoryEnvironment::capture()
-                    .home
-                    .map(std::path::PathBuf::from)
-                    .ok_or(ServerError::StartupFailed)?,
-            )
-            .map_err(|_| ServerError::StartupFailed)?;
+        let directory = crate::platform::app_directories::AppDirectoryEnvironment::capture()
+            .home
+            .map(std::path::PathBuf::from)
+            .ok_or(ServerError::StartupFailed)?;
         let shell = crate::platform::launch_host::user_shell();
         let factory = NativeTerminalSessionFactory::new(
             native_pty_factory(),
             ShellLaunchPlanner::new(
                 shell,
-                std::path::PathBuf::new(),
-                ShellIntegrationMode::Disabled,
+                crate::platform::launch_host::resource_root(),
+                ShellIntegrationMode::Automatic,
                 ShellEnvironment::default(),
                 ShellIntegrationPolicy {
                     supported: true,
@@ -70,7 +73,83 @@ impl DevelopmentPaneHost {
             filesystem,
             LocalMachine::default(),
         );
-        Self::new(factory, directory)
+        Ok(Self {
+            boot: nonce()?,
+            pane: None,
+            factory,
+            directory,
+            organization: None,
+            store: None,
+            uncertain: false,
+        })
+    }
+    fn retain(&mut self, organization: Option<Organization>) -> Result<(), Refusal> {
+        if self.organization == organization && !self.uncertain {
+            return Ok(());
+        }
+        if let Some(store) = &self.store
+            && store.write(organization.as_ref()).is_err()
+        {
+            self.uncertain = true;
+            return Err(Refusal::StorageUnavailable);
+        }
+        self.organization = organization;
+        Ok(())
+    }
+    fn recover(&mut self) -> Result<(), Refusal> {
+        if self.uncertain {
+            let recovered = self
+                .store
+                .as_ref()
+                .ok_or(Refusal::StorageUnavailable)?
+                .read()
+                .map_err(|_| Refusal::StorageUnavailable)?;
+            if recovered.is_none() && self.pane.is_some() {
+                if let Some(pane) = &mut self.pane {
+                    pane.runtime
+                        .shutdown_and_wait(Duration::from_secs(5))
+                        .map_err(|_| Refusal::CleanupUnresolved)?;
+                }
+                self.pane = None;
+            }
+            self.organization = recovered;
+            self.uncertain = false;
+        }
+        Ok(())
+    }
+    fn restored(&self) -> Result<Reply, Refusal> {
+        let organization = self.organization.as_ref().ok_or(Refusal::Missing)?;
+        Ok(Reply::Restored {
+            server: self.boot,
+            workspace: organization.workspace,
+            tab: organization.tab,
+            pane: organization.pane,
+        })
+    }
+    fn retain_directory(&mut self) -> Result<(), Refusal> {
+        let confirmed = self
+            .pane
+            .as_ref()
+            .and_then(|pane| pane.runtime.metadata_snapshot())
+            .and_then(|metadata| {
+                metadata
+                    .confirmed_directory
+                    .as_ref()
+                    .map(|path| std::path::PathBuf::from(path.as_ref()))
+            });
+        if let (Some(directory), Some(organization)) = (confirmed, &self.organization)
+            && organization.confirmed_directory.as_ref() != Some(&directory)
+        {
+            // Only owning-shell markers supply this candidate. Validate on the owning host
+            // before retaining it, and again when a later runtime starts.
+            let Ok(directory) = local_filesystem().validate_directory(&directory) else {
+                return Ok(());
+            };
+            let mut updated = organization.clone();
+            updated.confirmed_directory = Some(directory.path().to_owned());
+            self.retain(Some(updated))?;
+        }
+        Ok(())
     }
     fn start(
         &mut self,
@@ -78,11 +157,25 @@ impl DevelopmentPaneHost {
         connection: [u8; 32],
         size: PaneSize,
         style: Option<PresentationStyle>,
-    ) -> Result<Lease, ServerError> {
+    ) -> Result<Lease, Refusal> {
+        size.validate().map_err(|_| Refusal::Unsupported)?;
+        if self.organization.is_none() {
+            self.retain(Some(
+                Organization::first(self.directory.clone()).map_err(|_| Refusal::Failed)?,
+            ))?;
+        }
+        let directory = local_filesystem()
+            .validate_directory(
+                self.organization
+                    .as_ref()
+                    .ok_or(Refusal::Missing)?
+                    .startup_directory(),
+            )
+            .map_err(|_| Refusal::DirectoryUnavailable)?;
         let lease = Lease {
             server: self.boot,
-            session: nonce()?,
-            control: nonce()?,
+            session: nonce().map_err(|_| Refusal::Failed)?,
+            control: nonce().map_err(|_| Refusal::Failed)?,
             connection,
         };
         let runtime = self
@@ -90,11 +183,11 @@ impl DevelopmentPaneHost {
             .start_runtime(
                 geometry(size),
                 TerminalLaunchPlan::Local(
-                    LocalTerminalLaunchPlan::new(self.directory.clone()).without_client_effects(),
+                    LocalTerminalLaunchPlan::new(directory).without_client_effects(),
                 ),
-                appearance(style, 1).map_err(|_| ServerError::StartupFailed)?,
+                appearance(style, 1).map_err(|_| Refusal::Failed)?,
             )
-            .map_err(|_| ServerError::StartupFailed)?;
+            .map_err(|_| Refusal::Failed)?;
         let subscription = runtime.subscribe();
         // No focus grant: OSC 52 and native requests have no eligible client in this slice.
         self.pane = Some(OwnedPane {
@@ -134,13 +227,21 @@ impl DevelopmentPaneHost {
             }
             return pane.claim(device, connection, size, style, pane.device.is_none());
         }
+        if self.organization.is_some() {
+            // Observing a restarted server never grants first-use intent.
+            if !create || resume.is_some() {
+                return self.restored();
+            }
+            return self
+                .start(device, connection, size, style)
+                .map(|lease| Reply::Attached { lease });
+        }
         // A reconnect must never create a replacement Session after a lost launch reply.
         if !create || resume.is_some() {
             return Err(Refusal::Missing);
         }
         self.start(device, connection, size, style)
             .map(|lease| Reply::Attached { lease })
-            .map_err(|_| Refusal::Failed)
     }
     fn handle(
         &mut self,
@@ -154,7 +255,30 @@ impl DevelopmentPaneHost {
                 pane_takeover: true,
             });
         }
+        self.recover()?;
+        self.retain_directory()?;
         match request {
+            Request::StartRestored {
+                server,
+                pane,
+                size,
+                style,
+            } => {
+                if server != self.boot
+                    || self
+                        .organization
+                        .as_ref()
+                        .is_none_or(|org| org.pane != pane)
+                {
+                    return Err(Refusal::Stale);
+                }
+                if self.pane.is_some() {
+                    return self.select(device, connection, false, size, None, style);
+                }
+                return self
+                    .start(device, connection, size, style)
+                    .map(|lease| Reply::Attached { lease });
+            }
             Request::Attach {
                 create,
                 size,
@@ -238,9 +362,7 @@ impl DevelopmentPaneHost {
                     return Err(Refusal::Failed);
                 }
                 if pane.ended {
-                    pane.runtime
-                        .shutdown_and_wait(Duration::from_secs(5))
-                        .map_err(|_| Refusal::CleanupUnresolved)?;
+                    self.retire_exited()?;
                     self.pane = None;
                     Ok(Reply::Ended)
                 } else {
@@ -281,6 +403,7 @@ impl DevelopmentPaneHost {
                 pane.runtime
                     .shutdown_and_wait(Duration::from_secs(5))
                     .map_err(|_| Refusal::CleanupUnresolved)?;
+                self.retain(None)?;
                 self.pane = None;
                 Ok(Reply::Closed)
             }
@@ -288,17 +411,27 @@ impl DevelopmentPaneHost {
         }
     }
 
-    fn reconcile_selection(&mut self) -> Result<(), Refusal> {
+    fn retire_exited(&mut self) -> Result<(), Refusal> {
         let Some(pane) = &mut self.pane else {
             return Ok(());
         };
-        // A waiting client has no lease to Poll. Observe lifecycle events before offering
-        // control, even when the previous controller has disconnected.
         pane.drain();
         if pane.ended {
             pane.runtime
                 .shutdown_and_wait(Duration::from_secs(5))
                 .map_err(|_| Refusal::CleanupUnresolved)?;
+            // Ordinary exit closes the final Pane even without a subscribed client. Keep its
+            // final screen until the controller polls, but never retain it across a restart.
+            self.retain(None)?;
+        }
+        Ok(())
+    }
+    fn reconcile_selection(&mut self) -> Result<(), Refusal> {
+        self.retire_exited()?;
+        let Some(pane) = &self.pane else {
+            return Ok(());
+        };
+        if pane.ended {
             self.pane = None;
         } else if pane.failed {
             return Err(Refusal::Failed);
@@ -307,6 +440,16 @@ impl DevelopmentPaneHost {
     }
 }
 impl PaneService for DevelopmentPaneHost {
+    fn restore(&mut self, store: OrganizationStore) -> Result<(), ServerError> {
+        self.organization = store.read()?;
+        self.store = Some(store);
+        Ok(())
+    }
+    fn tick(&mut self) {
+        if self.recover().is_ok() && self.retain_directory().is_ok() {
+            let _ = self.retire_exited();
+        }
+    }
     fn request(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Reply {
         self.handle(device, connection, request)
             .unwrap_or_else(Reply::Refused)
@@ -319,6 +462,11 @@ impl PaneService for DevelopmentPaneHost {
         }
     }
     fn shutdown(&mut self) -> Result<(), ServerError> {
+        // Persist final confirmed metadata before ending live work. Refuse uncertain shutdown.
+        self.recover()
+            .map_err(|_| ServerError::StorageUnavailable)?;
+        self.retain_directory()
+            .map_err(|_| ServerError::StorageUnavailable)?;
         if let Some(pane) = &mut self.pane {
             pane.connected = false;
             pane.runtime
@@ -628,7 +776,8 @@ mod tests {
                     row.iter()
                         .map(|c| c.text.as_str())
                         .collect::<String>()
-                        .contains(text)
+                        .trim_end()
+                        == text
                 })
             {
                 return;
@@ -648,6 +797,122 @@ mod tests {
                 style: None,
             },
         )
+    }
+
+    #[test]
+    fn a_restored_pane_waits_for_explicit_first_use_and_starts_only_once() {
+        let mut host = host();
+        host.organization = Some(Organization::first(host.directory.clone()).unwrap());
+        let pane_id = host.organization.as_ref().unwrap().pane;
+        for resume in [
+            None,
+            Some(PaneTarget {
+                server: [8; 32],
+                session: [9; 32],
+            }),
+        ] {
+            assert!(matches!(host.request([1; 32], [1; 32], Request::Select {
+                create: false, size: size(), resume, style: None,
+            }), Reply::Restored { pane, .. } if pane == pane_id));
+            host.tick();
+            assert!(host.pane.is_none());
+        }
+        let request = Request::StartRestored {
+            server: host.boot,
+            pane: pane_id,
+            size: size(),
+            style: None,
+        };
+        let Reply::Attached { lease } = host.request([1; 32], [1; 32], request.clone()) else {
+            panic!("first use");
+        };
+        assert!(
+            matches!(host.request([2; 32], [2; 32], request), Reply::Takeover { target } if target == lease.into())
+        );
+        assert_eq!(host.organization.as_ref().unwrap().pane, pane_id);
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_missing_confirmed_directory_refuses_startup_without_falling_back() {
+        let mut host = host();
+        let mut organization = Organization::first(host.directory.clone()).unwrap();
+        organization.confirmed_directory = Some(host.directory.join(format!(
+            "missing-{:x}",
+            u128::from_be_bytes(nonce().unwrap()[..16].try_into().unwrap())
+        )));
+        host.organization = Some(organization.clone());
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [1; 32],
+                Request::StartRestored {
+                    server: host.boot,
+                    pane: organization.pane,
+                    size: size(),
+                    style: None,
+                }
+            ),
+            Reply::Refused(Refusal::DirectoryUnavailable)
+        ));
+        assert!(host.pane.is_none());
+        assert!(host.organization.as_ref() == Some(&organization));
+    }
+
+    #[test]
+    fn ordinary_exit_retires_organization_without_a_connected_client() {
+        let mut host = host();
+        let lease = attach(&mut host, 1, true);
+        command(&mut host, 1, lease, "exit");
+        host.disconnected([1; 32]);
+        let until = Instant::now() + Duration::from_secs(3);
+        while host.organization.is_some() && Instant::now() < until {
+            host.tick();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            host.organization.is_none(),
+            "ordinary exit closes the final Pane even without a client polling"
+        );
+    }
+
+    #[test]
+    fn only_owning_shell_directory_confirmation_changes_restoration() {
+        let mut host = host();
+        let lease = attach(&mut host, 1, true);
+        command(
+            &mut host,
+            1,
+            lease,
+            "stty -echo; printf '\\033]7;file://localhost/\\007\\033]133;A;spaceterm=%s\\007' \"$SPACETERM_PROMPT_OWNER\"; printf '\\033[2J\\033[HCONFIRMED\\n'",
+        );
+        await_text(&mut host, 1, lease, "CONFIRMED");
+        host.tick();
+        assert_eq!(
+            host.organization
+                .as_ref()
+                .unwrap()
+                .confirmed_directory
+                .as_deref(),
+            Some(std::path::Path::new("/"))
+        );
+        command(
+            &mut host,
+            1,
+            lease,
+            "printf '\\033]7;file://localhost/tmp\\007\\033]133;A;spaceterm=foreign\\007'; printf 'NESTED\\n'",
+        );
+        await_text(&mut host, 1, lease, "NESTED");
+        host.tick();
+        assert_eq!(
+            host.organization
+                .as_ref()
+                .unwrap()
+                .confirmed_directory
+                .as_deref(),
+            Some(std::path::Path::new("/"))
+        );
+        host.shutdown().unwrap();
     }
 
     #[test]
@@ -923,7 +1188,7 @@ mod tests {
             &mut host,
             2,
             lease,
-            "stty -echo; printf 'EXITING\\n'; sleep 0.2; exit\n",
+            "stty -echo; printf '\\033[2J\\033[HEXITING\\n'; sleep 0.2; exit\n",
         );
         await_text(&mut host, 2, lease, "EXITING");
         host.disconnected([2; 32]);

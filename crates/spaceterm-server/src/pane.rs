@@ -88,6 +88,13 @@ pub enum Request {
         resume: Option<PaneTarget>,
         style: Option<PresentationStyle>,
     },
+    /// Explicit first use of a retained Pane, fenced by stable identity and current server boot.
+    StartRestored {
+        server: [u8; 32],
+        pane: [u8; 32],
+        size: PaneSize,
+        style: Option<PresentationStyle>,
+    },
     TakeOver {
         target: PaneTarget,
         size: PaneSize,
@@ -124,6 +131,12 @@ pub enum Reply {
         #[serde(default)]
         pane_takeover: bool,
     },
+    Restored {
+        server: [u8; 32],
+        workspace: [u8; 32],
+        tab: [u8; 32],
+        pane: [u8; 32],
+    },
     Takeover {
         target: PaneTarget,
     },
@@ -145,6 +158,8 @@ pub enum Refusal {
     Unsupported,
     Failed,
     CleanupUnresolved,
+    DirectoryUnavailable,
+    StorageUnavailable,
 }
 impl From<Refusal> for ServerError {
     fn from(value: Refusal) -> Self {
@@ -154,6 +169,8 @@ impl From<Refusal> for ServerError {
             Refusal::Stale => Self::StaleControl,
             Refusal::Unsupported => Self::Unsupported,
             Refusal::Failed => Self::StartupFailed,
+            Refusal::DirectoryUnavailable => Self::DirectoryUnavailable,
+            Refusal::StorageUnavailable => Self::StorageUnavailable,
             Refusal::CleanupUnresolved => Self::CleanupUnresolved,
         }
     }
@@ -198,6 +215,13 @@ pub struct Screen {
 
 /// The host supplies runtime ownership; the protocol supplies authenticated device/connection facts.
 pub trait PaneService: Send {
+    fn restore(
+        &mut self,
+        _store: crate::organization::OrganizationStore,
+    ) -> Result<(), ServerError> {
+        Ok(())
+    }
+    fn tick(&mut self) {}
     fn request(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Reply;
     fn disconnected(&mut self, connection: [u8; 32]);
     fn shutdown(&mut self) -> Result<(), ServerError>;

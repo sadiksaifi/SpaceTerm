@@ -2,6 +2,7 @@
 #[cfg(feature = "client")]
 mod client;
 mod host;
+pub mod organization;
 pub mod pane;
 mod protocol;
 mod storage;
@@ -44,6 +45,8 @@ pub enum ServerError {
     StaleControl,
     #[error("This operation is unavailable for this Development Pane.")]
     Unsupported,
+    #[error("Directory unavailable.")]
+    DirectoryUnavailable,
     #[error("Terminal cleanup could not be confirmed.")]
     CleanupUnresolved,
 }

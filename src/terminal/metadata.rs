@@ -427,6 +427,8 @@ pub struct TerminalMetadataSnapshot {
     /// The Repository Source Directory: the reported directory as of the last prompt. Reports
     /// that arrive while a command runs apply only when it finishes.
     pub repository_directory: Arc<str>,
+    /// Directory confirmed by a prompt carrying this Terminal Session's Prompt Owner.
+    pub confirmed_directory: Option<Arc<str>>,
     /// Completed commands since the session started.
     pub finished_commands: u64,
     pub prompt_zone: PromptZone,
@@ -506,6 +508,7 @@ impl MetadataTracker {
                     provenance: TitleProvenance::Fallback,
                 },
                 repository_directory: Arc::from(initial_directory.as_str()),
+                confirmed_directory: None,
                 directory: DirectoryMetadata {
                     path: Arc::from(initial_directory),
                     provenance: DirectoryProvenance::Initial,
@@ -567,8 +570,12 @@ impl MetadataTracker {
         let Some(directory) = parse_osc7_directory(value, &self.snapshot.context) else {
             return false;
         };
-        let command_running = if self.prompt_owner_seen {
+        if self.snapshot.context.prompt_owner().is_some() {
+            // Integrations send OSC 7 before the first owned prompt. Keep the candidate,
+            // but only a matching Prompt Owner can confirm it for restoration.
             self.owner_reported_directory = Some(Arc::clone(&directory.path));
+        }
+        let command_running = if self.prompt_owner_seen {
             true
         } else {
             let running = self
@@ -690,6 +697,7 @@ impl MetadataTracker {
                 self.update(|snapshot| {
                     snapshot.prompt_zone = PromptZone::Prompt;
                     if let Some(directory) = committed {
+                        snapshot.confirmed_directory = Some(Arc::clone(&directory));
                         snapshot.repository_directory = directory;
                     }
                 }) || completed
@@ -1346,6 +1354,27 @@ mod tests {
             "zsh",
             epoch,
         )
+    }
+
+    #[test]
+    fn restoration_directory_requires_the_owning_shell_prompt() {
+        let epoch = Instant::now();
+        let mut tracker = owned_local_tracker(epoch);
+        tracker.set_reported_directory("file://mac.local/project");
+        tracker.apply_semantic_prompt("A", epoch);
+        assert_eq!(tracker.snapshot().confirmed_directory, None);
+        tracker.set_reported_directory("file://mac.local/project");
+        tracker.apply_semantic_prompt("A;spaceterm=0f1e", epoch);
+        assert_eq!(
+            tracker.snapshot().confirmed_directory.as_deref(),
+            Some("/project")
+        );
+        tracker.set_reported_directory("file://localhost/container");
+        tracker.apply_semantic_prompt("A;spaceterm=foreign", epoch);
+        assert_eq!(
+            tracker.snapshot().confirmed_directory.as_deref(),
+            Some("/project")
+        );
     }
 
     #[test]
