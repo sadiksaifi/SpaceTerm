@@ -357,7 +357,7 @@ def package(identity, release_tag=None):
         (tree / "build.json").write_text(json.dumps(expected, sort_keys=True) + "\n")
         if sys.platform == "darwin":
             identifier = f"io.github.sadiksaifi.{identity}.server"
-            requirement = f'designated => identifier "{identifier}" and {macos_signing.certificate_requirement(signer())}'
+            requirement = f'=designated => identifier "{identifier}" and {macos_signing.certificate_requirement(signer())}'
             with macos_signing.release_keychain(signer(), os.environ):
                 checked(
                     [
