@@ -907,6 +907,37 @@ fn a_replacement_subscription_receives_accessibility_without_new_output() {
 }
 
 #[test]
+fn replacement_subscriptions_seed_unchanged_hidden_input_state() {
+    let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+    let (mut runtime, events, accessibility) = result.unwrap();
+    records.update(|state| state.hidden_input = true);
+    runtime.focus(false);
+    receive_event(&events, "the original hidden-input transition", |event| {
+        matches!(event, TerminalSessionEvent::HiddenInputChanged(true))
+    });
+    drop(events);
+    drop(accessibility);
+
+    let replacement = runtime.subscribe();
+    receive_event(
+        &replacement.events,
+        "the unchanged hidden-input seed",
+        |event| matches!(event, TerminalSessionEvent::HiddenInputChanged(true)),
+    );
+    reader_steps
+        .send(ReaderStep::Bytes(b"after hidden seed\r\n".repeat(12)))
+        .unwrap();
+    receive_event(
+        &replacement.events,
+        "screen output after the hidden-input seed",
+        |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen_text(screen).contains("after hidden seed")),
+    );
+    assert!(replacement.hidden_input());
+    runtime.shutdown_and_join();
+    assert!(!replacement.hidden_input());
+}
+
+#[test]
 fn subscribing_after_shell_exit_replays_final_screen_and_exit() {
     let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
     let (mut runtime, events, accessibility) = result.unwrap();

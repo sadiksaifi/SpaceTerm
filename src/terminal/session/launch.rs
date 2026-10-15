@@ -441,13 +441,14 @@ impl TerminalRuntime {
                 worker: Some(worker),
                 native_pty_close: Some(native_pty_close),
                 schedule_input,
-                event_publisher,
+                event_publisher: event_publisher.clone(),
                 clipboard_authority,
             },
             TerminalSubscription {
                 events: event_rx,
                 accessibility: accessibility_rx,
                 clipboard: clipboard_requests,
+                state: event_publisher,
             },
         ))
     }

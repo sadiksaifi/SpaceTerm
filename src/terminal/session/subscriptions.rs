@@ -5,6 +5,15 @@ pub struct TerminalSubscription {
     pub events: async_channel::Receiver<TerminalSessionEvent>,
     pub accessibility: async_channel::Receiver<Arc<TerminalAccessibilityModel>>,
     pub clipboard: async_channel::Receiver<ClipboardRequest>,
+    pub(super) state: TerminalEventPublisher,
+}
+
+impl TerminalSubscription {
+    /// The retained PTY hidden-input state. Read it after receiving events to reconcile
+    /// coalesced change notifications. A stopped runtime always returns false.
+    pub fn hidden_input(&self) -> bool {
+        self.state.hidden_input()
+    }
 }
 
 #[derive(Clone)]
@@ -15,6 +24,7 @@ struct EventState {
     screen: Option<Arc<ScreenSnapshot>>,
     finished: Option<Result<TerminalSessionExit, TerminalSessionFailure>>,
     stopped: bool,
+    hidden_input: bool,
 }
 
 impl From<async_channel::Sender<TerminalSessionEvent>> for TerminalEventPublisher {
@@ -24,6 +34,7 @@ impl From<async_channel::Sender<TerminalSessionEvent>> for TerminalEventPublishe
             screen: None,
             finished: None,
             stopped: false,
+            hidden_input: false,
         })))
     }
 }
@@ -65,7 +76,15 @@ impl TerminalEventPublisher {
     pub(super) fn close(&self) {
         let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
         state.stopped = true;
+        state.hidden_input = false;
         state.events.close();
+    }
+
+    pub(super) fn hidden_input(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .hidden_input
     }
 
     pub(super) fn try_send(
@@ -100,8 +119,15 @@ impl EventState {
     fn retain(&mut self, event: &TerminalSessionEvent) {
         match event {
             TerminalSessionEvent::Screen(screen) => self.screen = Some(Arc::clone(screen)),
-            TerminalSessionEvent::Exited(exit) => self.finished = Some(Ok(exit.clone())),
-            TerminalSessionEvent::Failed(failure) => self.finished = Some(Err(failure.clone())),
+            TerminalSessionEvent::Exited(exit) => {
+                self.hidden_input = false;
+                self.finished = Some(Ok(exit.clone()));
+            }
+            TerminalSessionEvent::Failed(failure) => {
+                self.hidden_input = false;
+                self.finished = Some(Err(failure.clone()));
+            }
+            TerminalSessionEvent::HiddenInputChanged(active) => self.hidden_input = *active,
             _ => {}
         }
     }

@@ -550,6 +550,7 @@ impl TerminalRuntime {
             events,
             accessibility,
             clipboard,
+            state: self.event_publisher.clone(),
         }
     }
 
@@ -1429,7 +1430,9 @@ impl TerminalWorker {
                 }
                 self.events.repeat_screen();
                 self.schedules.note_screen_published();
-                true
+                self.send_terminal_event(TerminalSessionEvent::HiddenInputChanged(
+                    self.events.hidden_input(),
+                ))
             }
             Command::Key(input) => self.process_key(input),
             Command::ClearScreenAndScrollback => {
