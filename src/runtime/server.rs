@@ -194,11 +194,15 @@ impl DevelopmentPaneHost {
                 if pane.failed {
                     return Err(Refusal::Failed);
                 }
-                Ok(if pane.ended {
-                    Reply::Ended
+                if pane.ended {
+                    pane.runtime
+                        .shutdown_and_wait(Duration::from_secs(5))
+                        .map_err(|_| Refusal::CleanupUnresolved)?;
+                    self.pane = None;
+                    Ok(Reply::Ended)
                 } else {
-                    Reply::Unchanged
-                })
+                    Ok(Reply::Unchanged)
+                }
             }
             Request::Key { key, .. } => {
                 if pane.ended || pane.failed {
@@ -662,6 +666,47 @@ mod tests {
             "stty -echo; printf '\\033[2J\\033[HLIVE\\n'; stty size\n",
         );
         await_text(&mut host, 2, live, "24 80");
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn ordinary_exit_allows_a_later_explicit_launch_but_never_a_reconnect() {
+        let mut host = host();
+        let old = attach(&mut host, 2, true);
+        command(&mut host, 2, old, "exit\n");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if matches!(
+                host.request([1; 32], [2; 32], Request::Poll { lease: old }),
+                Reply::Ended
+            ) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "shell exit did not arrive");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [3; 32],
+                Request::Attach {
+                    create: false,
+                    size: size(),
+                    resume: Some(old),
+                    style: None,
+                }
+            ),
+            Reply::Refused(Refusal::Missing)
+        ));
+        let fresh = attach(&mut host, 3, true);
+        assert_ne!(fresh.session, old.session);
+        command(
+            &mut host,
+            3,
+            fresh,
+            "stty -echo; printf '\\033[2J\\033[HNEW-SHELL\\n'\n",
+        );
+        await_text(&mut host, 3, fresh, "NEW-SHELL");
         host.shutdown().unwrap();
     }
 }
