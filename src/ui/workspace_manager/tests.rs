@@ -14166,6 +14166,7 @@ fn a_shared_pin_chosen_while_another_client_pins_should_submit_the_version_it_op
             root_tab: SERVER_TAB,
             tabs: vec![Tab {
                 worktree: None,
+                worktree_repository: None,
                 id: SERVER_TAB,
                 root_pane: SERVER_PANE,
                 panes: vec![Pane {
@@ -14291,6 +14292,7 @@ fn shared_pane_harness(cx: &mut TestAppContext) -> (SharedPaneHarness, &mut Visu
             root_tab: SHARED_FOCUS_TAB,
             tabs: vec![Tab {
                 worktree: None,
+                worktree_repository: None,
                 id: SHARED_FOCUS_TAB,
                 root_pane: SHARED_FOCUS_PANE,
                 panes: vec![Pane {
@@ -14518,6 +14520,7 @@ fn shared_close_inventory(
         .iter()
         .map(|(tab, panes)| Tab {
             worktree: None,
+            worktree_repository: None,
             id: *tab,
             root_pane: panes[0].0,
             panes: panes
@@ -15487,6 +15490,7 @@ fn attachment_inventory() -> spaceterm_server::hierarchy::Inventory {
         root_tab: tab,
         tabs: vec![Tab {
             worktree: None,
+            worktree_repository: None,
             id: tab,
             root_pane: pane,
             panes: vec![Pane {
@@ -16006,12 +16010,14 @@ mod shared_repositories {
                 tabs: vec![
                     Tab {
                         worktree: Some(MAIN_ROOT.into()),
+                        worktree_repository: Some(MAIN_ROOT.into()),
                         id: ROOT_TAB,
                         root_pane: ROOT_PANE,
                         panes: vec![pane(ROOT_PANE, MAIN_ROOT)],
                     },
                     Tab {
                         worktree: Some(FEATURE_ROOT.into()),
+                        worktree_repository: Some(MAIN_ROOT.into()),
                         id: FEATURE_TAB,
                         root_pane: FEATURE_PANE,
                         panes: vec![pane(FEATURE_PANE, FEATURE_ROOT)],
@@ -16029,6 +16035,28 @@ mod shared_repositories {
         if let Some(snapshot) = &mut inventory.repositories {
             snapshot.directories = directories;
         }
+        inventory
+    }
+
+    /// The server's inventory after a restart when the Workspace's only Tab is in the feature
+    /// Worktree and its directory is gone. The server reads the Main Worktree the Tab saved, which
+    /// lists `main_listing`, and keeps no facts from before the restart.
+    fn restarted_in_removed_feature(revision: u64, main_listing: &[WorktreeRecord]) -> Inventory {
+        let mut inventory = rooted_in_feature(
+            revision,
+            vec![
+                facts(MAIN_ROOT, "main", main_listing),
+                DirectoryFacts {
+                    directory: FEATURE_ROOT.into(),
+                    repository: None,
+                    worktrees: None,
+                    failure: Some(RepositoryReadError::Unavailable),
+                },
+            ],
+        );
+        inventory.workspaces[0]
+            .tabs
+            .retain(|tab| tab.id == FEATURE_TAB);
         inventory
     }
 
@@ -16334,6 +16362,110 @@ mod shared_repositories {
         assert!(pruned.missing);
         assert!(pruned.has_tabs && pruned.openable() && !pruned.opens_tabs());
         assert_eq!(pruned.removal, WorktreeRemoval::Unlisted);
+        assert_eq!(harness.edits.submitted(), Vec::new());
+    }
+
+    /// A fresh window after a server restart finds the repository of a Workspace whose only Tab
+    /// is in a removed Worktree through the Main Worktree the Tab saved. The window can receive
+    /// the restarted server's inventory before the server reads any directory, and git can have
+    /// pruned the Worktree before the restart, so the Main Worktree's listing never names it. The
+    /// Tab still stays in the saved repository as a Missing Worktree, and the rows follow what git
+    /// lists from the Main Worktree: an addition and a prune.
+    #[gpui::test]
+    fn a_fresh_window_should_find_the_repository_of_a_removed_worktree_after_a_server_restart(
+        cx: &mut TestAppContext,
+    ) {
+        let mut unread = restarted_in_removed_feature(1, &[]);
+        if let Some(snapshot) = &mut unread.repositories {
+            snapshot.directories.clear();
+        }
+        let (harness, cx) = harness(cx, unread);
+        let rows = |cx: &mut VisualTestContext| {
+            let section = harness
+                .row(cx)
+                .worktrees
+                .expect("the Workspace lists its Worktrees");
+            let former = section
+                .groups
+                .iter()
+                .filter_map(|group| group.former_repository.as_ref().map(ToString::to_string))
+                .collect::<Vec<_>>();
+            let rows = section
+                .rows()
+                .map(|row| (row.name.to_string(), row.missing, row.has_tabs))
+                .collect::<Vec<_>>();
+            (
+                section.repository.map(|root| root.to_string()),
+                former,
+                rows,
+            )
+        };
+
+        let before_reads = rows(cx);
+        harness.publish(
+            restarted_in_removed_feature(
+                2,
+                &[
+                    record(MAIN_ROOT, "main", false),
+                    record(EXTRA_ROOT, "extra", false),
+                ],
+            ),
+            cx,
+        );
+        let after_restart = rows(cx);
+        harness.publish(
+            restarted_in_removed_feature(3, &[record(MAIN_ROOT, "main", false)]),
+            cx,
+        );
+        let after_prune = rows(cx);
+        let pruned = harness
+            .row(cx)
+            .worktrees
+            .and_then(|section| {
+                section
+                    .rows()
+                    .find(|row| row.name.as_ref() == "app-feature")
+                    .cloned()
+            })
+            .expect("the removed Worktree keeps its row");
+
+        assert_eq!(
+            before_reads,
+            (
+                None,
+                vec!["app".to_owned()],
+                vec![("app-feature".to_owned(), true, true)],
+            ),
+            "before the server reads any directory, the Tab keeps its saved repository"
+        );
+        assert_eq!(
+            after_restart,
+            (
+                Some(MAIN_ROOT.to_owned()),
+                Vec::new(),
+                vec![
+                    ("app".to_owned(), false, false),
+                    ("app-extra".to_owned(), false, false),
+                    ("app-feature".to_owned(), true, true),
+                ],
+            ),
+            "the saved Main Worktree locates the repository the pruned Worktree's Tab is in, and a \
+             Worktree added outside SpaceTerm joins the rows"
+        );
+        assert_eq!(
+            after_prune,
+            (
+                Some(MAIN_ROOT.to_owned()),
+                Vec::new(),
+                vec![
+                    ("app".to_owned(), false, false),
+                    ("app-feature".to_owned(), true, true),
+                ],
+            ),
+            "a Worktree pruned later leaves the rows while the Tab stays in its repository"
+        );
+        assert_eq!(pruned.removal, WorktreeRemoval::Unlisted);
+        assert!(pruned.has_tabs && pruned.openable() && !pruned.opens_tabs());
         assert_eq!(harness.edits.submitted(), Vec::new());
     }
 

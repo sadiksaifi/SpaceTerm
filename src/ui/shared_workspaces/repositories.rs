@@ -107,6 +107,38 @@ impl SharedRepositories {
             .map_or(Some(last), |(_, current)| Some(current))
     }
 
+    /// The Worktrees of the repository a Workspace's row reads, as git on the server lists them.
+    ///
+    /// A restarted server keeps no facts for a directory it cannot read, so a row in a removed
+    /// Worktree has no listing of its own. The Main Worktree saved with the Tab membership that
+    /// contains the row's directory then locates the repository, when the server reads it. The
+    /// saved Main Worktree is only where to look: what the server reads there decides the listing,
+    /// and a row the server reads outside any repository lists nothing.
+    pub(crate) fn workspace_worktrees(&self, workspace: &Workspace) -> Option<&WorktreeInventory> {
+        let directory = workspace_directory(workspace)?;
+        if let Some(inventory) = self.worktrees(directory) {
+            return Some(inventory);
+        }
+        if self
+            .facts(directory)
+            .is_some_and(|facts| facts.failure.is_none())
+        {
+            return None;
+        }
+        workspace
+            .tabs
+            .iter()
+            .filter_map(|tab| {
+                Some((
+                    tab.worktree.as_deref()?,
+                    tab.worktree_repository.as_deref()?,
+                ))
+            })
+            .filter(|(worktree, _)| directory.starts_with(worktree))
+            .max_by_key(|(worktree, _)| worktree.components().count())
+            .and_then(|(_, repository)| self.worktrees(repository))
+    }
+
     /// The Pull Request lookups the presented repositories need, one per branch and upstream.
     pub(crate) fn pull_request_keys(&self) -> Vec<ServerPullRequestKey> {
         self.snapshot
@@ -206,6 +238,7 @@ pub(crate) fn workspace_directory(workspace: &Workspace) -> Option<&Path> {
 mod tests {
     use std::time::Duration;
 
+    use spaceterm_server::hierarchy::{Axis, Tab};
     use spaceterm_server::repository::{
         ChangeSummary, ChangeTotal, GitHubRepository, GitToolStatus, PullRequestQuery, Repository,
         RepositoryHead, RepositoryReadError, WorktreeHead, WorktreeRecord,
@@ -500,6 +533,110 @@ mod tests {
             listed(&alone, "/srv/app-gone"),
             [PathBuf::from("/srv/app"), PathBuf::from("/srv/app-gone")],
             "with no surviving sibling, the last listing stays"
+        );
+    }
+
+    /// A Workspace whose Root Tab is in `/srv/app-gone`, saved with the Main Worktree `/srv/app`,
+    /// beside a Tab in another repository.
+    fn workspace_in_removed_worktree() -> Workspace {
+        let tab = |id: u8, worktree: &str, repository: &str| Tab {
+            worktree: Some(worktree.into()),
+            worktree_repository: Some(repository.into()),
+            id: [id; 32],
+            root_pane: [id; 32],
+            panes: vec![Pane {
+                id: [id; 32],
+                source: None,
+                axis: Axis::Right,
+                starting_directory: worktree.into(),
+                confirmed_directory: None,
+                creator: None,
+            }],
+        };
+        Workspace {
+            id: [9; 32],
+            name: "Build".to_owned(),
+            name_version: 0,
+            pin_version: 0,
+            pinned_directory: None,
+            root_tab: [1; 32],
+            tabs: vec![
+                tab(1, "/srv/app-gone", "/srv/app"),
+                tab(2, "/srv/other-feature", "/srv/other"),
+            ],
+        }
+    }
+
+    fn workspace_listing(repositories: &SharedRepositories) -> Option<Vec<PathBuf>> {
+        let inventory = repositories.workspace_worktrees(&workspace_in_removed_worktree())?;
+        Some(
+            inventory
+                .worktrees
+                .iter()
+                .map(|record| record.root.clone())
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn a_workspace_in_a_removed_worktree_should_list_what_its_saved_main_worktree_reads() {
+        let unreadable = DirectoryFacts {
+            directory: "/srv/app-gone".into(),
+            repository: None,
+            worktrees: None,
+            failure: Some(RepositoryReadError::Unavailable),
+        };
+        let outside = DirectoryFacts {
+            failure: None,
+            ..unreadable.clone()
+        };
+        let main = listing("/srv/app", "/srv/app", &["/srv/app", "/srv/app-extra"]);
+        let other = listing("/srv/other", "/srv/other", &["/srv/other"]);
+        let mut restarted = SharedRepositories::default();
+        let mut outside_git = SharedRepositories::default();
+        let mut main_unread = SharedRepositories::default();
+        restarted.accept(
+            Some(&snapshot(
+                1,
+                vec![unreadable.clone(), other.clone(), main.clone()],
+            )),
+            Instant::now(),
+        );
+        outside_git.accept(
+            Some(&snapshot(1, vec![outside, other.clone(), main])),
+            Instant::now(),
+        );
+        main_unread.accept(
+            Some(&snapshot(
+                1,
+                vec![
+                    unreadable.clone(),
+                    other,
+                    DirectoryFacts {
+                        directory: "/srv/app".into(),
+                        ..unreadable
+                    },
+                ],
+            )),
+            Instant::now(),
+        );
+
+        assert_eq!(
+            workspace_listing(&restarted),
+            Some(vec![
+                PathBuf::from("/srv/app"),
+                PathBuf::from("/srv/app-extra")
+            ])
+        );
+        assert_eq!(
+            workspace_listing(&outside_git),
+            None,
+            "a directory the server reads outside Git stays outside"
+        );
+        assert_eq!(
+            workspace_listing(&main_unread),
+            None,
+            "a saved Main Worktree the server cannot read lists nothing"
         );
     }
 

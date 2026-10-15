@@ -258,8 +258,10 @@ mod development {
         /// The Worktrees of the repository a shared Workspace's row reads, as git on the server
         /// lists them.
         fn shared_inventory(&self, workspace_id: WorkspaceId) -> Option<&WorktreeInventory> {
-            let (_, directory) = self.shared_row_source(workspace_id)?;
-            self.shared.as_ref()?.repositories().worktrees(directory)
+            let shared = self.shared.as_ref()?;
+            shared
+                .repositories()
+                .workspace_worktrees(shared.server_workspace(workspace_id)?)
         }
 
         /// Names every Worktree the server lists or keeps Tabs in, and tags each Tab with the
@@ -284,8 +286,7 @@ mod development {
                 return;
             };
             let repositories = shared.repositories();
-            let inventory =
-                workspace_directory(server).and_then(|directory| repositories.worktrees(directory));
+            let inventory = repositories.workspace_worktrees(server);
             let state = self
                 .shared_repositories
                 .worktrees
@@ -313,14 +314,15 @@ mod development {
                 let Some(root) = &tab.worktree else {
                     continue;
                 };
-                let key = membership_key(root, inventory, state, repositories);
+                let saved = tab.worktree_repository.as_deref();
+                let key = membership_key(root, saved, inventory, state, repositories);
                 let Ok(id) = state.registry.id_for(&key) else {
                     continue;
                 };
                 state
                     .records
                     .entry(id)
-                    .or_insert_with(|| unlisted_record(root, repositories));
+                    .or_insert_with(|| unlisted_record(root, saved, repositories));
                 scopes.insert(tab.id, (id, root.clone()));
             }
             manager.update(cx, |manager, cx| {
@@ -538,42 +540,68 @@ mod development {
     }
 
     /// The Worktree a Tab's server membership names. A root the repository lists now belongs to
-    /// it; one this window named earlier keeps its repository, so a Tab left in a removed
-    /// Worktree stays with it; one another repository the server read lists joins that one.
+    /// it; one whose own Worktree or saved Main Worktree the server reads joins that repository.
+    /// Until the server reads either, the saved Main Worktree still names the repository, so a Tab
+    /// in a Worktree git pruned before a restart joins its repository once the server reads it. A
+    /// membership saved without a Main Worktree keeps the repository this window named earlier,
+    /// so a Tab left in a removed Worktree stays with it.
     fn membership_key(
         root: &Path,
+        saved: Option<&Path>,
         inventory: Option<&WorktreeInventory>,
         state: &SharedWorktrees,
         repositories: &SharedRepositories,
     ) -> WorktreeKey {
+        let key = |main_root: &Path| {
+            WorktreeKey::new(
+                RepositoryIdentity::new(main_root.to_path_buf()),
+                root.to_path_buf(),
+            )
+        };
         if let Some(inventory) = inventory
             .filter(|inventory| inventory.worktrees.iter().any(|record| record.root == root))
         {
-            return WorktreeKey::new(
-                RepositoryIdentity::new(inventory.main_root.clone()),
-                root.to_path_buf(),
-            );
+            return key(&inventory.main_root);
         }
-        if let Some(key) = state
+        if let Some(listing) = membership_listing(root, saved, repositories) {
+            return key(&listing.main_root);
+        }
+        if let Some(saved) = saved {
+            return key(saved);
+        }
+        if let Some(named) = state
             .records
             .keys()
             .filter_map(|&id| state.registry.key(id))
-            .find(|key| key.root() == root)
+            .find(|named| named.root() == root)
         {
-            return key.clone();
+            return named.clone();
         }
-        let main_root = repositories.worktrees(root).or(inventory).map_or_else(
-            || root.to_path_buf(),
-            |inventory| inventory.main_root.clone(),
-        );
-        WorktreeKey::new(RepositoryIdentity::new(main_root), root.to_path_buf())
+        key(inventory.map_or(root, |inventory| inventory.main_root.as_path()))
+    }
+
+    /// The listing of the repository a Tab's membership is in: the server's reading of its
+    /// Worktree, else of the Main Worktree saved with the membership. A restarted server reads
+    /// nothing in a removed Worktree, and git stops listing it once pruned, so only the saved
+    /// Main Worktree still finds its repository.
+    fn membership_listing<'a>(
+        root: &Path,
+        saved: Option<&Path>,
+        repositories: &'a SharedRepositories,
+    ) -> Option<&'a WorktreeInventory> {
+        repositories
+            .worktrees(root)
+            .or_else(|| repositories.worktrees(saved?))
     }
 
     /// The record a Worktree this window never saw listed presents: the server's listing of it
     /// when another repository lists it, else a row with no branch whose directory is missing.
-    fn unlisted_record(root: &Path, repositories: &SharedRepositories) -> WorktreeRecord {
-        repositories
-            .worktrees(root)
+    fn unlisted_record(
+        root: &Path,
+        saved: Option<&Path>,
+        repositories: &SharedRepositories,
+    ) -> WorktreeRecord {
+        membership_listing(root, saved, repositories)
             .and_then(|inventory| {
                 inventory
                     .worktrees
