@@ -25,7 +25,9 @@ impl SharedWorkspaceHost {
             uncertain: false,
         }
     }
-    fn commit(&mut self, next: State) -> Result<(), Refusal> {
+    fn commit(&mut self, mut next: State) -> Result<(), Refusal> {
+        // Runtime facts authorize an in-memory comparison, never a later recovery read.
+        next.inventory.close = None;
         if let Some(store) = &self.store {
             let envelope = next
                 .envelope(&self.prototype.directory)
@@ -188,9 +190,6 @@ impl SharedWorkspaceHost {
                     .outcome(device, sequence)
                     .ok_or(Refusal::Failed)?
                     .clone();
-                // Runtime generations only authorize this in-memory comparison. They must never
-                // be read back as live facts after a process restart or uncertain write.
-                next.inventory.close = None;
                 self.commit(next)?;
                 self.synchronize()?;
                 Ok(Reply::Outcome(outcome))
