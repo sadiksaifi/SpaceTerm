@@ -48,7 +48,7 @@ mod window {
     use super::super::terminal_pane::StatusIntent;
     use super::super::{ClosePane, TerminalPane, TerminalPaneEvent};
     use crate::application_identity::ApplicationIdentity;
-    use crate::local_server::LocalServer;
+    use crate::local_server::{LocalServer, ServerError};
     use crate::platform::local_filesystem::LocalFilesystemAuthority;
     use crate::platform::terminal_accessibility::{
         TerminalAccessibilityAdapter, TerminalAccessibilityAdapterFactory,
@@ -82,11 +82,16 @@ mod window {
     pub(super) const TAKEOVER_SELECTOR: &str = "development-pane-takeover";
     pub(super) const TAKE_OVER_SELECTOR: &str = "development-pane-take-over";
     pub(super) const TAKE_OVER_STATUS_SELECTOR: &str = "development-pane-take-over-status";
+    const CLOSE_WINDOW_SELECTOR: &str = "development-pane-close-window";
     const CONFIRM_SELECTOR: &str = "development-pane-end-session-confirm";
     const CANCEL_SELECTOR: &str = "development-pane-end-session-cancel";
 
     const TAKEOVER_TITLE: &str = "Controlled by Another Client";
     const TAKEOVER_DETAIL: &str = "Take Over to type and resize here. The shell keeps running.";
+    const TAKEOVER_FAILED_DETAIL: &str = "Take Over is available once SpaceTerm connects again.";
+    const SESSION_ENDED_TITLE: &str = "Session Ended";
+    const SESSION_ENDED_DETAIL: &str =
+        "This Terminal Session is no longer available on the server.";
     const TAKING_OVER: &str = "Taking Over…";
     const TAKE_OVER_UNCONFIRMED: &str = "Take Over was not confirmed.";
 
@@ -393,7 +398,9 @@ mod window {
             if self.status == DevelopmentPaneStatus::TakingOver
                 && matches!(
                     status,
-                    DevelopmentPaneStatus::Takeover | DevelopmentPaneStatus::TakeoverReconnecting
+                    DevelopmentPaneStatus::Takeover
+                        | DevelopmentPaneStatus::TakeoverReconnecting
+                        | DevelopmentPaneStatus::TakeoverFailed(_)
                 )
             {
                 self.take_over_unconfirmed = !generation_changed;
@@ -438,12 +445,15 @@ mod window {
                     self.status,
                     DevelopmentPaneStatus::Takeover
                         | DevelopmentPaneStatus::TakeoverReconnecting
+                        | DevelopmentPaneStatus::TakeoverFailed(_)
                         | DevelopmentPaneStatus::TakingOver
                 );
             if entering_takeover
                 || matches!(
                     self.status,
-                    DevelopmentPaneStatus::Takeover | DevelopmentPaneStatus::TakeoverReconnecting
+                    DevelopmentPaneStatus::Takeover
+                        | DevelopmentPaneStatus::TakeoverReconnecting
+                        | DevelopmentPaneStatus::TakeoverFailed(_)
                 )
             {
                 self.terminal
@@ -454,6 +464,11 @@ mod window {
                 // Focus rests on the window, so typing meant for the shell reaches nothing and
                 // never takes control back by accident. Tab reaches Take Over.
                 self.focus_content(window, cx);
+            }
+            // Close Window replaces Take Over, which may hold focus. The window keeps focus, so
+            // typing never closes it and Tab reaches Close Window.
+            if self.session_ended() {
+                self.focus_handle.focus(window, cx);
             }
             // Retry held focus during the interruption and leaves with it, so typing returns to
             // the Pane once input resumes.
@@ -475,10 +490,14 @@ mod window {
         }
 
         fn retry(&mut self, cx: &mut gpui::Context<Self>) {
+            if self.session_ended() {
+                return;
+            }
             if matches!(
                 self.status,
                 DevelopmentPaneStatus::Reconnecting
                     | DevelopmentPaneStatus::TakeoverReconnecting
+                    | DevelopmentPaneStatus::TakeoverFailed(_)
                     | DevelopmentPaneStatus::Failed(_)
             ) {
                 self.connection.retry();
@@ -499,6 +518,12 @@ mod window {
             cx.notify();
         }
 
+        /// The Session ended while another client controlled it. Nothing remains to take over,
+        /// retry, or end, so the window offers only to close.
+        fn session_ended(&self) -> bool {
+            self.status == DevelopmentPaneStatus::TakeoverFailed(ServerError::SessionUnavailable)
+        }
+
         fn can_end_session(&self) -> bool {
             self.status == DevelopmentPaneStatus::Connected
                 && self.end_request.is_none()
@@ -507,7 +532,12 @@ mod window {
 
         /// Close Pane in this window ends the shell, as it does for a Workspace Pane. Closing the
         /// window leaves it running.
+        /// Once the Session ended elsewhere, Close Pane closes the window.
         fn close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut gpui::Context<Self>) {
+            if self.session_ended() {
+                window.remove_window();
+                return;
+            }
             self.confirm_end_session(window, cx);
         }
 
@@ -741,7 +771,9 @@ mod window {
                     }),
                     StatusIntent::Warning,
                 ),
-                DevelopmentPaneStatus::Failed(error) => (
+                DevelopmentPaneStatus::TakeoverFailed(_) if self.session_ended() => return None,
+                DevelopmentPaneStatus::Failed(error)
+                | DevelopmentPaneStatus::TakeoverFailed(error) => (
                     SharedString::new_static("Not Connected"),
                     SharedString::from(error.to_string()),
                     StatusIntent::Error,
@@ -910,12 +942,21 @@ mod window {
         }
 
         /// The Takeover Screen: another client controls the Pane, and Take Over moves control
-        /// here.
+        /// here. If the Session ended meanwhile, the screen says so and offers only to close.
         fn render_takeover_screen(&self, cx: &mut gpui::Context<Self>) -> AnyElement {
             let appearance = super::super::appearance::shared_chrome(cx);
             // The configured terminal background, never one the shell chose.
             let surface =
                 appearance.pane_surface(appearance_runtime::current(cx).terminal.colors.background);
+            let session_ended = self.session_ended();
+            let (title, detail) = match self.status {
+                _ if session_ended => (SESSION_ENDED_TITLE, SESSION_ENDED_DETAIL),
+                // SpaceTerm stopped reconnecting, so the screen claims nothing about the shell.
+                DevelopmentPaneStatus::TakeoverFailed(_) => {
+                    (TAKEOVER_TITLE, TAKEOVER_FAILED_DETAIL)
+                }
+                _ => (TAKEOVER_TITLE, TAKEOVER_DETAIL),
+            };
             let taking_over = self.status == DevelopmentPaneStatus::TakingOver;
             let status_text_style = appearance.typography.style(TextRole::Secondary);
             let status = if taking_over {
@@ -944,7 +985,7 @@ mod window {
                         )
                         .into_any_element(),
                 )
-            } else if self.take_over_unconfirmed {
+            } else if self.take_over_unconfirmed && !session_ended {
                 Some(
                     div()
                         .id(TAKE_OVER_STATUS_SELECTOR)
@@ -960,25 +1001,33 @@ mod window {
                 None
             };
             let owner = cx.weak_entity();
-            let take_over = Button::new(TAKE_OVER_SELECTOR, "Take Over")
-                .variant(ButtonVariant::Primary)
-                .size(ButtonSize::Regular)
-                .disabled(self.status != DevelopmentPaneStatus::Takeover)
-                .tab_stop(true)
-                .accessibility_description(
-                    "Moves typing and the Pane's size to this window. The shell keeps running.",
-                )
-                .debug_selector(TAKE_OVER_SELECTOR)
-                .on_activate(move |_, window, cx| {
-                    let _ = owner.update(cx, |pane_window, cx| {
-                        pane_window.take_over(window, cx);
-                    });
-                });
+            let action = if session_ended {
+                Button::new(CLOSE_WINDOW_SELECTOR, "Close Window")
+                    .variant(ButtonVariant::Primary)
+                    .size(ButtonSize::Regular)
+                    .tab_stop(true)
+                    .accessibility_description("Closes this window. The Session already ended.")
+                    .debug_selector(CLOSE_WINDOW_SELECTOR)
+                    .on_activate(|_, window, _| window.remove_window())
+            } else {
+                Button::new(TAKE_OVER_SELECTOR, "Take Over")
+                    .variant(ButtonVariant::Primary)
+                    .size(ButtonSize::Regular)
+                    .disabled(self.status != DevelopmentPaneStatus::Takeover)
+                    .tab_stop(true)
+                    .accessibility_description("Moves typing and the Pane's size to this window.")
+                    .debug_selector(TAKE_OVER_SELECTOR)
+                    .on_activate(move |_, window, cx| {
+                        let _ = owner.update(cx, |pane_window, cx| {
+                            pane_window.take_over(window, cx);
+                        });
+                    })
+            };
             div()
                 .id(TAKEOVER_SELECTOR)
                 .role(gpui::accesskit::Role::Group)
-                .aria_label(TAKEOVER_TITLE)
-                .aria_description(TAKEOVER_DETAIL)
+                .aria_label(title)
+                .aria_description(detail)
                 .debug_selector(|| TAKEOVER_SELECTOR.to_owned())
                 .absolute()
                 .inset_0()
@@ -1001,17 +1050,25 @@ mod window {
                             div()
                                 .chrome_text(appearance.typography.style(TextRole::Section))
                                 .text_color(gpui_color(appearance.colors.text))
-                                .child(TAKEOVER_TITLE),
+                                .child(title),
                         )
                         .child(
                             div()
+                                .id("development-pane-takeover-detail")
+                                // Assistive technology announces the end, which happens without
+                                // any action here.
+                                .when(session_ended, |detail_text| {
+                                    detail_text
+                                        .role(gpui::accesskit::Role::Status)
+                                        .aria_label(detail)
+                                })
                                 .whitespace_normal()
                                 .chrome_text(appearance.typography.style(TextRole::Secondary))
                                 .text_color(gpui_color(appearance.colors.text_secondary))
-                                .child(TAKEOVER_DETAIL),
+                                .child(detail),
                         ),
                 )
-                .child(take_over)
+                .child(action)
                 // The slot keeps its height, so Take Over stays put while its status changes.
                 .child(
                     div()

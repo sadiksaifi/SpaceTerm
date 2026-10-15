@@ -719,3 +719,148 @@ fn an_end_session_approval_never_outlives_control(cx: &mut TestAppContext) {
     pane.click("modal-action-development-pane-end-session-confirm");
     assert_eq!(pane.connection.end_sessions(), 1);
 }
+
+#[gpui::test]
+fn a_session_ended_while_another_client_controls_it_says_so_without_its_content(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let mut pane = open_pane(DevelopmentPaneStatus::Connected, cx);
+    pane.publish_title("secret-build");
+    pane.lose_control();
+    let delivered = pane.keys();
+
+    // Another client ends the Session while this window shows the Takeover Screen.
+    pane.set(DevelopmentPaneStatus::TakeoverFailed(
+        ServerError::SessionUnavailable,
+    ));
+
+    assert!(pane.rendered(TAKEOVER_SELECTOR));
+    assert!(
+        !pane.rendered(TERMINAL_SELECTOR),
+        "no part of the Pane paints"
+    );
+    assert!(!pane.rendered(TERMINAL_TITLE_SELECTOR));
+    assert!(
+        !pane.rendered(NOTICE_SELECTOR),
+        "nothing claims SpaceTerm is reconnecting"
+    );
+    assert!(!pane.rendered(RETRY_SELECTOR), "retrying finds no Session");
+    assert!(
+        !pane.rendered(TAKE_OVER_SELECTOR),
+        "nothing is left to take over"
+    );
+    let tree = A11yTree::read(pane.cx);
+    let screen = tree.node("Session Ended");
+    assert_eq!(screen["aria"]["role"], "Group");
+    let description = screen["aria"]["description"].as_str().unwrap_or_default();
+    assert!(description.contains("no longer available"));
+    assert!(
+        !description.contains("keeps running"),
+        "the shell no longer runs"
+    );
+    assert_eq!(
+        tree.node("This Terminal Session is no longer available on the server.")["aria"]["role"],
+        "Status",
+        "the end is announced"
+    );
+    assert!(tree.find("Controlled by Another Client").is_none());
+    assert!(tree.find("Reconnecting…").is_none());
+    assert!(tree.find("Terminal context actions").is_none());
+    assert!(tree.exposed(tree.node("Close Window")));
+
+    // Typing reaches nothing, and nothing restarts or ends a Session.
+    pane.press("space");
+    pane.press("enter");
+    pane.press("x");
+    assert_eq!(pane.keys(), delivered);
+    assert!(!pane.closed(), "typing never closes the window");
+    assert_eq!(pane.connection.take_overs(), 0);
+    assert_eq!(pane.connection.retries(), 0);
+    assert_eq!(pane.connection.end_sessions(), 0);
+    assert_eq!(pane.records.session_count(), 1, "no Session starts");
+
+    // End Session has nothing to end, so Tab passes over it to Close Window.
+    pane.press("tab");
+    pane.press("space");
+    assert!(pane.closed());
+    assert_eq!(pane.connection.end_sessions(), 0);
+}
+
+#[gpui::test]
+fn close_pane_closes_the_window_once_the_session_ended(cx: &mut TestAppContext) {
+    let mut pane = open_pane(DevelopmentPaneStatus::Connected, cx);
+    pane.lose_control();
+    pane.set(DevelopmentPaneStatus::TakeoverFailed(
+        ServerError::SessionUnavailable,
+    ));
+
+    // Close Pane acts on key down, so the window is gone before the key comes back up.
+    pane.cx.simulate_keystrokes("cmd-w");
+    pane.cx.run_until_parked();
+
+    assert!(pane.closed());
+    assert_eq!(pane.connection.end_sessions(), 0);
+}
+
+#[gpui::test]
+fn a_permanent_failure_after_losing_control_explains_itself_without_content(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let mut pane = open_pane(DevelopmentPaneStatus::Connected, cx);
+    pane.publish_title("secret-build");
+    let delivered = pane.keys();
+
+    // The window first learns of the takeover from a permanent failure.
+    pane.connection.lose_control();
+    pane.set(DevelopmentPaneStatus::TakeoverFailed(
+        ServerError::AuthenticationRefused,
+    ));
+
+    assert!(pane.rendered(TAKEOVER_SELECTOR));
+    assert!(
+        !pane.rendered(TERMINAL_SELECTOR),
+        "no part of the Pane paints"
+    );
+    assert!(!pane.rendered(TERMINAL_TITLE_SELECTOR));
+    let tree = A11yTree::read(pane.cx);
+    assert!(tree.find("Terminal context actions").is_none());
+    assert!(
+        tree.find("Reconnecting…").is_none(),
+        "SpaceTerm stopped trying"
+    );
+    let notice = tree.node("Not Connected");
+    assert_eq!(notice["aria"]["role"], "Status");
+    assert!(
+        notice["aria"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("could not authenticate")),
+        "the notice names the failure"
+    );
+    let screen = tree.node("Controlled by Another Client");
+    assert!(
+        !screen["aria"]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("keeps running"),
+        "nothing claims the shell runs while SpaceTerm cannot reach it"
+    );
+    assert_eq!(tree.node("Take Over")["aria"]["disabled"], true);
+
+    pane.cx.simulate_keystrokes("a enter");
+    assert_eq!(pane.keys(), delivered, "typing reaches no shell");
+    pane.click(TAKE_OVER_SELECTOR);
+    assert_eq!(pane.connection.take_overs(), 0);
+    pane.click(RETRY_SELECTOR);
+    assert_eq!(pane.connection.retries(), 1);
+
+    // A retry that reaches the server finds another Controlling Client again.
+    pane.set(DevelopmentPaneStatus::Takeover);
+    assert!(!pane.rendered(NOTICE_SELECTOR));
+    assert!(!pane.rendered(TERMINAL_SELECTOR));
+    pane.click(TAKE_OVER_SELECTOR);
+    assert_eq!(pane.connection.take_overs(), 1);
+}

@@ -18,6 +18,7 @@ pub(crate) enum DevelopmentPaneStatus {
     Connected,
     Takeover,
     TakeoverReconnecting,
+    TakeoverFailed(ServerError),
     TakingOver,
     Reconnecting,
     Ended,
@@ -32,6 +33,17 @@ pub(crate) struct DevelopmentPaneState {
     connected_epoch: AtomicU64,
 }
 impl DevelopmentPaneState {
+    fn new() -> Self {
+        Self {
+            status: Mutex::new(DevelopmentPaneStatus::Connecting),
+            retry: AtomicBool::new(false),
+            take_over: AtomicBool::new(false),
+            close: AtomicU64::new(0),
+            epoch: AtomicU64::new(0),
+            connected_epoch: AtomicU64::new(0),
+        }
+    }
+
     pub(crate) fn status(&self) -> DevelopmentPaneStatus {
         *self.status.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -67,6 +79,30 @@ impl DevelopmentPaneState {
             self.set(DevelopmentPaneStatus::Failed(ServerError::NotRunning));
         }
     }
+    fn connection_failed(&self, error: ServerError, has_takeover: bool) -> bool {
+        let retryable = matches!(
+            error,
+            ServerError::Protocol
+                | ServerError::NotRunning
+                | ServerError::StaleControl
+                | ServerError::Controlled
+        );
+        {
+            let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+            // A click accepted before this interruption is never replayed after it.
+            self.take_over.store(false, Ordering::Release);
+            *status = if has_takeover && retryable {
+                DevelopmentPaneStatus::TakeoverReconnecting
+            } else if has_takeover {
+                DevelopmentPaneStatus::TakeoverFailed(error)
+            } else if retryable {
+                DevelopmentPaneStatus::Reconnecting
+            } else {
+                DevelopmentPaneStatus::Failed(error)
+            };
+        }
+        retryable
+    }
     fn set(&self, status: DevelopmentPaneStatus) {
         *self.status.lock().unwrap_or_else(|e| e.into_inner()) = status;
     }
@@ -77,14 +113,7 @@ pub(crate) struct DevelopmentServerSessionFactory {
 }
 impl DevelopmentServerSessionFactory {
     pub(crate) fn new(server: LocalServer) -> (Self, Arc<DevelopmentPaneState>) {
-        let state = Arc::new(DevelopmentPaneState {
-            status: Mutex::new(DevelopmentPaneStatus::Connecting),
-            retry: AtomicBool::new(false),
-            take_over: AtomicBool::new(false),
-            close: AtomicU64::new(0),
-            epoch: AtomicU64::new(0),
-            connected_epoch: AtomicU64::new(0),
-        });
+        let state = Arc::new(DevelopmentPaneState::new());
         (
             Self {
                 server,
@@ -357,25 +386,7 @@ fn present(
                     takeover = true;
                     clear_presentation(&events, &mut generation, &appearance);
                 }
-                let retryable = matches!(
-                    error,
-                    ServerError::Protocol
-                        | ServerError::NotRunning
-                        | ServerError::StaleControl
-                        | ServerError::Controlled
-                );
-                {
-                    let mut status = state.status.lock().unwrap_or_else(|e| e.into_inner());
-                    // A click accepted before this interruption is never replayed after it.
-                    state.take_over.store(false, Ordering::Release);
-                    *status = if takeover {
-                        DevelopmentPaneStatus::TakeoverReconnecting
-                    } else if retryable {
-                        DevelopmentPaneStatus::Reconnecting
-                    } else {
-                        DevelopmentPaneStatus::Failed(error)
-                    };
-                }
+                let retryable = state.connection_failed(error, takeover);
                 let mut ticks = 0;
                 while alive.load(Ordering::Acquire) && !state.retry.swap(false, Ordering::AcqRel) {
                     if retryable && ticks >= 20 {
@@ -677,6 +688,25 @@ fn decode_screen(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ended_session_is_a_permanent_failure_after_control_loss() {
+        let state = DevelopmentPaneState::new();
+        state.set(DevelopmentPaneStatus::Takeover);
+        assert!(!state.connection_failed(ServerError::SessionUnavailable, true));
+        assert_eq!(
+            state.status(),
+            DevelopmentPaneStatus::TakeoverFailed(ServerError::SessionUnavailable)
+        );
+    }
+
+    #[test]
+    fn a_transport_outage_keeps_the_takeover_screen_reconnecting() {
+        let state = DevelopmentPaneState::new();
+        state.set(DevelopmentPaneStatus::Takeover);
+        assert!(state.connection_failed(ServerError::NotRunning, true));
+        assert_eq!(state.status(), DevelopmentPaneStatus::TakeoverReconnecting);
+    }
 
     #[test]
     fn screen_reconciliation_keeps_program_colors_and_projects_client_defaults() {
