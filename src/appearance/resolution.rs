@@ -6,21 +6,21 @@ use super::{
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) struct AppearanceGeneration(u64);
+pub struct AppearanceGeneration(u64);
 
 impl AppearanceGeneration {
-    pub(crate) const INITIAL: Self = Self(0);
+    pub const INITIAL: Self = Self(0);
     #[allow(
         dead_code,
         reason = "terminal update boundaries construct externally assigned generations"
     )]
-    pub(crate) const fn new(value: u64) -> Self {
+    pub const fn new(value: u64) -> Self {
         Self(value)
     }
-    pub(crate) const fn get(self) -> u64 {
+    pub const fn get(self) -> u64 {
         self.0
     }
-    pub(crate) fn next(self) -> Option<Self> {
+    pub fn next(self) -> Option<Self> {
         self.0.checked_add(1).map(Self)
     }
 }
@@ -76,7 +76,7 @@ impl From<Option<Appearance>> for SystemAppearance {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum FontClass {
+pub enum FontClass {
     Proportional,
     Monospace,
 }
@@ -124,21 +124,21 @@ impl AvailableFonts {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum FontStyle {
+pub enum FontStyle {
     Normal,
     Italic,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ResolvedFontDescriptor {
-    pub(crate) primary_family: String,
-    pub(crate) fallback_families: Vec<String>,
-    pub(crate) size: f32,
-    pub(crate) line_height: f32,
-    pub(crate) weight: u16,
-    pub(crate) style: FontStyle,
-    pub(crate) features: Vec<String>,
-    pub(crate) resolution_identity: String,
+pub struct ResolvedFontDescriptor {
+    pub primary_family: String,
+    pub fallback_families: Vec<String>,
+    pub size: f32,
+    pub line_height: f32,
+    pub weight: u16,
+    pub style: FontStyle,
+    pub features: Vec<String>,
+    pub resolution_identity: String,
 }
 
 impl ResolvedFontDescriptor {
@@ -172,14 +172,14 @@ pub(crate) struct ResolvedChromeTypography {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ResolvedTerminalTypography {
-    pub(crate) regular: ResolvedFontDescriptor,
-    pub(crate) bold: ResolvedFontDescriptor,
-    pub(crate) italic: ResolvedFontDescriptor,
-    pub(crate) bold_italic: ResolvedFontDescriptor,
-    pub(crate) cell_size: f32,
-    pub(crate) line_height: f32,
-    pub(crate) render_italic: bool,
+pub struct ResolvedTerminalTypography {
+    pub regular: ResolvedFontDescriptor,
+    pub bold: ResolvedFontDescriptor,
+    pub italic: ResolvedFontDescriptor,
+    pub bold_italic: ResolvedFontDescriptor,
+    pub cell_size: f32,
+    pub line_height: f32,
+    pub render_italic: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -192,13 +192,13 @@ pub(crate) struct ResolvedChromeAppearance {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ResolvedTerminalAppearance {
-    pub(crate) requested_theme: ThemeId,
-    pub(crate) effective_theme: ThemeId,
-    pub(crate) appearance: Appearance,
-    pub(crate) colors: TerminalColors,
-    pub(crate) typography: ResolvedTerminalTypography,
-    pub(crate) bold_as_bright: bool,
+pub struct ResolvedTerminalAppearance {
+    pub requested_theme: ThemeId,
+    pub effective_theme: ThemeId,
+    pub appearance: Appearance,
+    pub colors: TerminalColors,
+    pub typography: ResolvedTerminalTypography,
+    pub bold_as_bright: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

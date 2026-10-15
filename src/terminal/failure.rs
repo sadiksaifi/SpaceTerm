@@ -8,7 +8,7 @@ use super::key::KeyAction;
 use super::session::{TerminalSessionExit, TerminalSessionFailure, TerminalSessionStartupStage};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum FailureClass {
+pub enum FailureClass {
     Pty,
     Emulator,
     Presentation,
@@ -29,13 +29,13 @@ impl fmt::Display for FailureClass {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Recoverability {
+pub enum Recoverability {
     Recoverable,
     Fatal,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum FailureReason {
+pub enum FailureReason {
     Io(std::io::ErrorKind),
     OutOfMemory,
     InvalidValue,
@@ -57,7 +57,7 @@ impl From<libghostty_vt::Error> for FailureReason {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TerminalFailure {
+pub struct TerminalFailure {
     class: FailureClass,
     recoverability: Recoverability,
     operation: &'static str,
@@ -65,24 +65,24 @@ pub(crate) struct TerminalFailure {
 }
 
 impl TerminalFailure {
-    pub(crate) const fn pty(operation: &'static str) -> Self {
+    pub const fn pty(operation: &'static str) -> Self {
         Self::new(FailureClass::Pty, Recoverability::Fatal, operation)
     }
 
-    pub(crate) const fn emulator(operation: &'static str) -> Self {
+    pub const fn emulator(operation: &'static str) -> Self {
         Self::new(FailureClass::Emulator, Recoverability::Fatal, operation)
     }
 
-    pub(crate) fn emulator_error(operation: &'static str, error: libghostty_vt::Error) -> Self {
+    pub fn emulator_error(operation: &'static str, error: libghostty_vt::Error) -> Self {
         Self::emulator(operation).with_reason(error.into())
     }
 
-    pub(crate) const fn with_reason(mut self, reason: FailureReason) -> Self {
+    pub const fn with_reason(mut self, reason: FailureReason) -> Self {
         self.reason = Some(reason);
         self
     }
 
-    pub(crate) const fn presentation(operation: &'static str) -> Self {
+    pub const fn presentation(operation: &'static str) -> Self {
         Self::new(
             FailureClass::Presentation,
             Recoverability::Recoverable,
@@ -90,7 +90,7 @@ impl TerminalFailure {
         )
     }
 
-    pub(crate) const fn platform(operation: &'static str) -> Self {
+    pub const fn platform(operation: &'static str) -> Self {
         Self::new(
             FailureClass::Platform,
             Recoverability::Recoverable,
@@ -98,7 +98,7 @@ impl TerminalFailure {
         )
     }
 
-    pub(crate) const fn resource(operation: &'static str) -> Self {
+    pub const fn resource(operation: &'static str) -> Self {
         Self::new(
             FailureClass::Resource,
             Recoverability::Recoverable,
@@ -119,7 +119,7 @@ impl TerminalFailure {
         }
     }
 
-    pub(crate) fn from_session(failure: &TerminalSessionFailure) -> Self {
+    pub fn from_session(failure: &TerminalSessionFailure) -> Self {
         match failure {
             TerminalSessionFailure::Startup { stage, .. } => match stage {
                 TerminalSessionStartupStage::Pty
@@ -133,23 +133,23 @@ impl TerminalFailure {
         }
     }
 
-    pub(crate) const fn class(&self) -> FailureClass {
+    pub const fn class(&self) -> FailureClass {
         self.class
     }
 
-    pub(crate) const fn recoverability(&self) -> Recoverability {
+    pub const fn recoverability(&self) -> Recoverability {
         self.recoverability
     }
 
-    pub(crate) const fn operation(&self) -> &'static str {
+    pub const fn operation(&self) -> &'static str {
         self.operation
     }
 
-    pub(crate) const fn reason(&self) -> Option<FailureReason> {
+    pub const fn reason(&self) -> Option<FailureReason> {
         self.reason
     }
 
-    pub(crate) const fn is_fatal(&self) -> bool {
+    pub const fn is_fatal(&self) -> bool {
         matches!(self.recoverability, Recoverability::Fatal)
     }
 }
@@ -167,6 +167,8 @@ impl fmt::Display for TerminalFailure {
         )
     }
 }
+
+impl std::error::Error for TerminalFailure {}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) enum PaneTerminalState {

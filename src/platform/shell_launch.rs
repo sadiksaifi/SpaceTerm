@@ -45,7 +45,7 @@ const FOREIGN_RUNTIME_ENVIRONMENT: &[&str] = &[
 
 /// Composition supplies the selected shell, resources, captured environment, and policy facts.
 #[derive(Clone)]
-pub(crate) struct ShellLaunchPlanner {
+pub struct ShellLaunchPlanner {
     shell: PathBuf,
     resources: PathBuf,
     environment: (ShellIntegrationMode, ShellEnvironment),
@@ -56,7 +56,7 @@ pub(crate) struct ShellLaunchPlanner {
 impl ShellLaunchPlanner {
     /// `host_runtime_environment` names launch and terminal variables that only the host
     /// desktop exports, removed in addition to the shared foreign terminal variables.
-    pub(crate) fn new(
+    pub fn new(
         shell: PathBuf,
         resources: PathBuf,
         mode: ShellIntegrationMode,
@@ -74,7 +74,7 @@ impl ShellLaunchPlanner {
     }
 
     #[cfg(test)]
-    pub(crate) fn for_test(shell: PathBuf, resources: PathBuf) -> Self {
+    pub fn for_test(shell: PathBuf, resources: PathBuf) -> Self {
         Self::new(
             shell,
             resources,
@@ -86,7 +86,7 @@ impl ShellLaunchPlanner {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_environment(
+    pub fn with_environment(
         mut self,
         mode: ShellIntegrationMode,
         inherited: ShellEnvironment,
@@ -95,7 +95,7 @@ impl ShellLaunchPlanner {
         self
     }
 
-    pub(crate) fn fallback_title(&self) -> String {
+    pub fn fallback_title(&self) -> String {
         self.shell
             .file_name()
             .unwrap_or(self.shell.as_os_str())
@@ -103,7 +103,7 @@ impl ShellLaunchPlanner {
             .into_owned()
     }
 
-    pub(crate) fn local(
+    pub fn local(
         &self,
         working_directory: &Path,
     ) -> Result<PreparedShellLaunch, ShellLaunchFailure> {
@@ -161,7 +161,7 @@ impl ShellLaunchPlanner {
 }
 
 /// An owned, non-cloneable launch. Debug never exposes command, path, or environment values.
-pub(crate) struct PreparedShellLaunch {
+pub struct PreparedShellLaunch {
     executable: PathBuf,
     arguments: Vec<OsString>,
     working_directory: PathBuf,
@@ -197,36 +197,36 @@ impl PreparedShellLaunch {
     }
 
     /// Sets one more variable for the shell, replacing any inherited value.
-    pub(crate) fn with_environment_value(mut self, name: &str, value: &str) -> Self {
+    pub fn with_environment_value(mut self, name: &str, value: &str) -> Self {
         self.environment.push((name.into(), value.into()));
         self
     }
 
-    pub(crate) fn terminal_name(&self) -> &'static str {
+    pub fn terminal_name(&self) -> &'static str {
         self.terminal_name
     }
 
-    pub(crate) fn executable(&self) -> &OsStr {
+    pub fn executable(&self) -> &OsStr {
         self.executable.as_os_str()
     }
-    pub(crate) fn arguments(&self) -> &[OsString] {
+    pub fn arguments(&self) -> &[OsString] {
         &self.arguments
     }
-    pub(crate) fn working_directory(&self) -> &Path {
+    pub fn working_directory(&self) -> &Path {
         &self.working_directory
     }
-    pub(crate) fn inherit_environment(&self) -> bool {
+    pub fn inherit_environment(&self) -> bool {
         self.inherit_environment
     }
-    pub(crate) fn environment_removals(&self) -> &[OsString] {
+    pub fn environment_removals(&self) -> &[OsString] {
         &self.environment_removals
     }
-    pub(crate) fn environment(&self) -> &[(OsString, OsString)] {
+    pub fn environment(&self) -> &[(OsString, OsString)] {
         &self.environment
     }
 
     #[cfg(test)]
-    pub(crate) fn for_test(working_directory: PathBuf) -> Self {
+    pub fn for_test(working_directory: PathBuf) -> Self {
         let mut launch = ShellLaunchPlanner::for_test(
             "/fixture/zsh".into(),
             "/fixture/missing-resources".into(),
@@ -252,7 +252,7 @@ impl fmt::Debug for PreparedShellLaunch {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub(crate) enum ShellLaunchFailure {
+pub enum ShellLaunchFailure {
     #[error("Shell launch directory is unavailable; select an existing directory and retry")]
     DirectoryUnavailable,
     #[error("Remote Terminal Session Channel is unavailable; reconnect and retry")]

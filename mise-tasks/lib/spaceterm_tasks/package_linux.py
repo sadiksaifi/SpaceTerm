@@ -113,7 +113,12 @@ def package(release_tag=None):
     display_name = identity(name)["CFBundleName"]
     print(f"Building the x86_64 Linux {display_name} executable")
     executable = build_executable(
-        "--release", "--locked", "--no-default-features", env=packaged_environment(release_tag)
+        "--release",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "desktop",
+        env=packaged_environment(release_tag),
     )
     shutil.rmtree(STAGE, ignore_errors=True)
     STAGE.mkdir(parents=True)

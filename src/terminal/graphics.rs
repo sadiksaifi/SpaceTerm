@@ -175,44 +175,44 @@ fn storage_limits(resident: [usize; 2], available: usize) -> [usize; 2] {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct ImageKey {
-    pub(crate) image_id: u32,
-    pub(crate) generation: u64,
+pub struct ImageKey {
+    pub image_id: u32,
+    pub generation: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ImageSnapshot {
-    pub(crate) key: ImageKey,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) rgba: Arc<[u8]>,
+pub struct ImageSnapshot {
+    pub key: ImageKey,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Arc<[u8]>,
     pub(crate) reservation: Option<Arc<GraphicsReservation>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ImagePlacementSnapshot {
-    pub(crate) image: ImageKey,
-    pub(crate) placement_id: u32,
-    pub(crate) z: i32,
-    pub(crate) viewport_col: i32,
-    pub(crate) viewport_row: i32,
-    pub(crate) cell_offset_x: u32,
-    pub(crate) cell_offset_y: u32,
-    pub(crate) source_x: u32,
-    pub(crate) source_y: u32,
-    pub(crate) source_width: u32,
-    pub(crate) source_height: u32,
-    pub(crate) destination_width: u32,
-    pub(crate) destination_height: u32,
-    pub(crate) unicode_placeholder: bool,
+pub struct ImagePlacementSnapshot {
+    pub image: ImageKey,
+    pub placement_id: u32,
+    pub z: i32,
+    pub viewport_col: i32,
+    pub viewport_row: i32,
+    pub cell_offset_x: u32,
+    pub cell_offset_y: u32,
+    pub source_x: u32,
+    pub source_y: u32,
+    pub source_width: u32,
+    pub source_height: u32,
+    pub destination_width: u32,
+    pub destination_height: u32,
+    pub unicode_placeholder: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct GraphicsSnapshot {
-    pub(crate) generation: u64,
-    pub(crate) placement_generation: u64,
-    pub(crate) images: Arc<[Arc<ImageSnapshot>]>,
-    pub(crate) placements: Arc<[ImagePlacementSnapshot]>,
+pub struct GraphicsSnapshot {
+    pub generation: u64,
+    pub placement_generation: u64,
+    pub images: Arc<[Arc<ImageSnapshot>]>,
+    pub placements: Arc<[ImagePlacementSnapshot]>,
 }
 
 #[derive(Default)]

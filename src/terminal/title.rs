@@ -8,14 +8,14 @@ const ACTIVITY_FRESHNESS: Duration = Duration::from_secs(2);
 
 /// Keeps an animation candidate from briefly replacing the program's stable icon.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) enum TitleGlyph {
+pub enum TitleGlyph {
     #[default]
     Reported,
     Retained(Option<Arc<str>>),
 }
 
 impl TitleGlyph {
-    pub(crate) fn resolve<'a>(&'a self, reported: Option<&'a str>) -> Option<&'a str> {
+    pub fn resolve<'a>(&'a self, reported: Option<&'a str>) -> Option<&'a str> {
         match self {
             Self::Reported => reported,
             Self::Retained(glyph) => glyph.as_deref(),

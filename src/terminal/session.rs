@@ -3,15 +3,19 @@ use super::native_services::PastePayload;
 use crate::terminal::key::InputModifiers;
 mod clipboard;
 mod input;
-pub(crate) use clipboard::ClipboardRequest;
-use clipboard::{ClipboardAuthority, ClipboardCompletion, WorkerClipboard};
+mod subscriptions;
+pub use clipboard::ClipboardCompletion;
+pub use clipboard::ClipboardRequest;
+use clipboard::{ClipboardAuthority, WorkerClipboard};
 use input::PtyInput;
+pub use subscriptions::TerminalSubscription;
+use subscriptions::{TerminalEventPublisher, WorkerEventLifetime};
 mod schedules;
 use schedules::{FindQueryUpdate, ScheduleInput, WorkerSchedules};
 mod launch;
 use super::pointer_input::*;
 use crate::platform::local_filesystem::LocalFilesystemAuthority;
-pub(crate) use launch::{
+pub use launch::{
     LocalTerminalLaunchPlan, NativeTerminalSessionFactory, RemoteTerminalLaunchPlan,
     TerminalLaunchPlan,
 };
@@ -83,7 +87,7 @@ fn pty_size(geometry: TerminalGeometry) -> NativePtySize {
 // Screen events may supersede older screens. Failed and Exited are final events,
 // so the worker must not publish another screen after either one.
 #[derive(Debug)]
-pub(crate) enum TerminalSessionEvent {
+pub enum TerminalSessionEvent {
     Screen(Arc<ScreenSnapshot>),
     /// Retained Terminal Metadata changed; read it from the retained snapshot.
     MetadataChanged(MetadataWakeup),
@@ -96,7 +100,7 @@ pub(crate) enum TerminalSessionEvent {
 }
 
 #[derive(Debug)]
-pub(crate) struct MetadataWakeup {
+pub struct MetadataWakeup {
     queued: Arc<AtomicBool>,
 }
 
@@ -113,30 +117,34 @@ impl Drop for MetadataWakeup {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TerminalAppearanceUpdate {
-    pub(crate) generation: AppearanceGeneration,
-    pub(crate) appearance: Arc<ResolvedTerminalAppearance>,
+pub struct TerminalAppearanceUpdate {
+    pub generation: AppearanceGeneration,
+    pub appearance: Arc<ResolvedTerminalAppearance>,
 }
 
 #[cfg(test)]
 pub(crate) fn test_terminal_appearance_update() -> TerminalAppearanceUpdate {
-    use crate::appearance::{
-        AppearancePreferences, AvailableFonts, SystemAppearance, ThemeCatalog,
-    };
-
-    let resolved = ThemeCatalog::default()
-        .resolve(
-            AppearanceGeneration::INITIAL,
-            &AppearancePreferences::default(),
-            SystemAppearance::unavailable(),
-            &AvailableFonts::default(),
-        )
-        .expect("built-in terminal appearance must resolve");
-    TerminalAppearanceUpdate::new(resolved.generation, resolved.terminal)
+    TerminalAppearanceUpdate::builtin().expect("built-in terminal appearance must resolve")
 }
 
 impl TerminalAppearanceUpdate {
-    pub(crate) fn new(
+    /// Resolves the built-in appearance without consulting a desktop or installed fonts.
+    pub fn builtin() -> Result<Self, TerminalFailure> {
+        use crate::appearance::{
+            AppearancePreferences, AvailableFonts, SystemAppearance, ThemeCatalog,
+        };
+        let resolved = ThemeCatalog::default()
+            .resolve(
+                AppearanceGeneration::INITIAL,
+                &AppearancePreferences::default(),
+                SystemAppearance::unavailable(),
+                &AvailableFonts::default(),
+            )
+            .map_err(|_| TerminalFailure::emulator("resolve-builtin-terminal-appearance"))?;
+        Ok(Self::new(resolved.generation, resolved.terminal))
+    }
+
+    pub fn new(
         generation: AppearanceGeneration,
         appearance: Arc<ResolvedTerminalAppearance>,
     ) -> Self {
@@ -148,7 +156,7 @@ impl TerminalAppearanceUpdate {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum TerminalSessionExit {
+pub enum TerminalSessionExit {
     Success,
     ExitCode(u32),
     Signal(String),
@@ -169,7 +177,7 @@ impl fmt::Display for TerminalSessionExit {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum TerminalSessionFailure {
+pub enum TerminalSessionFailure {
     Startup {
         stage: TerminalSessionStartupStage,
         message: String,
@@ -186,7 +194,7 @@ pub(crate) enum TerminalSessionFailure {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TerminalSessionStartupStage {
+pub enum TerminalSessionStartupStage {
     Pty,
     Reader,
     ReaderThread,
@@ -242,7 +250,7 @@ impl fmt::Display for TerminalSessionStartupStage {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum TerminalSessionError {
+pub enum TerminalSessionError {
     #[error("failed to start the terminal worker thread: {0:?}")]
     SpawnWorker(std::io::ErrorKind),
     #[error(transparent)]
@@ -260,15 +268,15 @@ impl From<std::io::Error> for TerminalSessionError {
     }
 }
 
-pub(crate) struct StartedTerminalSession {
-    pub(crate) handle: Box<dyn TerminalSessionHandle>,
-    pub(crate) events: async_channel::Receiver<TerminalSessionEvent>,
-    pub(crate) accessibility: async_channel::Receiver<Arc<TerminalAccessibilityModel>>,
-    pub(crate) clipboard: async_channel::Receiver<ClipboardRequest>,
+pub struct StartedTerminalSession {
+    pub handle: Box<dyn TerminalSessionHandle>,
+    pub events: async_channel::Receiver<TerminalSessionEvent>,
+    pub accessibility: async_channel::Receiver<Arc<TerminalAccessibilityModel>>,
+    pub clipboard: async_channel::Receiver<ClipboardRequest>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SelectionCopyError {
+pub enum SelectionCopyError {
     Formatting,
     WorkerStopped,
 }
@@ -281,7 +289,7 @@ pub(crate) enum SelectionCopyError {
     )
 )]
 #[derive(Clone, Debug)]
-pub(crate) struct AccessibilitySelectionSender {
+pub struct AccessibilitySelectionSender {
     commands: CommandSender<Command>,
 }
 
@@ -294,7 +302,7 @@ pub(crate) struct AccessibilitySelectionSender {
 )]
 impl AccessibilitySelectionSender {
     #[cfg(test)]
-    pub(crate) fn recording_channel() -> (Self, RecordingAccessibilitySelectionReceiver) {
+    pub fn recording_channel() -> (Self, RecordingAccessibilitySelectionReceiver) {
         let (commands, receiver) = mpsc::channel();
         (
             Self { commands },
@@ -302,7 +310,7 @@ impl AccessibilitySelectionSender {
         )
     }
 
-    pub(crate) fn request(&self, request: AccessibilitySelectionRequest) {
+    pub fn request(&self, request: AccessibilitySelectionRequest) {
         if self
             .commands
             .send(Command::AccessibilitySelection(request))
@@ -323,7 +331,7 @@ impl AccessibilitySelectionSender {
     )
 )]
 #[derive(Clone)]
-pub(crate) struct AccessibilityDemandSender {
+pub struct AccessibilityDemandSender {
     commands: CommandSender<Command>,
     schedule_input: ScheduleInput,
 }
@@ -342,7 +350,7 @@ impl fmt::Debug for AccessibilityDemandSender {
     )
 )]
 impl AccessibilityDemandSender {
-    pub(crate) fn request(&self) {
+    pub fn request(&self) {
         self.request_at(Instant::now());
     }
 
@@ -358,11 +366,11 @@ impl AccessibilityDemandSender {
 }
 
 #[cfg(test)]
-pub(crate) struct RecordingAccessibilitySelectionReceiver(CommandReceiver<Command>);
+pub struct RecordingAccessibilitySelectionReceiver(CommandReceiver<Command>);
 
 #[cfg(test)]
 impl RecordingAccessibilitySelectionReceiver {
-    pub(crate) fn drain(&self) -> Vec<AccessibilitySelectionRequest> {
+    pub fn drain(&self) -> Vec<AccessibilitySelectionRequest> {
         self.0
             .try_iter()
             .map(|command| match command {
@@ -414,7 +422,7 @@ impl TerminalSessionPermissionRequestState {
     }
 }
 
-pub(crate) trait TerminalSessionHandle {
+pub trait TerminalSessionHandle {
     /// The newest Terminal Metadata the Terminal Session retained, presentable or not.
     fn metadata_snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
         None
@@ -477,7 +485,7 @@ pub(crate) trait TerminalSessionHandle {
 }
 
 /// Starts one Terminal Session by consuming typed Local or Remote launch authority.
-pub(crate) trait TerminalSessionFactory {
+pub trait TerminalSessionFactory {
     /// Starts a Terminal Session without reparsing or weakening the supplied launch plan.
     ///
     /// Remote implementations consume the prepared OpenSSH command exactly once and use only the
@@ -494,19 +502,20 @@ pub(crate) trait TerminalSessionFactory {
     }
 }
 
-pub(crate) struct TerminalSession {
+pub struct TerminalRuntime {
     metadata_state: TerminalSessionMetadataState,
     permission_request_state: TerminalSessionPermissionRequestState,
     commands: Option<CommandSender<Command>>,
     worker: Option<JoinHandle<()>>,
     native_pty_close: Option<NativePtyCloseHandle>,
     schedule_input: ScheduleInput,
-    clipboard_requests: async_channel::Receiver<ClipboardRequest>,
+    event_publisher: TerminalEventPublisher,
     clipboard_authority: Arc<ClipboardAuthority>,
 }
 
+#[cfg(test)]
 type StartedTerminalSessionParts = (
-    TerminalSession,
+    TerminalRuntime,
     async_channel::Receiver<TerminalSessionEvent>,
     async_channel::Receiver<Arc<TerminalAccessibilityModel>>,
 );
@@ -523,7 +532,27 @@ fn test_launch_planner() -> ShellLaunchPlanner {
     )
 }
 
-impl TerminalSession {
+impl TerminalRuntime {
+    /// Opens one presentation subscription, replacing the previous subscription.
+    /// Dropping its receivers leaves this runtime and its PTY alive.
+    pub fn subscribe(&self) -> TerminalSubscription {
+        let (events, event_sender) = self.event_publisher.subscribe();
+        self.clipboard_authority.observe_subscription(event_sender);
+        let (accessibility_sender, accessibility) = async_channel::bounded(1);
+        let (clipboard_sender, clipboard) = async_channel::bounded(1);
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::Subscribe {
+                accessibility: accessibility_sender,
+                clipboard: clipboard_sender,
+            });
+        }
+        TerminalSubscription {
+            events,
+            accessibility,
+            clipboard,
+        }
+    }
+
     fn copy_selection_query(
         &self,
         generation: Option<PresentationGeneration>,
@@ -555,7 +584,7 @@ impl TerminalSession {
         }
     }
 
-    fn shutdown(&mut self) {
+    pub fn shutdown(&mut self) {
         self.request_shutdown();
         // Dropping a JoinHandle detaches the worker. It still owns the PTY and reader
         // cleanup, but a close operation must never block its GPUI caller on either thread.
@@ -571,7 +600,7 @@ impl TerminalSession {
     }
 }
 
-impl TerminalSessionHandle for TerminalSession {
+impl TerminalSessionHandle for TerminalRuntime {
     fn metadata_snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
         self.metadata_state.snapshot()
     }
@@ -808,7 +837,7 @@ impl TerminalSessionHandle for TerminalSession {
     }
 }
 
-impl Drop for TerminalSession {
+impl Drop for TerminalRuntime {
     fn drop(&mut self) {
         self.shutdown();
     }
@@ -857,6 +886,10 @@ struct ReaderEventBatch {
 }
 
 enum Command {
+    Subscribe {
+        accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
+        clipboard: async_channel::Sender<ClipboardRequest>,
+    },
     Key(KeyInput),
     ClearScreenAndScrollback,
     Focus(bool),
@@ -944,6 +977,7 @@ impl Command {
 impl fmt::Debug for Command {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
+            Self::Subscribe { .. } => "Subscribe",
             Self::Key(..) => "Key",
             Self::ClearScreenAndScrollback => "ClearScreenAndScrollback",
             Self::Focus(..) => "Focus",
@@ -993,7 +1027,7 @@ struct TerminalWorker {
     emulator: TerminalEmulator,
     commands: CommandReceiver<Command>,
     reader_events: mpsc::Receiver<NativePtyOutput>,
-    events: async_channel::Sender<TerminalSessionEvent>,
+    events: TerminalEventPublisher,
     accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
     pending_command: Option<Command>,
     terminal_input_focused: bool,
@@ -1024,7 +1058,7 @@ struct TerminalWorkerPublishers {
     clipboard: WorkerClipboard,
     metadata_state: TerminalSessionMetadataState,
     permission_request_state: TerminalSessionPermissionRequestState,
-    events: async_channel::Sender<TerminalSessionEvent>,
+    events: TerminalEventPublisher,
     accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
 }
 
@@ -1377,6 +1411,26 @@ impl TerminalWorker {
 
     fn process_command(&mut self, command: Command) -> bool {
         match command {
+            Command::Subscribe {
+                accessibility,
+                clipboard,
+            } => {
+                self.accessibility.close();
+                self.accessibility = accessibility;
+                self.clipboard.replace_requests(clipboard);
+                if !self.process_focus(false) || !self.cancel_pointer_drag() {
+                    return false;
+                }
+                let now = Instant::now();
+                self.schedules.subscribe(now);
+                self.emulator.reset_accessibility_presentation();
+                if !self.publish_screen() {
+                    return false;
+                }
+                self.events.repeat_screen();
+                self.schedules.note_screen_published();
+                true
+            }
             Command::Key(input) => self.process_key(input),
             Command::ClearScreenAndScrollback => {
                 let action = self.emulator.clear_screen_and_scrollback();
@@ -1803,7 +1857,7 @@ impl TerminalWorker {
             self.native_pty.wait_for_exit(FINAL_CHILD_WAIT_TIMEOUT),
         );
         self.emulator.mark_metadata_stale();
-        if !self.publish_screen() || !self.publish_final_accessibility() {
+        if !self.publish_screen_snapshot() || !self.publish_final_accessibility() {
             return false;
         }
         self.send_terminal_event(event);
@@ -2151,9 +2205,15 @@ impl TerminalWorker {
     fn publish_screen(&mut self) -> bool {
         self.metadata_state.publish(self.emulator.metadata());
         if self.events.is_closed() {
-            return false;
+            self.schedules.set_presentable(false, Instant::now());
+            return true;
         }
 
+        self.publish_screen_snapshot()
+    }
+
+    fn publish_screen_snapshot(&mut self) -> bool {
+        self.metadata_state.publish(self.emulator.metadata());
         let snapshot = self.emulator.snapshot();
         self.schedules
             .update_graphics_animation(self.emulator.graphics_animation_deadline());
@@ -2162,7 +2222,8 @@ impl TerminalWorker {
                 let result = self
                     .events
                     .force_send(TerminalSessionEvent::Screen(snapshot))
-                    .is_ok();
+                    .is_ok()
+                    || self.events.is_closed();
                 if result {
                     let now = Instant::now();
                     self.schedules.metadata_presented();
@@ -2210,7 +2271,7 @@ impl TerminalWorker {
             .try_send(TerminalSessionEvent::MetadataChanged(wakeup))
         {
             Ok(()) | Err(async_channel::TrySendError::Full(_)) => true,
-            Err(async_channel::TrySendError::Closed(_)) => false,
+            Err(async_channel::TrySendError::Closed(_)) => true,
         }
     }
 
@@ -2376,15 +2437,22 @@ fn classify_native_pty_exit(exit: NativePtyExit) -> TerminalSessionExit {
     }
 }
 
-fn send_session_event(
-    events: &async_channel::Sender<TerminalSessionEvent>,
-    event: TerminalSessionEvent,
-) -> bool {
-    match events.try_send(event) {
+fn send_session_event(events: &TerminalEventPublisher, event: TerminalSessionEvent) -> bool {
+    let finished = matches!(
+        event,
+        TerminalSessionEvent::Exited(_) | TerminalSessionEvent::Failed(_)
+    );
+    let sent = match events.try_send(event) {
         Ok(()) => true,
-        Err(async_channel::TrySendError::Full(event)) => events.force_send(event).is_ok(),
-        Err(async_channel::TrySendError::Closed(_)) => false,
+        Err(async_channel::TrySendError::Full(event)) => {
+            events.force_send(event).is_ok() || events.is_closed()
+        }
+        Err(async_channel::TrySendError::Closed(_)) => true,
+    };
+    if finished {
+        events.close();
     }
+    sent
 }
 
 #[cfg(test)]

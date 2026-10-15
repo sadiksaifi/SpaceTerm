@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "desktop")]
 use gpui::BackgroundExecutor;
 use thiserror::Error;
 
@@ -616,8 +617,9 @@ impl SshProbeEnvironment {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[derive(Clone)]
-/// Portable SSH process owner built over one capability-specific process adapter.
+/// Desktop SSH process owner built over one capability-specific process adapter.
 pub(crate) struct SshProcessSupervisor<A: SshProcessAdapter> {
     executor: BackgroundExecutor,
     environment: SshProcessEnvironment,
@@ -625,6 +627,7 @@ pub(crate) struct SshProcessSupervisor<A: SshProcessAdapter> {
     cleanup_scope: SshProcessCleanupScope,
 }
 
+#[cfg(feature = "desktop")]
 impl<A: SshProcessAdapter> SshProcessSupervisor<A> {
     pub(crate) const fn new(
         executor: BackgroundExecutor,
@@ -651,6 +654,7 @@ pub(crate) struct SupervisedSshChild<A: SshProcessAdapter> {
     cleanup_scope: Option<SshProcessCleanupScope>,
 }
 
+#[cfg(feature = "desktop")]
 impl<A: SshProcessAdapter> SshProcessBackend for SshProcessSupervisor<A> {
     type Child = SupervisedSshChild<A>;
 

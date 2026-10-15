@@ -1,8 +1,8 @@
 pub(crate) mod remote_workspace;
-mod tab;
-mod tab_collection;
-mod workspace_collection;
-mod worktree;
+pub(crate) mod tab;
+pub(crate) mod tab_collection;
+pub(crate) mod workspace_collection;
+pub(crate) mod worktree;
 
 pub(crate) use crate::close_confirmation::{
     ClosePaneOutcome, CloseTabOutcome, CloseWorkspaceOutcome, FinalTabCloseOutcome,

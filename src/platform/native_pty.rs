@@ -14,15 +14,15 @@ use super::shell_launch::{PreparedShellLaunch, ShellLaunchFailure};
 const READ_BUFFER_SIZE: usize = 16 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct NativePtySize {
-    pub(crate) rows: u16,
-    pub(crate) columns: u16,
-    pub(crate) pixel_width: u16,
-    pub(crate) pixel_height: u16,
+pub struct NativePtySize {
+    pub rows: u16,
+    pub columns: u16,
+    pub pixel_width: u16,
+    pub pixel_height: u16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum NativePtyExit {
+pub enum NativePtyExit {
     Success,
     ExitCode(u32),
     Signal(String),
@@ -44,7 +44,7 @@ impl fmt::Display for NativePtyExit {
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 #[error("Native PTY read failed ({kind:?})")]
-pub(crate) struct NativePtyReadFailure {
+pub struct NativePtyReadFailure {
     kind: io::ErrorKind,
 }
 
@@ -56,34 +56,34 @@ impl NativePtyReadFailure {
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 #[error("Native PTY wait failed ({kind:?})")]
-pub(crate) struct NativePtyWaitFailure {
+pub struct NativePtyWaitFailure {
     kind: io::ErrorKind,
 }
 
 impl NativePtyWaitFailure {
-    pub(crate) fn new(kind: io::ErrorKind) -> Self {
+    pub fn new(kind: io::ErrorKind) -> Self {
         Self { kind }
     }
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 #[error("Native PTY operation failed ({kind:?})")]
-pub(crate) struct NativePtyOperationFailure {
+pub struct NativePtyOperationFailure {
     kind: io::ErrorKind,
 }
 
 impl NativePtyOperationFailure {
-    pub(crate) fn new(kind: io::ErrorKind) -> Self {
+    pub fn new(kind: io::ErrorKind) -> Self {
         Self { kind }
     }
 
-    pub(crate) const fn kind(&self) -> io::ErrorKind {
+    pub const fn kind(&self) -> io::ErrorKind {
         self.kind
     }
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum NativePtyStartupFailure {
+pub enum NativePtyStartupFailure {
     #[error(transparent)]
     Launch(#[from] ShellLaunchFailure),
     #[error(transparent)]
@@ -97,7 +97,7 @@ pub(crate) enum NativePtyStartupFailure {
 }
 
 impl NativePtyStartupFailure {
-    pub(crate) const fn stage(&self) -> NativePtyStartupStage {
+    pub const fn stage(&self) -> NativePtyStartupStage {
         match self {
             Self::Launch(_) | Self::Adapter(_) | Self::LifecycleCoordination => {
                 NativePtyStartupStage::Adapter
@@ -109,24 +109,24 @@ impl NativePtyStartupFailure {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum NativePtyStartupStage {
+pub enum NativePtyStartupStage {
     Adapter,
     Reader,
     ReaderThread,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum NativePtyOutput {
+pub enum NativePtyOutput {
     Bytes(Vec<u8>),
     Stopped(Option<NativePtyReadFailure>),
 }
 
-pub(crate) trait NativePtyOutputSink: Send + Sync + 'static {
+pub trait NativePtyOutputSink: Send + Sync + 'static {
     fn publish(&self, output: NativePtyOutput) -> bool;
 }
 
 /// Input writes must be nonblocking and report WouldBlock under PTY backpressure.
-pub(crate) trait NativePtyAdapter: Write + Send {
+pub trait NativePtyAdapter: Write + Send {
     fn take_reader(&mut self) -> io::Result<Box<dyn Read + Send>>;
     fn resize(&self, size: NativePtySize) -> Result<(), NativePtyOperationFailure>;
     fn hidden_input(&self) -> Result<bool, NativePtyOperationFailure> {
@@ -139,7 +139,7 @@ pub(crate) trait NativePtyAdapter: Write + Send {
 ///
 /// Application composition selects the Operating-System-specific implementation. The Interface
 /// deliberately exposes no descriptor, terminal attribute, signal, or process-group mechanism.
-pub(crate) trait NativePtyAdapterFactory: Send + Sync {
+pub trait NativePtyAdapterFactory: Send + Sync {
     fn create(
         &self,
         launch: PreparedShellLaunch,
@@ -149,7 +149,7 @@ pub(crate) trait NativePtyAdapterFactory: Send + Sync {
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 /// A closed construction failure classification at the Operating-System Adapter boundary.
-pub(crate) enum NativePtyAdapterConstructionFailure {
+pub enum NativePtyAdapterConstructionFailure {
     #[error("Native PTY resources could not be created")]
     ResourceCreationFailed,
     #[error("Native PTY resources could not be configured")]
@@ -162,17 +162,17 @@ pub(crate) enum NativePtyAdapterConstructionFailure {
     InputOutputUnavailable,
 }
 
-pub(crate) trait NativePtyTermination: Send + Sync {
+pub trait NativePtyTermination: Send + Sync {
     fn request_termination(&self) -> io::Result<()>;
 }
 
-pub(crate) struct NativePtyAdapterParts {
-    pub(crate) adapter: Box<dyn NativePtyAdapter>,
-    pub(crate) termination: Arc<dyn NativePtyTermination>,
+pub struct NativePtyAdapterParts {
+    pub adapter: Box<dyn NativePtyAdapter>,
+    pub termination: Arc<dyn NativePtyTermination>,
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct NativePtyCloseHandle {
+pub struct NativePtyCloseHandle {
     state: Arc<Mutex<NativePtyCloseState>>,
 }
 
@@ -183,7 +183,7 @@ struct NativePtyCloseState {
 }
 
 impl NativePtyCloseHandle {
-    pub(crate) fn request_close(&self) -> io::Result<()> {
+    pub fn request_close(&self) -> io::Result<()> {
         let supervisor = {
             let mut state = self.lock_state();
             if state.requested {
@@ -288,14 +288,14 @@ impl Drop for NativePtyTerminationSupervisor {
     }
 }
 
-pub(crate) struct NativePtyOwner {
+pub struct NativePtyOwner {
     adapter: Option<Box<dyn NativePtyAdapter>>,
     termination_supervisor: Option<NativePtyTerminationSupervisor>,
     reader_thread: Option<JoinHandle<()>>,
 }
 
 impl NativePtyOwner {
-    pub(crate) fn start(
+    pub fn start(
         adapter_factory: &dyn NativePtyAdapterFactory,
         launch: PreparedShellLaunch,
         size: NativePtySize,
@@ -329,15 +329,15 @@ impl NativePtyOwner {
         })
     }
 
-    pub(crate) fn resize(&self, size: NativePtySize) -> Result<(), NativePtyOperationFailure> {
+    pub fn resize(&self, size: NativePtySize) -> Result<(), NativePtyOperationFailure> {
         self.adapter().resize(size)
     }
 
-    pub(crate) fn hidden_input(&self) -> Result<bool, NativePtyOperationFailure> {
+    pub fn hidden_input(&self) -> Result<bool, NativePtyOperationFailure> {
         self.adapter().hidden_input()
     }
 
-    pub(crate) fn wait_for_exit(
+    pub fn wait_for_exit(
         &mut self,
         timeout: Duration,
     ) -> Result<NativePtyExit, NativePtyWaitFailure> {
@@ -408,21 +408,21 @@ fn spawn_reader(
 }
 
 #[cfg(test)]
-pub(crate) fn conformance_initialization() -> Result<Option<(PathBuf, NativePtySize)>, String> {
+pub fn conformance_initialization() -> Result<Option<(PathBuf, NativePtySize)>, String> {
     tests::observe_initialization()
 }
 
 #[cfg(test)]
-pub(crate) struct ShutdownObservation {
-    pub(crate) after_factory_drop: usize,
-    pub(crate) after_owner_drop: usize,
-    pub(crate) after_repeated_close: usize,
-    pub(crate) termination_completed: bool,
-    pub(crate) dropped_before_termination: bool,
+pub struct ShutdownObservation {
+    pub after_factory_drop: usize,
+    pub after_owner_drop: usize,
+    pub after_repeated_close: usize,
+    pub termination_completed: bool,
+    pub dropped_before_termination: bool,
 }
 
 #[cfg(test)]
-pub(crate) fn conformance_shutdown() -> Result<ShutdownObservation, String> {
+pub fn conformance_shutdown() -> Result<ShutdownObservation, String> {
     let (after_factory_drop, after_owner_drop) = tests::observe_retention(false)?;
     let (_, after_repeated_close) = tests::observe_retention(true)?;
     let (termination_completed, dropped_before_termination) = tests::observe_drop_order()?;

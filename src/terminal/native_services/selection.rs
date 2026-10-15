@@ -1,21 +1,21 @@
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum TrailingSpacePolicy {
+pub enum TrailingSpacePolicy {
     Preserve,
     #[default]
     Trim,
 }
 
 impl TrailingSpacePolicy {
-    pub(crate) const fn from_trim_enabled(enabled: bool) -> Self {
+    pub const fn from_trim_enabled(enabled: bool) -> Self {
         if enabled { Self::Trim } else { Self::Preserve }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct SelectionCopyOptions {
-    pub(crate) unwrap_soft_wraps: bool,
-    pub(crate) trailing_spaces: TrailingSpacePolicy,
-    pub(crate) include_html: bool,
+pub struct SelectionCopyOptions {
+    pub unwrap_soft_wraps: bool,
+    pub trailing_spaces: TrailingSpacePolicy,
+    pub include_html: bool,
 }
 
 impl Default for SelectionCopyOptions {
@@ -29,9 +29,9 @@ impl Default for SelectionCopyOptions {
 }
 
 #[derive(Clone, Eq, PartialEq)]
-pub(crate) struct SelectionCopy {
-    pub(crate) plain_text: String,
-    pub(crate) html: Option<String>,
+pub struct SelectionCopy {
+    pub plain_text: String,
+    pub html: Option<String>,
 }
 
 impl std::fmt::Debug for SelectionCopy {

@@ -25,16 +25,16 @@ where
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum Appearance {
+pub enum Appearance {
     Light,
     Dark,
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct ThemeId(String);
+pub struct ThemeId(String);
 
 impl ThemeId {
-    pub(crate) fn new(value: impl Into<String>) -> Result<Self, CatalogError> {
+    pub fn new(value: impl Into<String>) -> Result<Self, CatalogError> {
         let value = value.into();
         if !valid_theme_id(&value) {
             return Err(CatalogError::InvalidId);
@@ -42,16 +42,16 @@ impl ThemeId {
         Ok(Self(value))
     }
 
-    pub(crate) fn builtin(value: &'static str) -> Self {
+    pub fn builtin(value: &'static str) -> Self {
         debug_assert!(valid_theme_id(value));
         Self(value.to_owned())
     }
 
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    pub(crate) fn is_reserved(&self) -> bool {
+    pub fn is_reserved(&self) -> bool {
         self.0.starts_with("builtin.")
     }
 }
@@ -222,24 +222,24 @@ impl<'de> Deserialize<'de> for OptionalColorOverride {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct TerminalColors {
-    pub(crate) foreground: Color,
-    pub(crate) background: Color,
-    pub(crate) normal: [Color; 8],
-    pub(crate) bright: [Color; 8],
-    pub(crate) dim: [Color; 8],
-    pub(crate) bright_foreground: Color,
-    pub(crate) dim_foreground: Color,
-    pub(crate) cursor: Color,
-    pub(crate) cursor_text: Option<Color>,
-    pub(crate) selection_background: Color,
-    pub(crate) selection_foreground: Option<Color>,
-    pub(crate) find_match_background: Color,
-    pub(crate) find_match_foreground: Option<Color>,
-    pub(crate) find_active_match_background: Color,
-    pub(crate) find_active_match_foreground: Option<Color>,
-    pub(crate) hyperlink: Color,
-    pub(crate) visual_bell: Color,
+pub struct TerminalColors {
+    pub foreground: Color,
+    pub background: Color,
+    pub normal: [Color; 8],
+    pub bright: [Color; 8],
+    pub dim: [Color; 8],
+    pub bright_foreground: Color,
+    pub dim_foreground: Color,
+    pub cursor: Color,
+    pub cursor_text: Option<Color>,
+    pub selection_background: Color,
+    pub selection_foreground: Option<Color>,
+    pub find_match_background: Color,
+    pub find_match_foreground: Option<Color>,
+    pub find_active_match_background: Color,
+    pub find_active_match_foreground: Option<Color>,
+    pub hyperlink: Color,
+    pub visual_bell: Color,
 }
 
 impl TerminalColors {
@@ -278,7 +278,7 @@ impl TerminalColors {
             .apply(&mut self.find_active_match_foreground);
     }
 
-    pub(crate) fn validate(&self) -> Result<(), CatalogError> {
+    pub fn validate(&self) -> Result<(), CatalogError> {
         let mut protocol = vec![
             self.foreground,
             self.background,
@@ -738,7 +738,7 @@ pub(super) fn validate_text(value: &str, max: usize) -> Result<(), CatalogError>
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub(crate) enum CatalogError {
+pub enum CatalogError {
     #[error("invalid theme identity")]
     InvalidId,
     #[error("invalid theme metadata")]

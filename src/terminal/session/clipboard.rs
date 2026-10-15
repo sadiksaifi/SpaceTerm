@@ -3,27 +3,44 @@ use std::collections::VecDeque;
 use std::sync::atomic::AtomicU64;
 
 use super::*;
-use crate::terminal::native_services::clipboard::{ClipboardPreferences, TextClipboard};
 use crate::terminal::osc52::{MAX_OSC52_CONTENT_BYTES, Osc52Operation};
-use gpui::FutureExt as _;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
-pub(super) struct ClipboardAuthority(AtomicU64);
+pub(super) struct ClipboardAuthority {
+    epoch: AtomicU64,
+    subscription: Mutex<Option<async_channel::Sender<TerminalSessionEvent>>>,
+}
 
 impl ClipboardAuthority {
     pub(super) fn focus(&self, focused: bool) {
         // Increment on every transition, including a loss followed by regained focus.
         let _ = self
-            .0
+            .epoch
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
                 (old & 1 != u64::from(focused))
                     .then_some((old.wrapping_add(2) & !1) | u64::from(focused))
             });
     }
+    pub(super) fn observe_subscription(&self, events: async_channel::Sender<TerminalSessionEvent>) {
+        self.focus(false);
+        if let Ok(mut subscription) = self.subscription.lock() {
+            *subscription = Some(events);
+        }
+    }
+
     pub(super) fn grant(&self) -> Option<u64> {
-        let epoch = self.0.load(Ordering::Acquire);
+        if self
+            .subscription
+            .lock()
+            .ok()?
+            .as_ref()
+            .is_some_and(async_channel::Sender::is_closed)
+        {
+            return None;
+        }
+        let epoch = self.epoch.load(Ordering::Acquire);
         (epoch & 1 == 1).then_some(epoch)
     }
     fn permits(&self, epoch: u64) -> bool {
@@ -31,7 +48,7 @@ impl ClipboardAuthority {
     }
 }
 
-pub(crate) enum ClipboardCompletion {
+pub enum ClipboardCompletion {
     Denied,
     Written,
     Text(String),
@@ -50,7 +67,7 @@ impl fmt::Debug for ClipboardCompletion {
     }
 }
 
-pub(crate) struct ClipboardRequest {
+pub struct ClipboardRequest {
     id: u64,
     operation: Osc52Operation,
     authority: Arc<ClipboardAuthority>,
@@ -68,62 +85,19 @@ impl fmt::Debug for ClipboardRequest {
 }
 
 impl ClipboardRequest {
-    /// Consults the native clipboard only while the originating focus grant is current. A write
-    /// completes before this returns. A read completes when the native clipboard answers or the
-    /// request deadline passes, whichever comes first, so a slow owner cannot hold the UI or the
-    /// next request. The worker revalidates the grant before replying, and dropping the returned
-    /// task replies as denied.
-    pub(crate) fn perform(
-        mut self,
-        preferences: ClipboardPreferences,
-        clipboard: &dyn TextClipboard,
-        focused: bool,
-        cx: &mut gpui::App,
-    ) -> gpui::Task<()> {
-        let remaining = self
-            .deadline
-            .checked_duration_since(Instant::now())
-            .filter(|remaining| !remaining.is_zero());
-        let Some(remaining) = remaining.filter(|_| focused && self.authority.permits(self.epoch))
-        else {
-            self.complete(ClipboardCompletion::Denied);
-            return gpui::Task::ready(());
-        };
-        let target = match &self.operation {
-            Osc52Operation::Write { target, text } if preferences.allow_write => {
-                let completion = clipboard
-                    .write(clipboard.resolve(*target), text, cx)
-                    .map_or(ClipboardCompletion::Denied, |()| {
-                        ClipboardCompletion::Written
-                    });
-                self.complete(completion);
-                return gpui::Task::ready(());
-            }
-            Osc52Operation::Read { target, .. } if preferences.allow_read => *target,
-            _ => {
-                self.complete(ClipboardCompletion::Denied);
-                return gpui::Task::ready(());
-            }
-        };
-        let read = clipboard
-            .read(clipboard.resolve(target), cx)
-            .with_timeout(remaining, cx.background_executor());
-        cx.foreground_executor().spawn(async move {
-            let completion = match read.await {
-                Ok(Ok(text))
-                    if text
-                        .as_ref()
-                        .is_none_or(|text| text.len() <= MAX_OSC52_CONTENT_BYTES) =>
-                {
-                    ClipboardCompletion::Text(text.unwrap_or_default())
-                }
-                _ => ClipboardCompletion::Denied,
-            };
-            self.complete(completion);
-        })
+    /// Returns the current operation without granting native clipboard authority.
+    pub fn operation(&self) -> &Osc52Operation {
+        &self.operation
     }
 
-    fn complete(&mut self, completion: ClipboardCompletion) {
+    /// Revoked or expired requests cannot consult a client clipboard.
+    pub fn remaining(&self) -> Option<Duration> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero() && self.authority.permits(self.epoch))
+    }
+
+    pub fn complete(&mut self, completion: ClipboardCompletion) {
         if let Some(commands) = self.commands.take() {
             let _ = commands.send(Command::CompleteClipboard(self.id, completion));
         }
@@ -171,6 +145,10 @@ impl WorkerClipboard {
             },
             receiver,
         )
+    }
+
+    pub(super) fn replace_requests(&mut self, requests: async_channel::Sender<ClipboardRequest>) {
+        self.requests = Some(requests);
     }
 
     pub(super) fn pending(&self) -> bool {
@@ -268,11 +246,11 @@ impl WorkerClipboard {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 mod tests {
     use super::*;
     use crate::terminal::native_services::clipboard::{
-        ClipboardError, ClipboardRead, TextClipboardTarget,
+        ClipboardError, ClipboardPreferences, ClipboardRead, TextClipboard, TextClipboardTarget,
     };
     use crate::terminal::osc52::{Osc52Target, Osc52Terminator};
     use std::cell::{Cell, RefCell};
@@ -616,22 +594,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn clipboard_timeout_and_dropped_requests_complete_once() {
-        let (mut worker, requests, commands) = connected();
-        worker.begin(read(), worker.authority.grant());
-        let request = requests.try_recv().unwrap();
-        worker.pending.as_mut().unwrap().deadline = Instant::now();
-        assert!(worker.expired());
-        assert_eq!(
-            worker.complete(None, ClipboardCompletion::Denied),
-            (true, Some(b"\x1b]52;p;\x1b\\".to_vec()))
-        );
-        drop(request);
-        assert!(complete(&mut worker, &commands).is_none());
-        assert!(!worker.pending());
-    }
-
     /// A clipboard owner that answers each read only when the test does.
     #[derive(Default)]
     struct SlowClipboard {
@@ -753,5 +715,68 @@ mod tests {
         perform(request, ALLOW_READ, &clipboard, true, cx);
         assert!(clipboard.answer("late"));
         cx.run_until_parked();
+    }
+}
+
+#[cfg(test)]
+mod portable_tests {
+    use super::*;
+    use crate::terminal::osc52::{Osc52Target, Osc52Terminator};
+
+    #[test]
+    fn closed_subscription_revokes_pending_clipboard_without_waiting_for_worker() {
+        let (sender, commands) = mpsc::channel();
+        let (mut worker, requests) = WorkerClipboard::connect(sender);
+        let (events, subscription) = async_channel::bounded(1);
+        worker.authority.observe_subscription(events);
+        worker.authority.focus(true);
+        worker.begin(
+            Osc52Operation::Read {
+                target: Osc52Target::Primary,
+                terminator: Osc52Terminator::StringTerminator,
+            },
+            worker.authority.grant(),
+        );
+        let request = requests.try_recv().unwrap();
+        assert!(request.remaining().is_some());
+
+        drop(subscription);
+
+        assert!(request.remaining().is_none());
+        drop(request);
+        let Command::CompleteClipboard(id, completion) = commands.try_recv().unwrap() else {
+            panic!("clipboard completion expected");
+        };
+        assert_eq!(
+            worker.complete(Some(id), completion).1.unwrap(),
+            b"\x1b]52;p;\x1b\\"
+        );
+    }
+
+    #[test]
+    fn clipboard_timeout_and_dropped_requests_complete_once() {
+        let (sender, commands) = mpsc::channel();
+        let (mut worker, requests) = WorkerClipboard::connect(sender);
+        worker.authority.focus(true);
+        worker.begin(
+            Osc52Operation::Read {
+                target: Osc52Target::Primary,
+                terminator: Osc52Terminator::StringTerminator,
+            },
+            worker.authority.grant(),
+        );
+        let request = requests.try_recv().unwrap();
+        worker.pending.as_mut().unwrap().deadline = Instant::now();
+        assert!(worker.expired());
+        assert_eq!(
+            worker.complete(None, ClipboardCompletion::Denied),
+            (true, Some(b"\x1b]52;p;\x1b\\".to_vec()))
+        );
+        drop(request);
+        let Command::CompleteClipboard(id, completion) = commands.try_recv().unwrap() else {
+            panic!("clipboard completion expected");
+        };
+        assert!(worker.complete(Some(id), completion).1.is_none());
+        assert!(!worker.pending());
     }
 }

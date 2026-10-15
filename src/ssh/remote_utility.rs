@@ -1545,7 +1545,7 @@ impl<'a> ResponseParser<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 mod tests {
     use std::collections::VecDeque;
     use std::future::Future;

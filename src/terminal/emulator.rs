@@ -78,28 +78,28 @@ impl From<RgbColor> for Color {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CellSnapshot {
-    pub(crate) text: String,
-    pub(crate) foreground_source: TerminalColor,
-    pub(crate) background_source: TerminalColor,
-    pub(crate) inverse: bool,
-    pub(crate) bold: bool,
-    pub(crate) faint: bool,
-    pub(crate) italic: bool,
-    pub(crate) blinking: bool,
-    pub(crate) invisible: bool,
-    pub(crate) underline: TerminalUnderlineSnapshot,
-    pub(crate) underline_source: TerminalColor,
-    pub(crate) strikethrough: bool,
-    pub(crate) overline: bool,
-    pub(crate) selected: bool,
-    pub(crate) spacer_tail: bool,
-    pub(crate) semantic_content: CellSemanticSnapshot,
-    pub(crate) hyperlink: Option<Arc<crate::terminal::HyperlinkTarget>>,
+pub struct CellSnapshot {
+    pub text: String,
+    pub foreground_source: TerminalColor,
+    pub background_source: TerminalColor,
+    pub inverse: bool,
+    pub bold: bool,
+    pub faint: bool,
+    pub italic: bool,
+    pub blinking: bool,
+    pub invisible: bool,
+    pub underline: TerminalUnderlineSnapshot,
+    pub underline_source: TerminalColor,
+    pub strikethrough: bool,
+    pub overline: bool,
+    pub selected: bool,
+    pub spacer_tail: bool,
+    pub semantic_content: CellSemanticSnapshot,
+    pub hyperlink: Option<Arc<crate::terminal::HyperlinkTarget>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum CellSemanticSnapshot {
+pub enum CellSemanticSnapshot {
     #[default]
     Output,
     Input,
@@ -117,7 +117,7 @@ impl From<CellSemanticContent> for CellSemanticSnapshot {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum TerminalUnderlineSnapshot {
+pub enum TerminalUnderlineSnapshot {
     #[default]
     None,
     Single,
@@ -142,7 +142,7 @@ impl From<Underline> for TerminalUnderlineSnapshot {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum TerminalColor {
+pub enum TerminalColor {
     #[default]
     Default,
     Palette(u8),
@@ -160,21 +160,21 @@ impl From<StyleColor> for TerminalColor {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TerminalColorsSnapshot {
-    pub(crate) foreground: Color,
-    pub(crate) background: Color,
-    pub(crate) palette: Arc<[Color; 256]>,
-    pub(crate) reversed: bool,
-    pub(crate) foreground_source: TerminalDefaultColorSource,
-    pub(crate) background_source: TerminalDefaultColorSource,
-    pub(crate) cursor_source: TerminalDefaultColorSource,
-    pub(crate) palette_overrides: Arc<[bool; 256]>,
-    pub(crate) configured: Arc<TerminalColors>,
-    pub(crate) bold_as_bright: bool,
+pub struct TerminalColorsSnapshot {
+    pub foreground: Color,
+    pub background: Color,
+    pub palette: Arc<[Color; 256]>,
+    pub reversed: bool,
+    pub foreground_source: TerminalDefaultColorSource,
+    pub background_source: TerminalDefaultColorSource,
+    pub cursor_source: TerminalDefaultColorSource,
+    pub palette_overrides: Arc<[bool; 256]>,
+    pub configured: Arc<TerminalColors>,
+    pub bold_as_bright: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum TerminalDefaultColorSource {
+pub enum TerminalDefaultColorSource {
     #[default]
     HostDefault,
     ProgramOverride,
@@ -199,7 +199,7 @@ impl TerminalColorsSnapshot {
         }
     }
 
-    pub(crate) fn effective_background(&self) -> Color {
+    pub fn effective_background(&self) -> Color {
         if self.reversed {
             self.foreground
         } else {
@@ -208,10 +208,10 @@ impl TerminalColorsSnapshot {
     }
 }
 
-pub(crate) type RowSnapshot = Arc<[CellSnapshot]>;
+pub type RowSnapshot = Arc<[CellSnapshot]>;
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) struct PresentationGeneration(u64);
+pub struct PresentationGeneration(u64);
 
 impl PresentationGeneration {
     fn next(self) -> Self {
@@ -219,13 +219,13 @@ impl PresentationGeneration {
     }
 
     #[cfg(test)]
-    pub(crate) const fn test(value: u64) -> Self {
+    pub const fn test(value: u64) -> Self {
         Self(value)
     }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum ActiveScreenSnapshot {
+pub enum ActiveScreenSnapshot {
     #[default]
     Primary,
     Alternate,
@@ -241,19 +241,19 @@ impl From<Screen> for ActiveScreenSnapshot {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ScreenSizeSnapshot {
-    pub(crate) cols: u16,
-    pub(crate) rows: u16,
+pub struct ScreenSizeSnapshot {
+    pub cols: u16,
+    pub rows: u16,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ViewportSnapshot {
-    pub(crate) offset_rows: u64,
-    pub(crate) visible_rows: u64,
+pub struct ViewportSnapshot {
+    pub offset_rows: u64,
+    pub visible_rows: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum CursorShapeSnapshot {
+pub enum CursorShapeSnapshot {
     Bar,
     #[default]
     Block,
@@ -274,21 +274,21 @@ impl From<CursorVisualStyle> for CursorShapeSnapshot {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct CursorPositionSnapshot {
-    pub(crate) column: u16,
-    pub(crate) row: u16,
-    pub(crate) width_cells: u8,
+pub struct CursorPositionSnapshot {
+    pub column: u16,
+    pub row: u16,
+    pub width_cells: u8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct CursorSnapshot {
-    pub(crate) position: Option<CursorPositionSnapshot>,
-    pub(crate) visible: bool,
-    pub(crate) blinking: bool,
-    pub(crate) password_input: bool,
-    pub(crate) shape: CursorShapeSnapshot,
-    pub(crate) color: Color,
-    pub(crate) text_color: Color,
+pub struct CursorSnapshot {
+    pub position: Option<CursorPositionSnapshot>,
+    pub visible: bool,
+    pub blinking: bool,
+    pub password_input: bool,
+    pub shape: CursorShapeSnapshot,
+    pub color: Color,
+    pub text_color: Color,
 }
 
 impl Default for CursorSnapshot {
@@ -364,7 +364,7 @@ fn cursor_damage(
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) enum ContentDamageSnapshot {
+pub enum ContentDamageSnapshot {
     #[default]
     Clean,
     Rows(Arc<[u16]>),
@@ -372,21 +372,21 @@ pub(crate) enum ContentDamageSnapshot {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct SnapshotDamage {
-    pub(crate) content: ContentDamageSnapshot,
-    pub(crate) cursor: ContentDamageSnapshot,
-    pub(crate) title: bool,
-    pub(crate) metadata: bool,
-    pub(crate) scrollbar: bool,
-    pub(crate) viewport: bool,
-    pub(crate) active_screen: bool,
-    pub(crate) resize: bool,
-    pub(crate) mouse_tracking: bool,
-    pub(crate) selection_presence: bool,
-    pub(crate) search: bool,
-    pub(crate) graphics_content: bool,
-    pub(crate) graphics_geometry: bool,
-    pub(crate) appearance: bool,
+pub struct SnapshotDamage {
+    pub content: ContentDamageSnapshot,
+    pub cursor: ContentDamageSnapshot,
+    pub title: bool,
+    pub metadata: bool,
+    pub scrollbar: bool,
+    pub viewport: bool,
+    pub active_screen: bool,
+    pub resize: bool,
+    pub mouse_tracking: bool,
+    pub selection_presence: bool,
+    pub search: bool,
+    pub graphics_content: bool,
+    pub graphics_geometry: bool,
+    pub appearance: bool,
 }
 
 impl SnapshotDamage {
@@ -423,37 +423,37 @@ impl SnapshotDamage {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ScrollbarSnapshot {
-    pub(crate) total_rows: u64,
-    pub(crate) offset_rows: u64,
-    pub(crate) visible_rows: u64,
+pub struct ScrollbarSnapshot {
+    pub total_rows: u64,
+    pub offset_rows: u64,
+    pub visible_rows: u64,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ScreenSnapshot {
-    pub(crate) generation: PresentationGeneration,
-    pub(crate) appearance_generation: AppearanceGeneration,
-    pub(crate) terminal_appearance: Appearance,
-    pub(crate) configured_colors: Arc<TerminalColors>,
-    pub(crate) bold_as_bright: bool,
-    pub(crate) rows: Arc<[RowSnapshot]>,
+pub struct ScreenSnapshot {
+    pub generation: PresentationGeneration,
+    pub appearance_generation: AppearanceGeneration,
+    pub terminal_appearance: Appearance,
+    pub configured_colors: Arc<TerminalColors>,
+    pub bold_as_bright: bool,
+    pub rows: Arc<[RowSnapshot]>,
     /// Soft-wrap markers corresponding one-to-one with the published viewport rows.
-    pub(crate) row_soft_wrapped: Arc<[bool]>,
-    pub(crate) background: Color,
-    pub(crate) colors: TerminalColorsSnapshot,
-    pub(crate) size: ScreenSizeSnapshot,
-    pub(crate) viewport: ViewportSnapshot,
-    pub(crate) scrollbar: ScrollbarSnapshot,
-    pub(crate) active_screen: ActiveScreenSnapshot,
-    pub(crate) cursor: CursorSnapshot,
-    pub(crate) text_blinking: bool,
-    pub(crate) mouse_tracking: bool,
-    pub(crate) selection_present: bool,
-    pub(crate) title: Arc<str>,
-    pub(crate) metadata: Arc<TerminalMetadataSnapshot>,
-    pub(crate) find: Option<Arc<TerminalFindSnapshot>>,
-    pub(crate) graphics: GraphicsSnapshot,
-    pub(crate) damage: SnapshotDamage,
+    pub row_soft_wrapped: Arc<[bool]>,
+    pub background: Color,
+    pub colors: TerminalColorsSnapshot,
+    pub size: ScreenSizeSnapshot,
+    pub viewport: ViewportSnapshot,
+    pub scrollbar: ScrollbarSnapshot,
+    pub active_screen: ActiveScreenSnapshot,
+    pub cursor: CursorSnapshot,
+    pub text_blinking: bool,
+    pub mouse_tracking: bool,
+    pub selection_present: bool,
+    pub title: Arc<str>,
+    pub metadata: Arc<TerminalMetadataSnapshot>,
+    pub find: Option<Arc<TerminalFindSnapshot>>,
+    pub graphics: GraphicsSnapshot,
+    pub damage: SnapshotDamage,
 }
 
 impl PartialEq for ScreenSnapshot {
@@ -486,7 +486,7 @@ impl PartialEq for ScreenSnapshot {
 impl Eq for ScreenSnapshot {}
 
 impl ScreenSnapshot {
-    pub(crate) fn empty_with_appearance(
+    pub fn empty_with_appearance(
         paths: crate::local_path::LocalPathSemantics,
         initial_appearance: &TerminalAppearanceUpdate,
     ) -> Arc<Self> {
@@ -529,7 +529,7 @@ impl ScreenSnapshot {
 
     /// Recolors retained content for rendering without claiming that the worker applied a newer
     /// appearance generation. Program-owned defaults and palette entries remain unchanged.
-    pub(crate) fn projected_for_renderer(
+    pub fn projected_for_renderer(
         screen: &Arc<Self>,
         appearance: &ResolvedTerminalAppearance,
     ) -> Arc<Self> {
@@ -586,12 +586,12 @@ impl ScreenSnapshot {
     }
 
     #[cfg(test)]
-    pub(crate) fn empty(paths: crate::local_path::LocalPathSemantics) -> Arc<Self> {
+    pub fn empty(paths: crate::local_path::LocalPathSemantics) -> Arc<Self> {
         Self::empty_with_appearance(paths, &crate::terminal::test_terminal_appearance_update())
     }
 
     #[cfg(test)]
-    pub(crate) fn from_test_parts(
+    pub fn from_test_parts(
         rows: Arc<[RowSnapshot]>,
         scrollbar: ScrollbarSnapshot,
         title: impl Into<Arc<str>>,
@@ -610,7 +610,7 @@ impl ScreenSnapshot {
     }
 
     #[cfg(test)]
-    pub(crate) fn from_test_parts_at(
+    pub fn from_test_parts_at(
         rows: Arc<[RowSnapshot]>,
         scrollbar: ScrollbarSnapshot,
         title: impl Into<Arc<str>>,
@@ -790,7 +790,7 @@ struct MouseModeState {
 
 /// A keyboard movement through the Scrollback viewport, as the Scroll Commands request it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ScrollbackMovement {
+pub enum ScrollbackMovement {
     PageUp,
     PageDown,
     Top,
@@ -2279,6 +2279,10 @@ impl TerminalEmulator {
             .accessibility
             .apply(update, self.accessibility_generation);
         Ok((model, more))
+    }
+
+    pub(crate) fn reset_accessibility_presentation(&mut self) {
+        self.accessibility.reset_presentation();
     }
 
     pub(crate) fn accessibility_snapshot_for_current_presentation(

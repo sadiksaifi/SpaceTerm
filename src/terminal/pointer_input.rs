@@ -1,33 +1,33 @@
 use super::{InputModifiers, PresentationGeneration};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct SurfacePosition {
-    pub(crate) x: f32,
-    pub(crate) y: f32,
+pub struct SurfacePosition {
+    pub x: f32,
+    pub y: f32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PointerButton {
+pub enum PointerButton {
     Left,
     Middle,
     Right,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PointerPhase {
+pub enum PointerPhase {
     Press,
     Motion,
     Release,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ShiftSelectionPolicy {
+pub enum ShiftSelectionPolicy {
     OverrideApplicationMouse,
     ReportToApplication,
 }
 
 impl ShiftSelectionPolicy {
-    pub(crate) const fn from_selection_override(enabled: bool) -> Self {
+    pub const fn from_selection_override(enabled: bool) -> Self {
         if enabled {
             Self::OverrideApplicationMouse
         } else {
@@ -43,28 +43,28 @@ impl Default for ShiftSelectionPolicy {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct PointerInput {
-    pub(crate) generation: PresentationGeneration,
-    pub(crate) phase: PointerPhase,
-    pub(crate) button: Option<PointerButton>,
-    pub(crate) position: SurfacePosition,
-    pub(crate) modifiers: InputModifiers,
-    pub(crate) shift_selection: ShiftSelectionPolicy,
+pub struct PointerInput {
+    pub generation: PresentationGeneration,
+    pub phase: PointerPhase,
+    pub button: Option<PointerButton>,
+    pub position: SurfacePosition,
+    pub modifiers: InputModifiers,
+    pub shift_selection: ShiftSelectionPolicy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct WheelInput {
-    pub(crate) generation: PresentationGeneration,
-    pub(crate) horizontal_steps: i32,
-    pub(crate) vertical_steps: i32,
-    pub(crate) phase: WheelPhase,
-    pub(crate) position: SurfacePosition,
-    pub(crate) modifiers: InputModifiers,
-    pub(crate) shift_selection: ShiftSelectionPolicy,
+pub struct WheelInput {
+    pub generation: PresentationGeneration,
+    pub horizontal_steps: i32,
+    pub vertical_steps: i32,
+    pub phase: WheelPhase,
+    pub position: SurfacePosition,
+    pub modifiers: InputModifiers,
+    pub shift_selection: ShiftSelectionPolicy,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum WheelPhase {
+pub enum WheelPhase {
     GestureStarted,
     #[default]
     GestureChanged,

@@ -5,39 +5,39 @@ use libghostty_vt::terminal::{Point, PointCoordinate, PointSpace, ScrollViewport
 use libghostty_vt::{Error, Terminal};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum FindDirection {
+pub enum FindDirection {
     Next,
     Previous,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) struct FindQueryGeneration(u64);
+pub struct FindQueryGeneration(u64);
 
 impl FindQueryGeneration {
-    pub(crate) fn next(self) -> Self {
+    pub fn next(self) -> Self {
         Self(self.0.saturating_add(1))
     }
 
     #[cfg(test)]
-    pub(crate) const fn test(value: u64) -> Self {
+    pub const fn test(value: u64) -> Self {
         Self(value)
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct FindHighlightSpan {
-    pub(crate) row: u16,
-    pub(crate) start_column: u16,
-    pub(crate) end_column: u16,
-    pub(crate) current: bool,
+pub struct FindHighlightSpan {
+    pub row: u16,
+    pub start_column: u16,
+    pub end_column: u16,
+    pub current: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TerminalFindSnapshot {
-    pub(crate) generation: FindQueryGeneration,
-    pub(crate) total_matches: usize,
-    pub(crate) current_match: Option<usize>,
-    pub(crate) visible_spans: Arc<[FindHighlightSpan]>,
+pub struct TerminalFindSnapshot {
+    pub generation: FindQueryGeneration,
+    pub total_matches: usize,
+    pub current_match: Option<usize>,
+    pub visible_spans: Arc<[FindHighlightSpan]>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -179,23 +179,23 @@ macro_rules! chrome_color_fields {
     };
 }
 
-mod builtin;
+pub(crate) mod builtin;
 #[cfg(test)]
-mod catalog_tests;
-mod color;
-mod compiler;
-mod composition;
-mod harmonization;
+pub(crate) mod catalog_tests;
+pub(crate) mod color;
+pub(crate) mod compiler;
+pub(crate) mod composition;
+pub(crate) mod harmonization;
 #[cfg(test)]
-mod harmonization_tests;
-mod preferences;
-mod resolution;
-mod terminal_theme;
+pub(crate) mod harmonization_tests;
+pub(crate) mod preferences;
+pub(crate) mod resolution;
+pub(crate) mod terminal_theme;
+#[cfg(all(test, feature = "desktop"))]
+pub(crate) mod tests;
+pub(crate) mod zed;
 #[cfg(test)]
-mod tests;
-mod zed;
-#[cfg(test)]
-mod zed_tests;
+pub(crate) mod zed_tests;
 
 pub(crate) use color::Color;
 pub(crate) use compiler::{CaptionPaint, PullRequestPaint, SemanticPaint, StatusPaint};

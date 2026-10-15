@@ -1,5 +1,6 @@
 //! The only local-authority gate for Native Terminal Services. An admitted operation retains
 //! this private proof instead of repeatedly interpreting metadata in each caller.
+#[cfg(feature = "desktop")]
 use super::clipboard::ClipboardError;
 use super::file_insertion::{FileInsertionPolicy, prepare_file_insertion};
 use super::hyperlink::{HyperlinkKind, HyperlinkTarget, parse_local_file_uri, stable_identity};
@@ -15,6 +16,7 @@ impl LocalFileAccess {
         capabilities.are_enabled().then_some(Self(()))
     }
 
+    #[cfg(feature = "desktop")]
     pub(super) async fn clipboard<Read>(
         self,
         clipboard: impl FnOnce() -> Read,

@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// One permission that programs in a Terminal Session inherit from SpaceTerm and that only System
 /// Settings grants.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum SystemPermission {
+pub enum SystemPermission {
     /// Capturing the screen, which a program needs to take screenshots.
     ScreenRecording,
     /// Controlling other applications, which a program needs to click and type. System Settings names

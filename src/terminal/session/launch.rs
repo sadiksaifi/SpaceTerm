@@ -86,7 +86,7 @@ impl TerminalSessionLaunch {
 ///
 /// Its directory is local filesystem authority and is the only launch directory passed to local
 /// process `chdir` and identity validation.
-pub(crate) struct LocalTerminalLaunchPlan {
+pub struct LocalTerminalLaunchPlan {
     working_directory: crate::domain::ValidatedLocalDirectory,
 }
 
@@ -97,7 +97,7 @@ pub(crate) struct LocalTerminalLaunchPlan {
 /// Starting Directory remain typed remote metadata and must never enter `PathBuf`, local `chdir`,
 /// or local filesystem validation. The prepared channel is single-use and sensitive Debug output
 /// is deliberately redacted.
-pub(crate) struct RemoteTerminalLaunchPlan {
+pub struct RemoteTerminalLaunchPlan {
     local_home: crate::domain::ValidatedLocalDirectory,
     metadata_context: RemoteTerminalMetadataContext,
     fallback_title: String,
@@ -113,6 +113,7 @@ impl fmt::Debug for RemoteTerminalLaunchPlan {
 }
 
 impl RemoteTerminalLaunchPlan {
+    #[cfg(any(feature = "desktop", test))]
     pub(crate) const fn new(
         local_home: crate::domain::ValidatedLocalDirectory,
         metadata_context: RemoteTerminalMetadataContext,
@@ -128,28 +129,28 @@ impl RemoteTerminalLaunchPlan {
     }
 
     #[cfg(test)]
-    pub(crate) const fn local_home(&self) -> &crate::domain::ValidatedLocalDirectory {
+    pub const fn local_home(&self) -> &crate::domain::ValidatedLocalDirectory {
         &self.local_home
     }
 
     #[cfg(test)]
-    pub(crate) const fn destination(&self) -> &crate::domain::SshDestination {
+    pub const fn destination(&self) -> &crate::domain::SshDestination {
         self.metadata_context.destination()
     }
 
-    pub(crate) const fn remote_directory(&self) -> &crate::domain::RemoteDirectory {
+    pub const fn remote_directory(&self) -> &crate::domain::RemoteDirectory {
         self.metadata_context.initial_directory()
     }
 
-    pub(crate) fn fallback_title(&self) -> &str {
+    pub fn fallback_title(&self) -> &str {
         &self.fallback_title
     }
 
-    pub(crate) const fn metadata_context(&self) -> &RemoteTerminalMetadataContext {
+    pub const fn metadata_context(&self) -> &RemoteTerminalMetadataContext {
         &self.metadata_context
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "desktop"))]
     pub(crate) fn take_terminal_session_channel(
         &self,
     ) -> Result<
@@ -161,11 +162,11 @@ impl RemoteTerminalLaunchPlan {
 }
 
 impl LocalTerminalLaunchPlan {
-    pub(crate) const fn new(working_directory: crate::domain::ValidatedLocalDirectory) -> Self {
+    pub const fn new(working_directory: crate::domain::ValidatedLocalDirectory) -> Self {
         Self { working_directory }
     }
 
-    pub(crate) const fn working_directory(&self) -> &crate::domain::ValidatedLocalDirectory {
+    pub const fn working_directory(&self) -> &crate::domain::ValidatedLocalDirectory {
         &self.working_directory
     }
 }
@@ -175,13 +176,13 @@ impl LocalTerminalLaunchPlan {
 ///
 /// Matching this enum is the boundary at which local path capabilities and Terminal Session Channel
 /// ownership diverge; callers must not reconstruct one variant from the other's directory data.
-pub(crate) enum TerminalLaunchPlan {
+pub enum TerminalLaunchPlan {
     Local(LocalTerminalLaunchPlan),
     Remote(Box<RemoteTerminalLaunchPlan>),
 }
 
 #[derive(Clone)]
-pub(crate) struct NativeTerminalSessionFactory {
+pub struct NativeTerminalSessionFactory {
     local_filesystem: LocalFilesystemAuthority,
     local_machine: LocalMachine,
     native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
@@ -189,7 +190,7 @@ pub(crate) struct NativeTerminalSessionFactory {
 }
 
 impl NativeTerminalSessionFactory {
-    pub(crate) fn new(
+    pub fn new(
         native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
         launch_planner: ShellLaunchPlanner,
         local_filesystem: LocalFilesystemAuthority,
@@ -202,15 +203,26 @@ impl NativeTerminalSessionFactory {
             launch_planner,
         }
     }
-}
 
-impl TerminalSessionFactory for NativeTerminalSessionFactory {
-    fn start(
+    /// Starts an owned runtime without requiring a presentation or graphical session.
+    pub fn start_runtime(
         &self,
         geometry: TerminalGeometry,
         launch_plan: TerminalLaunchPlan,
         initial_appearance: TerminalAppearanceUpdate,
-    ) -> Result<StartedTerminalSession, TerminalSessionError> {
+    ) -> Result<TerminalRuntime, TerminalSessionError> {
+        let (runtime, subscription) =
+            self.start_subscribed(geometry, launch_plan, initial_appearance)?;
+        drop(subscription);
+        Ok(runtime)
+    }
+
+    fn start_subscribed(
+        &self,
+        geometry: TerminalGeometry,
+        launch_plan: TerminalLaunchPlan,
+        initial_appearance: TerminalAppearanceUpdate,
+    ) -> Result<(TerminalRuntime, TerminalSubscription), TerminalSessionError> {
         let launch = match launch_plan {
             TerminalLaunchPlan::Local(local) => TerminalSessionLaunch::local(
                 self.launch_planner.clone(),
@@ -220,18 +232,30 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
             ),
             TerminalLaunchPlan::Remote(remote) => TerminalSessionLaunch::remote(*remote)?,
         };
-        let (session, events, accessibility) = TerminalSession::start_launch(
+        TerminalRuntime::start_launch(
             Arc::clone(&self.native_pty_adapter_factory),
             geometry,
             launch,
             self.local_filesystem.clone(),
             initial_appearance,
-        )?;
+        )
+    }
+}
+
+impl TerminalSessionFactory for NativeTerminalSessionFactory {
+    fn start(
+        &self,
+        geometry: TerminalGeometry,
+        launch_plan: TerminalLaunchPlan,
+        initial_appearance: TerminalAppearanceUpdate,
+    ) -> Result<StartedTerminalSession, TerminalSessionError> {
+        let (session, subscription) =
+            self.start_subscribed(geometry, launch_plan, initial_appearance)?;
         Ok(StartedTerminalSession {
-            clipboard: session.clipboard_requests.clone(),
+            clipboard: subscription.clipboard,
             handle: Box::new(session),
-            events,
-            accessibility,
+            events: subscription.events,
+            accessibility: subscription.accessibility,
         })
     }
 
@@ -240,9 +264,9 @@ impl TerminalSessionFactory for NativeTerminalSessionFactory {
     }
 }
 
-impl TerminalSession {
+impl TerminalRuntime {
     #[cfg(test)]
-    pub(crate) fn start(
+    pub fn start(
         native_pty_adapter_factory: Arc<dyn NativePtyAdapterFactory>,
         launch_planner: ShellLaunchPlanner,
         geometry: TerminalGeometry,
@@ -263,6 +287,7 @@ impl TerminalSession {
             local_filesystem,
             test_terminal_appearance_update(),
         )
+        .map(|(runtime, subscription)| (runtime, subscription.events, subscription.accessibility))
     }
 
     fn start_launch(
@@ -271,7 +296,7 @@ impl TerminalSession {
         launch: TerminalSessionLaunch,
         filesystem: LocalFilesystemAuthority,
         initial_appearance: TerminalAppearanceUpdate,
-    ) -> Result<StartedTerminalSessionParts, TerminalSessionError> {
+    ) -> Result<(TerminalRuntime, TerminalSubscription), TerminalSessionError> {
         Self::start_deferred_with_context(
             geometry,
             launch.metadata,
@@ -317,6 +342,7 @@ impl TerminalSession {
                     .map(|owner| (owner, identity::TERM_FALLBACK))
             },
         )
+        .map(|(runtime, subscription)| (runtime, subscription.events, subscription.accessibility))
     }
 
     pub(super) fn start_deferred_with_context(
@@ -333,7 +359,7 @@ impl TerminalSession {
             -> Result<(NativePtyOwner, &'static str), NativePtyStartupFailure>
         + Send
         + 'static,
-    ) -> Result<StartedTerminalSessionParts, TerminalSessionError> {
+    ) -> Result<(TerminalRuntime, TerminalSubscription), TerminalSessionError> {
         let (command_tx, command_rx) = mpsc::channel();
         let (clipboard, clipboard_requests) = WorkerClipboard::connect(command_tx.clone());
         let clipboard_authority = Arc::clone(&clipboard.authority);
@@ -346,15 +372,19 @@ impl TerminalSession {
         let permission_request_state = TerminalSessionPermissionRequestState::default();
         let worker_permission_request_state = permission_request_state.clone();
         let (event_tx, event_rx) = async_channel::bounded(2);
+        clipboard_authority.observe_subscription(event_tx.clone());
+        let event_tx = TerminalEventPublisher::from(event_tx);
         let (accessibility_tx, accessibility_rx) = async_channel::bounded(1);
         let native_pty_close = NativePtyCloseHandle::default();
         let worker_native_pty_close = native_pty_close.clone();
         let native_pty_output = reader_transport.output_sink();
         let worker_events = event_tx.clone();
+        let event_publisher = event_tx.clone();
 
         let worker = thread::Builder::new()
             .name("spaceterm-terminal".to_owned())
             .spawn(move || {
+                let _completion = WorkerEventLifetime(worker_events.clone());
                 let (native_pty, terminal_name) = match start_native_pty(
                     pty_size(geometry),
                     native_pty_output,
@@ -411,11 +441,14 @@ impl TerminalSession {
                 worker: Some(worker),
                 native_pty_close: Some(native_pty_close),
                 schedule_input,
-                clipboard_requests,
+                event_publisher,
                 clipboard_authority,
             },
-            event_rx,
-            accessibility_rx,
+            TerminalSubscription {
+                events: event_rx,
+                accessibility: accessibility_rx,
+                clipboard: clipboard_requests,
+            },
         ))
     }
 }

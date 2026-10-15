@@ -20,6 +20,7 @@ use super::process::{
     ProcessCleanupCallback, ProcessExit, ProcessRunError, ProcessSignal, SshProcessBackend,
     SshProcessCleanup, SshProcessMechanismError, TransientSshErrorOutput,
 };
+#[cfg(feature = "desktop")]
 use super::remote_utility::PreparedSshRemoteUtilityCommand;
 use crate::domain::SshDestination;
 use crate::platform::app_paths::{
@@ -359,6 +360,7 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
     }
 
     /// Prepares a no-TTY utility command bound to the current live authority.
+    #[cfg(feature = "desktop")]
     pub(crate) fn remote_utility_command(
         &self,
     ) -> Result<PreparedSshRemoteUtilityCommand, ControlConnectionError> {
@@ -806,7 +808,7 @@ fn reserve_socket(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "desktop"))]
 mod tests {
     use super::super::process::{
         SshProcessExitInterrupt, SshProcessExitObservation, SshProcessExitWait, SshProcessExitWake,

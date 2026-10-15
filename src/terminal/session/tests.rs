@@ -11,6 +11,7 @@ use crate::ssh::command::{
     RemotePaneShellCommandBuilder, ValidatedRemoteLoginShell, ValidatedRemoteShellCommand,
 };
 
+#[cfg(feature = "desktop")]
 pub(in crate::terminal) fn metadata_changed() -> TerminalSessionEvent {
     TerminalSessionEvent::MetadataChanged(MetadataWakeup::new(Arc::new(AtomicBool::new(true))))
 }
@@ -738,7 +739,7 @@ fn start_scripted_session(
             releases_reader: termination_releases_reader,
         }),
     });
-    let started = TerminalSession::start(
+    let started = TerminalRuntime::start(
         Arc::new(adapter_factory),
         test_launch_planner(),
         test_geometry(),
@@ -825,6 +826,109 @@ pub(super) fn screen_text(screen: &ScreenSnapshot) -> String {
         .flat_map(|row| row.iter())
         .map(|cell| cell.text.as_str())
         .collect()
+}
+
+#[test]
+fn dropping_presentation_receivers_keeps_the_owned_runtime_reading_output() {
+    let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+    let (mut session, events, accessibility) = result.unwrap();
+    drop(events);
+    drop(accessibility);
+
+    reader_steps
+        .send(ReaderStep::Bytes(b"unobserved output\r\n".to_vec()))
+        .unwrap();
+    reader_steps
+        .send(ReaderStep::Bytes(
+            b"\x1b]7701;permissions=accessibility\x1b\\".to_vec(),
+        ))
+        .unwrap();
+    reader_steps.send(ReaderStep::Eof).unwrap();
+    records.wait_for("the runtime to consume output and exit", |state| {
+        state.pty_drops == 1
+    });
+
+    assert_eq!(
+        session.permission_request().unwrap().permissions(),
+        &[crate::platform::permission_access::SystemPermission::Accessibility]
+    );
+    session.shutdown_and_join();
+}
+
+#[test]
+fn a_new_subscription_presents_output_received_while_detached() {
+    let (result, reader_steps, _) = start_scripted_session(ScriptedPtyOptions::default());
+    let (mut runtime, events, accessibility) = result.unwrap();
+    drop(events);
+    drop(accessibility);
+    reader_steps
+        .send(ReaderStep::Bytes(b"before reattach\r\n".to_vec()))
+        .unwrap();
+
+    let subscription = runtime.subscribe();
+    reader_steps
+        .send(ReaderStep::Bytes(b"after reattach".to_vec()))
+        .unwrap();
+    let event = receive_event(
+        &subscription.events,
+        "output across re-subscription",
+        |event| matches!(event, TerminalSessionEvent::Screen(screen) if screen_text(screen).contains("after reattach")),
+    );
+    let TerminalSessionEvent::Screen(screen) = event else {
+        unreachable!()
+    };
+    assert!(screen_text(&screen).contains("before reattach"));
+    runtime.shutdown_and_join();
+}
+
+#[test]
+fn a_replacement_subscription_receives_accessibility_without_new_output() {
+    fn receive_model(
+        receiver: async_channel::Receiver<Arc<TerminalAccessibilityModel>>,
+    ) -> Arc<TerminalAccessibilityModel> {
+        let (reply, result) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let _ = reply.send(receiver.recv_blocking());
+        });
+        result
+            .recv_timeout(Duration::from_secs(1))
+            .expect("accessibility seed must arrive without terminal output")
+            .unwrap()
+    }
+    let (result, _, _) = start_scripted_session(ScriptedPtyOptions::default());
+    let (mut runtime, events, accessibility) = result.unwrap();
+    let first = receive_model(accessibility);
+    drop(events);
+
+    let subscription = runtime.subscribe();
+    let second = receive_model(subscription.accessibility);
+    assert_eq!(first.text(), second.text());
+    runtime.shutdown_and_join();
+}
+
+#[test]
+fn subscribing_after_shell_exit_replays_final_screen_and_exit() {
+    let (result, reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
+    let (mut runtime, events, accessibility) = result.unwrap();
+    drop(events);
+    drop(accessibility);
+    reader_steps
+        .send(ReaderStep::Bytes(b"final detached output".to_vec()))
+        .unwrap();
+    reader_steps.send(ReaderStep::Eof).unwrap();
+    records.wait_for("shell exit while detached", |state| state.pty_drops == 1);
+
+    let subscription = runtime.subscribe();
+    let TerminalSessionEvent::Screen(screen) = subscription.events.recv_blocking().unwrap() else {
+        panic!("the final screen precedes exit");
+    };
+    assert!(screen_text(&screen).contains("final detached output"));
+    assert!(matches!(
+        subscription.events.recv_blocking().unwrap(),
+        TerminalSessionEvent::Exited(TerminalSessionExit::Success)
+    ));
+    assert!(subscription.events.recv_blocking().is_err());
+    runtime.shutdown_and_join();
 }
 
 #[test]
@@ -1041,7 +1145,7 @@ fn deferred_start_should_return_before_pty_spawn_and_publish_a_typed_failure() {
     let (release_spawn, release) = mpsc::sync_channel(1);
     let started_at = Instant::now();
 
-    let (mut session, events, _accessibility) = TerminalSession::start_deferred_with(
+    let (mut session, events, _accessibility) = TerminalRuntime::start_deferred_with(
         test_geometry(),
         &std::env::temp_dir(),
         move |size, _output, _close_handle| {
@@ -1115,7 +1219,7 @@ fn close_before_native_pty_installation_should_terminate_once_after_startup() {
         startup_entered,
         release,
     ));
-    let (mut session, _events, _accessibility) = TerminalSession::start(
+    let (mut session, _events, _accessibility) = TerminalRuntime::start(
         adapter_factory,
         test_launch_planner(),
         test_geometry(),
@@ -1561,7 +1665,7 @@ fn denied_osc52_keeps_prior_focus_reports_before_later_terminal_replies() {
             emulator: TerminalEmulator::new(test_geometry()).unwrap(),
             commands,
             reader_events,
-            events,
+            events: events.into(),
             accessibility,
             pending_command: None,
             terminal_input_focused: true,
@@ -1602,7 +1706,7 @@ fn denied_osc52_reads_reply_empty_and_later_terminal_output_remains_ordered() {
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
-        events,
+        events: events.into(),
         accessibility,
         pending_command: None,
         terminal_input_focused: true,
@@ -1673,7 +1777,7 @@ fn permission_request_worker() -> PermissionRequestWorker {
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
-        events,
+        events: events.into(),
         accessibility,
         pending_command: None,
         terminal_input_focused: true,
@@ -1775,7 +1879,7 @@ fn consecutive_output_chunks_should_publish_one_ordered_coalesced_screen() {
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events: reader_event_rx,
-        events,
+        events: events.into(),
         accessibility,
         pending_command: None,
         terminal_input_focused: true,
@@ -1823,7 +1927,7 @@ fn rapid_output_coalesces_before_screen_and_accessibility_construction() {
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
-        events,
+        events: events.into(),
         accessibility,
         pending_command: None,
         terminal_input_focused: true,
@@ -1889,7 +1993,7 @@ fn queued_command_runs_before_accessibility_barrier_uses_the_pending_slot() {
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
-        events,
+        events: events.into(),
         accessibility,
         pending_command: Some(Command::Key(text_key(KeyAction::Press))),
         terminal_input_focused: true,
@@ -1940,7 +2044,7 @@ fn queued_input_runs_before_due_scrollback_compression() {
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
-        events,
+        events: events.into(),
         accessibility,
         pending_command: None,
         terminal_input_focused: true,
@@ -1985,7 +2089,7 @@ fn accessibility_demand_flushes_a_pending_screen_before_binding_its_model() {
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
-        events,
+        events: events.into(),
         accessibility,
         pending_command: None,
         terminal_input_focused: true,
@@ -2054,7 +2158,7 @@ fn hidden_output_builds_one_latest_presentation_only_after_restore() {
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
-        events,
+        events: events.into(),
         accessibility,
         pending_command: None,
         terminal_input_focused: true,
@@ -2121,7 +2225,7 @@ fn kitty_animation_publishes_new_pixels_while_the_pty_is_idle() {
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
-        events,
+        events: events.into(),
         accessibility,
         pending_command: None,
         terminal_input_focused: true,
@@ -2177,7 +2281,7 @@ fn kitty_deferred_replacement_retries_when_the_ui_releases_old_pixels_without_ou
             emulator,
             commands,
             reader_events,
-            events,
+            events: events.into(),
             accessibility,
             pending_command: None,
             terminal_input_focused: true,
@@ -2251,7 +2355,7 @@ fn synchronized_output_between_accessibility_chunks_preserves_the_eager_seed() {
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
-        events,
+        events: events.into(),
         accessibility,
         pending_command: None,
         terminal_input_focused: true,
@@ -2315,7 +2419,7 @@ fn restoring_visibility_restarts_an_interrupted_accessibility_update_without_out
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
-        events,
+        events: events.into(),
         accessibility,
         pending_command: None,
         terminal_input_focused: true,
@@ -2362,7 +2466,7 @@ fn restoring_visibility_restarts_an_interrupted_accessibility_update_without_out
 }
 
 #[test]
-fn closed_screen_lane_stops_before_snapshot_or_accessibility_construction() {
+fn closed_screen_lane_skips_snapshot_and_accessibility_without_stopping_runtime() {
     let (_command_tx, commands) = mpsc::channel();
     let (_reader_tx, reader_events) = mpsc::sync_channel(PTY_OUTPUT_QUEUE_CAPACITY);
     let records = ScriptedPtyRecords::default();
@@ -2376,7 +2480,7 @@ fn closed_screen_lane_stops_before_snapshot_or_accessibility_construction() {
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
-        events,
+        events: events.into(),
         accessibility,
         pending_command: None,
         terminal_input_focused: true,
@@ -2391,7 +2495,7 @@ fn closed_screen_lane_stops_before_snapshot_or_accessibility_construction() {
     let generation = worker.emulator.presentation_generation();
     drop(receiver);
 
-    assert!(!worker.publish_screen());
+    assert!(worker.publish_screen());
     assert_eq!(worker.emulator.presentation_generation(), generation);
     assert!(accessibility_receiver.try_recv().is_err());
     worker.finish();
@@ -2412,7 +2516,7 @@ fn synchronized_output_deadline_should_publish_only_after_output_stalls() {
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events: reader_event_rx,
-        events,
+        events: events.into(),
         accessibility,
         pending_command: None,
         terminal_input_focused: true,
@@ -2485,7 +2589,7 @@ fn hidden_worker_should_publish_directory_changes_without_constructing_screens()
             .unwrap(),
             commands,
             reader_events,
-            events,
+            events: events.into(),
             accessibility,
             pending_command: None,
             terminal_input_focused: false,
@@ -2563,7 +2667,7 @@ fn visible_metadata_screen_does_not_evict_bell_attention() {
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
-        events,
+        events: events.into(),
         accessibility,
         pending_command: None,
         terminal_input_focused: false,
@@ -2607,7 +2711,7 @@ fn hiding_before_a_throttled_screen_publishes_the_retained_metadata_change() {
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
-        events,
+        events: events.into(),
         accessibility,
         pending_command: None,
         terminal_input_focused: false,
@@ -2656,7 +2760,7 @@ fn hidden_metadata_bursts_do_not_evict_bell_attention() {
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
-        events,
+        events: events.into(),
         accessibility,
         pending_command: None,
         terminal_input_focused: false,
@@ -2708,7 +2812,7 @@ fn hidden_prompt_zone_changes_reach_close_confirmation_facts() {
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
-        events,
+        events: events.into(),
         accessibility,
         pending_command: None,
         terminal_input_focused: false,
@@ -2751,7 +2855,7 @@ fn synchronized_output_expiry_defers_hidden_screen_construction_until_restore() 
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events: reader_event_rx,
-        events,
+        events: events.into(),
         accessibility,
         pending_command: None,
         terminal_input_focused: true,
@@ -3153,14 +3257,14 @@ fn rapid_resizes_should_queue_one_notification_and_retain_only_the_latest_geomet
     let (commands, receiver) = mpsc::channel();
     let schedule_input = ScheduleInput::default();
     let mut schedules = WorkerSchedules::new(Instant::now(), schedule_input.clone());
-    let mut session = TerminalSession {
+    let mut session = TerminalRuntime {
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
         commands: Some(commands),
         worker: None,
         native_pty_close: None,
         schedule_input,
-        clipboard_requests: async_channel::bounded(1).1,
+        event_publisher: async_channel::bounded(1).0.into(),
         clipboard_authority: Arc::default(),
     };
     let pixel_only = TerminalGeometry::from_grid(
@@ -3189,14 +3293,14 @@ fn rapid_find_queries_should_queue_one_notification_and_retain_only_the_latest_q
     let (commands, receiver) = mpsc::channel();
     let schedule_input = ScheduleInput::default();
     let mut schedules = WorkerSchedules::new(Instant::now(), schedule_input.clone());
-    let mut session = TerminalSession {
+    let mut session = TerminalRuntime {
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
         commands: Some(commands),
         worker: None,
         native_pty_close: None,
         schedule_input,
-        clipboard_requests: async_channel::bounded(1).1,
+        event_publisher: async_channel::bounded(1).0.into(),
         clipboard_authority: Arc::default(),
     };
 
@@ -3221,14 +3325,14 @@ fn find_close_should_supersede_a_pending_query_update() {
     let (commands, receiver) = mpsc::channel();
     let schedule_input = ScheduleInput::default();
     let mut schedules = WorkerSchedules::new(Instant::now(), schedule_input.clone());
-    let mut session = TerminalSession {
+    let mut session = TerminalRuntime {
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
         commands: Some(commands),
         worker: None,
         native_pty_close: None,
         schedule_input,
-        clipboard_requests: async_channel::bounded(1).1,
+        event_publisher: async_channel::bounded(1).0.into(),
         clipboard_authority: Arc::default(),
     };
 
@@ -3820,14 +3924,14 @@ fn drop_should_return_after_termination_fails_with_a_blocked_reader() {
 fn accessibility_demand_sender_coalesces_native_queries_onto_the_worker_lane() {
     let (commands, receiver) = mpsc::channel();
     let schedule_input = ScheduleInput::default();
-    let session = TerminalSession {
+    let session = TerminalRuntime {
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
         commands: Some(commands),
         worker: None,
         native_pty_close: None,
         schedule_input: schedule_input.clone(),
-        clipboard_requests: async_channel::bounded(1).1,
+        event_publisher: async_channel::bounded(1).0.into(),
         clipboard_authority: Arc::default(),
     };
     let sender = session.accessibility_demand_sender().unwrap();
@@ -3886,7 +3990,7 @@ fn accessibility_selection_authority_uses_the_reliable_worker_command_lane() {
         emulator: TerminalEmulator::new(test_geometry()).unwrap(),
         commands,
         reader_events,
-        events,
+        events: events.into(),
         accessibility,
         pending_command: None,
         terminal_input_focused: true,
@@ -3910,14 +4014,14 @@ fn accessibility_selection_authority_uses_the_reliable_worker_command_lane() {
     assert_eq!(request.range, 1..3);
     let (commands, receiver) = mpsc::channel();
     worker.commands = receiver;
-    let session = TerminalSession {
+    let session = TerminalRuntime {
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
         commands: Some(commands),
         worker: None,
         native_pty_close: None,
         schedule_input: ScheduleInput::default(),
-        clipboard_requests: async_channel::bounded(1).1,
+        event_publisher: async_channel::bounded(1).0.into(),
         clipboard_authority: Arc::default(),
     };
     let handle: &dyn TerminalSessionHandle = &session;
@@ -3968,14 +4072,14 @@ fn accessibility_selection_authority_is_inert_after_worker_shutdown() {
 
 #[test]
 fn stopped_terminal_session_returns_an_error_for_selection_requests() {
-    let session = TerminalSession {
+    let session = TerminalRuntime {
         metadata_state: TerminalSessionMetadataState::default(),
         permission_request_state: TerminalSessionPermissionRequestState::default(),
         commands: None,
         worker: None,
         native_pty_close: None,
         schedule_input: ScheduleInput::default(),
-        clipboard_requests: async_channel::bounded(1).1,
+        event_publisher: async_channel::bounded(1).0.into(),
         clipboard_authority: Arc::default(),
     };
 
@@ -4006,7 +4110,7 @@ fn application_mouse_drag_cancellation_releases_once_and_accepts_a_fresh_press()
                 emulator: TerminalEmulator::new(test_geometry()).unwrap(),
                 commands,
                 reader_events,
-                events,
+                events: events.into(),
                 accessibility,
                 pending_command: None,
                 terminal_input_focused: true,
@@ -4095,7 +4199,7 @@ fn worker_autoscroll_survives_screen_publication_and_stops_with_the_drag() {
             emulator: TerminalEmulator::new(test_geometry()).unwrap(),
             commands,
             reader_events,
-            events,
+            events: events.into(),
             accessibility,
             pending_command: None,
             terminal_input_focused: true,
@@ -4283,7 +4387,7 @@ fn clipboard_worker() -> (
             emulator: TerminalEmulator::new(test_geometry()).unwrap(),
             commands,
             reader_events,
-            events,
+            events: events.into(),
             accessibility,
             pending_command: None,
             terminal_input_focused: true,
@@ -4306,7 +4410,7 @@ fn clipboard_request_survives_reader_exit_until_output_is_resumed() {
     let (mut worker, records, requests, reader_tx, commands) = clipboard_worker();
     // Keep presentation channels open while checking terminal completion.
     let (events, _events_receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
-    worker.events = events;
+    worker.events = events.into();
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     worker.accessibility = accessibility;
     reader_tx
@@ -4347,7 +4451,7 @@ fn clipboard_wait_keeps_selection_queries_live_and_orders_read_before_later_repl
 fn clipboard_reply_backpressure_keeps_selection_live_and_preserves_input_order() {
     let (mut worker, records, requests, _reader_tx, _commands) = clipboard_worker();
     let (events, _events_receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
-    worker.events = events;
+    worker.events = events.into();
     let (accessibility, _accessibility_receiver) = async_channel::bounded(1);
     worker.accessibility = accessibility;
     assert!(worker.feed_test_output(vec![b"\x1b]52;c;?\x07\x1b[5n".to_vec()]));
@@ -4479,7 +4583,7 @@ fn copy_or_forward_uses_enhanced_keyboard_and_suppresses_legacy_text() {
     ] {
         let (mut worker, records, _requests, _reader, _commands) = clipboard_worker();
         let (events, _events_receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
-        worker.events = events;
+        worker.events = events.into();
         let (reply, result) = mpsc::sync_channel(1);
         assert!(worker.process_command(Command::CopyOrForward(modifiers, reply)));
         assert_eq!(result.recv().unwrap().unwrap(), None);
@@ -4501,11 +4605,12 @@ fn copy_or_forward_uses_enhanced_keyboard_and_suppresses_legacy_text() {
     }
 }
 
+#[cfg(feature = "desktop")]
 #[test]
 fn unshifted_xterm_control_forms_write_exact_pty_bytes() {
     let (mut worker, records, _requests, _reader, _commands) = clipboard_worker();
     let (events, _events_receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
-    worker.events = events;
+    worker.events = events.into();
     let mut adapter = crate::terminal::testing::test_terminal_key_input_adapter();
     for (chord, expected) in [
         ("ctrl-2", b"\x00".as_slice()),
@@ -4560,7 +4665,7 @@ fn unshifted_xterm_control_forms_write_exact_pty_bytes() {
 fn fullscreen_application_mouse_capture_and_shift_selection_keep_copy_priority() {
     let (mut worker, records, _requests, _reader, _commands) = clipboard_worker();
     let (events, _events_receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
-    worker.events = events;
+    worker.events = events.into();
     worker
         .emulator
         .feed(b"\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[>11u\x1b[?2004hselected");

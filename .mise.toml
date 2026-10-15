@@ -187,7 +187,7 @@ run = "cargo clippy --all-targets --all-features --locked --no-deps -- -D warnin
 
 [tasks."lint:rust:portable"]
 description = "Lint shared targets without native features"
-run = "cargo clippy --all-targets --no-default-features --locked --no-deps -- -D warnings"
+run = "cargo clippy --package spaceterm --package spaceterm-directories --all-targets --no-default-features --locked --no-deps -- -D warnings"
 
 [tasks."lint:python"]
 description = "Lint and type-check the Python task code"
@@ -216,7 +216,7 @@ run = "cargo check --all-targets --all-features --locked"
 
 [tasks."check:portable"]
 description = "Check shared targets without native features"
-run = "cargo check --all-targets --no-default-features --locked"
+run = "cargo check --package spaceterm --package spaceterm-directories --all-targets --no-default-features --locked"
 
 [tasks.test]
 description = "Run tests with every feature for the current platform"
@@ -225,7 +225,7 @@ run = "cargo test --all-targets --all-features --locked {{usage.filter | quote}}
 
 [tasks."test:portable"]
 description = "Run shared tests without native features"
-run = "cargo test --all-targets --no-default-features --locked"
+run = "cargo test --package spaceterm --package spaceterm-directories --all-targets --no-default-features --locked"
 
 [tasks."test:rustdoc"]
 description = "Compile and test Rust documentation examples"
@@ -234,7 +234,7 @@ run = "cargo test --workspace --exclude libghostty-vt-sys --doc --all-features -
 
 [tasks."test:conformance"]
 description = "Run terminal protocol conformance tests"
-run = "cargo test --package spaceterm --all-targets --no-default-features --locked terminal::conformance"
+run = "cargo test --package spaceterm --all-targets --features desktop-tests --locked terminal::conformance"
 
 [tasks."test:native"]
 description = "Run native Adapter tests for the current platform"
@@ -265,6 +265,7 @@ run = [
   { task = "lint:plist:macos" },
   { task = "check" },
   { task = "test" },
+  { task = "test:runtime" },
   { task = "test:rustdoc" },
   { task = "test:native:macos" },
   { task = "engine:test" },
@@ -284,6 +285,7 @@ run = [
   { task = "test:accessibility:linux", args = ["--backend", "both"] },
   { task = "test:accessibility:regressions:linux" },
   { task = "test" },
+  { task = "test:runtime" },
   { task = "test:rustdoc" },
   { task = "test:native:linux" },
   { task = "engine:test" },
@@ -304,6 +306,7 @@ run = [
   { task = "lint:diff" },
   { task = "check:portable" },
   { task = "test:portable" },
+  { task = "test:runtime" },
 ]
 
 [tasks."engine:build"]

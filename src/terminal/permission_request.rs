@@ -13,17 +13,17 @@ const MAX_BODY_BYTES: usize = 256;
 
 /// The permissions one Permission Request asks for, in the order they were named.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PermissionRequest {
+pub struct PermissionRequest {
     permissions: Vec<SystemPermission>,
 }
 
 impl PermissionRequest {
-    pub(crate) fn permissions(&self) -> &[SystemPermission] {
+    pub fn permissions(&self) -> &[SystemPermission] {
         &self.permissions
     }
 
     /// Adds the permissions `other` names that this request does not, after its own.
-    pub(crate) fn merge(&mut self, other: PermissionRequest) {
+    pub fn merge(&mut self, other: PermissionRequest) {
         for permission in other.permissions {
             if !self.permissions.contains(&permission) {
                 self.permissions.push(permission);
@@ -32,7 +32,7 @@ impl PermissionRequest {
     }
 
     #[cfg(test)]
-    pub(crate) fn for_test(permissions: &[SystemPermission]) -> Self {
+    pub fn for_test(permissions: &[SystemPermission]) -> Self {
         Self {
             permissions: permissions.to_vec(),
         }

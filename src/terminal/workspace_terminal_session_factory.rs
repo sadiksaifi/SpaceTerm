@@ -35,12 +35,7 @@ struct RemoteWorkspaceTerminalLaunchContext {
     channel_provider: Arc<dyn TerminalSessionChannelProvider>,
 }
 
-#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
-#[error("the Terminal Session Channel is unavailable")]
-/// A content-free failure to reserve one Terminal Session Channel.
-///
-/// No hierarchy mutation may occur after this error and before a fresh revalidation succeeds.
-pub(crate) struct TerminalSessionChannelUnavailable;
+use super::TerminalSessionChannelUnavailable;
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 /// A content-free reason that a Remote child launch could not be authorized.

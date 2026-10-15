@@ -34,7 +34,7 @@ pub(crate) use crate::platform::local_filesystem::LocalDirectoryIdentity;
 
 /// A Terminal Session's directory, retaining its machine boundary.
 #[derive(Clone, Eq, PartialEq)]
-pub(crate) enum CurrentDirectory {
+pub enum CurrentDirectory {
     Local(std::path::PathBuf),
     Remote(RemoteDirectory),
 }
@@ -52,7 +52,7 @@ impl std::fmt::Debug for CurrentDirectory {
 /// Validation failures for values that cross the local-to-remote domain boundary.
 ///
 /// Rejected strings must not reach OpenSSH arguments, remote utility commands, or local path APIs.
-pub(crate) enum RemoteWorkspaceValueError {
+pub enum RemoteWorkspaceValueError {
     #[error("Remote user must be one non-empty, whitespace-free token")]
     User,
     #[error("SSH destination must be one non-option, control-free token")]
@@ -65,7 +65,7 @@ pub(crate) enum RemoteWorkspaceValueError {
 
 /// The validated account name discovered from a connected remote destination.
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct RemoteUser(String);
+pub struct RemoteUser(String);
 
 impl fmt::Debug for RemoteUser {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -74,7 +74,7 @@ impl fmt::Debug for RemoteUser {
 }
 
 impl RemoteUser {
-    pub(crate) fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
+    pub fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
         if value.is_empty()
             || value
                 .chars()
@@ -85,7 +85,7 @@ impl RemoteUser {
         Ok(Self(value))
     }
 
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -95,7 +95,7 @@ impl RemoteUser {
 /// Equality is spelling-sensitive so different configured aliases remain distinct even when they
 /// currently resolve to the same host. The token is passed as one validated OpenSSH argument.
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct SshDestination(String);
+pub struct SshDestination(String);
 
 impl fmt::Debug for SshDestination {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -104,7 +104,7 @@ impl fmt::Debug for SshDestination {
 }
 
 impl SshDestination {
-    pub(crate) fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
+    pub fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
         if value.is_empty()
             || value.starts_with('-')
             || value
@@ -116,12 +116,12 @@ impl SshDestination {
         Ok(Self(value))
     }
 
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Returns the machine this destination names, without its account prefix.
-    pub(crate) fn host(&self) -> &str {
+    pub fn host(&self) -> &str {
         self.0.rsplit_once('@').map_or(&self.0, |(_, host)| host)
     }
 }
@@ -131,7 +131,7 @@ impl SshDestination {
 /// This remote value is preserved for display and shell startup. It is not local filesystem
 /// authority and must never be converted to `PathBuf` or passed to a local path API.
 #[derive(Clone, Eq, PartialEq)]
-pub(crate) struct RemoteDirectory(String);
+pub struct RemoteDirectory(String);
 
 impl fmt::Debug for RemoteDirectory {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -140,7 +140,7 @@ impl fmt::Debug for RemoteDirectory {
 }
 
 impl RemoteDirectory {
-    pub(crate) fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
+    pub fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
         let supported_form = value.starts_with('/') || value == "~" || value.starts_with("~/");
         if !supported_form || value.chars().any(char::is_control) {
             return Err(RemoteWorkspaceValueError::StartingDirectory);
@@ -148,11 +148,11 @@ impl RemoteDirectory {
         Ok(Self(value))
     }
 
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    pub(crate) fn is_home_spelling(&self, home: &RemoteDirectoryIdentity) -> bool {
+    pub fn is_home_spelling(&self, home: &RemoteDirectoryIdentity) -> bool {
         let directory = self.0.trim_end_matches('/');
         directory == "~" || directory == home.as_str().trim_end_matches('/')
     }
@@ -163,7 +163,7 @@ impl RemoteDirectory {
 /// Its normalized path-like spelling is an opaque remote identity used for connection and pin
 /// revalidation. It must never become a local `PathBuf` or local filesystem identity.
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct RemoteDirectoryIdentity(String);
+pub struct RemoteDirectoryIdentity(String);
 
 impl fmt::Debug for RemoteDirectoryIdentity {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -172,7 +172,7 @@ impl fmt::Debug for RemoteDirectoryIdentity {
 }
 
 impl RemoteDirectoryIdentity {
-    pub(crate) fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
+    pub fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
         let normalized = value == "/"
             || value.strip_prefix('/').is_some_and(|relative| {
                 !relative.is_empty()
@@ -186,7 +186,7 @@ impl RemoteDirectoryIdentity {
         Ok(Self(value))
     }
 
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -260,7 +260,7 @@ pub(crate) enum DirectoryAvailability {
 /// A validated local directory and its local filesystem identity.
 ///
 /// Local launch and pin operations retain this authority when passing directories to native APIs.
-pub(crate) struct ValidatedLocalDirectory {
+pub struct ValidatedLocalDirectory {
     path: PathBuf,
     identity: LocalDirectoryIdentity,
 }
@@ -278,15 +278,15 @@ impl fmt::Debug for ValidatedLocalDirectory {
 }
 
 impl ValidatedLocalDirectory {
-    pub(crate) fn new(path: PathBuf, identity: LocalDirectoryIdentity) -> Self {
+    pub fn new(path: PathBuf, identity: LocalDirectoryIdentity) -> Self {
         Self { path, identity }
     }
 
-    pub(crate) fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         &self.path
     }
 
-    pub(crate) fn identity(&self) -> LocalDirectoryIdentity {
+    pub fn identity(&self) -> LocalDirectoryIdentity {
         self.identity.clone()
     }
 }

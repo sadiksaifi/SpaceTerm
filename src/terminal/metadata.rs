@@ -9,29 +9,29 @@ const MAX_TITLE_CHARS: usize = 256;
 const MAX_COMMAND_CHARS: usize = 4096;
 pub(crate) const PROGRESS_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub(crate) use crate::domain::CurrentDirectory;
+pub use crate::domain::workspace_collection::CurrentDirectory;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DirectoryProvenance {
+pub enum DirectoryProvenance {
     Initial,
     Osc7,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DirectoryMetadata {
-    pub(crate) path: Arc<str>,
-    pub(crate) provenance: DirectoryProvenance,
+pub struct DirectoryMetadata {
+    pub path: Arc<str>,
+    pub provenance: DirectoryProvenance,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum MetadataFreshness {
+pub enum MetadataFreshness {
     #[default]
     Live,
     Stale,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum TitleProvenance {
+pub enum TitleProvenance {
     #[default]
     Fallback,
     WorkingDirectory,
@@ -39,13 +39,13 @@ pub(crate) enum TitleProvenance {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TitleMetadata {
-    pub(crate) value: Arc<str>,
-    pub(crate) provenance: TitleProvenance,
+pub struct TitleMetadata {
+    pub value: Arc<str>,
+    pub provenance: TitleProvenance,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum PromptZone {
+pub enum PromptZone {
     #[default]
     Unknown,
     Prompt,
@@ -54,7 +54,7 @@ pub(crate) enum PromptZone {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum CommandState {
+pub enum CommandState {
     Running,
     Finished {
         exit_status: Option<i32>,
@@ -63,13 +63,13 @@ pub(crate) enum CommandState {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CommandMetadata {
-    pub(crate) line: Arc<str>,
-    pub(crate) state: CommandState,
+pub struct CommandMetadata {
+    pub line: Arc<str>,
+    pub state: CommandState,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum ProgressMetadata {
+pub enum ProgressMetadata {
     #[default]
     None,
     Normal(u8),
@@ -83,14 +83,14 @@ pub(crate) enum ProgressMetadata {
 ///
 /// Composition captures these once from the host. They are presentation identity only and carry
 /// no filesystem authority; `home` is a spelling used to abbreviate displayed directories.
-pub(crate) struct LocalMachine {
+pub struct LocalMachine {
     user: Option<Arc<str>>,
     hostname: Option<Arc<str>>,
     home: Option<Arc<str>>,
 }
 
 impl LocalMachine {
-    pub(crate) fn new(user: Option<&str>, hostname: Option<&str>, home: Option<&str>) -> Self {
+    pub fn new(user: Option<&str>, hostname: Option<&str>, home: Option<&str>) -> Self {
         Self {
             user: Self::retain(user),
             hostname: Self::retain(hostname),
@@ -102,15 +102,15 @@ impl LocalMachine {
         retain_machine_value(value)
     }
 
-    pub(crate) fn user(&self) -> Option<&str> {
+    pub fn user(&self) -> Option<&str> {
         self.user.as_deref()
     }
 
-    pub(crate) fn hostname(&self) -> Option<&str> {
+    pub fn hostname(&self) -> Option<&str> {
         self.hostname.as_deref()
     }
 
-    pub(crate) fn home(&self) -> Option<&str> {
+    pub fn home(&self) -> Option<&str> {
         self.home.as_deref()
     }
 }
@@ -120,24 +120,24 @@ impl LocalMachine {
 ///
 /// These are remote strings kept for presentation. They are never local filesystem authority, and
 /// `home` is used only to abbreviate a displayed remote directory.
-pub(crate) struct RemoteMachine {
+pub struct RemoteMachine {
     user: Option<Arc<str>>,
     home: Option<Arc<str>>,
 }
 
 impl RemoteMachine {
-    pub(crate) fn new(user: Option<&str>, home: Option<&str>) -> Self {
+    pub fn new(user: Option<&str>, home: Option<&str>) -> Self {
         Self {
             user: retain_machine_value(user),
             home: retain_machine_value(home),
         }
     }
 
-    pub(crate) fn user(&self) -> Option<&str> {
+    pub fn user(&self) -> Option<&str> {
         self.user.as_deref()
     }
 
-    pub(crate) fn home(&self) -> Option<&str> {
+    pub fn home(&self) -> Option<&str> {
         self.home.as_deref()
     }
 }
@@ -152,7 +152,7 @@ fn retain_machine_value(value: Option<&str>) -> Option<Arc<str>> {
 
 /// The Local or Remote account and machine presented by one Pane's Terminal Session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TerminalOrigin<'a> {
+pub enum TerminalOrigin<'a> {
     Local {
         user: Option<&'a str>,
         host: Option<&'a str>,
@@ -168,17 +168,14 @@ pub(crate) enum TerminalOrigin<'a> {
 ///
 /// The directory retains its exact remote spelling for presentation and startup. It is not local
 /// filesystem authority and must never be converted to `PathBuf` or locally validated.
-pub(crate) struct RemoteTerminalMetadataContext {
+pub struct RemoteTerminalMetadataContext {
     destination: SshDestination,
     initial_directory: RemoteDirectory,
     machine: RemoteMachine,
 }
 
 impl RemoteTerminalMetadataContext {
-    pub(crate) const fn new(
-        destination: SshDestination,
-        initial_directory: RemoteDirectory,
-    ) -> Self {
+    pub const fn new(destination: SshDestination, initial_directory: RemoteDirectory) -> Self {
         Self {
             destination,
             initial_directory,
@@ -190,20 +187,20 @@ impl RemoteTerminalMetadataContext {
     }
 
     /// Attaches the discovered account, so the Pane can name its user and abbreviate its home.
-    pub(crate) fn with_machine(mut self, machine: RemoteMachine) -> Self {
+    pub fn with_machine(mut self, machine: RemoteMachine) -> Self {
         self.machine = machine;
         self
     }
 
-    pub(crate) const fn destination(&self) -> &SshDestination {
+    pub const fn destination(&self) -> &SshDestination {
         &self.destination
     }
 
-    pub(crate) const fn initial_directory(&self) -> &RemoteDirectory {
+    pub const fn initial_directory(&self) -> &RemoteDirectory {
         &self.initial_directory
     }
 
-    pub(crate) fn set_initial_directory(&mut self, directory: RemoteDirectory) {
+    pub fn set_initial_directory(&mut self, directory: RemoteDirectory) {
         self.initial_directory = directory;
     }
 
@@ -224,7 +221,7 @@ impl RemoteTerminalMetadataContext {
 /// A nested shell, such as one inside `ssh` or `docker`, cannot know it, so its markers cannot end
 /// the owning shell's command and move the Repository Source Directory. Debug never shows it.
 #[derive(Clone, Eq, PartialEq)]
-pub(crate) struct PromptOwner(Arc<str>);
+pub struct PromptOwner(Arc<str>);
 
 impl PromptOwner {
     /// The variable that carries the secret to the shell integration.
@@ -263,7 +260,7 @@ impl std::fmt::Debug for PromptOwner {
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Local metadata may authorize local path actions. Remote directory strings carry no local
 /// filesystem authority.
-pub(crate) enum TerminalMetadataContext {
+pub enum TerminalMetadataContext {
     Local {
         paths: LocalPathSemantics,
         initial_directory: Arc<str>,
@@ -277,19 +274,19 @@ pub(crate) enum TerminalMetadataContext {
 /// Whether Terminal metadata may authorize features backed by the local filesystem.
 ///
 /// This capability is derived from Local versus Remote metadata and is not user-configurable.
-pub(crate) enum TerminalLocalFileCapabilities {
+pub enum TerminalLocalFileCapabilities {
     Enabled,
     Disabled,
 }
 
 impl TerminalLocalFileCapabilities {
-    pub(crate) const fn are_enabled(self) -> bool {
+    pub const fn are_enabled(self) -> bool {
         matches!(self, Self::Enabled)
     }
 }
 
 impl TerminalMetadataContext {
-    pub(crate) fn local(
+    pub fn local(
         paths: LocalPathSemantics,
         initial_directory: &str,
         machine: LocalMachine,
@@ -318,14 +315,14 @@ impl TerminalMetadataContext {
         }
     }
 
-    pub(crate) const fn local_paths(&self) -> Option<LocalPathSemantics> {
+    pub const fn local_paths(&self) -> Option<LocalPathSemantics> {
         match self {
             Self::Local { paths, .. } => Some(*paths),
             Self::Remote(_) => None,
         }
     }
 
-    pub(crate) fn current_directory(&self, directory: &str) -> Option<CurrentDirectory> {
+    pub fn current_directory(&self, directory: &str) -> Option<CurrentDirectory> {
         match self {
             Self::Local { .. } => self.local_directory(directory).map(CurrentDirectory::Local),
             Self::Remote(_) => RemoteDirectory::new(directory.to_owned())
@@ -334,7 +331,7 @@ impl TerminalMetadataContext {
         }
     }
 
-    pub(crate) fn local_directory(&self, directory: &str) -> Option<std::path::PathBuf> {
+    pub fn local_directory(&self, directory: &str) -> Option<std::path::PathBuf> {
         let paths = self.local_paths()?;
         paths
             .is_absolute(std::path::Path::new(directory))
@@ -354,11 +351,11 @@ impl TerminalMetadataContext {
         }
     }
 
-    pub(crate) const fn is_local(&self) -> bool {
+    pub const fn is_local(&self) -> bool {
         matches!(self, Self::Local { .. })
     }
 
-    pub(crate) const fn local_file_capabilities(&self) -> TerminalLocalFileCapabilities {
+    pub const fn local_file_capabilities(&self) -> TerminalLocalFileCapabilities {
         match self {
             Self::Local { .. } => TerminalLocalFileCapabilities::Enabled,
             Self::Remote(_) => TerminalLocalFileCapabilities::Disabled,
@@ -366,14 +363,14 @@ impl TerminalMetadataContext {
     }
 
     #[cfg(test)]
-    pub(crate) const fn remote(&self) -> Option<&RemoteTerminalMetadataContext> {
+    pub const fn remote(&self) -> Option<&RemoteTerminalMetadataContext> {
         match self {
             Self::Local { .. } => None,
             Self::Remote(context) => Some(context),
         }
     }
 
-    pub(crate) fn initial_directory(&self) -> &str {
+    pub fn initial_directory(&self) -> &str {
         match self {
             Self::Local {
                 initial_directory, ..
@@ -382,7 +379,7 @@ impl TerminalMetadataContext {
         }
     }
 
-    pub(crate) fn local_hostname(&self) -> Option<&str> {
+    pub fn local_hostname(&self) -> Option<&str> {
         match self {
             Self::Local { machine, .. } => machine.hostname(),
             Self::Remote(_) => None,
@@ -393,7 +390,7 @@ impl TerminalMetadataContext {
     ///
     /// A Local context abbreviates against the local home and a Remote one against the remote
     /// home, so neither side's home can ever shorten the other side's path.
-    pub(crate) fn home(&self) -> Option<&str> {
+    pub fn home(&self) -> Option<&str> {
         match self {
             Self::Local { machine, .. } => machine.home(),
             Self::Remote(context) => context.machine.home(),
@@ -401,7 +398,7 @@ impl TerminalMetadataContext {
     }
 
     /// The account and machine this Terminal Session runs on, for presentation only.
-    pub(crate) fn origin(&self) -> TerminalOrigin<'_> {
+    pub fn origin(&self) -> TerminalOrigin<'_> {
         match self {
             Self::Local { machine, .. } => TerminalOrigin::Local {
                 user: machine.user(),
@@ -421,29 +418,29 @@ impl TerminalMetadataContext {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TerminalMetadataSnapshot {
-    pub(crate) revision: u64,
-    pub(crate) context: TerminalMetadataContext,
-    pub(crate) freshness: MetadataFreshness,
-    pub(crate) title: TitleMetadata,
-    pub(crate) directory: DirectoryMetadata,
+pub struct TerminalMetadataSnapshot {
+    pub revision: u64,
+    pub context: TerminalMetadataContext,
+    pub freshness: MetadataFreshness,
+    pub title: TitleMetadata,
+    pub directory: DirectoryMetadata,
     /// The Repository Source Directory: the reported directory as of the last prompt. Reports
     /// that arrive while a command runs apply only when it finishes.
-    pub(crate) repository_directory: Arc<str>,
+    pub repository_directory: Arc<str>,
     /// Completed commands since the session started.
-    pub(crate) finished_commands: u64,
-    pub(crate) prompt_zone: PromptZone,
-    pub(crate) command: Option<CommandMetadata>,
+    pub finished_commands: u64,
+    pub prompt_zone: PromptZone,
+    pub command: Option<CommandMetadata>,
     /// Whether changing title frames provide recent animation evidence.
-    pub(crate) title_activity: bool,
-    pub(crate) title_glyph: TitleGlyph,
-    pub(crate) progress: ProgressMetadata,
+    pub title_activity: bool,
+    pub title_glyph: TitleGlyph,
+    pub progress: ProgressMetadata,
 }
 
 impl TerminalMetadataSnapshot {
     /// Whether any fact chrome presents differs: the directory, title, command, progress, or
     /// whether those facts are still live.
-    pub(crate) fn presentation_differs(&self, other: &Self) -> bool {
+    pub fn presentation_differs(&self, other: &Self) -> bool {
         self.freshness != other.freshness
             || self.directory != other.directory
             || self.title != other.title
@@ -454,7 +451,7 @@ impl TerminalMetadataSnapshot {
     }
 
     /// The Current Directory these facts establish, or none once they have gone stale.
-    pub(crate) fn current_directory(&self) -> Option<CurrentDirectory> {
+    pub fn current_directory(&self) -> Option<CurrentDirectory> {
         (self.freshness == MetadataFreshness::Live)
             .then(|| self.context.current_directory(&self.directory.path))
             .flatten()
