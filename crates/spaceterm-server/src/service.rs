@@ -66,6 +66,17 @@ struct Run {
 pub struct Service {
     paths: Paths,
     identity: String,
+    supervisor: std::sync::Arc<dyn Supervisor>,
+}
+
+trait Supervisor: Send + Sync {
+    fn check(&self, runtime: &Path, removing: bool) -> Result<(), ServerError>;
+    fn install(&self, runtime: &Path) -> Result<(), ServerError>;
+    fn prepare_start(&self) -> Result<(), ServerError>;
+    fn start(&self) -> Result<(), ServerError>;
+    fn disable(&self) -> Result<(), ServerError>;
+    fn uninstall(&self, runtime: &Path) -> Result<(), ServerError>;
+    fn running(&self) -> Result<bool, ServerError>;
 }
 
 impl Service {
@@ -76,10 +87,19 @@ impl Service {
             Err(ServerError::Unsupported)
         }
         #[cfg(target_os = "macos")]
-        Ok(Self {
-            paths: Paths::for_identity(identity)?,
-            identity: identity.to_owned(),
-        })
+        {
+            let paths = Paths::for_identity(identity)?;
+            let supervisor = std::sync::Arc::new(macos::LaunchAgent::new(&paths, identity)?);
+            Ok(Self::new(paths, identity.to_owned(), supervisor))
+        }
+    }
+    #[cfg(any(target_os = "macos", test))]
+    fn new(paths: Paths, identity: String, supervisor: std::sync::Arc<dyn Supervisor>) -> Self {
+        Self {
+            paths,
+            identity,
+            supervisor,
+        }
     }
     pub fn status(&self) -> Result<ServiceStatus, ServerError> {
         let Some((_, state)) = self.read()? else {
@@ -89,6 +109,16 @@ impl Service {
     }
     /// Discover verified retained builds without selecting, registering, or starting any of them.
     pub fn retained_installations(&self) -> Result<Vec<RetainedInstallation>, ServerError> {
+        let retained = self.read()?;
+        let _operation = retained
+            .as_ref()
+            .map(|(data, _)| data.lock("service.lock", false))
+            .transpose()?;
+        let approved = retained
+            .as_ref()
+            .map(|(data, _)| Self::state(data))
+            .transpose()?
+            .flatten();
         let parent = self.paths.data.join("installations");
         match Directory::open(&parent, false) {
             Ok(_) => {}
@@ -102,6 +132,13 @@ impl Service {
             let entry = entry.map_err(|_| ServerError::StorageUnavailable)?;
             let name = entry.file_name();
             if !name.to_str().is_some_and(runtime::digest_valid) {
+                continue;
+            }
+            // Reinstallation restores the approved build; selecting an update is a separate action.
+            if approved
+                .as_ref()
+                .is_some_and(|state| name.to_str() != Some(&state.installation))
+            {
                 continue;
             }
             let path = parent.join(name);
@@ -168,14 +205,14 @@ impl Service {
             }
         }
         if !state.stopped {
-            self.platform()?.prepare_start()?;
+            self.supervisor.prepare_start()?;
         }
-        self.platform()?.install(&self.runtime(&state))?;
+        self.supervisor.install(&self.runtime(&state))?;
         state.installed = true;
         data.write_json(c"service.json", &state)?;
         drop(instance);
         if state.stopped {
-            self.platform()?.disable()?;
+            self.supervisor.disable()?;
         } else {
             self.start_locked(&data, &mut state, false)?;
         }
@@ -210,12 +247,12 @@ impl Service {
     ) -> Result<(), ServerError> {
         let intent = data.lock("service-intent.lock", false)?;
         *state = Self::state(data)?.ok_or(ServerError::StorageUnavailable)?;
-        self.platform()?
+        self.supervisor
             .check(&self.runtime(state), state.removing)?;
         if state.stopped && !explicit {
             return Err(ServerError::Stopped);
         }
-        if self.platform()?.running()? {
+        if self.supervisor.running()? {
             return if state.stopped {
                 Err(ServerError::CleanupUnresolved)
             } else {
@@ -229,17 +266,20 @@ impl Service {
         state.run = None;
         data.read()?; // Unavailable or missing identity is never replaced by service controls.
         runtime::verify(&self.runtime(state), &self.identity)?;
-        self.platform()?.prepare_start()?;
+        self.supervisor.prepare_start()?;
         state.stopped = false;
         data.write_json(c"service.json", state)?;
         drop(intent);
-        self.platform()?.start()?;
+        self.supervisor.start()?;
         self.wait_running(true)
     }
     pub fn stop(&self) -> Result<ServiceStatus, ServerError> {
         let (data, _) = self.read()?.ok_or(ServerError::NotInstalled)?;
         let _operation = data.lock("service.lock", false)?;
         let mut state = Self::state(&data)?.ok_or(ServerError::NotInstalled)?;
+        if !state.installed {
+            return Err(ServerError::NotInstalled);
+        }
         self.stop_locked(&data, &mut state)?;
         self.snapshot(&state)
     }
@@ -251,9 +291,9 @@ impl Service {
             state.stopped = true;
             data.write_json(c"service.json", state)?;
         }
-        self.platform()?
+        self.supervisor
             .check(&self.runtime(state), state.removing)?;
-        self.platform()?.disable()?;
+        self.supervisor.disable()?;
         self.wait_running(false)?;
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
@@ -283,10 +323,13 @@ impl Service {
         let (data, _) = self.read()?.ok_or(ServerError::NotInstalled)?;
         let _operation = data.lock("service.lock", false)?;
         let mut state = Self::state(&data)?.ok_or(ServerError::NotInstalled)?;
+        if !state.installed && !state.removing {
+            return self.snapshot(&state);
+        }
         self.stop_locked(&data, &mut state)?;
         state.removing = true;
         data.write_json(c"service.json", &state)?;
-        self.platform()?.uninstall(&self.runtime(&state))?;
+        self.supervisor.uninstall(&self.runtime(&state))?;
         state.removing = false;
         state.installed = false;
         data.write_json(c"service.json", &state)?;
@@ -318,10 +361,13 @@ impl Service {
     }
     fn snapshot(&self, state: &State) -> Result<ServiceStatus, ServerError> {
         if state.installed {
-            self.platform()?
+            self.supervisor
                 .check(&self.runtime(state), state.removing)?;
         }
-        let running = self.platform()?.running()?;
+        let running = self.supervisor.running()?;
+        if running && !state.installed {
+            return Err(ServerError::CleanupUnresolved);
+        }
         if !running {
             check_cleanup(state)?;
         }
@@ -335,7 +381,7 @@ impl Service {
     fn wait_running(&self, desired: bool) -> Result<(), ServerError> {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
-            if self.platform()?.running()? == desired
+            if self.supervisor.running()? == desired
                 && (!desired || crate::host::connect(&self.paths).is_ok())
             {
                 return Ok(());
@@ -371,14 +417,6 @@ impl Service {
             directory.remove_socket(c"s", identity)?;
         }
         Ok(())
-    }
-    #[cfg(target_os = "macos")]
-    fn platform(&self) -> Result<macos::LaunchAgent, ServerError> {
-        macos::LaunchAgent::new(&self.paths, &self.identity)
-    }
-    #[cfg(not(target_os = "macos"))]
-    fn platform(&self) -> Result<Unavailable, ServerError> {
-        Err(ServerError::ServiceUnavailable)
     }
 }
 
@@ -487,33 +525,6 @@ fn boot() -> Result<String, ServerError> {
         std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
             .map(|v| v.trim().to_owned())
             .map_err(|_| ServerError::StorageUnavailable)
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-struct Unavailable;
-#[cfg(not(target_os = "macos"))]
-impl Unavailable {
-    fn check(&self, _: &Path, _: bool) -> Result<(), ServerError> {
-        Err(ServerError::ServiceUnavailable)
-    }
-    fn install(&self, _: &Path) -> Result<(), ServerError> {
-        Err(ServerError::ServiceUnavailable)
-    }
-    fn prepare_start(&self) -> Result<(), ServerError> {
-        Err(ServerError::ServiceUnavailable)
-    }
-    fn start(&self) -> Result<(), ServerError> {
-        Err(ServerError::ServiceUnavailable)
-    }
-    fn disable(&self) -> Result<(), ServerError> {
-        Err(ServerError::ServiceUnavailable)
-    }
-    fn uninstall(&self, _: &Path) -> Result<(), ServerError> {
-        Err(ServerError::ServiceUnavailable)
-    }
-    fn running(&self) -> Result<bool, ServerError> {
-        Err(ServerError::ServiceUnavailable)
     }
 }
 
@@ -649,6 +660,46 @@ pub(crate) fn retain_stop(paths: &Paths) -> Result<(), ServerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[derive(Default)]
+    struct TestSupervisor {
+        stop_data: Option<PathBuf>,
+    }
+    impl Supervisor for TestSupervisor {
+        fn check(&self, _: &Path, _: bool) -> Result<(), ServerError> {
+            if self.stop_data.is_some() {
+                Ok(())
+            } else {
+                panic!("unexpected OS call")
+            }
+        }
+        fn install(&self, _: &Path) -> Result<(), ServerError> {
+            panic!("unexpected OS call")
+        }
+        fn prepare_start(&self) -> Result<(), ServerError> {
+            panic!("unexpected OS call")
+        }
+        fn start(&self) -> Result<(), ServerError> {
+            panic!("unexpected OS call")
+        }
+        fn disable(&self) -> Result<(), ServerError> {
+            let data = Directory::open(
+                self.stop_data.as_deref().expect("unexpected OS call"),
+                false,
+            )?;
+            let state = Service::state(&data)?.ok_or(ServerError::NotInstalled)?;
+            Err(if state.stopped {
+                ServerError::ServiceUnavailable
+            } else {
+                ServerError::StartupFailed
+            })
+        }
+        fn uninstall(&self, _: &Path) -> Result<(), ServerError> {
+            panic!("unexpected OS call")
+        }
+        fn running(&self) -> Result<bool, ServerError> {
+            panic!("unexpected OS call")
+        }
+    }
     struct Fixture {
         root: PathBuf,
         paths: Paths,
@@ -685,6 +736,23 @@ mod tests {
         }
     }
     #[test]
+    fn reinstall_discovery_does_not_offer_an_unapproved_staged_build() {
+        let fixture = Fixture::new();
+        let other = fixture
+            .paths
+            .data
+            .join("installations")
+            .join("b".repeat(64));
+        Directory::open(other.parent().unwrap(), true).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let service = Service::new(
+            fixture.paths.clone(),
+            "spaceterm-development".into(),
+            std::sync::Arc::new(TestSupervisor::default()),
+        );
+        assert!(service.retained_installations().unwrap().is_empty());
+    }
+    #[test]
     fn protocol_stop_survives_reopen_without_replacing_identity() {
         let fixture = Fixture::new();
         let seed = Directory::open(&fixture.paths.data, false)
@@ -703,10 +771,11 @@ mod tests {
     fn connection_setup_cannot_restart_a_durably_stopped_service() {
         let fixture = Fixture::new();
         retain_stop(&fixture.paths).unwrap();
-        let service = Service {
-            paths: fixture.paths.clone(),
-            identity: "spaceterm-development".into(),
-        };
+        let service = Service::new(
+            fixture.paths.clone(),
+            "spaceterm-development".into(),
+            std::sync::Arc::new(TestSupervisor::default()),
+        );
         assert_eq!(service.start_if_enabled(), Err(ServerError::Stopped));
         assert!(
             Service::state(&Directory::open(&fixture.paths.data, false).unwrap())
@@ -741,6 +810,19 @@ mod tests {
         );
     }
     #[test]
+    fn stop_publishes_durable_intent_before_a_failing_supervisor_operation() {
+        let fixture = Fixture::new();
+        let supervisor = TestSupervisor {
+            stop_data: Some(fixture.paths.data.clone()),
+        };
+        let service = Service::new(
+            fixture.paths.clone(),
+            "spaceterm-development".into(),
+            std::sync::Arc::new(supervisor),
+        );
+        assert_eq!(service.stop(), Err(ServerError::ServiceUnavailable));
+    }
+    #[test]
     fn foreground_start_cannot_bypass_the_approved_service_runtime() {
         let fixture = Fixture::new();
         assert_eq!(
@@ -768,10 +850,11 @@ mod tests {
         let socket = fixture.paths.socket();
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let service = Service {
-            paths: fixture.paths.clone(),
-            identity: "spaceterm-development".into(),
-        };
+        let service = Service::new(
+            fixture.paths.clone(),
+            "spaceterm-development".into(),
+            std::sync::Arc::new(TestSupervisor::default()),
+        );
         assert_eq!(
             service.prove_quiescent(),
             Err(ServerError::CleanupUnresolved)

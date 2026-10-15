@@ -56,10 +56,12 @@ impl LaunchAgent {
             name: self.name.clone(),
         }
     }
-    pub(super) fn install(&self, runtime: &Path) -> Result<(), ServerError> {
+}
+impl Supervisor for LaunchAgent {
+    fn install(&self, runtime: &Path) -> Result<(), ServerError> {
         self.registration().install(&self.contents(runtime)?)
     }
-    pub(super) fn check(&self, runtime: &Path, removing: bool) -> Result<(), ServerError> {
+    fn check(&self, runtime: &Path, removing: bool) -> Result<(), ServerError> {
         self.registration()
             .check(&self.contents(runtime)?, removing)?;
         if let Ok(bytes) = command(
@@ -85,10 +87,10 @@ impl LaunchAgent {
         }
         Ok(())
     }
-    pub(super) fn prepare_start(&self) -> Result<(), ServerError> {
+    fn prepare_start(&self) -> Result<(), ServerError> {
         Ok(())
     }
-    pub(super) fn start(&self) -> Result<(), ServerError> {
+    fn start(&self) -> Result<(), ServerError> {
         command(
             "/bin/launchctl",
             &["enable".into(), self.target.clone().into()],
@@ -124,7 +126,7 @@ impl LaunchAgent {
         }
         Ok(())
     }
-    pub(super) fn disable(&self) -> Result<(), ServerError> {
+    fn disable(&self) -> Result<(), ServerError> {
         command(
             "/bin/launchctl",
             &["disable".into(), self.target.clone().into()],
@@ -155,7 +157,7 @@ impl LaunchAgent {
         }
         Ok(())
     }
-    pub(super) fn running(&self) -> Result<bool, ServerError> {
+    fn running(&self) -> Result<bool, ServerError> {
         let result = command(
             "/bin/launchctl",
             &["list".into(), self.label.clone().into()],
@@ -184,7 +186,7 @@ impl LaunchAgent {
             }
         }
     }
-    pub(super) fn uninstall(&self, runtime: &Path) -> Result<(), ServerError> {
+    fn uninstall(&self, runtime: &Path) -> Result<(), ServerError> {
         self.registration().remove(&self.contents(runtime)?)
     }
 }
