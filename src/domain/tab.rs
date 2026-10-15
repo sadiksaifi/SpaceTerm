@@ -209,6 +209,18 @@ pub(crate) enum PaneNodeRef<'a> {
     },
 }
 
+/// A complete replacement of presentation geometry, independent of root and focus ownership.
+#[cfg(any(feature = "developer-tools", test))]
+pub(crate) enum PaneArrangement {
+    Pane(PaneId),
+    Split {
+        axis: SplitAxis,
+        ratio: f32,
+        first: Box<Self>,
+        second: Box<Self>,
+    },
+}
+
 enum FocusHistoryStep {
     Previous,
     Next,
@@ -278,6 +290,56 @@ impl<T> Tab<T> {
 
     pub(crate) fn root(&self) -> PaneTreeRef<'_> {
         PaneTreeRef { node: &self.root }
+    }
+
+    /// Restore geometry only when it names every current Pane exactly once.
+    #[cfg(any(feature = "developer-tools", test))]
+    pub(crate) fn restore_arrangement(
+        &mut self,
+        arrangement: PaneArrangement,
+    ) -> Result<(), PaneError> {
+        fn build(
+            value: PaneArrangement,
+            panes: &mut std::collections::BTreeSet<PaneId>,
+            next: &mut u64,
+        ) -> Result<PaneNode, PaneError> {
+            match value {
+                PaneArrangement::Pane(id) => {
+                    if !panes.insert(id) {
+                        return Err(PaneError::MissingPane(id));
+                    }
+                    Ok(PaneNode::Leaf(id))
+                }
+                PaneArrangement::Split {
+                    axis,
+                    ratio,
+                    first,
+                    second,
+                } => {
+                    if !ratio.is_finite() || ratio <= 0.0 || ratio >= 1.0 {
+                        return Err(PaneError::InvalidSplitRatio(ratio));
+                    }
+                    let id = SplitId::from_raw(*next);
+                    *next = next.checked_add(1).ok_or(PaneError::SplitIdExhausted)?;
+                    Ok(PaneNode::Split {
+                        id,
+                        axis,
+                        ratio,
+                        first: Box::new(build(*first, panes, next)?),
+                        second: Box::new(build(*second, panes, next)?),
+                    })
+                }
+            }
+        }
+        let mut panes = std::collections::BTreeSet::new();
+        let mut next = self.next_split_id;
+        let root = build(arrangement, &mut panes, &mut next)?;
+        if panes.len() != self.panes.len() || self.panes.keys().any(|id| !panes.contains(id)) {
+            return Err(PaneError::MissingPane(self.root_pane_id));
+        }
+        self.root = root;
+        self.next_split_id = next;
+        Ok(())
     }
 
     pub(crate) fn pane(&self, pane_id: PaneId) -> Option<&T> {
@@ -1082,6 +1144,47 @@ mod tests {
         )
         .unwrap();
         tab
+    }
+
+    #[test]
+    fn restoring_geometry_preserves_root_focus_history_zoom_and_payloads() {
+        let mut tab = four_pane_tab();
+        tab.focus_pane(PaneId::new(3)).unwrap();
+        tab.toggle_zoom();
+        let original = (
+            tab.root_pane_id(),
+            tab.focused_pane_id(),
+            tab.focus_history.clone(),
+            tab.zoom_state(),
+        );
+        let layout = PaneArrangement::Split {
+            axis: SplitAxis::Vertical,
+            ratio: 0.7,
+            first: Box::new(PaneArrangement::Pane(PaneId::new(4))),
+            second: Box::new(PaneArrangement::Split {
+                axis: SplitAxis::Horizontal,
+                ratio: 0.3,
+                first: Box::new(PaneArrangement::Pane(PaneId::new(2))),
+                second: Box::new(PaneArrangement::Split {
+                    axis: SplitAxis::Vertical,
+                    ratio: 0.6,
+                    first: Box::new(PaneArrangement::Pane(PaneId::new(1))),
+                    second: Box::new(PaneArrangement::Pane(PaneId::new(3))),
+                }),
+            }),
+        };
+        tab.restore_arrangement(layout).unwrap();
+        assert_eq!(
+            (
+                tab.root_pane_id(),
+                tab.focused_pane_id(),
+                tab.focus_history.clone(),
+                tab.zoom_state()
+            ),
+            original
+        );
+        assert_eq!(tab.pane_count(), 4);
+        assert_eq!(tab.focus_previous_pane(), Some(PaneId::new(4)));
     }
 
     #[test]

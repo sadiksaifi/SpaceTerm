@@ -695,6 +695,419 @@ fn a_restored_pane_should_offer_start_new_shell_without_starting_one(cx: &mut Te
     );
 }
 
+/// Two desktop clients presenting the same server Workspace, each through its own Tab strip.
+/// Each one's arrangement and reading state is its own; the server owns only membership.
+mod independent_views {
+    use super::*;
+    use crate::domain::{PaneId, ZoomState};
+    use gpui::accesskit::{Action, ActionData};
+    use spaceterm_ui::a11y_testing::{A11yTree, perform_with};
+
+    const THIRD_TAB: Id = [10; 32];
+    const THIRD_TAB_PANE: Id = [11; 32];
+    const FOURTH_TAB: Id = [12; 32];
+    const FOURTH_TAB_PANE: Id = [13; 32];
+
+    /// The name a Layout description gives a server Pane.
+    fn label(pane: Id) -> &'static str {
+        match pane {
+            ROOT_PANE => "root",
+            SPLIT_PANE => "split",
+            REPLACEMENT_PANE => "new",
+            _ => "other",
+        }
+    }
+
+    /// One Pane Layout signature, with every Pane named by its server identity and every Split
+    /// by its axis and ratio, so two clients' layouts compare although their local Pane numbers
+    /// differ.
+    fn describe(signature: &str, server: impl Fn(PaneId) -> Option<Id>) -> String {
+        let mut described = String::new();
+        let mut rest = signature;
+        while !rest.is_empty() {
+            if let Some(after) = rest.strip_prefix("pane:") {
+                let end = after.find([',', ')']).unwrap_or(after.len());
+                let pane = PaneId::new(after[..end].parse().expect("a Pane number"));
+                described.push_str(label(server(pane).expect("every Pane here is shared")));
+                rest = &after[end..];
+            } else if let Some(after) = rest.strip_prefix("split:") {
+                let end = after.find('(').expect("a Split lists its children");
+                let mut fields = after[..end].split(':').skip(1);
+                let axis = fields.next().expect("a Split axis");
+                let ratio: f32 = fields
+                    .next()
+                    .and_then(|ratio| ratio.parse().ok())
+                    .expect("a Split ratio");
+                described.push_str(&format!("{axis} {ratio:.2}("));
+                rest = &after[end + 1..];
+            } else {
+                described.push_str(&rest[..1]);
+                rest = &rest[1..];
+            }
+        }
+        described
+    }
+
+    /// One client's own arrangement: its Tab display order, and its Active Tab's Pane Layout.
+    fn arrangement(harness: &SharedHarness, cx: &mut VisualTestContext) -> (Vec<Id>, String) {
+        harness.manager.read_with(cx, |manager, cx| {
+            let order = manager
+                .tab_ids()
+                .into_iter()
+                .map(|tab| manager.shared_server_tab(tab).expect("every Tab is shared"))
+                .collect();
+            let (active_tab, _) = manager.active_terminal_identity(cx);
+            let layout = describe(
+                &manager.active_tab_view().read(cx).layout_signature(),
+                |pane| manager.shared_server_pane(active_tab, pane, cx),
+            );
+            (order, layout)
+        })
+    }
+
+    /// The Active Tab and its Focused Pane, as the server names them.
+    fn view(harness: &SharedHarness, cx: &mut VisualTestContext) -> (Id, Id) {
+        harness.manager.read_with(cx, |manager, cx| {
+            let (tab, pane) = manager.active_terminal_identity(cx);
+            (
+                manager.shared_server_tab(tab).expect("a shared Tab"),
+                manager
+                    .shared_server_pane(tab, pane, cx)
+                    .expect("a shared Pane"),
+            )
+        })
+    }
+
+    fn zoomed(harness: &SharedHarness, cx: &mut VisualTestContext) -> Option<Id> {
+        harness.manager.read_with(cx, |manager, cx| {
+            let (tab, _) = manager.active_terminal_identity(cx);
+            match manager.active_tab_view().read(cx).zoom_state() {
+                ZoomState::Zoomed(pane) => manager.shared_server_pane(tab, pane, cx),
+                ZoomState::Restored => None,
+            }
+        })
+    }
+
+    fn keyboard_in_focused_pane(harness: &SharedHarness, cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, cx| {
+            harness
+                .manager
+                .read(cx)
+                .focused_terminal_is_focused(window, cx)
+        })
+    }
+
+    /// Both clients read the same publication.
+    fn publish_to_both(
+        clients: [(&SharedHarness, &mut VisualTestContext); 2],
+        inventory: &Inventory,
+    ) {
+        for (harness, cx) in clients {
+            publish(harness, inventory.clone(), cx);
+        }
+    }
+
+    /// Resizes the Active Tab's only Split to half its current offset through the action
+    /// assistive technology performs.
+    fn halve_split_accessibly(cx: &mut VisualTestContext) {
+        let offset = A11yTree::read(cx).node("Resize Pane split")["aria"]["numeric_value"]
+            .as_f64()
+            .expect("the Split publishes its offset");
+        let tree = A11yTree::read(cx);
+        perform_with(
+            cx,
+            tree.node("Resize Pane split"),
+            Action::SetValue,
+            Some(ActionData::NumericValue(offset / 2.0)),
+        );
+        cx.run_until_parked();
+    }
+
+    /// Drags local Pane 1 by its caption onto the right edge of local Pane 2.
+    fn move_first_pane_right_of_second(cx: &mut VisualTestContext) {
+        let target = cx
+            .debug_bounds("pane-surface-2")
+            .expect("the second Pane was rendered");
+        let caption = cx
+            .debug_bounds("pane-caption-1-focused")
+            .or_else(|| cx.debug_bounds("pane-caption-1-unfocused"))
+            .expect("the first Pane's caption was rendered");
+        let from = gpui::point(caption.left() + gpui::px(24.0), caption.center().y);
+        let edge = gpui::point(target.right() - gpui::px(8.0), target.center().y);
+        cx.simulate_mouse_move(from, None, Modifiers::none());
+        cx.simulate_mouse_down(from, gpui::MouseButton::Left, Modifiers::none());
+        for position in [edge, edge + gpui::point(gpui::px(-1.0), gpui::px(0.0))] {
+            cx.simulate_mouse_move(position, Some(gpui::MouseButton::Left), Modifiers::none());
+            cx.run_until_parked();
+        }
+        cx.simulate_mouse_up(edge, gpui::MouseButton::Left, Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    /// The scenario in ADR 0042: Mac 1 and Mac 2 arrange the same Workspace differently, then
+    /// another client creates and deletes Tabs and Panes. Each Mac keeps its own order, Pane
+    /// placement, Split axes, and ratios for what survives, and the new work joins where the ADR
+    /// says without moving either Mac's Active Tab or Focused Pane.
+    #[gpui::test]
+    fn two_clients_should_keep_their_own_arrangements_through_shared_creation_and_deletion(
+        mac_1: &mut TestAppContext,
+        mac_2: &mut TestAppContext,
+    ) {
+        let (first, mac_1) = shared_tab_manager(mac_1);
+        let (second, mac_2) = shared_tab_manager(mac_2);
+        publish_to_both(
+            [(&first, &mut *mac_1), (&second, &mut *mac_2)],
+            &inventory(
+                2,
+                vec![
+                    tab(
+                        ROOT_TAB,
+                        vec![
+                            pane(ROOT_PANE, None, Axis::Right),
+                            pane(SPLIT_PANE, Some(ROOT_PANE), Axis::Down),
+                        ],
+                    ),
+                    tab(SECOND_TAB, vec![pane(SECOND_TAB_PANE, None, Axis::Right)]),
+                    tab(THIRD_TAB, vec![pane(THIRD_TAB_PANE, None, Axis::Right)]),
+                ],
+            ),
+        );
+        let default = (
+            vec![ROOT_TAB, SECOND_TAB, THIRD_TAB],
+            "Vertical 0.50(root,split)".to_owned(),
+        );
+        assert_eq!(
+            arrangement(&first, mac_1),
+            default,
+            "creation order by default"
+        );
+        assert_eq!(
+            arrangement(&second, mac_2),
+            default,
+            "creation order by default"
+        );
+
+        // Mac 1 moves its Root Tab to the end and resizes the Split from assistive technology.
+        mac_1.dispatch_action(crate::ui::MoveTabRight);
+        mac_1.dispatch_action(crate::ui::MoveTabRight);
+        mac_1.run_until_parked();
+        halve_split_accessibly(mac_1);
+        // Mac 2 moves its Root Pane beside the split one.
+        move_first_pane_right_of_second(mac_2);
+
+        assert_eq!(
+            arrangement(&first, mac_1),
+            (
+                vec![SECOND_TAB, THIRD_TAB, ROOT_TAB],
+                "Vertical 0.25(root,split)".to_owned()
+            )
+        );
+        assert_eq!(
+            arrangement(&second, mac_2),
+            (
+                vec![ROOT_TAB, SECOND_TAB, THIRD_TAB],
+                "Horizontal 0.50(split,root)".to_owned()
+            ),
+            "Mac 1's rearrangement must leave Mac 2's arrangement alone, and Mac 2's own move \
+             must leave Mac 1's alone"
+        );
+        assert!(
+            first.edits.submitted().is_empty() && second.edits.submitted().is_empty(),
+            "rearranging is a client's own view, so it asks the server for nothing and cannot \
+             change its Root Tab or Root Pane"
+        );
+        let views = (view(&first, mac_1), view(&second, mac_2));
+
+        // Another client deletes the second Tab, creates a fourth, and splits the split Pane.
+        publish_to_both(
+            [(&first, &mut *mac_1), (&second, &mut *mac_2)],
+            &inventory(
+                3,
+                vec![
+                    tab(
+                        ROOT_TAB,
+                        vec![
+                            pane(ROOT_PANE, None, Axis::Right),
+                            pane(SPLIT_PANE, Some(ROOT_PANE), Axis::Down),
+                            pane(REPLACEMENT_PANE, Some(SPLIT_PANE), Axis::Right),
+                        ],
+                    ),
+                    tab(THIRD_TAB, vec![pane(THIRD_TAB_PANE, None, Axis::Right)]),
+                    tab(FOURTH_TAB, vec![pane(FOURTH_TAB_PANE, None, Axis::Right)]),
+                ],
+            ),
+        );
+
+        assert_eq!(
+            arrangement(&first, mac_1),
+            (
+                vec![THIRD_TAB, ROOT_TAB, FOURTH_TAB],
+                "Vertical 0.25(root,Horizontal 0.50(split,new))".to_owned()
+            ),
+            "the new Tab appends to Mac 1's own order, and the new Pane joins beside its source \
+             in Mac 1's own layout"
+        );
+        assert_eq!(
+            arrangement(&second, mac_2),
+            (
+                vec![ROOT_TAB, THIRD_TAB, FOURTH_TAB],
+                "Horizontal 0.50(Horizontal 0.50(split,new),root)".to_owned()
+            ),
+            "the same creation joins Mac 2's different arrangement the same way"
+        );
+
+        // The Pane the new one was split from is deleted, and the server clears the link.
+        publish_to_both(
+            [(&first, &mut *mac_1), (&second, &mut *mac_2)],
+            &inventory(
+                4,
+                vec![
+                    tab(
+                        ROOT_TAB,
+                        vec![
+                            pane(ROOT_PANE, None, Axis::Right),
+                            pane(REPLACEMENT_PANE, None, Axis::Right),
+                        ],
+                    ),
+                    tab(THIRD_TAB, vec![pane(THIRD_TAB_PANE, None, Axis::Right)]),
+                    tab(FOURTH_TAB, vec![pane(FOURTH_TAB_PANE, None, Axis::Right)]),
+                ],
+            ),
+        );
+
+        assert_eq!(
+            arrangement(&first, mac_1).1,
+            "Vertical 0.25(root,new)",
+            "Mac 1 keeps a valid layout of what survives, with its own ratio"
+        );
+        assert_eq!(
+            arrangement(&second, mac_2).1,
+            "Horizontal 0.50(new,root)",
+            "Mac 2 keeps a valid layout of what survives, with its own placement"
+        );
+        assert_eq!(
+            (view(&first, mac_1), view(&second, mac_2)),
+            views,
+            "another client's creation and deletion move neither Active Tab nor Focused Pane"
+        );
+        for (harness, pane) in [(&first, REPLACEMENT_PANE), (&second, REPLACEMENT_PANE)] {
+            assert_eq!(
+                harness.panes.pane(pane).selections(),
+                0,
+                "presenting another client's Pane must not ask the server for it"
+            );
+        }
+        assert!(
+            first.edits.submitted().is_empty() && second.edits.submitted().is_empty(),
+            "reconciling publications submits nothing"
+        );
+    }
+
+    /// One client zooms and another focuses a different Pane. Another client's split and Tab then
+    /// join both without taking either client's zoom, Focused Pane, or keyboard.
+    #[gpui::test]
+    fn another_clients_creation_should_take_neither_clients_zoom_nor_focus(
+        mac_1: &mut TestAppContext,
+        mac_2: &mut TestAppContext,
+    ) {
+        let (first, mac_1) = shared_tab_manager(mac_1);
+        let (second, mac_2) = shared_tab_manager(mac_2);
+        let split = vec![
+            pane(ROOT_PANE, None, Axis::Right),
+            pane(SPLIT_PANE, Some(ROOT_PANE), Axis::Down),
+        ];
+        publish_to_both(
+            [(&first, &mut *mac_1), (&second, &mut *mac_2)],
+            &inventory(2, vec![tab(ROOT_TAB, split.clone())]),
+        );
+
+        // Mac 1 zooms its Root Pane; Mac 2 reads in the split Pane.
+        mac_1.dispatch_action(crate::ui::TogglePaneZoom);
+        mac_1.run_until_parked();
+        click("pane-surface-2", mac_2);
+        assert_eq!(zoomed(&first, mac_1), Some(ROOT_PANE));
+        assert_eq!(zoomed(&second, mac_2), None, "zoom is Mac 1's own");
+        assert_eq!(view(&first, mac_1), (ROOT_TAB, ROOT_PANE));
+        assert_eq!(
+            view(&second, mac_2),
+            (ROOT_TAB, SPLIT_PANE),
+            "focus is Mac 2's own"
+        );
+
+        // Another client splits the zoomed Pane and creates a Tab.
+        let mut created = split.clone();
+        created.push(pane(REPLACEMENT_PANE, Some(ROOT_PANE), Axis::Right));
+        publish_to_both(
+            [(&first, &mut *mac_1), (&second, &mut *mac_2)],
+            &inventory(
+                3,
+                vec![
+                    tab(ROOT_TAB, created),
+                    tab(SECOND_TAB, vec![pane(SECOND_TAB_PANE, None, Axis::Right)]),
+                ],
+            ),
+        );
+
+        assert_eq!(
+            zoomed(&first, mac_1),
+            Some(ROOT_PANE),
+            "a Pane split from the zoomed one must not end Mac 1's zoom"
+        );
+        assert_eq!(view(&first, mac_1), (ROOT_TAB, ROOT_PANE));
+        assert!(
+            keyboard_in_focused_pane(&first, mac_1),
+            "Mac 1's keyboard stays in its Pane"
+        );
+        assert_eq!(zoomed(&second, mac_2), None);
+        assert_eq!(view(&second, mac_2), (ROOT_TAB, SPLIT_PANE));
+        assert!(
+            keyboard_in_focused_pane(&second, mac_2),
+            "Mac 2's keyboard stays in its Pane"
+        );
+        for harness in [&first, &second] {
+            assert_eq!(harness.panes.pane(REPLACEMENT_PANE).selections(), 0);
+            assert_eq!(harness.panes.pane(SECOND_TAB_PANE).selections(), 0);
+        }
+
+        // Another client closes the split Pane, which only Mac 2 was reading.
+        let mut closed = vec![pane(ROOT_PANE, None, Axis::Right)];
+        closed.push(pane(REPLACEMENT_PANE, Some(ROOT_PANE), Axis::Right));
+        let selections =
+            [ROOT_PANE, REPLACEMENT_PANE].map(|pane| second.panes.pane(pane).selections());
+        publish_to_both(
+            [(&first, &mut *mac_1), (&second, &mut *mac_2)],
+            &inventory(
+                4,
+                vec![
+                    tab(ROOT_TAB, closed),
+                    tab(SECOND_TAB, vec![pane(SECOND_TAB_PANE, None, Axis::Right)]),
+                ],
+            ),
+        );
+
+        assert_eq!(
+            zoomed(&first, mac_1),
+            Some(ROOT_PANE),
+            "closing another Pane must not end Mac 1's zoom"
+        );
+        assert!(keyboard_in_focused_pane(&first, mac_1));
+        let (tab, focused) = view(&second, mac_2);
+        assert!(
+            tab == ROOT_TAB && [ROOT_PANE, REPLACEMENT_PANE].contains(&focused),
+            "Mac 2's Focused Pane left, so its own layout chooses a surviving Pane"
+        );
+        assert!(
+            keyboard_in_focused_pane(&second, mac_2),
+            "the keyboard that was in the closed Pane rests in the Pane that follows"
+        );
+        assert_eq!(
+            [ROOT_PANE, REPLACEMENT_PANE].map(|pane| second.panes.pane(pane).selections()),
+            selections,
+            "nobody on Mac 2 selected a Pane, so the server is asked for nothing"
+        );
+    }
+}
+
 /// The edit state a person reads, independent of any window.
 mod edits {
     use super::*;
@@ -1537,3 +1950,6 @@ mod draft {
         );
     }
 }
+
+#[path = "retention_tests.rs"]
+mod retention_tests;

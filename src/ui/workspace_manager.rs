@@ -406,9 +406,20 @@ impl WorkspaceManager {
         if let Some(reason) = initial_directory_error {
             let _ = workspaces.set_directory_unavailable(workspaces.active_workspace_id(), reason);
         }
+        #[cfg(feature = "developer-tools")]
+        cx.on_app_quit(|manager, cx| {
+            manager.save_shared_arrangements(cx);
+            if let Some(shared) = manager.shared.as_mut() {
+                shared.flush_client_views();
+            }
+            async {}
+        })
+        .detach();
         cx.on_release(|manager, cx| {
             manager.release_sidebar_repositories(cx);
             manager.release_sidebar_worktrees(cx);
+            #[cfg(feature = "developer-tools")]
+            manager.save_shared_arrangements(cx);
         })
         .detach();
         let sidebar = cx.new(|cx| WorkspaceSidebar::new(sidebar_visible, window, cx));
@@ -3864,8 +3875,12 @@ impl WorkspaceManager {
         let edits = SharedEditSource::new(std::rc::Rc::new(
             crate::terminal::shared_workspace::SharedWorkspaceClient::new(server.clone()),
         ));
-        let sessions = SharedPaneSessions::new(server, client_home, &self.pane_construction);
+        let sessions =
+            SharedPaneSessions::new(server.clone(), client_home, &self.pane_construction);
         self.present_shared_workspaces(edits, sessions, window, cx);
+        if let Some(shared) = self.shared.as_mut() {
+            shared.retain_client_views(server);
+        }
     }
 
     /// Presents the Workspaces one shared edit channel publishes.
@@ -3908,6 +3923,14 @@ impl WorkspaceManager {
 
     /// Reads the server's answer and its inventory, then presents both.
     fn sync_shared_workspaces(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ready = self
+            .shared
+            .as_mut()
+            .map(|shared| shared.prepare_client_views());
+        if !matches!(ready, Some(Ok(true))) {
+            self.report_client_view_error(window, cx);
+            return;
+        }
         let Some(poll) = self
             .shared
             .as_mut()
@@ -3955,8 +3978,35 @@ impl WorkspaceManager {
             self.present_stale_shared_close(server_target, local, window, cx);
         }
         self.revalidate_shared_close(window, cx);
+        self.save_shared_arrangements(cx);
+        self.report_client_view_error(window, cx);
         if poll.changed {
             cx.notify();
+        }
+    }
+
+    fn save_shared_arrangements(&mut self, cx: &App) {
+        let Some(shared) = self.shared.as_ref() else {
+            return;
+        };
+        let workspaces = self
+            .workspaces
+            .iter()
+            .filter(|entry| shared.is_shared(entry.id()))
+            .filter_map(|entry| entry.payload().read(cx).shared_arrangement(cx))
+            .collect();
+        if let Some(shared) = self.shared.as_mut() {
+            shared.save_arrangements(spaceterm_server::client_view::ClientView { workspaces });
+        }
+    }
+
+    fn report_client_view_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(notice) = self
+            .shared
+            .as_mut()
+            .and_then(|shared| shared.take_view_error())
+        {
+            notice.present(window, cx);
         }
     }
 
@@ -4144,6 +4194,16 @@ impl WorkspaceManager {
             });
         }
         cx.notify();
+        if let Some(saved) = self
+            .shared
+            .as_ref()
+            .and_then(|shared| shared.saved_arrangement(workspace.id))
+            .cloned()
+        {
+            manager.update(cx, |manager, cx| {
+                manager.restore_shared_arrangement(&saved, workspace, cx)
+            });
+        }
     }
 
     /// Asks the server for a Workspace it owns and every connected client presents.
@@ -4813,15 +4873,21 @@ impl WorkspaceManager {
             shared.forget(workspace_id);
         }
         self.pending_final_tab_closes.remove(&workspace_id);
+        let own = removal == super::shared_workspaces::SharedRemoval::OwnClose;
+        let held_keyboard = self
+            .workspaces
+            .workspace(workspace_id)
+            .is_some_and(|entry| entry.payload().read(cx).holds_keyboard(window, cx));
         // Opening whatever takes its place selects that Workspace's Focused Pane. Another
         // client's publication is nobody's request for a Pane; this client's own Kill Workspace
         // is, as a local close is.
-        self.close_workspace_activating(
-            workspace_id,
-            removal == super::shared_workspaces::SharedRemoval::OwnClose,
-            window,
-            cx,
-        );
+        self.close_workspace_activating(workspace_id, own, window, cx);
+        // The keyboard that was in the removed Workspace rests in the Workspace that takes its
+        // place, without asking the server for a Pane there. Typing anywhere else, such as in
+        // the sidebar, stays where it is.
+        if !own && held_keyboard {
+            self.focus(window, cx);
+        }
     }
 
     /// The pin version a shared Workspace shows now, which its chooser keeps while it is open.

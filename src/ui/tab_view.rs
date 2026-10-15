@@ -1625,6 +1625,19 @@ impl TabView {
     }
 
     fn close_pane(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_pane_focusing(pane_id, true, window, cx);
+    }
+
+    /// Closes a Pane. `focus_remaining` hands the keyboard to the Focused Pane that remains, as a
+    /// close a person asked for does; a removal another client caused passes `false` unless the
+    /// keyboard was in the Pane that left, so typing elsewhere in this window stays where it is.
+    fn close_pane_focusing(
+        &mut self,
+        pane_id: PaneId,
+        focus_remaining: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.close_tab_requested {
             return;
         }
@@ -1663,6 +1676,7 @@ impl TabView {
                 });
                 cx.notify();
                 if self.active
+                    && focus_remaining
                     && let Some(terminal) = self.tab.pane(focused_pane_id)
                 {
                     terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
@@ -2366,6 +2380,95 @@ impl TabView {
 
 #[cfg(feature = "developer-tools")]
 impl TabView {
+    pub(crate) fn shared_layout(&self) -> Option<spaceterm_server::client_view::Layout> {
+        use spaceterm_server::client_view::{Layout, LayoutNode};
+        use spaceterm_server::hierarchy::Axis;
+        fn collect(
+            tree: PaneTreeRef<'_>,
+            shared: &super::shared_workspaces::SharedPanes,
+            nodes: &mut Vec<LayoutNode>,
+        ) -> Option<usize> {
+            let index = nodes.len();
+            nodes.push(LayoutNode::Pane([0; 32]));
+            nodes[index] = match tree.node() {
+                PaneNodeRef::Leaf { pane_id } => LayoutNode::Pane(shared.server_pane(pane_id)?),
+                PaneNodeRef::Split {
+                    axis,
+                    ratio,
+                    first,
+                    second,
+                    ..
+                } => LayoutNode::Split {
+                    axis: match axis {
+                        SplitAxis::Horizontal => Axis::Right,
+                        SplitAxis::Vertical => Axis::Down,
+                    },
+                    ratio,
+                    first: collect(first, shared, nodes)?,
+                    second: collect(second, shared, nodes)?,
+                },
+            };
+            Some(index)
+        }
+        let mut nodes = Vec::new();
+        collect(self.tab.root(), self.shared.as_ref()?, &mut nodes)?;
+        Some(Layout { nodes })
+    }
+
+    pub(crate) fn restore_shared_layout(
+        &mut self,
+        layout: &spaceterm_server::client_view::Layout,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::domain::tab::PaneArrangement;
+        use spaceterm_server::client_view::{Layout, LayoutNode};
+        use spaceterm_server::hierarchy::Axis;
+        fn convert(
+            layout: &Layout,
+            index: usize,
+            shared: &super::shared_workspaces::SharedPanes,
+        ) -> Option<PaneArrangement> {
+            match layout.nodes.get(index)? {
+                LayoutNode::Pane(id) => Some(PaneArrangement::Pane(shared.local_pane(*id)?)),
+                LayoutNode::Split {
+                    axis,
+                    ratio,
+                    first,
+                    second,
+                } => Some(PaneArrangement::Split {
+                    axis: match axis {
+                        Axis::Right => SplitAxis::Horizontal,
+                        Axis::Down => SplitAxis::Vertical,
+                    },
+                    ratio: *ratio,
+                    first: Box::new(convert(layout, *first, shared)?),
+                    second: Box::new(convert(layout, *second, shared)?),
+                }),
+            }
+        }
+        if layout.validate().is_err() {
+            return;
+        }
+        let Some(arrangement) = self
+            .shared
+            .as_ref()
+            .and_then(|shared| convert(layout, 0, shared))
+        else {
+            return;
+        };
+        if self.tab.restore_arrangement(arrangement).is_err() {
+            return;
+        }
+        self.advance_native_service_hierarchy_generation(cx);
+        self.pane_layout_revision += 1;
+        self.pane_motion.expect_change();
+        self.split_bounds.clear();
+        cx.emit(TabViewEvent::PresentationChanged {
+            tab_id: self.tab.id(),
+        });
+        cx.notify();
+    }
+
     /// Presents one server Tab in this Tab. The Pane this Tab already owns becomes the server's
     /// Root Pane, and every later Pane arrives with the server's published membership.
     pub(crate) fn adopt_shared(
@@ -2495,9 +2598,15 @@ impl TabView {
             .collect();
         let mut removed = false;
         for pane_id in absent {
+            // The keyboard moves to the Pane that remains only when it was in the Pane that left,
+            // as it does when a split's shell exits. A person typing in the sidebar, the Tab
+            // strip, or another Pane keeps typing there.
+            let held_keyboard = self.tab.pane(pane_id).is_some_and(|terminal| {
+                self.shared_pane_holds_focus(pane_id, terminal, window, cx)
+            });
             self.forget_shared_pane(pane_id);
             // Closing the final Pane closes its Tab, as an ordinary final close does.
-            self.close_pane(pane_id, window, cx);
+            self.close_pane_focusing(pane_id, held_keyboard, window, cx);
             removed = true;
         }
         removed
@@ -2557,6 +2666,15 @@ impl TabView {
         self.shared
             .as_ref()
             .is_some_and(|shared| shared.holds(server))
+    }
+
+    /// Whether the keyboard rests anywhere in this Tab: its Tab strip item, one of its Panes, or
+    /// the screen replacing one of them.
+    pub(crate) fn holds_keyboard(&self, window: &Window, cx: &App) -> bool {
+        self.tab_focus.contains_focused(window, cx)
+            || self.tab.panes_with_ids().any(|(pane_id, terminal)| {
+                self.shared_pane_holds_focus(pane_id, terminal, window, cx)
+            })
     }
 
     /// Focuses the Pane one accepted split of this client's own created, and asks the server for

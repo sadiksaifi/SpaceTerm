@@ -9,6 +9,8 @@ pub(crate) mod chrome_icons;
 mod chrome_semantic_pairs;
 mod chrome_state;
 pub(crate) mod chrome_typography;
+#[cfg(feature = "developer-tools")]
+mod client_view_state;
 mod control_theme;
 #[cfg(feature = "developer-tools")]
 pub(crate) mod developer_workbench;

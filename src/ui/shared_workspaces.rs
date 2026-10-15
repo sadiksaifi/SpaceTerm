@@ -16,8 +16,7 @@
 //!
 //! Operations the server path does not support yet stay unavailable here rather than falling back
 //! to the desktop: repairing a Pane's directory, Repository Status and Worktrees, reading shell
-//! content with assistive technology, paste, attaching and detaching, and retaining a client's
-//! own arrangement.
+//! content with assistive technology, paste, and attaching and detaching.
 
 use crate::application_identity::ApplicationIdentity;
 
@@ -404,6 +403,95 @@ mod development {
         }
     }
 
+    /// Why this client cannot read or keep its own arrangement of shared Workspaces: their Tab
+    /// display order and Pane Layouts. A failed read leaves the saved arrangement in place. A
+    /// failed save may already have replaced it, so no case claims which arrangement is saved.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum ArrangementUnavailable {
+        /// The saved arrangement could not be read, so shared Workspaces stay closed rather than
+        /// opening in a default arrangement that a later save would write over it.
+        Read,
+        /// The saved arrangement or its storage could not be validated, so shared Workspaces stay
+        /// closed and the saved data is kept.
+        UnsafeStorage,
+        /// SpaceTerm cannot confirm which arrangement was saved. The window keeps working, and
+        /// SpaceTerm makes no more saves until it quits and reopens.
+        Write,
+    }
+
+    impl ArrangementUnavailable {
+        /// Why reading the saved arrangement failed, from the server's bounded classification.
+        pub(crate) const fn reading(error: spaceterm_server::ServerError) -> Self {
+            match error {
+                spaceterm_server::ServerError::UnsafeStorage => Self::UnsafeStorage,
+                _ => Self::Read,
+            }
+        }
+
+        pub(crate) const fn title(self) -> &'static str {
+            match self {
+                Self::Read | Self::UnsafeStorage => "Arrangement Unavailable",
+                Self::Write => "Arrangement Could Not Be Saved",
+            }
+        }
+
+        const fn accessibility_label(self) -> &'static str {
+            match self {
+                Self::Read | Self::UnsafeStorage => "Arrangement unavailable",
+                Self::Write => "Arrangement could not be saved",
+            }
+        }
+
+        pub(crate) const fn detail(self) -> &'static str {
+            match self {
+                Self::Read => {
+                    "SpaceTerm could not read the Tab order and Pane Layouts this device saved \
+                     for shared Workspaces. Shared Workspaces stay closed, so the saved \
+                     arrangement is not replaced. Quit and reopen SpaceTerm to try again."
+                }
+                Self::UnsafeStorage => {
+                    "SpaceTerm could not validate the Tab order and Pane Layouts this device \
+                     saved for shared Workspaces, or the storage that holds them. Shared \
+                     Workspaces stay closed, and SpaceTerm keeps the saved data."
+                }
+                Self::Write => {
+                    "SpaceTerm cannot confirm which Tab order and Pane Layouts it saved for \
+                     shared Workspaces on this device. You can keep working, but SpaceTerm makes \
+                     no more saves of the arrangement until you quit and reopen it, so \
+                     arrangement changes from now on may be lost."
+                }
+            }
+        }
+
+        /// Presents the notice as a warning with one OK. The caller presents each failure once.
+        pub(crate) fn present<T: 'static>(self, window: &gpui::Window, cx: &mut gpui::Context<T>) {
+            let (id, ok) = match self {
+                Self::Read | Self::UnsafeStorage => (
+                    "shared-arrangement-unavailable",
+                    "shared-arrangement-unavailable-ok",
+                ),
+                Self::Write => (
+                    "shared-arrangement-not-saved",
+                    "shared-arrangement-not-saved-ok",
+                ),
+            };
+            let _ = spaceterm_ui::Alert::new(
+                spaceterm_ui::ModalId::new(id),
+                self.accessibility_label(),
+                self.title(),
+                self.detail().to_owned(),
+                vec![spaceterm_ui::ModalAction::new(
+                    (),
+                    "OK",
+                    spaceterm_ui::ModalActionRole::Cancel,
+                    ok,
+                )],
+            )
+            .intent(spaceterm_ui::AlertIntent::Warning)
+            .present(window, cx, |_, _| {});
+        }
+    }
+
     /// What one shared Workspace's row and chrome present. Every value here is server data: it
     /// names no directory this client may read, so it is displayed and never acted on.
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -736,6 +824,10 @@ mod development {
         submitted_close: Option<(ServerCloseTarget, CloseTarget)>,
         /// A close the server refused because what it would end changed after the confirmation.
         stale_close: Option<ServerCloseTarget>,
+        retained_views: Option<crate::ui::client_view_state::RetainedClientViews>,
+        saved_views: Option<spaceterm_server::client_view::ClientView>,
+        last_saved_view: Option<spaceterm_server::client_view::ClientView>,
+        view_error_reported: bool,
     }
 
     /// A refused same-field edit whose draft is kept until this client can name the Workspace it
@@ -767,7 +859,85 @@ mod development {
                 review: None,
                 submitted_close: None,
                 stale_close: None,
+                retained_views: None,
+                saved_views: None,
+                last_saved_view: None,
+                view_error_reported: false,
             }
+        }
+
+        pub(crate) fn retain_client_views(&mut self, server: LocalServer) {
+            self.retained_views = Some(crate::ui::client_view_state::RetainedClientViews::new(
+                server,
+            ));
+        }
+
+        /// Wait for the saved arrangement before applying the first inventory.
+        pub(crate) fn prepare_client_views(
+            &mut self,
+        ) -> Result<bool, crate::local_server::ServerError> {
+            if self.saved_views.is_some() || self.retained_views.is_none() {
+                return Ok(true);
+            }
+            match self
+                .retained_views
+                .as_ref()
+                .and_then(|views| views.loaded())
+            {
+                Some(Ok(saved)) => {
+                    self.saved_views = Some(saved);
+                    Ok(true)
+                }
+                Some(Err(error)) => Err(error),
+                None => Ok(false),
+            }
+        }
+
+        pub(crate) fn saved_arrangement(
+            &self,
+            workspace: Id,
+        ) -> Option<&spaceterm_server::client_view::WorkspaceView> {
+            self.saved_views
+                .as_ref()?
+                .workspaces
+                .iter()
+                .find(|view| view.workspace == workspace)
+        }
+
+        pub(crate) fn save_arrangements(
+            &mut self,
+            view: spaceterm_server::client_view::ClientView,
+        ) {
+            if self.revision.is_none()
+                || self.saved_views.is_none()
+                || self.last_saved_view.as_ref() == Some(&view)
+            {
+                return;
+            }
+            if let Some(retained) = &self.retained_views {
+                retained.save(view.clone());
+            }
+            self.last_saved_view = Some(view);
+        }
+
+        pub(crate) fn take_view_error(&mut self) -> Option<ArrangementUnavailable> {
+            if self.view_error_reported {
+                return None;
+            }
+            let retained = self.retained_views.as_ref()?;
+            let notice = if let Some(error) = retained.read_error() {
+                ArrangementUnavailable::reading(error)
+            } else if retained.error().is_some() {
+                ArrangementUnavailable::Write
+            } else {
+                return None;
+            };
+            self.view_error_reported = true;
+            Some(notice)
+        }
+
+        pub(crate) fn flush_client_views(&mut self) {
+            self.retained_views.take();
         }
 
         pub(crate) const fn sessions(&self) -> &SharedPaneSessions {

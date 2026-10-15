@@ -15294,3 +15294,204 @@ fn shared_tab_closes_should_reconcile_through_publication_down_to_the_final_tab(
     );
     assert_eq!(harness.shared_rows(cx), 0);
 }
+
+fn shared_close_rename_is_focused(
+    harness: &SharedCloseHarness,
+    cx: &mut VisualTestContext,
+) -> bool {
+    cx.update(|window, cx| {
+        harness
+            .manager
+            .read(cx)
+            .sidebar
+            .read(cx)
+            .rename_is_focused(window)
+    })
+}
+
+/// Another client's closes are membership here. A person typing in the sidebar keeps typing there
+/// while the server removes a Pane, a Tab, and finally the Workspace they are not typing in.
+#[gpui::test]
+fn another_clients_removals_should_leave_the_keyboard_where_a_person_is_typing(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::hierarchy::Inventory;
+
+    let (harness, cx) = shared_close_harness(cx);
+    right_click("workspace-row-1-inactive", cx);
+    click("workspace-menu-row-rename", cx);
+    assert!(shared_close_rename_is_focused(&harness, cx));
+
+    harness.publish(
+        shared_close_inventory(
+            2,
+            &[
+                (SHARED_CLOSE_ROOT_TAB, &[(SHARED_CLOSE_ROOT_PANE, None)]),
+                (SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)]),
+            ],
+        ),
+        cx,
+    );
+    assert_eq!(shared_close_counts(&harness, cx), (2, 2));
+    assert!(
+        shared_close_rename_is_focused(&harness, cx),
+        "another client's Pane close must not pull the keyboard into the remaining Pane"
+    );
+
+    harness.publish(
+        shared_close_inventory(
+            3,
+            &[(SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)])],
+        ),
+        cx,
+    );
+    assert_eq!(shared_close_counts(&harness, cx), (1, 1));
+    assert!(
+        shared_close_rename_is_focused(&harness, cx),
+        "another client's Tab close must not pull the keyboard into the Tab that remains"
+    );
+
+    harness.publish(
+        Inventory {
+            revision: 4,
+            workspaces: Vec::new(),
+            close: None,
+        },
+        cx,
+    );
+    assert_eq!(harness.shared_rows(cx), 0);
+    assert!(
+        shared_close_rename_is_focused(&harness, cx),
+        "another client's Kill Workspace must not end a rename in this window's own Workspace"
+    );
+    assert_eq!(
+        harness.panes.pane(SHARED_CLOSE_SECOND_PANE).selections(),
+        0,
+        "nobody here selected the Pane that remained, so the server is asked for nothing"
+    );
+}
+
+/// The keyboard was in what another client removed, so it rests in what remains, the way a
+/// split's exited shell hands it on, without asking the server for that Pane.
+#[gpui::test]
+fn another_clients_removal_of_where_the_keyboard_rests_should_hand_it_to_what_remains(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::hierarchy::Inventory;
+
+    let (harness, cx) = shared_close_harness(cx);
+    harness.panes.pane(SHARED_CLOSE_SPLIT_PANE).reconnect();
+    harness.panes.pane(SHARED_CLOSE_SECOND_PANE).reconnect();
+    settle_shared_panes(cx);
+    click("pane-surface-2", cx);
+    assert!(shared_close_terminal_is_focused(&harness, cx));
+    let root_selections = harness.panes.pane(SHARED_CLOSE_ROOT_PANE).selections();
+
+    // Another client closes the split Pane the keyboard is in.
+    harness.publish(
+        shared_close_inventory(
+            2,
+            &[
+                (SHARED_CLOSE_ROOT_TAB, &[(SHARED_CLOSE_ROOT_PANE, None)]),
+                (SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)]),
+            ],
+        ),
+        cx,
+    );
+    assert!(
+        shared_close_terminal_is_focused(&harness, cx),
+        "the keyboard should rest in the Pane that remains rather than nowhere"
+    );
+    assert_eq!(
+        harness.panes.pane(SHARED_CLOSE_ROOT_PANE).selections(),
+        root_selections,
+        "resting the keyboard is not a Pane selection"
+    );
+
+    // Another client closes the Active Tab the keyboard is in.
+    harness.publish(
+        shared_close_inventory(
+            3,
+            &[(SHARED_CLOSE_SECOND_TAB, &[(SHARED_CLOSE_SECOND_PANE, None)])],
+        ),
+        cx,
+    );
+    assert!(
+        shared_close_terminal_is_focused(&harness, cx),
+        "the keyboard should rest in the Tab that becomes active"
+    );
+    assert_eq!(
+        harness.panes.pane(SHARED_CLOSE_SECOND_PANE).selections(),
+        0,
+        "the Tab that becomes active asks the server for nothing"
+    );
+
+    // Another client kills the Workspace the keyboard is in.
+    harness.publish(
+        Inventory {
+            revision: 4,
+            workspaces: Vec::new(),
+            close: None,
+        },
+        cx,
+    );
+    assert_eq!(harness.shared_rows(cx), 0);
+    assert!(
+        shared_close_terminal_is_focused(&harness, cx),
+        "the keyboard should rest in the Workspace that becomes active"
+    );
+}
+
+/// One device presents its shared Workspaces in one Workspace Window. Asking a second window to
+/// present them brings the first one forward instead.
+#[gpui::test]
+fn a_second_workspace_window_should_bring_the_shared_one_forward_instead(cx: &mut TestAppContext) {
+    let (harness, cx) = shared_close_harness(cx);
+    let records = TestTerminalSessionRecords::default();
+    let session_factory: Rc<dyn TerminalSessionFactory> =
+        Rc::new(TestTerminalSessionFactory::new(records).with_fallback_title("zsh"));
+    let other = cx.add_window(|window, cx| {
+        WorkspaceManager::new_with_adapters(
+            session_factory,
+            std::env::temp_dir(),
+            workspace_adapters(test_remote_backend_factory()),
+            SidebarState::Expanded,
+            window,
+            cx,
+        )
+    });
+    other
+        .update(cx, |_, window, _| window.activate_window())
+        .expect("the second window is open");
+    cx.run_until_parked();
+
+    cx.update(|_, cx| crate::ui::shared_workspaces::adopt(cx));
+    cx.run_until_parked();
+
+    let presented = other
+        .read_with(cx, |manager, _| {
+            manager
+                .workspaces
+                .iter()
+                .filter(|workspace| manager.is_shared_workspace(workspace.id()))
+                .count()
+        })
+        .expect("the second window is open");
+    assert_eq!(
+        presented, 0,
+        "a second window must not present the same server's Workspaces"
+    );
+    assert_eq!(
+        harness.shared_rows(cx),
+        1,
+        "the first window keeps presenting them"
+    );
+    assert!(cx.update(|_, cx| crate::ui::shared_workspaces::adopted(cx)));
+    assert!(
+        cx.update(|window, cx| {
+            cx.active_window().map(|active| active.window_id())
+                == Some(window.window_handle().window_id())
+        }),
+        "the Workspace Window presenting them comes forward"
+    );
+}
