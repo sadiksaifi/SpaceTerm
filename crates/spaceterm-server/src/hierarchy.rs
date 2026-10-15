@@ -109,6 +109,8 @@ struct DeviceOutcomes {
 pub struct State {
     pub inventory: Inventory,
     devices: Vec<DeviceOutcomes>,
+    #[serde(default)]
+    creator_boot: Option<Id>,
 }
 impl State {
     pub fn empty() -> Self {
@@ -118,6 +120,17 @@ impl State {
                 workspaces: Vec::new(),
             },
             devices: Vec::new(),
+            creator_boot: None,
+        }
+    }
+    pub fn begin_boot(&mut self, boot: Id) {
+        if self.creator_boot != Some(boot) {
+            for w in &mut self.inventory.workspaces {
+                for t in &mut w.tabs {
+                    for p in &mut t.panes { p.creator = None; }
+                }
+            }
+            self.creator_boot = Some(boot);
         }
     }
     /// Legacy first-Pane opening has no shared-edit operation identity. It must not retire a
@@ -161,6 +174,7 @@ impl State {
                 }],
             },
             devices: Vec::new(),
+            creator_boot: None,
         })
     }
     pub fn envelope(
@@ -840,6 +854,21 @@ mod tests {
                 .unwrap(),
             Outcome::Conflict
         );
+    }
+
+    #[test]
+    fn recovery_preserves_creator_reservations_only_in_the_boot_that_created_them() {
+        let mut state = State::empty();
+        state.begin_boot([7; 32]);
+        state.apply([1; 32], 1, Mutation::CreateWorkspace { name: "Build".into() }, "/tmp".as_ref(), |_| true).unwrap();
+        let bytes = serde_json::to_vec(&state).unwrap();
+        let mut same_boot: State = serde_json::from_slice(&bytes).unwrap();
+        same_boot.begin_boot([7; 32]);
+        assert_eq!(same_boot.inventory.workspaces[0].tabs[0].panes[0].creator, Some([1; 32]));
+        let mut next_boot: State = serde_json::from_slice(&bytes).unwrap();
+        next_boot.begin_boot([8; 32]);
+        assert_eq!(next_boot.inventory.workspaces[0].tabs[0].panes[0].creator, None);
+
     }
 
     #[test]

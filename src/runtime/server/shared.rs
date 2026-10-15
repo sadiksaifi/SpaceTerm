@@ -15,9 +15,11 @@ impl SharedWorkspaceHost {
         Ok(Self::new(DevelopmentPaneHost::local()?))
     }
     pub(super) fn new(prototype: DevelopmentPaneHost) -> Self {
+        let mut state = State::empty();
+        state.begin_boot(prototype.boot);
         Self {
             prototype,
-            state: State::empty(),
+            state,
             panes: BTreeMap::new(),
             store: None,
             uncertain: false,
@@ -47,6 +49,7 @@ impl SharedWorkspaceHost {
             self.state = record
                 .as_ref()
                 .map_or_else(State::empty, State::from_legacy);
+            self.state.begin_boot(self.prototype.boot);
             self.uncertain = false;
         }
         Ok(())
@@ -290,14 +293,8 @@ impl PaneService for SharedWorkspaceHost {
             .read()?
             .as_ref()
             .map_or_else(State::empty, State::from_legacy);
-        // Control grants are live state. A restarted server begins with every Pane unclaimed.
-        for w in &mut self.state.inventory.workspaces {
-            for t in &mut w.tabs {
-                for p in &mut t.panes {
-                    p.creator = None;
-                }
-            }
-        }
+        // This also fences a later recovery read of the previous boot's retained record.
+        self.state.begin_boot(self.prototype.boot);
         self.store = Some(store);
         Ok(())
     }
