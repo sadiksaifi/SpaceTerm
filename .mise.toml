@@ -436,7 +436,6 @@ run = [
 description = "Exercise retained Development work through server kill and shutdown with both protocol majors"
 run = [
   "cargo build --package spaceterm-server-host --features client --examples --bins --locked",
-  "python -c 'from pathlib import Path; p = Path(\"target/debug/examples/spaceterm-server\"); p.symlink_to(\"../spaceterm-server\") if not p.exists() else None'",
   "cargo run --package spaceterm-server-host --features client --example restored_workspace --locked -- 1",
   "cargo run --package spaceterm-server-host --features client --example restored_workspace --locked -- 2",
 ]

@@ -78,7 +78,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         Ok(_) => return Err("Stop the idle Development server before this exercise.".into()),
         Err(error) => return Err(error.into()),
     }
-    // Setup locates its sibling binary, so this example's task stages a symlink beside examples.
+    // Setup locates its sibling binary. Stage the built host beside this example, including
+    // when Cargo uses a shared target directory outside the working tree.
+    let directory = std::env::current_exe()?
+        .parent()
+        .ok_or("example directory")?
+        .to_owned();
+    let companion = directory.join("spaceterm-server");
+    if !companion.try_exists()? {
+        std::os::unix::fs::symlink("../spaceterm-server", &companion)?;
+    }
     client.setup_and_start()?;
     let mut setup = connect(&client)?;
     match setup.exchange(&Request::Select {
