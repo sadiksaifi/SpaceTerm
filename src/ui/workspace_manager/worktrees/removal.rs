@@ -128,7 +128,7 @@ impl WorkspaceManager {
                 manager.close_tab_authorized(tab_id, window, cx);
             }
         });
-        if self.workspaces.active_workspace_id() == workspace_id {
+        if self.workspaces.active_workspace_id() == Some(workspace_id) {
             self.focus(window, cx);
         }
         cx.notify();

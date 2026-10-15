@@ -142,6 +142,7 @@ fn run(
 ) {
     while alive.load(Ordering::Acquire) {
         let result = (|| {
+            let attachments = server.attachments()?;
             let mut journal = server.shared_journal()?;
             let mut connection = server.connect_shared_pane()?;
             // Authoritative reconciliation always precedes a retry of a previously submitted edit.
@@ -161,6 +162,7 @@ fn run(
                 if !alive.load(Ordering::Acquire) {
                     return Ok(());
                 }
+                attachments.release_pending(&mut connection)?;
                 let (current, sequence) = inventory(&mut connection)?;
                 {
                     let mut s = state.lock().unwrap_or_else(|e| e.into_inner());

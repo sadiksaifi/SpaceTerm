@@ -16,7 +16,7 @@
 //!
 //! Operations the server path does not support yet stay unavailable here rather than falling back
 //! to the desktop: repairing a Pane's directory, Repository Status and Worktrees, reading shell
-//! content with assistive technology, paste, and attaching and detaching.
+//! content with assistive technology, and paste.
 
 use crate::application_identity::ApplicationIdentity;
 
@@ -40,11 +40,12 @@ pub(crate) fn adopted(_: &gpui::App) -> bool {
 pub(crate) use development::testing;
 #[cfg(feature = "developer-tools")]
 pub(crate) use development::{
-    POLL_INTERVAL, SharedAcceptance, SharedCloseApproval, SharedCloseReview, SharedCloseState,
-    SharedCloseUnavailable, SharedEditSource, SharedPaneSessions, SharedPanes, SharedRefusal,
-    SharedRefusalReason, SharedRemoval, SharedSubmission, SharedTabs, SharedWorkspaceConflict,
-    SharedWorkspaceFacts, SharedWorkspaceHost, SharedWorkspacePlan, SharedWorkspaces, adopt,
-    adopted, shared_close_changed_title,
+    POLL_INTERVAL, SharedAcceptance, SharedAttachmentFailure, SharedCloseApproval,
+    SharedCloseReview, SharedCloseState, SharedCloseUnavailable, SharedEditSource,
+    SharedPaneSessions, SharedPanes, SharedRefusal, SharedRefusalReason, SharedRemoval,
+    SharedSubmission, SharedTabs, SharedWorkspaceConflict, SharedWorkspaceFacts,
+    SharedWorkspaceHost, SharedWorkspacePlan, SharedWorkspaces, adopt, adopted,
+    shared_close_changed_title,
 };
 
 #[cfg(all(test, feature = "developer-tools"))]
@@ -430,35 +431,35 @@ mod development {
 
         pub(crate) const fn title(self) -> &'static str {
             match self {
-                Self::Read | Self::UnsafeStorage => "Arrangement Unavailable",
-                Self::Write => "Arrangement Could Not Be Saved",
+                Self::Read | Self::UnsafeStorage => "Shared Workspaces Unavailable",
+                Self::Write => "Changes Could Not Be Saved",
             }
         }
 
         const fn accessibility_label(self) -> &'static str {
             match self {
-                Self::Read | Self::UnsafeStorage => "Arrangement unavailable",
-                Self::Write => "Arrangement could not be saved",
+                Self::Read | Self::UnsafeStorage => "Shared Workspaces unavailable",
+                Self::Write => "Changes could not be saved",
             }
         }
 
         pub(crate) const fn detail(self) -> &'static str {
             match self {
                 Self::Read => {
-                    "SpaceTerm could not read the Tab order and Pane Layouts this device saved \
-                     for shared Workspaces. Shared Workspaces stay closed, so the saved \
-                     arrangement is not replaced. Quit and reopen SpaceTerm to try again."
+                    "SpaceTerm could not read which shared Workspaces this device presents, or their Tab order \
+                     and Pane Layouts. Shared Workspaces stay closed, so nothing saved is replaced. Quit and \
+                     reopen SpaceTerm to try again."
                 }
                 Self::UnsafeStorage => {
-                    "SpaceTerm could not validate the Tab order and Pane Layouts this device \
-                     saved for shared Workspaces, or the storage that holds them. Shared \
-                     Workspaces stay closed, and SpaceTerm keeps the saved data."
+                    "SpaceTerm could not validate which shared Workspaces this device presents, their Tab order \
+                     and Pane Layouts, or the storage that holds them. Shared Workspaces stay closed, and \
+                     SpaceTerm keeps the saved data."
                 }
                 Self::Write => {
-                    "SpaceTerm cannot confirm which Tab order and Pane Layouts it saved for \
-                     shared Workspaces on this device. You can keep working, but SpaceTerm makes \
-                     no more saves of the arrangement until you quit and reopen it, so \
-                     arrangement changes from now on may be lost."
+                    "SpaceTerm could not confirm that it saved which shared Workspaces this device \
+                     presents, or their Tab order and Pane Layouts. Until you quit and reopen \
+                     SpaceTerm, some of these changes may not be saved. Shared Workspaces keep \
+                     running on the server."
                 }
             }
         }
@@ -566,8 +567,9 @@ mod development {
         fn open(&self, pane: Id) -> Option<SharedPaneSubscription> {
             let (factory, state) =
                 DevelopmentServerSessionFactory::for_pane(self.server.clone(), pane);
+            let permit = self.server.attachments().ok()?.permit(pane)?;
             let session_factory = WorkspaceTerminalSessionFactory::new_server(
-                Rc::new(factory),
+                Rc::new(factory.with_attachment(permit)),
                 self.client_home.clone(),
             );
             let prepared = session_factory
@@ -799,8 +801,20 @@ mod development {
         }
     }
 
-    /// The Workspace Window's shared state: the server's inventory as this client last read it,
-    /// the edit it is waiting for, and the answer it must still present.
+    /// One available server Workspace and its optional presentation in this client.
+    #[derive(Clone, Debug)]
+    pub(crate) struct SharedAvailableWorkspace {
+        pub(crate) server: Id,
+        pub(crate) name: String,
+        pub(crate) local: Option<WorkspaceId>,
+    }
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum SharedAttachmentFailure {
+        Unchanged,
+        Uncertain,
+    }
+
+    /// The Workspace Window's inventory, attachments, arrangements, and outstanding shared edit.
     pub(crate) struct SharedWorkspaces {
         edits: SharedEditSource,
         sessions: SharedPaneSessions,
@@ -824,10 +838,12 @@ mod development {
         submitted_close: Option<(ServerCloseTarget, CloseTarget)>,
         /// A close the server refused because what it would end changed after the confirmation.
         stale_close: Option<ServerCloseTarget>,
+        attachments: spaceterm_server::attachments::Attachments,
         retained_views: Option<crate::ui::client_view_state::RetainedClientViews>,
         saved_views: Option<spaceterm_server::client_view::ClientView>,
         last_saved_view: Option<spaceterm_server::client_view::ClientView>,
         view_error_reported: bool,
+        attachment_error: Option<spaceterm_server::ServerError>,
     }
 
     /// A refused same-field edit whose draft is kept until this client can name the Workspace it
@@ -859,11 +875,65 @@ mod development {
                 review: None,
                 submitted_close: None,
                 stale_close: None,
+                attachments: spaceterm_server::attachments::Attachments::memory(),
                 retained_views: None,
                 saved_views: None,
                 last_saved_view: None,
                 view_error_reported: false,
+                attachment_error: None,
             }
+        }
+
+        pub(crate) fn available_workspaces(&self) -> Vec<SharedAvailableWorkspace> {
+            self.latest
+                .iter()
+                .flat_map(|inventory| &inventory.workspaces)
+                .filter_map(|workspace| {
+                    let local = self.local(workspace.id);
+                    (self.connected || local.is_some()).then(|| SharedAvailableWorkspace {
+                        server: workspace.id,
+                        name: workspace.name.clone(),
+                        local,
+                    })
+                })
+                .collect()
+        }
+        pub(crate) fn latest_inventory(&self) -> Option<&Inventory> {
+            self.latest.as_ref()
+        }
+        pub(crate) fn attachments_changeable(&self) -> bool {
+            self.attachments.changeable()
+                && (self.retained_views.is_none() || self.saved_views.is_some())
+        }
+        pub(crate) fn attach(&mut self, server: Id) -> Result<(), SharedAttachmentFailure> {
+            if !self.connected || !self.attachments_changeable() {
+                return Err(SharedAttachmentFailure::Unchanged);
+            }
+            match self.attachments.attach(server) {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(SharedAttachmentFailure::Unchanged),
+                Err(_) => Err(if self.attachments.changeable() {
+                    SharedAttachmentFailure::Unchanged
+                } else {
+                    SharedAttachmentFailure::Uncertain
+                }),
+            }
+        }
+        pub(crate) fn detach(&mut self, local: WorkspaceId) -> Result<(), SharedAttachmentFailure> {
+            if !self.attachments_changeable() {
+                return Err(SharedAttachmentFailure::Unchanged);
+            }
+            let server = self
+                .facts(local)
+                .ok_or(SharedAttachmentFailure::Unchanged)?
+                .server;
+            self.attachments.detach(server).map_err(|_| {
+                if self.attachments.changeable() {
+                    SharedAttachmentFailure::Unchanged
+                } else {
+                    SharedAttachmentFailure::Uncertain
+                }
+            })
         }
 
         pub(crate) fn retain_client_views(&mut self, server: LocalServer) {
@@ -885,6 +955,15 @@ mod development {
                 .and_then(|views| views.loaded())
             {
                 Some(Ok(saved)) => {
+                    if let Some(attachments) = self
+                        .retained_views
+                        .as_ref()
+                        .and_then(|views| views.attachments())
+                    {
+                        self.attachments = attachments?;
+                    } else {
+                        return Ok(false);
+                    }
                     self.saved_views = Some(saved);
                     Ok(true)
                 }
@@ -906,10 +985,26 @@ mod development {
 
         pub(crate) fn save_arrangements(
             &mut self,
-            view: spaceterm_server::client_view::ClientView,
+            mut view: spaceterm_server::client_view::ClientView,
         ) {
+            // Detached Workspaces keep their arrangement until explicitly reattached.
+            if let Some(previous) = self.last_saved_view.as_ref().or(self.saved_views.as_ref()) {
+                for saved in &previous.workspaces {
+                    if !view
+                        .workspaces
+                        .iter()
+                        .any(|v| v.workspace == saved.workspace)
+                        && self
+                            .latest
+                            .as_ref()
+                            .is_some_and(|i| i.workspaces.iter().any(|w| w.id == saved.workspace))
+                    {
+                        view.workspaces.push(saved.clone());
+                    }
+                }
+            }
             if self.revision.is_none()
-                || self.saved_views.is_none()
+                || (self.saved_views.is_none() && self.retained_views.is_some())
                 || self.last_saved_view.as_ref() == Some(&view)
             {
                 return;
@@ -917,6 +1012,7 @@ mod development {
             if let Some(retained) = &self.retained_views {
                 retained.save(view.clone());
             }
+            self.saved_views = Some(view.clone());
             self.last_saved_view = Some(view);
         }
 
@@ -925,7 +1021,13 @@ mod development {
                 return None;
             }
             let retained = self.retained_views.as_ref()?;
-            let notice = if let Some(error) = retained.read_error() {
+            let notice = if !self.attachments.changeable() {
+                ArrangementUnavailable::Write
+            } else if let Some(error) = self.attachment_error {
+                ArrangementUnavailable::reading(error)
+            } else if let Some(error) = retained.attachments().and_then(Result::err) {
+                ArrangementUnavailable::reading(error)
+            } else if let Some(error) = retained.read_error() {
                 ArrangementUnavailable::reading(error)
             } else if retained.error().is_some() {
                 ArrangementUnavailable::Write
@@ -1123,6 +1225,17 @@ mod development {
                 .inventory
                 .filter(|inventory| self.revision != Some(inventory.revision))
             {
+                if let Err(error) = self.attachments.reconcile(&inventory) {
+                    self.attachment_error = Some(error);
+                    return poll;
+                }
+                if let Some(accepted) = &poll.accepted
+                    && matches!(accepted.mutation, Mutation::CreateWorkspace { .. })
+                    && let Err(error) = self.attachments.attach(accepted.target)
+                {
+                    self.attachment_error = Some(error);
+                    poll.accepted = None;
+                }
                 // A waiting draft whose Workspace the server no longer has can never be asked
                 // again, so it reports the removal instead of waiting for a mapping.
                 if let Some(pending) = self.conflict.as_ref()
@@ -1223,6 +1336,9 @@ mod development {
         pub(crate) fn plan(&self, inventory: &Inventory) -> Vec<SharedWorkspacePlan> {
             let mut plan = Vec::new();
             for workspace in &inventory.workspaces {
+                if !self.attachments.is_attached(workspace.id) {
+                    continue;
+                }
                 let facts = SharedWorkspaceFacts::from_server(workspace);
                 match self.local(workspace.id) {
                     Some(local) => plan.push(SharedWorkspacePlan::Update { local, facts }),
@@ -1230,11 +1346,9 @@ mod development {
                 }
             }
             for (&local, facts) in &self.workspaces {
-                if !inventory
-                    .workspaces
-                    .iter()
-                    .any(|workspace| workspace.id == facts.server)
-                {
+                if !inventory.workspaces.iter().any(|workspace| {
+                    workspace.id == facts.server && self.attachments.is_attached(workspace.id)
+                }) {
                     plan.push(SharedWorkspacePlan::Removed { local });
                 }
             }

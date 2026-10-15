@@ -1471,8 +1471,36 @@ mod tests {
         else {
             panic!("claim");
         };
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::Mutate {
+                sequence: 2,
+                mutation: Mutation::SplitPane {
+                    workspace,
+                    tab: inventory.workspaces[0].root_tab,
+                    source: pane,
+                    axis: spaceterm_server::hierarchy::Axis::Right,
+                },
+            },
+        );
+        let split = shared_inventory(&mut host).workspaces[0].tabs[0].panes[1].id;
+        let Reply::Attached { lease: split_lease } = host.request(
+            [1; 32],
+            [6; 32],
+            Request::ClaimPane {
+                attachment: original,
+                pane: split,
+                claim: AttachmentClaim::Select { explicit: true },
+                size: size(),
+                style: None,
+            },
+        ) else {
+            panic!("second Pane claim");
+        };
         // The acquisition committed, but the desktop lost its reply before offline detach.
         host.disconnected([2; 32]);
+        host.disconnected([6; 32]);
         assert!(matches!(
             host.request(
                 [1; 32],
@@ -1487,6 +1515,13 @@ mod tests {
             host.request([1; 32], [2; 32], claim(original, true)),
             Reply::Refused(Refusal::Stale)
         ));
+        assert!(
+            matches!(
+                host.request([1; 32], [6; 32], Request::Poll { lease: split_lease }),
+                Reply::Refused(Refusal::Stale)
+            ),
+            "detach releases every original Pane grant"
+        );
         let later = Attachment {
             workspace,
             generation: 2,

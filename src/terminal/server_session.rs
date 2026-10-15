@@ -131,6 +131,7 @@ impl DevelopmentPaneState {
 pub(crate) struct DevelopmentServerSessionFactory {
     server: LocalServer,
     pane_id: Option<spaceterm_server::hierarchy::Id>,
+    attachment: Option<spaceterm_server::attachments::AttachmentPermit>,
     state: Arc<DevelopmentPaneState>,
 }
 impl DevelopmentServerSessionFactory {
@@ -140,10 +141,18 @@ impl DevelopmentServerSessionFactory {
             Self {
                 server,
                 pane_id: None,
+                attachment: None,
                 state: Arc::clone(&state),
             },
             state,
         )
+    }
+    pub(crate) fn with_attachment(
+        mut self,
+        permit: spaceterm_server::attachments::AttachmentPermit,
+    ) -> Self {
+        self.attachment = Some(permit);
+        self
     }
     pub(crate) fn for_pane(
         server: LocalServer,
@@ -236,6 +245,17 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
     }
 }
 
+fn exchange(
+    attachment: &Option<spaceterm_server::attachments::AttachmentPermit>,
+    connection: &mut pane::PaneConnection,
+    request: &Request,
+) -> Result<Reply, ServerError> {
+    match attachment {
+        Some(permit) => permit.exchange(connection, request),
+        None => connection.exchange(request),
+    }
+}
+
 fn present(
     factory: DevelopmentServerSessionFactory,
     alive: Arc<AtomicBool>,
@@ -247,6 +267,7 @@ fn present(
     let DevelopmentServerSessionFactory {
         server,
         pane_id,
+        attachment,
         state,
     } = factory;
     let mut create = true;
@@ -255,6 +276,9 @@ fn present(
     let mut generation = PresentationGeneration::default();
     let mut takeover = false;
     while alive.load(Ordering::Acquire) {
+        if attachment.as_ref().is_some_and(|permit| !permit.active()) {
+            return;
+        }
         state.retry.store(false, Ordering::Release);
         let connected = (|| {
             let mut connection = if pane_id.is_some() {
@@ -290,11 +314,12 @@ fn present(
                     style,
                 }
             };
-            let mut reply = connection.exchange(&request).map_err(|error| match error {
-                ServerError::Controlled => ServerError::Unsupported,
-                ServerError::StaleControl => ServerError::SessionUnavailable,
-                other => other,
-            })?;
+            let mut reply =
+                exchange(&attachment, &mut connection, &request).map_err(|error| match error {
+                    ServerError::Controlled => ServerError::Unsupported,
+                    ServerError::StaleControl => ServerError::SessionUnavailable,
+                    other => other,
+                })?;
             let mut dormant = false;
             while let Reply::Restored {
                 server: boot, pane, ..
@@ -311,38 +336,48 @@ fn present(
                     clear_presentation(&events, &mut generation, &appearance);
                 }
                 state.set(DevelopmentPaneStatus::Restored);
-                if !alive.load(Ordering::Acquire) {
+                if !alive.load(Ordering::Acquire)
+                    || attachment.as_ref().is_some_and(|permit| !permit.active())
+                {
                     return Ok(());
                 }
                 if state.start_restored.swap(false, Ordering::AcqRel)
                     || state.selected.swap(false, Ordering::AcqRel)
                 {
-                    reply = connection.exchange(&Request::StartRestored {
-                        server: boot,
-                        pane,
-                        size: *size.lock().unwrap_or_else(|e| e.into_inner()),
-                        style: Some(encode_style(
-                            &appearance.lock().unwrap_or_else(|e| e.into_inner()),
-                        )),
-                    })?;
+                    reply = exchange(
+                        &attachment,
+                        &mut connection,
+                        &Request::StartRestored {
+                            server: boot,
+                            pane,
+                            size: *size.lock().unwrap_or_else(|e| e.into_inner()),
+                            style: Some(encode_style(
+                                &appearance.lock().unwrap_or_else(|e| e.into_inner()),
+                            )),
+                        },
+                    )?;
                 } else {
                     std::thread::sleep(Duration::from_millis(100));
                     let size = *size.lock().unwrap_or_else(|e| e.into_inner());
-                    reply = connection.exchange(&if let Some(pane) = pane_id {
-                        Request::SelectPane {
-                            pane,
-                            explicit: false,
-                            size,
-                            style: None,
-                        }
-                    } else {
-                        Request::Select {
-                            create: false,
-                            size,
-                            resume: None,
-                            style: None,
-                        }
-                    })?;
+                    reply = exchange(
+                        &attachment,
+                        &mut connection,
+                        &if let Some(pane) = pane_id {
+                            Request::SelectPane {
+                                pane,
+                                explicit: false,
+                                size,
+                                style: None,
+                            }
+                        } else {
+                            Request::Select {
+                                create: false,
+                                size,
+                                resume: None,
+                                style: None,
+                            }
+                        },
+                    )?;
                 }
             }
             while let Reply::Takeover { target } = reply {
@@ -363,36 +398,46 @@ fn present(
                         *status = DevelopmentPaneStatus::Takeover;
                     }
                 }
-                if !alive.load(Ordering::Acquire) {
+                if !alive.load(Ordering::Acquire)
+                    || attachment.as_ref().is_some_and(|permit| !permit.active())
+                {
                     return Ok(());
                 }
                 if state.take_over.swap(false, Ordering::AcqRel) {
                     state.set(DevelopmentPaneStatus::TakingOver);
-                    reply = connection.exchange(&Request::TakeOver {
-                        target,
-                        size: *size.lock().unwrap_or_else(|e| e.into_inner()),
-                        style: Some(encode_style(
-                            &appearance.lock().unwrap_or_else(|e| e.into_inner()),
-                        )),
-                    })?;
+                    reply = exchange(
+                        &attachment,
+                        &mut connection,
+                        &Request::TakeOver {
+                            target,
+                            size: *size.lock().unwrap_or_else(|e| e.into_inner()),
+                            style: Some(encode_style(
+                                &appearance.lock().unwrap_or_else(|e| e.into_inner()),
+                            )),
+                        },
+                    )?;
                 } else {
                     std::thread::sleep(Duration::from_millis(100));
                     let size = *size.lock().unwrap_or_else(|e| e.into_inner());
-                    reply = connection.exchange(&if let Some(pane) = pane_id {
-                        Request::SelectPane {
-                            pane,
-                            explicit: state.selected.swap(false, Ordering::AcqRel),
-                            size,
-                            style: None,
-                        }
-                    } else {
-                        Request::Select {
-                            create: false,
-                            size,
-                            resume: Some(target),
-                            style: None,
-                        }
-                    })?;
+                    reply = exchange(
+                        &attachment,
+                        &mut connection,
+                        &if let Some(pane) = pane_id {
+                            Request::SelectPane {
+                                pane,
+                                explicit: state.selected.swap(false, Ordering::AcqRel),
+                                size,
+                                style: None,
+                            }
+                        } else {
+                            Request::Select {
+                                create: false,
+                                size,
+                                resume: Some(target),
+                                style: None,
+                            }
+                        },
+                    )?;
                 }
             }
             let Reply::Attached { lease } = reply else {
@@ -407,13 +452,15 @@ fn present(
             let epoch = state.invalidate();
             while input.try_recv().is_ok() {}
             loop {
-                if !alive.load(Ordering::Acquire) {
+                if !alive.load(Ordering::Acquire)
+                    || attachment.as_ref().is_some_and(|permit| !permit.active())
+                {
                     return Ok(());
                 }
                 if state.epoch.load(Ordering::Acquire) != epoch {
                     return Err(ServerError::Protocol);
                 }
-                let reply = connection.exchange(&Request::Poll { lease })?;
+                let reply = exchange(&attachment, &mut connection, &Request::Poll { lease })?;
                 if state.epoch.load(Ordering::Acquire) != epoch {
                     return Err(ServerError::Protocol);
                 }
@@ -441,7 +488,7 @@ fn present(
                 }
                 if state.close.swap(0, Ordering::AcqRel) == epoch {
                     if !matches!(
-                        connection.exchange(&Request::Close { lease })?,
+                        exchange(&attachment, &mut connection, &Request::Close { lease })?,
                         Reply::Closed
                     ) {
                         return Err(ServerError::Protocol);
@@ -467,7 +514,7 @@ fn present(
                         Input::Resize(size) => Request::Resize { lease, size },
                         Input::Style(style) => Request::Style { lease, style },
                     };
-                    connection.exchange(&request)?;
+                    exchange(&attachment, &mut connection, &request)?;
                 }
                 std::thread::sleep(Duration::from_millis(30));
             }

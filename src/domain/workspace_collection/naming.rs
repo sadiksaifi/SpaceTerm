@@ -74,6 +74,7 @@ impl<T> WorkspaceEntry<T> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::tests::PresentedWorkspace;
     use super::*;
 
     fn validated(path: &str, identity_label: u64) -> ValidatedLocalDirectory {
@@ -159,7 +160,7 @@ mod tests {
     #[test]
     fn automatic_name_should_follow_directory_and_return_to_an_available_default() {
         let mut workspaces = WorkspaceCollection::new_local(validated("/home/test", 0), |_, _| ());
-        let first = workspaces.active_workspace_id();
+        let first = workspaces.active_id();
         workspaces
             .update_automatic_directory(
                 first,
@@ -189,7 +190,7 @@ mod tests {
     #[test]
     fn automatic_directory_should_reject_cross_machine_values_without_mutation() {
         let mut workspaces = WorkspaceCollection::new_local(validated("/home/test", 0), |_, _| ());
-        let id = workspaces.active_workspace_id();
+        let id = workspaces.active_id();
         assert_eq!(
             workspaces.update_automatic_directory(
                 id,
@@ -198,7 +199,7 @@ mod tests {
             Err(WorkspaceError::DirectoryLocationMismatch(id))
         );
         assert_eq!(
-            workspaces.active_workspace().local_display_directory(),
+            workspaces.active().local_display_directory(),
             Some(Path::new("/home/test"))
         );
     }

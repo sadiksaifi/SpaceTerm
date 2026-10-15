@@ -87,6 +87,7 @@ impl Attachments {
         if unique.len() != choices.attached.len()
             || unique.len() > MAX_WORKSPACES
             || choices.pending.len() > MAX_WORKSPACES
+            || (!choices.initialized && choices != Choices::default())
             || generations.len() != choices.attached.len() + choices.pending.len()
             || generations
                 .iter()

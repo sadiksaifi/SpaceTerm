@@ -61,7 +61,7 @@ fn changing_pin_to_equivalent_directory_should_preserve_selected_spelling(cx: &m
     cx.run_until_parked();
 
     let state = manager.read_with(cx, |manager, _| {
-        let workspace = manager.workspaces.active_workspace();
+        let workspace = manager.workspaces.active();
         (
             manager.workspaces.len(),
             workspace.local_display_directory().unwrap().to_path_buf(),
@@ -141,7 +141,7 @@ fn replaced_pinned_directory_blocks_both_child_actions_without_closing_terminal_
     let original_counts = manager.read_with(cx, |manager, cx| {
         manager
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .aggregate_counts(cx)
@@ -159,7 +159,7 @@ fn replaced_pinned_directory_blocks_both_child_actions_without_closing_terminal_
             manager.read_with(cx, |manager, cx| {
                 manager
                     .workspaces
-                    .active_workspace()
+                    .active()
                     .payload()
                     .read(cx)
                     .aggregate_counts(cx)
@@ -167,11 +167,7 @@ fn replaced_pinned_directory_blocks_both_child_actions_without_closing_terminal_
             original_counts
         );
         assert!(manager.read_with(cx, |manager, _| {
-            manager
-                .workspaces
-                .active_workspace()
-                .pinned_directory()
-                .is_some()
+            manager.workspaces.active().pinned_directory().is_some()
         }));
         let modal_action = if action == "cmd-t" {
             "modal-action-tab-start-error-ok"
@@ -209,13 +205,13 @@ fn removal_should_protect_a_symbolic_link_pin_without_its_worktree_listing(
     symlink(&linked, base.join("alias")).unwrap();
     let (manager, _records, cx) =
         workspace_manager_with_directory_selection([Ok(Some(pinned.clone()))], cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     choose_pin_directory(&manager, cx);
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| manager.create_local_workspace(window, cx));
     });
     cx.run_until_parked();
-    let other = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let other = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     present_worktrees(cx, &[&linked]);
     let removable = manager.read_with(cx, |manager, cx| {
         assert!(manager.worktree_section(workspace_id, cx).is_none());

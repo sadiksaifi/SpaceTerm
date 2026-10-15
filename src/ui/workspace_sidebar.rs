@@ -96,6 +96,9 @@ pub(super) enum WorkspaceMenuCommand {
     PinDirectory,
     UnpinDirectory,
     Reconnect,
+    /// Removes this client's Workspace Attachment, leaving the Workspace and its Terminal
+    /// Sessions running on its server. It has no default Shortcut.
+    Detach,
     Close,
 }
 
@@ -187,6 +190,10 @@ pub(super) struct SharedWorkspaceRow {
     /// The short status line 2 shows in place of the directory while an edit waits or the server
     /// is unreachable.
     pub(super) status: Option<&'static str>,
+    /// Whether this client can change its Workspace Attachments now. Detaching needs no server,
+    /// so being offline never withholds it; an attachment write SpaceTerm could not confirm does,
+    /// until SpaceTerm reopens.
+    pub(super) detaches: bool,
 }
 
 impl WorkspaceRowViewModel {
