@@ -71,7 +71,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map_err(Into::into);
     }
     let major = std::env::args().nth(1).unwrap_or("2".into()).parse()?;
-    let client = LocalServer::for_development_client("restore-smoke", major)?;
+    let name = std::env::var("SPACETERM_DEVELOPMENT_CLIENT").unwrap_or("restore-smoke".into());
+    let client = LocalServer::for_development_client(&name, major)?;
+    // Detect a live listener before pairing, including when this test device has no credential.
+    // The runtime endpoint depends on UID and build identity, independently of the home path.
+    // SAFETY: geteuid has no preconditions.
+    let uid = unsafe { libc::geteuid() };
+    let directories = spaceterm_directories::ServerDirectories::for_account(
+        std::path::Path::new("/"),
+        uid,
+        "spaceterm-development",
+    )?;
+    if std::os::unix::net::UnixStream::connect(directories.runtime.join("s")).is_ok() {
+        return Err("Stop the idle Development server before this exercise.".into());
+    }
     // Refuse to interrupt somebody else's running server or mutate retained work.
     match client.refresh() {
         Err(ServerError::NotRunning | ServerError::NotPaired) => {}

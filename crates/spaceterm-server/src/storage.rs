@@ -21,7 +21,7 @@ const MAX_RECORD: usize = 32768;
 pub(crate) struct Record {
     pub seed: [u8; 32],
     pub paired: Vec<[u8; 32]>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub organization: Option<crate::organization::Organization>,
 }
 impl Drop for Record {
