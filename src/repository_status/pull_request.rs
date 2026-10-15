@@ -2,7 +2,6 @@
 //! environment, and the filtering of its JSON answer.
 
 use std::ffi::OsString;
-use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -23,21 +22,7 @@ const MAXIMUM_TITLE_CHARS: usize = 256;
 const BASE_REMOTE: &str = "upstream";
 const DEFAULT_REMOTE: &str = "origin";
 
-/// One Pull Request lookup: the base repository, the head branch, and the account that owns the
-/// head when it lives in a fork.
-#[derive(Clone, Eq, Hash, PartialEq)]
-pub(crate) struct PullRequestQuery {
-    pub(crate) repository: GitHubRepository,
-    pub(crate) head_branch: Arc<str>,
-    /// The push remote's owner. When known, every pull request must come from it.
-    pub(crate) head_owner: Option<Arc<str>>,
-}
-
-impl fmt::Debug for PullRequestQuery {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("PullRequestQuery(<redacted>)")
-    }
-}
+pub(crate) use spaceterm_server::repository::PullRequestQuery;
 
 /// The query for the current branch, or `None` when `HEAD` names no published branch or the base
 /// remote is not a GitHub-shaped URL.

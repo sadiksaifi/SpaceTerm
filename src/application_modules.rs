@@ -54,7 +54,14 @@ mod host_fonts;
 #[cfg(feature = "desktop")]
 mod keybindings;
 mod platform;
-#[cfg(feature = "desktop")]
+#[cfg_attr(
+    not(feature = "desktop"),
+    allow(
+        dead_code,
+        unused_imports,
+        reason = "shared Git policy is composed by the headless runtime"
+    )
+)]
 mod repository_status;
 #[cfg(feature = "desktop")]
 mod settings;
@@ -74,7 +81,14 @@ mod theme_registry;
 mod ui;
 #[cfg(feature = "desktop")]
 mod updates;
-#[cfg(feature = "desktop")]
+#[cfg_attr(
+    not(feature = "desktop"),
+    allow(
+        dead_code,
+        unused_imports,
+        reason = "shared Git policy is composed by the headless runtime"
+    )
+)]
 mod worktrees;
 
 #[cfg(feature = "desktop")]

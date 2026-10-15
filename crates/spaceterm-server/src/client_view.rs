@@ -332,6 +332,7 @@ mod tests {
     }
     fn tab(id: u8, panes: Vec<Pane>) -> Tab {
         Tab {
+            worktree: None,
             id: [id; 32],
             root_pane: panes[0].id,
             panes,
@@ -435,6 +436,7 @@ mod reconciliation_tests {
             ],
         };
         let tab = Tab {
+            worktree: None,
             id: [3; 32],
             root_pane: [2; 32],
             panes: vec![

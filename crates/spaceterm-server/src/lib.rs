@@ -8,6 +8,7 @@ mod host;
 pub mod organization;
 pub mod pane;
 mod protocol;
+pub mod repository;
 mod storage;
 
 #[cfg(feature = "client")]

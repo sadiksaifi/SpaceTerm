@@ -479,6 +479,7 @@ mod tests {
         use crate::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
         let fixture = Fixture::new();
         let inventory = Inventory {
+            repositories: None,
             revision: 1,
             close: None,
             workspaces: vec![Workspace {
@@ -489,6 +490,7 @@ mod tests {
                 pinned_directory: None,
                 root_tab: [2; 32],
                 tabs: vec![Tab {
+                    worktree: None,
                     id: [2; 32],
                     root_pane: [3; 32],
                     panes: vec![Pane {

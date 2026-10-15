@@ -11,7 +11,7 @@ client = ["dep:keyring"]
 [dependencies]
 libc = "=0.2.189"
 ring = "=0.17.14"
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"
 socket2 = "=0.6.5"
 spaceterm-directories = { path = "../spaceterm-directories" }

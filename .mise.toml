@@ -455,3 +455,11 @@ run = [
 [tasks."server:shared:desktop:test"]
 description = "Test shared Workspace integration and server Pane presentation in the main app"
 run = "cargo test --package spaceterm --lib --all-features --locked -- shared server_pane"
+
+[tasks."server:repository:smoke"]
+description = "Read owning-server Git facts and external Worktrees through two clients on both protocol majors"
+run = [
+  "cargo build --package spaceterm-server-host --features client --example repository_reads --bins --locked",
+  "cargo run --package spaceterm-server-host --features client --example repository_reads --locked -- 1",
+  "cargo run --package spaceterm-server-host --features client --example repository_reads --locked -- 2",
+]

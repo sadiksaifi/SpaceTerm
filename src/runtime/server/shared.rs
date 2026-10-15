@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 pub struct SharedWorkspaceHost {
     prototype: DevelopmentPaneHost,
+    repositories: super::repositories::ServerRepositories,
     state: State,
     panes: BTreeMap<Id, DevelopmentPaneHost>,
     store: Option<OrganizationStore>,
@@ -20,6 +21,7 @@ impl SharedWorkspaceHost {
         state.begin_boot(prototype.boot);
         Self {
             prototype,
+            repositories: Default::default(),
             state,
             panes: BTreeMap::new(),
             store: None,
@@ -30,6 +32,7 @@ impl SharedWorkspaceHost {
     fn commit(&mut self, mut next: State) -> Result<(), Refusal> {
         // Runtime facts authorize an in-memory comparison, never a later recovery read.
         next.inventory.close = None;
+        next.inventory.repositories = None;
         if let Some(store) = &self.store {
             let envelope = next
                 .envelope(&self.prototype.directory)
@@ -79,6 +82,7 @@ impl SharedWorkspaceHost {
                 next.remove_pane(*id);
             }
         }
+        self.repositories.update(&mut next);
         if next != self.state {
             self.commit(next)?;
         }
@@ -109,6 +113,7 @@ impl SharedWorkspaceHost {
                     .map(|pane| pane.lease.session),
             })
             .collect();
+        inventory.repositories = Some(self.repositories.snapshot());
         inventory.close = Some(CloseInventory {
             boot: self.prototype.boot,
             sessions,
@@ -166,6 +171,9 @@ impl SharedWorkspaceHost {
         host.select(device, connection, explicit, size, None, style)
     }
     fn handle(&mut self, device: Id, connection: Id, request: Request) -> Result<Reply, Refusal> {
+        if matches!(request, Request::Inventory) {
+            self.repositories.subscribe(connection);
+        }
         self.synchronize()?;
         match request {
             Request::ClaimPane {
@@ -461,11 +469,13 @@ impl PaneService for SharedWorkspaceHost {
             .unwrap_or_else(Reply::Refused)
     }
     fn disconnected(&mut self, connection: Id) {
+        self.repositories.disconnected(connection);
         for host in self.panes.values_mut() {
             host.disconnected(connection);
         }
     }
     fn shutdown(&mut self) -> Result<(), ServerError> {
+        self.repositories = Default::default();
         self.synchronize()
             .map_err(|_| ServerError::StorageUnavailable)?;
         for host in self.panes.values_mut() {

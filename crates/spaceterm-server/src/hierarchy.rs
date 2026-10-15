@@ -12,6 +12,9 @@ const MAX_OUTCOMES: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Inventory {
+    /// Live owning-server Git facts. Excluded from retained Organization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repositories: Option<crate::repository::Snapshot>,
     pub revision: u64,
     pub workspaces: Vec<Workspace>,
     /// Live facts accompany publication only; retained organization never supplies authority.
@@ -120,6 +123,9 @@ pub struct Workspace {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tab {
+    /// Saved membership, retained even when Git no longer lists the directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<PathBuf>,
     pub id: Id,
     pub root_pane: Id,
     pub panes: Vec<Pane>,
@@ -217,6 +223,7 @@ impl State {
     pub fn empty() -> Self {
         Self {
             inventory: Inventory {
+                repositories: None,
                 revision: 0,
                 workspaces: Vec::new(),
                 close: None,
@@ -255,6 +262,7 @@ impl State {
     pub fn from_legacy(org: &crate::organization::Organization) -> Self {
         org.shared.as_deref().cloned().unwrap_or_else(|| Self {
             inventory: Inventory {
+                repositories: None,
                 revision: 0,
                 close: None,
                 workspaces: vec![Workspace {
@@ -265,6 +273,7 @@ impl State {
                     pinned_directory: org.pinned_directory.clone(),
                     root_tab: org.tab,
                     tabs: vec![Tab {
+                        worktree: None,
                         id: org.tab,
                         root_pane: org.pane,
                         panes: vec![Pane {
@@ -308,7 +317,10 @@ impl State {
             org.starting_directory.clone_from(&p.starting_directory);
             org.confirmed_directory.clone_from(&p.confirmed_directory);
         }
-        org.shared = Some(Box::new(self.clone()));
+        let mut retained = self.clone();
+        retained.inventory.repositories = None;
+        retained.inventory.close = None;
+        org.shared = Some(Box::new(retained));
         Ok(org)
     }
     pub fn outcome(&self, device: Id, sequence: u64) -> Option<&RetainedOutcome> {
@@ -442,6 +454,7 @@ impl State {
                     pinned_directory: None,
                     root_tab: tab,
                     tabs: vec![Tab {
+                        worktree: None,
                         id: tab,
                         root_pane: pane,
                         panes: vec![Pane {
@@ -486,6 +499,7 @@ impl State {
                 let id = new_id()?;
                 let pane = new_id()?;
                 w.tabs.push(Tab {
+                    worktree: None,
                     id,
                     root_pane: pane,
                     panes: vec![Pane {
@@ -674,6 +688,7 @@ impl State {
             }
             for t in &w.tabs {
                 if t.id == [0; 32]
+                    || t.worktree.as_ref().is_some_and(|p| !valid_path(p))
                     || !ids.insert(t.id)
                     || !t.panes.iter().any(|p| p.id == t.root_pane)
                 {
