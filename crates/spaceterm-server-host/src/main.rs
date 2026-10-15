@@ -58,9 +58,11 @@ fn run() -> Result<(), spaceterm_server::ServerError> {
         return Err(spaceterm_server::ServerError::Protocol);
     }
     if command == "service-serve" {
-        if !spaceterm_server::service::admit(identity)? {
-            return Ok(());
-        }
+        check::resources()?;
+        return spaceterm_server::service::run(
+            identity,
+            spaceterm::runtime::SharedWorkspaceHost::local()?,
+        );
     } else if let Some(action) = command.to_str().and_then(|v| v.strip_prefix("service-")) {
         let service = spaceterm_server::service::Service::for_identity(identity)?;
         let status = match action {

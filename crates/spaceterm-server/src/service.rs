@@ -37,6 +37,15 @@ struct State {
     installed: bool,
     #[serde(default)]
     removing: bool,
+    #[serde(default)]
+    run: Option<Run>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Run {
+    boot: String,
+    token: [u8; 32],
 }
 
 /// Local owning-account authority. Construction only resolves account paths.
@@ -101,6 +110,7 @@ impl Service {
             stopped: false,
             installed: false,
             removing: false,
+            run: None,
         });
         // Uninstall never authorizes a different runtime. Update activation owns that transition.
         runtime::verify(&self.runtime(&state), &self.identity)?;
@@ -122,7 +132,7 @@ impl Service {
         if state.stopped {
             self.platform()?.disable()?;
         } else {
-            self.start_locked(&data, &mut state)?;
+            self.start_locked(&data, &mut state, false)?;
         }
         self.snapshot(&state)
     }
@@ -134,7 +144,7 @@ impl Service {
         if !state.installed {
             return Err(ServerError::NotInstalled);
         }
-        self.start_locked(&data, &mut state)?;
+        self.start_locked(&data, &mut state, true)?;
         self.snapshot(&state)
     }
     #[cfg(all(feature = "client", target_os = "macos"))]
@@ -145,17 +155,37 @@ impl Service {
         if state.stopped || !state.installed {
             return Err(ServerError::Stopped);
         }
-        self.start_locked(&data, &mut state)
+        self.start_locked(&data, &mut state, false)
     }
-    fn start_locked(&self, data: &Directory, state: &mut State) -> Result<(), ServerError> {
+    fn start_locked(
+        &self,
+        data: &Directory,
+        state: &mut State,
+        explicit: bool,
+    ) -> Result<(), ServerError> {
+        let intent = data.lock("service-intent.lock", false)?;
+        *state = Self::state(data)?.ok_or(ServerError::StorageUnavailable)?;
+        if state.stopped && !explicit {
+            return Err(ServerError::Stopped);
+        }
+        if self.platform()?.running()? {
+            return if state.stopped {
+                Err(ServerError::CleanupUnresolved)
+            } else {
+                Ok(())
+            };
+        }
         if state.removing {
             return Err(ServerError::CleanupUnresolved);
         }
+        check_cleanup(state)?;
+        state.run = None;
         data.read()?; // Unavailable or missing identity is never replaced by service controls.
         runtime::verify(&self.runtime(state), &self.identity)?;
         self.platform()?.prepare_start()?;
         state.stopped = false;
         data.write_json(c"service.json", state)?;
+        drop(intent);
         self.platform()?.start()?;
         self.wait_running(true)
     }
@@ -168,11 +198,25 @@ impl Service {
     }
     fn stop_locked(&self, data: &Directory, state: &mut State) -> Result<(), ServerError> {
         // Publication precedes all service-manager operations, so partial failure fails closed.
-        state.stopped = true;
-        data.write_json(c"service.json", state)?;
+        {
+            let _intent = data.lock("service-intent.lock", false)?;
+            *state = Self::state(data)?.ok_or(ServerError::StorageUnavailable)?;
+            state.stopped = true;
+            data.write_json(c"service.json", state)?;
+        }
         self.platform()?.disable()?;
         self.wait_running(false)?;
-        self.prove_quiescent()
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            *state = Self::state(data)?.ok_or(ServerError::StorageUnavailable)?;
+            match check_cleanup(state).and_then(|()| self.prove_quiescent()) {
+                Ok(()) => return Ok(()),
+                Err(ServerError::CleanupUnresolved) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50))
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
     pub fn restart(&self) -> Result<ServiceStatus, ServerError> {
         let (data, _) = self.read()?.ok_or(ServerError::NotInstalled)?;
@@ -182,7 +226,7 @@ impl Service {
             return Err(ServerError::NotInstalled);
         }
         self.stop_locked(&data, &mut state)?;
-        self.start_locked(&data, &mut state)?;
+        self.start_locked(&data, &mut state, true)?;
         self.snapshot(&state)
     }
     /// Remove only the service registration. Retain identity, organization, artifacts and Stop.
@@ -224,17 +268,23 @@ impl Service {
         Ok(state)
     }
     fn snapshot(&self, state: &State) -> Result<ServiceStatus, ServerError> {
+        let running = self.platform()?.running()?;
+        if !running {
+            check_cleanup(state)?;
+        }
         Ok(ServiceStatus {
             installed: state.installed,
             enabled: state.installed && !state.stopped,
             stopped: state.stopped,
-            running: self.platform()?.running()?,
+            running,
         })
     }
     fn wait_running(&self, desired: bool) -> Result<(), ServerError> {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
-            if self.platform()?.running()? == desired {
+            if self.platform()?.running()? == desired
+                && (!desired || crate::host::connect(&self.paths).is_ok())
+            {
                 return Ok(());
             }
             if Instant::now() >= deadline {
@@ -292,19 +342,83 @@ pub(crate) fn check_start(paths: &Paths) -> Result<(), ServerError> {
     Ok(())
 }
 
-/// Service entry point admission. The selected executable must match the approved artifact.
-pub fn admit(identity: &str) -> Result<bool, ServerError> {
+/// Run only the approved artifact. An interrupted same-boot run remains unresolved cleanup.
+/// Reboot proves the previous boot's processes ended; ordinary client launches grant no recovery.
+pub fn run(
+    identity: &str,
+    panes: impl crate::pane::PaneService + 'static,
+) -> Result<(), ServerError> {
     let service = Service::for_identity(identity)?;
-    let (_, state) = service.read()?.ok_or(ServerError::NotInstalled)?;
+    let (data, _) = service.read()?.ok_or(ServerError::NotInstalled)?;
+    let intent = data.lock("service-intent.lock", false)?;
+    let mut state = Service::state(&data)?.ok_or(ServerError::NotInstalled)?;
     if state.stopped || !state.installed {
-        return Ok(false);
+        return Ok(());
     }
+    check_cleanup(&state)?;
     let executable = std::env::current_exe().map_err(|_| ServerError::RuntimeUnavailable)?;
     if executable != service.runtime(&state).join("bin/spaceterm-server") {
         return Err(ServerError::RuntimeUnavailable);
     }
     runtime::verify(&service.runtime(&state), identity)?;
-    Ok(true)
+    let run = Run {
+        boot: boot()?,
+        token: crate::protocol::random()?,
+    };
+    state.run = Some(run.clone());
+    data.write_json(c"service.json", &state)?;
+    drop(intent);
+    match crate::run_local_with_panes(identity, panes) {
+        Ok(()) | Err(ServerError::Stopped) => {}
+        Err(error) => return Err(error),
+    }
+    let _intent = data.lock("service-intent.lock", false)?;
+    let mut state = Service::state(&data)?.ok_or(ServerError::StorageUnavailable)?;
+    if state
+        .run
+        .as_ref()
+        .is_none_or(|current| current.token != run.token)
+    {
+        return Err(ServerError::CleanupUnresolved);
+    }
+    state.run = None;
+    data.write_json(c"service.json", &state)
+}
+fn check_cleanup(state: &State) -> Result<(), ServerError> {
+    if let Some(run) = &state.run
+        && run.boot == boot()?
+    {
+        return Err(ServerError::CleanupUnresolved);
+    }
+    Ok(())
+}
+fn boot() -> Result<String, ServerError> {
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: sysctlbyname fills a correctly sized timeval for the fixed kernel key.
+        let mut value: libc::timeval = unsafe { std::mem::zeroed() };
+        let mut size = std::mem::size_of_val(&value);
+        if unsafe {
+            libc::sysctlbyname(
+                c"kern.boottime".as_ptr(),
+                (&raw mut value).cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        } != 0
+            || size != std::mem::size_of_val(&value)
+        {
+            return Err(ServerError::StorageUnavailable);
+        }
+        Ok(format!("{}:{}", value.tv_sec, value.tv_usec))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .map(|v| v.trim().to_owned())
+            .map_err(|_| ServerError::StorageUnavailable)
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -453,6 +567,7 @@ fn command(program: &str, args: &[OsString]) -> Result<Vec<u8>, ServerError> {
 // used for logout or crash recovery do not change this policy.
 pub(crate) fn retain_stop(paths: &Paths) -> Result<(), ServerError> {
     let data = Directory::open(&paths.data, false)?;
+    let _intent = data.lock("service-intent.lock", false)?;
     if let Some(mut state) = Service::state(&data)? {
         state.stopped = true;
         data.write_json(c"service.json", &state)?;
@@ -486,6 +601,7 @@ mod tests {
                     stopped: false,
                     installed: true,
                     removing: false,
+                    run: None,
                 },
             )
             .unwrap();

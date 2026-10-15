@@ -130,7 +130,6 @@ fn check_account(user: libc::uid_t) -> Result<(), ServerError> {
     Ok(())
 }
 
-#[cfg(feature = "client")]
 pub(crate) fn connect(paths: &Paths) -> Result<UnixStream, ServerError> {
     Directory::open(&paths.runtime, false).map_err(|error| {
         if error == ServerError::NotPaired {
