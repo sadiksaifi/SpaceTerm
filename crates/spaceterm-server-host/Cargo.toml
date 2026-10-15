@@ -20,6 +20,7 @@ name = "spaceterm-server"
 path = "src/main.rs"
 
 [dependencies]
+serde_json = "1.0"
 spaceterm = { path = "../..", default-features = false }
 spaceterm-server = { path = "../spaceterm-server" }
 libc = "=0.2.189"

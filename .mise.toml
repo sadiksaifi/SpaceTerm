@@ -463,3 +463,7 @@ run = [
   "cargo run --package spaceterm-server-host --features client --example repository_reads --locked -- 1",
   "cargo run --package spaceterm-server-host --features client --example repository_reads --locked -- 2",
 ]
+
+[tasks."server:test:host"]
+description = "Test the headless executable's build isolation"
+run = "cargo test --package spaceterm-server-host --no-default-features --locked"

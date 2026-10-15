@@ -160,9 +160,6 @@ impl LocalServer {
 
     /// Authenticates a terminal transport without setup or implicit Start Server.
     pub fn connect_pane(&self) -> Result<crate::pane::PaneConnection, ServerError> {
-        if self.identity != "spaceterm-development" {
-            return Err(ServerError::Unsupported);
-        }
         let credential = self.credential()?.ok_or(ServerError::NotPaired)?;
         let mut stream = host::connect(&self.paths)?;
         protocol::authenticate_client(
