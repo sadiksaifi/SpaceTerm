@@ -254,10 +254,13 @@ struct Record {
 #[cfg(feature = "client")]
 pub struct ClientViewStore {
     directory: crate::storage::Directory,
-    lock: std::fs::File,
+    _lock: ClientViewLock,
     record: Record,
     blocked: bool,
 }
+#[cfg(feature = "client")]
+struct ClientViewLock(std::fs::File);
+
 #[cfg(feature = "client")]
 impl ClientViewStore {
     pub(crate) fn open(
@@ -265,7 +268,7 @@ impl ClientViewStore {
         pin: Id,
         device: Id,
     ) -> Result<Self, ServerError> {
-        let lock = directory.lock("view.lock", true)?;
+        let lock = ClientViewLock(directory.lock("view.lock", true)?);
         let record = directory
             .read_json::<Record>("view.json")?
             .unwrap_or(Record {
@@ -280,7 +283,7 @@ impl ClientViewStore {
         record.view.validate()?;
         Ok(Self {
             directory,
-            lock,
+            _lock: lock,
             record,
             blocked: false,
         })
@@ -306,12 +309,13 @@ impl ClientViewStore {
     }
 }
 #[cfg(feature = "client")]
-impl Drop for ClientViewStore {
+impl Drop for ClientViewLock {
     fn drop(&mut self) {
         use std::os::fd::AsRawFd;
-        // SAFETY: this guard owns the live descriptor; explicit unlock also covers inherited fds.
+        // SAFETY: this guard owns the live descriptor. Unlock on rejected records too:
+        // another thread's fork may retain the descriptor until its child executes.
         unsafe {
-            libc::flock(self.lock.as_raw_fd(), libc::LOCK_UN);
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
         }
     }
 }
