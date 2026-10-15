@@ -98,6 +98,7 @@ fn open_settings(
                 ..super::super::PermissionCapabilities::default()
             },
             None,
+            None,
             window,
             cx,
         )

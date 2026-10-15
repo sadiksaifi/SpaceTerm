@@ -11,6 +11,7 @@ mod import;
 mod keybindings;
 mod microphone;
 mod permission_access;
+mod servers;
 mod sidebar;
 mod theme_gallery;
 mod theme_store;
@@ -166,6 +167,7 @@ pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App)
     let window_drag = composition.window_movement.create();
     let permissions = composition.permissions.clone();
     let theme_registry = composition.theme_registry.clone();
+    let local_server = servers::offered_local_server();
     let opened = cx.open_window(
         super::sidebar_window::window_options(
             "Settings",
@@ -178,6 +180,7 @@ pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App)
                     Rc::clone(&window_drag),
                     permissions.clone(),
                     theme_registry.clone(),
+                    local_server.clone(),
                     window,
                     cx,
                 );
@@ -283,6 +286,8 @@ pub(crate) struct SettingsWindow {
     settings_file: advanced::SettingsFileView,
     /// The Worktree Path Template field, kept so an edit survives re-rendering.
     worktree_location: git::WorktreeLocationField,
+    /// The local server this build offers. `None` omits the Servers section.
+    local_server: Option<servers::LocalServerRow>,
 }
 
 impl SidebarOwner for SettingsWindow {
@@ -309,7 +314,8 @@ impl SidebarOwner for SettingsWindow {
 
     /// Each section is its own view, so the detail pane starts at its top.
     fn select_section(&mut self, section: SettingsSectionId, cx: &mut Context<Self>) {
-        self.active_section = section;
+        let previous = std::mem::replace(&mut self.active_section, section);
+        self.section_presented(previous, cx);
         self.shortcuts.dismiss_notice();
         self.shortcuts.end_search_capture(cx);
         self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
@@ -350,6 +356,7 @@ impl SettingsWindow {
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
             PermissionCapabilities::default(),
             None,
+            None,
             window,
             cx,
         )
@@ -359,6 +366,7 @@ impl SettingsWindow {
         operating_system_window_drag_platform: Rc<dyn OperatingSystemWindowDragPlatform>,
         permissions: PermissionCapabilities,
         theme_registry: Option<ZedThemeRegistry>,
+        local_server: servers::OfferedLocalServer,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -436,7 +444,9 @@ impl SettingsWindow {
                 }
                 if matches!(event, TextInputEvent::ValueChanged(_)) {
                     settings.query = SharedString::from(search.read(cx).value().to_owned());
+                    let previous = settings.active_section;
                     settings.synchronize_search_results();
+                    settings.section_presented(previous, cx);
                     cx.notify();
                 }
             },
@@ -527,6 +537,7 @@ impl SettingsWindow {
             .into_iter()
             .filter(|section| {
                 section_feature(*section).is_none_or(|feature| presentation.has_feature(feature))
+                    && (*section != SettingsSectionId::Servers || local_server.is_some())
             })
             .collect();
         // Only a desktop whose Workspace windows can present a Background Image keeps its copies.
@@ -570,6 +581,17 @@ impl SettingsWindow {
             shortcuts,
             settings_file,
             worktree_location,
+            local_server: local_server.map(servers::LocalServerRow::new),
+        }
+    }
+
+    /// Checks the local server when its section replaces another in the detail pane, so the
+    /// status is current without opening Settings asking the server anything.
+    fn section_presented(&mut self, previous: SettingsSectionId, cx: &mut Context<Self>) {
+        if self.active_section == SettingsSectionId::Servers
+            && previous != SettingsSectionId::Servers
+        {
+            self.check_local_server(cx);
         }
     }
 
@@ -910,6 +932,7 @@ impl SettingsWindow {
                     SettingsSectionId::Keybindings => IconName::Keyboard,
                     SettingsSectionId::Privacy => IconName::Shield,
                     SettingsSectionId::Git => IconName::GitBranch,
+                    SettingsSectionId::Servers => IconName::Terminal,
                     SettingsSectionId::Updates => IconName::Download,
                     SettingsSectionId::Advanced => IconName::Cog,
                 },
@@ -1158,6 +1181,10 @@ impl SettingsWindow {
         } else if row == SettingsRowId::WorktreeLocation {
             let (caption, tone) = self.worktree_location_caption(cx);
             rendered = rendered.caption(caption, tone);
+        } else if row == SettingsRowId::LocalServer {
+            if let Some(presentation) = self.local_server_presentation() {
+                rendered = rendered.caption(presentation.explanation, presentation.tone);
+            }
         } else if let SettingsRowId::Shortcut(command) = row {
             if let Some(description) = self.shortcut_description(command, cx) {
                 rendered = rendered.caption(description.text, description.tone);
@@ -1209,6 +1236,7 @@ impl SettingsWindow {
                 self.render_git_tool(row, appearance, cx)
             }
             SettingsRowId::WorktreeLocation => self.render_worktree_location(appearance, cx),
+            SettingsRowId::LocalServer => self.render_local_server(appearance, cx),
             SettingsRowId::UpdateStatus => self.render_update_status(cx),
             SettingsRowId::AutomaticUpdateDownloads => self.render_automatic_update_downloads(cx),
             SettingsRowId::UpdateCheckInterval => self.render_update_check_interval(cx),

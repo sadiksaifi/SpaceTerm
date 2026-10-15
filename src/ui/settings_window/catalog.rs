@@ -22,6 +22,8 @@ pub(crate) enum SettingsSectionId {
     Privacy,
     /// Repository Status and Pull Requests, and the tools that provide them.
     Git,
+    /// The SpaceTerm Server this device pairs with and its authenticated status.
+    Servers,
     /// The installed version, the latest check, and how SpaceTerm keeps itself current.
     Updates,
     /// Settings as a whole: the settings file, export and import, and Reset All.
@@ -30,13 +32,14 @@ pub(crate) enum SettingsSectionId {
 
 impl SettingsSectionId {
     /// Every section in presentation order.
-    pub(super) const ALL: [Self; 8] = [
+    pub(super) const ALL: [Self; 9] = [
         Self::Interface,
         Self::Font,
         Self::Themes,
         Self::Keybindings,
         Self::Privacy,
         Self::Git,
+        Self::Servers,
         Self::Updates,
         Self::Advanced,
     ];
@@ -49,6 +52,7 @@ impl SettingsSectionId {
             Self::Keybindings => "Keybindings",
             Self::Privacy => "Privacy",
             Self::Git => "Git",
+            Self::Servers => "Servers",
             Self::Updates => "Updates",
             Self::Advanced => "Advanced",
         }
@@ -76,6 +80,10 @@ impl SettingsSectionId {
             Self::Git => {
                 "The branch and changes of the repository each terminal pane is in, read with your own Git and GitHub CLI."
             }
+            Self::Servers => {
+                "The Development server for your account. Terminal panes still run in SpaceTerm \
+                 itself."
+            }
             Self::Updates => {
                 "SpaceTerm keeps itself current in the background and asks before it restarts."
             }
@@ -93,6 +101,7 @@ impl SettingsSectionId {
             Self::Keybindings => "settings-section-keybindings",
             Self::Privacy => "settings-section-privacy",
             Self::Git => "settings-section-git",
+            Self::Servers => "settings-section-servers",
             Self::Updates => "settings-section-updates",
             Self::Advanced => "settings-section-advanced",
         }
@@ -140,6 +149,8 @@ pub(super) enum SettingsRowId {
     GitHubCli,
     /// The Worktree Path Template, where a new Worktree's directory goes.
     WorktreeLocation,
+    /// This device's pairing with the local server, its authenticated status, and the next step.
+    LocalServer,
     /// The installed version, the latest check, and the next step the update service offers.
     UpdateStatus,
     AutomaticUpdateDownloads,
@@ -195,6 +206,8 @@ impl SettingsRowId {
             | Self::ShowPullRequests
             | Self::GitHubCli
             | Self::WorktreeLocation
+            // The local server row holds status and actions, not a preference.
+            | Self::LocalServer
             | Self::UpdateStatus
             | Self::AutomaticUpdateDownloads
             | Self::UpdateCheckInterval
@@ -625,6 +638,33 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-worktree-location",
     },
     SettingsRowDescriptor {
+        id: SettingsRowId::LocalServer,
+        section: SettingsSectionId::Servers,
+        // The server leads the page and needs no title: it is what the page is about.
+        group: "",
+        label: "Local server",
+        keywords: &[
+            "server",
+            "spaceterm server",
+            "development",
+            "headless",
+            "pair",
+            "pairing",
+            "paired device",
+            "set up",
+            "setup",
+            "start server",
+            "connect",
+            "connection",
+            "authenticate",
+            "status",
+            "protocol",
+            "keychain",
+            "credential",
+        ],
+        selector: "settings-row-local-server",
+    },
+    SettingsRowDescriptor {
         id: SettingsRowId::UpdateStatus,
         section: SettingsSectionId::Updates,
         // The installed version leads the page and needs no title: it is what the page is about.
@@ -880,7 +920,7 @@ mod tests {
     }
 
     /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 33] = [
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 34] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Opacity,
         SettingsRowId::Blur,
@@ -906,6 +946,7 @@ mod tests {
         SettingsRowId::ShowPullRequests,
         SettingsRowId::GitHubCli,
         SettingsRowId::WorktreeLocation,
+        SettingsRowId::LocalServer,
         SettingsRowId::UpdateStatus,
         SettingsRowId::AutomaticUpdateDownloads,
         SettingsRowId::UpdateCheckInterval,
@@ -1207,6 +1248,7 @@ mod tests {
                     | SettingsRowId::ShowPullRequests
                     | SettingsRowId::GitHubCli
                     | SettingsRowId::WorktreeLocation
+                    | SettingsRowId::LocalServer
                     | SettingsRowId::UpdateStatus
                     | SettingsRowId::AutomaticUpdateDownloads
                     | SettingsRowId::UpdateCheckInterval
@@ -1257,6 +1299,17 @@ mod tests {
             assert!(
                 matching_rows(query).contains(&row),
                 "{query:?} should reach {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_server_query_reaches_the_local_server() {
+        for query in ["server", "pair", "set up", "start server", "protocol"] {
+            assert_eq!(
+                matching_rows(query).first(),
+                Some(&SettingsRowId::LocalServer),
+                "{query:?} should rank the local server first"
             );
         }
     }
