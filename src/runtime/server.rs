@@ -776,7 +776,8 @@ mod tests {
                     row.iter()
                         .map(|c| c.text.as_str())
                         .collect::<String>()
-                        .trim_end() == text
+                        .trim_end()
+                        == text
                 })
             {
                 return;
@@ -1187,7 +1188,7 @@ mod tests {
             &mut host,
             2,
             lease,
-            "stty -echo; printf 'EXITING\\n'; sleep 0.2; exit\n",
+            "stty -echo; printf '\\033[2J\\033[HEXITING\\n'; sleep 0.2; exit\n",
         );
         await_text(&mut host, 2, lease, "EXITING");
         host.disconnected([2; 32]);
