@@ -78,8 +78,8 @@ use crate::terminal::{
 use gpui::prelude::*;
 
 use gpui::{
-    Action, AnyElement, App, Context, Edges, Entity, Pixels, Render, Task, WeakEntity, Window, div,
-    px,
+    Action, AnyElement, App, Context, Edges, Entity, FocusHandle, Pixels, Render, Task, WeakEntity,
+    Window, div, px,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, AnchoredAlignment, AnchoredPlacement,
@@ -292,11 +292,34 @@ type SharedWorkspaceBinding = super::shared_workspaces::SharedWorkspaces;
 #[cfg(not(feature = "developer-tools"))]
 type SharedWorkspaceBinding = std::convert::Infallible;
 
+/// The server identity of a detached Workspace the Workspace Switcher offers. A build without the
+/// developer tools presents no server Workspaces, so it never offers one.
+#[cfg(feature = "developer-tools")]
+type DetachedWorkspace = spaceterm_server::hierarchy::Id;
+#[cfg(not(feature = "developer-tools"))]
+type DetachedWorkspace = std::convert::Infallible;
+
+/// What one Workspace Switcher result chooses.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SwitcherChoice {
+    /// A Workspace this window presents, which choosing activates.
+    Presented(WorkspaceId),
+    /// A server Workspace this client has detached, which choosing attaches and activates.
+    #[cfg_attr(
+        not(feature = "developer-tools"),
+        expect(
+            dead_code,
+            reason = "only the developer tools present server Workspaces"
+        )
+    )]
+    Detached(DetachedWorkspace),
+}
+
 pub(crate) struct WorkspaceManager {
     window_appearance: super::appearance_runtime::WindowAppearanceOwner,
     window_traffic_lights: super::appearance_runtime::WindowTrafficLightOwner,
     transient: WorkspaceTransientUi,
-    workspace_switcher: ComboBoxHandle<WorkspaceId, WorkspaceCreation>,
+    workspace_switcher: ComboBoxHandle<SwitcherChoice, WorkspaceCreation>,
     remote_workspace_name: Option<String>,
     sidebar: Entity<WorkspaceSidebar>,
     local_filesystem: LocalFilesystemAuthority,
@@ -327,6 +350,8 @@ pub(crate) struct WorkspaceManager {
     shared: Option<SharedWorkspaceBinding>,
     /// Reads the server's inventory and edit state while the window lives.
     _shared_poll: Option<Task<()>>,
+    /// Where the keyboard rests while the window presents no Workspace.
+    empty_focus: FocusHandle,
 }
 
 impl WorkspaceManager {
@@ -403,8 +428,10 @@ impl WorkspaceManager {
                     cx,
                 )
             });
-        if let Some(reason) = initial_directory_error {
-            let _ = workspaces.set_directory_unavailable(workspaces.active_workspace_id(), reason);
+        if let Some((reason, workspace_id)) =
+            initial_directory_error.zip(workspaces.active_workspace_id())
+        {
+            let _ = workspaces.set_directory_unavailable(workspace_id, reason);
         }
         #[cfg(feature = "developer-tools")]
         cx.on_app_quit(|manager, cx| {
@@ -497,6 +524,7 @@ impl WorkspaceManager {
             sidebar_worktrees: worktrees::SidebarWorktrees::default(),
             shared: None,
             _shared_poll: None,
+            empty_focus: cx.focus_handle(),
         }
     }
 
@@ -661,11 +689,22 @@ impl WorkspaceManager {
     }
 
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
-        let manager = self.workspaces.active_workspace().payload().clone();
+        // The empty view holds the keyboard while this window presents no Workspace.
+        let Some(manager) = self.active_tab_manager() else {
+            self.empty_focus.focus(window, cx);
+            return;
+        };
         manager.update(cx, |manager, cx| {
             manager.set_parent_focus_blocker(None, cx);
             manager.focus(window, cx);
         });
+    }
+
+    /// The Active Workspace's Tab manager, absent while this window presents no Workspace.
+    fn active_tab_manager(&self) -> Option<Entity<TabManager>> {
+        self.workspaces
+            .active_workspace()
+            .map(|workspace| workspace.payload().clone())
     }
 
     #[cfg_attr(
@@ -680,15 +719,15 @@ impl WorkspaceManager {
         window: &Window,
         cx: &mut App,
     ) -> NativeServiceStatus {
-        let workspace_id = self.workspaces.active_workspace_id();
         let blocker = self.terminal_focus_blocker(window, cx);
-        self.workspaces
-            .active_workspace()
-            .payload()
-            .update(cx, |manager, cx| {
-                manager.set_parent_focus_blocker(blocker, cx);
-                manager.native_service_status(workspace_id, window, cx)
-            })
+        let Some(workspace) = self.workspaces.active_workspace() else {
+            return NativeServiceStatus::default();
+        };
+        let workspace_id = workspace.id();
+        workspace.payload().update(cx, |manager, cx| {
+            manager.set_parent_focus_blocker(blocker, cx);
+            manager.native_service_status(workspace_id, window, cx)
+        })
     }
 
     fn native_service_target(
@@ -696,7 +735,7 @@ impl WorkspaceManager {
         origin: NativeServiceOrigin,
         cx: &App,
     ) -> Option<Entity<super::TerminalPane>> {
-        if self.workspaces.active_workspace_id() != origin.workspace_id() {
+        if self.workspaces.active_workspace_id() != Some(origin.workspace_id()) {
             return None;
         }
         self.workspaces
@@ -777,9 +816,11 @@ impl WorkspaceManager {
         })
     }
 
-    fn workspace_switcher_items(&self, cx: &App) -> Vec<ComboBoxItem<WorkspaceId>> {
+    /// The presented Workspaces in sidebar order, then the detached ones the server offers.
+    fn workspace_switcher_items(&self, cx: &App) -> Vec<ComboBoxItem<SwitcherChoice>> {
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
-        self.workspaces
+        let mut items: Vec<_> = self
+            .workspaces
             .iter()
             .enumerate()
             .map(|(index, workspace)| {
@@ -787,22 +828,27 @@ impl WorkspaceManager {
                     WorkspaceLocation::Local => IconName::Terminal,
                     WorkspaceLocation::Remote { .. } => IconName::Globe,
                 };
-                let item = ComboBoxItem::new(workspace.id(), workspace.name().to_owned())
-                    .leading_icon(move |foreground, size| {
-                        div()
-                            .child(Icon::new(icon, size, foreground))
-                            .into_any_element()
-                    })
-                    .debug_selector(format!(
-                        "workspace-switcher-result-{}",
-                        workspace.id().get()
-                    ));
+                let item = ComboBoxItem::new(
+                    SwitcherChoice::Presented(workspace.id()),
+                    workspace.name().to_owned(),
+                )
+                .leading_icon(move |foreground, size| {
+                    div()
+                        .child(Icon::new(icon, size, foreground))
+                        .into_any_element()
+                })
+                .debug_selector(format!(
+                    "workspace-switcher-result-{}",
+                    workspace.id().get()
+                ));
                 match workspace_activation_shortcut(index, presentation) {
                     Some(shortcut) => item.shortcut(shortcut),
                     None => item,
                 }
             })
-            .collect()
+            .collect();
+        items.extend(self.detached_switcher_items());
+        items
     }
 
     pub(crate) fn open_workspace_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -823,12 +869,11 @@ impl WorkspaceManager {
 
     fn sync_terminal_focus_blocker(&self, window: &Window, cx: &mut Context<Self>) {
         let blocker = self.non_modal_terminal_focus_blocker(window, cx);
-        self.workspaces
-            .active_workspace()
-            .payload()
-            .update(cx, |manager, cx| {
+        if let Some(manager) = self.active_tab_manager() {
+            manager.update(cx, |manager, cx| {
                 manager.set_parent_focus_blocker(blocker, cx);
             });
+        }
     }
 
     fn restore_remote_workspace_focus_after_activation(
@@ -970,7 +1015,7 @@ impl WorkspaceManager {
         if let Some(index) = self
             .workspaces
             .iter()
-            .position(|workspace| workspace.id() == id)
+            .position(|workspace| Some(workspace.id()) == id)
         {
             self.sidebar
                 .update(cx, |sidebar, cx| sidebar.reveal_row(index, cx));
@@ -999,7 +1044,7 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let previous_manager = self.workspaces.active_workspace().payload().clone();
+        let previous_manager = self.active_tab_manager();
         let pane_construction = self.pane_construction.clone();
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar.read(cx).layout().visible;
@@ -1074,9 +1119,11 @@ impl WorkspaceManager {
         };
 
         self.synchronize_tab_manager_layout(workspace_id, window, cx);
-        previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
+        if let Some(previous_manager) = &previous_manager {
+            previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
+        }
         next_manager.update(cx, |manager, cx| manager.activate(window, cx));
-        Self::hand_over_tab_strip(&previous_manager, &next_manager, cx);
+        Self::hand_over_tab_strip(previous_manager.as_ref(), &next_manager, cx);
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.cancel_rename(cx);
         });
@@ -1667,7 +1714,7 @@ impl WorkspaceManager {
             completion.physical_directory().clone(),
         );
         let previous_workspace_id = self.workspaces.active_workspace_id();
-        let previous_manager = self.workspaces.active_workspace().payload().clone();
+        let previous_manager = self.active_tab_manager();
         let sidebar_visible = self.sidebar.read(cx).layout().visible;
         let sidebar_width = self.sidebar.read(cx).layout().width;
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
@@ -1773,8 +1820,8 @@ impl WorkspaceManager {
 
     fn activate_remote_tab_manager(
         &self,
-        previous_workspace_id: WorkspaceId,
-        previous_manager: Entity<TabManager>,
+        previous_workspace_id: Option<WorkspaceId>,
+        previous_manager: Option<Entity<TabManager>>,
         workspace_id: WorkspaceId,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1787,7 +1834,9 @@ impl WorkspaceManager {
             unreachable!("an activated Remote Workspace must remain in its collection")
         };
         self.synchronize_tab_manager_layout(workspace_id, window, cx);
-        if previous_workspace_id != workspace_id {
+        if previous_workspace_id != Some(workspace_id)
+            && let Some(previous_manager) = &previous_manager
+        {
             previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
         }
         let blocker = self.non_modal_terminal_focus_blocker(window, cx);
@@ -1795,14 +1844,19 @@ impl WorkspaceManager {
             manager.set_parent_focus_blocker(blocker, cx);
             manager.activate(window, cx);
         });
-        Self::hand_over_tab_strip(&previous_manager, &next_manager, cx);
+        Self::hand_over_tab_strip(previous_manager.as_ref(), &next_manager, cx);
     }
 
-    /// Starts `next`'s Tab strip from the shape of `previous`'s, whose place it takes.
-    fn hand_over_tab_strip(previous: &Entity<TabManager>, next: &Entity<TabManager>, cx: &mut App) {
-        if previous == next {
+    /// Starts `next`'s Tab strip from the shape of `previous`'s, whose place it takes. The empty
+    /// view has no Tab strip to hand over.
+    fn hand_over_tab_strip(
+        previous: Option<&Entity<TabManager>>,
+        next: &Entity<TabManager>,
+        cx: &mut App,
+    ) {
+        let Some(previous) = previous.filter(|previous| *previous != next) else {
             return;
-        }
+        };
         if let Some(shape) = previous.read(cx).tab_strip_shape(cx) {
             next.update(cx, |manager, cx| manager.arrive_from(shape, cx));
         }
@@ -2447,7 +2501,7 @@ impl WorkspaceManager {
             return false;
         };
         let previous_workspace_id = self.workspaces.active_workspace_id();
-        let previous_manager = self.workspaces.active_workspace().payload().clone();
+        let previous_manager = self.active_tab_manager();
         if let Err(error) = self.workspaces.activate_workspace(workspace_id) {
             Self::report_workspace_error("activate", error);
             return false;
@@ -2457,8 +2511,10 @@ impl WorkspaceManager {
         let preserve_sidebar_focus = self.sidebar.read(cx).is_focused(window)
             || self.sidebar.read(cx).rename_is_focused(window)
             || self.sidebar.read(cx).menu_open();
-        if previous_workspace_id != workspace_id {
-            previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
+        if previous_workspace_id != Some(workspace_id) {
+            if let Some(previous_manager) = &previous_manager {
+                previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
+            }
             self.sidebar.update(cx, |sidebar, cx| {
                 sidebar.cancel_rename(cx);
             });
@@ -2468,7 +2524,7 @@ impl WorkspaceManager {
         } else {
             next_manager.update(cx, |manager, cx| manager.activate(window, cx));
         }
-        Self::hand_over_tab_strip(&previous_manager, &next_manager, cx);
+        Self::hand_over_tab_strip(previous_manager.as_ref(), &next_manager, cx);
         self.sync_terminal_focus_blocker(window, cx);
         self.scroll_active_workspace_into_view(cx);
 
@@ -2749,7 +2805,7 @@ impl WorkspaceManager {
             )
         };
         self.begin_remote_workspace_close(workspace_id, window, cx);
-        let was_active = self.workspaces.active_workspace_id() == workspace_id;
+        let was_active = self.workspaces.active_workspace_id() == Some(workspace_id);
         let local_filesystem = self.local_filesystem.clone();
         let session_factory = Rc::clone(&self.session_factory);
         let pane_construction = self.pane_construction.clone();
@@ -2796,10 +2852,12 @@ impl WorkspaceManager {
         closed_manager.update(cx, |manager, cx| manager.close_all(cx));
         self.remote_workspace_runtimes.remove(&workspace_id);
         self.debug_assert_remote_runtime_invariants();
-        self.synchronize_tab_manager_layout(self.workspaces.active_workspace_id(), window, cx);
+        // Closing never empties the collection: a final Workspace is replaced.
+        if let Some(active_workspace_id) = self.workspaces.active_workspace_id() {
+            self.synchronize_tab_manager_layout(active_workspace_id, window, cx);
+        }
 
-        if was_active {
-            let active_manager = self.workspaces.active_workspace().payload().clone();
+        if was_active && let Some(active_manager) = self.active_tab_manager() {
             if !activate_next
                 || self.sidebar.read(cx).is_focused(window)
                 || self.sidebar.read(cx).rename_is_focused(window)
@@ -2828,7 +2886,7 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         self.begin_remote_workspace_close(workspace_id, window, cx);
-        let was_active = self.workspaces.active_workspace_id() == workspace_id;
+        let was_active = self.workspaces.active_workspace_id() == Some(workspace_id);
         let outcome = match self.workspaces.close_workspace_for_final_tab(workspace_id) {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -2848,14 +2906,9 @@ impl WorkspaceManager {
                 payload.update(cx, |manager, cx| manager.close_all(cx));
                 self.remote_workspace_runtimes.remove(&workspace_id);
                 self.debug_assert_remote_runtime_invariants();
-                self.synchronize_tab_manager_layout(
-                    self.workspaces.active_workspace_id(),
-                    window,
-                    cx,
-                );
+                self.synchronize_tab_manager_layout(active_workspace_id, window, cx);
 
-                if was_active {
-                    let active_manager = self.workspaces.active_workspace().payload().clone();
+                if was_active && let Some(active_manager) = self.active_tab_manager() {
                     if self.sidebar.read(cx).is_focused(window)
                         || self.sidebar.read(cx).rename_is_focused(window)
                     {
@@ -2864,7 +2917,10 @@ impl WorkspaceManager {
                         active_manager.update(cx, |manager, cx| manager.activate(window, cx));
                     }
                 }
-                debug_assert_eq!(active_workspace_id, self.workspaces.active_workspace_id());
+                debug_assert_eq!(
+                    Some(active_workspace_id),
+                    self.workspaces.active_workspace_id()
+                );
                 self.pending_final_tab_closes.remove(&workspace_id);
                 self.sidebar.update(cx, |sidebar, cx| {
                     sidebar.cancel_rename_for(workspace_id, cx)
@@ -2880,8 +2936,9 @@ impl WorkspaceManager {
                 workspace_id: final_workspace_id,
             } => {
                 debug_assert_eq!(final_workspace_id, workspace_id);
-                let manager = self.workspaces.active_workspace().payload().clone();
-                manager.update(cx, |manager, cx| manager.close_all(cx));
+                if let Some(manager) = self.active_tab_manager() {
+                    manager.update(cx, |manager, cx| manager.close_all(cx));
+                }
                 self.remote_workspace_runtimes.remove(&workspace_id);
                 self.pending_final_tab_closes.remove(&workspace_id);
                 window.remove_window();
@@ -3081,6 +3138,7 @@ impl WorkspaceManager {
             WorkspaceMenuCommand::Reconnect => {
                 self.start_remote_workspace_reconnect(workspace_id, window, cx)
             }
+            WorkspaceMenuCommand::Detach => self.detach_shared_workspace(workspace_id, window, cx),
             WorkspaceMenuCommand::Close => {
                 self.request_close(CloseTarget::Workspace(workspace_id), window, cx)
             }
@@ -3110,8 +3168,9 @@ impl WorkspaceManager {
     }
 
     fn on_new_worktree(&mut self, _: &NewWorktree, window: &mut Window, cx: &mut Context<Self>) {
-        let workspace_id = self.workspaces.active_workspace_id();
-        self.new_worktree(workspace_id, window, cx);
+        if let Some(workspace_id) = self.workspaces.active_workspace_id() {
+            self.new_worktree(workspace_id, window, cx);
+        }
     }
 
     fn on_next_worktree(&mut self, _: &NextWorktree, window: &mut Window, cx: &mut Context<Self>) {
@@ -3194,8 +3253,10 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let workspace_id = self.workspaces.active_workspace_id();
-        self.request_close(CloseTarget::Workspace(workspace_id), window, cx);
+        // The empty view has no Workspace to close.
+        if let Some(workspace_id) = self.workspaces.active_workspace_id() {
+            self.request_close(CloseTarget::Workspace(workspace_id), window, cx);
+        }
     }
 
     fn on_activate_workspace_1(
@@ -3340,10 +3401,24 @@ impl WorkspaceManager {
         }
     }
 
+    /// The Active Workspace's chrome identity, or an empty one while the window presents no
+    /// Workspace.
+    fn active_chrome_identity(&self, cx: &App) -> WorkspaceChromeIdentity {
+        match self.workspaces.active_workspace_id() {
+            Some(workspace_id) => self.chrome_identity(workspace_id, cx),
+            None => WorkspaceChromeIdentity {
+                name: String::new(),
+                worktree: None,
+                pinned: false,
+                status: None,
+            },
+        }
+    }
+
     /// The Active Workspace's identity, shown in the top-left chrome only while the sidebar is
-    /// hidden.
-    fn workspace_chrome_identity(&self, cx: &App) -> (WorkspaceChromeIdentity, Tooltip) {
-        let workspace = self.workspaces.active_workspace();
+    /// hidden. The empty view has none, so the chooser shows only its glyph.
+    fn workspace_chrome_identity(&self, cx: &App) -> Option<(WorkspaceChromeIdentity, Tooltip)> {
+        let workspace = self.workspaces.active_workspace()?;
         let remote_connection_phase = workspace
             .remote_connection_state()
             .map(RemoteConnectionState::phase);
@@ -3376,7 +3451,7 @@ impl WorkspaceManager {
             .flatten()
             .map(|line| format!("\n{line}"))
             .unwrap_or_default();
-        (
+        Some((
             self.chrome_identity(workspace.id(), cx),
             Tooltip::new("workspace-switcher-tooltip", "Switch Workspace")
                 .detail(format!(
@@ -3384,7 +3459,7 @@ impl WorkspaceManager {
                     workspace.name()
                 ))
                 .debug_selector("workspace-switcher-tooltip"),
-        )
+        ))
     }
 
     fn render_top_left_chrome(
@@ -3424,11 +3499,13 @@ impl WorkspaceManager {
             .iter()
             .map(|creation| creation.shortcut(presentation))
             .collect();
-        let collapsed_identity = (presence > 0.0).then(|| {
-            let (identity, tooltip) = self.workspace_chrome_identity(cx);
-            let motion = layout.identity_motion(&identity, window, cx);
-            (identity, tooltip, motion)
-        });
+        let collapsed_identity = (presence > 0.0)
+            .then(|| self.workspace_chrome_identity(cx))
+            .flatten()
+            .map(|(identity, tooltip)| {
+                let motion = layout.identity_motion(&identity, window, cx);
+                (identity, tooltip, motion)
+            });
         let switcher_surface =
             super::tab_manager::active_tab_surface(appearance, window.is_window_active());
         let title_bar_host =
@@ -3449,7 +3526,9 @@ impl WorkspaceManager {
         let chooser = ComboBox::with_commands(
             "workspace-switcher",
             switcher_accessibility_name,
-            Some(self.workspaces.active_workspace_id()),
+            self.workspaces
+                .active_workspace_id()
+                .map(SwitcherChoice::Presented),
             "Switch Workspace",
             self.workspace_switcher_items(cx),
             move |_| {
@@ -3573,7 +3652,14 @@ impl WorkspaceManager {
         })
         .on_accept(move |acceptance, window, cx| {
             let _ = accept_manager.update(cx, |manager, cx| {
-                manager.activate_workspace(*acceptance.item_id(), window, cx);
+                match *acceptance.item_id() {
+                    SwitcherChoice::Presented(workspace_id) => {
+                        manager.activate_workspace(workspace_id, window, cx);
+                    }
+                    SwitcherChoice::Detached(server) => {
+                        manager.attach_detached_workspace(server, window, cx);
+                    }
+                }
                 manager.sync_terminal_focus_blocker(window, cx);
             });
         })
@@ -3763,7 +3849,7 @@ impl WorkspaceManager {
                     creates_worktrees: available
                         && shared.is_none()
                         && self.creates_worktrees(workspace.id(), cx),
-                    active: workspace.id() == active_workspace_id,
+                    active: Some(workspace.id()) == active_workspace_id,
                     shared: shared.map(|shared| shared.row),
                 }
             })
@@ -3828,6 +3914,27 @@ impl WorkspaceManager {
     }
 
     fn create_shared_workspace(&mut self, _: String, _: &mut Window, _: &mut Context<Self>) {}
+
+    const fn detached_switcher_items(&self) -> Vec<ComboBoxItem<SwitcherChoice>> {
+        Vec::new()
+    }
+
+    fn attach_detached_workspace(
+        &mut self,
+        server: DetachedWorkspace,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+        match server {}
+    }
+
+    fn detach_shared_workspace(&mut self, _: WorkspaceId, _: &mut Window, _: &mut Context<Self>) {}
+
+    /// Whether the server holding detached Workspaces is reachable. Without one there is nothing
+    /// to reach.
+    const fn shared_reachable(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(feature = "developer-tools")]
@@ -4115,7 +4222,7 @@ impl WorkspaceManager {
             return;
         };
         let active_workspace_id = self.workspaces.active_workspace_id();
-        let active_manager = self.workspaces.active_workspace().payload().clone();
+        let active_manager = self.active_tab_manager();
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar.read(cx).layout().visible;
         let sidebar_width = self.sidebar.read(cx).layout().width;
@@ -4151,8 +4258,11 @@ impl WorkspaceManager {
             Self::report_workspace_error("name the shared", error);
         }
         // Creating a Workspace activates it. The Active Workspace is this client's own view
-        // state, so it returns to where a person left it and nothing they type moves.
-        if let Err(error) = self.workspaces.activate_workspace(active_workspace_id) {
+        // state, so it returns to where a person left it and nothing they type moves. The empty
+        // view had none, so the new Workspace stays active there.
+        if let Some(active_workspace_id) = active_workspace_id
+            && let Err(error) = self.workspaces.activate_workspace(active_workspace_id)
+        {
             Self::report_workspace_error("restore the Active", error);
         }
         let Some(manager) = self
@@ -4173,8 +4283,13 @@ impl WorkspaceManager {
                 cx,
             );
         });
-        // The Active Workspace keeps the Tab strip, because it never changed.
-        active_manager.update(cx, |manager, cx| manager.activate_without_focus(cx));
+        // The Active Workspace keeps the Tab strip, because it never changed. Leaving the empty
+        // view presents the new Workspace without selecting a Pane, which would ask the server
+        // for control nobody requested.
+        active_manager
+            .as_ref()
+            .unwrap_or(&manager)
+            .update(cx, |manager, cx| manager.activate_without_focus(cx));
         if let Some(shared) = self.shared.as_mut() {
             shared.register(workspace_id, facts.clone());
         }
@@ -4905,10 +5020,284 @@ impl WorkspaceManager {
                 edits: editability.available(),
                 edits_reason: editability.explanation(),
                 status: editability.status(),
+                detaches: shared.attachments_changeable(),
             },
             directory: facts.displayed_directory().to_owned(),
             pinned: facts.pinned(),
         })
+    }
+
+    /// Whether the server holding this window's shared Workspaces is reachable.
+    fn shared_reachable(&self) -> bool {
+        self.shared.as_ref().is_none_or(|shared| {
+            super::shared_workspaces::SharedRefusalReason::from(shared.editability())
+                != super::shared_workspaces::SharedRefusalReason::Offline
+        })
+    }
+
+    /// The detached server Workspaces the Workspace Switcher offers after the presented ones.
+    ///
+    /// Only a connected server's detached Workspaces are offered, and each one attaches when
+    /// chosen. None takes an activation Shortcut, because those follow the sidebar's order.
+    fn detached_switcher_items(&self) -> Vec<ComboBoxItem<SwitcherChoice>> {
+        let Some(shared) = self.shared.as_ref() else {
+            return Vec::new();
+        };
+        let changeable = shared.attachments_changeable();
+        shared
+            .available_workspaces()
+            .into_iter()
+            .filter(|available| available.local.is_none())
+            .map(|available| {
+                ComboBoxItem::new(SwitcherChoice::Detached(available.server), available.name)
+                    .description(if changeable {
+                        DETACHED_DESCRIPTION
+                    } else {
+                        DETACHED_UNAVAILABLE_DESCRIPTION
+                    })
+                    .keywords(["Detached"])
+                    .disabled(!changeable)
+                    .leading_icon(|foreground, size| {
+                        div()
+                            .child(Icon::new(IconName::Terminal, size, foreground))
+                            .into_any_element()
+                    })
+                    .debug_selector(detached_switcher_selector(available.server))
+            })
+            .collect()
+    }
+
+    /// Attaches a detached server Workspace and activates it, as choosing a presented Workspace
+    /// activates that one.
+    ///
+    /// Attaching presents what the server holds now. It reinstates no Pane control this client
+    /// released when it detached; selecting a Pane asks for control afresh, as it does anywhere.
+    fn attach_detached_workspace(
+        &mut self,
+        server: spaceterm_server::hierarchy::Id,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(shared) = self.shared.as_mut() else {
+            return;
+        };
+        if let Err(failure) = shared.attach(server) {
+            Self::present_attachment_failure(AttachmentChange::Attach, failure, window, cx);
+            return;
+        }
+        // The inventory revision did not change, so this window presents the attachment now
+        // rather than waiting for the server's next publication.
+        if let Some(inventory) = self
+            .shared
+            .as_ref()
+            .and_then(|shared| shared.latest_inventory())
+            .cloned()
+        {
+            self.apply_shared_inventory(
+                &inventory,
+                super::shared_workspaces::SharedRemoval::Published,
+                window,
+                cx,
+            );
+        }
+        let Some(workspace_id) = self.shared.as_ref().and_then(|shared| shared.local(server))
+        else {
+            return;
+        };
+        if self.activate_workspace(workspace_id, window, cx) {
+            self.focus(window, cx);
+        }
+    }
+
+    /// Stops presenting a shared Workspace in this window.
+    ///
+    /// Detach Workspace removes only this client's Workspace Attachment. The Workspace and its
+    /// Terminal Sessions keep running on the server for every client, and this client gives up
+    /// control of its Panes. It needs no server, so it works offline, and it confirms nothing
+    /// because nothing ends. Detaching the final Workspace leaves the empty view: nothing
+    /// replaces it here, and nothing is created on the server.
+    fn detach_shared_workspace(
+        &mut self,
+        workspace_id: WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use super::shared_workspaces::SharedAttachmentFailure;
+
+        if !self.is_shared_workspace(workspace_id) {
+            return;
+        }
+        // The person's arrangement is saved first, so attaching the Workspace again restores it.
+        self.save_shared_arrangements(cx);
+        let Some(shared) = self.shared.as_mut() else {
+            return;
+        };
+        let outcome = shared.detach(workspace_id);
+        if outcome == Err(SharedAttachmentFailure::Unchanged) {
+            Self::present_attachment_failure(
+                AttachmentChange::Detach,
+                SharedAttachmentFailure::Unchanged,
+                window,
+                cx,
+            );
+            return;
+        }
+        // A write SpaceTerm cannot confirm still stops this presentation: the person asked for
+        // that, and the Panes' control may already be released.
+        self.remove_detached_workspace(workspace_id, window, cx);
+        if let Err(failure) = outcome {
+            Self::present_attachment_failure(AttachmentChange::Detach, failure, window, cx);
+        }
+    }
+
+    /// Removes a detached Workspace's presentation. Closing its local Panes drops their
+    /// subscriptions and ends nothing on the server.
+    fn remove_detached_workspace(
+        &mut self,
+        workspace_id: WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(shared) = self.shared.as_mut() {
+            shared.forget(workspace_id);
+        }
+        self.pending_final_tab_closes.remove(&workspace_id);
+        // Ends a pin chooser open for the Workspace; a shared Workspace has no remote runtime.
+        self.begin_remote_workspace_close(workspace_id, window, cx);
+        let was_active = self.workspaces.active_workspace_id() == Some(workspace_id);
+        let held_keyboard = self
+            .workspaces
+            .workspace(workspace_id)
+            .is_some_and(|entry| entry.payload().read(cx).holds_keyboard(window, cx));
+        let removed = match self.workspaces.remove_workspace(workspace_id) {
+            Ok(removed) => removed,
+            Err(error) => {
+                Self::report_workspace_error("detach", error);
+                return;
+            }
+        };
+        removed.update(cx, |manager, cx| manager.close_all(cx));
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.cancel_rename_for(workspace_id, cx)
+        });
+        match self.workspaces.active_workspace_id() {
+            // The Workspace that takes the detached one's place opens as a closed Workspace's
+            // neighbor does. The keyboard stays in the sidebar when it is there.
+            Some(active_workspace_id) if was_active => {
+                self.synchronize_tab_manager_layout(active_workspace_id, window, cx);
+                if let Some(active_manager) = self.active_tab_manager() {
+                    if self.sidebar.read(cx).is_focused(window)
+                        || self.sidebar.read(cx).rename_is_focused(window)
+                    {
+                        active_manager.update(cx, |manager, cx| manager.activate_without_focus(cx));
+                    } else {
+                        active_manager.update(cx, |manager, cx| manager.activate(window, cx));
+                    }
+                }
+                self.scroll_active_workspace_into_view(cx);
+            }
+            Some(_) => {
+                if held_keyboard {
+                    self.focus(window, cx);
+                }
+            }
+            // The empty view takes the keyboard, so its explanation and action are next.
+            None => self.empty_focus.focus(window, cx),
+        }
+        self.sync_terminal_focus_blocker(window, cx);
+        cx.notify();
+    }
+
+    /// Says that an attachment change failed or could not be confirmed. Every Workspace keeps
+    /// running on its server whatever this client saved.
+    fn present_attachment_failure(
+        change: AttachmentChange,
+        failure: super::shared_workspaces::SharedAttachmentFailure,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (label, title, detail) = change.failure(failure);
+        let _ = Alert::new(
+            ModalId::new("shared-attachment-failed"),
+            label,
+            title,
+            detail.to_owned(),
+            vec![ModalAction::new(
+                (),
+                "OK",
+                ModalActionRole::Cancel,
+                "shared-attachment-failed-ok",
+            )],
+        )
+        .intent(AlertIntent::Warning)
+        .present(window, cx, |_, _| {});
+    }
+}
+
+/// What a detached Workspace's Workspace Switcher result says beneath its name.
+#[cfg(feature = "developer-tools")]
+const DETACHED_DESCRIPTION: &str = "Detached";
+/// The same result while this client cannot change its attachments.
+#[cfg(feature = "developer-tools")]
+const DETACHED_UNAVAILABLE_DESCRIPTION: &str =
+    "Detached. Attaching is unavailable until SpaceTerm reopens.";
+
+/// A detached Workspace's Workspace Switcher result, named by its server identity's leading bytes.
+#[cfg(feature = "developer-tools")]
+fn detached_switcher_selector(server: spaceterm_server::hierarchy::Id) -> String {
+    let prefix: String = server[..4]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("workspace-switcher-detached-{prefix}")
+}
+
+/// Which attachment change a person asked for.
+#[cfg(feature = "developer-tools")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AttachmentChange {
+    Attach,
+    Detach,
+}
+
+#[cfg(feature = "developer-tools")]
+impl AttachmentChange {
+    /// The accessibility label, title, and detail of a failed or unconfirmed change.
+    const fn failure(
+        self,
+        failure: super::shared_workspaces::SharedAttachmentFailure,
+    ) -> (&'static str, &'static str, &'static str) {
+        use super::shared_workspaces::SharedAttachmentFailure::{Uncertain, Unchanged};
+
+        match (self, failure) {
+            (Self::Attach, Unchanged) => (
+                "Workspace not attached",
+                "Workspace Not Attached",
+                "SpaceTerm could not save the attachment on this device, so nothing changed. \
+                 The Workspace keeps running on the server.",
+            ),
+            (Self::Attach, Uncertain) => (
+                "Attachment not confirmed",
+                "Attachment Not Confirmed",
+                "SpaceTerm cannot confirm whether this device saved the attachment. The \
+                 Workspace keeps running on the server. SpaceTerm makes no more attachment \
+                 changes until you quit and reopen it.",
+            ),
+            (Self::Detach, Unchanged) => (
+                "Workspace not detached",
+                "Workspace Not Detached",
+                "SpaceTerm could not save the change on this device, so the Workspace stays \
+                 here. It keeps running on the server.",
+            ),
+            (Self::Detach, Uncertain) => (
+                "Detach not confirmed",
+                "Detach Not Confirmed",
+                "SpaceTerm removed the Workspace from this window but cannot confirm that this \
+                 device saved the change, so it may return when SpaceTerm reopens. It keeps \
+                 running on the server. SpaceTerm makes no more attachment changes until you \
+                 quit and reopen it.",
+            ),
+        }
     }
 }
 
@@ -4942,17 +5331,15 @@ impl Render for WorkspaceManager {
 
 impl WorkspaceManager {
     fn render_chrome(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        debug_assert!(self.workspaces.len() > 0);
         self.sync_terminal_focus_blocker(window, cx);
         let manager = cx.entity().downgrade();
-        let active_tab_manager = self.workspaces.active_workspace().payload().clone();
-        let workspace = self.workspaces.active_workspace();
+        let active_tab_manager = self.active_tab_manager();
         let sidebar_layout = self.sidebar.read(cx).layout();
         let sidebar_frame = self.sidebar.update(cx, |sidebar, cx| sidebar.present(cx));
         if sidebar_frame.moving {
             window.request_animation_frame();
         }
-        let identity = self.chrome_identity(workspace.id(), cx);
+        let identity = self.active_chrome_identity(cx);
         let resting_chrome = WorkspaceChromeLayout::resolve(sidebar_layout, &identity, window, cx);
         let chrome =
             WorkspaceChromeLayout::presented(sidebar_layout, sidebar_frame, &identity, window, cx);
@@ -4961,17 +5348,33 @@ impl WorkspaceManager {
         let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
             let _ = close_owner.update(cx, |manager, cx| manager.request_window_close(window, cx));
         });
-        active_tab_manager.update(cx, |manager, cx| {
-            manager.set_sidebar_layout(
-                sidebar_layout.visible,
-                sidebar_layout.width,
-                chrome.width,
+        let stage = match active_tab_manager {
+            Some(active_tab_manager) => {
+                active_tab_manager.update(cx, |manager, cx| {
+                    manager.set_sidebar_layout(
+                        sidebar_layout.visible,
+                        sidebar_layout.width,
+                        chrome.width,
+                        cx,
+                    );
+                    manager.present_sidebar(sidebar_frame.reveal, cx);
+                    manager.set_trailing_accessory(Some(update_control), cx);
+                    manager.set_window_close_handler(close);
+                });
+                active_tab_manager.into_any_element()
+            }
+            None => self.render_empty_workspace(
+                empty::EmptySidebar {
+                    width: sidebar_layout.width,
+                    reveal: sidebar_frame.reveal,
+                    top_chrome_width: chrome.width,
+                },
+                update_control,
+                close,
+                window,
                 cx,
-            );
-            manager.present_sidebar(sidebar_frame.reveal, cx);
-            manager.set_trailing_accessory(Some(update_control), cx);
-            manager.set_window_close_handler(close);
-        });
+            ),
+        };
         let rows = self.sidebar_rows(cx);
         let remote_unavailable = self.remote_workspace_unavailable_reason.clone();
         let creates_server_workspaces = self.shared.is_some();
@@ -4980,7 +5383,10 @@ impl WorkspaceManager {
         });
         // The New Worktree Command is available only where it can act, so its menu item disables
         // elsewhere.
-        let new_worktree = self.creates_worktrees(self.workspaces.active_workspace_id(), cx);
+        let new_worktree = self
+            .workspaces
+            .active_workspace_id()
+            .is_some_and(|workspace_id| self.creates_worktrees(workspace_id, cx));
         let step_worktrees = self.steps_worktrees(cx);
         let content = Self::workspace_action_scope(new_worktree, step_worktrees, cx)
             .id("workspace-manager")
@@ -5011,7 +5417,7 @@ impl WorkspaceManager {
                     .size_full()
                     .min_w_0()
                     .min_h_0()
-                    .child(active_tab_manager),
+                    .child(stage),
             )
             .when(sidebar_frame.reveal > 0.0, |root| {
                 root.child(self.sidebar.clone())
@@ -5342,6 +5748,7 @@ impl WorkspaceManager {
     }
 }
 
+mod empty;
 #[path = "workspace_manager/repository.rs"]
 mod repository;
 mod worktrees;

@@ -412,7 +412,9 @@ impl<T> WorkspaceEntry<T> {
 
 pub(crate) struct WorkspaceCollection<T> {
     workspaces: Vec<WorkspaceEntry<T>>,
-    active_workspace_id: WorkspaceId,
+    /// The Workspace the window presents. It is `None` only after [`Self::remove_workspace`]
+    /// removed the final Workspace, which leaves a deliberately empty collection.
+    active_workspace_id: Option<WorkspaceId>,
     next_workspace_id: u64,
 }
 
@@ -436,7 +438,7 @@ impl<T> WorkspaceCollection<T> {
                 availability: DirectoryAvailability::Available,
                 payload,
             }],
-            active_workspace_id: id,
+            active_workspace_id: Some(id),
             next_workspace_id: 2,
         }
     }
@@ -445,15 +447,14 @@ impl<T> WorkspaceCollection<T> {
         self.workspaces.len()
     }
 
-    pub(crate) const fn active_workspace_id(&self) -> WorkspaceId {
+    /// The Active Workspace, absent only while the collection is empty.
+    pub(crate) const fn active_workspace_id(&self) -> Option<WorkspaceId> {
         self.active_workspace_id
     }
 
-    pub(crate) fn active_workspace(&self) -> &WorkspaceEntry<T> {
-        let Some(workspace) = self.workspace(self.active_workspace_id) else {
-            unreachable!("the Active Workspace ID must always reference an owned Workspace")
-        };
-        workspace
+    /// The Active Workspace, absent only while the collection is empty.
+    pub(crate) fn active_workspace(&self) -> Option<&WorkspaceEntry<T>> {
+        self.workspace(self.active_workspace_id?)
     }
 
     pub(crate) fn workspace(&self, workspace_id: WorkspaceId) -> Option<&WorkspaceEntry<T>> {
@@ -565,7 +566,7 @@ impl<T> WorkspaceCollection<T> {
             availability: DirectoryAvailability::Available,
             payload,
         });
-        self.active_workspace_id = id;
+        self.active_workspace_id = Some(id);
         self.next_workspace_id = next;
         self.recalculate_automatic_names();
         Ok(id)
@@ -602,7 +603,7 @@ impl<T> WorkspaceCollection<T> {
             availability: DirectoryAvailability::Available,
             payload,
         });
-        self.active_workspace_id = id;
+        self.active_workspace_id = Some(id);
         self.next_workspace_id = next;
         self.recalculate_automatic_names();
         Ok(id)
@@ -668,7 +669,7 @@ impl<T> WorkspaceCollection<T> {
             return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
         }
 
-        self.active_workspace_id = workspace_id;
+        self.active_workspace_id = Some(workspace_id);
         Ok(())
     }
 
@@ -781,7 +782,7 @@ impl<T> WorkspaceCollection<T> {
                     payload: replacement_payload,
                 },
             );
-            self.active_workspace_id = replacement_workspace_id;
+            self.active_workspace_id = Some(replacement_workspace_id);
             self.next_workspace_id = next_workspace_id;
 
             return Ok(CloseWorkspaceOutcome::FinalWorkspaceReplaced {
@@ -792,17 +793,51 @@ impl<T> WorkspaceCollection<T> {
         }
 
         let closed_workspace = self.workspaces.remove(index);
-        if self.active_workspace_id == workspace_id {
-            let fallback_index = index.min(self.workspaces.len() - 1);
-            self.active_workspace_id = self.workspaces[fallback_index].id;
+        // Neither close path empties the collection: a final Workspace is replaced or closes the
+        // window instead, so a neighbor always remains.
+        let neighbor = self.workspaces[index.min(self.workspaces.len() - 1)].id;
+        if self.active_workspace_id == Some(workspace_id) {
+            self.active_workspace_id = Some(neighbor);
         }
 
         self.recalculate_automatic_names();
         Ok(CloseWorkspaceOutcome::WorkspaceClosed {
             closed_workspace_id: closed_workspace.id,
-            active_workspace_id: self.active_workspace_id,
+            active_workspace_id: self.active_workspace_id.unwrap_or(neighbor),
             payload: closed_workspace.payload,
         })
+    }
+
+    /// Removes a Workspace from the presentation without replacing it, returning its payload.
+    ///
+    /// Unlike closing, removing the final Workspace leaves the collection empty, with no Active
+    /// Workspace, until a later creation presents one. A removed Active Workspace passes
+    /// activation to the Workspace that takes its place in the order.
+    #[cfg_attr(
+        not(feature = "developer-tools"),
+        expect(
+            dead_code,
+            reason = "only Detach Workspace removes without a replacement"
+        )
+    )]
+    pub(crate) fn remove_workspace(
+        &mut self,
+        workspace_id: WorkspaceId,
+    ) -> Result<T, WorkspaceError> {
+        let index = self
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == workspace_id)
+            .ok_or(WorkspaceError::WorkspaceNotFound(workspace_id))?;
+        let removed = self.workspaces.remove(index);
+        if self.active_workspace_id == Some(workspace_id) {
+            self.active_workspace_id = self
+                .workspaces
+                .get(index.min(self.workspaces.len().saturating_sub(1)))
+                .map(WorkspaceEntry::id);
+        }
+        self.recalculate_automatic_names();
+        Ok(removed.payload)
     }
 
     pub(crate) fn close_workspace_for_final_tab(
@@ -822,15 +857,17 @@ impl<T> WorkspaceCollection<T> {
         }
 
         let closed_workspace = self.workspaces.remove(index);
-        if self.active_workspace_id == workspace_id {
-            let fallback_index = index.min(self.workspaces.len() - 1);
-            self.active_workspace_id = self.workspaces[fallback_index].id;
+        // Neither close path empties the collection: a final Workspace is replaced or closes the
+        // window instead, so a neighbor always remains.
+        let neighbor = self.workspaces[index.min(self.workspaces.len() - 1)].id;
+        if self.active_workspace_id == Some(workspace_id) {
+            self.active_workspace_id = Some(neighbor);
         }
 
         self.recalculate_automatic_names();
         Ok(FinalTabCloseOutcome::WorkspaceClosed {
             closed_workspace_id: closed_workspace.id,
-            active_workspace_id: self.active_workspace_id,
+            active_workspace_id: self.active_workspace_id.unwrap_or(neighbor),
             payload: closed_workspace.payload,
         })
     }
@@ -894,6 +931,22 @@ pub(super) mod tests {
     use std::rc::Rc;
 
     use super::*;
+
+    /// Reads the Active Workspace of a collection a test knows is not empty.
+    pub(crate) trait PresentedWorkspace<T> {
+        fn active(&self) -> &WorkspaceEntry<T>;
+
+        fn active_id(&self) -> WorkspaceId {
+            self.active().id()
+        }
+    }
+
+    impl<T> PresentedWorkspace<T> for WorkspaceCollection<T> {
+        fn active(&self) -> &WorkspaceEntry<T> {
+            self.active_workspace()
+                .expect("the collection should present an Active Workspace")
+        }
+    }
 
     /// `u64::MAX` makes every creation fail with an exhausted ID space.
     pub(crate) fn set_next_workspace_id<T>(workspaces: &mut WorkspaceCollection<T>, next: u64) {
@@ -1463,7 +1516,7 @@ pub(super) mod tests {
     #[test]
     fn pins_are_explicit_independent_and_do_not_change_home() {
         let mut workspaces = WorkspaceCollection::new_local(validated("/home/me", 1), |_, _| ());
-        let first = workspaces.active_workspace_id();
+        let first = workspaces.active_id();
         let second = workspaces
             .create_local_workspace(validated("/home/me", 1), |_, _| ())
             .unwrap();
@@ -1629,9 +1682,9 @@ pub(super) mod tests {
         assert_eq!(
             (
                 workspaces.len(),
-                workspaces.active_workspace_id(),
-                workspaces.active_workspace().id(),
-                workspaces.active_workspace().payload(),
+                workspaces.active_id(),
+                workspaces.active().id(),
+                workspaces.active().payload(),
             ),
             (
                 1,
@@ -1679,8 +1732,8 @@ pub(super) mod tests {
             (
                 created,
                 workspaces.len(),
-                workspaces.active_workspace_id(),
-                workspaces.active_workspace().payload(),
+                workspaces.active_id(),
+                workspaces.active().payload(),
             ),
             (
                 WorkspaceId::new(2),
@@ -1731,15 +1784,9 @@ pub(super) mod tests {
             )
             .unwrap();
 
-        let stored_working_directory = workspaces
-            .active_workspace()
-            .local_home_directory()
-            .unwrap();
+        let stored_working_directory = workspaces.active().local_home_directory().unwrap();
         assert_eq!(
-            (
-                workspaces.active_workspace().name(),
-                stored_working_directory,
-            ),
+            (workspaces.active().name(), stored_working_directory,),
             ("Default (2)", Path::new("/Users/test/projects"))
         );
     }
@@ -1771,10 +1818,7 @@ pub(super) mod tests {
         workspaces.activate_workspace(WorkspaceId::new(1)).unwrap();
 
         assert_eq!(
-            (
-                workspaces.active_workspace_id(),
-                workspaces.active_workspace().payload(),
-            ),
+            (workspaces.active_id(), workspaces.active().payload(),),
             (WorkspaceId::new(1), &"first payload")
         );
     }
@@ -1804,7 +1848,7 @@ pub(super) mod tests {
                     .iter()
                     .map(|workspace| *workspace.payload())
                     .collect::<Vec<_>>(),
-                workspaces.active_workspace_id(),
+                workspaces.active_id(),
                 workspaces
                     .iter()
                     .map(|workspace| (workspace.id(), workspace.name().to_owned()))
@@ -1857,7 +1901,7 @@ pub(super) mod tests {
         let result = workspaces.activate_workspace(WorkspaceId::new(99));
 
         assert_eq!(
-            (result, workspaces.active_workspace_id()),
+            (result, workspaces.active_id()),
             (
                 Err(WorkspaceError::WorkspaceNotFound(WorkspaceId::new(99))),
                 WorkspaceId::new(1),
@@ -1868,7 +1912,7 @@ pub(super) mod tests {
     #[test]
     fn creation_name_should_preserve_explicit_names_including_duplicates() {
         let mut workspaces = new_workspaces(());
-        let first = workspaces.active_workspace_id();
+        let first = workspaces.active_id();
         workspaces
             .rename_workspace(first, "Project".to_owned())
             .unwrap();
@@ -1899,13 +1943,13 @@ pub(super) mod tests {
     #[test]
     fn creation_name_should_claim_an_automatic_name_and_remain_frozen_after_directory_changes() {
         let mut workspaces = new_workspaces(());
-        let automatic_name = workspaces.active_workspace().name().to_owned();
-        let first = workspaces.active_workspace_id();
+        let automatic_name = workspaces.active().name().to_owned();
+        let first = workspaces.active_id();
         workspaces
             .rename_workspace(first, automatic_name.clone())
             .unwrap();
         assert_eq!(
-            workspaces.active_workspace().custom_name.as_deref(),
+            workspaces.active().custom_name.as_deref(),
             Some(automatic_name.as_str())
         );
         workspaces
@@ -1939,7 +1983,7 @@ pub(super) mod tests {
     #[test]
     fn creation_name_should_preserve_explicit_names_across_all_machines() {
         let mut workspaces = new_workspaces(());
-        let local = workspaces.active_workspace_id();
+        let local = workspaces.active_id();
         workspaces
             .rename_workspace(local, "Project".to_owned())
             .unwrap();
@@ -1984,16 +2028,16 @@ pub(super) mod tests {
     #[test]
     fn creation_name_should_keep_blank_names_automatic() {
         let mut workspaces = new_workspaces(());
-        let id = workspaces.active_workspace_id();
+        let id = workspaces.active_id();
         workspaces.rename_workspace(id, " \t ".to_owned()).unwrap();
 
-        assert_eq!(workspaces.active_workspace().custom_name, None);
+        assert_eq!(workspaces.active().custom_name, None);
     }
 
     #[test]
     fn creation_name_should_preserve_case_sensitive_matching_and_manual_rename_semantics() {
         let mut workspaces = new_workspaces(());
-        let first = workspaces.active_workspace_id();
+        let first = workspaces.active_id();
         workspaces
             .rename_workspace(first, "Project".to_owned())
             .unwrap();
@@ -2042,10 +2086,69 @@ pub(super) mod tests {
         let result = workspaces.rename_workspace(WorkspaceId::new(99), "unknown".to_owned());
 
         assert_eq!(
-            (result, workspaces.active_workspace().name()),
+            (result, workspaces.active().name()),
             (
                 Err(WorkspaceError::WorkspaceNotFound(WorkspaceId::new(99))),
                 "Default",
+            )
+        );
+    }
+
+    #[test]
+    fn removing_the_final_workspace_should_leave_an_empty_collection_without_a_replacement() {
+        let mut workspaces = new_workspaces("first payload");
+        workspaces.next_workspace_id = u64::MAX;
+
+        let removed = workspaces.remove_workspace(WorkspaceId::new(1));
+
+        assert_eq!(
+            (removed, workspaces.len(), workspaces.active_workspace_id()),
+            (Ok("first payload"), 0, None)
+        );
+    }
+
+    #[test]
+    fn removing_the_active_workspace_should_activate_the_workspace_that_takes_its_place() {
+        let mut workspaces = new_workspaces("first payload");
+        let second = workspaces
+            .create_local_workspace(validated("/second", 0), |_, _| "second payload")
+            .unwrap();
+        workspaces
+            .create_local_workspace(validated("/third", 0), |_, _| "third payload")
+            .unwrap();
+        workspaces.activate_workspace(second).unwrap();
+
+        workspaces.remove_workspace(second).unwrap();
+
+        assert_eq!(workspaces.active_workspace_id(), Some(WorkspaceId::new(3)));
+    }
+
+    #[test]
+    fn creating_a_workspace_in_an_empty_collection_should_activate_it_with_a_fresh_id() {
+        let mut workspaces = new_workspaces("first payload");
+        workspaces.remove_workspace(WorkspaceId::new(1)).unwrap();
+
+        let created = workspaces
+            .create_local_workspace(validated("/next", 0), |_, _| "next payload")
+            .unwrap();
+
+        assert_eq!(
+            (created, workspaces.active_workspace_id()),
+            (WorkspaceId::new(2), Some(WorkspaceId::new(2)))
+        );
+    }
+
+    #[test]
+    fn removing_an_unknown_workspace_should_leave_the_collection_unchanged() {
+        let mut workspaces = new_workspaces("first payload");
+
+        let removed = workspaces.remove_workspace(WorkspaceId::new(99));
+
+        assert_eq!(
+            (removed, workspaces.len()),
+            (
+                Err(WorkspaceError::WorkspaceNotFound(WorkspaceId::new(99))),
+                1
             )
         );
     }
@@ -2169,7 +2272,7 @@ pub(super) mod tests {
                 result.err(),
                 creations.get(),
                 workspaces.len(),
-                workspaces.active_workspace_id(),
+                workspaces.active_id(),
             ),
             (
                 Some(WorkspaceError::WorkspaceNotFound(WorkspaceId::new(99))),
@@ -2196,20 +2299,17 @@ pub(super) mod tests {
             )
             .unwrap();
 
-        let replacement_working_directory = workspaces
-            .active_workspace()
-            .local_home_directory()
-            .unwrap();
+        let replacement_working_directory = workspaces.active().local_home_directory().unwrap();
 
         assert_eq!(
             (
                 outcome,
                 workspaces.len(),
-                workspaces.active_workspace_id(),
-                workspaces.active_workspace().id(),
-                workspaces.active_workspace().name(),
+                workspaces.active_id(),
+                workspaces.active().id(),
+                workspaces.active().name(),
                 replacement_working_directory,
-                workspaces.active_workspace().payload(),
+                workspaces.active().payload(),
             ),
             (
                 CloseWorkspaceOutcome::FinalWorkspaceReplaced {
@@ -2247,7 +2347,7 @@ pub(super) mod tests {
                 payload: "first payload",
             }
         );
-        assert_eq!(workspaces.active_workspace().payload(), &"second payload");
+        assert_eq!(workspaces.active().payload(), &"second payload");
     }
 
     #[test]
@@ -2268,8 +2368,8 @@ pub(super) mod tests {
         assert_eq!(
             (
                 workspaces.len(),
-                workspaces.active_workspace_id(),
-                workspaces.active_workspace().payload(),
+                workspaces.active_id(),
+                workspaces.active().payload(),
             ),
             (1, WorkspaceId::new(1), &"first payload")
         );
@@ -2319,7 +2419,7 @@ pub(super) mod tests {
                 result.err(),
                 creations.get(),
                 workspaces.len(),
-                workspaces.active_workspace_id(),
+                workspaces.active_id(),
             ),
             (
                 Some(WorkspaceError::IdSpaceExhausted),

@@ -39,6 +39,7 @@ fn first_workspace_id() -> crate::domain::WorkspaceId {
         |_, _| (),
     )
     .active_workspace_id()
+    .expect("a new collection presents its first Workspace")
 }
 
 fn pane(id: Id, source: Option<Id>, axis: Axis) -> Pane {
@@ -1413,8 +1414,71 @@ mod edits {
     }
 
     #[test]
+    fn detached_workspace_keeps_its_latest_arrangement_while_other_views_are_saved() {
+        use spaceterm_server::client_view::{
+            ClientView, Layout, LayoutNode, TabView, WorkspaceView,
+        };
+        let (mut shared, _) = shared(Some(root_only()));
+        shared.poll();
+        bind(&mut shared, &root_only());
+        let personal = WorkspaceView {
+            workspace: WORKSPACE,
+            tabs: vec![TabView {
+                tab: ROOT_TAB,
+                layout: Layout {
+                    nodes: vec![LayoutNode::Pane(ROOT_PANE)],
+                },
+            }],
+        };
+        shared.save_arrangements(ClientView {
+            workspaces: vec![personal.clone()],
+        });
+        shared.detach(local()).unwrap();
+        shared.forget(local());
+        shared.save_arrangements(ClientView::default());
+        shared.attach(WORKSPACE).unwrap();
+        assert_eq!(shared.saved_arrangement(WORKSPACE), Some(&personal));
+    }
+
+    #[test]
+    fn offline_detach_survives_publication_and_reattach_never_submits_shared_creation() {
+        let (mut shared, edits) = shared(Some(root_only()));
+        shared.poll();
+        bind(&mut shared, &root_only());
+        edits.set_connected(false);
+        shared.poll();
+        shared.detach(local()).unwrap();
+        shared.forget(local());
+        assert!(shared.plan(&root_only()).is_empty());
+        assert!(
+            shared.available_workspaces().is_empty(),
+            "detached work needs a connected server to be offered"
+        );
+        assert!(shared.attach(WORKSPACE).is_err());
+        edits.set_connected(true);
+        shared.poll();
+        assert_eq!(shared.available_workspaces().len(), 1);
+        shared.attach(WORKSPACE).unwrap();
+        assert!(matches!(
+            shared.plan(&root_only()).as_slice(),
+            [SharedWorkspacePlan::Create { .. }]
+        ));
+        let mut gone = root_only();
+        gone.revision += 1;
+        gone.workspaces.clear();
+        edits.set_inventory(gone);
+        shared.poll();
+        assert!(
+            shared.attach(WORKSPACE).is_err(),
+            "killed work is never recreated by a saved attachment"
+        );
+        assert!(edits.submitted().is_empty());
+    }
+
+    #[test]
     fn a_plan_should_create_update_and_remove_against_the_published_inventory() {
         let (mut shared, _) = shared(Some(root_only()));
+        shared.poll();
         let plan = shared.plan(&root_only());
         assert!(matches!(
             plan.as_slice(),
@@ -1828,6 +1892,7 @@ mod draft {
             creates_worktrees: false,
             active: true,
             shared: Some(SharedWorkspaceRow {
+                detaches: true,
                 name_version,
                 edits: true,
                 edits_reason: "",

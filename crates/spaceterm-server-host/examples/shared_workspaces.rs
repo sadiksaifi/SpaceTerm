@@ -64,6 +64,97 @@ fn select(connection: &mut PaneConnection, pane: Id, explicit: bool) -> Result<R
         style: None,
     })
 }
+fn attachment_workflow(a: &LocalServer, b: &LocalServer) -> Result<(), Box<dyn Error>> {
+    let mut first = connect(a)?;
+    let mut second = connect(b)?;
+    let workspace = mutate(
+        &mut first,
+        Mutation::CreateWorkspace {
+            name: "Attachments smoke".into(),
+        },
+    )?;
+    let current = inventory(&mut first)?.0;
+    let pane = current
+        .workspaces
+        .iter()
+        .find(|w| w.id == workspace)
+        .ok_or("attachment Workspace")?
+        .tabs[0]
+        .root_pane;
+    let choices = a.attachments()?;
+    choices.reconcile(&current)?;
+    choices.attach(workspace)?;
+    let permit = choices.permit(pane).ok_or("attachment authority")?;
+    let select = Request::SelectPane {
+        pane,
+        explicit: true,
+        size: size(),
+        style: None,
+    };
+    let Reply::Attached { lease } = permit.exchange(&mut first, &select)? else {
+        return Err("attachment first use".into());
+    };
+    support::command(
+        &mut first,
+        lease,
+        r"stty -echo; sleep 1; printf '\nDETACH-CONTINUED\n'",
+    )?;
+    // Do not send the release yet, as when the desktop loses its connection before detach.
+    drop(first);
+    choices.detach(workspace)?;
+    assert!(!permit.active());
+    let original = choices
+        .pending()
+        .into_iter()
+        .find(|a| a.workspace == workspace)
+        .ok_or("original release")?;
+    let Reply::Attached { lease: other } = second.exchange(&Request::TakeOver {
+        target: lease.into(),
+        size: size(),
+        style: None,
+    })?
+    else {
+        return Err("other client's takeover".into());
+    };
+    let mut first = connect(a)?;
+    choices.release_pending(&mut first)?;
+    support::await_output(&mut second, other, "DETACH-CONTINUED")?;
+    assert!(choices.pending().is_empty());
+    choices.reconcile(&inventory(&mut first)?.0)?;
+    assert!(!choices.is_attached(workspace));
+    choices.attach(workspace)?;
+    let later = choices.permit(pane).ok_or("reattachment authority")?;
+    assert!(matches!(
+        later.exchange(&mut first, &select)?,
+        Reply::Takeover { .. }
+    ));
+    let Reply::Attached { lease: returned } = later.exchange(
+        &mut first,
+        &Request::TakeOver {
+            target: other.into(),
+            size: size(),
+            style: None,
+        },
+    )?
+    else {
+        return Err("explicit take back".into());
+    };
+    assert_eq!(lease.session, returned.session);
+    // Retrying a release whose acknowledgement was lost cannot revoke this later grant.
+    first.exchange(&Request::ReleaseAttachment {
+        attachment: original,
+    })?;
+    support::command(&mut first, returned, r"printf 'REATTACH-CONTINUES\n'")?;
+    support::await_output(&mut first, returned, "REATTACH-CONTINUES")?;
+    choices.detach(workspace)?;
+    choices.release_pending(&mut first)?;
+    assert!(!choices.is_attached(workspace));
+    close(&mut first, CloseTarget::Workspace { workspace })?;
+    choices.reconcile(&inventory(&mut first)?.0)?;
+    assert!(!choices.attach(workspace)?);
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let major = std::env::args().nth(1).unwrap_or("2".into()).parse()?;
     let a = LocalServer::for_development_client("shared-smoke-a", major)?;
@@ -82,6 +173,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     connect(&a)?.exchange(&Request::Shutdown)?;
     std::thread::sleep(Duration::from_millis(200));
     let mut host = Server::start()?;
+    attachment_workflow(&a, &b)?;
     let mut first = connect(&a)?;
     let mut second = connect(&b)?;
     let workspace = mutate(
@@ -372,7 +464,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     first.exchange(&Request::Shutdown)?;
     host.0.wait()?;
     println!(
-        "Shared edits, exact close, cross-client Kill, Root succession, lost replies, restart and Git Worktree preservation passed on protocol {major}."
+        "Shared edits, detach/reattach, exact control release, cross-client Kill, Root succession, lost replies, restart and Git Worktree preservation passed on protocol {major}."
     );
     Ok(())
 }

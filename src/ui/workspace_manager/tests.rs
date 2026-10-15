@@ -26,6 +26,7 @@ use spaceterm_ui::{
 };
 
 use super::*;
+use crate::domain::PresentedWorkspace;
 use crate::domain::{PaneId, TabId};
 
 fn workspace_frame(cx: &mut VisualTestContext) -> WorkspaceFrame {
@@ -74,7 +75,7 @@ fn sidebar_should_follow_the_local_root_in_background_and_promote_on_close(
     assert_eq!(
         manager.read_with(cx, |manager, _| manager
             .workspaces
-            .active_workspace()
+            .active()
             .name()
             .to_owned()),
         "api"
@@ -156,7 +157,7 @@ fn sidebar_should_follow_remote_root_across_tabs_pins_and_custom_names(cx: &mut 
     assert_eq!(
         manager.read_with(cx, |manager, _| manager
             .workspaces
-            .active_workspace()
+            .active()
             .name()
             .to_owned()),
         "api"
@@ -185,7 +186,7 @@ fn sidebar_should_follow_remote_root_across_tabs_pins_and_custom_names(cx: &mut 
     assert_eq!(
         manager.read_with(cx, |manager, _| manager
             .workspaces
-            .active_workspace()
+            .active()
             .name()
             .to_owned()),
         "pinned"
@@ -198,7 +199,7 @@ fn sidebar_should_follow_remote_root_across_tabs_pins_and_custom_names(cx: &mut 
     assert_eq!(
         manager.read_with(cx, |manager, _| manager
             .workspaces
-            .active_workspace()
+            .active()
             .name()
             .to_owned()),
         "latest"
@@ -217,7 +218,7 @@ fn sidebar_should_follow_remote_root_across_tabs_pins_and_custom_names(cx: &mut 
         .unwrap();
     cx.run_until_parked();
     let identity = manager.read_with(cx, |manager, _| {
-        let workspace = manager.workspaces.active_workspace();
+        let workspace = manager.workspaces.active();
         (
             workspace.name().to_owned(),
             workspace
@@ -358,7 +359,7 @@ fn sidebar_rows_end_with_the_branch_and_let_a_pull_request_open_in_the_browser(
     let path = cx.debug_bounds("workspace-row-path-1").unwrap();
     assert!(path.right() <= number.left());
     assert_eq!(number.right(), row.right() - row_trailing_padding(cx));
-    let active = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let active = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     cx.simulate_click(number.center(), Modifiers::none());
     cx.run_until_parked();
     assert_eq!(
@@ -366,7 +367,7 @@ fn sidebar_rows_end_with_the_branch_and_let_a_pull_request_open_in_the_browser(
         Some("https://github.com/acme/api/pull/478")
     );
     assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        manager.read_with(cx, |manager, _| manager.workspaces.active_id()),
         active
     );
 }
@@ -1133,9 +1134,9 @@ fn native_service_factory_reaches_initial_new_and_replacement_hierarchy(cx: &mut
     }
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            let workspace_id = manager.workspaces.active_workspace_id();
+            let workspace_id = manager.workspaces.active_id();
             manager.close_workspace(workspace_id, window, cx);
-            let final_workspace_id = manager.workspaces.active_workspace_id();
+            let final_workspace_id = manager.workspaces.active_id();
             manager.close_workspace(final_workspace_id, window, cx);
         });
     });
@@ -1514,7 +1515,7 @@ fn present_test_alert(
 fn choose_pin_directory(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContext) {
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.choose_pin_directory(manager.workspaces.active_workspace_id(), window, cx);
+            manager.choose_pin_directory(manager.workspaces.active_id(), window, cx);
         })
     });
     cx.run_until_parked();
@@ -1583,7 +1584,7 @@ fn create_disconnected_remote_workspace(
         gpui::Task::ready(Ok(())),
     );
     emit_remote_workspace_completion(&flow, completion, cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     lifecycle
         .try_send(ControlConnectionTerminalState::Closed)
         .unwrap();
@@ -1706,7 +1707,7 @@ fn workspace_modal_mount_blocks_and_restores_terminal_input(cx: &mut TestAppCont
     let view = manager.read_with(cx, |manager, cx| {
         manager
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .active_tab_view()
@@ -1784,7 +1785,7 @@ fn queued_modals_should_preserve_focused_pane_and_restore_terminal_input_focus(
     let view = manager.read_with(cx, |manager, cx| {
         manager
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .active_tab_view()
@@ -1902,7 +1903,7 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
             manager.focus(window, cx);
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .active_tab_view()
@@ -1932,7 +1933,7 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
             manager.focus(window, cx);
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .active_tab_view()
@@ -2086,7 +2087,7 @@ fn cancelled_directory_selection_fallback_should_leave_hierarchy_unchanged(
     let view = manager.read_with(cx, |manager, cx| {
         manager
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .active_tab_view()
@@ -2165,7 +2166,7 @@ fn top_combo_box_local_choice_should_create_without_a_directory_picker(cx: &mut 
                 manager.terminal_focus_blocker(window, cx),
                 manager
                     .workspaces
-                    .active_workspace()
+                    .active()
                     .payload()
                     .read(cx)
                     .focused_terminal_is_focused(window, cx),
@@ -2198,7 +2199,7 @@ fn top_combo_box_keyboard_acceptance_should_create_exactly_one_local_workspace(
                 manager.terminal_focus_blocker(window, cx),
                 manager
                     .workspaces
-                    .active_workspace()
+                    .active()
                     .payload()
                     .read(cx)
                     .focused_terminal_is_focused(window, cx),
@@ -2232,7 +2233,7 @@ fn top_combo_box_available_remote_should_open_one_flow_and_keep_terminal_input_b
                 manager.terminal_focus_blocker(window, cx),
                 manager
                     .workspaces
-                    .active_workspace()
+                    .active()
                     .payload()
                     .read(cx)
                     .focused_terminal_is_focused(window, cx),
@@ -2262,7 +2263,7 @@ fn top_combo_box_available_remote_should_open_one_flow_and_keep_terminal_input_b
                 manager.terminal_focus_blocker(window, cx),
                 manager
                     .workspaces
-                    .active_workspace()
+                    .active()
                     .payload()
                     .read(cx)
                     .focused_terminal_is_focused(window, cx),
@@ -2318,7 +2319,7 @@ fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_i
                 manager.terminal_focus_blocker(window, cx),
                 manager
                     .workspaces
-                    .active_workspace()
+                    .active()
                     .payload()
                     .read(cx)
                     .focused_terminal_is_focused(window, cx),
@@ -2348,7 +2349,7 @@ fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_i
                 manager.terminal_focus_blocker(window, cx),
                 manager
                     .workspaces
-                    .active_workspace()
+                    .active()
                     .payload()
                     .read(cx)
                     .focused_terminal_is_focused(window, cx),
@@ -2412,7 +2413,7 @@ fn choosing_remote_workspace_should_strictly_replace_the_panel_and_restore_focus
             manager.terminal_focus_blocker(window, cx),
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .focused_terminal_is_focused(window, cx),
@@ -2539,7 +2540,7 @@ fn deactivated_remote_creation_should_restore_actions_after_releasing_its_flow(
         manager
             .read(cx)
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .focused_terminal_is_focused(window, cx)
@@ -2560,7 +2561,7 @@ fn deactivated_remote_creation_should_restore_actions_after_releasing_its_flow(
             && window_combo_box_is_open(window, cx)
             && !manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .focused_terminal_is_focused(window, cx)
@@ -2635,7 +2636,7 @@ fn remote_completion_should_create_exact_metadata_launch_and_owned_runtime(
 
     let (workspace_id, destination, directory, physical, runtime_count, has_alias_pin) = manager
         .read_with(cx, |manager, _| {
-            let workspace = manager.workspaces.active_workspace();
+            let workspace = manager.workspaces.active();
             (
                 workspace.id(),
                 workspace
@@ -2716,7 +2717,7 @@ fn completed_flow_event_should_transfer_runtime_acknowledge_and_focus_remote_wor
             manager.terminal_focus_blocker(window, cx),
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .focused_terminal_is_focused(window, cx),
@@ -2747,7 +2748,7 @@ fn closed_remote_control_connection_should_preserve_workspace_and_block_its_pane
     );
     emit_remote_workspace_completion(&flow, completion, cx);
     let (workspace_id, tab_manager, view) = manager.read_with(cx, |manager, cx| {
-        let workspace = manager.workspaces.active_workspace();
+        let workspace = manager.workspaces.active();
         let tab_manager = workspace.payload().clone();
         let view = tab_manager.read(cx).active_tab_view();
         (workspace.id(), tab_manager, view)
@@ -2841,7 +2842,7 @@ fn workspace_menu_should_offer_reconnect_only_after_disconnect_or_failure(cx: &m
         gpui::Task::ready(Ok(())),
     );
     emit_remote_workspace_completion(&flow, completion, cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     let row_selector: &'static str =
         Box::leak(format!("workspace-row-{}-active", workspace_id.get()).into_boxed_str());
     redraw(cx);
@@ -3017,7 +3018,7 @@ fn reconnect_should_atomically_restart_the_same_workspace_tab_and_pane(cx: &mut 
     emit_remote_workspace_completion(&flow, completion, cx);
     let (workspace_id, tab_manager, view, starts_before_reconnect) =
         manager.read_with(cx, |manager, cx| {
-            let workspace = manager.workspaces.active_workspace();
+            let workspace = manager.workspaces.active();
             let tab_manager = workspace.payload().clone();
             let view = tab_manager.read(cx).active_tab_view();
             (workspace.id(), tab_manager, view, records.starts().len())
@@ -3112,7 +3113,7 @@ fn reconnect_should_consume_a_terminal_state_published_before_observer_installat
         gpui::Task::ready(Ok(())),
     );
     emit_remote_workspace_completion(&flow, completion, cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     old_lifecycle
         .try_send(ControlConnectionTerminalState::Closed)
         .unwrap();
@@ -3158,7 +3159,7 @@ fn reconnect_identity_change_should_keep_final_presentation_and_show_typed_alert
     );
     emit_remote_workspace_completion(&flow, completion, cx);
     let (workspace_id, view, starts) = manager.read_with(cx, |manager, cx| {
-        let workspace = manager.workspaces.active_workspace();
+        let workspace = manager.workspaces.active();
         (
             workspace.id(),
             workspace.payload().read(cx).active_tab_view(),
@@ -3238,7 +3239,7 @@ fn reconnect_directory_unavailable_should_remain_disconnected_with_actionable_al
         gpui::Task::ready(Ok(())),
     );
     emit_remote_workspace_completion(&flow, completion, cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     old_lifecycle
         .try_send(ControlConnectionTerminalState::Closed)
         .unwrap();
@@ -3330,7 +3331,7 @@ fn hierarchy_change_between_restart_prepare_and_commit_should_fail_with_typed_al
     cx.simulate_keystrokes("cmd-d");
     cx.run_until_parked();
     let (workspace_id, tab_manager, starts) = manager.read_with(cx, |manager, _| {
-        let workspace = manager.workspaces.active_workspace();
+        let workspace = manager.workspaces.active();
         (
             workspace.id(),
             workspace.payload().clone(),
@@ -3468,7 +3469,7 @@ fn reconnect_cancel_should_be_single_flight_and_close_late_success_without_resur
         gpui::Task::ready(Ok(())),
     );
     emit_remote_workspace_completion(&flow, completion, cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     lifecycle
         .try_send(ControlConnectionTerminalState::Closed)
         .unwrap();
@@ -3681,7 +3682,7 @@ fn authentication_cancelled_reconnect_should_return_to_disconnected_without_erro
         gpui::Task::ready(Ok(())),
     );
     emit_remote_workspace_completion(&flow, completion, cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     lifecycle
         .try_send(ControlConnectionTerminalState::Closed)
         .unwrap();
@@ -3775,7 +3776,7 @@ fn closing_workspace_during_reconnect_should_close_late_control_connection_and_p
         gpui::Task::ready(Ok(())),
     );
     emit_remote_workspace_completion(&flow, completion, cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     lifecycle
         .try_send(ControlConnectionTerminalState::Closed)
         .unwrap();
@@ -3808,7 +3809,7 @@ fn remote_child_identity_failure_preserves_connection_and_restores_focus_after_a
     let (completion, _, _, _) = remote_completion("work", "~/src", "/home/tester/src", true);
     emit_remote_workspace_completion(&flow, completion, cx);
     let (workspace_id, tab_manager) = manager.read_with(cx, |manager, _| {
-        let workspace = manager.workspaces.active_workspace();
+        let workspace = manager.workspaces.active();
         (workspace.id(), workspace.payload().clone())
     });
 
@@ -3997,7 +3998,7 @@ fn matching_remote_destinations_should_create_independent_workspaces(cx: &mut Te
             manager.workspaces.len(),
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .remote_starting_directory()
                 .unwrap()
                 .as_str()
@@ -4048,7 +4049,7 @@ fn independent_workspace_creation_during_revalidation_should_preserve_both_launc
             manager.remote_workspace_runtimes.len(),
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .remote_starting_directory()
                 .map(|directory| directory.as_str().to_owned()),
         )),
@@ -4075,7 +4076,7 @@ fn remote_workspace_close_should_release_active_alias_after_runtime_cleanup(
 
     let flow = open_remote_workspace_flow(&manager, cx);
     emit_remote_workspace_completion(&flow, completion, cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     assert!(aliases.is_active(&alias));
     assert_eq!(closes.load(Ordering::Acquire), 0);
     assert!(manager.read_with(cx, |manager, _| {
@@ -4110,7 +4111,7 @@ fn managed_alias_should_remain_immutable_after_master_loss_and_during_reconnect(
     let (completion, aliases, alias, closes, lifecycle) = remote_completion_with_active_alias();
     let flow = open_remote_workspace_flow(&manager, cx);
     emit_remote_workspace_completion(&flow, completion, cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
 
     assert!(aliases.begin_mutation([alias.clone()]).is_err());
     lifecycle
@@ -4236,7 +4237,7 @@ fn failed_pin_activation_should_report_the_error_without_changing_the_hierarchy(
         workspace_manager_with_directory_selection([Ok(Some(project.clone()))], cx);
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            let workspace_id = manager.workspaces.active_workspace_id();
+            let workspace_id = manager.workspaces.active_id();
             manager.transient.pin_target = Some(PinTarget::Workspace(workspace_id));
             manager.choose_local_pin_directory(PinTarget::Workspace(workspace_id), window, cx);
             // Selection validation retains its valid authority; activation independently fails.
@@ -4249,11 +4250,7 @@ fn failed_pin_activation_should_report_the_error_without_changing_the_hierarchy(
 
     assert_eq!(records.starts().len(), 1);
     assert!(manager.read_with(cx, |manager, _| {
-        manager
-            .workspaces
-            .active_workspace()
-            .pinned_directory()
-            .is_none()
+        manager.workspaces.active().pinned_directory().is_none()
     }));
     assert!(
         cx.debug_bounds("modal-action-workspace-pin-error-ok")
@@ -4277,7 +4274,7 @@ fn a_local_workspace_should_pin_the_directory_typed_in_the_directory_picker(
     let (manager, _, cx) = workspace_manager_with_directory_selection([], cx);
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            manager.choose_pin_directory(manager.workspaces.active_workspace_id(), window, cx);
+            manager.choose_pin_directory(manager.workspaces.active_id(), window, cx);
         })
     });
     cx.run_until_parked();
@@ -4293,7 +4290,7 @@ fn a_local_workspace_should_pin_the_directory_typed_in_the_directory_picker(
     cx.run_until_parked();
 
     let pinned = manager.read_with(cx, |manager, _| {
-        match manager.workspaces.active_workspace().pinned_directory() {
+        match manager.workspaces.active().pinned_directory() {
             Some(PinnedDirectory::Local(directory)) => Some(directory.path().to_owned()),
             _ => None,
         }
@@ -4316,7 +4313,7 @@ fn active_local_pin(
     cx: &mut VisualTestContext,
 ) -> Option<PathBuf> {
     manager.read_with(cx, |manager, _| {
-        match manager.workspaces.active_workspace().pinned_directory() {
+        match manager.workspaces.active().pinned_directory() {
             Some(PinnedDirectory::Local(directory)) => Some(directory.path().to_owned()),
             _ => None,
         }
@@ -4343,14 +4340,8 @@ fn open_local_directory_should_create_a_pinned_workspace_named_by_the_switcher_q
 
     manager.read_with(cx, |manager, _| {
         assert_eq!(manager.workspaces.len(), 2);
-        assert_eq!(
-            manager.workspaces.active_workspace_id(),
-            WorkspaceId::new(2)
-        );
-        assert_eq!(
-            manager.workspaces.active_workspace().name(),
-            "fresh workspace"
-        );
+        assert_eq!(manager.workspaces.active_id(), WorkspaceId::new(2));
+        assert_eq!(manager.workspaces.active().name(), "fresh workspace");
         assert!(manager.pin_picker.is_none());
     });
     assert_eq!(active_local_pin(&manager, cx), Some(project.clone()));
@@ -4391,10 +4382,7 @@ fn open_local_directory_should_activate_the_workspace_already_pinned_to_the_dire
 
     manager.read_with(cx, |manager, _| {
         assert_eq!(manager.workspaces.len(), 2);
-        assert_eq!(
-            manager.workspaces.active_workspace_id(),
-            WorkspaceId::new(2)
-        );
+        assert_eq!(manager.workspaces.active_id(), WorkspaceId::new(2));
     });
     assert_eq!(records.starts().len(), 2);
     fs::remove_dir_all(project).unwrap();
@@ -4432,7 +4420,7 @@ fn open_local_directory_should_keep_the_picker_usable_after_a_failed_creation(
         manager
             .read(cx)
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .focused_terminal_is_focused(window, cx)
@@ -4450,7 +4438,7 @@ fn open_local_directory_should_activate_the_pinned_workspace_when_home_is_unavai
     cx.simulate_keystrokes("cmd-o");
     cx.run_until_parked();
     confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
-    let pinned = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let pinned = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     manager.update(cx, |manager, _| {
         manager.local_home_directory_path =
             temporary_directory("open-local-reuse-missing-home-directory");
@@ -4468,7 +4456,7 @@ fn open_local_directory_should_activate_the_pinned_workspace_when_home_is_unavai
     assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
     manager.read_with(cx, |manager, _| {
         assert_eq!(manager.workspaces.len(), 2);
-        assert_eq!(manager.workspaces.active_workspace_id(), pinned);
+        assert_eq!(manager.workspaces.active_id(), pinned);
         assert!(manager.pin_picker.is_none());
     });
     assert_eq!(records.starts().len(), 2);
@@ -4528,7 +4516,7 @@ fn open_local_directory_should_close_the_picker_and_alert_when_home_is_unavailab
         manager
             .read(cx)
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .focused_terminal_is_focused(window, cx)
@@ -4558,7 +4546,7 @@ fn sidebar_open_local_directory_should_name_the_workspace_automatically_or_creat
     let expected_name = project.file_name().unwrap().to_str().unwrap().to_owned();
     manager.read_with(cx, |manager, _| {
         assert_eq!(manager.workspaces.len(), 2);
-        assert_eq!(manager.workspaces.active_workspace().name(), expected_name);
+        assert_eq!(manager.workspaces.active().name(), expected_name);
     });
     assert_eq!(active_local_pin(&manager, cx), Some(project.clone()));
     assert_eq!(records.starts().len(), 2);
@@ -4647,7 +4635,7 @@ fn open_remote_directory_should_return_to_the_picker_after_a_failed_launch_and_t
     manager.read_with(cx, |manager, _| {
         assert_eq!(manager.workspaces.len(), 2);
         assert!(manager.remote_workspace_flow.is_none());
-        match manager.workspaces.active_workspace().pinned_directory() {
+        match manager.workspaces.active().pinned_directory() {
             Some(PinnedDirectory::Remote {
                 directory,
                 identity,
@@ -4665,7 +4653,7 @@ fn open_remote_directory_should_return_to_the_picker_after_a_failed_launch_and_t
         manager
             .read(cx)
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .focused_terminal_is_focused(window, cx)
@@ -4697,13 +4685,10 @@ fn open_remote_directory_should_pin_the_new_workspace_and_reuse_it_for_the_same_
 
     manager.read_with(cx, |manager, _| {
         assert_eq!(manager.workspaces.len(), 2);
-        assert_eq!(
-            manager.workspaces.active_workspace_id(),
-            WorkspaceId::new(2)
-        );
+        assert_eq!(manager.workspaces.active_id(), WorkspaceId::new(2));
         assert!(manager.remote_workspace_flow.is_none());
         assert_eq!(manager.remote_workspace_runtimes.len(), 1);
-        match manager.workspaces.active_workspace().pinned_directory() {
+        match manager.workspaces.active().pinned_directory() {
             Some(PinnedDirectory::Remote {
                 directory,
                 identity,
@@ -4748,11 +4733,7 @@ fn unavailable_pinned_directory_should_block_children_and_recover_when_restored(
     cx.run_until_parked();
     assert_eq!(records.starts().len(), 1);
     assert!(manager.read_with(cx, |manager, _| {
-        manager
-            .workspaces
-            .active_workspace()
-            .pinned_directory()
-            .is_some()
+        manager.workspaces.active().pinned_directory().is_some()
     }));
     assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
     click("modal-action-tab-start-error-ok", cx);
@@ -4762,7 +4743,7 @@ fn unavailable_pinned_directory_should_block_children_and_recover_when_restored(
         manager
             .read(cx)
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .focused_terminal_is_focused(window, cx)
@@ -4774,7 +4755,7 @@ fn unavailable_pinned_directory_should_block_children_and_recover_when_restored(
     assert_eq!(records.starts().len(), 2);
     assert!(manager.read_with(cx, |manager, _| {
         matches!(
-            manager.workspaces.active_workspace().availability(),
+            manager.workspaces.active().availability(),
             crate::domain::DirectoryAvailability::Available
         )
     }));
@@ -4795,11 +4776,7 @@ fn unusable_directory_selection_should_not_pin_the_workspace(cx: &mut TestAppCon
     );
     assert_eq!(records.starts().len(), 1);
     assert!(manager.read_with(cx, |manager, _| {
-        manager
-            .workspaces
-            .active_workspace()
-            .pinned_directory()
-            .is_none()
+        manager.workspaces.active().pinned_directory().is_none()
     }));
     assert!(
         cx.debug_bounds("modal-action-workspace-pin-error-ok")
@@ -4820,7 +4797,7 @@ fn workspace_switcher_should_open_and_block_terminal_input_focus(cx: &mut TestAp
             manager.terminal_focus_blocker(window, cx),
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .focused_terminal_is_focused(window, cx),
@@ -4902,7 +4879,7 @@ fn workspace_switcher_escape_should_restore_terminal_focus(cx: &mut TestAppConte
         manager
             .read(cx)
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .focused_terminal_is_focused(window, cx)
@@ -4919,7 +4896,7 @@ fn workspace_switcher_escape_should_restore_terminal_focus(cx: &mut TestAppConte
             manager.terminal_focus_blocker(window, cx),
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .focused_terminal_is_focused(window, cx),
@@ -4965,14 +4942,14 @@ fn open_workspace_switcher_should_remove_a_workspace_after_its_final_terminal_se
     let state = manager.read_with(cx, |manager, _| {
         (
             manager.workspaces.workspace(WorkspaceId::new(1)).is_none(),
-            manager.workspaces.active_workspace_id(),
+            manager.workspaces.active_id(),
         )
     });
     assert_eq!(state, (true, WorkspaceId::new(3)));
     assert_eq!(
         manager.read_with(cx, |manager, _| manager
             .workspaces
-            .active_workspace()
+            .active()
             .name()
             .to_owned()),
         "alpha"
@@ -5003,12 +4980,12 @@ fn workspace_switcher_selection_should_activate_the_matching_workspace(cx: &mut 
     let state = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.workspaces.active_workspace_id(),
+            manager.workspaces.active_id(),
             window_combo_box_is_open(window, cx),
             manager.terminal_focus_blocker(window, cx),
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .focused_terminal_is_focused(window, cx),
@@ -5137,7 +5114,7 @@ fn active_tab_manager(
     cx: &VisualTestContext,
 ) -> (WorkspaceId, Entity<TabManager>) {
     manager.read_with(cx, |manager, _| {
-        let workspace = manager.workspaces.active_workspace();
+        let workspace = manager.workspaces.active();
         (workspace.id(), workspace.payload().clone())
     })
 }
@@ -5350,7 +5327,7 @@ fn command_w_should_confirm_kill_workspace_even_when_its_panes_are_idle(cx: &mut
         .try_send(TerminalSessionEvent::Screen(Arc::new(screen)))
         .unwrap();
     cx.run_until_parked();
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
 
     cx.simulate_keystrokes("cmd-w");
     redraw(cx);
@@ -5371,7 +5348,7 @@ fn command_w_should_confirm_kill_workspace_even_when_its_panes_are_idle(cx: &mut
     redraw(cx);
     assert_eq!(records.dropped_session_ids(), vec![1]);
     assert_ne!(
-        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        manager.read_with(cx, |manager, _| manager.workspaces.active_id()),
         workspace_id
     );
 }
@@ -5536,7 +5513,7 @@ fn direct_multi_tab_workspace_close_should_use_one_aggregate_confirmation(cx: &m
     assert_eq!(
         manager.read_with(cx, |manager, _| (
             manager.workspaces.len(),
-            manager.workspaces.active_workspace_id(),
+            manager.workspaces.active_id(),
         )),
         (1, WorkspaceId::new(2))
     );
@@ -5736,7 +5713,7 @@ fn chrome_mouse_down_handoff_should_restore_terminal_focus_without_a_pointer_rel
                 manager
                     .read(cx)
                     .workspaces
-                    .active_workspace()
+                    .active()
                     .payload()
                     .read(cx)
                     .focused_terminal_has_input_focus(window, cx)
@@ -5832,7 +5809,7 @@ fn workspace_top_chrome_should_restore_after_release_outside_its_hitbox(cx: &mut
         !manager
             .read(cx)
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .focused_terminal_has_input_focus(window, cx)
@@ -6516,7 +6493,7 @@ fn a_closing_sidebar_should_not_take_input(cx: &mut TestAppContext) {
             manager.sidebar.read(cx).is_focused(window),
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .focused_terminal_is_focused(window, cx),
@@ -6915,7 +6892,7 @@ fn sidebar_resize_interaction_should_block_then_restore_terminal_focus(cx: &mut 
             manager.terminal_focus_blocker(window, cx),
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .focused_terminal_is_focused(window, cx),
@@ -6935,7 +6912,7 @@ fn sidebar_resize_interaction_should_block_then_restore_terminal_focus(cx: &mut 
             manager.terminal_focus_blocker(window, cx),
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .focused_terminal_is_focused(window, cx),
@@ -6979,7 +6956,7 @@ fn double_clicking_sidebar_handle_should_request_default_width(cx: &mut TestAppC
             manager.sidebar.read(cx).layout().width,
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .focused_terminal_is_focused(window, cx),
@@ -6993,7 +6970,7 @@ fn dragging_sidebar_below_minimum_should_collapse_it_at_the_minimum_width(cx: &m
     let (manager, _records, cx) = workspace_manager(cx);
     let collapsed_width = cx.update(|window, cx| {
         WorkspaceChromeLayout::collapsed_width(
-            &chrome_identity(manager.read(cx).workspaces.active_workspace()),
+            &chrome_identity(manager.read(cx).workspaces.active()),
             window,
             cx,
         )
@@ -7388,7 +7365,7 @@ fn sidebar_new_workspace_button_should_create_local_immediately(cx: &mut TestApp
         manager
             .read(cx)
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .focused_terminal_is_focused(window, cx)
@@ -7507,7 +7484,7 @@ fn a_pinned_workspace_row_disclosing_worktrees_should_mark_the_pin_beside_its_na
     let (manager, _records, cx) =
         workspace_manager_with_directory_selection([Ok(Some(main.clone()))], cx);
     choose_pin_directory(&manager, cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     manager.update(cx, |manager, cx| {
         manager
             .workspaces
@@ -7694,7 +7671,7 @@ fn collapsed_top_chrome_should_ignore_a_larger_resized_sidebar_width(cx: &mut Te
 fn collapsed_identity_should_keep_an_unavailable_local_workspace_visible(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
     manager.update(cx, |manager, cx| {
-        let workspace_id = manager.workspaces.active_workspace_id();
+        let workspace_id = manager.workspaces.active_id();
         manager
             .workspaces
             .set_directory_unavailable(workspace_id, "Directory unavailable".to_owned())
@@ -7919,7 +7896,7 @@ fn collapsed_workspace_switcher_should_open_from_each_part_without_dragging(
             manager
                 .read(cx)
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .focused_terminal_is_focused(window, cx)
@@ -8016,7 +7993,7 @@ fn collapsed_workspace_name_should_open_filter_and_create_a_named_workspace(
     click("workspace-switcher-create-local", cx);
     assert_eq!(
         manager.read_with(cx, |manager, _| {
-            manager.workspaces.active_workspace().name().to_owned()
+            manager.workspaces.active().name().to_owned()
         }),
         "fresh workspace"
     );
@@ -8027,7 +8004,7 @@ fn collapsed_workspace_name_should_open_filter_and_create_a_named_workspace(
         manager
             .read(cx)
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .focused_terminal_is_focused(window, cx)
@@ -8082,7 +8059,7 @@ fn collapsed_top_chrome_should_fit_after_pinning_changes_name(cx: &mut TestAppCo
     assert_eq!(
         manager.read_with(cx, |manager, _| manager
             .workspaces
-            .active_workspace()
+            .active()
             .name()
             .to_owned()),
         name
@@ -8125,7 +8102,7 @@ fn collapsed_top_chrome_should_preserve_name_after_inactive_shell_exit(cx: &mut 
         .expect("the active Tab manager spacer was not rendered");
     assert_eq!(
         (
-            manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+            manager.read_with(cx, |manager, _| manager.workspaces.active_id()),
             spacer.size.width,
         ),
         (WorkspaceId::new(2), chrome.size.width)
@@ -8150,7 +8127,7 @@ fn cmd_n_should_create_a_local_workspace_without_the_panel(cx: &mut TestAppConte
             let manager = manager.read(cx);
             (
                 manager.workspaces.len(),
-                manager.workspaces.active_workspace_id(),
+                manager.workspaces.active_id(),
                 window_combo_box_is_open(window, cx),
             )
         }),
@@ -8369,7 +8346,7 @@ fn dragging_a_workspace_row_should_open_a_gap_and_settle_there_on_release(cx: &m
     assert_eq!(
         (
             workspace_order(&manager, cx),
-            manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+            manager.read_with(cx, |manager, _| manager.workspaces.active_id()),
         ),
         (vec![2, 3, 1], WorkspaceId::new(3))
     );
@@ -8393,7 +8370,7 @@ fn dragging_a_workspace_row_should_open_a_gap_and_settle_there_on_release(cx: &m
     cx.simulate_keystrokes("ctrl-1");
     cx.run_until_parked();
     assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        manager.read_with(cx, |manager, _| manager.workspaces.active_id()),
         WorkspaceId::new(2)
     );
 }
@@ -8903,7 +8880,7 @@ fn creating_workspaces_should_scroll_the_active_workspace_into_view(cx: &mut Tes
     let state = manager.read_with(cx, |manager, cx| {
         (
             manager.workspaces.len(),
-            manager.workspaces.active_workspace_id(),
+            manager.workspaces.active_id(),
             manager.sidebar.read(cx).scroll_handle().offset().y,
         )
     });
@@ -8950,7 +8927,7 @@ fn command_b_should_collapse_the_top_chrome_and_expand_terminal_content(cx: &mut
     let (manager, _records, cx) = workspace_manager(cx);
     let collapsed_width = cx.update(|window, cx| {
         WorkspaceChromeLayout::collapsed_width(
-            &chrome_identity(manager.read(cx).workspaces.active_workspace()),
+            &chrome_identity(manager.read(cx).workspaces.active()),
             window,
             cx,
         )
@@ -9004,7 +8981,7 @@ fn command_shift_e_should_toggle_focus_and_reveal_a_hidden_sidebar(cx: &mut Test
             workspace_manager.sidebar.read(cx).is_focused(window),
             workspace_manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .focused_terminal_is_focused(window, cx),
@@ -9092,10 +9069,10 @@ fn command_n_creates_and_activates_a_home_workspace(cx: &mut TestAppContext) {
     let state = manager.read_with(cx, |manager, _| {
         (
             manager.workspaces.len(),
-            manager.workspaces.active_workspace_id(),
+            manager.workspaces.active_id(),
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .local_home_directory()
                 .unwrap()
                 .to_path_buf(),
@@ -9136,10 +9113,10 @@ fn control_number_should_activate_workspaces_by_position(cx: &mut TestAppContext
     let first_state = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.workspaces.active_workspace_id(),
+            manager.workspaces.active_id(),
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .focused_terminal_is_focused(window, cx),
@@ -9151,11 +9128,11 @@ fn control_number_should_activate_workspaces_by_position(cx: &mut TestAppContext
     let second_state = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.workspaces.active_workspace_id(),
+            manager.workspaces.active_id(),
             manager.sidebar.read(cx).is_focused(window),
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .focused_terminal_is_focused(window, cx),
@@ -9164,8 +9141,7 @@ fn control_number_should_activate_workspaces_by_position(cx: &mut TestAppContext
 
     cx.simulate_keystrokes("ctrl-9");
     cx.run_until_parked();
-    let unavailable_state =
-        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let unavailable_state = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
 
     assert_eq!(first_state, (WorkspaceId::new(1), true));
     assert_eq!(second_state, (WorkspaceId::new(2), true, false));
@@ -9182,9 +9158,9 @@ fn clicking_an_inactive_workspace_should_restore_its_focused_pane(cx: &mut TestA
 
     let state = cx.update(|window, cx| {
         let manager = manager.read(cx);
-        let active_workspace = manager.workspaces.active_workspace().payload().read(cx);
+        let active_workspace = manager.workspaces.active().payload().read(cx);
         (
-            manager.workspaces.active_workspace_id(),
+            manager.workspaces.active_id(),
             manager.sidebar.read(cx).is_focused(window),
             manager.terminal_focus_blocker(window, cx),
             active_workspace.aggregate_counts(cx),
@@ -9211,7 +9187,7 @@ fn clicking_the_active_workspace_should_restore_terminal_focus_from_the_sidebar(
             manager.terminal_focus_blocker(window, cx),
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .focused_terminal_is_focused(window, cx),
@@ -9235,12 +9211,12 @@ fn right_clicking_an_inactive_workspace_should_open_its_menu_without_activating_
     let state = cx.update(|window, cx| {
         let manager = manager.read(cx);
         (
-            manager.workspaces.active_workspace_id(),
+            manager.workspaces.active_id(),
             manager.sidebar.read(cx).is_focused(window),
             manager.sidebar.read(cx).menu_open(),
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .focused_terminal_is_focused(window, cx),
@@ -9280,7 +9256,7 @@ fn workspace_menu_closure_recomputes_remaining_focus_owners(cx: &mut TestAppCont
             (
                 manager.sidebar.read(cx).is_focused(window),
                 manager.terminal_focus_blocker(window, cx),
-                manager.workspaces.active_workspace_id(),
+                manager.workspaces.active_id(),
             )
         }),
         (false, None, WorkspaceId::new(1))
@@ -9303,7 +9279,7 @@ fn tab_shortcuts_should_create_and_activate_tabs_while_sidebar_is_focused(cx: &m
             manager.sidebar.read(cx).is_focused(window),
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .aggregate_counts(cx),
@@ -9335,7 +9311,7 @@ fn close_pane_shortcut_from_sidebar_should_close_the_globally_final_operating_sy
     let state = manager.read_with(cx, |manager, _| {
         (
             manager.workspaces.len(),
-            manager.workspaces.active_workspace_id(),
+            manager.workspaces.active_id(),
             records.dropped_session_ids(),
             records.session_count(),
         )
@@ -9350,7 +9326,7 @@ fn duplicate_final_tab_close_requests_should_schedule_one_operating_system_windo
 ) {
     let (manager, records, cx) = workspace_manager(cx);
     let tab_manager = manager.read_with(cx, |manager, _| {
-        manager.workspaces.active_workspace().payload().clone()
+        manager.workspaces.active().payload().clone()
     });
 
     tab_manager.update(cx, |_, cx| {
@@ -9446,7 +9422,7 @@ fn pane_shortcuts_should_operate_on_the_active_tab_while_sidebar_is_focused(
             manager.sidebar.read(cx).is_focused(window),
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .aggregate_counts(cx),
@@ -9519,7 +9495,7 @@ fn workspace_context_menu_should_target_new_tab_and_rename_commands(cx: &mut Tes
     let workspace_detail = manager.read_with(cx, |manager, cx| {
         manager
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .aggregate_counts(cx)
@@ -9530,7 +9506,7 @@ fn workspace_context_menu_should_target_new_tab_and_rename_commands(cx: &mut Tes
     cx.simulate_keystrokes("cmd-a D e v enter");
     cx.run_until_parked();
     let name = manager.read_with(cx, |manager, _| {
-        manager.workspaces.active_workspace().name().to_owned()
+        manager.workspaces.active().name().to_owned()
     });
 
     assert_eq!((workspace_detail, name), ((2, 2), "Dev".to_owned()));
@@ -9563,8 +9539,8 @@ fn clicking_the_active_inline_rename_should_keep_it_editable(cx: &mut TestAppCon
 
     let rename_state = manager.read_with(cx, |manager, cx| {
         (
-            manager.workspaces.active_workspace_id(),
-            manager.workspaces.active_workspace().name().to_owned(),
+            manager.workspaces.active_id(),
+            manager.workspaces.active().name().to_owned(),
             !manager.sidebar.read(cx).is_renaming(),
         )
     });
@@ -9674,7 +9650,7 @@ fn dismissing_inline_rename_context_menu_should_preserve_editor_until_submission
         (
             manager.sidebar.read(cx).is_renaming(),
             manager.sidebar.read(cx).rename_is_focused(window),
-            manager.workspaces.active_workspace().name().to_owned(),
+            manager.workspaces.active().name().to_owned(),
         )
     });
     assert_eq!(
@@ -9688,7 +9664,7 @@ fn dismissing_inline_rename_context_menu_should_preserve_editor_until_submission
     let state_after_submit = manager.read_with(cx, |manager, cx| {
         (
             !manager.sidebar.read(cx).is_renaming(),
-            manager.workspaces.active_workspace().name().to_owned(),
+            manager.workspaces.active().name().to_owned(),
         )
     });
     assert_eq!(state_after_submit, (true, "Dev".to_owned()));
@@ -9723,7 +9699,7 @@ fn activating_inline_rename_context_menu_should_preserve_editor_until_submission
         (
             manager.sidebar.read(cx).is_renaming(),
             manager.sidebar.read(cx).rename_is_focused(window),
-            manager.workspaces.active_workspace().name().to_owned(),
+            manager.workspaces.active().name().to_owned(),
         )
     });
     assert_eq!(
@@ -9737,7 +9713,7 @@ fn activating_inline_rename_context_menu_should_preserve_editor_until_submission
     let state_after_submit = manager.read_with(cx, |manager, cx| {
         (
             !manager.sidebar.read(cx).is_renaming(),
-            manager.workspaces.active_workspace().name().to_owned(),
+            manager.workspaces.active().name().to_owned(),
         )
     });
     assert_eq!(state_after_submit, (true, "Ops".to_owned()));
@@ -9759,7 +9735,7 @@ fn blurring_inline_rename_should_commit_the_edited_name(cx: &mut TestAppContext)
 
     let rename_state = manager.read_with(cx, |manager, cx| {
         (
-            manager.workspaces.active_workspace().name().to_owned(),
+            manager.workspaces.active().name().to_owned(),
             !manager.sidebar.read(cx).is_renaming(),
         )
     });
@@ -9792,7 +9768,7 @@ fn activating_another_workspace_should_cancel_the_previous_inline_rename(cx: &mu
             .workspace(WorkspaceId::new(2))
             .expect("Workspace 2 must remain owned");
         (
-            manager.workspaces.active_workspace_id(),
+            manager.workspaces.active_id(),
             !manager.sidebar.read(cx).is_renaming(),
             first.name().to_owned(),
             first.payload().read(cx).aggregate_counts(cx),
@@ -9826,7 +9802,7 @@ fn explicitly_closing_the_final_workspace_should_replace_it_and_keep_the_window_
     let state = manager.read_with(cx, |manager, _| {
         (
             manager.workspaces.len(),
-            manager.workspaces.active_workspace_id(),
+            manager.workspaces.active_id(),
             records.dropped_session_ids(),
             records.session_count(),
         )
@@ -9853,7 +9829,7 @@ fn inactive_shell_exit_should_close_its_workspace_without_stealing_activation(
         .expect("the inactive shell exit must be delivered");
     cx.run_until_parked();
     assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        manager.read_with(cx, |manager, _| manager.workspaces.active_id()),
         WorkspaceId::new(2)
     );
     assert!(active_terminal_has_input_focus(&manager, cx));
@@ -9863,7 +9839,7 @@ fn inactive_shell_exit_should_close_its_workspace_without_stealing_activation(
     let state = manager.read_with(cx, |manager, _| {
         (
             manager.workspaces.len(),
-            manager.workspaces.active_workspace_id(),
+            manager.workspaces.active_id(),
             records.dropped_session_ids(),
         )
     });
@@ -9944,7 +9920,7 @@ fn pin_change_and_unpin_should_only_affect_future_terminal_starts(cx: &mut TestA
     assert_eq!(
         manager.read_with(cx, |manager, _| manager
             .workspaces
-            .active_workspace()
+            .active()
             .name()
             .to_owned()),
         "Default"
@@ -10086,7 +10062,7 @@ fn directory_picker_should_pin_its_target_and_keep_the_connection(cx: &mut TestA
         manager
             .read(cx)
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .focused_terminal_is_focused(window, cx)
@@ -10107,10 +10083,7 @@ fn unavailable_home_should_reject_new_workspace_before_mutating_hierarchy(cx: &m
     assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
     manager.read_with(cx, |manager, _| {
         assert_eq!(manager.workspaces.len(), 1);
-        assert_eq!(
-            manager.workspaces.active_workspace_id(),
-            WorkspaceId::new(1)
-        );
+        assert_eq!(manager.workspaces.active_id(), WorkspaceId::new(1));
     });
     assert_eq!(records.session_count(), 1);
     assert!(records.dropped_session_ids().is_empty());
@@ -10133,10 +10106,7 @@ fn unavailable_home_should_reject_final_workspace_replacement_before_closing(
     assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
     manager.read_with(cx, |manager, _| {
         assert_eq!(manager.workspaces.len(), 1);
-        assert_eq!(
-            manager.workspaces.active_workspace_id(),
-            WorkspaceId::new(1)
-        );
+        assert_eq!(manager.workspaces.active_id(), WorkspaceId::new(1));
     });
     assert_eq!(records.session_count(), 1);
     assert!(records.dropped_session_ids().is_empty());
@@ -10159,10 +10129,7 @@ fn unavailable_home_should_allow_closing_a_workspace_without_replacement(cx: &mu
     assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
     manager.read_with(cx, |manager, _| {
         assert_eq!(manager.workspaces.len(), 1);
-        assert_eq!(
-            manager.workspaces.active_workspace_id(),
-            WorkspaceId::new(1)
-        );
+        assert_eq!(manager.workspaces.active_id(), WorkspaceId::new(1));
     });
     assert_eq!(records.session_count(), 2);
     assert_eq!(records.dropped_session_ids(), vec![2]);
@@ -10184,7 +10151,7 @@ fn workspace_switcher_should_list_local_and_remote_workspaces_and_activate_remot
     cx.simulate_keystrokes("f r e s h enter");
     cx.run_until_parked();
     assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        manager.read_with(cx, |manager, _| manager.workspaces.active_id()),
         WorkspaceId::new(2)
     );
     assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
@@ -10343,7 +10310,7 @@ fn sidebar_remote_creation_should_open_host_selection_and_restore_focus_on_cance
         manager
             .read(cx)
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .focused_terminal_is_focused(window, cx)
@@ -10361,7 +10328,7 @@ fn switcher_should_preserve_explicit_local_names_without_switching_to_the_match(
         assert_eq!(
             manager.read_with(cx, |manager, _| manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .name()
                 .to_owned()),
             expected
@@ -10383,10 +10350,7 @@ fn creation_shortcut_should_accept_local_switcher_name_instead_of_highlight(
     cx.simulate_keystrokes("down cmd-n");
     cx.run_until_parked();
     manager.read_with(cx, |manager, _| {
-        assert_eq!(
-            manager.workspaces.active_workspace().name(),
-            "fresh workspace"
-        );
+        assert_eq!(manager.workspaces.active().name(), "fresh workspace");
         assert_eq!(manager.workspaces.len(), 2);
         assert!(manager.remote_workspace_flow.is_none());
     });
@@ -10396,7 +10360,7 @@ fn creation_shortcut_should_accept_local_switcher_name_instead_of_highlight(
         manager
             .read(cx)
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .focused_terminal_is_focused(window, cx)
@@ -10427,10 +10391,7 @@ fn creation_shortcut_should_accept_remote_switcher_name_instead_of_highlight(
     let (completion, _, _, _) = remote_completion("work", "~", "/home/tester", true);
     emit_remote_workspace_completion(&flow, completion, cx);
     manager.read_with(cx, |manager, _| {
-        assert_eq!(
-            manager.workspaces.active_workspace().name(),
-            "fresh workspace"
-        );
+        assert_eq!(manager.workspaces.active().name(), "fresh workspace");
         assert_eq!(manager.workspaces.len(), 2);
     });
     assert_eq!(records.starts().len(), 2);
@@ -10459,7 +10420,7 @@ fn switcher_should_preserve_explicit_remote_names_across_destinations(cx: &mut T
         assert_eq!(
             manager.read_with(cx, |manager, _| manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .name()
                 .to_owned()),
             expected
@@ -10503,7 +10464,7 @@ fn creation_shortcut_should_open_remote_setup_without_reusing_cancelled_query(
         manager
             .read(cx)
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .focused_terminal_is_focused(window, cx)
@@ -10521,7 +10482,7 @@ fn creation_shortcut_should_use_automatic_local_name_for_blank_and_cancelled_inp
     assert_eq!(
         manager.read_with(cx, |manager, _| manager
             .workspaces
-            .active_workspace()
+            .active()
             .name()
             .to_owned()),
         "Default (2)"
@@ -10529,7 +10490,7 @@ fn creation_shortcut_should_use_automatic_local_name_for_blank_and_cancelled_inp
     open_workspace_switcher(cx);
     cx.simulate_keystrokes("space space cmd-n");
     cx.run_until_parked();
-    let id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     manager.update(cx, |manager, _| {
         manager
             .workspaces
@@ -10544,7 +10505,7 @@ fn creation_shortcut_should_use_automatic_local_name_for_blank_and_cancelled_inp
     assert_eq!(
         manager.read_with(cx, |manager, _| manager
             .workspaces
-            .active_workspace()
+            .active()
             .name()
             .to_owned()),
         "automatic"
@@ -10565,7 +10526,7 @@ fn creation_shortcut_should_use_automatic_remote_name_for_blank_input(cx: &mut T
     assert_eq!(
         manager.read_with(cx, |manager, _| manager
             .workspaces
-            .active_workspace()
+            .active()
             .name()
             .to_owned()),
         "Default (2)"
@@ -10586,7 +10547,7 @@ fn creation_shortcut_should_create_named_local_even_with_existing_match(cx: &mut
     cx.run_until_parked();
     let id = manager.read_with(cx, |manager, _| {
         assert_eq!(manager.workspaces.len(), 2);
-        manager.workspaces.active_workspace_id()
+        manager.workspaces.active_id()
     });
     manager.update(cx, |manager, _| {
         manager
@@ -10602,7 +10563,7 @@ fn creation_shortcut_should_create_named_local_even_with_existing_match(cx: &mut
     assert_eq!(
         manager.read_with(cx, |manager, _| manager
             .workspaces
-            .active_workspace()
+            .active()
             .name()
             .to_owned()),
         "Alpha"
@@ -10660,7 +10621,7 @@ fn creation_shortcuts_should_not_escape_switcher_input_context_menu(cx: &mut Tes
     assert_eq!(
         manager.read_with(cx, |manager, _| manager
             .workspaces
-            .active_workspace()
+            .active()
             .name()
             .to_owned()),
         "fresh workspace"
@@ -10684,7 +10645,7 @@ fn workspace_switcher_check_should_follow_active_workspace_not_keyboard_highligh
     assert!(marker.right() < identity.left());
     assert_eq!(cx.debug_bounds("workspace-switcher-active-marker"), None);
     assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        manager.read_with(cx, |manager, _| manager.workspaces.active_id()),
         WorkspaceId::new(1)
     );
     cx.simulate_keystrokes("enter");
@@ -10697,7 +10658,7 @@ fn workspace_switcher_check_should_follow_active_workspace_not_keyboard_highligh
     assert!(marker.right() < identity.left());
     assert_eq!(cx.debug_bounds("workspace-switcher-active-marker"), None);
     assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        manager.read_with(cx, |manager, _| manager.workspaces.active_id()),
         WorkspaceId::new(2)
     );
 }
@@ -10735,7 +10696,7 @@ fn workspace_filter_icon_should_precede_editable_input_without_affecting_creatio
     assert_eq!(
         manager.read_with(cx, |manager, _| manager
             .workspaces
-            .active_workspace()
+            .active()
             .name()
             .to_owned()),
         "filter"
@@ -10768,7 +10729,7 @@ fn workspace_activation_hints_should_follow_sidebar_order_after_closing(cx: &mut
     cx.simulate_keystrokes("ctrl-1");
     cx.run_until_parked();
     assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        manager.read_with(cx, |manager, _| manager.workspaces.active_id()),
         WorkspaceId::new(2)
     );
     open_workspace_switcher(cx);
@@ -10908,7 +10869,7 @@ fn sidebar_keyboard_should_navigate_reveal_and_stop_at_both_ends(cx: &mut TestAp
     cx.simulate_keystrokes("cmd-shift-e home up");
     cx.run_until_parked();
     assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        manager.read_with(cx, |manager, _| manager.workspaces.active_id()),
         WorkspaceId::new(1)
     );
     let first = cx.debug_bounds("workspace-row-1-active").unwrap();
@@ -10922,13 +10883,13 @@ fn sidebar_keyboard_should_navigate_reveal_and_stop_at_both_ends(cx: &mut TestAp
     cx.simulate_keystrokes("down");
     cx.run_until_parked();
     assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        manager.read_with(cx, |manager, _| manager.workspaces.active_id()),
         WorkspaceId::new(2)
     );
     cx.simulate_keystrokes("end down");
     cx.run_until_parked();
     assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id()),
+        manager.read_with(cx, |manager, _| manager.workspaces.active_id()),
         WorkspaceId::new(25)
     );
     let last = cx.debug_bounds("workspace-row-25-active").unwrap();
@@ -10937,7 +10898,7 @@ fn sidebar_keyboard_should_navigate_reveal_and_stop_at_both_ends(cx: &mut TestAp
         !manager
             .read(cx)
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .focused_terminal_has_input_focus(window, cx)
@@ -10954,7 +10915,7 @@ fn sidebar_keyboard_should_navigate_reveal_and_stop_at_both_ends(cx: &mut TestAp
         manager
             .read(cx)
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .focused_terminal_is_focused(window, cx)
@@ -11035,7 +10996,7 @@ fn native_text_ui_should_keep_workspace_rename_until_the_emoji_is_committed(
     assert_eq!(
         manager.read_with(cx, |manager, _| manager
             .workspaces
-            .active_workspace()
+            .active()
             .name()
             .to_owned()),
         "🙂"
@@ -11051,7 +11012,7 @@ fn sidebar_keyboard_rename_cancel_should_preserve_name_and_restore_sidebar_focus
     cx.update(|window, _| window.activate_window());
     cx.run_until_parked();
     let original_name = manager.read_with(cx, |manager, _| {
-        manager.workspaces.active_workspace().name().to_owned()
+        manager.workspaces.active().name().to_owned()
     });
     cx.simulate_keystrokes("cmd-shift-e shift-f10 down enter");
     cx.run_until_parked();
@@ -11062,7 +11023,7 @@ fn sidebar_keyboard_rename_cancel_should_preserve_name_and_restore_sidebar_focus
     assert_eq!(
         manager.read_with(cx, |manager, _| manager
             .workspaces
-            .active_workspace()
+            .active()
             .name()
             .to_owned()),
         original_name
@@ -11073,7 +11034,7 @@ fn sidebar_keyboard_rename_cancel_should_preserve_name_and_restore_sidebar_focus
         !manager
             .read(cx)
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .focused_terminal_has_input_focus(window, cx)
@@ -11126,7 +11087,7 @@ fn sidebar_keyboard_menu_should_rename_and_restore_focus(cx: &mut TestAppContext
     assert_eq!(
         manager.read_with(cx, |manager, _| manager
             .workspaces
-            .active_workspace()
+            .active()
             .name()
             .to_owned()),
         "Dev"
@@ -11148,7 +11109,7 @@ fn sidebar_keyboard_menu_should_rename_and_restore_focus(cx: &mut TestAppContext
         manager
             .read(cx)
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .focused_terminal_is_focused(window, cx)
@@ -11293,7 +11254,7 @@ fn active_terminal_has_input_focus(
         manager
             .read(cx)
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .focused_terminal_has_input_focus(window, cx)
@@ -11438,7 +11399,7 @@ fn active_workspace_worktree_tab_counts(
     manager.read_with(cx, |manager, cx| {
         manager
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .worktree_tab_counts()
@@ -11613,7 +11574,7 @@ fn worktree_rows_should_carry_the_directory_and_branch_that_a_collapsed_row_show
     present_worktrees(cx, &[&linked]);
     let (workspace_id, home) = manager.read_with(cx, |manager, _| {
         (
-            manager.workspaces.active_workspace_id(),
+            manager.workspaces.active_id(),
             manager.local_home_directory_path.clone(),
         )
     });
@@ -11715,7 +11676,7 @@ fn a_nested_shell_should_not_change_the_directory_of_a_worktree_row(cx: &mut Tes
     assert_eq!(
         manager.read_with(cx, |manager, cx| {
             manager
-                .worktree_section(manager.workspaces.active_workspace_id(), cx)
+                .worktree_section(manager.workspaces.active_id(), cx)
                 .unwrap()
                 .groups[0]
                 .rows[0]
@@ -11734,7 +11695,7 @@ fn a_disclosure_chevron_should_trail_the_workspace_name(cx: &mut TestAppContext)
     let (manager, _records, cx) = workspace_manager(cx);
     let fixture = crate::terminal::testing::ShellResourcesFixture::new();
     present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     redraw(cx);
     let id = workspace_id.get();
     let name = cx
@@ -11779,7 +11740,7 @@ fn a_focused_git_workspace_row_should_collapse_and_expand_from_the_keyboard(
     let (manager, _records, cx) = workspace_manager(cx);
     let fixture = crate::terminal::testing::ShellResourcesFixture::new();
     present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     let expanded = |cx: &mut VisualTestContext| {
         manager.read_with(cx, |manager, cx| {
             manager.worktree_section(workspace_id, cx).unwrap().expanded
@@ -11813,7 +11774,7 @@ fn worktree_rows_should_match_a_two_line_workspace_row_height(cx: &mut TestAppCo
     let (manager, _records, cx) = workspace_manager(cx);
     let fixture = crate::terminal::testing::ShellResourcesFixture::new();
     present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     let linked = manager.read_with(cx, |manager, cx| {
         manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
     });
@@ -11844,7 +11805,7 @@ fn a_git_workspace_should_create_a_worktree_and_open_its_first_tab_once_listed(
         crate::ui::worktree_store::testing::install(cx);
     });
     let (manager, records, cx) = workspace_manager(cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     let workspace_row: &'static str = format!("workspace-row-{}-active", workspace_id.get()).leak();
     let plus: &'static str = format!("workspace-new-worktree-{}", workspace_id.get()).leak();
     let offered = |cx: &mut VisualTestContext| {
@@ -11957,7 +11918,7 @@ fn worktree_rows_should_open_tabs_from_their_own_menu(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     let fixture = crate::terminal::testing::ShellResourcesFixture::new();
     present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     let linked = manager.read_with(cx, |manager, cx| {
         manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
     });
@@ -12029,7 +11990,7 @@ fn worktree_menus_should_offer_removal_only_where_git_allows_it(cx: &mut TestApp
     let (manager, _records, cx) = workspace_manager(cx);
     let fixture = crate::terminal::testing::ShellResourcesFixture::new();
     present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     let (main, linked) = manager.read_with(cx, |manager, cx| {
         let rows = &manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows;
         (rows[0].worktree_id, rows[1].worktree_id)
@@ -12102,7 +12063,7 @@ fn a_worktree_should_hold_a_pinned_directory_chosen_through_a_symbolic_link_for_
     fs::create_dir_all(&pinned).unwrap();
     let (manager, _records, cx) =
         workspace_manager_with_directory_selection([Ok(Some(pinned.clone()))], cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             manager.transient.pin_target = Some(PinTarget::Workspace(workspace_id));
@@ -12132,7 +12093,7 @@ fn a_worktree_should_hold_a_pinned_directory_chosen_through_a_symbolic_link_for_
         manager.update(cx, |manager, cx| manager.create_local_workspace(window, cx));
     });
     cx.run_until_parked();
-    let other = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let other = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     store.update(cx, |store, cx| {
         store.present(
             &std::env::temp_dir(),
@@ -12225,14 +12186,14 @@ fn worktree_rows_should_copy_their_path_and_close_their_tabs(cx: &mut TestAppCon
     let linked_root = fixture.path().join("shell-integration");
     // The Root Pane is in the linked Worktree, so it holds the Root Tab and main has none.
     present_worktrees_containing(cx, &[&linked_root], 1);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     let linked = manager.read_with(cx, |manager, cx| {
         manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
     });
     let row = |cx: &mut VisualTestContext| worktree_row(workspace_id, linked, cx);
     let tabs = |cx: &mut VisualTestContext| {
         manager.read_with(cx, |manager, cx| {
-            let tabs = manager.workspaces.active_workspace().payload().read(cx);
+            let tabs = manager.workspaces.active().payload().read(cx);
             (tabs.worktree_tab_counts(), tabs.tab_ids())
         })
     };
@@ -12309,18 +12270,13 @@ fn closing_a_worktrees_tabs_should_keep_them_when_no_other_tab_can_open(cx: &mut
         store.present(&std::env::temp_dir(), Some(snapshot), cx)
     });
     cx.run_until_parked();
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     let linked = manager.read_with(cx, |manager, cx| {
         manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
     });
     let tab_ids = |cx: &mut VisualTestContext| {
         manager.read_with(cx, |manager, cx| {
-            manager
-                .workspaces
-                .active_workspace()
-                .payload()
-                .read(cx)
-                .tab_ids()
+            manager.workspaces.active().payload().read(cx).tab_ids()
         })
     };
     let before = tab_ids(cx);
@@ -12352,7 +12308,7 @@ fn removing_a_worktree_should_confirm_then_close_its_tabs_before_git_runs(cx: &m
     let (manager, _records, cx) = workspace_manager(cx);
     let fixture = crate::terminal::testing::ShellResourcesFixture::new();
     present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     let linked = manager.read_with(cx, |manager, cx| {
         manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
     });
@@ -12361,7 +12317,7 @@ fn removing_a_worktree_should_confirm_then_close_its_tabs_before_git_runs(cx: &m
         manager.read_with(cx, |manager, cx| {
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .worktree_tab_ids(linked)
@@ -12423,7 +12379,7 @@ fn worktree_commands_should_cycle_worktrees_with_tabs_and_the_hidden_sidebar_chr
     let fixture = crate::terminal::testing::ShellResourcesFixture::new();
     let integration = fixture.path().join("shell-integration");
     present_worktrees(cx, &[&integration.join("bash"), &integration.join("zsh")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     let (main, unopened, zsh) = manager.read_with(cx, |manager, cx| {
         let rows = &manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows;
         (
@@ -12436,7 +12392,7 @@ fn worktree_commands_should_cycle_worktrees_with_tabs_and_the_hidden_sidebar_chr
         manager.read_with(cx, |manager, cx| {
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .active_worktree()
@@ -12462,7 +12418,7 @@ fn worktree_commands_should_cycle_worktrees_with_tabs_and_the_hidden_sidebar_chr
     cx.run_until_parked();
     let hidden_step = step("alt-cmd-[", cx);
     let workspace_name = manager.read_with(cx, |manager, _| {
-        manager.workspaces.active_workspace().name().to_owned()
+        manager.workspaces.active().name().to_owned()
     });
     let chip_names = A11yTree::read(cx)
         .find(&format!("Switch Workspace, {workspace_name}, Worktree zsh"))
@@ -12510,7 +12466,7 @@ fn the_keyboard_should_reveal_each_worktree_row_of_a_group_taller_than_the_list(
     present_worktrees(cx, &linked);
     cx.simulate_resize(gpui::size(px(1000.0), px(400.0)));
     redraw(cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     let rows = manager.read_with(cx, |manager, cx| {
         manager
             .worktree_section(workspace_id, cx)
@@ -12619,7 +12575,7 @@ fn the_root_tab_should_stay_reachable_after_its_workspace_leaves_a_repository(
     let (manager, _records, cx) = workspace_manager(cx);
     let fixture = crate::terminal::testing::ShellResourcesFixture::new();
     present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     let linked_id = manager.read_with(cx, |manager, cx| {
         manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
     });
@@ -12635,7 +12591,7 @@ fn the_root_tab_should_stay_reachable_after_its_workspace_leaves_a_repository(
         manager.read_with(cx, |manager, cx| {
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .active_worktree()
@@ -12644,7 +12600,7 @@ fn the_root_tab_should_stay_reachable_after_its_workspace_leaves_a_repository(
     open_linked(cx);
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
-            let tabs = manager.workspaces.active_workspace().payload().clone();
+            let tabs = manager.workspaces.active().payload().clone();
             let root_tab = tabs.read(cx).tab_ids()[0];
             tabs.update(cx, |tabs, cx| {
                 tabs.activate_tab_for_test(root_tab, window, cx)
@@ -12683,7 +12639,7 @@ fn the_root_tab_should_stay_reachable_after_its_workspace_leaves_a_repository(
     assert_eq!(
         manager.read_with(cx, |manager, cx| manager
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .active_worktree()),
@@ -13541,7 +13497,7 @@ fn row_menus_should_place_their_destructive_commands_below_the_divider(cx: &mut 
     let linked_root = fixture.path().join("shell-integration");
     // The Root Pane is in the linked Worktree, so the collapsed row stands for a removable one.
     present_worktrees_containing(cx, &[&linked_root], 1);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     let linked = manager.read_with(cx, |manager, cx| {
         manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
     });
@@ -13612,7 +13568,7 @@ fn removing_a_worktree_that_cannot_be_checked_should_report_it_and_keep_its_tabs
     let (manager, _records, cx) = workspace_manager(cx);
     let fixture = crate::terminal::testing::ShellResourcesFixture::new();
     present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     let linked = manager.read_with(cx, |manager, cx| {
         manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
     });
@@ -13635,7 +13591,7 @@ fn removing_a_worktree_that_cannot_be_checked_should_report_it_and_keep_its_tabs
         manager.read_with(cx, |manager, cx| {
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .worktree_tab_ids(linked)
@@ -13658,13 +13614,13 @@ fn closing_the_tabs_of_a_main_worktree_holding_every_tab_should_leave_one_new_ta
     let fixture = crate::terminal::testing::ShellResourcesFixture::new();
     // The Root Pane is in the Main Worktree, so it holds every Tab.
     present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     let main = manager.read_with(cx, |manager, cx| {
         manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[0].worktree_id
     });
     let tabs = |cx: &mut VisualTestContext| {
         manager.read_with(cx, |manager, cx| {
-            let tabs = manager.workspaces.active_workspace().payload().read(cx);
+            let tabs = manager.workspaces.active().payload().read(cx);
             (tabs.worktree_tab_counts(), tabs.worktree_tab_ids(main))
         })
     };
@@ -13731,7 +13687,7 @@ fn closing_every_tab_in_a_bare_repository_layout_should_open_the_next_tab_in_ano
         store.present(&bare, Some(snapshot.clone()), cx)
     });
     cx.run_until_parked();
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     let rows = manager.read_with(cx, |manager, cx| {
         manager.worktree_section(workspace_id, cx).unwrap().groups[0]
             .rows
@@ -13742,7 +13698,7 @@ fn closing_every_tab_in_a_bare_repository_layout_should_open_the_next_tab_in_ano
     let (one, two) = (rows[0].0, rows[1].0);
     let tabs = |cx: &mut VisualTestContext| {
         manager.read_with(cx, |manager, cx| {
-            let tabs = manager.workspaces.active_workspace().payload().read(cx);
+            let tabs = manager.workspaces.active().payload().read(cx);
             (
                 tabs.worktree_tab_counts().into_iter().collect::<Vec<_>>(),
                 tabs.tab_ids(),
@@ -13808,12 +13764,12 @@ fn removing_a_worktree_should_close_its_tabs_in_every_workspace(cx: &mut TestApp
         crate::ui::worktree_store::testing::install_with_removal_git(cx);
     });
     let (manager, _records, cx) = workspace_manager(cx);
-    let first = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let first = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| manager.create_local_workspace(window, cx));
     });
     cx.run_until_parked();
-    let second = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let second = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     let fixture = crate::terminal::testing::ShellResourcesFixture::new();
     // Both Workspaces start in the same repository, so each lists the linked Worktree.
     present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
@@ -13910,18 +13866,13 @@ fn removing_a_worktree_with_no_other_to_keep_a_tab_in_should_report_it_and_keep_
         cx.update(|_, cx| crate::ui::worktree_store::InstalledWorktrees::store(cx).unwrap());
     store.update(cx, |store, cx| store.present(&bare, Some(snapshot), cx));
     cx.run_until_parked();
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     let one = manager.read_with(cx, |manager, cx| {
         manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[0].worktree_id
     });
     let tab_ids = |cx: &mut VisualTestContext| {
         manager.read_with(cx, |manager, cx| {
-            manager
-                .workspaces
-                .active_workspace()
-                .payload()
-                .read(cx)
-                .tab_ids()
+            manager.workspaces.active().payload().read(cx).tab_ids()
         })
     };
     let before = tab_ids(cx);
@@ -13950,7 +13901,7 @@ fn a_worktree_menu_should_keep_the_selection_and_return_typing_to_the_pane(
     cx.run_until_parked();
     let fixture = crate::terminal::testing::ShellResourcesFixture::new();
     present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     let (main, linked) = manager.read_with(cx, |manager, cx| {
         let rows = &manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows;
         (rows[0].worktree_id, rows[1].worktree_id)
@@ -14034,7 +13985,7 @@ fn an_inactive_workspace_menu_should_open_its_tab_there_and_rename_it_in_place(
     cx.run_until_parked();
     let renamed = manager.read_with(cx, |manager, _| {
         (
-            manager.workspaces.active_workspace_id(),
+            manager.workspaces.active_id(),
             manager
                 .workspaces
                 .workspace(WorkspaceId::new(1))
@@ -14049,10 +14000,10 @@ fn an_inactive_workspace_menu_should_open_its_tab_there_and_rename_it_in_place(
     click("workspace-menu-row-new-tab", cx);
     let opened = manager.read_with(cx, |manager, cx| {
         (
-            manager.workspaces.active_workspace_id(),
+            manager.workspaces.active_id(),
             manager
                 .workspaces
-                .active_workspace()
+                .active()
                 .payload()
                 .read(cx)
                 .tab_ids()
@@ -14089,7 +14040,7 @@ fn a_menu_should_keep_the_keyboards_row_in_a_focused_sidebar(cx: &mut TestAppCon
     let fixture = crate::terminal::testing::ShellResourcesFixture::new();
     let integration = fixture.path().join("shell-integration");
     present_worktrees(cx, &[&integration.join("bash"), &integration.join("zsh")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_workspace_id());
+    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     let (bash, zsh) = manager.read_with(cx, |manager, cx| {
         let rows = &manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows;
         (rows[1].worktree_id, rows[2].worktree_id)
@@ -14405,7 +14356,7 @@ fn shared_terminal_is_focused(harness: &SharedPaneHarness, cx: &mut VisualTestCo
             .manager
             .read(cx)
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .focused_terminal_is_focused(window, cx)
@@ -15180,7 +15131,7 @@ fn shared_close_terminal_is_focused(
             .manager
             .read(cx)
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .focused_terminal_is_focused(window, cx)
@@ -15191,7 +15142,7 @@ fn shared_close_counts(harness: &SharedCloseHarness, cx: &mut VisualTestContext)
     harness.manager.read_with(cx, |manager, cx| {
         manager
             .workspaces
-            .active_workspace()
+            .active()
             .payload()
             .read(cx)
             .aggregate_counts(cx)
@@ -15494,4 +15445,444 @@ fn a_second_workspace_window_should_bring_the_shared_one_forward_instead(cx: &mu
         }),
         "the Workspace Window presenting them comes forward"
     );
+}
+
+const ATTACHED_BUILD: [u8; 32] = [21; 32];
+const ATTACHED_BUILD_TAB: [u8; 32] = [22; 32];
+const ATTACHED_BUILD_PANE: [u8; 32] = [23; 32];
+const ATTACHED_DOCS: [u8; 32] = [24; 32];
+const ATTACHED_DOCS_TAB: [u8; 32] = [25; 32];
+const ATTACHED_DOCS_PANE: [u8; 32] = [26; 32];
+/// The Workspace Switcher result of the detached Build Workspace, named by its leading bytes.
+const DETACHED_BUILD_RESULT: &str = "workspace-switcher-detached-15151515";
+
+/// Two shared Workspaces, Build and Docs, beside this window's own Workspace. Adoption attaches
+/// the Workspaces the server already holds, so the sidebar lists the desktop Workspace first,
+/// then Build as Workspace 2 and Docs as Workspace 3.
+struct AttachmentHarness {
+    manager: Entity<WorkspaceManager>,
+    edits: Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
+    panes: Rc<crate::ui::shared_workspaces::testing::ScriptedPanes>,
+}
+
+fn attachment_inventory() -> spaceterm_server::hierarchy::Inventory {
+    use spaceterm_server::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
+
+    let workspace = |id, name: &str, tab, pane| Workspace {
+        id,
+        name: name.to_owned(),
+        name_version: 0,
+        pin_version: 0,
+        pinned_directory: None,
+        root_tab: tab,
+        tabs: vec![Tab {
+            id: tab,
+            root_pane: pane,
+            panes: vec![Pane {
+                id: pane,
+                source: None,
+                axis: Axis::Right,
+                starting_directory: PathBuf::from("/server/work"),
+                confirmed_directory: None,
+                creator: None,
+            }],
+        }],
+    };
+    Inventory {
+        revision: 1,
+        close: None,
+        workspaces: vec![
+            workspace(
+                ATTACHED_BUILD,
+                "Build",
+                ATTACHED_BUILD_TAB,
+                ATTACHED_BUILD_PANE,
+            ),
+            workspace(ATTACHED_DOCS, "Docs", ATTACHED_DOCS_TAB, ATTACHED_DOCS_PANE),
+        ],
+    }
+}
+
+fn attachment_harness(cx: &mut TestAppContext) -> (AttachmentHarness, &mut VisualTestContext) {
+    use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
+    use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+
+    let (manager, _records, cx) = workspace_manager(cx);
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    let edits = Rc::new(ScriptedEdits::new(Some(attachment_inventory())));
+    let panes = ScriptedPanes::new(WorkspaceTerminalSessionFactory::new_local(
+        Rc::new(TestTerminalSessionFactory::new(
+            TestTerminalSessionRecords::default(),
+        )),
+        crate::terminal::testing::test_local_directory(std::env::temp_dir()),
+    ));
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.present_shared_workspaces(
+                SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
+                SharedPaneSessions::with_opener(
+                    Rc::clone(&panes) as Rc<_>,
+                    &PaneConstruction::testing(),
+                ),
+                window,
+                cx,
+            );
+        });
+    });
+    let harness = AttachmentHarness {
+        manager,
+        edits,
+        panes,
+    };
+    harness.sync(cx);
+    assert_eq!(
+        harness.presented(cx),
+        vec![1, 2, 3],
+        "a first adoption attaches the Workspaces the server already holds"
+    );
+    (harness, cx)
+}
+
+impl AttachmentHarness {
+    fn sync(&self, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            self.manager
+                .update(cx, |manager, cx| manager.sync_shared_workspaces(window, cx));
+        });
+        settle_shared_panes(cx);
+    }
+
+    /// The Workspaces this window presents, in sidebar order.
+    fn presented(&self, cx: &mut VisualTestContext) -> Vec<u64> {
+        workspace_order(&self.manager, cx)
+    }
+
+    fn active(&self, cx: &mut VisualTestContext) -> Option<WorkspaceId> {
+        self.manager
+            .read_with(cx, |manager, _| manager.workspaces.active_workspace_id())
+    }
+
+    /// Opens a row's context menu and chooses Detach Workspace.
+    fn detach(&self, workspace: u64, cx: &mut VisualTestContext) {
+        right_click(workspace_row(&self.manager, workspace, cx), cx);
+        click("workspace-menu-row-detach", cx);
+        settle_shared_panes(cx);
+    }
+
+    /// Kills the desktop Workspace through its menu and confirms, leaving the shared ones.
+    fn close_desktop_workspace(&self, cx: &mut VisualTestContext) {
+        right_click(workspace_row(&self.manager, 1, cx), cx);
+        click("workspace-menu-row-close", cx);
+        if cx
+            .debug_bounds("modal-action-close-confirmation-confirm")
+            .is_some()
+        {
+            click("modal-action-close-confirmation-confirm", cx);
+        }
+        settle_shared_panes(cx);
+    }
+}
+
+/// The row selector a Workspace's sidebar row carries in its current state.
+fn workspace_row(
+    manager: &Entity<WorkspaceManager>,
+    workspace: u64,
+    cx: &mut VisualTestContext,
+) -> &'static str {
+    let active = manager.read_with(cx, |manager, _| {
+        manager.workspaces.active_workspace_id() == Some(WorkspaceId::new(workspace))
+    });
+    let state = if active { "active" } else { "inactive" };
+    format!("workspace-row-{workspace}-{state}").leak()
+}
+
+/// The accessible names of the open menu's items, in order.
+fn menu_item_labels(cx: &mut VisualTestContext) -> Vec<String> {
+    spaceterm_ui::a11y_testing::A11yTree::read(cx)
+        .with_role("MenuItem")
+        .iter()
+        .map(|item| {
+            item["aria"]["label"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn detach_workspace_should_stop_presenting_it_here_and_offer_it_detached_in_the_switcher(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (harness, cx) = attachment_harness(cx);
+
+    harness.detach(2, cx);
+    let presented = harness.presented(cx);
+    let confirmation = cx
+        .debug_bounds("modal-action-close-confirmation-confirm")
+        .is_some();
+    open_workspace_switcher(cx);
+    let tree = A11yTree::read(cx);
+    let detached = tree
+        .with_role("ListBoxOption")
+        .into_iter()
+        .find(|option| option["aria"]["label"] == "Build")
+        .cloned();
+
+    assert_eq!(presented, vec![1, 3], "only Build stops being presented");
+    assert!(
+        !confirmation,
+        "Detach Workspace ends nothing, so it asks for no confirmation"
+    );
+    assert_eq!(
+        harness.edits.submitted(),
+        Vec::new(),
+        "detaching asks the server for nothing: no Kill and no replacement Workspace"
+    );
+    assert_eq!(
+        harness.active(cx),
+        Some(WorkspaceId::new(1)),
+        "detaching an inactive Workspace leaves the Active Workspace where it was"
+    );
+    let detached = detached.expect("the switcher lists the detached Workspace");
+    assert_eq!(detached["aria"]["description"], "Detached");
+    assert!(
+        detached["aria"]["keyboard_shortcut"].is_null(),
+        "a detached Workspace takes no activation Shortcut"
+    );
+}
+
+#[gpui::test]
+fn choosing_a_detached_workspace_should_attach_and_activate_it_without_taking_over(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = attachment_harness(cx);
+    harness.detach(2, cx);
+
+    open_workspace_switcher(cx);
+    click(DETACHED_BUILD_RESULT, cx);
+    harness.sync(cx);
+    let reattached = harness.manager.read_with(cx, |manager, _| {
+        manager
+            .shared
+            .as_ref()
+            .and_then(|shared| shared.local(ATTACHED_BUILD))
+    });
+    let switcher_open = cx.update(|window, cx| window_combo_box_is_open(window, cx));
+
+    let reattached = reattached.expect("choosing the detached Workspace attaches it");
+    assert_eq!(
+        harness.active(cx),
+        Some(reattached),
+        "choosing the detached Workspace also activates it"
+    );
+    assert!(!switcher_open);
+    assert_eq!(
+        harness.presented(cx).len(),
+        3,
+        "attaching presents the Workspace again beside the others"
+    );
+    assert_eq!(
+        harness.panes.pane(ATTACHED_BUILD_PANE).take_overs(),
+        0,
+        "attaching reinstates no control by taking the Pane over"
+    );
+    assert_eq!(harness.edits.submitted(), Vec::new());
+}
+
+#[gpui::test]
+fn detaching_the_final_workspace_should_leave_an_empty_view_without_a_replacement(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (harness, cx) = attachment_harness(cx);
+    harness.close_desktop_workspace(cx);
+    harness.detach(2, cx);
+    harness.detach(3, cx);
+
+    let count = harness
+        .manager
+        .read_with(cx, |manager, _| manager.workspace_count());
+    let tree = A11yTree::read(cx);
+    let empty = tree.node(super::empty::EMPTY_TITLE).clone();
+    let focused = tree.focused().map(|node| node["aria"]["label"].clone());
+    let action = tree.node(super::empty::EMPTY_ACTION).clone();
+
+    assert_eq!(count, 0, "nothing replaces the detached final Workspace");
+    assert_eq!(
+        harness.edits.submitted(),
+        Vec::new(),
+        "the empty view asks the server to create nothing"
+    );
+    assert_eq!(empty["aria"]["role"], "Group");
+    assert_eq!(empty["aria"]["description"], super::empty::EMPTY_DETAIL);
+    assert_eq!(
+        focused,
+        Some(serde_json::json!(super::empty::EMPTY_TITLE)),
+        "the keyboard rests on the empty view, which names itself and explains what to do"
+    );
+    assert_eq!(action["aria"]["role"], "Button");
+    assert!(cx.debug_bounds("tab-bar").is_none(), "no Tab strip remains");
+}
+
+#[gpui::test]
+fn the_empty_view_action_should_open_the_switcher_with_the_detached_workspaces(
+    cx: &mut TestAppContext,
+) {
+    use crate::ui::workspace_creation::WorkspaceCreation;
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (harness, cx) = attachment_harness(cx);
+    harness.close_desktop_workspace(cx);
+    harness.detach(2, cx);
+    harness.detach(3, cx);
+
+    // Plain Tab moves from the empty view to its action, and Return activates it.
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    let focused = A11yTree::read(cx)
+        .focused()
+        .map(|node| node["aria"]["label"].clone());
+    press_return(cx);
+    let switcher_open = cx.update(|window, cx| window_combo_box_is_open(window, cx));
+    // The switcher's creation commands share its option role, and how many of them render
+    // depends on the platform's viewport, so only the remaining options are Workspaces.
+    let creations = WorkspaceCreation::rows(true)
+        .into_iter()
+        .map(WorkspaceCreation::label)
+        .collect::<Vec<_>>();
+    let workspaces: Vec<(String, String)> = A11yTree::read(cx)
+        .with_role("ListBoxOption")
+        .iter()
+        .map(|option| {
+            let text = |key: &str| option["aria"][key].as_str().unwrap_or_default().to_owned();
+            (text("label"), text("description"))
+        })
+        .filter(|(label, _)| !creations.contains(&label.as_str()))
+        .collect();
+    click(DETACHED_BUILD_RESULT, cx);
+    harness.sync(cx);
+
+    assert_eq!(focused, Some(serde_json::json!(super::empty::EMPTY_ACTION)));
+    assert!(switcher_open, "the action opens the Workspace Switcher");
+    assert_eq!(
+        workspaces,
+        [("Build", "Detached"), ("Docs", "Detached")]
+            .map(|(label, description)| (label.to_owned(), description.to_owned())),
+        "the switcher offers the two detached Workspaces and no other Workspace"
+    );
+    assert_eq!(
+        harness.presented(cx).len(),
+        1,
+        "choosing a detached Workspace leaves the empty view"
+    );
+    assert!(cx.debug_bounds("empty-workspace").is_none());
+    assert!(
+        harness.active(cx).is_some(),
+        "the attached Workspace becomes the Active Workspace"
+    );
+}
+
+#[gpui::test]
+fn detach_workspace_should_be_named_apart_from_kill_and_carry_no_shortcut(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (harness, cx) = attachment_harness(cx);
+
+    right_click(workspace_row(&harness.manager, 2, cx), cx);
+    let shared_menu = menu_item_labels(cx);
+    let detach = A11yTree::read(cx).node("Detach Workspace").clone();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    right_click(workspace_row(&harness.manager, 1, cx), cx);
+    let desktop_menu = menu_item_labels(cx);
+
+    let position = |label: &str| shared_menu.iter().position(|item| item == label);
+    assert!(
+        position("Detach Workspace") < position("Kill Workspace"),
+        "Detach Workspace sits apart from Kill Workspace: {shared_menu:?}"
+    );
+    assert!(
+        detach["aria"]["keyboard_shortcut"].is_null(),
+        "Detach Workspace has no default Shortcut"
+    );
+    assert_ne!(detach["aria"]["disabled"], true);
+    assert!(
+        !desktop_menu.iter().any(|item| item.starts_with("Detach")),
+        "a Workspace this window owns has no attachment to detach: {desktop_menu:?}"
+    );
+}
+
+#[gpui::test]
+fn offline_detach_should_still_stop_presenting_while_shared_edits_stay_unavailable(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (harness, cx) = attachment_harness(cx);
+    harness.edits.set_connected(false);
+    harness.sync(cx);
+
+    right_click(workspace_row(&harness.manager, 2, cx), cx);
+    let tree = A11yTree::read(cx);
+    let detach_disabled = tree.node("Detach Workspace")["aria"]["disabled"].clone();
+    let kill_disabled = tree.node("Kill Workspace")["aria"]["disabled"].clone();
+    click("workspace-menu-row-detach", cx);
+    settle_shared_panes(cx);
+    let after_detach = harness.presented(cx);
+    // Navigation through what this window still presents keeps working offline.
+    click(workspace_row(&harness.manager, 3, cx), cx);
+    let navigated = harness.active(cx);
+    open_workspace_switcher(cx);
+    let offered_offline = cx.debug_bounds(DETACHED_BUILD_RESULT).is_some();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    harness.edits.set_connected(true);
+    harness.sync(cx);
+    open_workspace_switcher(cx);
+    let offered_online = cx.debug_bounds(DETACHED_BUILD_RESULT).is_some();
+
+    assert!(
+        detach_disabled.is_null() || detach_disabled == false,
+        "Detach Workspace needs no server"
+    );
+    assert_eq!(kill_disabled, true, "Kill Workspace waits for the server");
+    assert_eq!(after_detach, vec![1, 3]);
+    assert_eq!(navigated, Some(WorkspaceId::new(3)));
+    assert!(
+        !offered_offline,
+        "an unreachable server's detached Workspaces are not offered"
+    );
+    assert!(
+        offered_online,
+        "the detached Workspace is offered again once the server is reachable"
+    );
+    assert_eq!(harness.edits.submitted(), Vec::new());
+}
+
+#[gpui::test]
+fn the_offline_empty_view_should_say_detached_workspaces_return_on_reconnect(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (harness, cx) = attachment_harness(cx);
+    harness.close_desktop_workspace(cx);
+    harness.edits.set_connected(false);
+    harness.sync(cx);
+    harness.detach(2, cx);
+    harness.detach(3, cx);
+
+    let tree = A11yTree::read(cx);
+    let description = tree.node(super::empty::EMPTY_TITLE)["aria"]["description"].clone();
+    let count = harness
+        .manager
+        .read_with(cx, |manager, _| manager.workspace_count());
+
+    assert_eq!(count, 0);
+    assert_eq!(description, super::empty::EMPTY_OFFLINE_DETAIL);
 }

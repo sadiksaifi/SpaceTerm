@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 #[derive(Default)]
 struct State {
     loaded: Option<Result<ClientView, ServerError>>,
+    attachments: Option<Result<spaceterm_server::attachments::Attachments, ServerError>>,
     pending: Option<ClientView>,
     error: Option<ServerError>,
     closed: bool,
@@ -25,9 +26,11 @@ impl RetainedClientViews {
         let worker = std::thread::Builder::new()
             .name("spaceterm-client-view".into())
             .spawn(move || {
+                let attachments = server.attachments();
                 let opened = server.client_view_store();
                 {
                     let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
+                    state.attachments = Some(attachments);
                     state.loaded = Some(
                         opened
                             .as_ref()
@@ -70,6 +73,15 @@ impl RetainedClientViews {
             wake,
             worker,
         }
+    }
+    pub(super) fn attachments(
+        &self,
+    ) -> Option<Result<spaceterm_server::attachments::Attachments, ServerError>> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .attachments
+            .clone()
     }
     pub(super) fn loaded(&self) -> Option<Result<ClientView, ServerError>> {
         self.state

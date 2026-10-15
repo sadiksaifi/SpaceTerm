@@ -12,8 +12,10 @@ impl WorkspaceManager {
     /// Whether the Active Workspace has more than one Worktree with Tabs, or Tabs outside every
     /// Worktree and a Worktree with Tabs, to step between.
     pub(in crate::ui::workspace_manager) fn steps_worktrees(&self, cx: &App) -> bool {
-        let manager = self.workspaces.active_workspace().payload().read(cx);
-        manager.worktree_tab_counts().len() + usize::from(manager.has_unscoped_tabs()) > 1
+        self.workspaces.active_workspace().is_some_and(|workspace| {
+            let manager = workspace.payload().read(cx);
+            manager.worktree_tab_counts().len() + usize::from(manager.has_unscoped_tabs()) > 1
+        })
     }
 
     /// Shows the next or previous Worktree with Tabs, wrapping at either end, and focuses its
@@ -24,11 +26,14 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let workspace_id = self.workspaces.active_workspace_id();
+        let Some(workspace) = self.workspaces.active_workspace() else {
+            return;
+        };
+        let workspace_id = workspace.id();
         let Some(section) = self.worktree_section(workspace_id, cx) else {
             return;
         };
-        let manager = self.workspaces.active_workspace().payload().read(cx);
+        let manager = workspace.payload().read(cx);
         let unscoped = manager.has_unscoped_tabs();
         let active = manager.active_worktree();
         // `None` stands for the Tabs outside every Worktree.

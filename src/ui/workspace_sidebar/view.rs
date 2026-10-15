@@ -1777,6 +1777,27 @@ fn workspace_menu_entries(
             .debug_selector("workspace-menu-row-reconnect"),
         );
     }
+    // Detach Workspace stops presenting the Workspace here and releases this client's control
+    // of its Panes. The Workspace and its Terminal Sessions keep running on the server, so it
+    // sits apart from Kill Workspace, which ends them for every client. It needs no server, so
+    // it stays available while this client is offline.
+    if let Some(shared) = shared {
+        entries.push(
+            MenuEntry::action(
+                if shared.detaches {
+                    "Detach Workspace"
+                } else {
+                    "Detach Workspace Unavailable"
+                },
+                RowMenuCommand::Workspace(WorkspaceMenuCommand::Detach),
+            )
+            .disabled(!shared.detaches)
+            .icon(|foreground, size| {
+                Icon::new(IconName::Minus, size, foreground).into_any_element()
+            })
+            .debug_selector("workspace-menu-row-detach"),
+        );
+    }
     // The destructive commands sit together below the divider.
     entries.push(MenuEntry::separator());
     if let Some((worktree_id, name, removal)) = active_worktree

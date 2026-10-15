@@ -21,6 +21,7 @@ pub struct DevelopmentPaneHost {
 }
 struct OwnedPane {
     device: Option<[u8; 32]>,
+    attachment_generation: Option<u64>,
     lease: Lease,
     connected: bool,
     runtime: TerminalRuntime,
@@ -195,6 +196,7 @@ impl DevelopmentPaneHost {
         // No focus grant: OSC 52 and native requests have no eligible client in this slice.
         self.pane = Some(OwnedPane {
             device: Some(device),
+            attachment_generation: None,
             lease,
             connected: true,
             runtime,
@@ -500,6 +502,9 @@ impl OwnedPane {
         } else {
             None
         };
+        if transfer {
+            self.attachment_generation = None;
+        }
         self.device = Some(device);
         self.lease.control = control;
         self.lease.connection = connection;
@@ -1430,6 +1435,143 @@ mod tests {
         };
         assert_eq!(original.session, returned.session);
         await_text(&mut host, 3, returned, "CONTINUED");
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn detached_attachment_fences_lost_claim_replies_and_late_release_preserves_reattachment() {
+        use spaceterm_server::{attachments::Attachment, hierarchy::Mutation};
+        let mut host = SharedWorkspaceHost::new(host());
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::Mutate {
+                sequence: 1,
+                mutation: Mutation::CreateWorkspace {
+                    name: "work".into(),
+                },
+            },
+        );
+        let inventory = shared_inventory(&mut host);
+        let workspace = inventory.workspaces[0].id;
+        let pane = inventory.workspaces[0].tabs[0].root_pane;
+        let original = Attachment {
+            workspace,
+            generation: 1,
+        };
+        let claim = |attachment, explicit| Request::ClaimPane {
+            attachment,
+            pane,
+            claim: AttachmentClaim::Select { explicit },
+            size: size(),
+            style: None,
+        };
+        let Reply::Attached { lease: first } =
+            host.request([1; 32], [2; 32], claim(original, true))
+        else {
+            panic!("claim");
+        };
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::Mutate {
+                sequence: 2,
+                mutation: Mutation::SplitPane {
+                    workspace,
+                    tab: inventory.workspaces[0].root_tab,
+                    source: pane,
+                    axis: spaceterm_server::hierarchy::Axis::Right,
+                },
+            },
+        );
+        let split = shared_inventory(&mut host).workspaces[0].tabs[0].panes[1].id;
+        let Reply::Attached { lease: split_lease } = host.request(
+            [1; 32],
+            [6; 32],
+            Request::ClaimPane {
+                attachment: original,
+                pane: split,
+                claim: AttachmentClaim::Select { explicit: true },
+                size: size(),
+                style: None,
+            },
+        ) else {
+            panic!("second Pane claim");
+        };
+        // The acquisition committed, but the desktop lost its reply before offline detach.
+        host.disconnected([2; 32]);
+        host.disconnected([6; 32]);
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [3; 32],
+                Request::ReleaseAttachment {
+                    attachment: original
+                }
+            ),
+            Reply::Unchanged
+        ));
+        assert!(matches!(
+            host.request([1; 32], [2; 32], claim(original, true)),
+            Reply::Refused(Refusal::Stale)
+        ));
+        assert!(
+            matches!(
+                host.request([1; 32], [6; 32], Request::Poll { lease: split_lease }),
+                Reply::Refused(Refusal::Stale)
+            ),
+            "detach releases every original Pane grant"
+        );
+        let later = Attachment {
+            workspace,
+            generation: 2,
+        };
+        assert!(matches!(
+            host.request([1; 32], [4; 32], claim(later, false)),
+            Reply::Takeover { .. }
+        ));
+        let Reply::Attached { lease: current } = host.request([1; 32], [4; 32], claim(later, true))
+        else {
+            panic!("reattach selects without resuming old control");
+        };
+        assert_eq!(current.session, first.session);
+        assert_ne!(current.control, first.control);
+        // Lost release acknowledgement is safely retried after a later grant exists.
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [5; 32],
+                Request::ReleaseAttachment {
+                    attachment: original
+                }
+            ),
+            Reply::Unchanged
+        ));
+        assert!(matches!(
+            host.request([1; 32], [4; 32], Request::Poll { lease: current }),
+            Reply::Screen(_) | Reply::Unchanged
+        ));
+        let Reply::Attached { lease: other } = host.request(
+            [9; 32],
+            [9; 32],
+            Request::TakeOver {
+                target: current.into(),
+                size: size(),
+                style: None,
+            },
+        ) else {
+            panic!("takeover");
+        };
+        host.request(
+            [1; 32],
+            [5; 32],
+            Request::ReleaseAttachment { attachment: later },
+        );
+        assert!(matches!(
+            host.request([9; 32], [9; 32], Request::Poll { lease: other }),
+            Reply::Screen(_) | Reply::Unchanged
+        ));
+        assert_eq!(shared_inventory(&mut host).workspaces.len(), 1);
         host.shutdown().unwrap();
     }
 

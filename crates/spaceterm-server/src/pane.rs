@@ -73,7 +73,24 @@ pub struct PresentationStyle {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AttachmentClaim {
+    Select { explicit: bool },
+    Start { server: [u8; 32] },
+    TakeOver { target: PaneTarget },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
+    ClaimPane {
+        attachment: crate::attachments::Attachment,
+        pane: crate::hierarchy::Id,
+        claim: AttachmentClaim,
+        size: PaneSize,
+        style: Option<PresentationStyle>,
+    },
+    ReleaseAttachment {
+        attachment: crate::attachments::Attachment,
+    },
     Capabilities,
     Inventory,
     Mutate {
