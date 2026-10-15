@@ -31,6 +31,7 @@ pub struct LocalServer {
     identity: String,
     account: String,
     versions: Vec<u16>,
+    shared_pane: std::sync::Arc<crate::pane::SharedPaneConnection>,
 }
 impl LocalServer {
     /// A single worker owns the journal lock for this exact native device credential and pin.
@@ -67,6 +68,7 @@ impl LocalServer {
             identity: directory_name.to_owned(),
             account,
             versions,
+            shared_pane: std::sync::Arc::default(),
         })
     }
     /// Independent Development desktop identity, retained only in native credential storage.
@@ -114,10 +116,7 @@ impl LocalServer {
             &credential.pin,
             &self.versions,
         )?;
-        let mut connection = crate::pane::PaneConnection {
-            stream,
-            takeover: false,
-        };
+        let mut connection = crate::pane::PaneConnection::new(stream, false);
         // The status-only server predates optional terminal operations and closes after proof.
         status.development_pane = matches!(
             connection.exchange(&crate::pane::Request::Capabilities),
@@ -142,19 +141,12 @@ impl LocalServer {
             &credential.pin,
             &self.versions,
         )?;
-        let mut connection = crate::pane::PaneConnection {
-            stream,
-            takeover: false,
-        };
-        let crate::pane::Reply::Capabilities {
-            development_pane: true,
-            pane_takeover,
-        } = connection.exchange(&crate::pane::Request::Capabilities)?
-        else {
-            return Err(ServerError::Unsupported);
-        };
-        connection.takeover = pane_takeover;
-        Ok(connection)
+        crate::pane::PaneConnection::negotiate(stream)
+    }
+    /// Multiplexes shared inventory and Pane requests on one authenticated transport.
+    /// Clones of this native client share its connection, but independent desktops do not.
+    pub fn connect_shared_pane(&self) -> Result<crate::pane::PaneConnection, ServerError> {
+        self.shared_pane.connect(|| self.connect_pane())
     }
     /// Reads the saved native credential and authenticates an existing server. Never starts it.
     pub fn refresh(&self) -> Result<AuthenticatedStatus, ServerError> {

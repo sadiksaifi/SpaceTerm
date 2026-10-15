@@ -253,20 +253,141 @@ pub trait PaneService: Send {
 
 #[cfg(feature = "client")]
 pub struct PaneConnection {
-    pub(crate) stream: std::os::unix::net::UnixStream,
-    pub(crate) takeover: bool,
+    transport: std::sync::Arc<PaneTransport>,
+}
+#[cfg(feature = "client")]
+struct PaneTransport {
+    stream: std::sync::Mutex<Option<std::os::unix::net::UnixStream>>,
+    takeover: bool,
+}
+/// One transport for a desktop's inventory and Pane workers. It retains no credential.
+#[cfg(feature = "client")]
+#[derive(Default)]
+pub(crate) struct SharedPaneConnection(std::sync::Mutex<std::sync::Weak<PaneTransport>>);
+#[cfg(feature = "client")]
+impl SharedPaneConnection {
+    pub(crate) fn connect(
+        &self,
+        open: impl FnOnce() -> Result<PaneConnection, ServerError>,
+    ) -> Result<PaneConnection, ServerError> {
+        let mut saved = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(transport) = saved.upgrade()
+            && transport
+                .stream
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+        {
+            return Ok(PaneConnection { transport });
+        }
+        // Serialize authentication as well as publication, so simultaneous Pane
+        // workers never briefly allocate a separate host connection each.
+        let connection = open()?;
+        *saved = std::sync::Arc::downgrade(&connection.transport);
+        Ok(connection)
+    }
 }
 #[cfg(feature = "client")]
 impl PaneConnection {
+    pub(crate) fn negotiate(
+        mut stream: std::os::unix::net::UnixStream,
+    ) -> Result<Self, ServerError> {
+        let mut wire = crate::protocol::Wire::terminal(&mut stream)?;
+        wire.write(&Request::Capabilities)?;
+        match wire.read()? {
+            Reply::Capabilities {
+                development_pane: true,
+                pane_takeover,
+            } => Ok(Self::new(stream, pane_takeover)),
+            Reply::Refused(reason) => Err(reason.into()),
+            _ => Err(ServerError::Unsupported),
+        }
+    }
+    pub(crate) fn new(stream: std::os::unix::net::UnixStream, takeover: bool) -> Self {
+        Self {
+            transport: std::sync::Arc::new(PaneTransport {
+                stream: std::sync::Mutex::new(Some(stream)),
+                takeover,
+            }),
+        }
+    }
     pub fn supports_takeover(&self) -> bool {
-        self.takeover
+        self.transport.takeover
     }
     pub fn exchange(&mut self, request: &Request) -> Result<Reply, ServerError> {
-        let mut wire = crate::protocol::Wire::terminal(&mut self.stream)?;
-        wire.write(request)?;
-        match wire.read()? {
+        let mut stream = self
+            .transport
+            .stream
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let result = (|| {
+            let mut wire =
+                crate::protocol::Wire::terminal(stream.as_mut().ok_or(ServerError::NotRunning)?)?;
+            wire.write(request)?;
+            wire.read()
+        })();
+        // An uncertain exchange fences every subscriber of this transport. A new
+        // connection gets a fresh host identity; no request is replayed here.
+        if result.is_err() {
+            *stream = None;
+        }
+        match result? {
             Reply::Refused(reason) => Err(reason.into()),
             reply => Ok(reply),
         }
+    }
+}
+
+#[cfg(all(test, feature = "client"))]
+mod transport_tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn uncertain_exchange_fences_all_subscribers_before_reconnecting() {
+        let shared = SharedPaneConnection::default();
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let mut inventory = shared
+            .connect(|| Ok(PaneConnection::new(client, true)))
+            .unwrap();
+        let mut pane = shared
+            .connect(|| panic!("Pane must reuse inventory transport"))
+            .unwrap();
+        let peer = std::thread::spawn(move || {
+            let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
+            assert!(matches!(
+                wire.read::<Request>().unwrap(),
+                Request::Inventory
+            ));
+            // A lost reply leaves the operation uncertain. The transport never retries it.
+        });
+        assert!(inventory.exchange(&Request::Inventory).is_err());
+        peer.join().unwrap();
+        assert!(matches!(
+            pane.exchange(&Request::Capabilities),
+            Err(ServerError::NotRunning)
+        ));
+
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let mut replacement = shared
+            .connect(|| Ok(PaneConnection::new(client, false)))
+            .unwrap();
+        let peer = std::thread::spawn(move || {
+            let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
+            assert!(matches!(
+                wire.read::<Request>().unwrap(),
+                Request::Capabilities
+            ));
+            wire.write(&Reply::Unchanged).unwrap();
+        });
+        assert!(matches!(
+            replacement.exchange(&Request::Capabilities).unwrap(),
+            Reply::Unchanged
+        ));
+        assert!(matches!(
+            pane.exchange(&Request::Inventory),
+            Err(ServerError::NotRunning)
+        ));
+        peer.join().unwrap();
     }
 }

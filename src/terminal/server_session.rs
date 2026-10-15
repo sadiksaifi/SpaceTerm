@@ -257,7 +257,11 @@ fn present(
     while alive.load(Ordering::Acquire) {
         state.retry.store(false, Ordering::Release);
         let connected = (|| {
-            let mut connection = server.connect_pane()?;
+            let mut connection = if pane_id.is_some() {
+                server.connect_shared_pane()?
+            } else {
+                server.connect_pane()?
+            };
             let intent = create;
             create = false;
             let measured = *size.lock().unwrap_or_else(|e| e.into_inner());

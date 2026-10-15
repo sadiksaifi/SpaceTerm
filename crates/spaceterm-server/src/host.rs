@@ -515,6 +515,122 @@ mod startup_tests {
         );
     }
 
+    #[cfg(feature = "client")]
+    #[test]
+    #[ignore = "runs only as a child of the shared transport admission test"]
+    fn shared_transport_child() {
+        use crate::pane::{PaneService, Reply, Request};
+        struct Service;
+        impl PaneService for Service {
+            fn request(&mut self, _: [u8; 32], _: [u8; 32], request: Request) -> Reply {
+                match request {
+                    Request::Capabilities => Reply::Capabilities {
+                        development_pane: true,
+                        pane_takeover: true,
+                    },
+                    Request::Inventory => Reply::Inventory {
+                        inventory: crate::hierarchy::State::empty().inventory,
+                        next_sequence: 1,
+                    },
+                    Request::SelectPane { pane, .. } => Reply::Restored {
+                        server: [1; 32],
+                        workspace: [2; 32],
+                        tab: pane,
+                        pane,
+                    },
+                    Request::Shutdown => Reply::Closed,
+                    _ => Reply::Unchanged,
+                }
+            }
+            fn disconnected(&mut self, _: [u8; 32]) {}
+            fn shutdown(&mut self) -> Result<(), ServerError> {
+                Ok(())
+            }
+        }
+        let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
+        serve_with_panes(
+            &Paths {
+                data: root.join("d"),
+                runtime: root.join("r"),
+            },
+            Some(Box::new(Service)),
+        )
+        .unwrap();
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn two_desktops_keep_all_supported_panes_without_exhausting_management_admission() {
+        use crate::pane::{PaneConnection, PaneSize, Reply, Request, SharedPaneConnection};
+        for major in [1, 2] {
+            let fixture = Fixture::new();
+            let other = protocol::key(&protocol::random().unwrap()).unwrap();
+            let data = Directory::open(&fixture.paths.data, false).unwrap();
+            let mut record = data.read().unwrap();
+            record.paired.push(protocol::public(&other));
+            data.write(&record).unwrap();
+            let _child = fixture.start_test("host::startup_tests::shared_transport_child", false);
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !fixture.paths.socket().exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "shared transport server did not start"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let first = SharedPaneConnection::default();
+            let second = SharedPaneConnection::default();
+            let open = |device: &ring::signature::Ed25519KeyPair| {
+                let mut stream = UnixStream::connect(fixture.paths.socket()).unwrap();
+                protocol::authenticate_client(&mut stream, device, &fixture.pin, &[major])?;
+                PaneConnection::negotiate(stream)
+            };
+            let mut retained = Vec::new();
+            for (desktop, device) in [(&first, &fixture.device), (&second, &other)] {
+                let mut inventory = desktop.connect(|| open(device)).unwrap();
+                assert!(matches!(
+                    inventory.exchange(&Request::Inventory).unwrap(),
+                    Reply::Inventory { .. }
+                ));
+                retained.push(inventory);
+                for pane in 0..crate::hierarchy::MAX_PANES {
+                    let mut connection = desktop
+                        .connect(|| open(device))
+                        .expect("supported Pane must have transport capacity");
+                    let id = [pane as u8; 32];
+                    let reply = connection
+                        .exchange(&Request::SelectPane {
+                            pane: id,
+                            explicit: false,
+                            size: PaneSize {
+                                columns: 80,
+                                rows: 24,
+                                cell_width: 8,
+                                cell_height: 18,
+                            },
+                            style: None,
+                        })
+                        .unwrap();
+                    assert!(matches!(reply, Reply::Restored { pane, .. } if pane == id));
+                    retained.push(connection);
+                }
+            }
+            // Both complete desktop hierarchies remain subscribed while Settings and
+            // management authenticate independently of their shared transports.
+            let mut management = open(&fixture.device).unwrap();
+            for connection in &mut retained {
+                assert!(matches!(
+                    connection.exchange(&Request::Inventory).unwrap(),
+                    Reply::Inventory { .. }
+                ));
+            }
+            assert!(matches!(
+                management.exchange(&Request::Shutdown).unwrap(),
+                Reply::Closed
+            ));
+        }
+    }
+
     #[test]
     fn shutdown_refuses_an_attach_already_waiting_for_its_frame() {
         use crate::pane::{PaneSize, Reply, Request};
