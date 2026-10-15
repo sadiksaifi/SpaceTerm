@@ -28,7 +28,7 @@ const REAL_SHELL_DEADLINE: Duration = Duration::from_secs(30);
 // Login startup can replace the line editor and discard input sent before the first prompt.
 // Wait for the shell integration's observed command-input boundary, not an arbitrary delay.
 fn wait_for_shell_prompt(
-    session: &TerminalSession,
+    session: &TerminalRuntime,
     events: &async_channel::Receiver<TerminalSessionEvent>,
 ) {
     let deadline = Instant::now() + REAL_SHELL_DEADLINE;
@@ -61,7 +61,7 @@ fn wait_for_shell_prompt(
     }
 }
 
-fn enter_command(session: &TerminalSession, command: &str) {
+fn enter_command(session: &TerminalRuntime, command: &str) {
     assert_eq!(
         session
             .request_paste(command.to_owned().into())
@@ -92,7 +92,7 @@ fn real_shell_output_round_trips_through_the_pty_and_emulator() {
     }
     let startup = ShellStartupDirectory::new();
     let size = test_geometry();
-    let (session, events, _accessibility) = TerminalSession::start(
+    let (session, events, _accessibility) = TerminalRuntime::start(
         native_pty_adapter_factory(),
         test_launch_planner(startup.path()),
         size,
@@ -151,7 +151,7 @@ fn real_shell_exit_command_emits_an_exited_event() {
     }
     let startup = ShellStartupDirectory::new();
     let size = test_geometry();
-    let (session, events, _accessibility) = TerminalSession::start(
+    let (session, events, _accessibility) = TerminalRuntime::start(
         native_pty_adapter_factory(),
         test_launch_planner(startup.path()),
         size,
@@ -191,10 +191,10 @@ fn real_shell_exit_command_emits_an_exited_event() {
     assert_eq!(exit_status, Some(TerminalSessionExit::Success));
 }
 
-struct JoinedRealPtySession(TerminalSession);
+struct JoinedRealPtySession(TerminalRuntime);
 
 impl std::ops::Deref for JoinedRealPtySession {
-    type Target = TerminalSession;
+    type Target = TerminalRuntime;
 
     fn deref(&self) -> &Self::Target {
         &self.0

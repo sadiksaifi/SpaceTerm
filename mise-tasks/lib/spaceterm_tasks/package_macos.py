@@ -76,7 +76,9 @@ def package_bundle(release_tag=None):
         environment["SPACETERM_SPARKLE_DIR"] = str(updater)
         config["macos"]["frameworks"] = [str(updater / "Sparkle.framework")]
     print(f"Building the Apple Silicon {template['CFBundleName']} executable")
-    executable = build_executable("--release", "--locked", "--no-default-features", env=environment)
+    executable = build_executable(
+        "--release", "--locked", "--no-default-features", "--features", "desktop", env=environment
+    )
     binaries = STAGE / "binaries"
     binaries.mkdir()
     shutil.copyfile(executable, binaries / template["CFBundleExecutable"])

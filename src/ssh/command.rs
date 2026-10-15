@@ -477,7 +477,7 @@ impl PartialEq for PreparedSshTerminalSessionChannelCommand {
 impl Eq for PreparedSshTerminalSessionChannelCommand {}
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub(crate) enum PreparedSshTerminalSessionChannelError {
+pub enum PreparedSshTerminalSessionChannelError {
     #[error("the prepared SSH Terminal Session Channel command has already been consumed")]
     AlreadyConsumed,
     #[error("the prepared SSH Terminal Session Channel command is unavailable")]
@@ -1401,6 +1401,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "desktop")]
     #[test]
     fn prepared_pane_command_should_preserve_exact_argv_and_be_single_use() {
         let connection = crate::ssh::testing::SshConnectionFixture::with_environment(
@@ -1431,6 +1432,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "desktop")]
     #[test]
     fn prepared_pane_command_debug_should_redact_command_context() {
         let connection = crate::ssh::testing::SshConnectionFixture::with_environment(

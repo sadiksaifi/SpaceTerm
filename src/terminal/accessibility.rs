@@ -6,7 +6,7 @@ use super::PresentationGeneration;
 use super::emulator::ActiveScreenSnapshot;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) enum AccessibilityScreen {
+pub enum AccessibilityScreen {
     Primary,
     Alternate,
 }
@@ -21,18 +21,18 @@ impl From<ActiveScreenSnapshot> for AccessibilityScreen {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct AccessibilityRowId {
-    pub(crate) screen: AccessibilityScreen,
-    pub(crate) screen_generation: usize,
-    pub(crate) node_serial: u64,
-    pub(crate) page_row: u16,
+pub struct AccessibilityRowId {
+    pub screen: AccessibilityScreen,
+    pub screen_generation: usize,
+    pub node_serial: u64,
+    pub page_row: u16,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct AccessibilityCellRef {
-    pub(crate) row: AccessibilityRowId,
-    pub(crate) row_revision: u64,
-    pub(crate) column: u16,
+pub struct AccessibilityCellRef {
+    pub row: AccessibilityRowId,
+    pub row_revision: u64,
+    pub column: u16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -108,7 +108,7 @@ pub(crate) struct AccessibilityUpdate {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct AccessibilityGeometry {
+pub struct AccessibilityGeometry {
     origin_x: f32,
     origin_y: f32,
     cell_width: f32,
@@ -116,12 +116,7 @@ pub(crate) struct AccessibilityGeometry {
 }
 
 impl AccessibilityGeometry {
-    pub(crate) fn new(
-        origin_x: f32,
-        origin_y: f32,
-        cell_width: f32,
-        line_height: f32,
-    ) -> Option<Self> {
+    pub fn new(origin_x: f32, origin_y: f32, cell_width: f32, line_height: f32) -> Option<Self> {
         (origin_x.is_finite()
             && origin_y.is_finite()
             && cell_width.is_finite()
@@ -138,12 +133,26 @@ impl AccessibilityGeometry {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    not(feature = "desktop"),
+    allow(
+        dead_code,
+        reason = "native accessibility adapters consume notification policy"
+    )
+)]
 pub(crate) enum AccessibilityNotification {
     Value,
     Selection,
     Focus,
 }
 
+#[cfg_attr(
+    not(feature = "desktop"),
+    allow(
+        dead_code,
+        reason = "native accessibility adapters consume notification policy"
+    )
+)]
 impl AccessibilityNotification {
     const fn bit(self) -> u8 {
         match self {
@@ -155,10 +164,17 @@ impl AccessibilityNotification {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[cfg_attr(
+    not(feature = "desktop"),
+    allow(
+        dead_code,
+        reason = "native accessibility adapters consume notification policy"
+    )
+)]
 pub(crate) struct AccessibilityNotifications(u8);
 
 #[cfg_attr(
-    not(target_os = "macos"),
+    any(not(target_os = "macos"), not(feature = "desktop")),
     allow(
         dead_code,
         reason = "only a native accessibility Adapter posts notifications"
@@ -583,37 +599,37 @@ struct RetainedAccessibilityRequest {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct AccessibilitySelectionRequest {
-    pub(crate) generation: PresentationGeneration,
-    pub(crate) content_revision: u64,
-    pub(crate) screen: AccessibilityScreen,
-    pub(crate) range: Range<usize>,
+pub struct AccessibilitySelectionRequest {
+    pub generation: PresentationGeneration,
+    pub content_revision: u64,
+    pub screen: AccessibilityScreen,
+    pub range: Range<usize>,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct TerminalAccessibilityModel {
+pub struct TerminalAccessibilityModel {
     data: Arc<TerminalAccessibilityData>,
 }
 
 /// Read-only projection of a retained terminal row, including its document offsets.
-pub(crate) struct AccessibilityRowView<'a> {
-    pub(crate) id: AccessibilityRowId,
-    pub(crate) revision: u64,
-    pub(crate) soft_wrapped: bool,
-    pub(crate) range: Range<usize>,
-    pub(crate) text: &'a str,
-    pub(crate) len_utf16: usize,
+pub struct AccessibilityRowView<'a> {
+    pub id: AccessibilityRowId,
+    pub revision: u64,
+    pub soft_wrapped: bool,
+    pub range: Range<usize>,
+    pub text: &'a str,
+    pub len_utf16: usize,
     row: &'a AccessibilityRow,
 }
 
-pub(crate) struct AccessibilityCellView<'a> {
-    pub(crate) text: &'a str,
-    pub(crate) utf16: Range<usize>,
-    pub(crate) columns: Range<u16>,
+pub struct AccessibilityCellView<'a> {
+    pub text: &'a str,
+    pub utf16: Range<usize>,
+    pub columns: Range<u16>,
 }
 
 impl<'a> AccessibilityRowView<'a> {
-    pub(crate) fn cells(&self) -> impl Iterator<Item = AccessibilityCellView<'a>> + '_ {
+    pub fn cells(&self) -> impl Iterator<Item = AccessibilityCellView<'a>> + '_ {
         self.row.cells.iter().map(|cell| AccessibilityCellView {
             text: &self.row.text
                 [self.row.utf16_bytes[cell.utf16.start]..self.row.utf16_bytes[cell.utf16.end]],
@@ -624,7 +640,7 @@ impl<'a> AccessibilityRowView<'a> {
 }
 
 impl TerminalAccessibilityModel {
-    pub(crate) fn rows(&self) -> impl Iterator<Item = AccessibilityRowView<'_>> {
+    pub fn rows(&self) -> impl Iterator<Item = AccessibilityRowView<'_>> {
         let document = &self.data.document;
         document
             .blocks
@@ -644,7 +660,7 @@ impl TerminalAccessibilityModel {
             })
     }
 
-    pub(crate) fn row(&self, line: usize) -> Option<AccessibilityRowView<'_>> {
+    pub fn row(&self, line: usize) -> Option<AccessibilityRowView<'_>> {
         let document = &self.data.document;
         let (row, _) = document.row(line)?;
         Some(AccessibilityRowView {
@@ -659,7 +675,7 @@ impl TerminalAccessibilityModel {
     }
 
     /// None means row identities or order changed and the publisher must rebuild topology.
-    pub(crate) fn changed_rows_since(&self, previous: &Self) -> Option<Vec<usize>> {
+    pub fn changed_rows_since(&self, previous: &Self) -> Option<Vec<usize>> {
         let document = &self.data.document;
         let old = &previous.data.document;
         if self.shares_document(previous) {
@@ -675,14 +691,14 @@ impl TerminalAccessibilityModel {
         Some(lines)
     }
 
-    pub(crate) fn visible_lines(&self) -> Range<usize> {
+    pub fn visible_lines(&self) -> Range<usize> {
         self.data.visible_lines.clone()
     }
 
-    pub(crate) fn cursor_cell(&self) -> Option<(usize, u16)> {
+    pub fn cursor_cell(&self) -> Option<(usize, u16)> {
         self.data.cursor_cell
     }
-    pub(crate) fn from_screen(screen: &super::ScreenSnapshot) -> Self {
+    pub fn from_screen(screen: &super::ScreenSnapshot) -> Self {
         let lines = screen
             .rows
             .iter()
@@ -874,19 +890,19 @@ impl TerminalAccessibilityModel {
         }
     }
 
-    pub(crate) fn generation(&self) -> PresentationGeneration {
+    pub fn generation(&self) -> PresentationGeneration {
         self.data.generation
     }
 
-    pub(crate) fn shares_snapshot(&self, other: &Self) -> bool {
+    pub fn shares_snapshot(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.data, &other.data)
     }
 
-    pub(crate) fn shares_document(&self, other: &Self) -> bool {
+    pub fn shares_document(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.data.document, &other.data.document)
     }
 
-    pub(crate) fn active_screen(&self) -> AccessibilityScreen {
+    pub fn active_screen(&self) -> AccessibilityScreen {
         self.data.screen
     }
 
@@ -897,38 +913,38 @@ impl TerminalAccessibilityModel {
             reason = "only a native accessibility Adapter answers text queries"
         )
     )]
-    pub(crate) fn text(&self) -> &str {
+    pub fn text(&self) -> &str {
         self.data.document.text()
     }
 
-    pub(crate) fn len_utf16(&self) -> usize {
+    pub fn len_utf16(&self) -> usize {
         self.data.document.len_utf16
     }
 
-    pub(crate) fn visible_range(&self) -> Range<usize> {
+    pub fn visible_range(&self) -> Range<usize> {
         self.data.visible_range.clone()
     }
 
-    pub(crate) fn selection_range(&self) -> Option<Range<usize>> {
+    pub fn selection_range(&self) -> Option<Range<usize>> {
         self.data.selection.clone()
     }
 
-    pub(crate) fn cursor_range(&self) -> Range<usize> {
+    pub fn cursor_range(&self) -> Range<usize> {
         self.data.cursor.clone()
     }
 
-    pub(crate) fn selected_or_cursor_range(&self) -> Range<usize> {
+    pub fn selected_or_cursor_range(&self) -> Range<usize> {
         self.data
             .selection
             .clone()
             .unwrap_or_else(|| self.data.cursor.clone())
     }
 
-    pub(crate) fn range_for_line(&self, line: usize) -> Option<Range<usize>> {
+    pub fn range_for_line(&self, line: usize) -> Option<Range<usize>> {
         self.data.document.range_for_line(line)
     }
 
-    pub(crate) fn line_for_index(&self, index: usize) -> Option<usize> {
+    pub fn line_for_index(&self, index: usize) -> Option<usize> {
         self.data.document.line_for_index(index)
     }
 
@@ -939,7 +955,7 @@ impl TerminalAccessibilityModel {
             reason = "only a native accessibility Adapter answers text queries"
         )
     )]
-    pub(crate) fn range_for_index(&self, index: usize) -> Option<Range<usize>> {
+    pub fn range_for_index(&self, index: usize) -> Option<Range<usize>> {
         if index >= self.len_utf16() {
             return None;
         }
@@ -954,14 +970,11 @@ impl TerminalAccessibilityModel {
             .or_else(|| (index < self.len_utf16()).then_some(index..index + 1))
     }
 
-    pub(crate) fn text_for_range(&self, range: Range<usize>) -> Option<String> {
+    pub fn text_for_range(&self, range: Range<usize>) -> Option<String> {
         self.data.document.text_for_range(range)
     }
 
-    pub(crate) fn selection_request(
-        &self,
-        range: Range<usize>,
-    ) -> Option<AccessibilitySelectionRequest> {
+    pub fn selection_request(&self, range: Range<usize>) -> Option<AccessibilitySelectionRequest> {
         if range.start > range.end || range.end > self.len_utf16() {
             return None;
         }
@@ -1004,7 +1017,7 @@ impl TerminalAccessibilityModel {
         first.zip(last)
     }
 
-    pub(crate) fn bounds_for_range(
+    pub fn bounds_for_range(
         &self,
         range: Range<usize>,
         geometry: AccessibilityGeometry,
@@ -1081,7 +1094,7 @@ impl TerminalAccessibilityModel {
         ))
     }
 
-    pub(crate) fn index_for_point(
+    pub fn index_for_point(
         &self,
         x: f32,
         y: f32,
@@ -1112,7 +1125,7 @@ impl TerminalAccessibilityModel {
             reason = "only a native accessibility Adapter answers text queries"
         )
     )]
-    pub(crate) fn range_for_point(
+    pub fn range_for_point(
         &self,
         x: f32,
         y: f32,
@@ -1156,6 +1169,10 @@ pub(crate) struct TerminalAccessibilityState {
 }
 
 impl TerminalAccessibilityState {
+    pub(crate) fn reset_presentation(&mut self) {
+        self.latest = None;
+    }
+
     pub(crate) fn apply(
         &mut self,
         update: AccessibilityUpdate,

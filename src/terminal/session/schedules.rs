@@ -142,6 +142,17 @@ pub(super) struct WorkerSchedules {
 }
 
 impl WorkerSchedules {
+    pub(super) fn subscribe(&mut self, now: Instant) {
+        self.metadata_presentation_queued
+            .store(false, Ordering::Release);
+        self.metadata_presentation_pending = false;
+        self.accessibility_continuation.update(false);
+        self.input.accessibility_demand.clear();
+        self.accessibility_presentation = AccessibilityPresentationSchedule::new(now);
+        self.set_presentable(true, now);
+        self.request_presentation();
+    }
+
     pub(super) fn prime_compression(&mut self, activity: CompressionActivity) {
         self.compression.prime(activity);
     }

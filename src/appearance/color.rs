@@ -1,18 +1,18 @@
 use std::ops::RangeInclusive;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Color {
-    pub(crate) r: u8,
-    pub(crate) g: u8,
-    pub(crate) b: u8,
-    pub(crate) a: u8,
+pub struct Color {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
 }
 
 impl Color {
-    pub(crate) const BLACK: Self = Self::rgb(0x000000);
-    pub(crate) const WHITE: Self = Self::rgb(0xffffff);
+    pub const BLACK: Self = Self::rgb(0x000000);
+    pub const WHITE: Self = Self::rgb(0xffffff);
 
-    pub(crate) const fn rgb(hex: u32) -> Self {
+    pub const fn rgb(hex: u32) -> Self {
         Self {
             r: ((hex >> 16) & 0xff) as u8,
             g: ((hex >> 8) & 0xff) as u8,
@@ -21,7 +21,7 @@ impl Color {
         }
     }
 
-    pub(crate) const fn rgba(hex: u32) -> Self {
+    pub const fn rgba(hex: u32) -> Self {
         Self {
             r: ((hex >> 24) & 0xff) as u8,
             g: ((hex >> 16) & 0xff) as u8,
@@ -30,19 +30,19 @@ impl Color {
         }
     }
 
-    pub(crate) const fn from_rgb_components(r: u8, g: u8, b: u8) -> Self {
+    pub const fn from_rgb_components(r: u8, g: u8, b: u8) -> Self {
         Self { r, g, b, a: 0xff }
     }
 
-    pub(crate) const fn rgba_hex(self) -> u32 {
+    pub const fn rgba_hex(self) -> u32 {
         (self.r as u32) << 24 | (self.g as u32) << 16 | (self.b as u32) << 8 | self.a as u32
     }
 
-    pub(crate) const fn is_opaque(self) -> bool {
+    pub const fn is_opaque(self) -> bool {
         self.a == 0xff
     }
 
-    pub(crate) fn canonical_hex(self) -> String {
+    pub fn canonical_hex(self) -> String {
         format!("#{:08x}", self.rgba_hex())
     }
 }
@@ -94,12 +94,12 @@ impl<'de> serde::Deserialize<'de> for Color {
 
 impl Color {
     /// Replace straight alpha without changing color channels.
-    pub(crate) const fn with_alpha(self, alpha: u8) -> Self {
+    pub const fn with_alpha(self, alpha: u8) -> Self {
         Self { a: alpha, ..self }
     }
 
     /// Scale existing alpha, retaining authored translucency.
-    pub(crate) const fn multiply_opacity(self, opacity: u8) -> Self {
+    pub const fn multiply_opacity(self, opacity: u8) -> Self {
         Self {
             a: ((self.a as u16 * opacity as u16 + 127) / 255) as u8,
             ..self
@@ -107,7 +107,7 @@ impl Color {
     }
 
     /// Straight-alpha source-over, including when both layers are translucent.
-    pub(crate) fn source_over(self, destination: Self) -> Self {
+    pub fn source_over(self, destination: Self) -> Self {
         let source_alpha = f64::from(self.a) / 255.0;
         let destination_alpha = f64::from(destination.a) / 255.0;
         let alpha = source_alpha + destination_alpha * (1.0 - source_alpha);
@@ -130,7 +130,7 @@ impl Color {
 
     /// Express this opaque semantic target as the smallest straight-alpha overlay over `base`.
     /// Callers must composite authored alpha into the target first.
-    pub(crate) fn relative_overlay(self, base: Self) -> Self {
+    pub fn relative_overlay(self, base: Self) -> Self {
         let base_channels = [base.r, base.g, base.b].map(f64::from);
         let target_channels = [self.r, self.g, self.b].map(f64::from);
         let alpha = base_channels
@@ -158,7 +158,7 @@ impl Color {
     }
 
     /// Interpolate straight RGBA values for authored surface ramps.
-    pub(crate) fn mix(self, other: Self, amount: f64) -> Self {
+    pub fn mix(self, other: Self, amount: f64) -> Self {
         let amount = amount.clamp(0.0, 1.0);
         let channel =
             |a: u8, b: u8| (f64::from(a) * (1.0 - amount) + f64::from(b) * amount).round() as u8;
@@ -174,7 +174,7 @@ impl Color {
     ///
     /// Channels mix premultiplied by alpha, so fading from or to a transparent paint changes only
     /// its coverage and never passes through a darker color.
-    pub(crate) fn fade(self, other: Self, amount: f64) -> Self {
+    pub fn fade(self, other: Self, amount: f64) -> Self {
         let amount = amount.clamp(0.0, 1.0);
         let coverage = |color: Self| f64::from(color.a) / 255.0;
         let (from, to) = (coverage(self) * (1.0 - amount), coverage(other) * amount);
@@ -196,7 +196,7 @@ impl Color {
     }
 
     /// sRGB contrast of opaque presentation colors. Composite alpha before calling.
-    pub(crate) fn contrast_ratio(self, other: Self) -> f64 {
+    pub fn contrast_ratio(self, other: Self) -> f64 {
         let luminance = |color: Self| {
             let linear = |channel: u8| {
                 let v = f64::from(channel) / 255.0;
@@ -214,7 +214,7 @@ impl Color {
 
     /// Finds the nearest readable luminance while retaining OKLab hue and chroma until the sRGB
     /// gamut boundary forces chroma inward.
-    pub(crate) fn readable_preserving_chroma(
+    pub fn readable_preserving_chroma(
         self,
         backgrounds: &[Self],
         minimum_contrast: f64,
@@ -330,7 +330,7 @@ impl Color {
     }
 
     /// Like [`Self::readable_preserving_chroma`], but never flips polarity or changes opacity.
-    pub(crate) fn readable_preserving_chroma_toward(
+    pub fn readable_preserving_chroma_toward(
         self,
         backgrounds: &[Self],
         minimum_contrast: f64,
@@ -423,13 +423,13 @@ impl Color {
         None
     }
 
-    pub(crate) fn oklab_lightness(self) -> f64 {
+    pub fn oklab_lightness(self) -> f64 {
         self.oklab()[0]
     }
 
     /// Clamps OKLab lightness into `lightness` and chroma to at most `max_chroma`, keeping hue and
     /// alpha. Chroma moves further inward when the sRGB gamut boundary requires it.
-    pub(crate) fn fit_oklab(self, lightness: RangeInclusive<f64>, max_chroma: f64) -> Self {
+    pub fn fit_oklab(self, lightness: RangeInclusive<f64>, max_chroma: f64) -> Self {
         let [start_l, start_a, start_b] = self.oklab();
         let fitted_l = start_l.clamp(*lightness.start(), *lightness.end());
         let chroma = start_a.hypot(start_b);

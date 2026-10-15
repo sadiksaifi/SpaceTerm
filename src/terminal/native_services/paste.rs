@@ -15,19 +15,19 @@ const STRIPPED_CONTROLS: [u8; 16] = [
 ];
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct PasteConfirmationId(u64);
+pub struct PasteConfirmationId(u64);
 
 impl PasteConfirmationId {
-    pub(crate) const fn new(value: u64) -> Self {
+    pub const fn new(value: u64) -> Self {
         Self(value)
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct PasteRisk {
-    pub(crate) multiline: bool,
-    pub(crate) control_bytes: bool,
-    pub(crate) closing_fence: bool,
+pub struct PasteRisk {
+    pub multiline: bool,
+    pub control_bytes: bool,
+    pub closing_fence: bool,
 }
 
 impl PasteRisk {
@@ -37,22 +37,22 @@ impl PasteRisk {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct PasteConfirmation {
-    pub(crate) id: PasteConfirmationId,
-    pub(crate) byte_len: usize,
-    pub(crate) line_count: usize,
-    pub(crate) risk: PasteRisk,
+pub struct PasteConfirmation {
+    pub id: PasteConfirmationId,
+    pub byte_len: usize,
+    pub line_count: usize,
+    pub risk: PasteRisk,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PasteRequestOutcome {
+pub enum PasteRequestOutcome {
     Written,
     ConfirmationRequired(PasteConfirmation),
     Rejected(PasteRejection),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PasteRejection {
+pub enum PasteRejection {
     Empty,
     TooLarge { limit: usize },
     ConfirmationPending,
@@ -77,13 +77,13 @@ impl std::fmt::Display for PasteRejection {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PasteDecision {
+pub enum PasteDecision {
     Confirm,
     Cancel,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PasteResolution {
+pub enum PasteResolution {
     Written,
     Cancelled,
     Stale,
@@ -233,18 +233,18 @@ impl PasteConfirmationSchedule {
 }
 
 #[derive(Clone, Eq, PartialEq)]
-pub(crate) struct PastePayload {
+pub struct PastePayload {
     pub(super) text: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PasteIntakeError {
+pub enum PasteIntakeError {
     TerminalUnfocused,
     InvalidFiles(&'static str),
 }
 
 impl PastePayload {
-    pub(crate) fn service_text(
+    pub fn service_text(
         text: impl Into<String>,
         terminal_input_focused: bool,
     ) -> Result<Self, PasteIntakeError> {
@@ -267,12 +267,12 @@ impl PastePayload {
             .map(|text| Some(Self { text }))
     }
 
-    pub(crate) fn text(&self) -> &str {
+    pub fn text(&self) -> &str {
         &self.text
     }
 
     #[cfg(test)]
-    pub(crate) fn into_text(self) -> String {
+    pub fn into_text(self) -> String {
         self.text
     }
 }

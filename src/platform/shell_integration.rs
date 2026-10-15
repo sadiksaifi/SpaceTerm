@@ -2,13 +2,13 @@ use std::ffi::OsString;
 use std::path::Path;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ShellIntegrationMode {
+pub enum ShellIntegrationMode {
     Automatic,
     Disabled,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ShellKind {
+pub enum ShellKind {
     Bash,
     Elvish,
     Fish,
@@ -17,7 +17,7 @@ pub(crate) enum ShellKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ShellIntegrationStatus {
+pub enum ShellIntegrationStatus {
     Applied(ShellKind),
     Disabled,
     Unsupported,
@@ -25,30 +25,30 @@ pub(crate) enum ShellIntegrationStatus {
 }
 
 #[derive(Clone, Default, Eq, PartialEq)]
-pub(crate) struct ShellEnvironment {
-    pub(crate) xdg_data_dirs: Option<OsString>,
-    pub(crate) zdotdir: Option<OsString>,
-    pub(crate) env: Option<OsString>,
+pub struct ShellEnvironment {
+    pub xdg_data_dirs: Option<OsString>,
+    pub zdotdir: Option<OsString>,
+    pub env: Option<OsString>,
 }
 
 #[derive(Clone, Eq, PartialEq)]
-pub(crate) struct ShellIntegrationPlan {
-    pub(crate) status: ShellIntegrationStatus,
+pub struct ShellIntegrationPlan {
+    pub status: ShellIntegrationStatus,
     pub(super) arguments: Vec<OsString>,
     pub(super) environment: Vec<(OsString, OsString)>,
 }
 
 /// Captured compatibility and search-path facts, selected independently of the host at planning.
 #[derive(Clone)]
-pub(crate) struct ShellIntegrationPolicy {
-    pub(crate) supported: bool,
-    pub(crate) path_list_separator: char,
-    pub(crate) fallback_xdg_data_dirs: OsString,
+pub struct ShellIntegrationPolicy {
+    pub supported: bool,
+    pub path_list_separator: char,
+    pub fallback_xdg_data_dirs: OsString,
 }
 
 impl ShellIntegrationPolicy {
     #[cfg(test)]
-    pub(crate) fn fixture() -> Self {
+    pub fn fixture() -> Self {
         Self {
             supported: true,
             path_list_separator: ':',
@@ -77,7 +77,7 @@ fn prepend_path(
     Some(value)
 }
 
-pub(crate) fn plan_shell_integration(
+pub fn plan_shell_integration(
     shell: &Path,
     resource_root: &Path,
     mode: ShellIntegrationMode,
@@ -160,7 +160,7 @@ pub(crate) fn plan_shell_integration(
     }
 }
 
-pub(crate) fn configured_mode(value: Option<&std::ffi::OsStr>) -> ShellIntegrationMode {
+pub fn configured_mode(value: Option<&std::ffi::OsStr>) -> ShellIntegrationMode {
     match value.and_then(std::ffi::OsStr::to_str) {
         Some(value)
             if matches!(

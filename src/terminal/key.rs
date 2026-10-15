@@ -1,58 +1,58 @@
-pub(crate) use libghostty_vt::key::Key as PhysicalKey;
+pub use libghostty_vt::key::Key as PhysicalKey;
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct InputModifiers {
-    pub(crate) shift: bool,
-    pub(crate) alt: bool,
-    pub(crate) control: bool,
-    pub(crate) platform: bool,
-    pub(crate) caps_lock: bool,
-    pub(crate) num_lock: bool,
-    pub(crate) shift_right: bool,
-    pub(crate) alt_right: bool,
-    pub(crate) control_right: bool,
-    pub(crate) platform_right: bool,
+pub struct InputModifiers {
+    pub shift: bool,
+    pub alt: bool,
+    pub control: bool,
+    pub platform: bool,
+    pub caps_lock: bool,
+    pub num_lock: bool,
+    pub shift_right: bool,
+    pub alt_right: bool,
+    pub control_right: bool,
+    pub platform_right: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum KeyAction {
+pub enum KeyAction {
     Press,
     Repeat,
     Release,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum OptionAsAltPolicy {
+pub enum OptionAsAltPolicy {
     None,
     #[default]
     Both,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct KeyInput {
-    pub(crate) action: KeyAction,
-    pub(crate) physical_key: PhysicalKey,
-    pub(crate) native_key_code: Option<u16>,
-    pub(crate) logical_key: String,
-    pub(crate) text: Option<String>,
-    pub(crate) unshifted_codepoint: Option<char>,
-    pub(crate) modifiers: InputModifiers,
-    pub(crate) consumed_modifiers: InputModifiers,
-    pub(crate) option_as_alt: OptionAsAltPolicy,
+pub struct KeyInput {
+    pub action: KeyAction,
+    pub physical_key: PhysicalKey,
+    pub native_key_code: Option<u16>,
+    pub logical_key: String,
+    pub text: Option<String>,
+    pub unshifted_codepoint: Option<char>,
+    pub modifiers: InputModifiers,
+    pub consumed_modifiers: InputModifiers,
+    pub option_as_alt: OptionAsAltPolicy,
 }
 
 impl KeyInput {
     const TEXT_INPUT_LOGICAL_KEY: &'static str = "text-input";
     const INPUT_METHOD_LOGICAL_KEY: &'static str = "input-method-commit";
 
-    pub(crate) fn input_method_commit(text: impl Into<String>) -> Self {
+    pub fn input_method_commit(text: impl Into<String>) -> Self {
         let mut input = Self::text_input(text);
         input.logical_key = Self::INPUT_METHOD_LOGICAL_KEY.to_owned();
         input
     }
 
-    pub(crate) fn text_input(text: impl Into<String>) -> Self {
+    pub fn text_input(text: impl Into<String>) -> Self {
         Self {
             action: KeyAction::Press,
             physical_key: PhysicalKey::Unidentified,
@@ -66,7 +66,7 @@ impl KeyInput {
         }
     }
 
-    pub(crate) fn is_text_input(&self) -> bool {
+    pub fn is_text_input(&self) -> bool {
         self.action == KeyAction::Press
             && self.physical_key == PhysicalKey::Unidentified
             && self.native_key_code.is_none()
@@ -74,7 +74,7 @@ impl KeyInput {
             && self.text.is_some()
     }
 
-    pub(crate) fn is_input_method_commit(&self) -> bool {
+    pub fn is_input_method_commit(&self) -> bool {
         self.action == KeyAction::Press
             && self.physical_key == PhysicalKey::Unidentified
             && self.native_key_code.is_none()
@@ -82,7 +82,7 @@ impl KeyInput {
             && self.text.is_some()
     }
 
-    pub(crate) fn is_modifier_key(&self) -> bool {
+    pub fn is_modifier_key(&self) -> bool {
         matches!(
             self.physical_key,
             PhysicalKey::AltLeft
@@ -100,7 +100,7 @@ impl KeyInput {
         )
     }
 
-    pub(crate) fn validate(&self) -> Result<(), KeyInputError> {
+    pub fn validate(&self) -> Result<(), KeyInputError> {
         if self.physical_key == PhysicalKey::Unidentified
             && !self.is_text_input()
             && !self.is_input_method_commit()
@@ -116,7 +116,7 @@ impl KeyInput {
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
-pub(crate) enum KeyInputError {
+pub enum KeyInputError {
     #[error("unsupported terminal key {logical_key:?} with native key code {native_key_code:?}")]
     UnsupportedKey {
         native_key_code: Option<u16>,

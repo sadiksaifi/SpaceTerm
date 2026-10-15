@@ -40,7 +40,9 @@ fn main() {
         println!("cargo:rustc-cfg=spaceterm_release");
     }
 
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+    if env::var_os("CARGO_FEATURE_DESKTOP").is_none()
+        || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
+    {
         return;
     }
     assert_eq!(

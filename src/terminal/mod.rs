@@ -1,35 +1,76 @@
-mod accessibility;
+#![cfg_attr(
+    not(feature = "desktop"),
+    allow(
+        unused_imports,
+        reason = "desktop consumers use the complete terminal reexport set"
+    )
+)]
+
+pub(crate) mod accessibility;
+#[cfg_attr(
+    not(feature = "desktop"),
+    allow(
+        dead_code,
+        reason = "desktop presentation policy shares runtime types and tests"
+    )
+)]
 pub(crate) mod attention;
+#[cfg(feature = "desktop")]
 pub(crate) mod attention_notification;
+#[cfg(feature = "desktop")]
 pub(crate) mod attention_runtime;
-#[cfg(test)]
-mod conformance;
-mod emulator;
-mod failure;
+#[cfg(all(test, feature = "desktop"))]
+pub(crate) mod conformance;
+pub(crate) mod emulator;
+#[cfg_attr(
+    not(feature = "desktop"),
+    allow(
+        dead_code,
+        reason = "desktop presentation policy shares runtime types and tests"
+    )
+)]
+pub(crate) mod failure;
+#[cfg_attr(
+    not(feature = "desktop"),
+    allow(
+        dead_code,
+        reason = "desktop presentation policy shares runtime types and tests"
+    )
+)]
 pub(crate) mod secure_input;
+#[cfg(feature = "desktop")]
 pub(crate) mod wheel_phase;
 #[cfg(test)]
 pub(crate) use native_services::file_insertion;
-mod find;
+pub(crate) mod find;
 pub(crate) mod geometry;
-mod graphics;
+pub(crate) mod graphics;
 pub(crate) use native_services::hyperlink;
 pub(crate) mod identity;
 pub(crate) mod key;
+#[cfg(feature = "desktop")]
 pub(crate) mod key_input;
-mod keyboard_protocol;
+pub(crate) mod keyboard_protocol;
 pub(crate) mod metadata;
+#[cfg_attr(
+    not(feature = "desktop"),
+    allow(
+        dead_code,
+        reason = "desktop presentation policy shares runtime types and tests"
+    )
+)]
 pub(crate) mod native_services;
 pub(crate) mod title;
 pub(crate) use native_services::osc52;
 pub(crate) use native_services::paste;
 pub(crate) mod permission_request;
 pub(crate) use native_services::selection;
-mod pointer_input;
-mod session;
+pub(crate) mod pointer_input;
+pub(crate) mod session;
 #[cfg(test)]
 pub(crate) mod testing;
-mod workspace_terminal_session_factory;
+#[cfg(feature = "desktop")]
+pub(crate) mod workspace_terminal_session_factory;
 
 #[cfg(test)]
 pub(crate) use accessibility::{
@@ -63,7 +104,9 @@ pub(crate) use graphics::{GraphicsSnapshot, ImageKey, ImagePlacementSnapshot, Im
 pub(crate) use hyperlink::HyperlinkTarget;
 pub(crate) use key::{InputModifiers, KeyAction, KeyInput, OptionAsAltPolicy, PhysicalKey};
 #[cfg(all(test, feature = "native-tests"))]
+#[cfg(feature = "desktop")]
 pub(crate) use key_input::assert_common_adapter_contract;
+#[cfg(feature = "desktop")]
 pub(crate) use key_input::{
     GpuiTerminalKeyInputAdapter, GpuiTerminalKeyInputAdapterFactory, KeyTranslation,
     TerminalKeyInputAdapter, TerminalKeyInputAdapterFactory, TerminalKeyInputEventKind,
@@ -91,13 +134,20 @@ pub(crate) use session::{
     NativeTerminalSessionFactory, SelectionCopyError, StartedTerminalSession,
     TerminalAppearanceUpdate, TerminalSessionEvent, TerminalSessionFactory, TerminalSessionHandle,
 };
+#[cfg(feature = "desktop")]
 pub(crate) use workspace_terminal_session_factory::{
     PreparedWorkspaceTerminalLaunch, TerminalSessionChannelProvider,
-    TerminalSessionChannelRevalidationError, TerminalSessionChannelUnavailable,
-    WorkspaceTerminalSessionFactory,
+    TerminalSessionChannelRevalidationError, WorkspaceTerminalSessionFactory,
 };
 
 pub(crate) use pointer_input::{
     PointerButton, PointerInput, PointerPhase, ShiftSelectionPolicy, SurfacePosition, WheelInput,
     WheelPhase,
 };
+
+#[derive(Clone, Copy, Debug, thiserror::Error, Eq, PartialEq)]
+#[error("the Terminal Session Channel is unavailable")]
+/// A content-free failure to reserve one Terminal Session Channel.
+///
+/// No hierarchy mutation may occur after this error and before a fresh revalidation succeeds.
+pub(crate) struct TerminalSessionChannelUnavailable;

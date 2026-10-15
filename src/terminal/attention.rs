@@ -4,7 +4,7 @@ const BELL_RATE_LIMIT: Duration = Duration::from_millis(100);
 const DOCK_RATE_LIMIT: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AttentionEvent {
+pub enum AttentionEvent {
     Bell,
     CommandFinished {
         exit_status: Option<i32>,

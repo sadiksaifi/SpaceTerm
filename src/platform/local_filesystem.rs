@@ -13,7 +13,7 @@ use thiserror::Error;
 use crate::domain::ValidatedLocalDirectory;
 
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub(crate) enum LocalFilesystemError {
+pub enum LocalFilesystemError {
     #[error("the path is not absolute")]
     NotAbsolute,
     #[error("the path is malformed")]
@@ -60,7 +60,7 @@ enum IdentityValue {
 
 /// Equality retains the object, so removal cannot recycle its identity into a successor.
 #[derive(Clone)]
-pub(crate) struct LocalObjectIdentity(IdentityValue, Option<Arc<IdentityPermit>>);
+pub struct LocalObjectIdentity(IdentityValue, Option<Arc<IdentityPermit>>);
 
 impl PartialEq for LocalObjectIdentity {
     fn eq(&self, other: &Self) -> bool {
@@ -117,46 +117,46 @@ impl LocalObjectIdentity {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct LocalDirectoryIdentity(LocalObjectIdentity);
+pub struct LocalDirectoryIdentity(LocalObjectIdentity);
 
 impl LocalDirectoryIdentity {
     /// An unavailable startup directory carries no filesystem authority.
-    pub(crate) fn unavailable() -> Self {
+    pub fn unavailable() -> Self {
         Self(LocalObjectIdentity(IdentityValue::Unavailable, None))
     }
 
     #[cfg(test)]
-    pub(crate) fn for_test(label: u64) -> Self {
+    pub fn for_test(label: u64) -> Self {
         Self(LocalObjectIdentity(IdentityValue::Fixture(label), None))
     }
 
     #[cfg(test)]
-    pub(crate) fn is_synthetic(&self) -> bool {
+    pub fn is_synthetic(&self) -> bool {
         matches!(self.0.0, IdentityValue::Fixture(0))
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum LocalObjectKind {
+pub enum LocalObjectKind {
     Directory,
     File,
     Other,
 }
 
-pub(crate) struct LocalIdentityObservation {
-    pub(crate) identity: LocalObjectIdentity,
-    pub(crate) kind: LocalObjectKind,
+pub struct LocalIdentityObservation {
+    pub identity: LocalObjectIdentity,
+    pub kind: LocalObjectKind,
 }
 
 /// The sole irreducible operation: capture the identity and type of one retained object.
 /// Implementations must not read file contents or block opening a special file.
-pub(crate) trait LocalIdentitySource: Send + Sync {
+pub trait LocalIdentitySource: Send + Sync {
     fn identify(&self, path: &Path) -> Result<LocalIdentityObservation, LocalFilesystemError>;
 }
 
 /// Whether a path can take a new directory.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum NewDirectoryTarget {
+pub enum NewDirectoryTarget {
     /// Nothing is at the path, or an empty directory is.
     Free,
     /// A file, a link, or a directory with entries is at the path.
@@ -164,7 +164,7 @@ pub(crate) enum NewDirectoryTarget {
 }
 
 #[derive(Clone)]
-pub(crate) struct LocalFilesystemAuthority {
+pub struct LocalFilesystemAuthority {
     paths: crate::local_path::LocalPathSemantics,
     identity: Arc<dyn LocalIdentitySource>,
     handles: Arc<IdentityBudget>,
@@ -172,7 +172,7 @@ pub(crate) struct LocalFilesystemAuthority {
 }
 
 impl LocalFilesystemAuthority {
-    pub(crate) fn new(
+    pub fn new(
         paths: crate::local_path::LocalPathSemantics,
         identity: Arc<dyn LocalIdentitySource>,
     ) -> Self {
@@ -184,11 +184,11 @@ impl LocalFilesystemAuthority {
         }
     }
 
-    pub(crate) fn path_semantics(&self) -> crate::local_path::LocalPathSemantics {
+    pub fn path_semantics(&self) -> crate::local_path::LocalPathSemantics {
         self.paths
     }
 
-    pub(crate) fn validate_directory(
+    pub fn validate_directory(
         &self,
         path: &Path,
     ) -> Result<ValidatedLocalDirectory, LocalFilesystemError> {
@@ -208,7 +208,7 @@ impl LocalFilesystemAuthority {
         ))
     }
 
-    pub(crate) fn revalidate_directory(
+    pub fn revalidate_directory(
         &self,
         directory: &ValidatedLocalDirectory,
     ) -> Result<ValidatedLocalDirectory, LocalFilesystemError> {
@@ -220,13 +220,13 @@ impl LocalFilesystemAuthority {
     }
 
     /// Whether anything, of any kind, is at `path`. A symbolic link counts without being followed.
-    pub(crate) fn has_entry(&self, path: &Path) -> bool {
+    pub fn has_entry(&self, path: &Path) -> bool {
         validate_absolute_path(self.paths, path).is_ok() && fs::symlink_metadata(path).is_ok()
     }
 
     /// Whether `path` lies inside `root` on disk, following symbolic links in either, so a
     /// directory chosen through a link still belongs to the directory it resolves into.
-    pub(crate) fn physically_contains(&self, root: &Path, path: &Path) -> bool {
+    pub fn physically_contains(&self, root: &Path, path: &Path) -> bool {
         if validate_absolute_path(self.paths, root).is_err()
             || validate_absolute_path(self.paths, path).is_err()
         {
@@ -240,7 +240,7 @@ impl LocalFilesystemAuthority {
 
     /// Lists the names of `directory`'s child directories, following symbolic links, and stops
     /// after `limit` names. Names that are not valid UTF-8 are omitted.
-    pub(crate) fn list_child_directories(
+    pub fn list_child_directories(
         &self,
         directory: &Path,
         limit: usize,
@@ -279,7 +279,7 @@ impl LocalFilesystemAuthority {
     }
 
     /// Succeeds when `path` names a readable directory and otherwise classifies why not.
-    pub(crate) fn probe_directory(&self, path: &Path) -> Result<(), LocalFilesystemError> {
+    pub fn probe_directory(&self, path: &Path) -> Result<(), LocalFilesystemError> {
         validate_absolute_path(self.paths, path)?;
         if !fs::metadata(path).map_err(classify_io_error)?.is_dir() {
             return Err(LocalFilesystemError::NotDirectory);
@@ -288,7 +288,7 @@ impl LocalFilesystemAuthority {
     }
 
     /// Whether a new directory may go at `path`: nothing is there, or an empty directory is.
-    pub(crate) fn probe_new_directory(
+    pub fn probe_new_directory(
         &self,
         path: &Path,
     ) -> Result<NewDirectoryTarget, LocalFilesystemError> {
@@ -312,7 +312,7 @@ impl LocalFilesystemAuthority {
         })
     }
 
-    pub(crate) fn create_directory_all(&self, path: &Path) -> Result<(), LocalFilesystemError> {
+    pub fn create_directory_all(&self, path: &Path) -> Result<(), LocalFilesystemError> {
         validate_absolute_path(self.paths, path)?;
         fs::create_dir_all(path).map_err(classify_io_error)
     }
@@ -334,7 +334,7 @@ impl LocalFilesystemAuthority {
         Ok(observation.identity)
     }
 
-    pub(crate) fn local_file(&self, value: &str, directory: &Path) -> Option<ValidatedLocalFile> {
+    pub fn local_file(&self, value: &str, directory: &Path) -> Option<ValidatedLocalFile> {
         valid_file_text(value).then_some(())?;
         let path = Path::new(value);
         let selected = if self.paths.is_absolute(path) {
@@ -361,10 +361,10 @@ impl LocalFilesystemAuthority {
 }
 
 /// One bounded level of a local directory's child directory names.
-pub(crate) struct LocalChildDirectories {
-    pub(crate) names: Vec<String>,
+pub struct LocalChildDirectories {
+    pub names: Vec<String>,
     /// Whether more child directories exist than were listed.
-    pub(crate) truncated: bool,
+    pub truncated: bool,
 }
 
 impl fmt::Debug for LocalChildDirectories {
@@ -403,7 +403,7 @@ struct LocalFileState {
 }
 
 #[derive(Clone)]
-pub(crate) struct ValidatedLocalFile(Arc<LocalFileState>);
+pub struct ValidatedLocalFile(Arc<LocalFileState>);
 
 impl fmt::Debug for ValidatedLocalFile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -421,14 +421,14 @@ impl PartialEq for ValidatedLocalFile {
 impl Eq for ValidatedLocalFile {}
 
 impl ValidatedLocalFile {
-    pub(crate) fn path_semantics(&self) -> crate::local_path::LocalPathSemantics {
+    pub fn path_semantics(&self) -> crate::local_path::LocalPathSemantics {
         self.0.authority.paths
     }
-    pub(crate) fn canonical_path(&self) -> &Path {
+    pub fn canonical_path(&self) -> &Path {
         &self.0.canonical
     }
 
-    pub(crate) fn revalidated_path(&self) -> Option<PathBuf> {
+    pub fn revalidated_path(&self) -> Option<PathBuf> {
         let state = &self.0;
         let selected = state
             .authority
@@ -491,6 +491,10 @@ impl LocalFileEmissionRegistry {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    not(feature = "desktop"),
+    allow(dead_code, reason = "desktop adapter tests reuse filesystem fixtures")
+)]
 mod tests;
 
 #[cfg(all(

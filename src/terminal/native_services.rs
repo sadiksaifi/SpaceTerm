@@ -1,20 +1,34 @@
 //! Native Terminal Services owns portable clipboard, insertion, contextual-action,
 //! preview and Services request policy. Application composition injects each
 //! irreducible capability independently; this value is wiring, not a platform API.
+#[cfg_attr(
+    not(feature = "desktop"),
+    allow(
+        unused_imports,
+        reason = "desktop adapters report paste intake failures"
+    )
+)]
 pub(crate) use paste::{PasteIntakeError, PastePayload};
 mod local_authority;
 use local_authority::LocalFileAccess;
+#[cfg(feature = "desktop")]
 pub(crate) mod clipboard;
 pub(crate) mod file_insertion;
+#[cfg(feature = "desktop")]
 pub(crate) mod file_preview;
 pub(crate) mod hyperlink;
 pub(crate) mod osc52;
 pub(crate) mod paste;
 pub(crate) mod selection;
+#[cfg(feature = "desktop")]
 pub(crate) mod services;
+#[cfg(feature = "desktop")]
+pub(crate) mod session_clipboard;
 #[cfg(test)]
+#[cfg(feature = "desktop")]
 pub(crate) mod testing;
 
+#[cfg(feature = "desktop")]
 #[derive(Clone)]
 pub(crate) struct NativeServiceAdapters {
     pub(crate) text_clipboard: std::rc::Rc<dyn clipboard::TextClipboard>,

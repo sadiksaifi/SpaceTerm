@@ -1,10 +1,14 @@
 //! Linux atomic rename primitives for the shared POSIX secure filesystem and the updater.
 
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
+#[cfg(feature = "desktop")]
+use std::ffi::CString;
 use std::fs::File;
 use std::io;
 use std::os::fd::AsRawFd;
+#[cfg(feature = "desktop")]
 use std::os::unix::ffi::OsStrExt as _;
+#[cfg(feature = "desktop")]
 use std::path::Path;
 
 pub(super) fn exchange_at(directory: &File, first: &CStr, second: &CStr) -> io::Result<()> {
@@ -16,6 +20,7 @@ pub(super) fn rename_noreplace_at(directory: &File, from: &CStr, to: &CStr) -> i
 }
 
 /// Exchanges two entries on one filesystem, which may sit in different directories.
+#[cfg(feature = "desktop")]
 pub(super) fn exchange_paths(first: &Path, second: &Path) -> io::Result<()> {
     let path = |path: &Path| {
         CString::new(path.as_os_str().as_bytes())

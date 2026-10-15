@@ -10,16 +10,16 @@ use crate::terminal::metadata::TerminalLocalFileCapabilities;
 
 pub(crate) const MAX_LINK_BYTES: usize = 4096;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum HyperlinkKind {
+pub enum HyperlinkKind {
     Url,
     LocalPath,
 }
 
 #[derive(Clone, Eq, PartialEq)]
-pub(crate) struct HyperlinkTarget {
-    pub(crate) identity: u64,
-    pub(crate) kind: HyperlinkKind,
-    pub(crate) value: String,
+pub struct HyperlinkTarget {
+    pub identity: u64,
+    pub kind: HyperlinkKind,
+    pub value: String,
     pub(super) local_file: Option<ValidatedLocalFile>,
 }
 
@@ -32,11 +32,11 @@ impl fmt::Debug for HyperlinkTarget {
 }
 
 impl HyperlinkTarget {
-    pub(crate) fn is_available(&self, capabilities: TerminalLocalFileCapabilities) -> bool {
+    pub fn is_available(&self, capabilities: TerminalLocalFileCapabilities) -> bool {
         self.kind == HyperlinkKind::Url || LocalFileAccess::authorize(capabilities).is_some()
     }
 
-    pub(crate) fn url(value: &str) -> Option<Self> {
+    pub fn url(value: &str) -> Option<Self> {
         valid_text(value)
             .then(|| {
                 value
@@ -49,7 +49,7 @@ impl HyperlinkTarget {
     }
 
     #[cfg(test)]
-    pub(crate) fn osc8(
+    pub fn osc8(
         value: &str,
         trusted_directory: &Path,
         local_hostname: Option<&str>,
@@ -64,7 +64,7 @@ impl HyperlinkTarget {
         )
     }
 
-    pub(crate) fn resolve_osc8(
+    pub fn resolve_osc8(
         value: &str,
         trusted_directory: &Path,
         local_hostname: Option<&str>,
@@ -95,7 +95,7 @@ impl HyperlinkTarget {
         }
     }
 
-    pub(crate) fn activation_url(
+    pub fn activation_url(
         &self,
         local_file_capabilities: TerminalLocalFileCapabilities,
     ) -> Option<String> {
@@ -118,7 +118,7 @@ impl HyperlinkTarget {
     /// Returns the canonical file URI immediately after construction. Callers
     /// must not retain this as proof that the filesystem entry is still safe.
     #[cfg(test)]
-    pub(crate) fn canonical_file_url(&self) -> Option<String> {
+    pub fn canonical_file_url(&self) -> Option<String> {
         (self.kind == HyperlinkKind::LocalPath).then(|| {
             self.local_file
                 .as_ref()
@@ -145,7 +145,7 @@ impl HyperlinkTarget {
         LocalFileAccess::authorize(local_file_capabilities)?.restore(metadata, registry)
     }
 
-    pub(crate) fn revalidated_local_path(
+    pub fn revalidated_local_path(
         &self,
         local_file_capabilities: TerminalLocalFileCapabilities,
     ) -> Option<PathBuf> {

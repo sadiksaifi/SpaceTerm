@@ -3,17 +3,23 @@
 pub(crate) mod prompt;
 
 use crate::platform::app_paths::AppPaths;
+#[cfg(feature = "desktop")]
 use crate::ui::askpass_dialog::GpuiAskPassPresenter;
+#[cfg(feature = "desktop")]
 use gpui::{App, AppContext, Window};
+#[cfg(feature = "desktop")]
 use std::cell::RefCell;
 use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
+#[cfg(feature = "desktop")]
 use std::rc::Rc;
+#[cfg(feature = "desktop")]
+use std::sync::atomic::AtomicU64;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, Ordering},
     mpsc,
 };
 use std::thread::{self, JoinHandle};
@@ -607,11 +613,13 @@ enum AskPassUiCommand {
     Cancel { owner: u64 },
 }
 
+#[cfg(feature = "desktop")]
 pub(super) struct GpuiAskPassBridge {
     commands: async_channel::Sender<AskPassUiCommand>,
     next_owner: Arc<AtomicU64>,
 }
 
+#[cfg(feature = "desktop")]
 impl GpuiAskPassBridge {
     pub(super) fn new(window: &Window, cx: &mut App) -> Self {
         let presenter = cx.new(|_| GpuiAskPassPresenter::default());
@@ -782,6 +790,7 @@ fn enqueue_cancel_without_blocking(commands: async_channel::Sender<AskPassUiComm
     }
 }
 
+#[cfg(feature = "desktop")]
 fn map_presentation_result(result: prompt::AskPassResult) -> AskPassProtocolReply {
     match result {
         prompt::AskPassResult::Secret(secret) => AskPassProtocolReply::Secret(secret),
@@ -795,6 +804,7 @@ fn map_presentation_result(result: prompt::AskPassResult) -> AskPassProtocolRepl
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct AskPassUnavailable;
+#[cfg(feature = "desktop")]
 pub(crate) trait AskPassWindowFactory: Send + Sync {
     fn create(
         &self,
@@ -919,12 +929,14 @@ impl AskPassEnvironment {
 }
 
 /// Portable per-window factory for isolated AskPass attempts.
+#[cfg(feature = "desktop")]
 pub(crate) struct GpuiAskPassBrokerFactory {
     helper_path: PathBuf,
     bridge: GpuiAskPassBridge,
     local_ipc: Arc<dyn AskPassLocalIpc>,
 }
 
+#[cfg(feature = "desktop")]
 impl GpuiAskPassBrokerFactory {
     pub(crate) fn new(
         window: &Window,
@@ -943,6 +955,7 @@ impl GpuiAskPassBrokerFactory {
     }
 }
 
+#[cfg(feature = "desktop")]
 impl AskPassAttemptFactory for GpuiAskPassBrokerFactory {
     fn start_attempt(&self, paths: &AppPaths) -> Result<AskPassAttempt, AskPassUnavailable> {
         start_attempt_with_presenter(

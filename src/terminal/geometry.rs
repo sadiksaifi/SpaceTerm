@@ -1,100 +1,100 @@
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct LogicalSize {
-    pub(crate) width: f32,
-    pub(crate) height: f32,
+pub struct LogicalSize {
+    pub width: f32,
+    pub height: f32,
 }
 
 impl LogicalSize {
-    pub(crate) const fn new(width: f32, height: f32) -> Self {
+    pub const fn new(width: f32, height: f32) -> Self {
         Self { width, height }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct LogicalCellSize {
-    pub(crate) width: f32,
-    pub(crate) height: f32,
+pub struct LogicalCellSize {
+    pub width: f32,
+    pub height: f32,
 }
 
 impl LogicalCellSize {
-    pub(crate) const fn new(width: f32, height: f32) -> Self {
+    pub const fn new(width: f32, height: f32) -> Self {
         Self { width, height }
     }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct LogicalPosition {
-    pub(crate) x: f32,
-    pub(crate) y: f32,
+pub struct LogicalPosition {
+    pub x: f32,
+    pub y: f32,
 }
 
 impl LogicalPosition {
-    pub(crate) const fn new(x: f32, y: f32) -> Self {
+    pub const fn new(x: f32, y: f32) -> Self {
         Self { x, y }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct BackingScale(f32);
+pub struct BackingScale(f32);
 
 impl BackingScale {
-    pub(crate) const ONE: Self = Self(1.0);
+    pub const ONE: Self = Self(1.0);
 
-    pub(crate) fn new(factor: f32) -> Option<Self> {
+    pub fn new(factor: f32) -> Option<Self> {
         (factor.is_finite() && factor > 0.0).then_some(Self(factor))
     }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct BackingPosition {
-    pub(crate) x: f32,
-    pub(crate) y: f32,
+pub struct BackingPosition {
+    pub x: f32,
+    pub y: f32,
 }
 
 impl BackingPosition {
-    pub(crate) const fn new(x: f32, y: f32) -> Self {
+    pub const fn new(x: f32, y: f32) -> Self {
         Self { x, y }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct CellGridSize {
-    pub(crate) cols: u16,
-    pub(crate) rows: u16,
+pub struct CellGridSize {
+    pub cols: u16,
+    pub rows: u16,
 }
 
 impl CellGridSize {
-    pub(crate) const fn new(cols: u16, rows: u16) -> Self {
+    pub const fn new(cols: u16, rows: u16) -> Self {
         Self { cols, rows }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct CellGridPosition {
-    pub(crate) col: u16,
-    pub(crate) row: u16,
+pub struct CellGridPosition {
+    pub col: u16,
+    pub row: u16,
 }
 
 impl CellGridPosition {
-    pub(crate) const fn new(col: u16, row: u16) -> Self {
+    pub const fn new(col: u16, row: u16) -> Self {
         Self { col, row }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct BackingSize {
-    pub(crate) width: u32,
-    pub(crate) height: u32,
+pub struct BackingSize {
+    pub width: u32,
+    pub height: u32,
 }
 
 impl BackingSize {
-    pub(crate) const fn new(width: u32, height: u32) -> Self {
+    pub const fn new(width: u32, height: u32) -> Self {
         Self { width, height }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct TerminalGeometry {
+pub struct TerminalGeometry {
     grid: CellGridSize,
     logical_cell: LogicalCellSize,
     backing_scale: BackingScale,
@@ -103,7 +103,7 @@ pub(crate) struct TerminalGeometry {
 }
 
 impl TerminalGeometry {
-    pub(crate) fn from_viewport(
+    pub fn from_viewport(
         viewport: LogicalSize,
         cell: LogicalCellSize,
         backing_scale: BackingScale,
@@ -116,7 +116,7 @@ impl TerminalGeometry {
         Self::from_grid_with_logical_cell(grid, cell, fitted_cell, backing_scale)
     }
 
-    pub(crate) fn fitted_cell_size(
+    pub fn fitted_cell_size(
         viewport: LogicalSize,
         nominal: LogicalCellSize,
         grid: CellGridSize,
@@ -128,7 +128,7 @@ impl TerminalGeometry {
     }
 
     #[cfg(test)]
-    pub(crate) fn from_grid(
+    pub fn from_grid(
         grid: CellGridSize,
         cell: LogicalCellSize,
         backing_scale: BackingScale,
@@ -163,38 +163,38 @@ impl TerminalGeometry {
         }
     }
 
-    pub(crate) const fn grid(self) -> CellGridSize {
+    pub const fn grid(self) -> CellGridSize {
         self.grid
     }
 
-    pub(crate) const fn logical_cell_size(self) -> LogicalCellSize {
+    pub const fn logical_cell_size(self) -> LogicalCellSize {
         self.logical_cell
     }
 
-    pub(crate) const fn backing_cell_size(self) -> BackingSize {
+    pub const fn backing_cell_size(self) -> BackingSize {
         self.backing_cell
     }
 
-    pub(crate) const fn backing_grid_size(self) -> BackingSize {
+    pub const fn backing_grid_size(self) -> BackingSize {
         self.backing_grid
     }
 
     #[cfg(test)]
-    pub(crate) fn logical_grid_size(self) -> LogicalSize {
+    pub fn logical_grid_size(self) -> LogicalSize {
         LogicalSize::new(
             self.logical_cell.width * f32::from(self.grid.cols),
             self.logical_cell.height * f32::from(self.grid.rows),
         )
     }
 
-    pub(crate) fn to_backing_position(self, logical: LogicalPosition) -> BackingPosition {
+    pub fn to_backing_position(self, logical: LogicalPosition) -> BackingPosition {
         BackingPosition::new(
             logical.x * self.backing_scale.0,
             logical.y * self.backing_scale.0,
         )
     }
 
-    pub(crate) fn cell_at_backing_position(self, position: BackingPosition) -> CellGridPosition {
+    pub fn cell_at_backing_position(self, position: BackingPosition) -> CellGridPosition {
         let cell_width = self.logical_cell.width * self.backing_scale.0;
         let cell_height = self.logical_cell.height * self.backing_scale.0;
         let col = (position.x / cell_width)

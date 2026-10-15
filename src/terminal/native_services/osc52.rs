@@ -11,7 +11,7 @@ pub(in crate::terminal) enum Osc52Access {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Osc52Target {
+pub enum Osc52Target {
     Default,
     Standard,
     Selection,
@@ -19,13 +19,13 @@ pub(crate) enum Osc52Target {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::terminal) enum Osc52Terminator {
+pub enum Osc52Terminator {
     Bell,
     StringTerminator,
 }
 
 #[derive(Clone, Eq, PartialEq)]
-pub(in crate::terminal) enum Osc52Operation {
+pub enum Osc52Operation {
     Read {
         target: Osc52Target,
         terminator: Osc52Terminator,
