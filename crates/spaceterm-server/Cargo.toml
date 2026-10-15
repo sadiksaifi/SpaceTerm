@@ -5,14 +5,14 @@ edition = "2024"
 
 [features]
 default = []
-client = ["dep:keyring", "dep:socket2"]
+client = ["dep:keyring"]
 
 [dependencies]
 libc = "=0.2.189"
 ring = "=0.17.14"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-socket2 = { version = "=0.6.5", optional = true }
+socket2 = "=0.6.5"
 spaceterm-directories = { path = "../spaceterm-directories" }
 thiserror = "2.0.17"
 zeroize = "=1.9.0"

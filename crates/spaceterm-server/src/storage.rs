@@ -31,6 +31,12 @@ impl Drop for Record {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) struct SocketIdentity {
+    device: libc::dev_t,
+    inode: libc::ino_t,
+}
+
 pub(crate) struct Directory(File);
 impl Directory {
     pub fn open(path: &Path, create: bool) -> Result<Self, ServerError> {
@@ -74,6 +80,69 @@ impl Directory {
             }
         }
         Ok(Self(dir))
+    }
+    pub fn verify_path(&self, path: &Path) -> Result<(), ServerError> {
+        let retained = self
+            .0
+            .metadata()
+            .map_err(|_| ServerError::StorageUnavailable)?;
+        let current =
+            std::fs::symlink_metadata(path).map_err(|_| ServerError::StorageUnavailable)?;
+        if !current.is_dir() || retained.dev() != current.dev() || retained.ino() != current.ino() {
+            return Err(ServerError::UnsafeStorage);
+        }
+        private(&self.0, true)
+    }
+    pub fn socket_identity(
+        &self,
+        name: &std::ffi::CStr,
+    ) -> Result<Option<SocketIdentity>, ServerError> {
+        // SAFETY: zero is valid for every field of stat; fstatat fills the retained output below.
+        let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: descriptor, terminated leaf name, and writable output remain live for this call.
+        if unsafe {
+            libc::fstatat(
+                self.0.as_raw_fd(),
+                name.as_ptr(),
+                &mut metadata,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            return if std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound {
+                Ok(None)
+            } else {
+                Err(ServerError::StorageUnavailable)
+            };
+        }
+        // SAFETY: geteuid has no preconditions.
+        if metadata.st_uid != unsafe { libc::geteuid() }
+            || metadata.st_mode & libc::S_IFMT != libc::S_IFSOCK
+            || metadata.st_mode & 0o7777 != 0o600
+        {
+            return Err(ServerError::UnsafeStorage);
+        }
+        Ok(Some(SocketIdentity {
+            device: metadata.st_dev,
+            inode: metadata.st_ino,
+        }))
+    }
+    pub fn remove_socket(
+        &self,
+        name: &std::ffi::CStr,
+        expected: SocketIdentity,
+    ) -> Result<(), ServerError> {
+        // Revalidate immediately before descriptor-relative deletion. Changed entries stay intact.
+        if self.socket_identity(name)? != Some(expected) {
+            return Err(ServerError::UnsafeStorage);
+        }
+        // SAFETY: descriptor and terminated single-component name remain live for this call.
+        if unsafe { libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            return Err(ServerError::StorageUnavailable);
+        }
+        self.0
+            .sync_all()
+            .map_err(|_| ServerError::StorageUnavailable)
     }
     fn file(&self, name: &str, create: bool) -> Result<File, ServerError> {
         let name = CString::new(name).map_err(|_| ServerError::UnsafeStorage)?;
