@@ -14696,9 +14696,18 @@ impl SharedCloseHarness {
     }
 }
 
+/// The largest part of the hierarchy a shared close removes, as the server reports it.
+#[derive(Clone, Copy)]
+enum SharedCloseRemoves {
+    Pane,
+    Tab,
+    Workspace,
+}
+
 fn shared_close_mutation(
     target: spaceterm_server::hierarchy::CloseTarget,
     panes: &[SharedClosePane],
+    removes: SharedCloseRemoves,
 ) -> spaceterm_server::hierarchy::Mutation {
     use spaceterm_server::hierarchy::{CloseConfirmation, ConfirmedPane, Mutation};
 
@@ -14713,6 +14722,8 @@ fn shared_close_mutation(
                     session: *session,
                 })
                 .collect(),
+            removes_tab: !matches!(removes, SharedCloseRemoves::Pane),
+            removes_workspace: matches!(removes, SharedCloseRemoves::Workspace),
         },
     }
 }
@@ -14754,6 +14765,7 @@ fn shared_kill_workspace_should_confirm_then_end_exactly_what_it_showed_for_ever
                 (SHARED_CLOSE_SPLIT_PANE, Some([32; 32])),
                 (SHARED_CLOSE_SECOND_PANE, None),
             ],
+            SharedCloseRemoves::Workspace,
         )]
     );
     assert_eq!(
@@ -14844,6 +14856,7 @@ fn shared_tab_close_should_end_panes_another_client_controls_without_taking_over
                 (SHARED_CLOSE_ROOT_PANE, Some([31; 32])),
                 (SHARED_CLOSE_SPLIT_PANE, Some([32; 32])),
             ],
+            SharedCloseRemoves::Tab,
         )]
     );
     assert_eq!(
@@ -14909,8 +14922,60 @@ fn shared_close_made_stale_by_another_client_should_end_nothing_until_reviewed_a
                 tab: SHARED_CLOSE_ROOT_TAB,
             },
             &grown,
+            SharedCloseRemoves::Tab,
         )],
         "the fresh review approves the Pane the other client added"
+    );
+}
+
+/// Another client closes the sibling Tab while Close Tab is open. The Tab's Panes and Sessions
+/// stay the same, but closing it now removes the Workspace, so the confirmation is withdrawn and
+/// only a fresh review that says so can approve it.
+#[gpui::test]
+fn shared_tab_close_made_final_by_a_sibling_close_should_end_nothing_until_reviewed_again(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::hierarchy::CloseTarget as ServerCloseTarget;
+
+    let (harness, cx) = shared_close_harness(cx);
+    cx.dispatch_action(crate::ui::CloseTab);
+    redraw(cx);
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-confirm")
+            .is_some()
+    );
+
+    let root = [
+        (SHARED_CLOSE_ROOT_PANE, Some([31; 32])),
+        (SHARED_CLOSE_SPLIT_PANE, Some([32; 32])),
+    ];
+    harness.publish(
+        shared_close_inventory(2, &[(SHARED_CLOSE_ROOT_TAB, &root)]),
+        cx,
+    );
+
+    assert!(
+        cx.debug_bounds("modal-action-shared-close-confirm")
+            .is_none(),
+        "a confirmation that never said the Workspace is removed is withdrawn"
+    );
+    assert!(harness.closes().is_empty(), "a stale approval ends nothing");
+
+    click("modal-action-shared-close-review", cx);
+    redraw(cx);
+    click("modal-action-shared-close-confirm", cx);
+    redraw(cx);
+    assert_eq!(
+        harness.closes(),
+        vec![shared_close_mutation(
+            ServerCloseTarget::Tab {
+                workspace: SHARED_CLOSE_WORKSPACE,
+                tab: SHARED_CLOSE_ROOT_TAB,
+            },
+            &root,
+            SharedCloseRemoves::Workspace,
+        )],
+        "the fresh review approves the Workspace's removal"
     );
 }
 
@@ -15022,6 +15087,7 @@ fn shared_pane_close_should_ask_the_server_for_that_pane_only(cx: &mut TestAppCo
                 pane: SHARED_CLOSE_ROOT_PANE,
             },
             &[(SHARED_CLOSE_ROOT_PANE, Some([31; 32]))],
+            SharedCloseRemoves::Pane,
         )]
     );
 }
@@ -15133,6 +15199,7 @@ fn shared_tab_closes_should_reconcile_through_publication_down_to_the_final_tab(
                 tab: SHARED_CLOSE_SECOND_TAB,
             },
             &[(SHARED_CLOSE_SECOND_PANE, None)],
+            SharedCloseRemoves::Workspace,
         ))
     );
     harness.edits.answer(Outcome::Accepted {

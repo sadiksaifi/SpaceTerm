@@ -853,6 +853,84 @@ mod tests {
     }
 
     #[test]
+    fn shared_close_rejects_new_ancestor_deletion_after_a_sibling_closes() {
+        use spaceterm_server::hierarchy::{Axis, CloseTarget, Mutation, Outcome};
+        for close_pane in [true, false] {
+            let mut host = SharedWorkspaceHost::new(host());
+            let workspace = create_shared(&mut host, 1);
+            let initial = shared_inventory(&mut host);
+            let tab = initial.workspaces[0].root_tab;
+            let pane = initial.workspaces[0].tabs[0].root_pane;
+            let mutation = if close_pane {
+                Mutation::SplitPane {
+                    workspace,
+                    tab,
+                    source: pane,
+                    axis: Axis::Down,
+                }
+            } else {
+                Mutation::CreateTab { workspace }
+            };
+            let Reply::Outcome(result) = host.request(
+                [1; 32],
+                [1; 32],
+                Request::Mutate {
+                    sequence: 2,
+                    mutation,
+                },
+            ) else {
+                panic!()
+            };
+            let Outcome::Accepted { target: sibling } = result.outcome else {
+                panic!()
+            };
+            let target = if close_pane {
+                CloseTarget::Pane {
+                    workspace,
+                    tab,
+                    pane,
+                }
+            } else {
+                CloseTarget::Tab { workspace, tab }
+            };
+            let sibling = if close_pane {
+                CloseTarget::Pane {
+                    workspace,
+                    tab,
+                    pane: sibling,
+                }
+            } else {
+                CloseTarget::Tab {
+                    workspace,
+                    tab: sibling,
+                }
+            };
+            let inventory = shared_inventory(&mut host);
+            let approval = inventory.close_confirmation(target).unwrap();
+            let sibling_confirmation = inventory.close_confirmation(sibling).unwrap();
+            assert!(matches!(host.request(
+                [2; 32], [2; 32], Request::Mutate { sequence: 1, mutation: Mutation::Close {
+                    target: sibling, confirmation: sibling_confirmation,
+                } },
+            ), Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. })));
+            assert!(matches!(host.request(
+                [3; 32], [3; 32], Request::Mutate { sequence: 1, mutation: Mutation::Close {
+                    target, confirmation: approval,
+                } },
+            ), Reply::Outcome(result) if result.outcome == Outcome::StaleConfirmation));
+            let remaining = shared_inventory(&mut host);
+            assert_eq!(remaining.workspaces[0].id, workspace);
+            let confirmation = remaining.close_confirmation(target).unwrap();
+            assert!(matches!(host.request(
+                [3; 32], [3; 32], Request::Mutate { sequence: 2, mutation: Mutation::Close {
+                    target, confirmation,
+                } },
+            ), Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. })));
+            assert!(shared_inventory(&mut host).workspaces.is_empty());
+        }
+    }
+
+    #[test]
     fn shared_session_reset_retains_membership_but_ordinary_final_shell_exit_removes_it() {
         let mut host = SharedWorkspaceHost::new(host());
         create_shared(&mut host, 1);

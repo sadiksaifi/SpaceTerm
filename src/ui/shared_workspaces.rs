@@ -805,28 +805,20 @@ mod development {
                 .close_confirmation(target)
                 .ok_or(SharedCloseUnavailable::Unreported)?;
             let scope = match target {
-                ServerCloseTarget::Pane { tab, .. } => SharedCloseScope::Pane {
-                    removes_tab: workspace
-                        .tabs
-                        .iter()
-                        .find(|candidate| candidate.id == tab)
-                        .is_some_and(|tab| tab.panes.len() == 1),
-                },
+                ServerCloseTarget::Pane { .. } => SharedCloseScope::Pane,
                 ServerCloseTarget::Tab { .. } => SharedCloseScope::Tab,
                 ServerCloseTarget::Workspace { .. } => SharedCloseScope::Workspace,
             };
-            let workspace_panes: usize = workspace.tabs.iter().map(|tab| tab.panes.len()).sum();
             Ok(SharedCloseApproval {
                 target,
                 scope,
                 workspace: workspace.name.clone(),
-                // The server removes a Workspace once nothing in it remains.
-                removes_workspace: confirmation.panes.len() == workspace_panes,
                 confirmation,
             })
         }
 
-        /// Whether what an approval would end is still exactly what the server reports now.
+        /// Whether what an approval would end and remove is still exactly what the server
+        /// reports now.
         pub(crate) fn close_state(&self, approval: &SharedCloseApproval) -> SharedCloseState {
             let Some(inventory) = self.latest.as_ref() else {
                 return SharedCloseState::Changed;
@@ -1192,9 +1184,10 @@ mod development {
         })
     }
 
-    /// What closing one shared target ends, captured from the server's report when the
-    /// confirmation opened. The server ends these Panes and Sessions only if they are still
-    /// exactly what it holds, whichever client controls them.
+    /// What closing one shared target ends and removes, captured from the server's report when
+    /// the confirmation opened. The server ends these Panes and Sessions only if they and the
+    /// Tab and Workspace the close removes are still exactly what it holds, whichever client
+    /// controls them.
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub(crate) struct SharedCloseApproval {
         target: ServerCloseTarget,
@@ -1202,14 +1195,12 @@ mod development {
         scope: SharedCloseScope,
         /// The Workspace's name as the server published it.
         workspace: String,
-        /// Whether nothing of the Workspace remains afterwards, so the server removes it.
-        removes_workspace: bool,
     }
 
-    /// Which close a person asked for, and for a Pane, whether its Tab goes with it.
+    /// Which close a person asked for.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub(crate) enum SharedCloseScope {
-        Pane { removes_tab: bool },
+        Pane,
         Tab,
         Workspace,
     }
@@ -1227,7 +1218,7 @@ mod development {
 
         pub(crate) fn title(&self) -> String {
             match self.scope {
-                SharedCloseScope::Pane { .. } => "Close Pane?".to_owned(),
+                SharedCloseScope::Pane => "Close Pane?".to_owned(),
                 SharedCloseScope::Tab => "Close Tab?".to_owned(),
                 SharedCloseScope::Workspace => {
                     format!("Kill Workspace \u{201C}{}\u{201D}?", self.workspace)
@@ -1237,7 +1228,7 @@ mod development {
 
         pub(crate) const fn confirm_label(&self) -> &'static str {
             match self.scope {
-                SharedCloseScope::Pane { .. } => "Close Pane",
+                SharedCloseScope::Pane => "Close Pane",
                 SharedCloseScope::Tab => "Close Tab",
                 SharedCloseScope::Workspace => "Kill Workspace",
             }
@@ -1251,7 +1242,7 @@ mod development {
                 SharedCloseScope::Workspace => {
                     "Its Tabs and Panes are permanently removed for every client.".to_owned()
                 }
-                _ if self.removes_workspace => format!(
+                _ if self.confirmation.removes_workspace => format!(
                     "This is the only {} in \u{201C}{}\u{201D}, so the Workspace is permanently \
                      removed for every client.",
                     if self.scope == SharedCloseScope::Tab {
@@ -1261,11 +1252,11 @@ mod development {
                     },
                     self.workspace
                 ),
-                SharedCloseScope::Pane { removes_tab: true } => {
+                SharedCloseScope::Pane if self.confirmation.removes_tab => {
                     "This is the only Pane in its Tab, so the Tab closes for every client."
                         .to_owned()
                 }
-                SharedCloseScope::Pane { .. } => "The Pane closes for every client.".to_owned(),
+                SharedCloseScope::Pane => "The Pane closes for every client.".to_owned(),
                 SharedCloseScope::Tab => match panes {
                     1 => "The Tab and its Pane close for every client.".to_owned(),
                     count => format!("The Tab and its {count} Panes close for every client."),
@@ -1286,7 +1277,7 @@ mod development {
 
         /// What a removed Workspace leaves behind, when the close removes one.
         pub(crate) fn detail(&self) -> Option<&'static str> {
-            self.removes_workspace.then_some(
+            self.confirmation.removes_workspace.then_some(
                 "Other Workspaces keep running. Repository files and Git Worktree directories \
                  stay on disk. Neither a server restart nor another client can bring this \
                  Workspace back.",
@@ -1302,7 +1293,7 @@ mod development {
         /// already removed.
         pub(crate) const fn missing_title(&self) -> &'static str {
             match self.scope {
-                SharedCloseScope::Pane { .. } => "Pane Already Closed",
+                SharedCloseScope::Pane => "Pane Already Closed",
                 SharedCloseScope::Tab => "Tab Already Closed",
                 SharedCloseScope::Workspace => "Workspace Already Removed",
             }

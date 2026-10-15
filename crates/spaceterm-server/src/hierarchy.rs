@@ -42,12 +42,29 @@ pub struct CloseInventory {
 pub struct CloseConfirmation {
     pub boot: Id,
     pub panes: Vec<ConfirmedPane>,
+    pub removes_tab: bool,
+    pub removes_workspace: bool,
 }
 
 impl Inventory {
     pub fn close_confirmation(&self, target: CloseTarget) -> Option<CloseConfirmation> {
         let live = self.close.as_ref()?;
         let ids = self.close_panes(target)?;
+        let workspace = match target {
+            CloseTarget::Pane { workspace, .. }
+            | CloseTarget::Tab { workspace, .. }
+            | CloseTarget::Workspace { workspace } => workspace,
+        };
+        let workspace = self.workspaces.iter().find(|w| w.id == workspace)?;
+        // Sibling removal can change the consequences without changing any target Pane.
+        let removes_tab = match target {
+            CloseTarget::Pane { tab, .. } => {
+                workspace.tabs.iter().find(|t| t.id == tab)?.panes.len() == 1
+            }
+            CloseTarget::Tab { .. } | CloseTarget::Workspace { .. } => true,
+        };
+        let removes_workspace =
+            ids.len() == workspace.tabs.iter().map(|t| t.panes.len()).sum::<usize>();
         let panes = ids
             .into_iter()
             .map(|id| live.sessions.iter().find(|p| p.id == id).cloned())
@@ -55,6 +72,8 @@ impl Inventory {
         Some(CloseConfirmation {
             boot: live.boot,
             panes,
+            removes_tab,
+            removes_workspace,
         })
     }
 
@@ -851,6 +870,8 @@ mod tests {
             target: CloseTarget::Tab { workspace, tab },
             confirmation: CloseConfirmation {
                 boot: [9; 32],
+                removes_tab: true,
+                removes_workspace: false,
                 panes: vec![ConfirmedPane {
                     id: pane,
                     session: None,

@@ -1157,6 +1157,8 @@ mod close {
                             session: Some([40; 32]),
                         },
                     ],
+                    removes_tab: true,
+                    removes_workspace: false,
                 },
             }],
             "the request names both Panes and the Session the person saw, and nothing in the \
@@ -1176,6 +1178,51 @@ mod close {
         shared.poll();
 
         assert_eq!(shared.close_state(&approval), SharedCloseState::Changed);
+        assert!(edits.submitted().is_empty());
+    }
+
+    /// Another client closes the split beside the reviewed Pane. The Pane and its Session stay
+    /// the same, but closing it now also closes its Tab, which the person never reviewed.
+    #[test]
+    fn a_sibling_close_that_makes_the_pane_its_tabs_last_should_require_a_fresh_review() {
+        const ROOT_PANE_TARGET: CloseTarget = CloseTarget::Pane {
+            workspace: WORKSPACE,
+            tab: ROOT_TAB,
+            pane: ROOT_PANE,
+        };
+        let (mut shared, edits) = shared(split_beside_second_tab());
+        let approval = shared
+            .close_approval(ROOT_PANE_TARGET)
+            .expect("the published Pane can be reviewed");
+        assert!(
+            approval
+                .message()
+                .starts_with("The Pane closes for every client.")
+        );
+
+        edits.set_inventory(inventory(
+            3,
+            vec![
+                tab(ROOT_TAB, vec![pane(ROOT_PANE, None, Axis::Right)]),
+                tab(SECOND_TAB, vec![pane(SECOND_TAB_PANE, None, Axis::Right)]),
+            ],
+        ));
+        shared.poll();
+
+        assert_eq!(
+            shared.close_state(&approval),
+            SharedCloseState::Changed,
+            "the reviewed close no longer says its Tab closes too"
+        );
+        let fresh = shared
+            .close_approval(ROOT_PANE_TARGET)
+            .expect("the Pane can be reviewed again");
+        assert!(
+            fresh.message().starts_with(
+                "This is the only Pane in its Tab, so the Tab closes for every client."
+            )
+        );
+        assert_eq!(fresh.detail(), None, "the Workspace keeps its second Tab");
         assert!(edits.submitted().is_empty());
     }
 
@@ -1254,6 +1301,8 @@ mod close {
             confirmation: CloseConfirmation {
                 boot: BOOT,
                 panes: Vec::new(),
+                removes_tab: true,
+                removes_workspace: false,
             },
         });
         edits.answer(Outcome::StaleConfirmation);
