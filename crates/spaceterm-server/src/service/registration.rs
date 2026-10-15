@@ -86,6 +86,13 @@ impl Registration {
         }
         Ok(file)
     }
+    pub fn check(&self, expected: &[u8], missing_allowed: bool) -> Result<(), ServerError> {
+        let directory = owned_directory(&self.directory)?;
+        if missing_allowed && !exists(&directory, &self.name)? {
+            return Ok(());
+        }
+        self.validate(&directory, expected).map(|_| ())
+    }
     pub fn remove(&self, expected: &[u8]) -> Result<(), ServerError> {
         let directory = owned_directory(&self.directory)?;
         // Missing is idempotent only after the caller durably recorded removal intent.

@@ -29,6 +29,14 @@ pub struct ServiceStatus {
     pub stopped: bool,
 }
 
+/// A signed retained build that can be selected during explicit first installation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetainedInstallation {
+    pub directory: PathBuf,
+    pub version: String,
+    pub commit: String,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct State {
@@ -74,17 +82,49 @@ impl Service {
         };
         self.snapshot(&state)
     }
+    /// Discover verified retained builds without selecting, registering, or starting any of them.
+    pub fn retained_installations(&self) -> Result<Vec<RetainedInstallation>, ServerError> {
+        let parent = self.paths.data.join("installations");
+        match Directory::open(&parent, false) {
+            Ok(_) => {}
+            Err(ServerError::NotPaired) => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        }
+        let directory = owned_directory(&parent)?;
+        lock_directory(&directory)?;
+        let mut choices = Vec::new();
+        for entry in std::fs::read_dir(&parent).map_err(|_| ServerError::StorageUnavailable)? {
+            let entry = entry.map_err(|_| ServerError::StorageUnavailable)?;
+            let name = entry.file_name();
+            if !name.to_str().is_some_and(runtime::digest_valid) {
+                continue;
+            }
+            let path = parent.join(name);
+            let (version, commit) = runtime::describe(&path, &self.identity)?;
+            choices.push(RetainedInstallation {
+                directory: path,
+                version,
+                commit,
+            });
+        }
+        verify_directory_path(&directory, &parent)?;
+        choices.sort_by(|a, b| (&a.version, &a.commit).cmp(&(&b.version, &b.commit)));
+        Ok(choices)
+    }
     /// Accept only an independently signed artifact retained in this account's installation store.
     /// Reinstallation preserves the approved version and deliberate Stop state.
     pub fn install(&self, installation: &Path) -> Result<ServiceStatus, ServerError> {
         let data = Directory::open(&self.paths.data, true)?;
         let _operation = data.lock("service.lock", false)?;
         data.verify_path(&self.paths.data)?;
-        if let Some(state) = Self::state(&data)?
+        if let Some(mut state) = Self::state(&data)?
             && state.installed
         {
             if state.removing {
                 return Err(ServerError::CleanupUnresolved);
+            }
+            if !state.stopped {
+                self.start_locked(&data, &mut state, false)?;
             }
             return self.snapshot(&state);
         }
@@ -165,6 +205,8 @@ impl Service {
     ) -> Result<(), ServerError> {
         let intent = data.lock("service-intent.lock", false)?;
         *state = Self::state(data)?.ok_or(ServerError::StorageUnavailable)?;
+        self.platform()?
+            .check(&self.runtime(state), state.removing)?;
         if state.stopped && !explicit {
             return Err(ServerError::Stopped);
         }
@@ -204,6 +246,8 @@ impl Service {
             state.stopped = true;
             data.write_json(c"service.json", state)?;
         }
+        self.platform()?
+            .check(&self.runtime(state), state.removing)?;
         self.platform()?.disable()?;
         self.wait_running(false)?;
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -268,6 +312,10 @@ impl Service {
         Ok(state)
     }
     fn snapshot(&self, state: &State) -> Result<ServiceStatus, ServerError> {
+        if state.installed {
+            self.platform()?
+                .check(&self.runtime(state), state.removing)?;
+        }
         let running = self.platform()?.running()?;
         if !running {
             check_cleanup(state)?;
@@ -425,6 +473,9 @@ fn boot() -> Result<String, ServerError> {
 struct Unavailable;
 #[cfg(not(target_os = "macos"))]
 impl Unavailable {
+    fn check(&self, _: &Path, _: bool) -> Result<(), ServerError> {
+        Err(ServerError::ServiceUnavailable)
+    }
     fn install(&self, _: &Path) -> Result<(), ServerError> {
         Err(ServerError::ServiceUnavailable)
     }
@@ -534,7 +585,8 @@ fn command(program: &str, args: &[OsString]) -> Result<Vec<u8>, ServerError> {
     let mut output = child.stdout.take().ok_or(ServerError::ServiceUnavailable)?;
     let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
-        let _ = output.by_ref().take(65537).read_to_end(&mut bytes);
+        let _ = output.by_ref().take(65536).read_to_end(&mut bytes);
+        let _ = std::io::copy(&mut output, &mut std::io::sink());
         bytes
     });
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -557,9 +609,6 @@ fn command(program: &str, args: &[OsString]) -> Result<Vec<u8>, ServerError> {
     };
     let bytes = reader.join().map_err(|_| ServerError::ServiceUnavailable)?;
     result?;
-    if bytes.len() > 65536 {
-        return Err(ServerError::ServiceUnavailable);
-    }
     Ok(bytes)
 }
 
@@ -626,6 +675,48 @@ mod tests {
         let reopened = Directory::open(&fixture.paths.data, false).unwrap();
         assert_eq!(reopened.read().unwrap().seed, seed);
         assert!(Service::state(&reopened).unwrap().unwrap().stopped);
+    }
+    #[cfg(all(feature = "client", target_os = "macos"))]
+    #[test]
+    fn connection_setup_cannot_restart_a_durably_stopped_service() {
+        let fixture = Fixture::new();
+        retain_stop(&fixture.paths).unwrap();
+        let service = Service {
+            paths: fixture.paths.clone(),
+            identity: "spaceterm-development".into(),
+        };
+        assert_eq!(service.start_if_enabled(), Err(ServerError::Stopped));
+        assert!(
+            Service::state(&Directory::open(&fixture.paths.data, false).unwrap())
+                .unwrap()
+                .unwrap()
+                .stopped
+        );
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn service_definition_publication_reuses_exact_bytes_and_preserves_changed_entries() {
+        let fixture = Fixture::new();
+        let registration = registration::Registration {
+            directory: fixture.root.join("registration"),
+            name: "server.plist".into(),
+        };
+        registration.install(b"approved definition").unwrap();
+        registration.install(b"approved definition").unwrap();
+        std::fs::write(registration.path(), b"replacement").unwrap();
+        assert_eq!(
+            registration.remove(b"approved definition"),
+            Err(ServerError::CleanupUnresolved)
+        );
+        assert_eq!(std::fs::read(registration.path()).unwrap(), b"replacement");
+        std::fs::remove_file(registration.path()).unwrap();
+        std::os::unix::fs::symlink(fixture.root.join("outside"), registration.path()).unwrap();
+        assert!(registration.install(b"approved definition").is_err());
+        assert!(
+            std::fs::symlink_metadata(registration.path())
+                .unwrap()
+                .is_symlink()
+        );
     }
     #[test]
     fn unavailable_policy_is_never_treated_as_missing_installation() {

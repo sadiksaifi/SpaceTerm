@@ -62,6 +62,24 @@ pub(super) fn verify(path: &Path, identity: &str) -> Result<(), ServerError> {
     verify_directory_path(&directory, path)
 }
 
+pub(super) fn describe(path: &Path, identity: &str) -> Result<(String, String), ServerError> {
+    verify(path, identity)?;
+    let directory = owned_directory(path)?;
+    let bytes = read_file(&directory, Path::new("build.json"), 4096)?;
+    let info: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| ServerError::RuntimeUnavailable)?;
+    let version = info["version"]
+        .as_str()
+        .ok_or(ServerError::RuntimeUnavailable)?;
+    let commit = info["commit"]
+        .as_str()
+        .ok_or(ServerError::RuntimeUnavailable)?;
+    if version.len() > 64 || commit.len() != 40 || !commit.bytes().all(|v| v.is_ascii_hexdigit()) {
+        return Err(ServerError::RuntimeUnavailable);
+    }
+    Ok((version.to_owned(), commit.to_owned()))
+}
+
 fn verify_contents(directory: &File, bytes: &[u8], identity: &str) -> Result<(), ServerError> {
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
     let mut names = BTreeSet::new();

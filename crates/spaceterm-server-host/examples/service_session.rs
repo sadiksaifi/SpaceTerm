@@ -17,6 +17,15 @@ fn run() -> Result<(), Box<dyn Error>> {
         .nth(1)
         .ok_or("application identity required")?;
     let service = Service::for_identity(&identity)?;
+    if let Some(installation) = std::env::args_os().nth(2) {
+        let status = service.install(std::path::Path::new(&installation))?;
+        if !status.running {
+            return Err("service did not start".into());
+        }
+        println!(
+            "Signed retained account service installed and started without administrator authorization."
+        );
+    }
     let client = LocalServer::for_identity(&identity)?;
     client.pair()?;
     let mut first = client.connect_pane()?;
@@ -121,8 +130,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 fn main() {
-    if run().is_err() {
-        eprintln!("Native service lifecycle check did not complete.");
+    if let Err(error) = run() {
+        eprintln!("Native service lifecycle check did not complete: {error}");
         std::process::exit(1);
     }
 }

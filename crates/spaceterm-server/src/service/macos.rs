@@ -59,6 +59,32 @@ impl LaunchAgent {
     pub(super) fn install(&self, runtime: &Path) -> Result<(), ServerError> {
         self.registration().install(&self.contents(runtime)?)
     }
+    pub(super) fn check(&self, runtime: &Path, removing: bool) -> Result<(), ServerError> {
+        self.registration()
+            .check(&self.contents(runtime)?, removing)?;
+        if let Ok(bytes) = command(
+            "/bin/launchctl",
+            &["list".into(), self.label.clone().into()],
+        ) {
+            let expected = format!(
+                "\"Program\" = \"{}\";",
+                runtime
+                    .join("bin/spaceterm-server")
+                    .to_str()
+                    .ok_or(ServerError::UnsafeStorage)?
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+            );
+            let text = std::str::from_utf8(&bytes).map_err(|_| ServerError::ServiceUnavailable)?;
+            if removing && !self.registration().path().exists() {
+                return Err(ServerError::CleanupUnresolved);
+            }
+            if !text.lines().any(|line| line.trim() == expected) {
+                return Err(ServerError::CleanupUnresolved);
+            }
+        }
+        Ok(())
+    }
     pub(super) fn prepare_start(&self) -> Result<(), ServerError> {
         Ok(())
     }
@@ -103,6 +129,19 @@ impl LaunchAgent {
             "/bin/launchctl",
             &["disable".into(), self.target.clone().into()],
         )?;
+        if self.running()? {
+            command(
+                "/bin/launchctl",
+                &["kill".into(), "SIGTERM".into(), self.target.clone().into()],
+            )?;
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while self.running()? {
+                if Instant::now() >= deadline {
+                    return Err(ServerError::CleanupUnresolved);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
         if command(
             "/bin/launchctl",
             &["list".into(), self.label.clone().into()],
