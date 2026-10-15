@@ -127,6 +127,7 @@ impl DevelopmentPaneState {
         *self.status.lock().unwrap_or_else(|e| e.into_inner()) = status;
     }
 }
+#[derive(Clone)]
 pub(crate) struct DevelopmentServerSessionFactory {
     server: LocalServer,
     pane_id: Option<spaceterm_server::hierarchy::Id>,
@@ -219,22 +220,11 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
             size: Arc::clone(&measured_size),
             appearance: Arc::clone(&appearance),
         };
-        let server = self.server.clone();
-        let pane_id = self.pane_id;
-        let state = Arc::clone(&self.state);
+        let factory = self.clone();
         std::thread::Builder::new()
             .name("spaceterm-pane-connection".into())
             .spawn(move || {
-                present(
-                    server,
-                    pane_id,
-                    state,
-                    alive,
-                    receiver,
-                    events,
-                    measured_size,
-                    appearance,
-                );
+                present(factory, alive, receiver, events, measured_size, appearance);
             })
             .map_err(TerminalSessionError::from)?;
         Ok(StartedTerminalSession {
@@ -247,15 +237,18 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
 }
 
 fn present(
-    server: LocalServer,
-    pane_id: Option<spaceterm_server::hierarchy::Id>,
-    state: Arc<DevelopmentPaneState>,
+    factory: DevelopmentServerSessionFactory,
     alive: Arc<AtomicBool>,
     input: mpsc::Receiver<(u64, Input)>,
     events: async_channel::Sender<TerminalSessionEvent>,
     size: Arc<Mutex<PaneSize>>,
     appearance: Arc<Mutex<TerminalAppearanceUpdate>>,
 ) {
+    let DevelopmentServerSessionFactory {
+        server,
+        pane_id,
+        state,
+    } = factory;
     let mut create = true;
     let mut expected_session: Option<Lease> = None;
     let mut expected_target: Option<pane::PaneTarget> = None;

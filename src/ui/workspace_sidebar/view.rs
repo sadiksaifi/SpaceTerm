@@ -1689,10 +1689,6 @@ fn new_workspace_menu_entries(
 }
 
 /// Every Workspace command carries a symbol, so all labels share the icon column.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one Workspace row menu needs every fact that decides which commands it offers"
-)]
 fn workspace_menu_entries(
     new_tab: bool,
     new_worktree: bool,
