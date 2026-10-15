@@ -22,13 +22,16 @@ fn server_reports_its_compiled_identity_and_refuses_other_namespaces() {
     );
     for identity in ["spaceterm", "spaceterm-preflight", "spaceterm-development"] {
         if identity != env!("SPACETERM_SERVER_IDENTITY") {
-            assert!(
-                !Command::new(executable)
-                    .args(["serve", identity])
-                    .env_clear()
-                    .status()
-                    .unwrap()
-                    .success()
+            let refused = Command::new(executable)
+                .args(["serve", identity])
+                .env_clear()
+                .output()
+                .unwrap();
+            assert_eq!(refused.status.code(), Some(1));
+            assert!(refused.stdout.is_empty());
+            assert_eq!(
+                refused.stderr,
+                b"The local server connection did not complete.\n"
             );
         }
     }
