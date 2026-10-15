@@ -121,6 +121,7 @@ impl DevelopmentPaneHost {
         style: Option<PresentationStyle>,
     ) -> Result<Reply, Refusal> {
         size.validate().map_err(|_| Refusal::Unsupported)?;
+        self.reconcile_selection()?;
         if let Some(pane) = &mut self.pane {
             let target = PaneTarget::from(pane.lease);
             if resume.is_some_and(|old| old != target) {
@@ -194,6 +195,7 @@ impl DevelopmentPaneHost {
                 size,
                 style,
             } => {
+                self.reconcile_selection()?;
                 let pane = self.pane.as_mut().ok_or(Refusal::Missing)?;
                 if PaneTarget::from(pane.lease) != target {
                     return Err(Refusal::Stale);
@@ -284,6 +286,24 @@ impl DevelopmentPaneHost {
             }
             _ => Err(Refusal::Unsupported),
         }
+    }
+
+    fn reconcile_selection(&mut self) -> Result<(), Refusal> {
+        let Some(pane) = &mut self.pane else {
+            return Ok(());
+        };
+        // A waiting client has no lease to Poll. Observe lifecycle events before offering
+        // control, even when the previous controller has disconnected.
+        pane.drain();
+        if pane.ended {
+            pane.runtime
+                .shutdown_and_wait(Duration::from_secs(5))
+                .map_err(|_| Refusal::CleanupUnresolved)?;
+            self.pane = None;
+        } else if pane.failed {
+            return Err(Refusal::Failed);
+        }
+        Ok(())
     }
 }
 impl PaneService for DevelopmentPaneHost {
@@ -892,6 +912,57 @@ mod tests {
             "stty -echo; printf '\\033[2J\\033[HLIVE\\n'; stty size\n",
         );
         await_text(&mut host, 2, live, "24 80");
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn a_waiting_client_observes_exit_without_the_controller_polling() {
+        let mut host = host();
+        let lease = attach(&mut host, 2, true);
+        command(
+            &mut host,
+            2,
+            lease,
+            "stty -echo; printf 'EXITING\\n'; sleep 0.2; exit\n",
+        );
+        await_text(&mut host, 2, lease, "EXITING");
+        host.disconnected([2; 32]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let reply = host.request(
+                [9; 32],
+                [9; 32],
+                Request::Select {
+                    create: false,
+                    size: size(),
+                    resume: Some(lease.into()),
+                    style: None,
+                },
+            );
+            if matches!(reply, Reply::Refused(Refusal::Missing)) {
+                break;
+            }
+            assert!(matches!(reply, Reply::Takeover { .. }));
+            assert!(
+                Instant::now() < deadline,
+                "an exited shell still offers takeover"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(matches!(
+            host.request(
+                [9; 32],
+                [9; 32],
+                Request::TakeOver {
+                    target: lease.into(),
+                    size: size(),
+                    style: None,
+                }
+            ),
+            Reply::Refused(Refusal::Missing)
+        ));
+        let replacement = attach(&mut host, 3, true);
+        assert_ne!(replacement.session, lease.session);
         host.shutdown().unwrap();
     }
 
