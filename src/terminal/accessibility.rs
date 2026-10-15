@@ -174,17 +174,10 @@ impl AccessibilityNotification {
 pub(crate) struct AccessibilityNotifications(u8);
 
 #[cfg_attr(
-    not(target_os = "macos"),
+    any(not(target_os = "macos"), not(feature = "desktop")),
     allow(
         dead_code,
         reason = "only a native accessibility Adapter posts notifications"
-    )
-)]
-#[cfg_attr(
-    not(feature = "desktop"),
-    allow(
-        dead_code,
-        reason = "native accessibility adapters consume notification policy"
     )
 )]
 impl AccessibilityNotifications {

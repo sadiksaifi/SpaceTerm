@@ -327,7 +327,6 @@ pub(crate) mod unix_adapter_tests;
     allow(dead_code, reason = "only macOS native tests start a peer process")
 )]
 #[cfg(all(any(target_os = "macos", target_os = "linux"), test))]
-#[cfg(feature = "desktop")]
 mod unix_peer_credentials_tests;
 
 #[cfg(test)]
