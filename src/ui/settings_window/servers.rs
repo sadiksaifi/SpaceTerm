@@ -321,6 +321,11 @@ fn failure(error: ServerError) -> (&'static str, &'static str, Option<LocalServe
             "settings-local-server-state-session-unavailable",
             Some(Action::Check),
         ),
+        ServerError::DirectoryUnavailable => (
+            "Directory Unavailable",
+            "settings-local-server-state-directory-unavailable",
+            Some(Action::Check),
+        ),
         ServerError::Unsupported => (
             "Unsupported",
             "settings-local-server-state-unsupported",

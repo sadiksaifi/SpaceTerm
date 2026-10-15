@@ -15,6 +15,7 @@ use std::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DevelopmentPaneStatus {
     Connecting,
+    Restored,
     Connected,
     Takeover,
     TakeoverReconnecting,
@@ -28,6 +29,7 @@ pub(crate) struct DevelopmentPaneState {
     status: Mutex<DevelopmentPaneStatus>,
     retry: AtomicBool,
     take_over: AtomicBool,
+    start_restored: AtomicBool,
     close: AtomicU64,
     epoch: AtomicU64,
     connected_epoch: AtomicU64,
@@ -38,6 +40,7 @@ impl DevelopmentPaneState {
             status: Mutex::new(DevelopmentPaneStatus::Connecting),
             retry: AtomicBool::new(false),
             take_over: AtomicBool::new(false),
+            start_restored: AtomicBool::new(false),
             close: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
             connected_epoch: AtomicU64::new(0),
@@ -52,6 +55,11 @@ impl DevelopmentPaneState {
     }
     pub(crate) fn retry(&self) {
         self.retry.store(true, Ordering::Release);
+    }
+    pub(crate) fn start_restored(&self) {
+        if self.status() == DevelopmentPaneStatus::Restored {
+            self.start_restored.store(true, Ordering::Release);
+        }
     }
     pub(crate) fn take_over(&self) {
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
@@ -88,6 +96,7 @@ impl DevelopmentPaneState {
             let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
             // A click accepted before this interruption is never replayed after it.
             self.take_over.store(false, Ordering::Release);
+            self.start_restored.store(false, Ordering::Release);
             *status = if has_takeover && retryable {
                 DevelopmentPaneStatus::TakeoverReconnecting
             } else if has_takeover {
@@ -255,6 +264,44 @@ fn present(
                 ServerError::StaleControl => ServerError::SessionUnavailable,
                 other => other,
             })?;
+            let mut dormant = false;
+            while let Reply::Restored {
+                server: boot, pane, ..
+            } = reply
+            {
+                if !dormant {
+                    dormant = true;
+                    expected_session = None;
+                    expected_target = None;
+                    takeover = false;
+                    state.invalidate();
+                    state.start_restored.store(false, Ordering::Release);
+                    while input.try_recv().is_ok() {}
+                    clear_presentation(&events, &mut generation, &appearance);
+                }
+                state.set(DevelopmentPaneStatus::Restored);
+                if !alive.load(Ordering::Acquire) {
+                    return Ok(());
+                }
+                if state.start_restored.swap(false, Ordering::AcqRel) {
+                    reply = connection.exchange(&Request::StartRestored {
+                        server: boot,
+                        pane,
+                        size: *size.lock().unwrap_or_else(|e| e.into_inner()),
+                        style: Some(encode_style(
+                            &appearance.lock().unwrap_or_else(|e| e.into_inner()),
+                        )),
+                    })?;
+                } else {
+                    std::thread::sleep(Duration::from_millis(100));
+                    reply = connection.exchange(&Request::Select {
+                        create: false,
+                        size: *size.lock().unwrap_or_else(|e| e.into_inner()),
+                        resume: None,
+                        style: None,
+                    })?;
+                }
+            }
             while let Reply::Takeover { target } = reply {
                 if expected_target.is_some_and(|old| old != target) {
                     return Err(ServerError::SessionUnavailable);

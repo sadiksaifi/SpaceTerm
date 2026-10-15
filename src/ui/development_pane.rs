@@ -82,6 +82,9 @@ mod window {
     pub(super) const TAKEOVER_SELECTOR: &str = "development-pane-takeover";
     pub(super) const TAKE_OVER_SELECTOR: &str = "development-pane-take-over";
     pub(super) const TAKE_OVER_STATUS_SELECTOR: &str = "development-pane-take-over-status";
+    pub(super) const RESTORED_SELECTOR: &str = "development-pane-restored";
+    pub(super) const START_SHELL_SELECTOR: &str = "development-pane-start-shell";
+    pub(super) const START_SHELL_STATUS_SELECTOR: &str = "development-pane-start-shell-status";
     const CLOSE_WINDOW_SELECTOR: &str = "development-pane-close-window";
     const CONFIRM_SELECTOR: &str = "development-pane-end-session-confirm";
     const CANCEL_SELECTOR: &str = "development-pane-end-session-cancel";
@@ -94,6 +97,15 @@ mod window {
         "This Terminal Session is no longer available on the server.";
     const TAKING_OVER: &str = "Taking Over…";
     const TAKE_OVER_UNCONFIRMED: &str = "Take Over was not confirmed.";
+    const RESTORED_TITLE: &str = "Server Restarted";
+    const RESTORED_DETAIL: &str = "Programs that were running in this Pane ended when the server \
+                                   stopped. Start a new shell to keep working here.";
+    const DIRECTORY_UNAVAILABLE_TITLE: &str = "Directory Unavailable";
+    const DIRECTORY_UNAVAILABLE_DETAIL: &str = "This Pane's directory is no longer available on \
+                                                the server, so no shell started. Programs that \
+                                                were running here ended when the server stopped.";
+    const STARTING_SHELL: &str = "Starting Shell…";
+    const START_SHELL_UNCONFIRMED: &str = "Starting the shell was not confirmed.";
 
     /// What the window needs from the server connection behind its Pane.
     pub(crate) trait DevelopmentPaneConnection {
@@ -104,6 +116,9 @@ mod window {
         fn connection_generation(&self) -> u64;
         /// Asks for a reconnection attempt now instead of at the next automatic one.
         fn retry(&self);
+        /// Asks the server to start a fresh shell in a Pane retained across a server restart. Only
+        /// a person's explicit request calls this; rendering, focus, and reconnection never do.
+        fn start_restored(&self);
         /// Asks the server to make this client the Controlling Client. From Takeover, the status
         /// reads TakingOver once this returns.
         fn take_over(&self);
@@ -123,6 +138,10 @@ mod window {
 
         fn retry(&self) {
             DevelopmentPaneState::retry(self);
+        }
+
+        fn start_restored(&self) {
+            DevelopmentPaneState::start_restored(self);
         }
 
         fn take_over(&self) {
@@ -268,6 +287,16 @@ mod window {
             )
     }
 
+    /// Why the Pane has no shell after the server restarted. The screen naming it replaces the
+    /// Pane, because the programs it showed ended with the server.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Dormant {
+        /// The Pane waits for a person to start a fresh shell.
+        Restored,
+        /// The server refused to start a shell, because the Pane's directory is unavailable.
+        DirectoryUnavailable,
+    }
+
     /// The window's single Pane, its server connection, and the End Session request.
     pub(crate) struct DevelopmentPaneWindow {
         terminal: Entity<TerminalPane>,
@@ -286,6 +315,14 @@ mod window {
         /// The last Take Over ended without a grant reaching this client, so the Takeover Screen
         /// says so. The server may still have committed it before the reply was lost.
         take_over_unconfirmed: bool,
+        /// The screen replacing a Pane retained across a server restart. It stays through
+        /// interruptions until a fresh shell's screen arrives or another client controls the Pane.
+        dormant: Option<Dormant>,
+        /// Start New Shell was requested, and no answer has reached this window yet.
+        start_pending: bool,
+        /// The last Start New Shell ended without a shell reaching this client, so the screen says
+        /// so. The server may still have started it before the reply was lost.
+        start_unconfirmed: bool,
         focus_handle: FocusHandle,
         window_appearance: WindowAppearanceOwner,
         window_traffic_lights: WindowTrafficLightOwner,
@@ -368,6 +405,9 @@ mod window {
                 confirmation: None,
                 takeover_shown: false,
                 take_over_unconfirmed: false,
+                dormant: None,
+                start_pending: false,
+                start_unconfirmed: false,
                 focus_handle,
                 window_appearance,
                 window_traffic_lights,
@@ -406,6 +446,13 @@ mod window {
             {
                 self.take_over_unconfirmed = !generation_changed;
             }
+            // A new connection that still finds the Pane dormant never received the start, or
+            // lost its answer. The window claims neither and offers Start New Shell again.
+            if self.start_pending && generation_changed && status == DevelopmentPaneStatus::Restored
+            {
+                self.start_pending = false;
+                self.start_unconfirmed = true;
+            }
             self.status = status;
             self.generation = generation;
             if superseded {
@@ -429,9 +476,13 @@ mod window {
                 DevelopmentPaneStatus::Connected => {
                     self.takeover_shown = false;
                     self.take_over_unconfirmed = false;
+                    self.dormant = None;
+                    self.start_pending = false;
+                    self.start_unconfirmed = false;
                 }
                 _ => {}
             }
+            self.apply_dormancy(window, cx);
             let interrupted = self.status != DevelopmentPaneStatus::Connected;
             if interrupted {
                 self.dismiss_confirmation(window, cx);
@@ -462,13 +513,17 @@ mod window {
             }
             if entering_takeover {
                 self.takeover_shown = true;
+                // Another client started the shell, so nothing here waits to start it.
+                self.dormant = None;
+                self.start_pending = false;
+                self.start_unconfirmed = false;
                 // Focus rests on the window, so typing meant for the shell reaches nothing and
                 // never takes control back by accident. Tab reaches Take Over.
                 self.focus_content(window, cx);
             }
-            // Close Window replaces Take Over, which may hold focus. The window keeps focus, so
-            // typing never closes it and Tab reaches Close Window.
-            if self.session_ended() {
+            // Close Window replaces Take Over or Start New Shell, which may hold focus. The window
+            // keeps focus, so typing never closes it and Tab reaches Close Window.
+            if self.session_ended() || self.directory_unavailable() {
                 self.focus_handle.focus(window, cx);
             }
             // Retry held focus during the interruption and leaves with it, so typing returns to
@@ -479,10 +534,71 @@ mod window {
             cx.notify();
         }
 
-        /// Moves focus to what the window presents: the Pane, or the window itself while the
-        /// Takeover Screen replaces the Pane.
+        /// Presents a Pane retained across a server restart. Its former screen and title belong
+        /// to programs that ended with the server, so they are forgotten before anything else
+        /// paints, and only a person's Start New Shell starts a shell.
+        fn apply_dormancy(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+            let dormant = match self.status {
+                DevelopmentPaneStatus::Restored => Dormant::Restored,
+                DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable) => {
+                    Dormant::DirectoryUnavailable
+                }
+                // An interruption while starting leaves the outcome unknown. Reconnecting
+                // answers it.
+                DevelopmentPaneStatus::Reconnecting | DevelopmentPaneStatus::Failed(_)
+                    if self.start_pending =>
+                {
+                    self.start_pending = false;
+                    self.start_unconfirmed = true;
+                    return;
+                }
+                _ => return,
+            };
+            let entering = self.dormant.is_none();
+            if dormant == Dormant::DirectoryUnavailable {
+                self.start_pending = false;
+                self.start_unconfirmed = false;
+            }
+            self.dormant = Some(dormant);
+            self.takeover_shown = false;
+            self.take_over_unconfirmed = false;
+            self.terminal
+                .update(cx, |terminal, cx| terminal.clear_server_presentation(cx));
+            if entering {
+                // Focus rests on the window, so typing meant for the former shell reaches
+                // nothing and never starts a new one by accident. Tab reaches Start New Shell.
+                self.focus_handle.focus(window, cx);
+            }
+        }
+
+        fn directory_unavailable(&self) -> bool {
+            self.dormant == Some(Dormant::DirectoryUnavailable)
+        }
+
+        /// Starts a fresh shell in a Pane retained across a server restart, once, on a person's
+        /// request.
+        fn start_shell(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+            if !self.can_start_shell() {
+                return;
+            }
+            self.start_unconfirmed = false;
+            self.start_pending = true;
+            // Start New Shell waits disabled while the server answers, and a disabled control
+            // gives up focus. The window keeps it, so the keyboard stays on the screen.
+            self.focus_handle.focus(window, cx);
+            self.connection.start_restored();
+            self.sync_status(window, cx);
+            cx.notify();
+        }
+
+        fn can_start_shell(&self) -> bool {
+            self.status == DevelopmentPaneStatus::Restored && !self.start_pending
+        }
+
+        /// Moves focus to what the window presents: the Pane, or the window itself while a
+        /// screen replaces the Pane.
         fn focus_content(&self, window: &mut Window, cx: &mut gpui::Context<Self>) {
-            if self.takeover_shown {
+            if self.takeover_shown || self.dormant.is_some() {
                 self.focus_handle.focus(window, cx);
             } else {
                 self.terminal
@@ -490,8 +606,10 @@ mod window {
             }
         }
 
+        /// Retries the connection only. It never starts a shell in a dormant Pane, and an
+        /// unavailable directory waits for directory repair rather than a retry.
         fn retry(&mut self, cx: &mut gpui::Context<Self>) {
-            if self.session_ended() {
+            if self.session_ended() || self.directory_unavailable() {
                 return;
             }
             if matches!(
@@ -533,9 +651,10 @@ mod window {
 
         /// Close Pane in this window ends the shell, as it does for a Workspace Pane. Closing the
         /// window leaves it running.
-        /// Once the Session ended elsewhere, Close Pane closes the window.
+        /// Once the Session ended elsewhere, or while no shell runs since the server restarted,
+        /// Close Pane closes the window. The server keeps a dormant Pane.
         fn close_pane(&mut self, _: &ClosePane, window: &mut Window, cx: &mut gpui::Context<Self>) {
-            if self.session_ended() {
+            if self.session_ended() || self.dormant.is_some() {
                 window.remove_window();
                 return;
             }
@@ -628,7 +747,9 @@ mod window {
             if self.end_request.is_some() && self.status == DevelopmentPaneStatus::Connected {
                 return Some("Ending Session…");
             }
-            (self.status == DevelopmentPaneStatus::Connecting).then_some("Connecting…")
+            // Starting a shell reports on the screen that replaces the Pane.
+            (self.status == DevelopmentPaneStatus::Connecting && self.dormant.is_none())
+                .then_some("Connecting…")
         }
 
         fn render_header(&self, window: &Window, cx: &mut gpui::Context<Self>) -> AnyElement {
@@ -642,8 +763,12 @@ mod window {
             // The Pane falls back to the window's own name until the shell reports a title, and
             // the window already shows that name. The Takeover Screen shows no title, because the
             // shell's title belongs to the Controlling Client's view.
+            // A dormant Pane shows no title either, because the shell that set it ended.
             let title = Some(self.terminal.read(cx).title()).filter(|title| {
-                !self.takeover_shown && !title.trim().is_empty() && title.as_ref() != WINDOW_TITLE
+                !self.takeover_shown
+                    && self.dormant.is_none()
+                    && !title.trim().is_empty()
+                    && title.as_ref() != WINDOW_TITLE
             });
             let status = self.progress_label().map(|label| {
                 let indicator = ProgressRing::new(
@@ -766,6 +891,10 @@ mod window {
                     SharedString::new_static(if self.takeover_shown {
                         "Take Over is available once SpaceTerm reconnects. The shell keeps \
                          running on the server."
+                    } else if self.dormant == Some(Dormant::Restored) {
+                        "Start New Shell is available once SpaceTerm reconnects."
+                    } else if self.dormant.is_some() {
+                        "No shell is running in this Pane."
                     } else if self.end_request.is_some() {
                         "End Session was interrupted and is not sent again. Typing is paused and \
                          is not sent."
@@ -775,6 +904,8 @@ mod window {
                     StatusIntent::Warning,
                 ),
                 DevelopmentPaneStatus::TakeoverFailed(_) if self.session_ended() => return None,
+                // The screen replacing the Pane explains it, and nothing here can repair it.
+                DevelopmentPaneStatus::Failed(_) if self.directory_unavailable() => return None,
                 DevelopmentPaneStatus::Failed(error)
                 | DevelopmentPaneStatus::TakeoverFailed(error) => (
                     SharedString::new_static("Not Connected"),
@@ -881,9 +1012,11 @@ mod window {
             let appearance = super::super::appearance::shared_chrome(cx);
             let header = self.render_header(window, cx);
             let notice = self.render_notice(cx);
-            // The Takeover Screen replaces the Pane outright, so nothing of the former screen
-            // paints or reaches assistive technology.
-            let content = if self.takeover_shown {
+            // The dormant and Takeover Screens replace the Pane outright, so nothing of the former
+            // screen paints or reaches assistive technology.
+            let content = if let Some(dormant) = self.dormant {
+                self.render_dormant_screen(dormant, cx)
+            } else if self.takeover_shown {
                 self.render_takeover_screen(cx)
             } else {
                 self.render_terminal(&appearance)
@@ -947,10 +1080,6 @@ mod window {
         /// The Takeover Screen: another client controls the Pane, and Take Over moves control
         /// here. If the Session ended meanwhile, the screen says so and offers only to close.
         fn render_takeover_screen(&self, cx: &mut gpui::Context<Self>) -> AnyElement {
-            let appearance = super::super::appearance::shared_chrome(cx);
-            // The configured terminal background, never one the shell chose.
-            let surface =
-                appearance.pane_surface(appearance_runtime::current(cx).terminal.colors.background);
             let session_ended = self.session_ended();
             let (title, detail) = match self.status {
                 _ if session_ended => (SESSION_ENDED_TITLE, SESSION_ENDED_DETAIL),
@@ -960,58 +1089,25 @@ mod window {
                 }
                 _ => (TAKEOVER_TITLE, TAKEOVER_DETAIL),
             };
-            let taking_over = self.status == DevelopmentPaneStatus::TakingOver;
-            let status_text_style = appearance.typography.style(TextRole::Secondary);
-            let status = if taking_over {
-                Some(
-                    div()
-                        .id(TAKE_OVER_STATUS_SELECTOR)
-                        .role(gpui::accesskit::Role::Status)
-                        .aria_label(TAKING_OVER)
-                        .debug_selector(|| TAKE_OVER_STATUS_SELECTOR.to_owned())
-                        .flex()
-                        .items_center()
-                        .gap(appearance.spacing(6.0))
-                        .child(
-                            ProgressRing::new(
-                                "development-pane-take-over-progress",
-                                TAKING_OVER,
-                                ProgressState::Indeterminate,
-                            )
-                            .size(ProgressSize::Compact),
-                        )
-                        .child(
-                            div()
-                                .chrome_text(status_text_style)
-                                .text_color(gpui_color(appearance.colors.text_secondary))
-                                .child(TAKING_OVER),
-                        )
-                        .into_any_element(),
-                )
+            let status = if self.status == DevelopmentPaneStatus::TakingOver {
+                Some(Self::progress_status(
+                    TAKE_OVER_STATUS_SELECTOR,
+                    "development-pane-take-over-progress",
+                    TAKING_OVER,
+                    cx,
+                ))
             } else if self.take_over_unconfirmed && !session_ended {
-                Some(
-                    div()
-                        .id(TAKE_OVER_STATUS_SELECTOR)
-                        .role(gpui::accesskit::Role::Status)
-                        .aria_label(TAKE_OVER_UNCONFIRMED)
-                        .debug_selector(|| TAKE_OVER_STATUS_SELECTOR.to_owned())
-                        .chrome_text(status_text_style)
-                        .text_color(gpui_color(appearance.colors.text_secondary))
-                        .child(TAKE_OVER_UNCONFIRMED)
-                        .into_any_element(),
-                )
+                Some(Self::note_status(
+                    TAKE_OVER_STATUS_SELECTOR,
+                    TAKE_OVER_UNCONFIRMED,
+                    cx,
+                ))
             } else {
                 None
             };
             let owner = cx.weak_entity();
             let action = if session_ended {
-                Button::new(CLOSE_WINDOW_SELECTOR, "Close Window")
-                    .variant(ButtonVariant::Primary)
-                    .size(ButtonSize::Regular)
-                    .tab_stop(true)
-                    .accessibility_description("Closes this window. The Session already ended.")
-                    .debug_selector(CLOSE_WINDOW_SELECTOR)
-                    .on_activate(|_, window, _| window.remove_window())
+                close_window_button("Closes this window. The Session already ended.")
             } else {
                 Button::new(TAKE_OVER_SELECTOR, "Take Over")
                     .variant(ButtonVariant::Primary)
@@ -1026,12 +1122,108 @@ mod window {
                         });
                     })
             };
+            // Assistive technology announces the end, which happens without any action here.
+            Self::render_screen(
+                TAKEOVER_SELECTOR,
+                title,
+                detail,
+                session_ended,
+                action,
+                status,
+                cx,
+            )
+        }
+
+        /// The screen replacing a Pane retained across a server restart. Its programs ended, so
+        /// it shows nothing of them. Start New Shell is the only way to start a shell here.
+        fn render_dormant_screen(
+            &self,
+            dormant: Dormant,
+            cx: &mut gpui::Context<Self>,
+        ) -> AnyElement {
+            if dormant == Dormant::DirectoryUnavailable {
+                // Retry and Choose Directory belong to directory repair, so only closing remains.
+                // The screen names no directory.
+                return Self::render_screen(
+                    RESTORED_SELECTOR,
+                    DIRECTORY_UNAVAILABLE_TITLE,
+                    DIRECTORY_UNAVAILABLE_DETAIL,
+                    true,
+                    close_window_button("Closes this window. The Pane stays on the server."),
+                    None,
+                    cx,
+                );
+            }
+            let starting = self.start_pending
+                && matches!(
+                    self.status,
+                    DevelopmentPaneStatus::Restored | DevelopmentPaneStatus::Connecting
+                );
+            let status = if starting {
+                Some(Self::progress_status(
+                    START_SHELL_STATUS_SELECTOR,
+                    "development-pane-start-shell-progress",
+                    STARTING_SHELL,
+                    cx,
+                ))
+            } else if self.start_unconfirmed {
+                Some(Self::note_status(
+                    START_SHELL_STATUS_SELECTOR,
+                    START_SHELL_UNCONFIRMED,
+                    cx,
+                ))
+            } else {
+                None
+            };
+            let owner = cx.weak_entity();
+            let action = Button::new(START_SHELL_SELECTOR, "Start New Shell")
+                .variant(ButtonVariant::Primary)
+                .size(ButtonSize::Regular)
+                .disabled(!self.can_start_shell())
+                .tab_stop(true)
+                .accessibility_description(
+                    "Starts a new shell on the server in this Pane's last directory.",
+                )
+                .debug_selector(START_SHELL_SELECTOR)
+                .on_activate(move |_, window, cx| {
+                    let _ = owner.update(cx, |pane_window, cx| {
+                        pane_window.start_shell(window, cx);
+                    });
+                });
+            // The server restart happens without any action here, so assistive technology
+            // announces it.
+            Self::render_screen(
+                RESTORED_SELECTOR,
+                RESTORED_TITLE,
+                RESTORED_DETAIL,
+                true,
+                action,
+                status,
+                cx,
+            )
+        }
+
+        /// A centered screen replacing the Pane: a title, its detail, one action, and a status
+        /// slot under the action.
+        fn render_screen(
+            selector: &'static str,
+            title: &'static str,
+            detail: &'static str,
+            announce: bool,
+            action: Button,
+            status: Option<AnyElement>,
+            cx: &mut gpui::Context<Self>,
+        ) -> AnyElement {
+            let appearance = super::super::appearance::shared_chrome(cx);
+            // The configured terminal background, never one the shell chose.
+            let surface =
+                appearance.pane_surface(appearance_runtime::current(cx).terminal.colors.background);
             div()
-                .id(TAKEOVER_SELECTOR)
+                .id(selector)
                 .role(gpui::accesskit::Role::Group)
                 .aria_label(title)
                 .aria_description(detail)
-                .debug_selector(|| TAKEOVER_SELECTOR.to_owned())
+                .debug_selector(|| selector.to_owned())
                 .absolute()
                 .inset_0()
                 .bg(gpui_color(surface))
@@ -1057,10 +1249,8 @@ mod window {
                         )
                         .child(
                             div()
-                                .id("development-pane-takeover-detail")
-                                // Assistive technology announces the end, which happens without
-                                // any action here.
-                                .when(session_ended, |detail_text| {
+                                .id(format!("{selector}-detail"))
+                                .when(announce, |detail_text| {
                                     detail_text
                                         .role(gpui::accesskit::Role::Status)
                                         .aria_label(detail)
@@ -1072,7 +1262,7 @@ mod window {
                         ),
                 )
                 .child(action)
-                // The slot keeps its height, so Take Over stays put while its status changes.
+                // The slot keeps its height, so the action stays put while its status changes.
                 .child(
                     div()
                         .h(appearance.spacing(20.0))
@@ -1082,6 +1272,64 @@ mod window {
                 )
                 .into_any_element()
         }
+
+        /// An action's progress, read by assistive technology as one status.
+        fn progress_status(
+            selector: &'static str,
+            progress_id: &'static str,
+            label: &'static str,
+            cx: &mut gpui::Context<Self>,
+        ) -> AnyElement {
+            let appearance = super::super::appearance::shared_chrome(cx);
+            div()
+                .id(selector)
+                .role(gpui::accesskit::Role::Status)
+                .aria_label(label)
+                .debug_selector(|| selector.to_owned())
+                .flex()
+                .items_center()
+                .gap(appearance.spacing(6.0))
+                .child(
+                    ProgressRing::new(progress_id, label, ProgressState::Indeterminate)
+                        .size(ProgressSize::Compact),
+                )
+                .child(
+                    div()
+                        .chrome_text(appearance.typography.style(TextRole::Secondary))
+                        .text_color(gpui_color(appearance.colors.text_secondary))
+                        .child(label),
+                )
+                .into_any_element()
+        }
+
+        /// An action's outcome as plain text, read by assistive technology as one status.
+        fn note_status(
+            selector: &'static str,
+            label: &'static str,
+            cx: &mut gpui::Context<Self>,
+        ) -> AnyElement {
+            let appearance = super::super::appearance::shared_chrome(cx);
+            div()
+                .id(selector)
+                .role(gpui::accesskit::Role::Status)
+                .aria_label(label)
+                .debug_selector(|| selector.to_owned())
+                .chrome_text(appearance.typography.style(TextRole::Secondary))
+                .text_color(gpui_color(appearance.colors.text_secondary))
+                .child(label)
+                .into_any_element()
+        }
+    }
+
+    /// Close Window, offered once nothing in the window can act on the Pane.
+    fn close_window_button(description: &'static str) -> Button {
+        Button::new(CLOSE_WINDOW_SELECTOR, "Close Window")
+            .variant(ButtonVariant::Primary)
+            .size(ButtonSize::Regular)
+            .tab_stop(true)
+            .accessibility_description(description)
+            .debug_selector(CLOSE_WINDOW_SELECTOR)
+            .on_activate(|_, window, _| window.remove_window())
     }
 
     /// Plain Tab the Pane did not take moves focus, so the window's actions stay reachable from
@@ -1165,6 +1413,7 @@ mod window {
             generation: AtomicU64,
             reconnect_after_next_read: AtomicBool,
             retries: AtomicUsize,
+            restored_starts: AtomicUsize,
             take_overs: AtomicUsize,
             end_session_generations: Mutex<Vec<u64>>,
         }
@@ -1176,6 +1425,7 @@ mod window {
                     generation: AtomicU64::new(0),
                     reconnect_after_next_read: AtomicBool::new(false),
                     retries: AtomicUsize::new(0),
+                    restored_starts: AtomicUsize::new(0),
                     take_overs: AtomicUsize::new(0),
                     end_session_generations: Mutex::new(Vec::new()),
                 }
@@ -1216,6 +1466,11 @@ mod window {
                 self.retries.load(Ordering::SeqCst)
             }
 
+            /// How many times the window asked to start a fresh shell in a dormant Pane.
+            pub(in crate::ui::development_pane) fn restored_starts(&self) -> usize {
+                self.restored_starts.load(Ordering::SeqCst)
+            }
+
             pub(in crate::ui::development_pane) fn end_sessions(&self) -> usize {
                 self.end_session_generations().len()
             }
@@ -1244,6 +1499,11 @@ mod window {
 
             fn retry(&self) {
                 self.retries.fetch_add(1, Ordering::SeqCst);
+            }
+
+            /// Counts the request and leaves the status for the test to answer.
+            fn start_restored(&self) {
+                self.restored_starts.fetch_add(1, Ordering::SeqCst);
             }
 
             fn take_over(&self) {

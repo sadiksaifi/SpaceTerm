@@ -8,7 +8,8 @@ use gpui::{Modifiers, TestAppContext, VisualTestContext, WeakEntity};
 
 use super::window::testing::ScriptedConnection;
 use super::window::{
-    DevelopmentPaneWindow, END_SESSION_SELECTOR, NOTICE_SELECTOR, RETRY_SELECTOR, STATUS_INTERVAL,
+    DevelopmentPaneWindow, END_SESSION_SELECTOR, NOTICE_SELECTOR, RESTORED_SELECTOR,
+    RETRY_SELECTOR, START_SHELL_SELECTOR, START_SHELL_STATUS_SELECTOR, STATUS_INTERVAL,
     TAKE_OVER_SELECTOR, TAKE_OVER_STATUS_SELECTOR, TAKEOVER_SELECTOR, TERMINAL_SELECTOR,
     TERMINAL_TITLE_SELECTOR, WINDOW_TITLE,
 };
@@ -86,6 +87,14 @@ impl OpenPane<'_> {
 
     fn reconnect(&mut self) {
         self.connection.reconnect();
+        self.cx.executor().advance_clock(STATUS_INTERVAL);
+        self.cx.run_until_parked();
+    }
+
+    /// A new connection reaches the server, which answers with this status.
+    fn reconnect_to(&mut self, status: DevelopmentPaneStatus) {
+        self.connection.reconnect();
+        self.connection.set(status);
         self.cx.executor().advance_clock(STATUS_INTERVAL);
         self.cx.run_until_parked();
     }
@@ -896,4 +905,277 @@ fn a_permanent_failure_after_losing_control_explains_itself_without_content(
     assert!(!pane.rendered(TERMINAL_SELECTOR));
     pane.click(TAKE_OVER_SELECTOR);
     assert_eq!(pane.connection.take_overs(), 1);
+}
+
+#[gpui::test]
+fn a_restored_pane_starts_a_shell_only_when_asked(cx: &mut TestAppContext) {
+    let mut pane = open_pane(DevelopmentPaneStatus::Connecting, cx);
+    pane.set(DevelopmentPaneStatus::Restored);
+
+    assert!(pane.rendered(RESTORED_SELECTOR));
+    assert!(pane.rendered(START_SHELL_SELECTOR));
+    assert!(!pane.rendered(TERMINAL_SELECTOR), "no former screen paints");
+    assert!(
+        !pane.rendered(NOTICE_SELECTOR),
+        "the server answered; nothing failed"
+    );
+    assert!(
+        !pane.rendered("development-pane-status"),
+        "the screen reports its own progress"
+    );
+
+    // Typing meant for the former shell, focus, and reconnection start nothing.
+    pane.press("space");
+    pane.press("enter");
+    pane.press("x");
+    pane.cx.update(|window, _| window.activate_window());
+    pane.set(DevelopmentPaneStatus::Reconnecting);
+    pane.click(RETRY_SELECTOR);
+    pane.set(DevelopmentPaneStatus::Restored);
+    pane.click(END_SESSION_SELECTOR);
+    assert!(!pane.rendered("modal-action-development-pane-end-session-confirm"));
+    assert_eq!(pane.connection.restored_starts(), 0);
+    assert_eq!(pane.connection.retries(), 1, "Retry only reconnects");
+    assert_eq!(pane.keys(), 0, "typing reaches no shell");
+
+    pane.click(START_SHELL_SELECTOR);
+    assert_eq!(pane.connection.restored_starts(), 1);
+    assert!(
+        pane.rendered(START_SHELL_STATUS_SELECTOR),
+        "progress shows at once"
+    );
+    pane.click(START_SHELL_SELECTOR);
+    assert_eq!(
+        pane.connection.restored_starts(),
+        1,
+        "Start New Shell waits for the server"
+    );
+
+    // The fresh shell's first screen returns the Pane, and typing reaches it.
+    pane.reconnect();
+    assert!(!pane.rendered(RESTORED_SELECTOR));
+    assert!(pane.rendered(TERMINAL_SELECTOR));
+    pane.cx.simulate_keystrokes("a");
+    assert!(pane.keys() > 0, "typing reaches the fresh shell");
+    assert_eq!(pane.connection.restored_starts(), 1);
+}
+
+#[gpui::test]
+fn a_server_restart_forgets_the_former_screen(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let mut pane = open_pane(DevelopmentPaneStatus::Connected, cx);
+    pane.publish_title("secret-build");
+    assert!(pane.rendered(TERMINAL_TITLE_SELECTOR));
+
+    // The server stops while the window stays open, then returns with the Pane dormant.
+    pane.set(DevelopmentPaneStatus::Reconnecting);
+    pane.reconnect_to(DevelopmentPaneStatus::Restored);
+
+    assert!(pane.rendered(RESTORED_SELECTOR));
+    assert!(!pane.rendered(TERMINAL_SELECTOR));
+    assert!(
+        !pane.rendered(TERMINAL_TITLE_SELECTOR),
+        "the ended shell's title never shows"
+    );
+    let tree = A11yTree::read(pane.cx);
+    assert!(
+        tree.find("Terminal context actions").is_none(),
+        "the Pane leaves the tree"
+    );
+    let screen = tree.node("Server Restarted");
+    assert_eq!(screen["aria"]["role"], "Group");
+    let description = screen["aria"]["description"].as_str().unwrap_or_default();
+    assert!(description.contains("ended"), "the former programs ended");
+    assert!(
+        description.contains("new shell"),
+        "the screen says a new shell starts"
+    );
+    assert!(
+        !description.contains("keeps running"),
+        "nothing claims a shell runs"
+    );
+
+    pane.click(START_SHELL_SELECTOR);
+    pane.reconnect();
+    assert!(pane.rendered(TERMINAL_SELECTOR));
+    assert!(
+        !pane.rendered(TERMINAL_TITLE_SELECTOR),
+        "the former title never returns"
+    );
+    pane.publish_title("fresh-shell");
+    assert!(pane.rendered(TERMINAL_TITLE_SELECTOR));
+}
+
+#[gpui::test]
+fn assistive_technology_reaches_start_new_shell(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let pane = open_pane(DevelopmentPaneStatus::Restored, cx);
+
+    let tree = A11yTree::read(pane.cx);
+    assert_eq!(
+        tree.node(
+            "Programs that were running in this Pane ended when the server stopped. Start a new \
+             shell to keep working here."
+        )["aria"]["role"],
+        "Status",
+        "the restart is announced"
+    );
+    let start = tree.node("Start New Shell");
+    assert_eq!(start["aria"]["role"], "Button");
+    assert!(tree.exposed(start));
+    perform(pane.cx, start, gpui::accesskit::Action::Click);
+    pane.cx.run_until_parked();
+    assert_eq!(pane.connection.restored_starts(), 1);
+
+    let tree = A11yTree::read(pane.cx);
+    assert_eq!(tree.node("Starting Shell…")["aria"]["role"], "Status");
+    assert_eq!(tree.node("Start New Shell")["aria"]["disabled"], true);
+}
+
+#[gpui::test]
+fn the_keyboard_reaches_start_new_shell_but_typing_never_presses_it(cx: &mut TestAppContext) {
+    let mut pane = open_pane(DevelopmentPaneStatus::Connected, cx);
+    pane.set(DevelopmentPaneStatus::Reconnecting);
+    pane.reconnect_to(DevelopmentPaneStatus::Restored);
+
+    // Someone typing into the shell when the server restarts keeps typing into nothing.
+    pane.press("space");
+    pane.press("enter");
+    pane.press("x");
+    assert_eq!(pane.connection.restored_starts(), 0);
+
+    // End Session has no shell to end, so Tab passes over it to Start New Shell.
+    pane.press("tab");
+    pane.press("space");
+    assert_eq!(pane.connection.restored_starts(), 1);
+
+    // Start New Shell waits for the server, so pressing again sends nothing more.
+    pane.press("space");
+    pane.press("enter");
+    assert_eq!(pane.connection.restored_starts(), 1);
+    assert_eq!(pane.keys(), 0);
+}
+
+#[gpui::test]
+fn an_interrupted_start_says_it_was_not_confirmed_and_can_be_tried_again(cx: &mut TestAppContext) {
+    let mut pane = open_pane(DevelopmentPaneStatus::Restored, cx);
+    pane.click(START_SHELL_SELECTOR);
+
+    pane.set(DevelopmentPaneStatus::Reconnecting);
+    assert!(pane.rendered(RESTORED_SELECTOR), "no former screen returns");
+    assert!(pane.rendered(NOTICE_SELECTOR));
+    assert!(
+        pane.rendered(START_SHELL_STATUS_SELECTOR),
+        "the attempt is not left spinning"
+    );
+    pane.click(START_SHELL_SELECTOR);
+    assert_eq!(
+        pane.connection.restored_starts(),
+        1,
+        "Start New Shell waits for the server"
+    );
+
+    pane.set(DevelopmentPaneStatus::Restored);
+    assert!(pane.rendered(START_SHELL_STATUS_SELECTOR));
+    pane.click(START_SHELL_SELECTOR);
+    assert_eq!(
+        pane.connection.restored_starts(),
+        2,
+        "Start New Shell is offered again"
+    );
+}
+
+#[gpui::test]
+fn a_start_lost_between_two_reads_is_offered_again(cx: &mut TestAppContext) {
+    let mut pane = open_pane(DevelopmentPaneStatus::Restored, cx);
+    pane.click(START_SHELL_SELECTOR);
+
+    // The connection drops and returns to the dormant Pane before the window reads it.
+    pane.reconnect_to(DevelopmentPaneStatus::Restored);
+
+    assert!(pane.rendered(START_SHELL_STATUS_SELECTOR));
+    pane.click(START_SHELL_SELECTOR);
+    assert_eq!(pane.connection.restored_starts(), 2);
+}
+
+#[gpui::test]
+fn an_unavailable_directory_explains_itself_without_paths_or_repair(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let mut pane = open_pane(DevelopmentPaneStatus::Restored, cx);
+    pane.click(START_SHELL_SELECTOR);
+
+    pane.set(DevelopmentPaneStatus::Failed(
+        ServerError::DirectoryUnavailable,
+    ));
+
+    assert!(pane.rendered(RESTORED_SELECTOR));
+    assert!(!pane.rendered(TERMINAL_SELECTOR));
+    assert!(
+        !pane.rendered(NOTICE_SELECTOR),
+        "the screen explains the failure"
+    );
+    assert!(!pane.rendered(RETRY_SELECTOR), "repair arrives separately");
+    assert!(!pane.rendered(START_SHELL_SELECTOR));
+    assert!(!pane.rendered(START_SHELL_STATUS_SELECTOR));
+    let tree = A11yTree::read(pane.cx);
+    let screen = tree.node("Directory Unavailable");
+    assert_eq!(screen["aria"]["role"], "Group");
+    let description = screen["aria"]["description"].as_str().unwrap_or_default();
+    assert!(description.contains("no shell started"));
+    assert!(!description.contains('/'), "the screen names no path");
+    assert!(tree.find("Choose Directory").is_none());
+    assert!(tree.find("Retry").is_none());
+    assert!(tree.find("Terminal context actions").is_none());
+    assert_eq!(
+        tree.node(
+            "This Pane's directory is no longer available on the server, so no shell started. \
+             Programs that were running here ended when the server stopped."
+        )["aria"]["role"],
+        "Status",
+        "the refusal is announced"
+    );
+    assert!(tree.exposed(tree.node("Close Window")));
+
+    // Typing reaches nothing, and nothing retries or starts a shell.
+    pane.press("space");
+    pane.press("enter");
+    pane.press("x");
+    assert_eq!(pane.keys(), 0);
+    assert!(!pane.closed(), "typing never closes the window");
+    assert_eq!(pane.connection.retries(), 0);
+    assert_eq!(pane.connection.restored_starts(), 1);
+
+    // Tab passes over End Session to Close Window, which leaves the Pane on the server.
+    pane.press("tab");
+    pane.press("space");
+    assert!(pane.closed());
+    assert_eq!(pane.connection.end_sessions(), 0);
+}
+
+#[gpui::test]
+fn close_pane_closes_the_window_while_no_shell_runs(cx: &mut TestAppContext) {
+    let pane = open_pane(DevelopmentPaneStatus::Restored, cx);
+
+    // Close Pane acts on key down, so the window is gone before the key comes back up.
+    pane.cx.simulate_keystrokes("cmd-w");
+    pane.cx.run_until_parked();
+
+    assert!(pane.closed());
+    assert_eq!(pane.connection.end_sessions(), 0);
+    assert_eq!(pane.connection.restored_starts(), 0);
+}
+
+#[gpui::test]
+fn another_client_starting_the_shell_shows_the_takeover_screen(cx: &mut TestAppContext) {
+    let mut pane = open_pane(DevelopmentPaneStatus::Restored, cx);
+
+    pane.lose_control();
+
+    assert!(pane.rendered(TAKEOVER_SELECTOR));
+    assert!(!pane.rendered(RESTORED_SELECTOR));
+    assert!(!pane.rendered(TERMINAL_SELECTOR));
+    assert_eq!(pane.connection.restored_starts(), 0);
 }
