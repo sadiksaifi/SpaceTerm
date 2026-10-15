@@ -28,6 +28,7 @@ pub(crate) enum DevelopmentPaneStatus {
 pub(crate) struct DevelopmentPaneState {
     status: Mutex<DevelopmentPaneStatus>,
     retry: AtomicBool,
+    selected: AtomicBool,
     take_over: AtomicBool,
     start_restored: AtomicBool,
     close: AtomicU64,
@@ -39,6 +40,7 @@ impl DevelopmentPaneState {
         Self {
             status: Mutex::new(DevelopmentPaneStatus::Connecting),
             retry: AtomicBool::new(false),
+            selected: AtomicBool::new(false),
             take_over: AtomicBool::new(false),
             start_restored: AtomicBool::new(false),
             close: AtomicU64::new(0),
@@ -52,6 +54,17 @@ impl DevelopmentPaneState {
     }
     pub(crate) fn connection_generation(&self) -> u64 {
         self.connected_epoch.load(Ordering::Acquire)
+    }
+    pub(crate) fn select(&self) {
+        if matches!(
+            self.status(),
+            DevelopmentPaneStatus::Connecting
+                | DevelopmentPaneStatus::Restored
+                | DevelopmentPaneStatus::Takeover
+        ) {
+            self.selected.store(true, Ordering::Release);
+            self.retry.store(true, Ordering::Release);
+        }
     }
     pub(crate) fn retry(&self) {
         self.retry.store(true, Ordering::Release);
@@ -97,6 +110,7 @@ impl DevelopmentPaneState {
             // A click accepted before this interruption is never replayed after it.
             self.take_over.store(false, Ordering::Release);
             self.start_restored.store(false, Ordering::Release);
+            self.selected.store(false, Ordering::Release);
             *status = if has_takeover && retryable {
                 DevelopmentPaneStatus::TakeoverReconnecting
             } else if has_takeover {
@@ -115,6 +129,7 @@ impl DevelopmentPaneState {
 }
 pub(crate) struct DevelopmentServerSessionFactory {
     server: LocalServer,
+    pane_id: Option<spaceterm_server::hierarchy::Id>,
     state: Arc<DevelopmentPaneState>,
 }
 impl DevelopmentServerSessionFactory {
@@ -123,10 +138,19 @@ impl DevelopmentServerSessionFactory {
         (
             Self {
                 server,
+                pane_id: None,
                 state: Arc::clone(&state),
             },
             state,
         )
+    }
+    pub(crate) fn for_pane(
+        server: LocalServer,
+        pane: spaceterm_server::hierarchy::Id,
+    ) -> (Self, Arc<DevelopmentPaneState>) {
+        let (mut factory, state) = Self::new(server);
+        factory.pane_id = Some(pane);
+        (factory, state)
     }
 }
 
@@ -196,12 +220,14 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
             appearance: Arc::clone(&appearance),
         };
         let server = self.server.clone();
+        let pane_id = self.pane_id;
         let state = Arc::clone(&self.state);
         std::thread::Builder::new()
             .name("spaceterm-pane-connection".into())
             .spawn(move || {
                 present(
                     server,
+                    pane_id,
                     state,
                     alive,
                     receiver,
@@ -222,6 +248,7 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
 
 fn present(
     server: LocalServer,
+    pane_id: Option<spaceterm_server::hierarchy::Id>,
     state: Arc<DevelopmentPaneState>,
     alive: Arc<AtomicBool>,
     input: mpsc::Receiver<(u64, Input)>,
@@ -244,7 +271,14 @@ fn present(
             let style = Some(encode_style(
                 &appearance.lock().unwrap_or_else(|e| e.into_inner()),
             ));
-            let request = if connection.supports_takeover() {
+            let request = if let Some(pane) = pane_id {
+                Request::SelectPane {
+                    pane,
+                    explicit: state.selected.swap(false, Ordering::AcqRel),
+                    size: measured,
+                    style,
+                }
+            } else if connection.supports_takeover() {
                 Request::Select {
                     create: intent,
                     size: measured,
@@ -283,7 +317,9 @@ fn present(
                 if !alive.load(Ordering::Acquire) {
                     return Ok(());
                 }
-                if state.start_restored.swap(false, Ordering::AcqRel) {
+                if state.start_restored.swap(false, Ordering::AcqRel)
+                    || state.selected.swap(false, Ordering::AcqRel)
+                {
                     reply = connection.exchange(&Request::StartRestored {
                         server: boot,
                         pane,
@@ -294,16 +330,26 @@ fn present(
                     })?;
                 } else {
                     std::thread::sleep(Duration::from_millis(100));
-                    reply = connection.exchange(&Request::Select {
-                        create: false,
-                        size: *size.lock().unwrap_or_else(|e| e.into_inner()),
-                        resume: None,
-                        style: None,
+                    let size = *size.lock().unwrap_or_else(|e| e.into_inner());
+                    reply = connection.exchange(&if let Some(pane) = pane_id {
+                        Request::SelectPane {
+                            pane,
+                            explicit: false,
+                            size,
+                            style: None,
+                        }
+                    } else {
+                        Request::Select {
+                            create: false,
+                            size,
+                            resume: None,
+                            style: None,
+                        }
                     })?;
                 }
             }
             while let Reply::Takeover { target } = reply {
-                if expected_target.is_some_and(|old| old != target) {
+                if pane_id.is_none() && expected_target.is_some_and(|old| old != target) {
                     return Err(ServerError::SessionUnavailable);
                 }
                 expected_target = Some(target);
@@ -334,18 +380,28 @@ fn present(
                     })?;
                 } else {
                     std::thread::sleep(Duration::from_millis(100));
-                    reply = connection.exchange(&Request::Select {
-                        create: false,
-                        size: *size.lock().unwrap_or_else(|e| e.into_inner()),
-                        resume: Some(target),
-                        style: None,
+                    let size = *size.lock().unwrap_or_else(|e| e.into_inner());
+                    reply = connection.exchange(&if let Some(pane) = pane_id {
+                        Request::SelectPane {
+                            pane,
+                            explicit: state.selected.swap(false, Ordering::AcqRel),
+                            size,
+                            style: None,
+                        }
+                    } else {
+                        Request::Select {
+                            create: false,
+                            size,
+                            resume: Some(target),
+                            style: None,
+                        }
                     })?;
                 }
             }
             let Reply::Attached { lease } = reply else {
                 return Err(ServerError::Protocol);
             };
-            if expected_target.is_some_and(|old| old != lease.into()) {
+            if pane_id.is_none() && expected_target.is_some_and(|old| old != lease.into()) {
                 return Err(ServerError::SessionUnavailable);
             }
             expected_session = Some(lease);
@@ -422,6 +478,12 @@ fn present(
         match connected {
             Ok(()) => return,
             Err(error) => {
+                if pane_id.is_some() && error == ServerError::SessionUnavailable {
+                    state.set(DevelopmentPaneStatus::Ended);
+                    let _ = events
+                        .force_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success));
+                    return;
+                }
                 if !takeover {
                     state.invalidate();
                 }
