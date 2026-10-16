@@ -1,10 +1,10 @@
 use crate::terminal::graphics::{GraphicsReservation, GraphicsSnapshot, ImageSnapshot};
-use pane::graphics::{CHUNK_BYTES, Error, Image, ImageKey, Snapshot};
+use pane::graphics::{CHUNK_BYTES, Error, Image, Snapshot};
 use spaceterm_server::{
     ServerError,
     pane::{self, Lease, Reply, Request},
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 struct Transfer {
@@ -22,7 +22,7 @@ pub(crate) struct Graphics {
     valid: bool,
     transfer: Option<Transfer>,
     last_requested_image: Option<u32>,
-    missing: HashSet<ImageKey>,
+    failures: HashMap<u32, (u64, Error)>,
     reported: Option<Error>,
 }
 
@@ -40,7 +40,7 @@ impl Graphics {
             self.images.clear();
             self.transfer = None;
             self.last_requested_image = None;
-            self.missing.clear();
+            self.failures.clear();
         }
         self.alternate = alternate;
         let current = |image: &Image| {
@@ -62,9 +62,14 @@ impl Graphics {
         if self.transfer.as_ref().is_some_and(|t| !current(&t.image)) {
             self.transfer = None;
         }
-        if self.manifest != manifest {
-            self.missing.clear();
-        }
+        self.failures.retain(|image_id, _| {
+            manifest.as_ref().is_some_and(|manifest| {
+                manifest
+                    .images
+                    .iter()
+                    .any(|image| image.key.image_id == *image_id)
+            })
+        });
         self.manifest = manifest;
         self.valid = true;
         Ok(())
@@ -115,6 +120,7 @@ impl Graphics {
 
     pub(crate) fn recovered(&mut self) -> bool {
         let ready = self.valid
+            && self.failures.is_empty()
             && self.manifest.as_ref().is_none_or(|manifest| {
                 manifest
                     .images
@@ -141,7 +147,12 @@ impl Graphics {
                             self.images
                                 .get(&image.key.image_id)
                                 .is_none_or(|cached| cached.key != image.key)
-                                && !self.missing.contains(&image.key)
+                                && self.failures.get(&image.key.image_id).is_none_or(
+                                    |(generation, error)| {
+                                        *generation != image.key.generation
+                                            || *error == Error::Capacity
+                                    },
+                                )
                         })
                         // Cycle through IDs so a changing animation cannot monopolize transfers.
                         .min_by_key(|image| {
@@ -159,14 +170,22 @@ impl Graphics {
             self.last_requested_image = Some(image.key.image_id);
             let length = match image.byte_len() {
                 Ok(length) => length,
-                Err(error) => return Ok(Err(error)),
+                Err(error) => {
+                    self.failures
+                        .insert(image.key.image_id, (image.key.generation, error));
+                    return Ok(Err(error));
+                }
             };
             // Include the bounded Vec-to-Arc copy; keep that conservative charge with the image.
             let Some(reservation) = GraphicsReservation::try_acquire(length * 2) else {
+                self.failures
+                    .insert(image.key.image_id, (image.key.generation, Error::Capacity));
                 return Ok(Err(Error::Capacity));
             };
             let mut bytes = Vec::new();
             if bytes.try_reserve_exact(length).is_err() {
+                self.failures
+                    .insert(image.key.image_id, (image.key.generation, Error::Capacity));
                 return Ok(Err(Error::Capacity));
             }
             self.transfer = Some(Transfer {
@@ -189,7 +208,10 @@ impl Graphics {
         let chunk = match result {
             Ok(chunk) => chunk,
             Err(error) => {
-                self.missing.insert(transfer.image.key);
+                self.failures.insert(
+                    transfer.image.key.image_id,
+                    (transfer.image.key.generation, error),
+                );
                 self.transfer = None;
                 return Ok(Err(error));
             }
@@ -202,7 +224,10 @@ impl Graphics {
             || chunk.offset != transfer.bytes.len()
             || chunk.bytes.len() != CHUNK_BYTES.min(length - transfer.bytes.len())
         {
-            self.missing.insert(transfer.image.key);
+            self.failures.insert(
+                transfer.image.key.image_id,
+                (transfer.image.key.generation, Error::Malformed),
+            );
             self.transfer = None;
             return Ok(Err(Error::Malformed));
         }
@@ -213,6 +238,7 @@ impl Graphics {
         let Some(transfer) = self.transfer.take() else {
             return Ok(Ok(false));
         };
+        self.failures.remove(&transfer.image.key.image_id);
         self.images.insert(
             transfer.image.key.image_id,
             Arc::new(ImageSnapshot {
@@ -230,7 +256,7 @@ impl Graphics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pane::graphics::{Chunk, Placement};
+    use pane::graphics::{Chunk, ImageKey, Placement};
 
     fn lease() -> Lease {
         Lease {
@@ -382,6 +408,17 @@ mod tests {
         for error in [Error::Missing, Error::Malformed] {
             let mut graphics = Graphics::default();
             graphics.update(Some(Ok(manifest(1, 1))), false).unwrap();
+            graphics
+                .poll(lease(), &mut |request| reply(request, 4))
+                .unwrap()
+                .unwrap();
+            let mut replacement = manifest(1, 1);
+            replacement.generation = 2;
+            replacement.images[0].key.generation = 2;
+            replacement.placements[0].image = replacement.images[0].key;
+            graphics
+                .update(Some(Ok(replacement.clone())), false)
+                .unwrap();
             let result = graphics
                 .poll(lease(), &mut |_| {
                     Ok(if error == Error::Missing {
@@ -399,17 +436,46 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(result, Err(error));
-            assert!(graphics.snapshot().images.is_empty());
-            assert!(graphics.snapshot().placements.is_empty());
+            let displayed = graphics.snapshot();
+            assert_eq!(displayed.images[0].key.generation, 1);
+            assert_eq!(displayed.placements[0].image, displayed.images[0].key);
             assert!(graphics.failure(error));
             assert_eq!(graphics.snapshot().failure, Some(error));
             assert!(!graphics.failure(error));
+            assert!(!graphics.recovered());
+            replacement.placement_generation += 1;
+            replacement.placements[0].viewport_row += 1;
+            graphics
+                .update(Some(Ok(replacement.clone())), false)
+                .unwrap();
+            assert!(
+                !graphics.recovered(),
+                "geometry cannot resolve a failed image"
+            );
             assert_eq!(
                 graphics
                     .poll(lease(), &mut |_| panic!("failed resource must not spin"))
                     .unwrap(),
                 Ok(false)
             );
+            if error == Error::Missing {
+                replacement.images.clear();
+                replacement.placements.clear();
+                graphics.update(Some(Ok(replacement)), false).unwrap();
+            } else {
+                replacement.images[0].key.generation = 3;
+                replacement.placements[0].image = replacement.images[0].key;
+                graphics.update(Some(Ok(replacement)), false).unwrap();
+                assert!(!graphics.recovered(), "a replacement must complete first");
+                assert_eq!(
+                    graphics
+                        .poll(lease(), &mut |request| reply(request, 4))
+                        .unwrap(),
+                    Ok(true)
+                );
+            }
+            assert!(graphics.recovered());
+            assert_eq!(graphics.snapshot().failure, None);
         }
     }
 
@@ -469,5 +535,40 @@ mod tests {
         );
         assert!(graphics.recovered());
         assert_eq!(graphics.snapshot().failure, None);
+
+        let mut replacement = manifest(1, 1);
+        replacement.generation = 2;
+        replacement.images[0].key.generation = 2;
+        replacement.placements[0].image = replacement.images[0].key;
+        graphics.update(Some(Ok(replacement)), false).unwrap();
+        // The cached RGBA pixel retains its eight-byte transfer reservation.
+        let reservation = GraphicsReservation::try_acquire(
+            crate::terminal::graphics::APPLICATION_DECODED_LIMIT - 8,
+        )
+        .unwrap();
+        for _ in 0..3 {
+            assert_eq!(
+                graphics
+                    .poll(lease(), &mut |_| panic!("replacement must await capacity"))
+                    .unwrap(),
+                Err(Error::Capacity)
+            );
+            graphics.failure(Error::Capacity);
+            assert!(!graphics.recovered(), "old pixels cannot prove recovery");
+            let displayed = graphics.snapshot();
+            assert_eq!(displayed.failure, Some(Error::Capacity));
+            assert_eq!(displayed.images[0].key.generation, 1);
+        }
+        drop(reservation);
+        assert_eq!(
+            graphics
+                .poll(lease(), &mut |request| reply(request, 4))
+                .unwrap(),
+            Ok(true)
+        );
+        assert!(graphics.recovered());
+        let displayed = graphics.snapshot();
+        assert_eq!(displayed.failure, None);
+        assert_eq!(displayed.images[0].key.generation, 2);
     }
 }
