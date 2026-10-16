@@ -297,6 +297,7 @@ impl SharedWorkspaceHost {
                 interactive_input: true,
                 native_effects: true,
                 reading: true,
+                graphics: true,
             }),
             Request::Inventory => Ok(Reply::Inventory {
                 inventory: self.inventory(),
@@ -418,6 +419,7 @@ impl SharedWorkspaceHost {
                     Request::TakeOver { target, .. } => *target,
                     Request::ReadingStatus { lease }
                     | Request::Read { lease, .. }
+                    | Request::GraphicsChunk { lease, .. }
                     | Request::SelectionChunk { lease, .. }
                     | Request::Poll { lease }
                     | Request::NativeEffects { lease, .. }

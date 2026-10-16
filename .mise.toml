@@ -495,3 +495,14 @@ arg "<identity>" help="Installed application identity"
 arg "[installation]" help="Verified retained installation to install explicitly before the check"
 '''
 run = "cargo run --package spaceterm-server-host --features client --example service_session --locked -- {{usage.identity | quote}} {% if usage.installation %}{{usage.installation | quote}}{% endif %}"
+
+[tasks."server:graphics:desktop:test"]
+description = "Test bounded server graphics transfer, fixture parity, and desktop painting without native credentials"
+run = [
+  "cargo test --package spaceterm --lib --no-default-features --features desktop-tests --locked -- graphics",
+  "cargo test --package spaceterm --lib --no-default-features --features desktop-tests --locked -- terminal::server_session",
+]
+
+[tasks."server:graphics:transport:test"]
+description = "Test authenticated graphics transfers and slow readers on both protocol majors with fixture identities"
+run = "cargo test --package spaceterm-server --lib --features client --locked"

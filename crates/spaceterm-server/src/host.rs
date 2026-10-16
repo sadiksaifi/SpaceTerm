@@ -288,6 +288,7 @@ pub(crate) fn serve_runtime(
                                         interactive_input: false,
                                         native_effects: false,
                                         reading: false,
+                                        graphics: false,
                                     }
                                 }
                                 None => {
@@ -569,6 +570,7 @@ mod startup_tests {
                         interactive_input: true,
                         native_effects: true,
                         reading: false,
+                        graphics: false,
                     },
                     Request::Inventory => Reply::Inventory {
                         inventory: crate::hierarchy::State::empty().inventory,
@@ -580,6 +582,13 @@ mod startup_tests {
                         tab: pane,
                         pane,
                     },
+                    Request::GraphicsChunk { image, offset, .. } => {
+                        Reply::GraphicsChunk(Ok(crate::pane::graphics::Chunk {
+                            image,
+                            offset,
+                            bytes: vec![255; crate::pane::graphics::CHUNK_BYTES],
+                        }))
+                    }
                     Request::SelectionChunk {
                         generation, offset, ..
                     } => Reply::SelectionChunk {
@@ -610,9 +619,9 @@ mod startup_tests {
 
     #[cfg(feature = "client")]
     #[test]
-    fn a_client_that_stops_reading_selection_chunks_does_not_stall_another_client() {
+    fn a_client_that_stops_reading_resource_chunks_does_not_stall_another_client() {
         use crate::pane::{Lease, PaneConnection, Reply, Request};
-        for major in [1, 2] {
+        for (major, graphics) in [(1, false), (2, false), (1, true), (2, true)] {
             let fixture = Fixture::new();
             let _child = fixture.start_test("host::startup_tests::shared_transport_child", false);
             let deadline = Instant::now() + Duration::from_secs(3);
@@ -644,10 +653,21 @@ mod startup_tests {
             for index in 0..16 {
                 protocol::Wire::terminal(&mut slow)
                     .unwrap()
-                    .write(&Request::SelectionChunk {
-                        lease,
-                        generation: 1,
-                        offset: index * crate::pane::reading::SELECTION_CHUNK_BYTES,
+                    .write(&if graphics {
+                        Request::GraphicsChunk {
+                            lease,
+                            image: crate::pane::graphics::ImageKey {
+                                image_id: 1,
+                                generation: 1,
+                            },
+                            offset: index * crate::pane::graphics::CHUNK_BYTES,
+                        }
+                    } else {
+                        Request::SelectionChunk {
+                            lease,
+                            generation: 1,
+                            offset: index * crate::pane::reading::SELECTION_CHUNK_BYTES,
+                        }
                     })
                     .unwrap();
             }

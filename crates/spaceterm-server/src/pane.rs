@@ -1,5 +1,6 @@
 //! Authenticated terminal operations. Native requests never grant local file authority.
 pub mod effects;
+pub mod graphics;
 pub mod reading;
 use crate::ServerError;
 use serde::{Deserialize, Serialize};
@@ -174,6 +175,11 @@ pub enum AttachmentClaim {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
+    GraphicsChunk {
+        lease: Lease,
+        image: graphics::ImageKey,
+        offset: usize,
+    },
     Read {
         lease: Lease,
         operation: reading::Operation,
@@ -285,6 +291,7 @@ pub enum Request {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Reply {
+    GraphicsChunk(Result<graphics::Chunk, graphics::Error>),
     Reading {
         accepted: bool,
     },
@@ -320,6 +327,8 @@ pub enum Reply {
         native_effects: bool,
         #[serde(default)]
         reading: bool,
+        #[serde(default)]
+        graphics: bool,
     },
     Restored {
         server: [u8; 32],
@@ -387,6 +396,10 @@ pub struct Cell {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Screen {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphics: Option<Result<graphics::Snapshot, graphics::Error>>,
+    #[serde(default)]
+    pub cell_pixels: Option<(u16, u16)>,
     #[serde(default)]
     pub reading: Option<reading::Snapshot>,
     /// Per-screen targets; cells refer to indices in this bounded table.
@@ -443,6 +456,7 @@ struct PaneTransport {
     interactive_input: bool,
     native_effects: bool,
     reading: bool,
+    graphics: bool,
 }
 /// One transport for a desktop's inventory and Pane workers. It retains no credential.
 #[cfg(feature = "client")]
@@ -485,6 +499,7 @@ impl PaneConnection {
                 interactive_input,
                 native_effects,
                 reading,
+                graphics,
             } => {
                 let mut connection = Self::new(stream, pane_takeover);
                 std::sync::Arc::get_mut(&mut connection.transport)
@@ -496,6 +511,9 @@ impl PaneConnection {
                 std::sync::Arc::get_mut(&mut connection.transport)
                     .ok_or(ServerError::Protocol)?
                     .reading = reading;
+                std::sync::Arc::get_mut(&mut connection.transport)
+                    .ok_or(ServerError::Protocol)?
+                    .graphics = graphics;
                 Ok(connection)
             }
             Reply::Refused(reason) => Err(reason.into()),
@@ -510,11 +528,15 @@ impl PaneConnection {
                 interactive_input: false,
                 native_effects: false,
                 reading: false,
+                graphics: false,
             }),
         }
     }
     pub fn supports_native_effects(&self) -> bool {
         self.transport.native_effects
+    }
+    pub fn supports_graphics(&self) -> bool {
+        self.transport.graphics
     }
     pub fn supports_reading(&self) -> bool {
         self.transport.reading

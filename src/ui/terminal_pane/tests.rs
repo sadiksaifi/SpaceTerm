@@ -291,6 +291,7 @@ fn graphics_screen_with_images(generation: u64, image_ids: &[u32]) -> Arc<Screen
         generation,
     );
     Arc::make_mut(&mut screen).graphics = crate::terminal::GraphicsSnapshot {
+        failure: None,
         generation,
         placement_generation: generation,
         images: image_ids
@@ -8330,6 +8331,31 @@ fn graphics_post_mutation_failures_remain_quota_bounded_for_changing_keys(cx: &m
             )
         );
     }
+}
+
+#[gpui::test]
+fn server_graphics_recovery_clears_only_its_own_failure_notice(cx: &mut TestAppContext) {
+    let (pane, cx, _records) = connected_terminal_pane(cx);
+    pane.update(cx, |pane, cx| {
+        let mut failed = graphics_screen(9, 1);
+        Arc::make_mut(&mut failed).graphics.failure =
+            Some(spaceterm_server::pane::graphics::Error::Capacity);
+        pane.handle_event(TerminalSessionEvent::Screen(failed), cx);
+        assert!(pane.pane_state.failure().is_some());
+        // Coalescing may discard intermediate frames. The newest frame carries recovery itself.
+        pane.handle_event(TerminalSessionEvent::Screen(graphics_screen(11, 1)), cx);
+        assert!(pane.pane_state.failure().is_none());
+        pane.present_failure(
+            TerminalFailure::resource("paint-terminal-graphics"),
+            true,
+            Some(RecoveryAction::RendererResources),
+        );
+        pane.handle_event(TerminalSessionEvent::Screen(graphics_screen(12, 1)), cx);
+        assert_eq!(
+            pane.pane_state.failure().unwrap().operation(),
+            "paint-terminal-graphics"
+        );
+    });
 }
 
 #[gpui::test]
