@@ -104,6 +104,10 @@ impl XtGetTcapObserver {
         }
     }
 
+    pub(crate) fn enable_clipboard(&mut self) {
+        self.clipboard = true;
+    }
+
     pub(crate) fn disable_clipboard(&mut self) {
         self.clipboard = false;
     }

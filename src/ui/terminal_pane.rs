@@ -649,6 +649,7 @@ pub(crate) struct TerminalPane {
     declined_permissions: Vec<SystemPermission>,
     /// The offer the notice shows now and when it began, while the notice shows.
     permission_request_showing: Option<PermissionRequestShowing>,
+    server_permission_grant: Option<crate::terminal::session::ClientEffectGrant>,
     /// Re-reads the offer whenever the Permission Setup or an authorization changes, from the
     /// first request on.
     _permission_setup: Option<gpui::Subscription>,
@@ -961,6 +962,7 @@ impl TerminalPane {
             permission_request: Vec::new(),
             declined_permissions: Vec::new(),
             permission_request_showing: None,
+            server_permission_grant: None,
             _permission_setup: None,
             fullscreen_escape: FullscreenEscapeSequence::default(),
             hovered_link: None,
@@ -1315,6 +1317,11 @@ impl TerminalPane {
             self.ime.cancel();
             self.invalidate_preedit_layout();
             self.advance_native_service_focus_epoch();
+            if self.server_permission_grant.take().is_some() {
+                self.requested_permissions.clear();
+                self.permission_request.clear();
+                self.permission_request_showing = None;
+            }
         }
         self.lifecycle_dependencies
             .secure_input
@@ -1361,6 +1368,11 @@ impl TerminalPane {
         if focus_changed || self.input_method_focus != input_method {
             self.terminal_input_focus = focused;
             self.input_method_focus = input_method;
+            if self.server_permission_grant.take().is_some() {
+                self.requested_permissions.clear();
+                self.permission_request.clear();
+                self.permission_request_showing = None;
+            }
             self.advance_native_service_focus_epoch();
             if !focused {
                 self.key_input_adapter.reset();
@@ -1431,8 +1443,14 @@ impl TerminalPane {
     }
 
     fn sync_secure_input(&self) {
+        let hidden_input = self
+            .terminal_session
+            .session
+            .as_ref()
+            .and_then(|session| session.hidden_input())
+            .unwrap_or(self.hidden_input);
         self.secure_input_pane
-            .update(self.hidden_input, self.terminal_input_focus);
+            .update(hidden_input, self.terminal_input_focus);
     }
 
     fn reset_hidden_input(&mut self) {
@@ -2403,11 +2421,55 @@ impl TerminalPane {
                 let caption_changed = self.accept_metadata(Arc::clone(&screen.metadata));
                 self.screen = screen;
                 self.screen_session_epoch = self.terminal_session.session_epoch;
+                self.sync_secure_input();
                 if caption_changed {
                     cx.emit(TerminalPaneEvent::CaptionChanged);
                 }
                 self.reconcile_pending_accessibility();
                 self.sync_scrollbar(cx);
+            }
+            TerminalSessionEvent::ClientEffect(request) => {
+                if !request.grant.current() {
+                    return false;
+                }
+                use spaceterm_server::pane::effects::Effect;
+                match request.effect {
+                    Effect::Bell => {
+                        return self.handle_event(
+                            TerminalSessionEvent::Attention(
+                                crate::terminal::attention::AttentionEvent::Bell,
+                            ),
+                            cx,
+                        );
+                    }
+                    Effect::CommandFinished {
+                        exit_status,
+                        duration_ms,
+                    } => {
+                        return self.handle_event(
+                            TerminalSessionEvent::Attention(
+                                crate::terminal::attention::AttentionEvent::CommandFinished {
+                                    exit_status,
+                                    duration: Duration::from_millis(duration_ms),
+                                },
+                            ),
+                            cx,
+                        );
+                    }
+                    Effect::PermissionSetup {
+                        screen_recording,
+                        accessibility,
+                    } => {
+                        self.server_permission_grant = Some(request.grant);
+                        let request =
+                            crate::terminal::permission_request::PermissionRequest::from_effect(
+                                screen_recording,
+                                accessibility,
+                            );
+                        return self.offer_permission_setup(request.permissions(), cx);
+                    }
+                    Effect::ClipboardRead { .. } | Effect::ClipboardWrite { .. } => return false,
+                }
             }
             TerminalSessionEvent::Attention(event) => {
                 let effects = self.attention.observe(
@@ -2943,7 +3005,6 @@ impl TerminalPane {
         }
 
         if button == PointerButton::Left
-            && !self.server_backed()
             && spaceterm_ui::PointerConventions::get(cx).activates_link(event.modifiers)
             && let Some(link) = self.link_at(position)
         {
@@ -3026,31 +3087,20 @@ impl TerminalPane {
             return;
         }
         self.pointer_modifiers = input_modifiers(event.modifiers);
-        if self.server_backed()
-            && (!self.interactive_input_available()
-                || (self.pressed_button.is_none()
-                    && pointer_uses_text_cursor(
-                        self.screen.mouse_tracking,
-                        self.pointer_modifiers.shift,
-                        self.pointer_selection_policy(),
-                    )))
-        {
+        if self.server_backed() && !self.interactive_input_available() {
             return;
         }
         let dragging = self.pressed_button.is_some();
         let Some(position) = self.surface_position(event.position, dragging) else {
             return;
         };
-        let hovered_link = (!self.server_backed())
-            .then(|| {
-                self.link_cell_at(position)
-                    .map(|(cell, target)| HoveredTerminalLink {
-                        generation: self.screen.generation,
-                        cell,
-                        target,
-                    })
-            })
-            .flatten();
+        let hovered_link = self
+            .link_cell_at(position)
+            .map(|(cell, target)| HoveredTerminalLink {
+                generation: self.screen.generation,
+                cell,
+                target,
+            });
         if self.hovered_link != hovered_link {
             self.hovered_link = hovered_link;
             cx.notify();
@@ -3061,6 +3111,16 @@ impl TerminalPane {
         }
         if self.pressed_link.is_some() {
             cx.stop_propagation();
+            return;
+        }
+        if self.server_backed()
+            && self.pressed_button.is_none()
+            && pointer_uses_text_cursor(
+                self.screen.mouse_tracking,
+                self.pointer_modifiers.shift,
+                self.pointer_selection_policy(),
+            )
+        {
             return;
         }
         if let Some(session) = &self.terminal_session.session {
@@ -3086,6 +3146,9 @@ impl TerminalPane {
             return;
         };
         if let Some((generation, pressed)) = self.pressed_link.take() {
+            if self.server_backed() && !self.interactive_input_available() {
+                return;
+            }
             let current = self
                 .surface_position(event.position, false)
                 .and_then(|position| self.link_at(position));
@@ -3371,7 +3434,10 @@ impl TerminalPane {
         let terminal_input_focused = self.synchronize_terminal_input_focus(window, cx);
         let guard = self.paste_request_guard();
         let policy = self.file_insertion;
-        let local = self.terminal_session.local_file_capabilities;
+        let local = self
+            .terminal_session
+            .session_factory
+            .file_insertion_capabilities();
         let files = self.file_clipboard.clone();
         self.pending_paste_read = Some(cx.spawn(async move |this, cx| {
             let Ok(Some(insertion)) = PastePayload::clipboard(
@@ -3411,10 +3477,7 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) -> bool {
         self.sync_terminal_input_focus(window, cx);
-        if self.server_backed()
-            || !self.native_service_origin_matches(origin)
-            || !self.terminal_input_focus
-        {
+        if !self.native_service_origin_matches(origin) || !self.terminal_input_focus {
             return false;
         }
         let Ok(insertion) = PastePayload::service_text(text, true) else {
@@ -3445,7 +3508,9 @@ impl TerminalPane {
         let insertion = match PastePayload::prepare_dropped_files(
             self.file_insertion,
             paths,
-            self.terminal_session.local_file_capabilities,
+            self.terminal_session
+                .session_factory
+                .file_insertion_capabilities(),
         ) {
             Ok(Some(insertion)) => insertion,
             Ok(None) => return,
@@ -3565,6 +3630,9 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) {
         self.context_menu = None;
+        if self.server_backed() && !self.interactive_input_available() {
+            return;
+        }
         let current = menu.link.as_ref().and_then(|_| self.link_at(menu.position));
         let link = revalidated_context_link(
             menu.generation,
@@ -3672,7 +3740,7 @@ impl TerminalPane {
         let session_available = self.terminal_session.session.is_some();
         let capabilities = NativeServiceCapabilities::new(
             !self.server_backed() && session_available && self.native_context_actions().copy,
-            !self.server_backed() && session_available && self.terminal_input_focus,
+            session_available && self.terminal_input_focus && self.interactive_input_available(),
         );
         let origin = session_available.then(|| {
             NativeServiceOrigin::new(
@@ -3902,6 +3970,14 @@ impl TerminalPane {
 
     /// Reads which requested permissions the notice offers, and reports whether that changed.
     fn refresh_permission_offer(&mut self, cx: &App) -> bool {
+        if self
+            .server_permission_grant
+            .as_ref()
+            .is_some_and(|grant| !grant.owned())
+        {
+            self.requested_permissions.clear();
+            self.server_permission_grant = None;
+        }
         let offered = match &self.lifecycle_dependencies.permission_setup {
             Some(setup) if !self.requested_permissions.is_empty() => {
                 let setup = setup.read(cx);
@@ -3975,7 +4051,12 @@ impl TerminalPane {
     }
 
     fn set_up_requested_permissions(&mut self, cx: &mut Context<Self>) {
-        if !self.permission_request_armed(cx) {
+        if !self.permission_request_armed(cx)
+            || self
+                .server_permission_grant
+                .as_ref()
+                .is_some_and(|grant| !grant.owned())
+        {
             return;
         }
         let permissions = std::mem::take(&mut self.permission_request);
@@ -4680,6 +4761,7 @@ impl Drop for TerminalPane {
 
 impl Render for TerminalPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.refresh_permission_offer(cx);
         let appearance = super::appearance::shared_chrome(cx);
         let native_activity = self.current_activity(window, cx);
         self.update_application_activity(native_activity, cx);
@@ -5093,12 +5175,13 @@ impl Render for TerminalPane {
         let local_operations = !self.server_backed();
         self.accessibility_element
             .decorate(pane_root)
+            .on_action(cx.listener(Self::set_up_permission_request))
+            .on_action(cx.listener(Self::decline_permission_request_action))
+            .when(self.terminal_session.session_factory.file_insertion_capabilities() == TerminalLocalFileCapabilities::Enabled && self.interactive_input_available(), |root| root.on_drop(cx.listener(Self::insert_dropped_files)))
             .when(local_operations, |root| {
                 root.on_action(cx.listener(Self::copy_selection))
                     .on_action(cx.listener(Self::edit_copy))
-                    .on_drop(cx.listener(Self::insert_dropped_files))
-                    .on_action(cx.listener(Self::set_up_permission_request))
-                    .on_action(cx.listener(Self::decline_permission_request_action))
+
                     .on_action(cx.listener(Self::clear_screen_and_scrollback))
                     .on_action(cx.listener(Self::scroll_page_up))
                     .on_action(cx.listener(Self::scroll_page_down))

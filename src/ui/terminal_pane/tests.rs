@@ -9428,6 +9428,48 @@ mod permission_requests {
     }
 
     #[gpui::test]
+    fn server_permission_setup_reuses_the_notice_and_revalidates_its_grant(
+        cx: &mut TestAppContext,
+    ) {
+        for revoke in [false, true] {
+            let (pane, cx, _) = connected_terminal_pane(cx);
+            let access = install_setup(
+                &pane,
+                PermissionAuthorization::NotGranted,
+                PermissionAuthorization::NotGranted,
+                cx,
+            );
+            let authority =
+                Arc::new(crate::terminal::session::clipboard::ClipboardAuthority::default());
+            authority.route();
+            authority.client_focus(Some(true));
+            let request = crate::terminal::session::ClientEffectRequest::new(
+                spaceterm_server::pane::effects::Effect::PermissionSetup {
+                    screen_recording: false,
+                    accessibility: true,
+                },
+                Arc::clone(&authority),
+                authority.output_epoch().unwrap(),
+                Duration::from_secs(1),
+            );
+            pane.update(cx, |pane, cx| {
+                pane.handle_event(TerminalSessionEvent::ClientEffect(request), cx);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("permission-request").is_some());
+            cx.executor().advance_clock(PERMISSION_REQUEST_ARMING_DELAY);
+            if revoke {
+                authority.client_focus(Some(false));
+                authority.client_focus(Some(true));
+            }
+            pane.update(cx, |pane, cx| pane.set_up_requested_permissions(cx));
+            cx.run_until_parked();
+            assert_eq!(!access.prepared.borrow().is_empty(), !revoke);
+        }
+    }
+
+    #[gpui::test]
     fn terminal_context_menu_secondary_click_targets_grid_but_not_controls(
         cx: &mut TestAppContext,
     ) {

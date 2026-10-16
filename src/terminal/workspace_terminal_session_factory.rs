@@ -325,6 +325,14 @@ impl WorkspaceTerminalSessionFactory {
         }
     }
 
+    pub(crate) fn file_insertion_capabilities(&self) -> TerminalLocalFileCapabilities {
+        if self.session_factory.allows_local_file_insertion() {
+            TerminalLocalFileCapabilities::Enabled
+        } else {
+            self.local_file_capabilities()
+        }
+    }
+
     pub(crate) fn is_server_backed(&self) -> bool {
         self.session_factory.is_server_backed()
     }

@@ -1,8 +1,11 @@
 //! Desktop presentation and fenced input for an authenticated server Pane.
+mod effects;
 use super::pointer_input::{PointerInput, WheelInput};
+use super::session::clipboard::ClipboardAuthority;
 use super::session::*;
 use super::{emulator::*, geometry::TerminalGeometry, key::*};
 use crate::local_server::{LocalServer, ServerError};
+use effects::ClientEffects;
 use spaceterm_server::pane::{self, Lease, PaneSize, Reply, Request};
 use std::sync::{
     Arc, Mutex,
@@ -37,6 +40,8 @@ pub(crate) struct DevelopmentPaneState {
     connected_epoch: AtomicU64,
     paste_unconfirmed: AtomicBool,
     interaction: Mutex<Interaction>,
+    effect_authority: Arc<ClipboardAuthority>,
+    hidden_input: AtomicBool,
 }
 impl DevelopmentPaneState {
     fn new() -> Self {
@@ -51,6 +56,12 @@ impl DevelopmentPaneState {
             connected_epoch: AtomicU64::new(0),
             paste_unconfirmed: AtomicBool::new(false),
             interaction: Mutex::new(Interaction::default()),
+            hidden_input: AtomicBool::new(false),
+            effect_authority: {
+                let authority = ClipboardAuthority::default();
+                authority.route();
+                Arc::new(authority)
+            },
         }
     }
 
@@ -88,6 +99,8 @@ impl DevelopmentPaneState {
         }
     }
     fn invalidate(&self) -> u64 {
+        self.effect_authority.client_focus(None);
+        self.hidden_input.store(false, Ordering::Release);
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if *status == DevelopmentPaneStatus::Connected {
             *status = DevelopmentPaneStatus::Reconnecting;
@@ -136,6 +149,8 @@ impl DevelopmentPaneState {
     fn set(&self, status: DevelopmentPaneStatus) {
         let mut current = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if status != DevelopmentPaneStatus::Connected {
+            self.effect_authority.client_focus(None);
+            self.hidden_input.store(false, Ordering::Release);
             self.paste_unconfirmed.store(false, Ordering::Release);
         }
         *current = status;
@@ -169,6 +184,11 @@ impl DevelopmentPaneState {
         self.connected_epoch.store(epoch, Ordering::Release);
         if paste_unconfirmed {
             self.paste_unconfirmed.store(true, Ordering::Release);
+        }
+        if *status != DevelopmentPaneStatus::Connected {
+            let interaction = self.interaction.lock().unwrap_or_else(|e| e.into_inner());
+            self.effect_authority
+                .client_focus(Some(interaction.target == pane::FocusTarget::Terminal));
         }
         *status = DevelopmentPaneStatus::Connected;
         Ok(())
@@ -368,6 +388,7 @@ struct PresentationHandle {
 }
 impl Drop for PresentationHandle {
     fn drop(&mut self) {
+        self.state.effect_authority.client_focus(None);
         self.alive.store(false, Ordering::Release);
     }
 }
@@ -852,6 +873,9 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
     fn is_server_backed(&self) -> bool {
         true
     }
+    fn allows_local_file_insertion(&self) -> bool {
+        true
+    }
     fn fallback_title(&self) -> String {
         "Development Pane".into()
     }
@@ -864,7 +888,7 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
         let (input, receiver) = mpsc::sync_channel(512);
         let (events, output) = async_channel::bounded(2);
         let (_, accessibility) = async_channel::bounded(1);
-        let (_, clipboard) = async_channel::bounded(1);
+        let (effects, clipboard) = ClientEffects::new();
         let alive = Arc::new(AtomicBool::new(true));
         let measured_size = Arc::new(Mutex::new(pane_size(geometry)));
         self.state
@@ -885,7 +909,15 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
         std::thread::Builder::new()
             .name("spaceterm-pane-connection".into())
             .spawn(move || {
-                present(factory, alive, receiver, events, measured_size, appearance);
+                present(
+                    factory,
+                    alive,
+                    receiver,
+                    events,
+                    measured_size,
+                    appearance,
+                    effects,
+                );
             })
             .map_err(TerminalSessionError::from)?;
         Ok(StartedTerminalSession {
@@ -923,6 +955,7 @@ fn present(
     events: async_channel::Sender<TerminalSessionEvent>,
     size: Arc<Mutex<PaneSize>>,
     appearance: Arc<Mutex<TerminalAppearanceUpdate>>,
+    mut effects: ClientEffects,
 ) {
     let DevelopmentServerSessionFactory {
         server,
@@ -1250,6 +1283,11 @@ fn present(
                         &mut paste_unconfirmed,
                     )?;
                 }
+                if ready && connection.supports_native_effects() {
+                    effects.poll(&state, lease, &events, &mut |request| {
+                        exchange(&attachment, &mut connection, request)
+                    })?;
+                }
                 std::thread::sleep(Duration::from_millis(30));
             }
         })();
@@ -1362,6 +1400,9 @@ impl TerminalSessionHandle for PresentationHandle {
         *self.size.lock().unwrap_or_else(|e| e.into_inner()) = size;
         self.send(Input::Resize(size));
     }
+    fn hidden_input(&self) -> Option<bool> {
+        Some(self.state.hidden_input.load(Ordering::Acquire))
+    }
     fn focus(&self, focused: bool) {
         self.interactive_focus(focused, focused);
     }
@@ -1373,11 +1414,21 @@ impl TerminalSessionHandle for PresentationHandle {
         } else {
             pane::FocusTarget::Unfocused
         };
-        self.state
+        let mut interaction = self
+            .state
             .interaction
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .focus(target);
+            .unwrap_or_else(|e| e.into_inner());
+        if interaction.target != target {
+            self.state
+                .effect_authority
+                .client_focus(if interaction.interactive {
+                    Some(terminal_input)
+                } else {
+                    None
+                });
+        }
+        interaction.focus(target);
     }
     fn interactive_input_available(&self) -> bool {
         self.state.status() == DevelopmentPaneStatus::Connected
@@ -1400,6 +1451,7 @@ impl TerminalSessionHandle for PresentationHandle {
             .interaction
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        self.state.effect_authority.client_focus(Some(false));
         if let Some(pending) = interaction.pending.filter(|pending| {
             pending.id == id
                 && pending.epoch == self.state.epoch.load(Ordering::Acquire)
@@ -1410,6 +1462,7 @@ impl TerminalSessionHandle for PresentationHandle {
                 id: pending.wire_id,
             };
         } else {
+            self.state.effect_authority.client_focus(Some(false));
             interaction.focus(pane::FocusTarget::Unfocused);
         }
     }
@@ -1649,7 +1702,11 @@ fn decode_screen(
                         },
                         selected: false,
                         semantic_content: CellSemanticSnapshot::Output,
-                        hyperlink: None,
+                        hyperlink: c
+                            .hyperlink
+                            .as_deref()
+                            .and_then(super::hyperlink::HyperlinkTarget::url)
+                            .map(Arc::new),
                     })
                     .collect::<Vec<_>>(),
             )
@@ -1748,14 +1805,14 @@ fn decode_screen(
 mod tests {
     use super::*;
 
-    struct Adapter {
-        handle: PresentationHandle,
+    pub(super) struct Adapter {
+        pub(super) handle: PresentationHandle,
         input: mpsc::Receiver<SubmittedInput>,
-        active: ActiveInput,
+        pub(super) active: ActiveInput,
         unconfirmed: bool,
     }
     impl Adapter {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             use super::super::geometry::{BackingScale, CellGridSize, LogicalCellSize};
             let geometry = TerminalGeometry::from_grid(
                 CellGridSize::new(20, 6),
@@ -2709,6 +2766,7 @@ mod tests {
         configured.colors.background = crate::appearance::Color::rgb(0xffffff);
         configured.colors.normal[0] = crate::appearance::Color::rgb(0x112233);
         let cell = pane::Cell {
+            hyperlink: None,
             text: "x".into(),
             foreground: pane::Color::Default,
             background: pane::Color::Default,
@@ -2741,6 +2799,15 @@ mod tests {
             cursor_text: [0, 0, 0],
             alternate: false,
         };
+        let mut linked = screen.clone();
+        linked.rows[0][0].hyperlink = Some("https://example.test".into());
+        linked.rows[0][1].hyperlink = Some("file:///etc/passwd".into());
+        let linked = decode_screen(linked, PresentationGeneration::test(1), &appearance).unwrap();
+        assert_eq!(
+            linked.rows[0][0].hyperlink.as_ref().unwrap().kind,
+            super::super::hyperlink::HyperlinkKind::Url
+        );
+        assert!(linked.rows[0][1].hyperlink.is_none());
         let decoded = decode_screen(screen, PresentationGeneration::test(1), &appearance).unwrap();
         assert_eq!(
             decoded.colors.foreground,

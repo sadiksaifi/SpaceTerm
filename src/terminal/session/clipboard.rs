@@ -8,12 +8,45 @@ use crate::terminal::osc52::{MAX_OSC52_CONTENT_BYTES, Osc52Operation};
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
-pub(super) struct ClipboardAuthority {
+pub(crate) struct ClipboardAuthority {
+    routed: AtomicBool,
+    connected: AtomicBool,
     epoch: AtomicU64,
     subscription: Mutex<Option<async_channel::Sender<TerminalSessionEvent>>>,
 }
 
 impl ClipboardAuthority {
+    pub(crate) fn routed(&self) -> bool {
+        self.routed.load(Ordering::Acquire)
+    }
+    pub(crate) fn route(&self) {
+        self.routed.store(true, Ordering::Release);
+    }
+    pub(crate) fn client_focus(&self, focused: Option<bool>) {
+        self.connected.store(false, Ordering::Release);
+        let _ = self
+            .epoch
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+                Some((old.wrapping_add(2) & !1) | u64::from(focused == Some(true)))
+            });
+        self.connected.store(focused.is_some(), Ordering::Release);
+    }
+    pub(crate) fn output_epoch(&self) -> Option<u64> {
+        if self.routed.load(Ordering::Acquire) {
+            self.connected
+                .load(Ordering::Acquire)
+                .then(|| self.epoch.load(Ordering::Acquire))
+        } else {
+            self.grant()
+        }
+    }
+    pub(crate) fn native_permits(&self, epoch: u64) -> bool {
+        self.routed.load(Ordering::Acquire) && self.output_epoch() == Some(epoch)
+    }
+    pub(crate) fn native_request(&self, epoch: Option<u64>) -> bool {
+        self.routed.load(Ordering::Acquire) && epoch.is_some_and(|epoch| self.native_permits(epoch))
+    }
+
     pub(super) fn focus(&self, focused: bool) {
         // Increment on every transition, including a loss followed by regained focus.
         let _ = self
@@ -38,6 +71,9 @@ impl ClipboardAuthority {
             .as_ref()
             .is_some_and(async_channel::Sender::is_closed)
         {
+            return None;
+        }
+        if self.routed.load(Ordering::Acquire) && !self.connected.load(Ordering::Acquire) {
             return None;
         }
         let epoch = self.epoch.load(Ordering::Acquire);
@@ -74,6 +110,7 @@ pub struct ClipboardRequest {
     epoch: u64,
     deadline: Instant,
     commands: Option<CommandSender<Command>>,
+    relay: Option<mpsc::SyncSender<(u64, ClipboardCompletion)>>,
 }
 
 impl fmt::Debug for ClipboardRequest {
@@ -84,7 +121,79 @@ impl fmt::Debug for ClipboardRequest {
     }
 }
 
+#[derive(Clone)]
+pub struct ClientEffectGrant {
+    authority: Arc<ClipboardAuthority>,
+    epoch: u64,
+    deadline: Instant,
+}
+
+impl fmt::Debug for ClientEffectGrant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ClientEffectGrant { .. }")
+    }
+}
+
+impl ClientEffectGrant {
+    #[cfg(feature = "desktop")]
+    pub(crate) fn owned(&self) -> bool {
+        self.authority.native_permits(self.epoch)
+    }
+    pub(crate) fn remaining(&self) -> Option<Duration> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero() && self.authority.native_permits(self.epoch))
+    }
+    pub fn current(&self) -> bool {
+        Instant::now() < self.deadline && self.authority.native_permits(self.epoch)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ClientEffectRequest {
+    pub effect: spaceterm_server::pane::effects::Effect,
+    pub grant: ClientEffectGrant,
+}
+
+impl ClientEffectRequest {
+    pub(crate) fn new(
+        effect: spaceterm_server::pane::effects::Effect,
+        authority: Arc<ClipboardAuthority>,
+        epoch: u64,
+        remaining: Duration,
+    ) -> Self {
+        Self {
+            effect,
+            grant: ClientEffectGrant {
+                authority,
+                epoch,
+                deadline: Instant::now() + remaining,
+            },
+        }
+    }
+}
+
 impl ClipboardRequest {
+    #[cfg(feature = "desktop")]
+    pub(crate) fn relayed(
+        id: u64,
+        operation: Osc52Operation,
+        authority: Arc<ClipboardAuthority>,
+        epoch: u64,
+        remaining: Duration,
+        relay: mpsc::SyncSender<(u64, ClipboardCompletion)>,
+    ) -> Self {
+        Self {
+            id,
+            operation,
+            authority,
+            epoch,
+            deadline: Instant::now() + remaining,
+            commands: None,
+            relay: Some(relay),
+        }
+    }
+
     /// Returns the current operation without granting native clipboard authority.
     pub fn operation(&self) -> &Osc52Operation {
         &self.operation
@@ -98,6 +207,15 @@ impl ClipboardRequest {
     }
 
     pub fn complete(&mut self, completion: ClipboardCompletion) {
+        let completion = if self.remaining().is_some() {
+            completion
+        } else {
+            ClipboardCompletion::Denied
+        };
+        if let Some(relay) = self.relay.take() {
+            let _ = relay.try_send((self.id, completion));
+            return;
+        }
         if let Some(commands) = self.commands.take() {
             let _ = commands.send(Command::CompleteClipboard(self.id, completion));
         }
@@ -195,6 +313,7 @@ impl WorkerClipboard {
         let request = ClipboardRequest {
             id: self.next_id,
             operation,
+            relay: None,
             authority: Arc::clone(&self.authority),
             epoch,
             deadline,
