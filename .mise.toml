@@ -384,6 +384,10 @@ run = "git-cliff --config cliff.toml --unreleased --offline --strip all"
 description = "Test local server authentication and private storage"
 run = "cargo test --package spaceterm-server --package spaceterm-server-host --package spaceterm-directories --all-features --locked"
 
+[tasks."server:test:headless"]
+description = "Test the server without native client credential adapters"
+run = "cargo test --package spaceterm-server --no-default-features --locked"
+
 [tasks."server:check"]
 description = "Check the local server and desktop credential adapters"
 run = [
@@ -471,7 +475,7 @@ run = "cargo test --package spaceterm-server-host --no-default-features --locked
 [tasks."server:service"]
 description = "Explicitly control this build's account server service"
 usage = '''
-arg "<action>" help="status, install, start, stop, restart, or uninstall"
+arg "<action>" help="status, install, start, stop, restart, uninstall, or enable-linger"
 arg "[installation]" help="Verified retained installation directory for install"
 '''
 run = "cargo run --package spaceterm-server-host --no-default-features --locked -- service-{{usage.action}} spaceterm-development {% if usage.installation %}{{usage.installation | quote}}{% endif %}"
