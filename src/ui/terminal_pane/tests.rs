@@ -2271,11 +2271,7 @@ fn server_pane_pastes_text_once_without_local_selection_find_or_scrollback(
 ) {
     let (_pane, cx, records) = server_terminal_pane(cx, true);
     cx.write_to_clipboard(ClipboardItem::new_string("echo hello".into()));
-    cx.simulate_keystrokes(if cfg!(target_os = "macos") {
-        "cmd-v"
-    } else {
-        "ctrl-shift-v"
-    });
+    cx.simulate_keystrokes("cmd-v");
     cx.run_until_parked();
     assert_eq!(
         requested_pastes(&records),
