@@ -364,6 +364,7 @@ pub(crate) struct TestTerminalSessionFactory {
     paste_response: Result<PasteRequestOutcome, String>,
     pending_paste_response: Option<async_channel::Receiver<Result<PasteRequestOutcome, String>>>,
     paste_resolution: Result<PasteResolution, String>,
+    pending_paste_resolution: Option<async_channel::Receiver<Result<PasteResolution, String>>>,
     server_backed: bool,
     interactive_input_available: bool,
 }
@@ -380,6 +381,7 @@ impl TestTerminalSessionFactory {
             paste_response: Ok(PasteRequestOutcome::Written),
             pending_paste_response: None,
             paste_resolution: Ok(PasteResolution::Written),
+            pending_paste_resolution: None,
             server_backed: false,
             interactive_input_available: true,
         }
@@ -438,6 +440,14 @@ impl TestTerminalSessionFactory {
         receiver: async_channel::Receiver<Result<PasteRequestOutcome, String>>,
     ) -> Self {
         self.pending_paste_response = Some(receiver);
+        self
+    }
+
+    pub(crate) fn with_pending_paste_resolution(
+        mut self,
+        receiver: async_channel::Receiver<Result<PasteResolution, String>>,
+    ) -> Self {
+        self.pending_paste_resolution = Some(receiver);
         self
     }
 
@@ -504,6 +514,7 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
                 paste_response: self.paste_response.clone(),
                 pending_paste_response: self.pending_paste_response.clone(),
                 paste_resolution: self.paste_resolution.clone(),
+                pending_paste_resolution: self.pending_paste_resolution.clone(),
             }),
             events,
             accessibility,
@@ -527,6 +538,7 @@ struct TestTerminalSessionHandle {
     paste_response: Result<PasteRequestOutcome, String>,
     pending_paste_response: Option<async_channel::Receiver<Result<PasteRequestOutcome, String>>>,
     paste_resolution: Result<PasteResolution, String>,
+    pending_paste_resolution: Option<async_channel::Receiver<Result<PasteResolution, String>>>,
 }
 
 impl TestTerminalSessionHandle {
@@ -672,6 +684,9 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
         decision: PasteDecision,
     ) -> async_channel::Receiver<Result<PasteResolution, String>> {
         self.record(RecordedCommand::ResolvePaste(id, decision));
+        if let Some(receiver) = &self.pending_paste_resolution {
+            return receiver.clone();
+        }
         let (sender, receiver) = async_channel::bounded(1);
         let _ = sender.try_send(self.paste_resolution.clone());
         receiver

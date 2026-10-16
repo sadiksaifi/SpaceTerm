@@ -2360,14 +2360,12 @@ fn server_pane_without_interactive_capability_discards_keys_ime_and_paste_chords
 }
 
 #[gpui::test]
-fn server_pane_program_pointer_and_wheel_follow_screen_modes_and_shift_override(
-    cx: &mut TestAppContext,
-) {
+fn server_pane_program_pointer_and_wheel_follow_screen_modes(cx: &mut TestAppContext) {
     let (pane, cx, records) = server_terminal_pane(cx, true);
     for (index, (tracking, alternate, modifiers, pointer_expected, wheel_expected)) in [
         (false, false, Modifiers::none(), false, false),
         (true, false, Modifiers::none(), true, true),
-        (true, false, Modifiers::shift(), false, false),
+        (true, false, Modifiers::shift(), true, true),
         (false, true, Modifiers::none(), false, true),
     ]
     .into_iter()
@@ -2442,6 +2440,102 @@ fn server_pane_program_pointer_and_wheel_follow_screen_modes_and_shift_override(
             "server wheel input never reveals local Scrollback"
         );
     }
+}
+
+#[gpui::test]
+fn server_pane_shift_right_and_middle_clicks_reach_tracking_programs(cx: &mut TestAppContext) {
+    let (pane, cx, records) = server_terminal_pane(cx, true);
+    let (owner, answer) = async_channel::unbounded();
+    owner.try_send("must not paste".to_owned()).unwrap();
+    pane.update(cx, |pane, _| {
+        pane.primary_selection = Some(Rc::new(SlowPrimary(answer)))
+    });
+    let mut screen = context_action_screen(None, false);
+    Arc::make_mut(&mut screen).mouse_tracking = true;
+    records
+        .event_sender(1)
+        .unwrap()
+        .try_send(TerminalSessionEvent::Screen(screen))
+        .unwrap();
+    cx.run_until_parked();
+    let position = pane.read_with(cx, |pane, _| pane.grid_bounds.unwrap().center());
+    for (button, expected) in [
+        (MouseButton::Right, PointerButton::Right),
+        (MouseButton::Middle, PointerButton::Middle),
+    ] {
+        let before = records.commands().len();
+        cx.simulate_mouse_down(position, button, Modifiers::shift());
+        cx.simulate_mouse_up(position, button, Modifiers::shift());
+        cx.run_until_parked();
+        let pointers = records.commands()[before..]
+            .iter()
+            .filter_map(|call| match &call.command {
+                RecordedCommand::Pointer(input) => Some((
+                    input.phase,
+                    input.button,
+                    input.modifiers.shift,
+                    input.shift_selection,
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pointers,
+            [
+                (
+                    PointerPhase::Press,
+                    Some(expected),
+                    true,
+                    ShiftSelectionPolicy::ReportToApplication
+                ),
+                (
+                    PointerPhase::Release,
+                    Some(expected),
+                    true,
+                    ShiftSelectionPolicy::ReportToApplication
+                )
+            ]
+        );
+        assert!(
+            spaceterm_ui::a11y_testing::A11yTree::read(cx)
+                .with_role("Menu")
+                .is_empty()
+        );
+        assert!(
+            cx.debug_bounds("terminal-context-menu-row-paste-enabled")
+                .is_none()
+        );
+        assert!(requested_pastes(&records).is_empty());
+    }
+    assert_eq!(owner.len(), 1, "tracking clicks never read PRIMARY");
+}
+
+#[gpui::test]
+fn server_pane_status_stacks_above_typing_unavailable_without_hiding_either_notice(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+    let (pane, cx, _records) = server_terminal_pane(cx, false);
+    pane.update(cx, |pane, cx| {
+        pane.status = Some("Diagnostics exported".to_owned());
+        pane.status_intent = StatusIntent::Success;
+        cx.notify();
+    });
+    let tree = A11yTree::read(cx);
+    for label in ["Terminal status", "Typing Unavailable"] {
+        assert_eq!(tree.node(label)["aria"]["role"], "Status");
+        assert!(tree.exposed(tree.node(label)));
+    }
+    let status = cx.debug_bounds("terminal-status").unwrap();
+    let unsupported = cx.debug_bounds("terminal-input-unavailable").unwrap();
+    let pane = cx.debug_bounds("terminal-pane").unwrap();
+    assert_eq!(
+        status.bottom() + px(8.0),
+        unsupported.top(),
+        "the notices keep an 8px vertical gap"
+    );
+    assert_eq!(status.right(), unsupported.right());
+    assert_eq!(unsupported.right() + px(12.0), pane.right());
 }
 
 #[gpui::test]
@@ -8994,7 +9088,7 @@ fn paste_selection_pastes_primary_through_the_paste_path_like_middle_click(
             Box::pin(std::future::ready(Ok(Some("primary selection".into()))))
         }
     }
-    let (pane, cx, records) = server_terminal_pane(cx, true);
+    let (pane, cx, records) = connected_terminal_pane(cx);
     let paste_selection = |cx: &mut VisualTestContext| {
         let before = records.commands().len();
         cx.dispatch_action(crate::ui::PasteSelection);
@@ -9051,7 +9145,7 @@ fn shift_middle_click_pastes_primary_under_mouse_tracking_when_shift_overrides_i
             Box::pin(std::future::ready(Ok(Some("primary selection".into()))))
         }
     }
-    let (pane, cx, records) = server_terminal_pane(cx, true);
+    let (pane, cx, records) = connected_terminal_pane(cx);
     pane.update(cx, |pane, _| {
         pane.primary_selection = Some(Rc::new(Primary));
         Arc::make_mut(&mut pane.screen).mouse_tracking = true;
@@ -9101,13 +9195,18 @@ impl crate::terminal::native_services::clipboard::PrimarySelection for SlowPrima
 
 fn terminal_pane_with_slow_primary(
     cx: &mut TestAppContext,
+    server_backed: bool,
 ) -> (
     Entity<TerminalPane>,
     &mut VisualTestContext,
     TestTerminalSessionRecords,
     async_channel::Sender<String>,
 ) {
-    let (pane, cx, records) = server_terminal_pane(cx, true);
+    let (pane, cx, records) = if server_backed {
+        server_terminal_pane(cx, true)
+    } else {
+        connected_terminal_pane(cx)
+    };
     let (owner, answer) = async_channel::unbounded();
     pane.update(cx, |pane, _| {
         pane.primary_selection = Some(Rc::new(SlowPrimary(answer)));
@@ -9128,7 +9227,7 @@ fn requested_pastes(records: &TestTerminalSessionRecords) -> Vec<RecordedCommand
 fn paste_selection_from_a_slow_owner_leaves_the_pane_free_and_pastes_when_answered(
     cx: &mut TestAppContext,
 ) {
-    let (pane, cx, records, owner) = terminal_pane_with_slow_primary(cx);
+    let (pane, cx, records, owner) = terminal_pane_with_slow_primary(cx, false);
 
     cx.dispatch_action(crate::ui::PasteSelection);
     cx.run_until_parked();
@@ -9148,7 +9247,7 @@ fn paste_selection_from_a_slow_owner_leaves_the_pane_free_and_pastes_when_answer
 fn paste_reads_completing_after_focus_moved_or_the_terminal_session_closed_are_discarded(
     cx: &mut TestAppContext,
 ) {
-    let (pane, cx, records, owner) = terminal_pane_with_slow_primary(cx);
+    let (pane, cx, records, owner) = terminal_pane_with_slow_primary(cx, false);
 
     cx.dispatch_action(crate::ui::PasteSelection);
     cx.run_until_parked();
@@ -9166,10 +9265,29 @@ fn paste_reads_completing_after_focus_moved_or_the_terminal_session_closed_are_d
 }
 
 #[gpui::test]
+fn server_untracked_middle_click_pastes_primary_without_selection_support(cx: &mut TestAppContext) {
+    let (pane, cx, records, owner) = terminal_pane_with_slow_primary(cx, true);
+    let position = pane.read_with(cx, |pane, _| pane.grid_bounds.unwrap().center());
+    cx.simulate_mouse_down(position, MouseButton::Middle, Modifiers::none());
+    cx.simulate_mouse_up(position, MouseButton::Middle, Modifiers::none());
+    cx.run_until_parked();
+    owner.try_send("server PRIMARY".to_owned()).unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        requested_pastes(&records),
+        [RecordedCommand::RequestPaste("server PRIMARY".into())]
+    );
+    assert!(records.commands().iter().all(|call| !matches!(
+        call.command,
+        RecordedCommand::Pointer(_) | RecordedCommand::PointerAndCopySelection(_)
+    )));
+}
+
+#[gpui::test]
 fn server_paste_read_from_a_former_connection_is_discarded_without_a_visible_outage(
     cx: &mut TestAppContext,
 ) {
-    let (_pane, cx, records, owner) = terminal_pane_with_slow_primary(cx);
+    let (_pane, cx, records, owner) = terminal_pane_with_slow_primary(cx, true);
     cx.dispatch_action(crate::ui::PasteSelection);
     cx.run_until_parked();
     records.advance_input_generation(1);
@@ -9188,7 +9306,7 @@ fn server_paste_read_from_a_former_connection_is_discarded_without_a_visible_out
 
 #[gpui::test]
 fn a_newer_paste_discards_the_read_it_replaces(cx: &mut TestAppContext) {
-    let (_pane, cx, records, owner) = terminal_pane_with_slow_primary(cx);
+    let (_pane, cx, records, owner) = terminal_pane_with_slow_primary(cx, false);
 
     cx.dispatch_action(crate::ui::PasteSelection);
     cx.run_until_parked();
@@ -9962,6 +10080,25 @@ fn headless_pane() -> (
 
 fn accessible_paste_confirmation(
     cx: &mut TestAppContext,
+    server_backed: bool,
+) -> (
+    Entity<TerminalPane>,
+    &mut VisualTestContext,
+    TestTerminalSessionRecords,
+    PasteConfirmation,
+) {
+    accessible_paste_confirmation_with_session_options(cx, |sessions| {
+        if server_backed {
+            sessions.server_backed()
+        } else {
+            sessions
+        }
+    })
+}
+
+fn accessible_paste_confirmation_with_session_options(
+    cx: &mut TestAppContext,
+    configure: impl FnOnce(TestTerminalSessionFactory) -> TestTerminalSessionFactory,
 ) -> (
     Entity<TerminalPane>,
     &mut VisualTestContext,
@@ -9979,10 +10116,11 @@ fn accessible_paste_confirmation(
         },
     };
     let (pane, cx, records) = terminal_pane_with_session_options(cx, |sessions| {
-        sessions
-            .server_backed()
-            .with_paste_response(Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)))
-            .with_paste_resolution(Ok(PasteResolution::Written))
+        configure(
+            sessions
+                .with_paste_response(Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)))
+                .with_paste_resolution(Ok(PasteResolution::Written)),
+        )
     });
     cx.write_to_clipboard(ClipboardItem::new_string(
         "private-one\nprivate-two\n".to_owned(),
@@ -9990,11 +10128,112 @@ fn accessible_paste_confirmation(
     (pane, cx, records, confirmation)
 }
 
+fn approve_deferred_paste_resolution(
+    cx: &mut TestAppContext,
+    server_backed: bool,
+) -> (
+    Entity<TerminalPane>,
+    &mut VisualTestContext,
+    TestTerminalSessionRecords,
+    async_channel::Sender<Result<PasteResolution, String>>,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+    let (reply, response) = async_channel::bounded(1);
+    let (pane, cx, records, confirmation) =
+        accessible_paste_confirmation_with_session_options(cx, |sessions| {
+            let sessions = sessions.with_pending_paste_resolution(response);
+            if server_backed {
+                sessions.server_backed()
+            } else {
+                sessions
+            }
+        });
+    cx.dispatch_action(PasteClipboard);
+    let tree = A11yTree::read(cx);
+    perform(cx, tree.node("Paste"), Action::Click);
+    let tree = A11yTree::read(cx);
+    assert!(tree.with_role("AlertDialog").is_empty());
+    assert!(tree.find("Terminal status").is_none());
+    assert_eq!(
+        records
+            .commands()
+            .iter()
+            .filter_map(|call| match call.command {
+                RecordedCommand::ResolvePaste(id, decision) => Some((id, decision)),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        [(confirmation.id, PasteDecision::Confirm)]
+    );
+    (pane, cx, records, reply)
+}
+
+#[gpui::test]
+fn deferred_paste_resolution_stale_reply_warns_after_local_or_server_approval(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+    for server_backed in [false, true] {
+        let (_pane, cx, _records, reply) = approve_deferred_paste_resolution(cx, server_backed);
+        reply.try_send(Ok(PasteResolution::Stale)).unwrap();
+        let tree = A11yTree::read(cx);
+        let status = tree.node("Terminal status");
+        assert_eq!(status["aria"]["role"], "Status");
+        assert_eq!(
+            status["aria"]["value"], "Warning",
+            "server_backed={server_backed}"
+        );
+        assert_eq!(
+            status["aria"]["description"],
+            "Paste confirmation expired without writing terminal input"
+        );
+    }
+}
+
+#[gpui::test]
+fn deferred_paste_resolution_lost_reply_reports_error_after_local_or_server_approval(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+    for server_backed in [false, true] {
+        let (_pane, cx, _records, reply) = approve_deferred_paste_resolution(cx, server_backed);
+        drop(reply);
+        let tree = A11yTree::read(cx);
+        let status = tree.node("Terminal status");
+        assert_eq!(status["aria"]["role"], "Status");
+        assert_eq!(
+            status["aria"]["value"], "Error",
+            "server_backed={server_backed}"
+        );
+        assert_eq!(
+            status["aria"]["description"],
+            "Paste confirmation was lost without writing terminal input"
+        );
+    }
+}
+
+#[gpui::test]
+fn deferred_paste_resolution_from_a_former_input_generation_publishes_no_status(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+    for server_backed in [false, true] {
+        let (_pane, cx, records, reply) = approve_deferred_paste_resolution(cx, server_backed);
+        records.advance_input_generation(1);
+        reply.try_send(Ok(PasteResolution::Stale)).unwrap();
+        assert!(
+            A11yTree::read(cx).find("Terminal status").is_none(),
+            "server_backed={server_backed}"
+        );
+    }
+}
+
 #[gpui::test]
 fn server_paste_confirmation_from_a_former_connection_cannot_be_approved(cx: &mut TestAppContext) {
     use gpui::accesskit::Action;
     use spaceterm_ui::a11y_testing::{A11yTree, perform};
-    let (_pane, cx, records, confirmation) = accessible_paste_confirmation(cx);
+    let (_pane, cx, records, confirmation) = accessible_paste_confirmation(cx, true);
     cx.dispatch_action(PasteClipboard);
     let tree = A11yTree::read(cx);
     assert_eq!(tree.with_role("AlertDialog").len(), 1);
@@ -10103,7 +10342,7 @@ fn server_preedit_commit_from_a_former_connection_is_discarded(cx: &mut TestAppC
 fn paste_confirmation_publishes_dialog_text_and_contains_accessibility(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
 
-    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx);
+    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx, false);
     A11yTree::read(cx);
     cx.dispatch_action(PasteClipboard);
     let tree = A11yTree::read(cx);
@@ -10154,7 +10393,7 @@ fn paste_confirmation_restores_terminal_focus_after_escape_and_accessibility_can
     use gpui::accesskit::Action;
     use spaceterm_ui::a11y_testing::{A11yTree, perform};
 
-    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx);
+    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx, false);
     let original_focus = A11yTree::read(cx).focused().unwrap()["accesskit_id"].clone();
     for escape in [true, false] {
         let before = records.commands().len();
@@ -10198,7 +10437,7 @@ fn paste_confirmation_accessibility_confirm_resolves_once_and_restores_terminal_
     use gpui::accesskit::Action;
     use spaceterm_ui::a11y_testing::{A11yTree, perform, supports};
 
-    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx);
+    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx, false);
     let original_focus = A11yTree::read(cx).focused().unwrap()["accesskit_id"].clone();
     cx.dispatch_action(PasteClipboard);
     let tree = A11yTree::read(cx);
@@ -10226,7 +10465,7 @@ fn paste_confirmation_accessibility_confirm_resolves_once_and_restores_terminal_
 #[gpui::test]
 fn server_session_exit_cancels_paste_confirmation(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
-    let (_pane, cx, records, confirmation) = accessible_paste_confirmation(cx);
+    let (_pane, cx, records, confirmation) = accessible_paste_confirmation(cx, true);
     cx.dispatch_action(PasteClipboard);
     assert_eq!(A11yTree::read(cx).with_role("AlertDialog").len(), 1);
     records
@@ -10254,7 +10493,7 @@ fn paste_confirmation_retirement_removes_the_dialog_and_cancels_the_payload(
 ) {
     use spaceterm_ui::a11y_testing::A11yTree;
 
-    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx);
+    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx, false);
     cx.dispatch_action(PasteClipboard);
     assert_eq!(A11yTree::read(cx).with_role("AlertDialog").len(), 1);
     pane.update(cx, |pane, _| pane.close());
@@ -10285,7 +10524,7 @@ fn paste_confirmation_retirement_removes_the_dialog_and_cancels_the_payload(
 #[gpui::test]
 fn paste_confirmation_cancels_when_focus_leaves_its_pane_or_window(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
-    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx);
+    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx, false);
     for target in 0..5 {
         cx.dispatch_action(PasteClipboard);
         assert_eq!(A11yTree::read(cx).with_role("AlertDialog").len(), 1);
@@ -10345,7 +10584,7 @@ fn paste_confirmation_keeps_authority_when_the_main_window_sets_its_modal_blocke
 ) {
     use gpui::accesskit::Action;
     use spaceterm_ui::a11y_testing::{A11yTree, perform};
-    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx);
+    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx, false);
     cx.dispatch_action(PasteClipboard);
     assert_eq!(A11yTree::read(cx).with_role("AlertDialog").len(), 1);
     pane.update(cx, |pane, cx| {
@@ -10390,7 +10629,7 @@ fn paste_confirmation_cancels_a_press_after_focus_moves_to_a_background_control(
 ) {
     use gpui::accesskit::Action;
     use spaceterm_ui::a11y_testing::{A11yTree, perform};
-    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx);
+    let (pane, cx, records, confirmation) = accessible_paste_confirmation(cx, false);
     let background = cx.update(|window, cx| {
         let background = cx.focus_handle();
         window
