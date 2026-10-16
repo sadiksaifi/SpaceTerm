@@ -252,6 +252,7 @@ struct PasteRequestGuard {
     session_identity: u64,
     focus_epoch: u64,
     hierarchy_generation: u64,
+    input_generation: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -584,6 +585,9 @@ pub(crate) struct TerminalPane {
     product_focus: TerminalProductFocus,
     focus_coordinator: TerminalFocusCoordinator,
     terminal_input_focus: bool,
+    input_method_focus: bool,
+    input_generation: u64,
+    input_method_generation: Option<u64>,
     surface_active: bool,
     application_active: bool,
     attention: AttentionState,
@@ -898,6 +902,9 @@ impl TerminalPane {
             product_focus: TerminalProductFocus::default(),
             focus_coordinator: TerminalFocusCoordinator::default(),
             terminal_input_focus: false,
+            input_method_focus: false,
+            input_generation: 0,
+            input_method_generation: None,
             surface_active: false,
             application_active: false,
             attention: AttentionState::default(),
@@ -1263,7 +1270,10 @@ impl TerminalPane {
         activity: SurfaceActivity,
         modal_open: bool,
     ) -> Option<TerminalFocusFacts> {
-        if self.terminal_session.remote_input_blocked || self.native_attention_pane.is_none() {
+        if self.terminal_session.remote_input_blocked
+            || self.native_attention_pane.is_none()
+            || (self.server_backed() && !self.interactive_input_available())
+        {
             return None;
         }
         Some(TerminalFocusFacts {
@@ -1297,6 +1307,15 @@ impl TerminalPane {
         modal_open: bool,
         cx: &App,
     ) -> (bool, bool) {
+        let generation = self.current_input_generation();
+        if self.input_generation != generation {
+            self.input_generation = generation;
+            self.pending_paste_read = None;
+            self.cancel_pending_paste();
+            self.ime.cancel();
+            self.invalidate_preedit_layout();
+            self.advance_native_service_focus_epoch();
+        }
         self.lifecycle_dependencies
             .secure_input
             .update_application_activation(activity.application_active);
@@ -1321,8 +1340,11 @@ impl TerminalPane {
             }
         }
         let focused = self.terminal_input_focused_with_activity(window, activity, modal_open);
+        let input_method = self
+            .focus_facts(window, activity, modal_open)
+            .is_some_and(TerminalFocusCoordinator::accepts_input_method_text);
         let focus_gained = !self.terminal_input_focus && focused;
-        self.apply_terminal_input_focus(focused);
+        self.apply_interactive_focus(focused, input_method);
         (focused, focus_gained)
     }
 
@@ -1331,8 +1353,13 @@ impl TerminalPane {
     }
 
     fn apply_terminal_input_focus(&mut self, focused: bool) {
-        if self.terminal_input_focus != focused {
+        self.apply_interactive_focus(focused, focused);
+    }
+
+    fn apply_interactive_focus(&mut self, focused: bool, input_method: bool) {
+        if self.terminal_input_focus != focused || self.input_method_focus != input_method {
             self.terminal_input_focus = focused;
+            self.input_method_focus = input_method;
             self.advance_native_service_focus_epoch();
             if !focused {
                 self.key_input_adapter.reset();
@@ -1362,7 +1389,7 @@ impl TerminalPane {
                 {
                     session.focus_paste_confirmation(confirmation.id);
                 } else {
-                    session.focus(focused);
+                    session.interactive_focus(focused, input_method);
                 }
             }
             self.sync_secure_input();
@@ -1519,11 +1546,25 @@ impl TerminalPane {
         }
     }
 
-    /// Whether the shell runs in a SpaceTerm Server. Its Terminal Session supports screen
-    /// presentation, keys, and resize only, so the Pane neither offers nor performs Selection,
-    /// Copy, Paste, file drops, Terminal Find, Scrollback, links, or pointer input.
+    /// Whether the shell runs in a SpaceTerm Server, without client-local file or content actions.
     fn server_backed(&self) -> bool {
         self.terminal_session.session_factory.is_server_backed()
+    }
+
+    fn interactive_input_available(&self) -> bool {
+        self.terminal_session_available()
+            && self
+                .terminal_session
+                .session
+                .as_ref()
+                .is_some_and(|session| session.interactive_input_available())
+    }
+
+    fn current_input_generation(&self) -> u64 {
+        self.terminal_session
+            .session
+            .as_ref()
+            .map_or(0, |session| session.input_generation())
     }
 
     fn terminal_session_available(&self) -> bool {
@@ -2382,6 +2423,12 @@ impl TerminalPane {
                 self.hidden_input = hidden_input;
                 self.sync_secure_input();
             }
+            TerminalSessionEvent::PasteUnconfirmed => {
+                self.status = Some(
+                    "Paste was not confirmed. Check the shell before pasting again.".to_owned(),
+                );
+                self.status_intent = StatusIntent::Warning;
+            }
             TerminalSessionEvent::PermissionRequested(request) => {
                 return self.offer_permission_setup(request.permissions(), cx);
             }
@@ -2522,10 +2569,18 @@ impl TerminalPane {
             return;
         }
         window.show_character_palette();
+        self.input_method_generation = Some(self.current_input_generation());
         cx.stop_propagation();
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !window.is_offering_key_equivalent()
+            && self.server_backed()
+            && !self.interactive_input_available()
+        {
+            cx.stop_propagation();
+            return;
+        }
         if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
@@ -2627,6 +2682,9 @@ impl TerminalPane {
         translation: KeyTranslation,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.server_backed() && !self.interactive_input_available() {
+            return true;
+        }
         let input = match translation {
             KeyTranslation::Encoded(input) => input,
             KeyTranslation::TextInput(text) => KeyInput::text_input(text),
@@ -2843,8 +2901,7 @@ impl TerminalPane {
         if !self.synchronize_terminal_input_focus(window, cx) {
             return;
         }
-        // A server-backed Terminal Session takes keys and resize only, so a press just focuses.
-        if self.server_backed() {
+        if self.server_backed() && !self.interactive_input_available() {
             cx.stop_propagation();
             return;
         }
@@ -2875,6 +2932,7 @@ impl TerminalPane {
         }
 
         if button == PointerButton::Left
+            && !self.server_backed()
             && spaceterm_ui::PointerConventions::get(cx).activates_link(event.modifiers)
             && let Some(link) = self.link_at(position)
         {
@@ -2883,8 +2941,20 @@ impl TerminalPane {
             return;
         }
 
+        if self.server_backed()
+            && pointer_uses_text_cursor(
+                self.screen.mouse_tracking,
+                self.pointer_modifiers.shift,
+                self.shift_selection,
+            )
+        {
+            cx.stop_propagation();
+            return;
+        }
+
         self.pressed_button = Some(button);
-        self.selection_copy_pending = button == PointerButton::Left
+        self.selection_copy_pending = !self.server_backed()
+            && button == PointerButton::Left
             && pointer_uses_text_cursor(
                 self.screen.mouse_tracking,
                 self.pointer_modifiers.shift,
@@ -2945,20 +3015,30 @@ impl TerminalPane {
             return;
         }
         self.pointer_modifiers = input_modifiers(event.modifiers);
-        if self.server_backed() {
+        if self.server_backed()
+            && (!self.interactive_input_available()
+                || pointer_uses_text_cursor(
+                    self.screen.mouse_tracking,
+                    self.pointer_modifiers.shift,
+                    self.shift_selection,
+                ))
+        {
             return;
         }
         let dragging = self.pressed_button.is_some();
         let Some(position) = self.surface_position(event.position, dragging) else {
             return;
         };
-        let hovered_link = self
-            .link_cell_at(position)
-            .map(|(cell, target)| HoveredTerminalLink {
-                generation: self.screen.generation,
-                cell,
-                target,
-            });
+        let hovered_link = (!self.server_backed())
+            .then(|| {
+                self.link_cell_at(position)
+                    .map(|(cell, target)| HoveredTerminalLink {
+                        generation: self.screen.generation,
+                        cell,
+                        target,
+                    })
+            })
+            .flatten();
         if self.hovered_link != hovered_link {
             self.hovered_link = hovered_link;
             cx.notify();
@@ -3068,13 +3148,27 @@ impl TerminalPane {
             cx.stop_propagation();
             return;
         }
-        if self.server_backed() {
+        if self.server_backed()
+            && (!self.interactive_input_available()
+                || (self.screen.mouse_tracking
+                    && pointer_uses_text_cursor(
+                        self.screen.mouse_tracking,
+                        event.modifiers.shift,
+                        self.shift_selection,
+                    ))
+                || (!self.screen.mouse_tracking
+                    && !(self.screen.active_screen
+                        == crate::terminal::ActiveScreenSnapshot::Alternate
+                        && self.screen.alternate_scroll)))
+        {
             return;
         }
         let Some(position) = self.surface_position(event.position, false) else {
             return;
         };
-        self.reveal_scrollbar(cx);
+        if !self.server_backed() {
+            self.reveal_scrollbar(cx);
+        }
         if self.terminal_session.remote_input_blocked {
             cx.stop_propagation();
             return;
@@ -3235,6 +3329,9 @@ impl TerminalPane {
     /// Pastes the PRIMARY selection through the same confirmation and bracketed paste as the
     /// Clipboard, for both middle-click and Paste Selection.
     fn paste_primary_selection(&mut self, cx: &mut Context<Self>) {
+        if !self.interactive_input_available() {
+            return;
+        }
         let Some(primary) = &self.primary_selection else {
             return;
         };
@@ -3256,6 +3353,9 @@ impl TerminalPane {
     }
 
     fn paste_clipboard(&mut self, _: &PasteClipboard, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.interactive_input_available() {
+            return;
+        }
         let terminal_input_focused = self.synchronize_terminal_input_focus(window, cx);
         let guard = self.paste_request_guard();
         let policy = self.file_insertion;
@@ -3299,7 +3399,10 @@ impl TerminalPane {
         cx: &mut Context<Self>,
     ) -> bool {
         self.sync_terminal_input_focus(window, cx);
-        if !self.native_service_origin_matches(origin) || !self.terminal_input_focus {
+        if self.server_backed()
+            || !self.native_service_origin_matches(origin)
+            || !self.terminal_input_focus
+        {
             return false;
         }
         let Ok(insertion) = PastePayload::service_text(text, true) else {
@@ -3433,7 +3536,7 @@ impl TerminalPane {
     }
 
     fn context_menu_available(&self) -> bool {
-        !self.server_backed()
+        (!self.server_backed() || self.interactive_input_available())
             && matches!(self.pane_state, PaneTerminalState::Running)
             && self.product_focus.active_workspace
             && self.product_focus.active_tab
@@ -3468,8 +3571,10 @@ impl TerminalPane {
 
         match command {
             TerminalContextMenuCommand::Paste => self.paste_clipboard(&PasteClipboard, window, cx),
-            TerminalContextMenuCommand::Find => self.open_find(&OpenTerminalFind, window, cx),
-            TerminalContextMenuCommand::Copy if actions.copy => {
+            TerminalContextMenuCommand::Find if !self.server_backed() => {
+                self.open_find(&OpenTerminalFind, window, cx)
+            }
+            TerminalContextMenuCommand::Copy if !self.server_backed() && actions.copy => {
                 if let Some(session) = &self.terminal_session.session {
                     self.publish_selection_copy(
                         session.copy_selection_at(menu.generation),
@@ -3554,8 +3659,8 @@ impl TerminalPane {
         self.sync_terminal_input_focus(window, cx);
         let session_available = self.terminal_session.session.is_some();
         let capabilities = NativeServiceCapabilities::new(
-            session_available && self.native_context_actions().copy,
-            session_available && self.terminal_input_focus,
+            !self.server_backed() && session_available && self.native_context_actions().copy,
+            !self.server_backed() && session_available && self.terminal_input_focus,
         );
         let origin = session_available.then(|| {
             NativeServiceOrigin::new(
@@ -3571,6 +3676,9 @@ impl TerminalPane {
     }
 
     fn request_paste_text(&mut self, text: PastePayload, cx: &mut Context<Self>) {
+        if !self.interactive_input_available() {
+            return;
+        }
         let Some(session) = &self.terminal_session.session else {
             return;
         };
@@ -3594,6 +3702,7 @@ impl TerminalPane {
                     }
                     match outcome {
                         Ok(Ok(PasteRequestOutcome::Written)) => this.clear_attention(cx),
+                        Ok(Ok(PasteRequestOutcome::Unconfirmed)) => {}
                         Ok(Ok(PasteRequestOutcome::ConfirmationRequired(confirmation))) => {
                             this.present_paste_confirmation(confirmation, guard, window, cx);
                         }
@@ -3622,6 +3731,7 @@ impl TerminalPane {
             session_identity: self.terminal_session.native_service_session_identity,
             focus_epoch: self.native_service_focus_epoch.get(),
             hierarchy_generation: self.native_service_hierarchy_generation,
+            input_generation: self.current_input_generation(),
         }
     }
 
@@ -3631,6 +3741,7 @@ impl TerminalPane {
             && self.terminal_session.native_service_session_identity == guard.session_identity
             && self.native_service_focus_epoch.get() == guard.focus_epoch
             && self.native_service_hierarchy_generation == guard.hierarchy_generation
+            && self.current_input_generation() == guard.input_generation
     }
 
     #[cfg_attr(
@@ -4002,6 +4113,7 @@ impl TerminalPane {
             return;
         }
         if self.native_attention_pane.is_none()
+            || self.current_input_generation() != guard.input_generation
             || !self.product_focus.active_workspace
             || !self.product_focus.active_tab
             || !self.product_focus.focused_pane
@@ -4025,6 +4137,7 @@ impl TerminalPane {
                 let _ = this.update(cx, |this, cx| this.clear_attention(cx));
             }
             Ok(Ok(PasteResolution::Cancelled)) => {}
+            Ok(Ok(PasteResolution::Unconfirmed)) => {}
             Ok(Ok(PasteResolution::Stale)) => {
                 let _ = this.update(cx, |this, cx| {
                     this.status = Some(
@@ -4389,6 +4502,13 @@ impl EntityInputHandler for TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let input_generation = self.input_method_generation.take();
+        if input_generation.is_some_and(|generation| generation != self.current_input_generation())
+        {
+            self.ime.cancel();
+            self.invalidate_preedit_layout();
+            return;
+        }
         if !self.synchronize_terminal_input_focus(window, cx)
             && !self.accepts_input_method_text(window, cx)
         {
@@ -4424,6 +4544,7 @@ impl EntityInputHandler for TerminalPane {
         }
         self.ime
             .replace_and_mark(range, new_text, new_selected_range);
+        self.input_method_generation = Some(self.current_input_generation());
         self.invalidate_preedit_layout();
         self.pending_accessibility_notifications
             .insert(AccessibilityNotification::Value);
@@ -4837,6 +4958,8 @@ impl Render for TerminalPane {
         let context_menu_available = self.context_menu_available();
         let context_menu_entries = terminal_context_menu_entries(
             context_menu_actions,
+            self.interactive_input_available(),
+            !self.server_backed(),
             crate::desktop_profile::DesktopPresentation::get(cx),
         );
         let context_open_pane = pane.clone();
@@ -4912,6 +5035,19 @@ impl Render for TerminalPane {
             .when(active_hovered_link.is_some(), |root| root.cursor_pointer())
             .key_context(key_context)
             .track_focus(&self.focus_handle);
+        let typing_unavailable = (self.server_backed()
+            && self.terminal_session_available()
+            && !self.interactive_input_available())
+            .then(|| {
+                super::server_pane::render_notice(
+                    "terminal-input-unavailable".into(),
+                    "Typing Unavailable".into(),
+                    "This server doesn't accept terminal input from this version of SpaceTerm. The shell keeps running on the server.".into(),
+                    StatusIntent::Warning,
+                    None,
+                    cx,
+                )
+            });
         // A server-backed Pane registers no handler for an operation its Terminal Session lacks, so
         // menus and shortcuts present that operation as unavailable.
         let local_operations = !self.server_backed();
@@ -4920,9 +5056,6 @@ impl Render for TerminalPane {
             .when(local_operations, |root| {
                 root.on_action(cx.listener(Self::copy_selection))
                     .on_action(cx.listener(Self::edit_copy))
-                    .on_action(cx.listener(Self::paste_clipboard))
-                    .on_action(cx.listener(Self::paste_selection))
-                    .on_action(cx.listener(Self::edit_paste))
                     .on_drop(cx.listener(Self::insert_dropped_files))
                     .on_action(cx.listener(Self::set_up_permission_request))
                     .on_action(cx.listener(Self::decline_permission_request_action))
@@ -4936,6 +5069,11 @@ impl Render for TerminalPane {
                     .on_action(cx.listener(Self::find_previous))
                     .on_action(cx.listener(Self::close_find))
                     .on_action(cx.listener(Self::show_repository_status))
+            })
+            .when(self.interactive_input_available(), |root| {
+                root.on_action(cx.listener(Self::paste_clipboard))
+                    .on_action(cx.listener(Self::paste_selection))
+                    .on_action(cx.listener(Self::edit_paste))
             })
             .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::export_diagnostics))
@@ -4966,6 +5104,7 @@ impl Render for TerminalPane {
                     .child(context_menu),
             )
             .child(self.accessibility_element.decorate_text(terminal_text))
+            .children(typing_unavailable)
             .child(scrollbar)
             .when_some(find_bar, |root, find_bar| root.child(find_bar))
             .when_some(repository_popover, |root, popover| root.child(popover))

@@ -29,44 +29,51 @@ fn terminal_context_presentation(
 /// Ordinary editing commands use labels and shortcuts without decorative icons.
 pub(crate) fn terminal_context_menu_entries(
     actions: NativeContextActions,
+    paste_available: bool,
+    local_operations: bool,
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> Vec<MenuEntry<TerminalContextMenuCommand>> {
     let paste_shortcut = presentation.shortcut(&spaceterm_ui::EditPaste);
     let find_shortcut = presentation.shortcut(&crate::ui::OpenTerminalFind);
     let presentation = terminal_context_presentation(presentation);
-    vec![
+    let mut entries = vec![
         menu_entry(
             TerminalContextMenuCommand::Copy,
             "Copy",
-            actions.copy,
+            local_operations && actions.copy,
             presentation.copy_shortcut,
         ),
         menu_entry(
             TerminalContextMenuCommand::Paste,
             "Paste",
-            true,
+            paste_available,
             paste_shortcut,
         ),
         menu_entry(
             TerminalContextMenuCommand::Find,
             "Find",
-            true,
+            local_operations,
             find_shortcut,
         ),
-        MenuEntry::separator(),
-        menu_entry(
-            TerminalContextMenuCommand::OpenLink,
-            "Open Link",
-            actions.open_link,
-            None,
-        ),
-        menu_entry(
-            TerminalContextMenuCommand::FilePreview,
-            presentation.file_preview_label,
-            actions.file_preview,
-            None,
-        ),
-    ]
+    ];
+    if local_operations {
+        entries.extend([
+            MenuEntry::separator(),
+            menu_entry(
+                TerminalContextMenuCommand::OpenLink,
+                "Open Link",
+                actions.open_link,
+                None,
+            ),
+            menu_entry(
+                TerminalContextMenuCommand::FilePreview,
+                presentation.file_preview_label,
+                actions.file_preview,
+                None,
+            ),
+        ]);
+    }
+    entries
 }
 
 fn menu_entry(
