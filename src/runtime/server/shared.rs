@@ -282,6 +282,7 @@ impl SharedWorkspaceHost {
                             .attachment_generation
                             .is_some_and(|generation| generation <= attachment.generation)
                     {
+                        pane.invalidate_input();
                         pane.lease.control = nonce().map_err(|_| Refusal::Failed)?;
                         pane.device = None;
                         pane.connected = false;
@@ -293,6 +294,7 @@ impl SharedWorkspaceHost {
             Request::Capabilities => Ok(Reply::Capabilities {
                 development_pane: true,
                 pane_takeover: true,
+                interactive_input: true,
             }),
             Request::Inventory => Ok(Reply::Inventory {
                 inventory: self.inventory(),
@@ -413,6 +415,8 @@ impl SharedWorkspaceHost {
                 let target = match &request {
                     Request::TakeOver { target, .. } => *target,
                     Request::Poll { lease }
+                    | Request::Focus { lease, .. }
+                    | Request::Input { lease, .. }
                     | Request::Key { lease, .. }
                     | Request::Resize { lease, .. }
                     | Request::Style { lease, .. }

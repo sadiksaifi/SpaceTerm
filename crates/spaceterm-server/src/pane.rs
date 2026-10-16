@@ -61,6 +61,96 @@ pub struct Key {
     pub option_as_alt: bool,
 }
 
+/// Eligibility supplied by the controlling client's current local focus generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FocusTarget {
+    Unfocused,
+    FocusedPane,
+    Terminal,
+    PasteConfirmation { id: u64 },
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum PointerPhase {
+    Press,
+    Motion,
+    Release,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum PointerButton {
+    Left,
+    Middle,
+    Right,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum WheelPhase {
+    GestureStarted,
+    GestureChanged,
+    GestureEnded,
+    GestureCancelled,
+    MomentumStarted,
+    MomentumChanged,
+    MomentumEnded,
+    MomentumCancelled,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Pointer {
+    pub screen_generation: u64,
+    pub phase: PointerPhase,
+    pub button: Option<PointerButton>,
+    pub x: f32,
+    pub y: f32,
+    pub modifiers: u16,
+    pub shift_selection: bool,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Wheel {
+    pub screen_generation: u64,
+    pub horizontal_steps: i32,
+    pub vertical_steps: i32,
+    pub phase: WheelPhase,
+    pub x: f32,
+    pub y: f32,
+    pub modifiers: u16,
+    pub shift_selection: bool,
+}
+
+/// Input is never replayed or accepted outside its exact lease and focus generation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum InteractiveInput {
+    Key(Key),
+    Pointer(Pointer),
+    Wheel(Wheel),
+    Paste { text: String },
+    ResolvePaste { id: u64, confirm: bool },
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PasteConfirmation {
+    pub id: u64,
+    pub byte_len: u32,
+    pub line_count: u32,
+    pub multiline: bool,
+    pub control_bytes: bool,
+    pub closing_fence: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PasteRejection {
+    Empty,
+    TooLarge { limit: u32 },
+    ConfirmationPending,
+    TerminalUnfocused,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PasteOutcome {
+    Written,
+    ConfirmationRequired(PasteConfirmation),
+    Rejected(PasteRejection),
+    Cancelled,
+    Stale,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PresentationStyle {
     pub light: bool,
@@ -81,6 +171,16 @@ pub enum AttachmentClaim {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
+    Focus {
+        lease: Lease,
+        generation: u64,
+        target: FocusTarget,
+    },
+    Input {
+        lease: Lease,
+        generation: u64,
+        input: InteractiveInput,
+    },
     ClaimPane {
         attachment: crate::attachments::Attachment,
         pane: crate::hierarchy::Id,
@@ -160,6 +260,7 @@ pub enum Request {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Reply {
+    Paste(PasteOutcome),
     Inventory {
         inventory: crate::hierarchy::Inventory,
         next_sequence: u64,
@@ -169,6 +270,8 @@ pub enum Reply {
         development_pane: bool,
         #[serde(default)]
         pane_takeover: bool,
+        #[serde(default)]
+        interactive_input: bool,
     },
     Restored {
         server: [u8; 32],
@@ -234,6 +337,12 @@ pub struct Cell {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Screen {
+    #[serde(default)]
+    pub generation: u64,
+    #[serde(default)]
+    pub mouse_tracking: bool,
+    #[serde(default)]
+    pub alternate_scroll: bool,
     pub columns: u16,
     pub rows: Vec<Vec<Cell>>,
     pub wrapped: Vec<bool>,
@@ -276,6 +385,7 @@ pub struct PaneConnection {
 struct PaneTransport {
     stream: std::sync::Mutex<Option<std::os::unix::net::UnixStream>>,
     takeover: bool,
+    interactive_input: bool,
 }
 /// One transport for a desktop's inventory and Pane workers. It retains no credential.
 #[cfg(feature = "client")]
@@ -315,7 +425,14 @@ impl PaneConnection {
             Reply::Capabilities {
                 development_pane: true,
                 pane_takeover,
-            } => Ok(Self::new(stream, pane_takeover)),
+                interactive_input,
+            } => {
+                let mut connection = Self::new(stream, pane_takeover);
+                std::sync::Arc::get_mut(&mut connection.transport)
+                    .ok_or(ServerError::Protocol)?
+                    .interactive_input = interactive_input;
+                Ok(connection)
+            }
             Reply::Refused(reason) => Err(reason.into()),
             _ => Err(ServerError::Unsupported),
         }
@@ -325,11 +442,15 @@ impl PaneConnection {
             transport: std::sync::Arc::new(PaneTransport {
                 stream: std::sync::Mutex::new(Some(stream)),
                 takeover,
+                interactive_input: false,
             }),
         }
     }
     pub fn supports_takeover(&self) -> bool {
         self.transport.takeover
+    }
+    pub fn supports_interactive_input(&self) -> bool {
+        self.transport.interactive_input
     }
     pub fn exchange(&mut self, request: &Request) -> Result<Reply, ServerError> {
         let mut stream = self

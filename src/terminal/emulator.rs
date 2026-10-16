@@ -448,6 +448,7 @@ pub struct ScreenSnapshot {
     pub cursor: CursorSnapshot,
     pub text_blinking: bool,
     pub mouse_tracking: bool,
+    pub alternate_scroll: bool,
     pub selection_present: bool,
     pub title: Arc<str>,
     pub metadata: Arc<TerminalMetadataSnapshot>,
@@ -474,6 +475,7 @@ impl PartialEq for ScreenSnapshot {
             && self.cursor == other.cursor
             && self.text_blinking == other.text_blinking
             && self.mouse_tracking == other.mouse_tracking
+            && self.alternate_scroll == other.alternate_scroll
             && self.selection_present == other.selection_present
             && self.title == other.title
             && self.metadata == other.metadata
@@ -517,6 +519,7 @@ impl ScreenSnapshot {
             },
             text_blinking: false,
             mouse_tracking: false,
+            alternate_scroll: false,
             selection_present: false,
             title: Arc::from(""),
             metadata: MetadataTracker::new(paths, "", "", Default::default(), Instant::now())
@@ -650,6 +653,7 @@ impl ScreenSnapshot {
             cursor: CursorSnapshot::default(),
             text_blinking: false,
             mouse_tracking: false,
+            alternate_scroll: false,
             selection_present: false,
             title: Arc::from(""),
             metadata: MetadataTracker::new(
@@ -724,6 +728,7 @@ pub(crate) struct TerminalEmulator {
     cached_scrollbar: Option<ScrollbarSnapshot>,
     cached_active_screen: Option<ActiveScreenSnapshot>,
     cached_mouse_tracking: Option<bool>,
+    cached_alternate_scroll: Option<bool>,
     cached_selection_present: Option<bool>,
     cached_metadata_revision: Option<u64>,
     cached_appearance_generation: Option<AppearanceGeneration>,
@@ -1171,6 +1176,7 @@ impl TerminalEmulator {
             cached_scrollbar: None,
             cached_active_screen: None,
             cached_mouse_tracking: None,
+            cached_alternate_scroll: None,
             cached_selection_present: None,
             cached_metadata_revision: None,
             cached_appearance_generation: None,
@@ -1509,6 +1515,41 @@ impl TerminalEmulator {
             TerminalFailure::emulator_error("encode-terminal-focus-event", error)
         })?;
         Ok(EmulatorAction::bytes(buffer[..written].to_vec()))
+    }
+
+    pub(crate) fn application_pointer(
+        &mut self,
+        input: PointerInput,
+    ) -> Result<EmulatorAction, TerminalFailure> {
+        if !self.terminal.is_mouse_tracking().map_err(|error| {
+            TerminalFailure::emulator_error("query-terminal-mouse-tracking-mode", error)
+        })? || shift_overrides_application_mouse(input.modifiers, input.shift_selection)
+        {
+            return Ok(EmulatorAction::none());
+        }
+        self.pointer(input)
+    }
+
+    pub(crate) fn application_wheel(
+        &mut self,
+        input: WheelInput,
+    ) -> Result<EmulatorAction, TerminalFailure> {
+        let tracking = self.terminal.is_mouse_tracking().map_err(|error| {
+            TerminalFailure::emulator_error("query-terminal-mouse-tracking-mode", error)
+        })?;
+        if tracking && shift_overrides_application_mouse(input.modifiers, input.shift_selection) {
+            return Ok(EmulatorAction::none());
+        }
+        let alternate_scroll = self.terminal.active_screen().map_err(|error| {
+            TerminalFailure::emulator_error("query-active-terminal-screen", error)
+        })? == Screen::Alternate
+            && self.terminal.mode(Mode::ALT_SCROLL).map_err(|error| {
+                TerminalFailure::emulator_error("query-alternate-scroll-mode", error)
+            })?;
+        if !tracking && !alternate_scroll {
+            return Ok(EmulatorAction::none());
+        }
+        self.wheel(input)
     }
 
     pub(crate) fn pointer(
@@ -2470,6 +2511,7 @@ impl TerminalEmulator {
             || self.cached_cols != cols
             || self.cached_colors.as_ref() != Some(&terminal_colors);
         let previous_scrollbar = self.cached_scrollbar;
+        let alternate_scroll = self.terminal.mode(Mode::ALT_SCROLL)?;
         let first_snapshot = self.cached_colors.is_none();
         let mut damage = if first_snapshot {
             SnapshotDamage::initial()
@@ -2486,7 +2528,8 @@ impl TerminalEmulator {
                 }),
                 active_screen: self.cached_active_screen != Some(active_screen),
                 resize: self.cached_cols != cols || self.cached_rows != rows,
-                mouse_tracking: self.cached_mouse_tracking != Some(mouse_tracking),
+                mouse_tracking: self.cached_mouse_tracking != Some(mouse_tracking)
+                    || self.cached_alternate_scroll != Some(alternate_scroll),
                 selection_presence: self.cached_selection_present != Some(selection_present),
                 search: find_changed,
                 graphics_content: graphics_content_changed,
@@ -2696,6 +2739,7 @@ impl TerminalEmulator {
         self.cached_scrollbar = Some(scrollbar);
         self.cached_active_screen = Some(active_screen);
         self.cached_mouse_tracking = Some(mouse_tracking);
+        self.cached_alternate_scroll = Some(alternate_scroll);
         self.cached_selection_present = Some(selection_present);
         self.cached_metadata_revision = Some(metadata.revision);
         self.cached_appearance_generation = Some(self.applied_appearance.generation);
@@ -2724,6 +2768,7 @@ impl TerminalEmulator {
             cursor,
             text_blinking,
             mouse_tracking,
+            alternate_scroll,
             selection_present,
             title,
             metadata,

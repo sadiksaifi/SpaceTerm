@@ -35,6 +35,11 @@ struct OwnedPane {
     ended: bool,
     failed: bool,
     appearance_generation: u64,
+    focus_generation: u64,
+    focus: FocusTarget,
+    pending_paste: Option<u64>,
+    screen_generation: u64,
+    size: PaneSize,
 }
 fn nonce() -> Result<[u8; 32], ServerError> {
     let mut bytes = [0; 32];
@@ -210,6 +215,11 @@ impl DevelopmentPaneHost {
             ended: false,
             failed: false,
             appearance_generation: 1,
+            focus_generation: 0,
+            focus: FocusTarget::Unfocused,
+            pending_paste: None,
+            screen_generation: 0,
+            size,
         });
         Ok(lease)
     }
@@ -262,6 +272,7 @@ impl DevelopmentPaneHost {
             return Ok(Reply::Capabilities {
                 development_pane: true,
                 pane_takeover: true,
+                interactive_input: true,
             });
         }
         self.recover()?;
@@ -344,6 +355,8 @@ impl DevelopmentPaneHost {
         let pane = self.pane.as_mut().ok_or(Refusal::Missing)?;
         let lease = match &request {
             Request::Poll { lease }
+            | Request::Focus { lease, .. }
+            | Request::Input { lease, .. }
             | Request::Key { lease, .. }
             | Request::Resize { lease, .. }
             | Request::Close { lease }
@@ -365,7 +378,9 @@ impl DevelopmentPaneHost {
                     && pane.sent != Some(screen.generation)
                 {
                     pane.sent = Some(screen.generation);
-                    return Ok(Reply::Screen(Box::new(encode_screen(screen))));
+                    let mut screen = encode_screen(screen);
+                    screen.generation = pane.screen_generation;
+                    return Ok(Reply::Screen(Box::new(screen)));
                 }
                 if pane.failed {
                     return Err(Refusal::Failed);
@@ -379,6 +394,9 @@ impl DevelopmentPaneHost {
                 }
             }
             Request::Key { key, .. } => {
+                if pane.focus_generation != 0 {
+                    return Err(Refusal::Unsupported);
+                }
                 if pane.ended || pane.failed {
                     return Err(Refusal::Missing);
                 }
@@ -386,12 +404,25 @@ impl DevelopmentPaneHost {
                     .key(decode_key(key).ok_or(Refusal::Unsupported)?);
                 Ok(Reply::Unchanged)
             }
+            Request::Focus {
+                generation, target, ..
+            } => pane.focus(generation, target),
+            Request::Input {
+                generation, input, ..
+            } => {
+                let reply = pane.input(generation, input);
+                if matches!(reply, Err(Refusal::Failed)) {
+                    pane.invalidate_input();
+                }
+                reply
+            }
             Request::Resize { size, .. } => {
                 size.validate().map_err(|_| Refusal::Unsupported)?;
                 if pane.ended || pane.failed {
                     return Err(Refusal::Missing);
                 }
                 pane.runtime.resize(geometry(size));
+                pane.size = size;
                 Ok(Reply::Unchanged)
             }
             Request::Style { style, .. } => {
@@ -403,6 +434,7 @@ impl DevelopmentPaneHost {
                 Ok(Reply::Unchanged)
             }
             Request::Release { .. } => {
+                pane.invalidate_input();
                 pane.lease.control = nonce().map_err(|_| Refusal::Failed)?;
                 pane.device = None;
                 pane.connected = false;
@@ -467,6 +499,7 @@ impl PaneService for DevelopmentPaneHost {
         if let Some(pane) = &mut self.pane
             && pane.lease.connection == connection
         {
+            pane.invalidate_input();
             pane.connected = false;
         }
     }
@@ -477,6 +510,7 @@ impl PaneService for DevelopmentPaneHost {
         self.retain_directory()
             .map_err(|_| ServerError::StorageUnavailable)?;
         if let Some(pane) = &mut self.pane {
+            pane.invalidate_input();
             pane.connected = false;
             pane.runtime
                 .shutdown_and_wait(Duration::from_secs(5))
@@ -487,6 +521,236 @@ impl PaneService for DevelopmentPaneHost {
     }
 }
 impl OwnedPane {
+    fn invalidate_input(&mut self) {
+        self.focus = FocusTarget::Unfocused;
+        self.pending_paste = None;
+        self.runtime.focus(false);
+    }
+
+    fn focus(&mut self, generation: u64, target: FocusTarget) -> Result<Reply, Refusal> {
+        if self.ended || self.failed {
+            return Err(Refusal::Missing);
+        }
+        if generation == 0 || generation < self.focus_generation {
+            return Err(Refusal::Stale);
+        }
+        if generation == self.focus_generation && target == self.focus {
+            return Ok(Reply::Unchanged);
+        }
+        if let FocusTarget::PasteConfirmation { id } = target {
+            if self.pending_paste != Some(id)
+                || generation != self.focus_generation
+                || self.focus != FocusTarget::Terminal
+            {
+                return Err(Refusal::Stale);
+            }
+            self.runtime
+                .focus_paste_confirmation(PasteConfirmationId::new(id));
+        } else {
+            if generation <= self.focus_generation {
+                return Err(Refusal::Stale);
+            }
+            // Even a new Terminal generation cancels approvals from a preceding local focus.
+            if let Some(id) = self.pending_paste.take() {
+                self.runtime
+                    .resolve_paste(PasteConfirmationId::new(id), PasteDecision::Cancel);
+            }
+            self.runtime.focus(target == FocusTarget::Terminal);
+        }
+        self.focus_generation = generation;
+        self.focus = target;
+        Ok(Reply::Unchanged)
+    }
+
+    fn input(&mut self, generation: u64, input: InteractiveInput) -> Result<Reply, Refusal> {
+        if self.ended || self.failed {
+            return Err(Refusal::Missing);
+        }
+        if generation == 0 || generation != self.focus_generation {
+            return Err(Refusal::Stale);
+        }
+        match input {
+            InteractiveInput::Key(key) => {
+                let key = decode_key(key).ok_or(Refusal::Unsupported)?;
+                if self.focus != FocusTarget::Terminal
+                    && !(self.focus == FocusTarget::FocusedPane && key.is_input_method_commit())
+                {
+                    return Err(Refusal::Stale);
+                }
+                self.runtime.key(key);
+                Ok(Reply::Unchanged)
+            }
+            InteractiveInput::Pointer(input) => {
+                self.require_terminal_focus()?;
+                if input.screen_generation != self.screen_generation {
+                    return Ok(Reply::Unchanged);
+                }
+                let generation = self.pointer_generation(
+                    input.screen_generation,
+                    input.x,
+                    input.y,
+                    input.modifiers,
+                )?;
+                if !matches!(input.phase, pane::PointerPhase::Motion) && input.button.is_none() {
+                    return Err(Refusal::Unsupported);
+                }
+                self.runtime.application_pointer(PointerInput {
+                    generation,
+                    phase: match input.phase {
+                        pane::PointerPhase::Press => super::PointerPhase::Press,
+                        pane::PointerPhase::Motion => super::PointerPhase::Motion,
+                        pane::PointerPhase::Release => super::PointerPhase::Release,
+                    },
+                    button: input.button.map(|button| match button {
+                        pane::PointerButton::Left => super::PointerButton::Left,
+                        pane::PointerButton::Middle => super::PointerButton::Middle,
+                        pane::PointerButton::Right => super::PointerButton::Right,
+                    }),
+                    position: SurfacePosition {
+                        x: input.x,
+                        y: input.y,
+                    },
+                    modifiers: decode_modifiers(input.modifiers),
+                    shift_selection: ShiftSelectionPolicy::from_selection_override(
+                        input.shift_selection,
+                    ),
+                });
+                Ok(Reply::Unchanged)
+            }
+            InteractiveInput::Wheel(input) => {
+                self.require_terminal_focus()?;
+                if input.screen_generation != self.screen_generation {
+                    return Ok(Reply::Unchanged);
+                }
+                let generation = self.pointer_generation(
+                    input.screen_generation,
+                    input.x,
+                    input.y,
+                    input.modifiers,
+                )?;
+                if input.horizontal_steps.unsigned_abs() > 100
+                    || input.vertical_steps.unsigned_abs() > 100
+                {
+                    return Err(Refusal::Unsupported);
+                }
+                self.runtime.application_wheel(WheelInput {
+                    generation,
+                    horizontal_steps: input.horizontal_steps,
+                    vertical_steps: input.vertical_steps,
+                    phase: match input.phase {
+                        pane::WheelPhase::GestureStarted => super::WheelPhase::GestureStarted,
+                        pane::WheelPhase::GestureChanged => super::WheelPhase::GestureChanged,
+                        pane::WheelPhase::GestureEnded => super::WheelPhase::GestureEnded,
+                        pane::WheelPhase::GestureCancelled => super::WheelPhase::GestureCancelled,
+                        pane::WheelPhase::MomentumStarted => super::WheelPhase::MomentumStarted,
+                        pane::WheelPhase::MomentumChanged => super::WheelPhase::MomentumChanged,
+                        pane::WheelPhase::MomentumEnded => super::WheelPhase::MomentumEnded,
+                        pane::WheelPhase::MomentumCancelled => super::WheelPhase::MomentumCancelled,
+                    },
+                    position: SurfacePosition {
+                        x: input.x,
+                        y: input.y,
+                    },
+                    modifiers: decode_modifiers(input.modifiers),
+                    shift_selection: ShiftSelectionPolicy::from_selection_override(
+                        input.shift_selection,
+                    ),
+                });
+                Ok(Reply::Unchanged)
+            }
+            InteractiveInput::Paste { text } => {
+                self.require_terminal_focus()?;
+                let result = self.runtime.request_paste(PastePayload::from(text));
+                let result = runtime_reply(result)?;
+                let outcome = match result {
+                    PasteRequestOutcome::Unconfirmed => return Err(Refusal::Failed),
+                    PasteRequestOutcome::Written => PasteOutcome::Written,
+                    PasteRequestOutcome::ConfirmationRequired(confirmation) => {
+                        let id = confirmation.id.value();
+                        self.pending_paste = Some(id);
+                        PasteOutcome::ConfirmationRequired(pane::PasteConfirmation {
+                            id,
+                            byte_len: confirmation.byte_len as u32,
+                            line_count: confirmation.line_count as u32,
+                            multiline: confirmation.risk.multiline,
+                            control_bytes: confirmation.risk.control_bytes,
+                            closing_fence: confirmation.risk.closing_fence,
+                        })
+                    }
+                    PasteRequestOutcome::Rejected(reason) => PasteOutcome::Rejected(match reason {
+                        super::PasteRejection::Empty => pane::PasteRejection::Empty,
+                        super::PasteRejection::TooLarge { limit } => {
+                            pane::PasteRejection::TooLarge {
+                                limit: limit as u32,
+                            }
+                        }
+                        super::PasteRejection::ConfirmationPending => {
+                            pane::PasteRejection::ConfirmationPending
+                        }
+                        super::PasteRejection::TerminalUnfocused => {
+                            pane::PasteRejection::TerminalUnfocused
+                        }
+                    }),
+                };
+                Ok(Reply::Paste(outcome))
+            }
+            InteractiveInput::ResolvePaste { id, confirm } => {
+                if self.pending_paste != Some(id)
+                    || !(self.focus == FocusTarget::Terminal
+                        || self.focus == (FocusTarget::PasteConfirmation { id }))
+                {
+                    return Ok(Reply::Paste(PasteOutcome::Stale));
+                }
+                self.pending_paste = None;
+                let result = runtime_reply(self.runtime.resolve_paste(
+                    PasteConfirmationId::new(id),
+                    if confirm {
+                        PasteDecision::Confirm
+                    } else {
+                        PasteDecision::Cancel
+                    },
+                ))?;
+                Ok(Reply::Paste(match result {
+                    PasteResolution::Unconfirmed => return Err(Refusal::Failed),
+                    PasteResolution::Written => PasteOutcome::Written,
+                    PasteResolution::Cancelled => PasteOutcome::Cancelled,
+                    PasteResolution::Stale => PasteOutcome::Stale,
+                }))
+            }
+        }
+    }
+    fn require_terminal_focus(&self) -> Result<(), Refusal> {
+        if self.focus == FocusTarget::Terminal {
+            Ok(())
+        } else {
+            Err(Refusal::Stale)
+        }
+    }
+    fn pointer_generation(
+        &self,
+        generation: u64,
+        x: f32,
+        y: f32,
+        modifiers: u16,
+    ) -> Result<PresentationGeneration, Refusal> {
+        if modifiers > 1023
+            || !x.is_finite()
+            || !y.is_finite()
+            || x < 0.0
+            || y < 0.0
+            || x >= f32::from(self.size.columns) * f32::from(self.size.cell_width)
+            || y >= f32::from(self.size.rows) * f32::from(self.size.cell_height)
+        {
+            return Err(Refusal::Unsupported);
+        }
+        if generation == 0 || generation != self.screen_generation {
+            return Err(Refusal::Stale);
+        }
+        self.screen
+            .as_ref()
+            .map(|screen| screen.generation)
+            .ok_or(Refusal::Stale)
+    }
     fn claim(
         &mut self,
         device: [u8; 32],
@@ -509,12 +773,17 @@ impl OwnedPane {
         if transfer {
             self.attachment_generation = None;
         }
+        if transfer || connection != self.lease.connection || !self.connected {
+            self.invalidate_input();
+            self.focus_generation = 0;
+        }
         self.device = Some(device);
         self.lease.control = control;
         self.lease.connection = connection;
         self.connected = true;
         self.sent = None;
         self.runtime.resize(geometry(size));
+        self.size = size;
         if let Some(appearance) = appearance {
             self.appearance_generation += 1;
             self.runtime.update_appearance(appearance);
@@ -524,11 +793,33 @@ impl OwnedPane {
     fn drain(&mut self) {
         while let Ok(event) = self.subscription.events.try_recv() {
             match event {
-                TerminalSessionEvent::Screen(screen) => self.screen = Some(screen),
+                TerminalSessionEvent::Screen(screen) => {
+                    if self
+                        .screen
+                        .as_ref()
+                        .is_none_or(|old| old.generation != screen.generation)
+                    {
+                        self.screen_generation = self.screen_generation.saturating_add(1);
+                    }
+                    self.screen = Some(screen);
+                }
                 TerminalSessionEvent::Exited(_) => self.ended = true,
                 TerminalSessionEvent::Failed(_) => self.failed = true,
                 _ => {}
             }
+        }
+    }
+}
+fn runtime_reply<T>(reply: async_channel::Receiver<Result<T, String>>) -> Result<T, Refusal> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match reply.try_recv() {
+            Ok(result) => return result.map_err(|_| Refusal::Failed),
+            Err(async_channel::TryRecvError::Closed) => return Err(Refusal::Failed),
+            Err(async_channel::TryRecvError::Empty) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(_) => return Err(Refusal::Failed),
         }
     }
 }
@@ -581,6 +872,9 @@ fn encode_color(color: TerminalColor) -> pane::Color {
 }
 pub(crate) fn encode_screen(screen: &ScreenSnapshot) -> Screen {
     Screen {
+        generation: 0,
+        mouse_tracking: screen.mouse_tracking,
+        alternate_scroll: screen.alternate_scroll,
         columns: screen.size.cols,
         rows: screen
             .rows
@@ -692,6 +986,790 @@ pub(crate) fn decode_key(key: Key) -> Option<KeyInput> {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn interactive_input_requires_current_focus_and_legacy_keys_cannot_bypass_it() {
+        let mut host = host();
+        let lease = attach(&mut host, 1, true);
+        let key = Key {
+            physical: PhysicalKey::Enter as u32,
+            action: 0,
+            logical: "enter".into(),
+            text: None,
+            unshifted: None,
+            modifiers: 0,
+            consumed: 0,
+            option_as_alt: false,
+        };
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [1; 32],
+                Request::Focus {
+                    lease,
+                    generation: 1,
+                    target: FocusTarget::Unfocused
+                }
+            ),
+            Reply::Unchanged
+        ));
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [1; 32],
+                Request::Key {
+                    lease,
+                    key: key.clone()
+                }
+            ),
+            Reply::Refused(Refusal::Unsupported)
+        ));
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [1; 32],
+                Request::Input {
+                    lease,
+                    generation: 1,
+                    input: InteractiveInput::Key(key.clone())
+                }
+            ),
+            Reply::Refused(Refusal::Stale)
+        ));
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [1; 32],
+                Request::Focus {
+                    lease,
+                    generation: 2,
+                    target: FocusTarget::Terminal
+                }
+            ),
+            Reply::Unchanged
+        ));
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [1; 32],
+                Request::Input {
+                    lease,
+                    generation: 2,
+                    input: InteractiveInput::Key(key)
+                }
+            ),
+            Reply::Unchanged
+        ));
+        host.shutdown().unwrap();
+    }
+
+    fn focus(host: &mut impl PaneService, lease: Lease, generation: u64, target: FocusTarget) {
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                lease.connection,
+                Request::Focus {
+                    lease,
+                    generation,
+                    target
+                }
+            ),
+            Reply::Unchanged
+        ));
+    }
+    fn input(
+        host: &mut impl PaneService,
+        lease: Lease,
+        generation: u64,
+        input: InteractiveInput,
+    ) -> Reply {
+        host.request(
+            [1; 32],
+            lease.connection,
+            Request::Input {
+                lease,
+                generation,
+                input,
+            },
+        )
+    }
+    fn text_key(text: &str, ime: bool) -> InteractiveInput {
+        InteractiveInput::Key(Key {
+            physical: PhysicalKey::Unidentified as u32,
+            action: 0,
+            logical: if ime {
+                "input-method-commit"
+            } else {
+                "text-input"
+            }
+            .into(),
+            text: Some(text.into()),
+            unshifted: None,
+            modifiers: 0,
+            consumed: 0,
+            option_as_alt: false,
+        })
+    }
+    fn capture(host: &mut DevelopmentPaneHost, lease: Lease, bytes: usize, modes: &str) {
+        command(
+            host,
+            1,
+            lease,
+            &format!(
+                "stty raw -echo; printf '{modes}\\033[2J\\033[HREADY\\r\\n'; dd bs=1 count={bytes} 2>/dev/null | od -An -tx1 | tr -d ' \\n'; printf '\\r\\n'"
+            ),
+        );
+        await_text(host, 1, lease, "READY");
+    }
+    fn next_screen(host: &mut DevelopmentPaneHost, lease: Lease) -> Box<Screen> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Reply::Screen(screen) =
+                host.request([1; 32], lease.connection, Request::Poll { lease })
+            {
+                return screen;
+            }
+            assert!(Instant::now() < deadline, "screen did not arrive");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn focus_edges_and_focused_pane_ime_are_observable_at_the_pty() {
+        let mut host = host();
+        let lease = attach(&mut host, 1, true);
+        capture(&mut host, lease, 16, "\\033[?1004h");
+        focus(&mut host, lease, 1, FocusTarget::Terminal);
+        focus(&mut host, lease, 2, FocusTarget::FocusedPane);
+        assert!(matches!(
+            input(&mut host, lease, 2, text_key("discarded", false)),
+            Reply::Refused(Refusal::Stale)
+        ));
+        assert!(matches!(
+            input(&mut host, lease, 2, text_key("界", true)),
+            Reply::Unchanged
+        ));
+        focus(&mut host, lease, 3, FocusTarget::Unfocused);
+        assert!(matches!(
+            input(&mut host, lease, 3, text_key("discarded", true)),
+            Reply::Refused(Refusal::Stale)
+        ));
+        focus(&mut host, lease, 4, FocusTarget::Terminal);
+        assert!(matches!(
+            input(&mut host, lease, 1, text_key("discarded", false)),
+            Reply::Refused(Refusal::Stale)
+        ));
+        assert!(matches!(
+            input(&mut host, lease, 4, text_key("K", false)),
+            Reply::Unchanged
+        ));
+        await_text(&mut host, 1, lease, "1b5b4f1b5b491b5b4fe7958c1b5b494b");
+        host.shutdown().unwrap();
+    }
+
+    fn unsafe_paste(host: &mut DevelopmentPaneHost, lease: Lease, generation: u64) -> u64 {
+        let Reply::Paste(PasteOutcome::ConfirmationRequired(confirmation)) = input(
+            host,
+            lease,
+            generation,
+            InteractiveInput::Paste {
+                text: "a\nb".into(),
+            },
+        ) else {
+            panic!("expected unsafe paste confirmation")
+        };
+        assert_eq!(confirmation.byte_len, 3);
+        assert_eq!(confirmation.line_count, 2);
+        assert!(confirmation.multiline);
+        confirmation.id
+    }
+
+    #[test]
+    fn paste_confirmation_preserves_exact_modal_authority_and_focus_loss_cancels_it() {
+        let mut host = host();
+        let lease = attach(&mut host, 1, true);
+        capture(&mut host, lease, 5, "");
+        focus(&mut host, lease, 1, FocusTarget::Terminal);
+        let first = unsafe_paste(&mut host, lease, 1);
+        focus(
+            &mut host,
+            lease,
+            1,
+            FocusTarget::PasteConfirmation { id: first },
+        );
+        focus(&mut host, lease, 2, FocusTarget::Unfocused);
+        focus(&mut host, lease, 3, FocusTarget::Terminal);
+        assert!(matches!(
+            input(
+                &mut host,
+                lease,
+                3,
+                InteractiveInput::ResolvePaste {
+                    id: first,
+                    confirm: true
+                }
+            ),
+            Reply::Paste(PasteOutcome::Stale)
+        ));
+        let cancelled = unsafe_paste(&mut host, lease, 3);
+        assert!(matches!(
+            input(
+                &mut host,
+                lease,
+                3,
+                InteractiveInput::ResolvePaste {
+                    id: cancelled,
+                    confirm: false
+                }
+            ),
+            Reply::Paste(PasteOutcome::Cancelled)
+        ));
+        assert!(matches!(
+            input(
+                &mut host,
+                lease,
+                3,
+                InteractiveInput::Paste { text: "ok".into() }
+            ),
+            Reply::Paste(PasteOutcome::Written)
+        ));
+        let id = unsafe_paste(&mut host, lease, 3);
+        assert_ne!(id, first);
+        focus(&mut host, lease, 3, FocusTarget::PasteConfirmation { id });
+        assert!(matches!(
+            input(
+                &mut host,
+                lease,
+                3,
+                InteractiveInput::ResolvePaste { id, confirm: true }
+            ),
+            Reply::Paste(PasteOutcome::Written)
+        ));
+        assert!(matches!(
+            input(
+                &mut host,
+                lease,
+                3,
+                InteractiveInput::ResolvePaste { id, confirm: true }
+            ),
+            Reply::Paste(PasteOutcome::Stale)
+        ));
+        await_text(&mut host, 1, lease, "6f6b610d62");
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn application_pointer_and_wheel_encode_at_the_pty_and_stale_screens_are_dropped() {
+        let mut host = host();
+        let lease = attach(&mut host, 1, true);
+        capture(&mut host, lease, 28, "\\033[?1000h\\033[?1006h");
+        focus(&mut host, lease, 1, FocusTarget::Terminal);
+        // Poll again after a deliberate resize to obtain a fresh authoritative mapping.
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::Resize {
+                lease,
+                size: PaneSize {
+                    columns: 81,
+                    ..size()
+                },
+            },
+        );
+        let screen = next_screen(&mut host, lease);
+        assert!(screen.mouse_tracking);
+        let pointer = Pointer {
+            screen_generation: screen.generation,
+            phase: pane::PointerPhase::Press,
+            button: Some(pane::PointerButton::Left),
+            x: 4.0,
+            y: 5.0,
+            modifiers: 0,
+            shift_selection: true,
+        };
+        assert!(matches!(
+            input(
+                &mut host,
+                lease,
+                1,
+                InteractiveInput::Pointer(Pointer {
+                    screen_generation: u64::MAX,
+                    ..pointer
+                })
+            ),
+            Reply::Unchanged
+        ));
+        assert!(matches!(
+            input(&mut host, lease, 1, InteractiveInput::Pointer(pointer)),
+            Reply::Unchanged
+        ));
+        assert!(matches!(
+            input(
+                &mut host,
+                lease,
+                1,
+                InteractiveInput::Pointer(Pointer {
+                    screen_generation: screen.generation,
+                    phase: pane::PointerPhase::Release,
+                    ..pointer
+                })
+            ),
+            Reply::Unchanged
+        ));
+        assert!(matches!(
+            input(
+                &mut host,
+                lease,
+                1,
+                InteractiveInput::Wheel(Wheel {
+                    screen_generation: screen.generation,
+                    horizontal_steps: 0,
+                    vertical_steps: 1,
+                    phase: pane::WheelPhase::GestureChanged,
+                    x: 4.0,
+                    y: 5.0,
+                    modifiers: 0,
+                    shift_selection: true
+                })
+            ),
+            Reply::Unchanged
+        ));
+        await_text(
+            &mut host,
+            1,
+            lease,
+            "1b5b3c303b313b314d1b5b3c303b313b316d1b5b3c36343b313b314d",
+        );
+        assert!(
+            !host
+                .pane
+                .as_ref()
+                .unwrap()
+                .screen
+                .as_ref()
+                .unwrap()
+                .selection_present
+        );
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn bracketed_paste_reuses_bounds_normalization_and_control_sanitization() {
+        let mut host = host();
+        let lease = attach(&mut host, 1, true);
+        capture(&mut host, lease, 30, "\\033[?2004h");
+        focus(&mut host, lease, 1, FocusTarget::Terminal);
+        for (text, expected) in [
+            (String::new(), pane::PasteRejection::Empty),
+            (
+                "x".repeat(1_048_577),
+                pane::PasteRejection::TooLarge { limit: 1_048_576 },
+            ),
+        ] {
+            assert!(
+                matches!(input(&mut host, lease, 1, InteractiveInput::Paste { text }), Reply::Paste(PasteOutcome::Rejected(reason)) if reason == expected)
+            );
+        }
+        let Reply::Paste(PasteOutcome::ConfirmationRequired(confirmation)) = input(
+            &mut host,
+            lease,
+            1,
+            InteractiveInput::Paste {
+                text: "x\x1b[201~y".into(),
+            },
+        ) else {
+            panic!("closing fence must require confirmation")
+        };
+        assert!(confirmation.closing_fence);
+        input(
+            &mut host,
+            lease,
+            1,
+            InteractiveInput::ResolvePaste {
+                id: confirmation.id,
+                confirm: false,
+            },
+        );
+        for text in ["a\r\nb", "a\x1bb"] {
+            assert!(matches!(
+                input(
+                    &mut host,
+                    lease,
+                    1,
+                    InteractiveInput::Paste { text: text.into() }
+                ),
+                Reply::Paste(PasteOutcome::Written)
+            ));
+        }
+        await_text(
+            &mut host,
+            1,
+            lease,
+            "1b5b3230307e610a621b5b3230317e1b5b3230307e6120621b5b3230317e",
+        );
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn reconnect_takeover_and_wrong_device_invalidate_paste_and_input_authority() {
+        let mut host = host();
+        let original = attach(&mut host, 1, true);
+        capture(&mut host, original, 2, "");
+        focus(&mut host, original, 1, FocusTarget::Terminal);
+        let pending = unsafe_paste(&mut host, original, 1);
+        host.disconnected(original.connection);
+        assert!(matches!(
+            input(&mut host, original, 1, text_key("bad", false)),
+            Reply::Refused(Refusal::Stale)
+        ));
+        let resumed = attach(&mut host, 2, false);
+        assert_eq!(resumed.session, original.session);
+        assert!(matches!(
+            input(&mut host, resumed, 1, text_key("bad", false)),
+            Reply::Refused(Refusal::Stale)
+        ));
+        focus(&mut host, resumed, 1, FocusTarget::Terminal);
+        assert!(matches!(
+            input(
+                &mut host,
+                resumed,
+                1,
+                InteractiveInput::ResolvePaste {
+                    id: pending,
+                    confirm: true
+                }
+            ),
+            Reply::Paste(PasteOutcome::Stale)
+        ));
+        unsafe_paste(&mut host, resumed, 1);
+        let Reply::Attached { lease: successor } = host.request(
+            [2; 32],
+            [3; 32],
+            Request::TakeOver {
+                target: resumed.into(),
+                size: size(),
+                style: None,
+            },
+        ) else {
+            panic!("takeover failed")
+        };
+        for request in [
+            Request::Focus {
+                lease: resumed,
+                generation: 2,
+                target: FocusTarget::Terminal,
+            },
+            Request::Input {
+                lease: resumed,
+                generation: 1,
+                input: text_key("bad", false),
+            },
+            Request::Input {
+                lease: resumed,
+                generation: 1,
+                input: InteractiveInput::ResolvePaste {
+                    id: pending,
+                    confirm: true,
+                },
+            },
+        ] {
+            assert!(matches!(
+                host.request([1; 32], [2; 32], request),
+                Reply::Refused(Refusal::Stale)
+            ));
+        }
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [3; 32],
+                Request::Focus {
+                    lease: successor,
+                    generation: 1,
+                    target: FocusTarget::Terminal
+                }
+            ),
+            Reply::Refused(Refusal::Stale)
+        ));
+        assert!(matches!(
+            host.request(
+                [2; 32],
+                [3; 32],
+                Request::Focus {
+                    lease: successor,
+                    generation: 1,
+                    target: FocusTarget::Terminal
+                }
+            ),
+            Reply::Unchanged
+        ));
+        assert!(matches!(
+            host.request(
+                [2; 32],
+                [3; 32],
+                Request::Input {
+                    lease: successor,
+                    generation: 1,
+                    input: InteractiveInput::ResolvePaste {
+                        id: pending,
+                        confirm: true
+                    }
+                }
+            ),
+            Reply::Paste(PasteOutcome::Stale)
+        ));
+        assert!(matches!(
+            host.request(
+                [2; 32],
+                [3; 32],
+                Request::Input {
+                    lease: successor,
+                    generation: 1,
+                    input: text_key("ok", false)
+                }
+            ),
+            Reply::Unchanged
+        ));
+        // The new device has exactly the same running PTY, with no cancelled payload bytes.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Reply::Screen(screen) =
+                host.request([2; 32], [3; 32], Request::Poll { lease: successor })
+                && screen.rows.iter().any(|row| {
+                    row.iter()
+                        .map(|cell| cell.text.as_str())
+                        .collect::<String>()
+                        .trim_end()
+                        == "6f6b"
+                })
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "successor PTY witness missing");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn malformed_interactive_values_never_reach_the_pty() {
+        let mut host = host();
+        let lease = attach(&mut host, 1, true);
+        capture(&mut host, lease, 2, "");
+        focus(&mut host, lease, 1, FocusTarget::Terminal);
+        let generation = host.pane.as_ref().unwrap().screen_generation;
+        for invalid in [
+            InteractiveInput::Key(Key {
+                physical: u32::MAX,
+                action: 0,
+                logical: "x".into(),
+                text: Some("bad".into()),
+                unshifted: None,
+                modifiers: 0,
+                consumed: 0,
+                option_as_alt: false,
+            }),
+            InteractiveInput::Pointer(Pointer {
+                screen_generation: generation,
+                phase: pane::PointerPhase::Press,
+                button: None,
+                x: 1.0,
+                y: 1.0,
+                modifiers: 0,
+                shift_selection: false,
+            }),
+            InteractiveInput::Pointer(Pointer {
+                screen_generation: generation,
+                phase: pane::PointerPhase::Press,
+                button: Some(pane::PointerButton::Left),
+                x: f32::NAN,
+                y: 1.0,
+                modifiers: 0,
+                shift_selection: false,
+            }),
+            InteractiveInput::Wheel(Wheel {
+                screen_generation: generation,
+                horizontal_steps: i32::MIN,
+                vertical_steps: 0,
+                phase: pane::WheelPhase::GestureChanged,
+                x: 1.0,
+                y: 1.0,
+                modifiers: 0,
+                shift_selection: false,
+            }),
+        ] {
+            assert!(matches!(
+                input(&mut host, lease, 1, invalid),
+                Reply::Refused(Refusal::Unsupported)
+            ));
+        }
+        input(&mut host, lease, 1, text_key("ok", false));
+        await_text(&mut host, 1, lease, "6f6b");
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn application_input_never_starts_selection_or_scrolls_server_history() {
+        for modes in ["", "\\033[?1049h\\033[?1000h\\033[?1007h"] {
+            let mut host = host();
+            let lease = attach(&mut host, 1, true);
+            capture(&mut host, lease, 2, modes);
+            focus(&mut host, lease, 1, FocusTarget::Terminal);
+            let generation = host.pane.as_ref().unwrap().screen_generation;
+            let pointer = Pointer {
+                screen_generation: generation,
+                phase: pane::PointerPhase::Press,
+                button: Some(pane::PointerButton::Left),
+                x: 4.0,
+                y: 5.0,
+                modifiers: 1,
+                shift_selection: true,
+            };
+            input(&mut host, lease, 1, InteractiveInput::Pointer(pointer));
+            input(
+                &mut host,
+                lease,
+                1,
+                InteractiveInput::Pointer(Pointer {
+                    phase: pane::PointerPhase::Release,
+                    ..pointer
+                }),
+            );
+            input(
+                &mut host,
+                lease,
+                1,
+                InteractiveInput::Wheel(Wheel {
+                    screen_generation: generation,
+                    horizontal_steps: 0,
+                    vertical_steps: 3,
+                    phase: pane::WheelPhase::GestureChanged,
+                    x: 4.0,
+                    y: 5.0,
+                    modifiers: 1,
+                    shift_selection: true,
+                }),
+            );
+            input(&mut host, lease, 1, text_key("ok", false));
+            await_text(&mut host, 1, lease, "6f6b");
+            let screen = host.pane.as_ref().unwrap().screen.as_ref().unwrap();
+            assert!(!screen.selection_present);
+            assert_eq!(
+                screen.viewport.offset_rows + screen.viewport.visible_rows,
+                screen.scrollbar.total_rows
+            );
+            host.shutdown().unwrap();
+        }
+    }
+
+    #[test]
+    fn shared_interactive_input_uses_controlling_size_and_terminal_visible_appearance() {
+        let mut host = SharedWorkspaceHost::new(host());
+        create_shared(&mut host, 1);
+        let pane = shared_inventory(&mut host).workspaces[0].tabs[0].root_pane;
+        let Reply::Attached { lease } = host.request(
+            [1; 32],
+            [1; 32],
+            Request::SelectPane {
+                pane,
+                explicit: true,
+                size: size(),
+                style: None,
+            },
+        ) else {
+            panic!("shared Pane missing")
+        };
+        let style = PresentationStyle {
+            light: true,
+            foreground: [20; 3],
+            background: [240; 3],
+            palette: [[0; 3]; 16],
+            cursor: [20; 3],
+            cursor_text: None,
+            bold_as_bright: false,
+        };
+        assert!(matches!(
+            host.request(
+                [2; 32],
+                [2; 32],
+                Request::Style {
+                    lease,
+                    style: style.clone()
+                }
+            ),
+            Reply::Refused(Refusal::Stale)
+        ));
+        assert!(matches!(
+            host.request([1; 32], [1; 32], Request::Style { lease, style }),
+            Reply::Unchanged
+        ));
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::Resize {
+                lease,
+                size: PaneSize {
+                    columns: 91,
+                    rows: 31,
+                    cell_width: 9,
+                    cell_height: 19,
+                },
+            },
+        );
+        focus(&mut host, lease, 1, FocusTarget::Terminal);
+        input(
+            &mut host,
+            lease,
+            1,
+            text_key(
+                "stty -echo; stty size; stty raw -echo; printf '\\033[?996n'; dd bs=1 count=9 2>/dev/null | od -An -tx1 | tr -d ' \\n'; printf '\\r\\n'",
+                false,
+            ),
+        );
+        input(
+            &mut host,
+            lease,
+            1,
+            InteractiveInput::Key(Key {
+                physical: PhysicalKey::Enter as u32,
+                action: 0,
+                logical: "enter".into(),
+                text: None,
+                unshifted: None,
+                modifiers: 0,
+                consumed: 0,
+                option_as_alt: false,
+            }),
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Reply::Screen(screen) = host.request([1; 32], [1; 32], Request::Poll { lease }) {
+                let rows = screen
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .map(|cell| cell.text.as_str())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>();
+                if rows
+                    .iter()
+                    .any(|row| row.trim_end() == "1b5b3f3939373b326e")
+                {
+                    assert_eq!((screen.columns, screen.rows.len()), (91, 31));
+                    assert_eq!(screen.background, [240; 3]);
+                    assert!(rows.iter().any(|row| row.trim_end() == "31 91"));
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "controlling appearance query response missing"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        host.shutdown().unwrap();
+    }
 
     pub(super) fn shared_inventory(
         host: &mut SharedWorkspaceHost,

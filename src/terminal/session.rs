@@ -449,6 +449,11 @@ pub trait TerminalSessionHandle {
         true
     }
 
+    /// Changes whenever a connection or control grant can no longer authorize delayed input.
+    fn input_generation(&self) -> u64 {
+        0
+    }
+
     /// Transfers Terminal Input Focus to this Terminal Session's Paste Confirmation.
     fn focus_paste_confirmation(&self, _id: PasteConfirmationId) {
         self.focus(false);
@@ -553,6 +558,18 @@ fn test_launch_planner() -> ShellLaunchPlanner {
 }
 
 impl TerminalRuntime {
+    /// Sends application mouse input without starting a server-owned Selection.
+    pub fn application_pointer(&self, input: PointerInput) {
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::ApplicationPointer(input));
+        }
+    }
+    /// Sends application wheel input without moving server-owned Scrollback.
+    pub fn application_wheel(&self, input: WheelInput) {
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::ApplicationWheel(input));
+        }
+    }
     /// Opens one presentation subscription, replacing the previous subscription.
     /// Dropping its receivers leaves this runtime and its PTY alive.
     pub fn subscribe(&self) -> TerminalSubscription {
@@ -947,6 +964,8 @@ enum Command {
     FocusPasteConfirmation(PasteConfirmationId),
     Resize,
     Pointer(PointerInput),
+    ApplicationPointer(PointerInput),
+    ApplicationWheel(WheelInput),
     PointerAndCopySelection(
         PointerInput,
         mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>,
@@ -1035,6 +1054,8 @@ impl fmt::Debug for Command {
             Self::FocusPasteConfirmation(..) => "FocusPasteConfirmation",
             Self::Resize => "Resize",
             Self::Pointer(..) => "Pointer",
+            Self::ApplicationPointer(..) => "ApplicationPointer",
+            Self::ApplicationWheel(..) => "ApplicationWheel",
             Self::PointerAndCopySelection(..) => "PointerAndCopySelection",
             Self::Wheel(..) => "Wheel",
             Self::ScrollTo(..) => "ScrollTo",
@@ -1551,6 +1572,20 @@ impl TerminalWorker {
                     }
                 }
             }
+            Command::ApplicationPointer(input) => match self.emulator.application_pointer(input) {
+                Ok(action) => self.apply_emulator_action(action),
+                Err(message) => {
+                    self.send_runtime_failure(message);
+                    false
+                }
+            },
+            Command::ApplicationWheel(input) => match self.emulator.application_wheel(input) {
+                Ok(action) => self.apply_emulator_action(action),
+                Err(message) => {
+                    self.send_runtime_failure(message);
+                    false
+                }
+            },
             Command::Pointer(input) => match self.emulator.pointer(input) {
                 Ok(action) => {
                     self.apply_emulator_action(action) && self.refresh_selection_autoscroll()
