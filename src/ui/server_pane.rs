@@ -176,6 +176,7 @@ pub(crate) fn render_notice(
     detail: SharedString,
     intent: StatusIntent,
     retry: Option<Button>,
+    anchored: bool,
     cx: &App,
 ) -> AnyElement {
     let appearance = super::appearance::shared_chrome(cx);
@@ -194,11 +195,14 @@ pub(crate) fn render_notice(
                 .aria_label(title.clone())
                 .aria_description(description)
                 .debug_selector(move || element_selector.to_string())
-                .absolute()
-                .right(appearance.spacing(12.0))
-                .bottom(appearance.spacing(12.0))
+                .when(anchored, |notice| {
+                    notice
+                        .absolute()
+                        .right(appearance.spacing(12.0))
+                        .bottom(appearance.spacing(12.0))
+                })
                 .w(appearance.spacing(300.0))
-                .max_w(gpui::relative(0.94))
+                .max_w(gpui::relative(if anchored { 0.94 } else { 1.0 }))
                 .text_color(gpui_color(floating_colors.text))
                 .chrome_text(appearance.typography.style(TextRole::Body))
                 .flex()

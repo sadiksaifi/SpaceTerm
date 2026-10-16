@@ -1552,6 +1552,14 @@ impl TerminalPane {
         self.terminal_session.session_factory.is_server_backed()
     }
 
+    fn pointer_selection_policy(&self) -> ShiftSelectionPolicy {
+        if self.server_backed() {
+            ShiftSelectionPolicy::ReportToApplication
+        } else {
+            self.shift_selection
+        }
+    }
+
     fn interactive_input_available(&self) -> bool {
         self.terminal_session_available()
             && self
@@ -2925,7 +2933,7 @@ impl TerminalPane {
             && pointer_uses_text_cursor(
                 self.screen.mouse_tracking,
                 self.pointer_modifiers.shift,
-                self.shift_selection,
+                self.pointer_selection_policy(),
             )
             && self.primary_selection.is_some()
         {
@@ -2948,7 +2956,7 @@ impl TerminalPane {
             && pointer_uses_text_cursor(
                 self.screen.mouse_tracking,
                 self.pointer_modifiers.shift,
-                self.shift_selection,
+                self.pointer_selection_policy(),
             )
         {
             cx.stop_propagation();
@@ -2961,7 +2969,7 @@ impl TerminalPane {
             && pointer_uses_text_cursor(
                 self.screen.mouse_tracking,
                 self.pointer_modifiers.shift,
-                self.shift_selection,
+                self.pointer_selection_policy(),
             );
         if let Some(session) = &self.terminal_session.session {
             session.pointer(PointerInput {
@@ -2970,7 +2978,7 @@ impl TerminalPane {
                 button: Some(button),
                 position,
                 modifiers: self.pointer_modifiers,
-                shift_selection: self.shift_selection,
+                shift_selection: self.pointer_selection_policy(),
             });
         }
         cx.stop_propagation();
@@ -3023,7 +3031,7 @@ impl TerminalPane {
                 || pointer_uses_text_cursor(
                     self.screen.mouse_tracking,
                     self.pointer_modifiers.shift,
-                    self.shift_selection,
+                    self.pointer_selection_policy(),
                 ))
         {
             return;
@@ -3061,7 +3069,7 @@ impl TerminalPane {
                 button: self.pressed_button,
                 position,
                 modifiers: self.pointer_modifiers,
-                shift_selection: self.shift_selection,
+                shift_selection: self.pointer_selection_policy(),
             });
         }
         cx.stop_propagation();
@@ -3108,7 +3116,7 @@ impl TerminalPane {
             button: Some(button),
             position,
             modifiers: self.pointer_modifiers,
-            shift_selection: self.shift_selection,
+            shift_selection: self.pointer_selection_policy(),
         };
         let copy = self.terminal_session.session.as_ref().and_then(|session| {
             if copy_selection {
@@ -3157,7 +3165,7 @@ impl TerminalPane {
                     && pointer_uses_text_cursor(
                         self.screen.mouse_tracking,
                         event.modifiers.shift,
-                        self.shift_selection,
+                        self.pointer_selection_policy(),
                     ))
                 || (!self.screen.mouse_tracking
                     && !(self.screen.active_screen
@@ -3201,7 +3209,7 @@ impl TerminalPane {
                 phase,
                 position,
                 modifiers: input_modifiers(event.modifiers),
-                shift_selection: self.shift_selection,
+                shift_selection: self.pointer_selection_policy(),
             });
         }
         cx.stop_propagation();
@@ -3496,7 +3504,7 @@ impl TerminalPane {
                 PointerButton::Right,
                 self.screen.mouse_tracking,
                 modifiers.shift,
-                self.shift_selection,
+                self.pointer_selection_policy(),
             )
         {
             return false;
@@ -4830,7 +4838,7 @@ impl Render for TerminalPane {
         let pointer_uses_text_cursor = pointer_uses_text_cursor(
             display_screen.mouse_tracking,
             self.pointer_modifiers.shift,
-            self.shift_selection,
+            self.pointer_selection_policy(),
         );
         let preedit = displaying_current.then(|| self.preedit_layout()).flatten();
         let attention_visual = self.attention_visual;
@@ -5064,16 +5072,18 @@ impl Render for TerminalPane {
             .when(active_hovered_link.is_some(), |root| root.cursor_pointer())
             .key_context(key_context)
             .track_focus(&self.focus_handle);
-        let typing_unavailable = (self.server_backed()
+        let typing_unavailable = self.server_backed()
             && self.terminal_session_available()
-            && !self.interactive_input_available())
-            .then(|| {
+            && !self.interactive_input_available();
+        let status_visible = status.is_some() && paste_confirmation.is_none();
+        let mut typing_notice = typing_unavailable.then(|| {
                 super::server_pane::render_notice(
                     "terminal-input-unavailable".into(),
                     "Typing Unavailable".into(),
                     "This server doesn't accept terminal input from this version of SpaceTerm. The shell keeps running on the server.".into(),
                     StatusIntent::Warning,
                     None,
+                    false,
                     cx,
                 )
             });
@@ -5133,7 +5143,9 @@ impl Render for TerminalPane {
                     .child(context_menu),
             )
             .child(self.accessibility_element.decorate_text(terminal_text))
-            .children(typing_unavailable)
+            .children((!status_visible).then(|| typing_notice.take()).flatten().map(|notice| {
+                div().absolute().right(appearance.spacing(12.0)).bottom(appearance.spacing(12.0)).max_w(relative(0.94)).child(notice)
+            }))
             .child(scrollbar)
             .when_some(find_bar, |root, find_bar| root.child(find_bar))
             .when_some(repository_popover, |root, popover| root.child(popover))
@@ -5207,8 +5219,7 @@ impl Render for TerminalPane {
                     let width = message_width.max(action_width)
                         + appearance.spacing(20.0)
                         + notice_shell.hairline() * 4.0;
-                    root.child(
-                        notice_shell.mount(
+                    let status_element = notice_shell.mount(
                             div()
                                 .id("terminal-status")
                                 .role(gpui::accesskit::Role::Status)
@@ -5216,9 +5227,9 @@ impl Render for TerminalPane {
                                 .aria_description(status.clone())
                                 .aria_value(status_intent.map_or("Terminal Session exited", StatusIntent::label))
                                 .debug_selector(|| "terminal-status".to_owned())
-                                .absolute()
-                                .right(px(TERMINAL_SIDE_INSET))
-                                .bottom_0()
+                                .when(!typing_unavailable, |status| {
+                                    status.absolute().right(px(TERMINAL_SIDE_INSET)).bottom_0()
+                                })
                                 .w(width)
                                 .max_w(relative(0.94))
                                 .text_color(gpui_color(floating_colors.text))
@@ -5316,8 +5327,13 @@ impl Render for TerminalPane {
                                             )
                                         }),
                                 ),
+                        );
+                    match typing_notice.take() {
+                        Some(notice) => root.child(
+                            div().absolute().right(appearance.spacing(12.0)).bottom(appearance.spacing(12.0)).max_w(relative(0.94)).flex().flex_col().items_end().gap(appearance.spacing(8.0)).child(status_element).child(notice)
                         ),
-                    )
+                        None => root.child(status_element),
+                    }
                 },
             )
             .into_any_element()
