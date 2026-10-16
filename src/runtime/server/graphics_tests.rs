@@ -313,7 +313,7 @@ fn existing_visual_fixtures_keep_pixels_and_placements_through_the_server_adapte
 
 #[cfg(feature = "desktop")]
 #[test]
-fn running_multichunk_animation_completes_coherent_frames_while_the_server_advances() {
+fn running_multichunk_animation_and_another_image_both_display_while_the_server_advances() {
     use crate::terminal::server_graphics::Graphics;
     let _guard = crate::terminal::graphics::test_lock();
     let mut host = host();
@@ -322,7 +322,7 @@ fn running_multichunk_animation_completes_coherent_frames_while_the_server_advan
     let red = base64::engine::general_purpose::STANDARD.encode([255, 0, 0, 255].repeat(512 * 512));
     let blue = base64::engine::general_purpose::STANDARD.encode([0, 0, 255, 255].repeat(512 * 512));
     let output = format!(
-        "\x1b[2J\x1b[H\x1b_Ga=T,t=d,f=32,i=10,s=512,v=512,c=8,r=8,C=1,q=2;{red}\x1b\\\x1b_Ga=f,t=d,f=32,i=10,s=512,v=512,z=40,q=2;{blue}\x1b\\\x1b_Ga=a,i=10,r=1,z=40,s=3,v=1,q=2\x1b\\"
+        "\x1b[2J\x1b[H\x1b_Ga=T,t=d,f=32,i=20,s=1,v=1,c=1,r=1,C=1,q=2;AQIDBA==\x1b\\\x1b_Ga=T,t=d,f=32,i=10,s=512,v=512,c=8,r=8,C=1,q=2;{red}\x1b\\\x1b_Ga=f,t=d,f=32,i=10,s=512,v=512,z=40,q=2;{blue}\x1b\\\x1b_Ga=a,i=10,r=1,z=40,s=3,v=1,q=2\x1b\\"
     );
     let path = std::env::temp_dir().join(format!(
         "spaceterm-animation-{:x}",
@@ -337,8 +337,10 @@ fn running_multichunk_animation_completes_coherent_frames_while_the_server_advan
     let mut graphics = Graphics::default();
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut completed = 0;
+    let mut displayed_animation = None;
+    let mut static_visible = false;
     let mut generations = std::collections::HashSet::new();
-    while Instant::now() < deadline && completed < 3 {
+    while Instant::now() < deadline && (completed < 3 || !static_visible) {
         let reply = host.request([1; 32], lease.connection, Request::Poll { lease });
         assert!(
             !matches!(reply, Reply::Refused(_)),
@@ -346,7 +348,13 @@ fn running_multichunk_animation_completes_coherent_frames_while_the_server_advan
         );
         if let Reply::Screen(mut screen) = reply {
             if let Some(Ok(manifest)) = &screen.graphics {
-                generations.extend(manifest.images.iter().map(|image| image.key));
+                generations.extend(
+                    manifest
+                        .images
+                        .iter()
+                        .filter(|image| image.key.image_id == 10)
+                        .map(|image| image.key),
+                );
             }
             graphics
                 .update(screen.graphics.take(), screen.alternate)
@@ -359,17 +367,26 @@ fn running_multichunk_animation_completes_coherent_frames_while_the_server_advan
             .unwrap()
             .unwrap()
         {
-            completed += 1;
             let snapshot = graphics.snapshot();
-            assert_eq!(snapshot.images.len(), 1);
-            let rgba = &snapshot.images[0].rgba;
-            assert!(
-                rgba.as_chunks::<4>()
-                    .0
-                    .iter()
-                    .all(|pixel| pixel.as_slice() == &rgba[..4]),
-                "a displayed frame cannot mix chunks from different generations"
-            );
+            for image in snapshot.images.iter() {
+                if image.key.image_id == 20 {
+                    assert_eq!(image.rgba.as_ref(), [1, 2, 3, 4]);
+                    static_visible = true;
+                } else {
+                    let rgba = &image.rgba;
+                    assert!(
+                        rgba.as_chunks::<4>()
+                            .0
+                            .iter()
+                            .all(|pixel| pixel.as_slice() == &rgba[..4]),
+                        "a displayed frame cannot mix chunks from different generations"
+                    );
+                    if displayed_animation != Some(image.key) {
+                        displayed_animation = Some(image.key);
+                        completed += 1;
+                    }
+                }
+            }
             assert!(!snapshot.placements.is_empty());
         }
         std::thread::sleep(Duration::from_millis(30));
@@ -385,4 +402,5 @@ fn running_multichunk_animation_completes_coherent_frames_while_the_server_advan
         completed, 3,
         "running animation frames must eventually paint"
     );
+    assert!(static_visible, "the other visible image must also paint");
 }

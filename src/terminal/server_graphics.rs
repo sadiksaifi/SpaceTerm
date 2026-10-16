@@ -21,6 +21,7 @@ pub(crate) struct Graphics {
     images: HashMap<u32, Arc<ImageSnapshot>>,
     valid: bool,
     transfer: Option<Transfer>,
+    last_requested_image: Option<u32>,
     missing: HashSet<ImageKey>,
     reported: Option<Error>,
 }
@@ -38,6 +39,7 @@ impl Graphics {
         if alternate != self.alternate {
             self.images.clear();
             self.transfer = None;
+            self.last_requested_image = None;
             self.missing.clear();
         }
         self.alternate = alternate;
@@ -132,17 +134,29 @@ impl Graphics {
                 .manifest
                 .as_ref()
                 .and_then(|manifest| {
-                    manifest.images.iter().find(|image| {
-                        self.images
-                            .get(&image.key.image_id)
-                            .is_none_or(|cached| cached.key != image.key)
-                            && !self.missing.contains(&image.key)
-                    })
+                    manifest
+                        .images
+                        .iter()
+                        .filter(|image| {
+                            self.images
+                                .get(&image.key.image_id)
+                                .is_none_or(|cached| cached.key != image.key)
+                                && !self.missing.contains(&image.key)
+                        })
+                        // Cycle through IDs so a changing animation cannot monopolize transfers.
+                        .min_by_key(|image| {
+                            (
+                                self.last_requested_image
+                                    .is_some_and(|last| image.key.image_id <= last),
+                                image.key.image_id,
+                            )
+                        })
                 })
                 .cloned()
             else {
                 return Ok(Ok(false));
             };
+            self.last_requested_image = Some(image.key.image_id);
             let length = match image.byte_len() {
                 Ok(length) => length,
                 Err(error) => return Ok(Err(error)),
@@ -320,6 +334,46 @@ mod tests {
             393216,
             "a frozen frame owns bounded residency until released"
         );
+    }
+
+    #[test]
+    fn animated_multichunk_images_cannot_starve_other_visible_images() {
+        let _guard = crate::terminal::graphics::test_lock();
+        let mut graphics = Graphics::default();
+        let mut manifest = manifest(512, 512);
+        let mut other = self::manifest(1, 1);
+        other.images[0].key.image_id = 20;
+        other.placements[0].image = other.images[0].key;
+        manifest.images.extend(other.images);
+        manifest.placements.extend(other.placements);
+        let mut completed_animation = 0;
+        for generation in 1..=16 {
+            manifest.generation = generation;
+            manifest.images[0].key.generation = generation;
+            manifest.placements[0].image = manifest.images[0].key;
+            graphics.update(Some(Ok(manifest.clone())), false).unwrap();
+            graphics
+                .poll(lease(), &mut |request| {
+                    let Request::GraphicsChunk { image, offset, .. } = request else {
+                        panic!("unexpected request")
+                    };
+                    let length = if image.image_id == 7 {
+                        512 * 512 * 4
+                    } else {
+                        4
+                    };
+                    if image.image_id == 7 && offset + CHUNK_BYTES >= length {
+                        completed_animation += 1;
+                    }
+                    reply(request, length)
+                })
+                .unwrap()
+                .unwrap();
+        }
+        assert!(completed_animation >= 3, "animation must continue painting");
+        let snapshot = graphics.snapshot();
+        assert_eq!(snapshot.images.len(), 2, "both visible images must arrive");
+        assert_eq!(snapshot.placements.len(), 2);
     }
 
     #[test]
