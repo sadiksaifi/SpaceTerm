@@ -2321,11 +2321,7 @@ fn server_pane_without_interactive_capability_discards_keys_ime_and_paste_chords
         touch_phase: gpui::TouchPhase::Moved,
     });
     cx.write_to_clipboard(ClipboardItem::new_string("must not run".into()));
-    cx.simulate_keystrokes(if cfg!(target_os = "macos") {
-        "a cmd-v"
-    } else {
-        "a ctrl-shift-v"
-    });
+    cx.simulate_keystrokes("a cmd-v");
     cx.dispatch_action(PasteClipboard);
     cx.update(|window, cx| {
         pane.update(cx, |pane, cx| {
