@@ -42,6 +42,7 @@ struct OwnedPane {
     runtime: TerminalRuntime,
     subscription: TerminalSubscription,
     screen: Option<Arc<ScreenSnapshot>>,
+    graphics_transfer: Option<(ActiveScreenSnapshot, Arc<crate::terminal::ImageSnapshot>)>,
     sent: Option<PresentationGeneration>,
     ended: bool,
     failed: bool,
@@ -224,6 +225,7 @@ impl DevelopmentPaneHost {
             runtime,
             subscription,
             screen: None,
+            graphics_transfer: None,
             sent: None,
             ended: false,
             failed: false,
@@ -584,6 +586,7 @@ impl PaneService for DevelopmentPaneHost {
 }
 impl OwnedPane {
     fn invalidate_input(&mut self) {
+        self.graphics_transfer = None;
         self.reading.invalidate();
         self.runtime.client_effect_focus(None);
         self.effects.clear();
@@ -895,6 +898,20 @@ impl OwnedPane {
         while let Ok(event) = self.subscription.events.try_recv() {
             match event {
                 TerminalSessionEvent::Screen(screen) => {
+                    if self
+                        .graphics_transfer
+                        .as_ref()
+                        .is_some_and(|(active, image)| {
+                            *active != screen.active_screen
+                                || !screen.graphics.images.iter().any(|current| {
+                                    current.key.image_id == image.key.image_id
+                                        && current.width == image.width
+                                        && current.height == image.height
+                                })
+                        })
+                    {
+                        self.graphics_transfer = None;
+                    }
                     if self
                         .screen
                         .as_ref()

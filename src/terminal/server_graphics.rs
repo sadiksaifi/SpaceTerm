@@ -20,7 +20,7 @@ struct Transfer {
 pub(crate) struct Graphics {
     manifest: Option<Snapshot>,
     alternate: bool,
-    images: HashMap<ImageKey, Arc<ImageSnapshot>>,
+    images: HashMap<u32, Arc<ImageSnapshot>>,
     transfer: Option<Transfer>,
     missing: HashSet<ImageKey>,
     reported: Option<Error>,
@@ -42,10 +42,18 @@ impl Graphics {
             self.missing.clear();
         }
         self.alternate = alternate;
-        let current = |image: &Image| manifest.as_ref().is_some_and(|m| m.images.contains(image));
-        self.images.retain(|key, image| {
+        let current = |image: &Image| {
+            manifest.as_ref().is_some_and(|m| {
+                m.images.iter().any(|current| {
+                    current.key.image_id == image.key.image_id
+                        && current.width == image.width
+                        && current.height == image.height
+                })
+            })
+        };
+        self.images.retain(|_, image| {
             current(&Image {
-                key: *key,
+                key: image.key,
                 width: image.width,
                 height: image.height,
             })
@@ -70,13 +78,18 @@ impl Graphics {
             images: manifest
                 .images
                 .iter()
-                .filter_map(|image| self.images.get(&image.key).cloned())
+                .filter_map(|image| self.images.get(&image.key.image_id).cloned())
                 .collect(),
             placements: manifest
                 .placements
                 .iter()
-                .filter(|p| self.images.contains_key(&p.image))
-                .cloned()
+                .filter_map(|p| {
+                    self.images.get(&p.image.image_id).map(|image| {
+                        let mut placement = p.clone();
+                        placement.image = image.key;
+                        placement
+                    })
+                })
                 .collect(),
         }
     }
@@ -117,7 +130,10 @@ impl Graphics {
                 .as_ref()
                 .and_then(|manifest| {
                     manifest.images.iter().find(|image| {
-                        !self.images.contains_key(&image.key) && !self.missing.contains(&image.key)
+                        self.images
+                            .get(&image.key.image_id)
+                            .is_none_or(|cached| cached.key != image.key)
+                            && !self.missing.contains(&image.key)
                     })
                 })
                 .cloned()
@@ -181,7 +197,7 @@ impl Graphics {
             return Ok(Ok(false));
         };
         self.images.insert(
-            transfer.image.key,
+            transfer.image.key.image_id,
             Arc::new(ImageSnapshot {
                 key: transfer.image.key,
                 width: transfer.image.width,

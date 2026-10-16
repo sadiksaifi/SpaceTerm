@@ -142,7 +142,25 @@ fn graphics_transfers_are_pulled_in_bounded_chunks_without_retaining_a_transfer_
         panic!("missing chunk")
     };
     assert_eq!(first.bytes, vec![0; CHUNK_BYTES]);
-    let Reply::GraphicsChunk(Ok(last)) = chunk(&mut host, lease, key, CHUNK_BYTES) else {
+    host.disconnected(lease.connection);
+    let resumed = attach(&mut host, 2, false);
+    assert!(matches!(
+        chunk(&mut host, lease, key, CHUNK_BYTES),
+        Reply::Refused(Refusal::Stale)
+    ));
+    assert!(
+        matches!(
+            chunk(&mut host, resumed, key, CHUNK_BYTES),
+            Reply::GraphicsChunk(Err(Error::Missing))
+        ),
+        "a resumed lease cannot continue a previous connection's pinned source"
+    );
+    // Restart from the authoritative image after the old connection's transfer was discarded.
+    assert!(matches!(
+        chunk(&mut host, resumed, key, 0),
+        Reply::GraphicsChunk(Ok(_))
+    ));
+    let Reply::GraphicsChunk(Ok(last)) = chunk(&mut host, resumed, key, CHUNK_BYTES) else {
         panic!("missing final chunk")
     };
     assert_eq!(last.bytes, vec![0; 393216 - CHUNK_BYTES]);
@@ -291,4 +309,80 @@ fn existing_visual_fixtures_keep_pixels_and_placements_through_the_server_adapte
             }
         }
     }
+}
+
+#[cfg(feature = "desktop")]
+#[test]
+fn running_multichunk_animation_completes_coherent_frames_while_the_server_advances() {
+    use crate::terminal::server_graphics::Graphics;
+    let _guard = crate::terminal::graphics::test_lock();
+    let mut host = host();
+    let lease = attach(&mut host, 1, true);
+    use base64::Engine as _;
+    let red = base64::engine::general_purpose::STANDARD.encode([255, 0, 0, 255].repeat(512 * 512));
+    let blue = base64::engine::general_purpose::STANDARD.encode([0, 0, 255, 255].repeat(512 * 512));
+    let output = format!(
+        "\x1b[2J\x1b[H\x1b_Ga=T,t=d,f=32,i=10,s=512,v=512,c=8,r=8,C=1,q=2;{red}\x1b\\\x1b_Ga=f,t=d,f=32,i=10,s=512,v=512,z=40,q=2;{blue}\x1b\\\x1b_Ga=a,i=10,r=1,z=40,s=3,v=1,q=2\x1b\\"
+    );
+    let path = std::env::temp_dir().join(format!(
+        "spaceterm-animation-{:x}",
+        u128::from_ne_bytes(nonce().unwrap()[..16].try_into().unwrap())
+    ));
+    std::fs::write(&path, output).unwrap();
+    let quoted = format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    assert!(matches!(
+        command(&mut host, 1, lease, &format!("stty -echo; cat {quoted}")),
+        Reply::Unchanged
+    ));
+    let mut graphics = Graphics::default();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut completed = 0;
+    let mut generations = std::collections::HashSet::new();
+    while Instant::now() < deadline && completed < 3 {
+        let reply = host.request([1; 32], lease.connection, Request::Poll { lease });
+        assert!(
+            !matches!(reply, Reply::Refused(_)),
+            "animation runtime refused its poll: {reply:?}"
+        );
+        if let Reply::Screen(mut screen) = reply {
+            if let Some(Ok(manifest)) = &screen.graphics {
+                generations.extend(manifest.images.iter().map(|image| image.key));
+            }
+            graphics
+                .update(screen.graphics.take(), screen.alternate)
+                .unwrap();
+        }
+        if graphics
+            .poll(lease, &mut |request| {
+                Ok(host.request([1; 32], lease.connection, request.clone()))
+            })
+            .unwrap()
+            .unwrap()
+        {
+            completed += 1;
+            let snapshot = graphics.snapshot();
+            assert_eq!(snapshot.images.len(), 1);
+            let rgba = &snapshot.images[0].rgba;
+            assert!(
+                rgba.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .all(|pixel| pixel.as_slice() == &rgba[..4]),
+                "a displayed frame cannot mix chunks from different generations"
+            );
+            assert!(!snapshot.placements.is_empty());
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    host.shutdown().unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert!(
+        generations.len() >= 2,
+        "the animation must keep advancing during download: {} keys, {completed} completions",
+        generations.len()
+    );
+    assert_eq!(
+        completed, 3,
+        "running animation frames must eventually paint"
+    );
 }
