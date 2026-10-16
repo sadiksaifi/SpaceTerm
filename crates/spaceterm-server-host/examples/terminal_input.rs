@@ -189,6 +189,90 @@ fn unsafe_paste(
     assert_eq!((p.byte_len, p.line_count, p.multiline), (3, 2, true));
     Ok(p.id)
 }
+fn native_effects(c: &mut PaneConnection, lease: Lease) -> Result<(), Box<dyn Error>> {
+    use spaceterm_server::pane::effects::{Completion, Effect};
+    assert!(c.supports_native_effects());
+    focus(c, lease, 3, FocusTarget::Terminal)?;
+    command(
+        c,
+        lease,
+        3,
+        "stty raw -echo; printf '\\033[2J\\033[H\\033]52;c;?\\007'; dd bs=1 count=12 2>/dev/null | od -An -tx1 | tr -d ' \\n'; stty sane; printf '\\r\\n'",
+    )?;
+    let request = await_effect(c, lease, 3)?;
+    assert!(matches!(request.effect, Effect::ClipboardRead { .. }));
+    c.exchange(&Request::CompleteClipboard {
+        lease,
+        generation: 3,
+        id: request.id,
+        completion: Completion::Text("abc".into()),
+    })?;
+    await_marker(c, lease, "1b5d35323b633b59574a6a07")?;
+    command(
+        c,
+        lease,
+        3,
+        "sleep 0.1; printf '\\033]7701;permissions=accessibility\\007\\007'",
+    )?;
+    focus(c, lease, 4, FocusTarget::Unfocused)?;
+    let mut permission = false;
+    let mut bell = false;
+    for _ in 0..2 {
+        match await_effect(c, lease, 4)?.effect {
+            Effect::PermissionSetup {
+                accessibility: true,
+                ..
+            } => permission = true,
+            Effect::Bell => bell = true,
+            other => return Err(format!("unexpected effect: {other:?}").into()),
+        }
+    }
+    assert!(permission && bell);
+    focus(c, lease, 5, FocusTarget::Terminal)?;
+    command(
+        c,
+        lease,
+        5,
+        "stty raw -echo; printf '\\033[2J\\033[H\\033]52;c;?\\007'; dd bs=1 count=8 2>/dev/null | od -An -tx1 | tr -d ' \\n'; stty sane; printf '\\r\\n'",
+    )?;
+    let request = await_effect(c, lease, 5)?;
+    focus(c, lease, 6, FocusTarget::Unfocused)?;
+    focus(c, lease, 7, FocusTarget::Terminal)?;
+    assert!(matches!(
+        c.exchange(&Request::CompleteClipboard {
+            lease,
+            generation: 5,
+            id: request.id,
+            completion: Completion::Text("must not enter PTY".into())
+        }),
+        Err(ServerError::StaleControl)
+    ));
+    await_marker(c, lease, "1b5d35323b633b07")?;
+    Ok(())
+}
+
+fn await_effect(
+    c: &mut PaneConnection,
+    lease: Lease,
+    generation: u64,
+) -> Result<effects::Request, Box<dyn Error>> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match c.exchange(&Request::NativeEffects { lease, generation })? {
+            Reply::NativeEffects {
+                request: Some(request),
+                ..
+            } => return Ok(request),
+            Reply::NativeEffects { request: None, .. } => {}
+            _ => return Err("native effects missing".into()),
+        }
+        if Instant::now() >= deadline {
+            return Err("native effect timed out".into());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let major = std::env::args()
         .nth(1)
@@ -485,12 +569,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             .trim_end()
             == "31 91"
     }));
+    native_effects(&mut b, lease)?;
     b.exchange(&Request::Close { lease })?;
     cleanup.cleanup()?;
     b.exchange(&Request::Shutdown)?;
     let _ = server.kill();
     println!(
-        "Protocol {major}: paired clients verified PTY keys/IME, focus reports, paste approval/focus/reconnect/takeover fences, pointer/wheel, measured resize and controlling appearance."
+        "Protocol {major}: paired clients verified PTY keys/IME, focus reports, paste approval/focus/reconnect/takeover fences, pointer/wheel, measured resize, controlling appearance, clipboard replies/refusal, Permission Requests and background attention."
     );
     Ok(())
 }

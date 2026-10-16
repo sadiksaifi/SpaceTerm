@@ -1,8 +1,11 @@
 //! Desktop presentation and fenced input for an authenticated server Pane.
+mod effects;
 use super::pointer_input::{PointerInput, WheelInput};
+use super::session::clipboard::ClipboardAuthority;
 use super::session::*;
 use super::{emulator::*, geometry::TerminalGeometry, key::*};
 use crate::local_server::{LocalServer, ServerError};
+use effects::ClientEffects;
 use spaceterm_server::pane::{self, Lease, PaneSize, Reply, Request};
 use std::sync::{
     Arc, Mutex,
@@ -37,6 +40,9 @@ pub(crate) struct DevelopmentPaneState {
     connected_epoch: AtomicU64,
     paste_unconfirmed: AtomicBool,
     interaction: Mutex<Interaction>,
+    effect_authority: Arc<ClipboardAuthority>,
+    hidden_input: AtomicBool,
+    client_effects: Mutex<std::collections::VecDeque<ClientEffectRequest>>,
 }
 impl DevelopmentPaneState {
     fn new() -> Self {
@@ -51,6 +57,13 @@ impl DevelopmentPaneState {
             connected_epoch: AtomicU64::new(0),
             paste_unconfirmed: AtomicBool::new(false),
             interaction: Mutex::new(Interaction::default()),
+            hidden_input: AtomicBool::new(false),
+            client_effects: Mutex::new(std::collections::VecDeque::new()),
+            effect_authority: {
+                let authority = ClipboardAuthority::default();
+                authority.route();
+                Arc::new(authority)
+            },
         }
     }
 
@@ -88,6 +101,12 @@ impl DevelopmentPaneState {
         }
     }
     fn invalidate(&self) -> u64 {
+        self.effect_authority.client_focus(None);
+        self.client_effects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.hidden_input.store(false, Ordering::Release);
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if *status == DevelopmentPaneStatus::Connected {
             *status = DevelopmentPaneStatus::Reconnecting;
@@ -136,6 +155,8 @@ impl DevelopmentPaneState {
     fn set(&self, status: DevelopmentPaneStatus) {
         let mut current = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if status != DevelopmentPaneStatus::Connected {
+            self.effect_authority.client_focus(None);
+            self.hidden_input.store(false, Ordering::Release);
             self.paste_unconfirmed.store(false, Ordering::Release);
         }
         *current = status;
@@ -170,6 +191,11 @@ impl DevelopmentPaneState {
         if paste_unconfirmed {
             self.paste_unconfirmed.store(true, Ordering::Release);
         }
+        if *status != DevelopmentPaneStatus::Connected {
+            let interaction = self.interaction.lock().unwrap_or_else(|e| e.into_inner());
+            self.effect_authority
+                .client_focus(Some(interaction.target == pane::FocusTarget::Terminal));
+        }
         *status = DevelopmentPaneStatus::Connected;
         Ok(())
     }
@@ -177,16 +203,21 @@ impl DevelopmentPaneState {
 #[derive(Clone)]
 pub(crate) struct DevelopmentServerSessionFactory {
     server: LocalServer,
+    local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
     pane_id: Option<spaceterm_server::hierarchy::Id>,
     attachment: Option<spaceterm_server::attachments::AttachmentPermit>,
     state: Arc<DevelopmentPaneState>,
 }
 impl DevelopmentServerSessionFactory {
-    pub(crate) fn new(server: LocalServer) -> (Self, Arc<DevelopmentPaneState>) {
+    pub(crate) fn new(
+        server: LocalServer,
+        local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
+    ) -> (Self, Arc<DevelopmentPaneState>) {
         let state = Arc::new(DevelopmentPaneState::new());
         (
             Self {
                 server,
+                local_files,
                 pane_id: None,
                 attachment: None,
                 state: Arc::clone(&state),
@@ -203,9 +234,10 @@ impl DevelopmentServerSessionFactory {
     }
     pub(crate) fn for_pane(
         server: LocalServer,
+        local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
         pane: spaceterm_server::hierarchy::Id,
     ) -> (Self, Arc<DevelopmentPaneState>) {
-        let (mut factory, state) = Self::new(server);
+        let (mut factory, state) = Self::new(server, local_files);
         factory.pane_id = Some(pane);
         (factory, state)
     }
@@ -368,6 +400,7 @@ struct PresentationHandle {
 }
 impl Drop for PresentationHandle {
     fn drop(&mut self) {
+        self.state.effect_authority.client_focus(None);
         self.alive.store(false, Ordering::Release);
     }
 }
@@ -852,6 +885,14 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
     fn is_server_backed(&self) -> bool {
         true
     }
+    fn allows_local_file_insertion(&self) -> bool {
+        true
+    }
+    fn local_file_authority(
+        &self,
+    ) -> Option<&crate::platform::local_filesystem::LocalFilesystemAuthority> {
+        Some(&self.local_files)
+    }
     fn fallback_title(&self) -> String {
         "Development Pane".into()
     }
@@ -864,7 +905,7 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
         let (input, receiver) = mpsc::sync_channel(512);
         let (events, output) = async_channel::bounded(2);
         let (_, accessibility) = async_channel::bounded(1);
-        let (_, clipboard) = async_channel::bounded(1);
+        let (effects, clipboard) = ClientEffects::new();
         let alive = Arc::new(AtomicBool::new(true));
         let measured_size = Arc::new(Mutex::new(pane_size(geometry)));
         self.state
@@ -885,7 +926,15 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
         std::thread::Builder::new()
             .name("spaceterm-pane-connection".into())
             .spawn(move || {
-                present(factory, alive, receiver, events, measured_size, appearance);
+                present(
+                    factory,
+                    alive,
+                    receiver,
+                    events,
+                    measured_size,
+                    appearance,
+                    effects,
+                );
             })
             .map_err(TerminalSessionError::from)?;
         Ok(StartedTerminalSession {
@@ -923,9 +972,11 @@ fn present(
     events: async_channel::Sender<TerminalSessionEvent>,
     size: Arc<Mutex<PaneSize>>,
     appearance: Arc<Mutex<TerminalAppearanceUpdate>>,
+    mut effects: ClientEffects,
 ) {
     let DevelopmentServerSessionFactory {
         server,
+        local_files,
         pane_id,
         attachment,
         state,
@@ -1157,6 +1208,7 @@ fn present(
                             *screen,
                             generation,
                             &appearance.lock().unwrap_or_else(|e| e.into_inner()),
+                            Some(&local_files),
                         )?;
                         if !ready {
                             // Claims apply their measured controller facts once.
@@ -1249,6 +1301,14 @@ fn present(
                         },
                         &mut paste_unconfirmed,
                     )?;
+                }
+                if ready
+                    && connection.supports_native_effects()
+                    && let Some((generation, _)) = active_input.focus_sent
+                {
+                    effects.poll(&state, lease, generation, &events, &mut |request| {
+                        exchange(&attachment, &mut connection, request)
+                    })?;
                 }
                 std::thread::sleep(Duration::from_millis(30));
             }
@@ -1362,6 +1422,17 @@ impl TerminalSessionHandle for PresentationHandle {
         *self.size.lock().unwrap_or_else(|e| e.into_inner()) = size;
         self.send(Input::Resize(size));
     }
+    fn take_client_effects(&self) -> Vec<ClientEffectRequest> {
+        self.state
+            .client_effects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect()
+    }
+    fn hidden_input(&self) -> Option<bool> {
+        Some(self.state.hidden_input.load(Ordering::Acquire))
+    }
     fn focus(&self, focused: bool) {
         self.interactive_focus(focused, focused);
     }
@@ -1373,11 +1444,21 @@ impl TerminalSessionHandle for PresentationHandle {
         } else {
             pane::FocusTarget::Unfocused
         };
-        self.state
+        let mut interaction = self
+            .state
             .interaction
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .focus(target);
+            .unwrap_or_else(|e| e.into_inner());
+        if interaction.target != target {
+            self.state
+                .effect_authority
+                .client_focus(if interaction.interactive {
+                    Some(terminal_input)
+                } else {
+                    None
+                });
+        }
+        interaction.focus(target);
     }
     fn interactive_input_available(&self) -> bool {
         self.state.status() == DevelopmentPaneStatus::Connected
@@ -1400,6 +1481,7 @@ impl TerminalSessionHandle for PresentationHandle {
             .interaction
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        self.state.effect_authority.client_focus(Some(false));
         if let Some(pending) = interaction.pending.filter(|pending| {
             pending.id == id
                 && pending.epoch == self.state.epoch.load(Ordering::Acquire)
@@ -1410,6 +1492,7 @@ impl TerminalSessionHandle for PresentationHandle {
                 id: pending.wire_id,
             };
         } else {
+            self.state.effect_authority.client_focus(Some(false));
             interaction.focus(pane::FocusTarget::Unfocused);
         }
     }
@@ -1590,10 +1673,35 @@ fn decode_color(c: pane::Color) -> TerminalColor {
         pane::Color::Rgb(c) => TerminalColor::Rgb(color(c)),
     }
 }
+fn decode_hyperlink(
+    link: &pane::effects::Hyperlink,
+    local_files: Option<&crate::platform::local_filesystem::LocalFilesystemAuthority>,
+) -> Option<Arc<super::hyperlink::HyperlinkTarget>> {
+    use super::hyperlink::{HyperlinkTarget, MAX_LINK_BYTES};
+    let target = match link {
+        pane::effects::Hyperlink::Url(value) => HyperlinkTarget::url(value)?,
+        pane::effects::Hyperlink::File(value) => {
+            let filesystem = local_files?;
+            if value.len() > MAX_LINK_BYTES
+                || !filesystem
+                    .path_semantics()
+                    .is_absolute(std::path::Path::new(value))
+            {
+                return None;
+            }
+            HyperlinkTarget::from_local_file(
+                filesystem.local_file(value, std::path::Path::new("/"))?,
+            )?
+        }
+    };
+    Some(Arc::new(target))
+}
+
 fn decode_screen(
     wire: pane::Screen,
     generation: PresentationGeneration,
     appearance: &TerminalAppearanceUpdate,
+    local_files: Option<&crate::platform::local_filesystem::LocalFilesystemAuthority>,
 ) -> Result<Arc<ScreenSnapshot>, ServerError> {
     if !(2..=pane::MAX_COLUMNS).contains(&wire.columns)
         || wire.rows.len() > usize::from(pane::MAX_ROWS)
@@ -1619,6 +1727,12 @@ fn decode_screen(
         cols: wire.columns,
         rows: wire.rows.len() as u16,
     };
+    let links = wire
+        .hyperlinks
+        .iter()
+        .take(pane::effects::MAX_SCREEN_HYPERLINKS)
+        .map(|link| decode_hyperlink(link, local_files))
+        .collect::<Vec<_>>();
     screen.rows = wire
         .rows
         .into_iter()
@@ -1649,7 +1763,11 @@ fn decode_screen(
                         },
                         selected: false,
                         semantic_content: CellSemanticSnapshot::Output,
-                        hyperlink: None,
+                        hyperlink: c
+                            .hyperlink
+                            .and_then(|index| links.get(usize::from(index)))
+                            .cloned()
+                            .flatten(),
                     })
                     .collect::<Vec<_>>(),
             )
@@ -1748,14 +1866,14 @@ fn decode_screen(
 mod tests {
     use super::*;
 
-    struct Adapter {
-        handle: PresentationHandle,
+    pub(super) struct Adapter {
+        pub(super) handle: PresentationHandle,
         input: mpsc::Receiver<SubmittedInput>,
-        active: ActiveInput,
+        pub(super) active: ActiveInput,
         unconfirmed: bool,
     }
     impl Adapter {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             use super::super::geometry::{BackingScale, CellGridSize, LogicalCellSize};
             let geometry = TerminalGeometry::from_grid(
                 CellGridSize::new(20, 6),
@@ -2703,12 +2821,52 @@ mod tests {
     }
 
     #[test]
+    fn server_file_links_need_client_authority_and_revalidate_before_preview() {
+        use crate::terminal::{TerminalLocalFileCapabilities, native_services::FilePreviewTarget};
+        let directory = std::env::temp_dir().join(format!(
+            "spaceterm-client-link-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let directory = std::fs::canonicalize(directory).unwrap();
+        let path = directory.join("preview");
+        std::fs::write(&path, b"fixture").unwrap();
+        let link = pane::effects::Hyperlink::File(path.to_str().unwrap().into());
+        assert!(decode_hyperlink(&link, None).is_none());
+        let filesystem = crate::platform::runtime_local_filesystem();
+        let target = decode_hyperlink(&link, Some(&filesystem)).unwrap();
+        assert!(
+            FilePreviewTarget::from_link(&target, TerminalLocalFileCapabilities::Disabled)
+                .is_none()
+        );
+        let preview =
+            FilePreviewTarget::from_link(&target, TerminalLocalFileCapabilities::Enabled).unwrap();
+        assert_eq!(preview.revalidated_path(), Some(path.clone()));
+        std::fs::rename(&path, directory.join("original")).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+        assert!(preview.revalidated_path().is_none());
+        assert!(
+            decode_hyperlink(
+                &pane::effects::Hyperlink::File("relative".into()),
+                Some(&filesystem)
+            )
+            .is_none()
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn screen_reconciliation_keeps_program_colors_and_projects_client_defaults() {
         let mut appearance = TerminalAppearanceUpdate::builtin().unwrap();
         let configured = Arc::make_mut(&mut appearance.appearance);
         configured.colors.background = crate::appearance::Color::rgb(0xffffff);
         configured.colors.normal[0] = crate::appearance::Color::rgb(0x112233);
         let cell = pane::Cell {
+            hyperlink: None,
             text: "x".into(),
             foreground: pane::Color::Default,
             background: pane::Color::Default,
@@ -2719,6 +2877,7 @@ mod tests {
         let mut overrides = vec![false; 256];
         overrides[1] = true;
         let screen = pane::Screen {
+            hyperlinks: Vec::new(),
             generation: 1,
             mouse_tracking: false,
             alternate_scroll: false,
@@ -2741,7 +2900,24 @@ mod tests {
             cursor_text: [0, 0, 0],
             alternate: false,
         };
-        let decoded = decode_screen(screen, PresentationGeneration::test(1), &appearance).unwrap();
+        let mut linked = screen.clone();
+        linked.hyperlinks = vec![
+            pane::effects::Hyperlink::Url("https://example.test".into()),
+            pane::effects::Hyperlink::File("/etc/passwd".into()),
+        ];
+        linked.rows[0][0].hyperlink = Some(0);
+        linked.rows[0][1].hyperlink = Some(1);
+        linked.rows[1][0].hyperlink = Some(u16::MAX);
+        let linked =
+            decode_screen(linked, PresentationGeneration::test(1), &appearance, None).unwrap();
+        assert_eq!(
+            linked.rows[0][0].hyperlink.as_ref().unwrap().kind,
+            super::super::hyperlink::HyperlinkKind::Url
+        );
+        assert!(linked.rows[0][1].hyperlink.is_none());
+        assert!(linked.rows[1][0].hyperlink.is_none());
+        let decoded =
+            decode_screen(screen, PresentationGeneration::test(1), &appearance, None).unwrap();
         assert_eq!(
             decoded.colors.foreground,
             crate::appearance::Color::rgb(0x0a141e)

@@ -216,7 +216,8 @@ mod window {
             eprintln!("The Development Pane is unavailable because the home directory is invalid");
             return;
         };
-        let (factory, state) = DevelopmentServerSessionFactory::new(server);
+        let (factory, state) =
+            DevelopmentServerSessionFactory::new(server, composition.local_filesystem.clone());
         let session_factory = WorkspaceTerminalSessionFactory::new_server(Rc::new(factory), home);
         let panes = composition.panes.clone();
         let window_drag = composition.window_movement.create();

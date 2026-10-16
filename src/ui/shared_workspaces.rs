@@ -548,12 +548,16 @@ mod development {
         /// Completes the launch plan the server factory ignores. It is client launch scaffolding
         /// and never a directory the server's Terminal Session starts in.
         client_home: ValidatedLocalDirectory,
+        local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
     }
 
     impl SharedPaneOpener for LocalServerPanes {
         fn open(&self, pane: Id) -> Option<SharedPaneSubscription> {
-            let (factory, state) =
-                DevelopmentServerSessionFactory::for_pane(self.server.clone(), pane);
+            let (factory, state) = DevelopmentServerSessionFactory::for_pane(
+                self.server.clone(),
+                self.local_files.clone(),
+                pane,
+            );
             let permit = self.server.attachments().ok()?.permit(pane)?;
             let session_factory = WorkspaceTerminalSessionFactory::new_server(
                 Rc::new(factory.with_attachment(permit)),
@@ -569,9 +573,8 @@ mod development {
 
     /// Opens passive subscriptions to the server's Panes and supplies their Pane construction.
     ///
-    /// A shared Pane's Terminal Session supports screen presentation, keys, and resize only, so
-    /// its Pane publishes no accessible shell text and offers no local file, clipboard, or paste
-    /// operation.
+    /// Shared Panes reuse native client effects and same-machine file authority. Accessible
+    /// shell text remains unavailable until server-backed accessibility is implemented.
     #[derive(Clone)]
     pub(crate) struct SharedPaneSessions {
         opener: Rc<dyn SharedPaneOpener>,
@@ -582,12 +585,14 @@ mod development {
         pub(crate) fn new(
             server: LocalServer,
             client_home: ValidatedLocalDirectory,
+            local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
             panes: &PaneConstruction,
         ) -> Self {
             Self::with_opener(
                 Rc::new(LocalServerPanes {
                     server,
                     client_home,
+                    local_files,
                 }),
                 panes,
             )

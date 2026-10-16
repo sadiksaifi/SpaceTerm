@@ -1,11 +1,11 @@
 use super::failure::{FailureReason, TerminalFailure};
 use super::native_services::PastePayload;
 use crate::terminal::key::InputModifiers;
-mod clipboard;
+pub(crate) mod clipboard;
 mod input;
 mod subscriptions;
 pub use clipboard::ClipboardCompletion;
-pub use clipboard::ClipboardRequest;
+pub use clipboard::{ClientEffectGrant, ClientEffectRequest, ClipboardRequest};
 use clipboard::{ClipboardAuthority, WorkerClipboard};
 use input::PtyInput;
 pub use subscriptions::TerminalSubscription;
@@ -92,6 +92,8 @@ pub enum TerminalSessionEvent {
     /// Retained Terminal Metadata changed; read it from the retained snapshot.
     MetadataChanged(MetadataWakeup),
     Attention(AttentionEvent),
+    ClientEffect(ClientEffectRequest),
+    ClientEffectsReady,
     HiddenInputChanged(bool),
     /// A paste may have been written before the connection lost its acknowledgement.
     PasteUnconfirmed,
@@ -425,6 +427,16 @@ impl TerminalSessionPermissionRequestState {
 }
 
 pub trait TerminalSessionHandle {
+    /// Drains bounded native requests independently of replaceable presentation wakeups.
+    fn take_client_effects(&self) -> Vec<ClientEffectRequest> {
+        Vec::new()
+    }
+
+    /// Retained host hidden-input state when presentation notifications can coalesce.
+    fn hidden_input(&self) -> Option<bool> {
+        None
+    }
+
     /// The newest Terminal Metadata the Terminal Session retained, presentable or not.
     fn metadata_snapshot(&self) -> Option<Arc<TerminalMetadataSnapshot>> {
         None
@@ -523,9 +535,19 @@ pub trait TerminalSessionFactory {
         "Terminal".to_owned()
     }
 
-    /// Whether the shell runs in a SpaceTerm Server rather than this application. A server-backed
-    /// Terminal Session supports only screen presentation, keys, and resize, and grants no local
-    /// file, clipboard, or permission authority.
+    /// Explicit client file intake is allowed only by same-machine composition.
+    /// Server-supplied paths never acquire this authority.
+    fn allows_local_file_insertion(&self) -> bool {
+        false
+    }
+
+    /// Client filesystem authority supplied only for an authenticated same-machine server route.
+    /// Received paths cannot supply or replace this adapter.
+    fn local_file_authority(&self) -> Option<&LocalFilesystemAuthority> {
+        None
+    }
+
+    /// Whether the shell runs in a SpaceTerm Server rather than this application.
     fn is_server_backed(&self) -> bool {
         false
     }
@@ -585,6 +607,16 @@ impl TerminalRuntime {
         if let Some(commands) = &self.commands {
             let _ = commands.send(Command::ApplicationWheel(input));
         }
+    }
+    /// Routes native requests through the authenticated controlling client.
+    pub(crate) fn route_client_effects(&self) {
+        self.clipboard_authority.route();
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::RouteClientEffects);
+        }
+    }
+    pub(crate) fn client_effect_focus(&self, focused: Option<bool>) {
+        self.clipboard_authority.client_focus(focused);
     }
     /// Opens one presentation subscription, replacing the previous subscription.
     /// Dropping its receivers leaves this runtime and its PTY alive.
@@ -959,7 +991,7 @@ struct TerminalSessionNativePtyOutputSink {
 impl NativePtyOutputSink for TerminalSessionNativePtyOutputSink {
     fn publish(&self, output: NativePtyOutput) -> bool {
         // ReaderReady orders bounded PTY output against the reliable control command lane.
-        let epoch = self.clipboard_authority.grant();
+        let epoch = self.clipboard_authority.output_epoch();
         self.events.send(output).is_ok() && self.commands.send(Command::ReaderReady(epoch)).is_ok()
     }
 }
@@ -970,6 +1002,7 @@ struct ReaderEventBatch {
 }
 
 enum Command {
+    RouteClientEffects,
     Subscribe {
         accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
         clipboard: async_channel::Sender<ClipboardRequest>,
@@ -1065,6 +1098,7 @@ impl Command {
 impl fmt::Debug for Command {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
+            Self::RouteClientEffects => "RouteClientEffects",
             Self::Subscribe { .. } => "Subscribe",
             Self::Key(..) => "Key",
             Self::ClearScreenAndScrollback => "ClearScreenAndScrollback",
@@ -1513,6 +1547,10 @@ impl TerminalWorker {
 
     fn process_command(&mut self, command: Command) -> bool {
         match command {
+            Command::RouteClientEffects => {
+                self.emulator.enable_client_clipboard();
+                true
+            }
             Command::Subscribe {
                 accessibility,
                 clipboard,
@@ -2061,14 +2099,14 @@ impl TerminalWorker {
         let mut focus_reports = Vec::new();
         // Every Permission Request in these chunks becomes one event, so a program that floods
         // requests cannot crowd other events out of the bounded queue.
-        let mut requested: Option<PermissionRequest> = None;
+        let mut requested: Option<(PermissionRequest, Option<u64>)> = None;
         while !self.clipboard.pending() {
             let Some((effect, epoch)) = self.clipboard.effects.pop_front() else {
                 break;
             };
             let continued = match effect {
                 Osc52Effect::Terminal(bytes) => {
-                    self.feed_terminal_output(&bytes, &mut requested, &mut focus_reports)
+                    self.feed_terminal_output(&bytes, epoch, &mut requested, &mut focus_reports)
                 }
                 Osc52Effect::Operation(operation) => {
                     if !self.flush_ordered_terminal_replies(&mut focus_reports) {
@@ -2084,9 +2122,23 @@ impl TerminalWorker {
                 return false;
             }
         }
-        if let Some(request) = requested {
-            self.permission_request_state.publish(&request);
-            if !self.send_terminal_event(TerminalSessionEvent::PermissionRequested(request)) {
+        if let Some((request, epoch)) = requested {
+            if !self.clipboard.authority.routed() {
+                self.permission_request_state.publish(&request);
+            }
+            let effect = spaceterm_server::pane::effects::Effect::PermissionSetup {
+                screen_recording: request.permissions().contains(
+                    &crate::platform::permission_access::SystemPermission::ScreenRecording,
+                ),
+                accessibility: request
+                    .permissions()
+                    .contains(&crate::platform::permission_access::SystemPermission::Accessibility),
+            };
+            if !self.send_client_effect(
+                TerminalSessionEvent::PermissionRequested(request),
+                effect,
+                epoch,
+            ) {
                 return false;
             }
         }
@@ -2144,16 +2196,23 @@ impl TerminalWorker {
     fn feed_terminal_output(
         &mut self,
         bytes: &[u8],
-        requested: &mut Option<PermissionRequest>,
+        epoch: Option<u64>,
+        requested: &mut Option<(PermissionRequest, Option<u64>)>,
         focus_reports: &mut Vec<u8>,
     ) -> bool {
         let emulator = &mut self.emulator;
-        self.permission_requests.feed(
+        self.permission_requests.feed_with_context(
             bytes,
+            epoch,
             |bytes| emulator.feed(bytes),
-            |request| match requested {
-                Some(requested) => requested.merge(request),
-                None => *requested = Some(request),
+            |request, epoch| match requested {
+                Some((requested, old_epoch)) => {
+                    requested.merge(request);
+                    if *old_epoch != epoch {
+                        *old_epoch = None;
+                    }
+                }
+                None => *requested = Some((request, epoch)),
             },
         );
         if let Some(error) = self.emulator.graphics_failure() {
@@ -2164,7 +2223,17 @@ impl TerminalWorker {
             return false;
         }
         for event in self.emulator.take_attention_events() {
-            if !self.send_terminal_event(TerminalSessionEvent::Attention(event)) {
+            let effect = match event {
+                AttentionEvent::Bell => spaceterm_server::pane::effects::Effect::Bell,
+                AttentionEvent::CommandFinished {
+                    exit_status,
+                    duration,
+                } => spaceterm_server::pane::effects::Effect::CommandFinished {
+                    exit_status,
+                    duration_ms: duration.as_millis().min(u128::from(u64::MAX)) as u64,
+                },
+            };
+            if !self.send_client_effect(TerminalSessionEvent::Attention(event), effect, epoch) {
                 return false;
             }
         }
@@ -2522,6 +2591,28 @@ impl TerminalWorker {
         self.send_terminal_event(TerminalSessionEvent::Failed(
             TerminalSessionFailure::Runtime(failure),
         ))
+    }
+
+    fn send_client_effect(
+        &self,
+        direct: TerminalSessionEvent,
+        effect: spaceterm_server::pane::effects::Effect,
+        epoch: Option<u64>,
+    ) -> bool {
+        if !self.clipboard.authority.routed() {
+            return self.send_terminal_event(direct);
+        }
+        if self.clipboard.authority.native_request(epoch) {
+            self.events.client_effect(ClientEffectRequest::new(
+                effect,
+                Arc::clone(&self.clipboard.authority),
+                epoch.unwrap_or_default(),
+                Duration::from_secs(1),
+            ));
+            true
+        } else {
+            true
+        }
     }
 
     fn send_terminal_event(&self, event: TerminalSessionEvent) -> bool {

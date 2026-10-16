@@ -201,7 +201,7 @@ impl WorkspaceTerminalSessionFactory {
     /// Creates a factory whose server-backed children start in a SpaceTerm Server.
     ///
     /// `home_directory` only completes the launch plan the server factory ignores. The factory
-    /// holds no local filesystem authority, so it cannot select or revalidate local directories.
+    /// grants no Workspace directory authority, so it cannot select or revalidate server directories.
     #[cfg(feature = "desktop")]
     pub(crate) fn new_server(
         session_factory: Rc<dyn TerminalSessionFactory>,
@@ -313,15 +313,31 @@ impl WorkspaceTerminalSessionFactory {
         }
     }
 
-    /// A server-backed Terminal Session's paths name the server's files, so they grant no local
-    /// file authority even when the server runs on this machine.
+    /// Server metadata grants no authority. Only explicit same-machine client composition can
+    /// enable validated local file links for a server-backed Terminal Session.
     pub(crate) fn local_file_capabilities(&self) -> TerminalLocalFileCapabilities {
         match &self.launch_context {
-            WorkspaceTerminalLaunchContext::Local(_) if !self.is_server_backed() => {
+            WorkspaceTerminalLaunchContext::Local(_)
+                if !self.is_server_backed()
+                    || self.session_factory.local_file_authority().is_some() =>
+            {
                 TerminalLocalFileCapabilities::Enabled
             }
             WorkspaceTerminalLaunchContext::Local(_)
             | WorkspaceTerminalLaunchContext::Remote(_) => TerminalLocalFileCapabilities::Disabled,
+        }
+    }
+
+    pub(crate) fn allows_permission_setup(&self) -> bool {
+        !self.is_remote()
+            && (!self.is_server_backed() || self.session_factory.local_file_authority().is_some())
+    }
+
+    pub(crate) fn file_insertion_capabilities(&self) -> TerminalLocalFileCapabilities {
+        if self.session_factory.allows_local_file_insertion() {
+            TerminalLocalFileCapabilities::Enabled
+        } else {
+            self.local_file_capabilities()
         }
     }
 

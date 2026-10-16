@@ -31,6 +31,18 @@ impl PermissionRequest {
         }
     }
 
+    #[cfg(feature = "desktop")]
+    pub(crate) fn from_effect(screen_recording: bool, accessibility: bool) -> Self {
+        let permissions = [
+            (screen_recording, SystemPermission::ScreenRecording),
+            (accessibility, SystemPermission::Accessibility),
+        ]
+        .into_iter()
+        .filter_map(|(include, permission)| include.then_some(permission))
+        .collect();
+        Self { permissions }
+    }
+
     #[cfg(test)]
     pub fn for_test(permissions: &[SystemPermission]) -> Self {
         Self {
@@ -59,6 +71,7 @@ enum FilterState {
 #[derive(Debug)]
 pub(crate) struct PermissionRequestFilter {
     state: FilterState,
+    context: Option<u64>,
     candidate: Vec<u8>,
 }
 
@@ -66,6 +79,7 @@ impl Default for PermissionRequestFilter {
     fn default() -> Self {
         Self {
             state: FilterState::Ground,
+            context: None,
             candidate: Vec::new(),
         }
     }
@@ -82,11 +96,25 @@ impl PermissionRequestFilter {
     ///
     /// Output between requests reaches `terminal` in one call, except for a prefix split across
     /// reads.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "unfenced parser is used by filter regressions")
+    )]
     pub(crate) fn feed(
         &mut self,
         bytes: &[u8],
-        mut terminal: impl FnMut(&[u8]),
+        terminal: impl FnMut(&[u8]),
         mut request: impl FnMut(PermissionRequest),
+    ) {
+        self.feed_with_context(bytes, None, terminal, |value, _| request(value));
+    }
+
+    pub(crate) fn feed_with_context(
+        &mut self,
+        bytes: &[u8],
+        context: Option<u64>,
+        mut terminal: impl FnMut(&[u8]),
+        mut request: impl FnMut(PermissionRequest, Option<u64>),
     ) {
         // Terminal output from `passed` up to the current byte has not been passed on yet.
         let mut passed = 0;
@@ -100,6 +128,7 @@ impl PermissionRequestFilter {
                 FilterState::Ground => {
                     if byte == 0x1b {
                         self.candidate.push(byte);
+                        self.context = context;
                         self.state = FilterState::Prefix;
                         prefix_start = Some(index);
                     }
@@ -158,7 +187,7 @@ impl PermissionRequestFilter {
                             && !matches!(byte, 0x18 | 0x1a)
                             && let Some(parsed) = parse(&body)
                         {
-                            request(parsed);
+                            request(parsed, self.context);
                         }
                     } else if byte == 0x1b {
                         self.state = if discarding {
@@ -212,6 +241,34 @@ fn parse(body: &[u8]) -> Option<PermissionRequest> {
         }
     }
     (!permissions.is_empty()).then_some(PermissionRequest { permissions })
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+    #[test]
+    fn fragmented_permission_requests_keep_their_original_authority() {
+        let mut filter = PermissionRequestFilter::default();
+        let mut requests = Vec::new();
+        filter.feed_with_context(
+            b"\x1b]7701;permissions=access",
+            Some(1),
+            |_| {},
+            |_, _| panic!("incomplete request"),
+        );
+        filter.feed_with_context(
+            b"ibility\x07",
+            Some(2),
+            |_| {},
+            |request, epoch| requests.push((request, epoch)),
+        );
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].1, Some(1));
+        assert_eq!(
+            requests[0].0.permissions(),
+            [SystemPermission::Accessibility]
+        );
+    }
 }
 
 #[cfg(test)]

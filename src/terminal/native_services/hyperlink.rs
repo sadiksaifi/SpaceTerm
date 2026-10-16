@@ -81,7 +81,7 @@ impl HyperlinkTarget {
         })
     }
 
-    pub(super) fn from_local_file(file: ValidatedLocalFile) -> Option<Self> {
+    pub(crate) fn from_local_file(file: ValidatedLocalFile) -> Option<Self> {
         let value = file.canonical_path().to_str()?.to_owned();
         Some(Self::new(HyperlinkKind::LocalPath, value, Some(file)))
     }

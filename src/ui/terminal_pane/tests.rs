@@ -2581,7 +2581,9 @@ fn server_pane_status_stacks_above_typing_unavailable_without_hiding_either_noti
 }
 
 #[gpui::test]
-fn server_pane_context_menu_offers_paste_without_local_content_actions(cx: &mut TestAppContext) {
+fn server_pane_context_menu_offers_native_links_and_paste_without_selection_or_find(
+    cx: &mut TestAppContext,
+) {
     let (pane, cx, records) = server_terminal_pane(cx, true);
     records
         .event_sender(1)
@@ -2607,6 +2609,8 @@ fn server_pane_context_menu_offers_paste_without_local_content_actions(cx: &mut 
         "terminal-context-menu-row-paste-enabled",
         "terminal-context-menu-row-copy-disabled",
         "terminal-context-menu-row-find-disabled",
+        "terminal-context-menu-row-open-link-enabled",
+        "terminal-context-menu-row-file-preview-disabled",
     ] {
         assert!(
             cx.debug_bounds(selector).is_some(),
@@ -2614,14 +2618,12 @@ fn server_pane_context_menu_offers_paste_without_local_content_actions(cx: &mut 
         );
     }
     for selector in [
-        "terminal-context-menu-row-open-link-enabled",
-        "terminal-context-menu-row-file-preview-disabled",
         "terminal-context-menu-row-open-link-disabled",
         "terminal-context-menu-row-file-preview-enabled",
     ] {
         assert!(
             cx.debug_bounds(selector).is_none(),
-            "{selector} requires local content support"
+            "{selector} has no eligible native action"
         );
     }
     cx.write_to_clipboard(ClipboardItem::new_string("menu paste".into()));
@@ -2665,6 +2667,28 @@ fn server_pane_accepts_host_input_method_text_without_terminal_input_focus(
         })
         .collect::<Vec<_>>();
     assert_eq!(commits, ["日本"]);
+}
+
+#[gpui::test]
+fn server_pane_discards_a_file_drop_when_its_connection_changes_before_insertion(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, records) = server_terminal_pane(cx, true);
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.insert_dropped_file_paths(&[PathBuf::from("/tmp/native fixture")], window, cx);
+            assert!(pane.pending_file_insertion.is_some());
+            records.advance_input_generation(1);
+            pane.flush_pending_file_insertion(cx);
+        });
+    });
+    cx.run_until_parked();
+    assert!(
+        !records
+            .commands()
+            .iter()
+            .any(|call| matches!(call.command, RecordedCommand::RequestPaste(_)))
+    );
 }
 
 #[gpui::test]
@@ -9425,6 +9449,62 @@ mod permission_requests {
             }
         });
         cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn server_permission_setup_reuses_the_notice_and_revalidates_its_grant(
+        cx: &mut TestAppContext,
+    ) {
+        for (local_authority, revoke) in [(false, false), (true, false), (true, true)] {
+            let (pane, cx, _) = terminal_pane_with_session_options(cx, |sessions| {
+                let sessions = sessions.server_backed();
+                if local_authority {
+                    sessions.with_client_filesystem(crate::platform::runtime_local_filesystem())
+                } else {
+                    sessions
+                }
+            });
+            let access = install_setup(
+                &pane,
+                PermissionAuthorization::NotGranted,
+                PermissionAuthorization::NotGranted,
+                cx,
+            );
+            let authority =
+                Arc::new(crate::terminal::session::clipboard::ClipboardAuthority::default());
+            authority.route();
+            authority.client_focus(Some(true));
+            let request = crate::terminal::session::ClientEffectRequest::new(
+                spaceterm_server::pane::effects::Effect::PermissionSetup {
+                    screen_recording: false,
+                    accessibility: true,
+                },
+                Arc::clone(&authority),
+                authority.output_epoch().unwrap(),
+                Duration::from_secs(1),
+            );
+            pane.update(cx, |pane, cx| {
+                pane.handle_event(TerminalSessionEvent::ClientEffect(request), cx);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            assert_eq!(
+                cx.debug_bounds("permission-request").is_some(),
+                local_authority
+            );
+            if !local_authority {
+                assert!(access.prepared.borrow().is_empty());
+                continue;
+            }
+            cx.executor().advance_clock(PERMISSION_REQUEST_ARMING_DELAY);
+            if revoke {
+                authority.client_focus(Some(false));
+                authority.client_focus(Some(true));
+            }
+            pane.update(cx, |pane, cx| pane.set_up_requested_permissions(cx));
+            cx.run_until_parked();
+            assert_eq!(!access.prepared.borrow().is_empty(), !revoke);
+        }
     }
 
     #[gpui::test]

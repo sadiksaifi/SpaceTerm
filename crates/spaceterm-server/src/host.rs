@@ -286,6 +286,7 @@ pub(crate) fn serve_runtime(
                                         development_pane: false,
                                         pane_takeover: false,
                                         interactive_input: false,
+                                        native_effects: false,
                                     }
                                 }
                                 None => {
@@ -565,6 +566,7 @@ mod startup_tests {
                         development_pane: true,
                         pane_takeover: true,
                         interactive_input: true,
+                        native_effects: true,
                     },
                     Request::Inventory => Reply::Inventory {
                         inventory: crate::hierarchy::State::empty().inventory,

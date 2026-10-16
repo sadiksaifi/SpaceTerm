@@ -1,4 +1,5 @@
-//! Optional Development terminal operations. No native effects or file authority cross this API.
+//! Authenticated terminal operations. Native requests never grant local file authority.
+pub mod effects;
 use crate::ServerError;
 use serde::{Deserialize, Serialize};
 
@@ -171,6 +172,16 @@ pub enum AttachmentClaim {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
+    NativeEffects {
+        lease: Lease,
+        generation: u64,
+    },
+    CompleteClipboard {
+        lease: Lease,
+        generation: u64,
+        id: u64,
+        completion: effects::Completion,
+    },
     Focus {
         lease: Lease,
         generation: u64,
@@ -260,6 +271,10 @@ pub enum Request {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Reply {
+    NativeEffects {
+        request: Option<effects::Request>,
+        hidden_input: bool,
+    },
     Paste(PasteOutcome),
     Inventory {
         inventory: crate::hierarchy::Inventory,
@@ -272,6 +287,8 @@ pub enum Reply {
         pane_takeover: bool,
         #[serde(default)]
         interactive_input: bool,
+        #[serde(default)]
+        native_effects: bool,
     },
     Restored {
         server: [u8; 32],
@@ -328,6 +345,8 @@ pub enum Color {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Cell {
+    #[serde(default)]
+    pub hyperlink: Option<u16>,
     pub text: String,
     pub foreground: Color,
     pub background: Color,
@@ -337,6 +356,9 @@ pub struct Cell {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Screen {
+    /// Per-screen targets; cells refer to indices in this bounded table.
+    #[serde(default)]
+    pub hyperlinks: Vec<effects::Hyperlink>,
     #[serde(default)]
     pub generation: u64,
     #[serde(default)]
@@ -386,6 +408,7 @@ struct PaneTransport {
     stream: std::sync::Mutex<Option<std::os::unix::net::UnixStream>>,
     takeover: bool,
     interactive_input: bool,
+    native_effects: bool,
 }
 /// One transport for a desktop's inventory and Pane workers. It retains no credential.
 #[cfg(feature = "client")]
@@ -426,11 +449,15 @@ impl PaneConnection {
                 development_pane: true,
                 pane_takeover,
                 interactive_input,
+                native_effects,
             } => {
                 let mut connection = Self::new(stream, pane_takeover);
                 std::sync::Arc::get_mut(&mut connection.transport)
                     .ok_or(ServerError::Protocol)?
                     .interactive_input = interactive_input;
+                std::sync::Arc::get_mut(&mut connection.transport)
+                    .ok_or(ServerError::Protocol)?
+                    .native_effects = native_effects;
                 Ok(connection)
             }
             Reply::Refused(reason) => Err(reason.into()),
@@ -443,8 +470,12 @@ impl PaneConnection {
                 stream: std::sync::Mutex::new(Some(stream)),
                 takeover,
                 interactive_input: false,
+                native_effects: false,
             }),
         }
+    }
+    pub fn supports_native_effects(&self) -> bool {
+        self.transport.native_effects
     }
     pub fn supports_takeover(&self) -> bool {
         self.transport.takeover

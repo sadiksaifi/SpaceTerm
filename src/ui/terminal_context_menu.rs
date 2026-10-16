@@ -56,7 +56,7 @@ pub(crate) fn terminal_context_menu_entries(
             find_shortcut,
         ),
     ];
-    if local_operations {
+    if local_operations || actions.open_link || actions.file_preview {
         entries.extend([
             MenuEntry::separator(),
             menu_entry(

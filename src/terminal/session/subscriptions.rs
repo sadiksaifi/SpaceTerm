@@ -9,6 +9,16 @@ pub struct TerminalSubscription {
 }
 
 impl TerminalSubscription {
+    pub(crate) fn take_client_effects(&self) -> Vec<ClientEffectRequest> {
+        self.state
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .client_effects
+            .drain(..)
+            .collect()
+    }
+
     /// The retained PTY hidden-input state. Read it after receiving events to reconcile
     /// coalesced change notifications. A stopped runtime always returns false.
     pub fn hidden_input(&self) -> bool {
@@ -25,6 +35,7 @@ struct EventState {
     finished: Option<Result<TerminalSessionExit, TerminalSessionFailure>>,
     stopped: bool,
     hidden_input: bool,
+    client_effects: std::collections::VecDeque<ClientEffectRequest>,
 }
 
 impl From<async_channel::Sender<TerminalSessionEvent>> for TerminalEventPublisher {
@@ -35,11 +46,22 @@ impl From<async_channel::Sender<TerminalSessionEvent>> for TerminalEventPublishe
             finished: None,
             stopped: false,
             hidden_input: false,
+            client_effects: std::collections::VecDeque::new(),
         })))
     }
 }
 
 impl TerminalEventPublisher {
+    pub(super) fn client_effect(&self, request: ClientEffectRequest) {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .client_effects
+            .retain(|request| request.grant.current());
+        if state.client_effects.len() < 8 {
+            state.client_effects.push_back(request);
+        }
+    }
+
     pub(super) fn subscribe(
         &self,
     ) -> (

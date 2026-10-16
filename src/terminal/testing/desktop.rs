@@ -366,6 +366,7 @@ pub(crate) struct TestTerminalSessionFactory {
     paste_resolution: Result<PasteResolution, String>,
     pending_paste_resolution: Option<async_channel::Receiver<Result<PasteResolution, String>>>,
     server_backed: bool,
+    client_files: Option<crate::platform::local_filesystem::LocalFilesystemAuthority>,
     interactive_input_available: bool,
 }
 
@@ -383,6 +384,7 @@ impl TestTerminalSessionFactory {
             paste_resolution: Ok(PasteResolution::Written),
             pending_paste_resolution: None,
             server_backed: false,
+            client_files: None,
             interactive_input_available: true,
         }
     }
@@ -390,6 +392,14 @@ impl TestTerminalSessionFactory {
     /// Starts Terminal Sessions that report themselves as running in a SpaceTerm Server.
     pub(crate) fn server_backed(mut self) -> Self {
         self.server_backed = true;
+        self
+    }
+
+    pub(crate) fn with_client_filesystem(
+        mut self,
+        filesystem: crate::platform::local_filesystem::LocalFilesystemAuthority,
+    ) -> Self {
+        self.client_files = Some(filesystem);
         self
     }
 
@@ -527,6 +537,14 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
 
     fn is_server_backed(&self) -> bool {
         self.server_backed
+    }
+    fn allows_local_file_insertion(&self) -> bool {
+        self.server_backed
+    }
+    fn local_file_authority(
+        &self,
+    ) -> Option<&crate::platform::local_filesystem::LocalFilesystemAuthority> {
+        self.client_files.as_ref()
     }
 }
 

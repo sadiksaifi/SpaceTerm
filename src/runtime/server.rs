@@ -7,6 +7,11 @@ use spaceterm_server::{
 };
 use std::{sync::Arc, time::Duration};
 
+#[cfg(test)]
+#[path = "server/effect_tests.rs"]
+mod effect_tests;
+mod effects;
+use self::effects::NativeEffects;
 mod repositories;
 #[cfg(test)]
 #[path = "server/repository_tests.rs"]
@@ -40,6 +45,7 @@ struct OwnedPane {
     pending_paste: Option<u64>,
     screen_generation: u64,
     size: PaneSize,
+    effects: NativeEffects,
 }
 fn nonce() -> Result<[u8; 32], ServerError> {
     let mut bytes = [0; 32];
@@ -202,7 +208,7 @@ impl DevelopmentPaneHost {
             )
             .map_err(|_| Refusal::Failed)?;
         let subscription = runtime.subscribe();
-        // No focus grant: OSC 52 and native requests have no eligible client in this slice.
+        runtime.route_client_effects();
         self.pane = Some(OwnedPane {
             device: Some(device),
             attachment_generation: None,
@@ -220,6 +226,7 @@ impl DevelopmentPaneHost {
             pending_paste: None,
             screen_generation: 0,
             size,
+            effects: NativeEffects::default(),
         });
         Ok(lease)
     }
@@ -273,6 +280,7 @@ impl DevelopmentPaneHost {
                 development_pane: true,
                 pane_takeover: true,
                 interactive_input: true,
+                native_effects: true,
             });
         }
         self.recover()?;
@@ -355,6 +363,8 @@ impl DevelopmentPaneHost {
         let pane = self.pane.as_mut().ok_or(Refusal::Missing)?;
         let lease = match &request {
             Request::Poll { lease }
+            | Request::NativeEffects { lease, .. }
+            | Request::CompleteClipboard { lease, .. }
             | Request::Focus { lease, .. }
             | Request::Input { lease, .. }
             | Request::Key { lease, .. }
@@ -373,6 +383,27 @@ impl DevelopmentPaneHost {
         }
         pane.drain();
         match request {
+            Request::NativeEffects { generation, .. } => {
+                if generation == 0 || generation != pane.focus_generation {
+                    return Err(Refusal::Stale);
+                }
+                Ok(Reply::NativeEffects {
+                    request: pane.effects.next(generation),
+                    hidden_input: pane.subscription.hidden_input(),
+                })
+            }
+            Request::CompleteClipboard {
+                generation,
+                id,
+                completion,
+                ..
+            } => {
+                if generation != pane.focus_generation {
+                    return Err(Refusal::Stale);
+                }
+                pane.effects.complete(id, completion);
+                Ok(Reply::Unchanged)
+            }
             Request::Poll { .. } => {
                 if let Some(screen) = &pane.screen
                     && pane.sent != Some(screen.generation)
@@ -522,6 +553,8 @@ impl PaneService for DevelopmentPaneHost {
 }
 impl OwnedPane {
     fn invalidate_input(&mut self) {
+        self.runtime.client_effect_focus(None);
+        self.effects.clear();
         self.focus = FocusTarget::Unfocused;
         self.pending_paste = None;
         self.runtime.focus(false);
@@ -558,6 +591,9 @@ impl OwnedPane {
             }
             self.runtime.focus(target == FocusTarget::Terminal);
         }
+        self.effects.clear();
+        self.runtime
+            .client_effect_focus(Some(target == FocusTarget::Terminal));
         self.focus_generation = generation;
         self.focus = target;
         Ok(Reply::Unchanged)
@@ -805,6 +841,10 @@ impl OwnedPane {
         Ok(Reply::Attached { lease: self.lease })
     }
     fn drain(&mut self) {
+        self.effects.drain_clipboard(&self.subscription.clipboard);
+        for request in self.subscription.take_client_effects() {
+            self.effects.push(request);
+        }
         while let Ok(event) = self.subscription.events.try_recv() {
             match event {
                 TerminalSessionEvent::Screen(screen) => {
@@ -817,8 +857,15 @@ impl OwnedPane {
                     }
                     self.screen = Some(screen);
                 }
-                TerminalSessionEvent::Exited(_) => self.ended = true,
-                TerminalSessionEvent::Failed(_) => self.failed = true,
+                TerminalSessionEvent::ClientEffect(_) => {}
+                TerminalSessionEvent::Exited(_) => {
+                    self.invalidate_input();
+                    self.ended = true;
+                }
+                TerminalSessionEvent::Failed(_) => {
+                    self.invalidate_input();
+                    self.failed = true;
+                }
                 _ => {}
             }
         }
@@ -885,7 +932,11 @@ fn encode_color(color: TerminalColor) -> pane::Color {
     }
 }
 pub(crate) fn encode_screen(screen: &ScreenSnapshot) -> Screen {
-    Screen {
+    let mut hyperlinks = Vec::new();
+    let mut link_indices = std::collections::HashMap::new();
+    let mut link_bytes = 0;
+    let mut encoded = Screen {
+        hyperlinks: Vec::new(),
         generation: 0,
         mouse_tracking: screen.mouse_tracking,
         alternate_scroll: screen.alternate_scroll,
@@ -896,6 +947,33 @@ pub(crate) fn encode_screen(screen: &ScreenSnapshot) -> Screen {
             .map(|row| {
                 row.iter()
                     .map(|c| Cell {
+                        hyperlink: c.hyperlink.as_ref().and_then(|link| {
+                            let key = (link.kind == HyperlinkKind::LocalPath, link.value.as_str());
+                            if let Some(index) = link_indices.get(&key) {
+                                return Some(*index);
+                            }
+                            // Link metadata must never make an otherwise renderable screen exceed
+                            // the transport frame. Excess targets lose their action, not their text.
+                            if hyperlinks.len() >= pane::effects::MAX_SCREEN_HYPERLINKS
+                                || link.value.len() > crate::terminal::hyperlink::MAX_LINK_BYTES
+                                || link_bytes + link.value.len()
+                                    > pane::effects::MAX_SCREEN_HYPERLINK_BYTES
+                            {
+                                return None;
+                            }
+                            let index = hyperlinks.len() as u16;
+                            link_bytes += link.value.len();
+                            hyperlinks.push(match link.kind {
+                                HyperlinkKind::Url => {
+                                    pane::effects::Hyperlink::Url(link.value.clone())
+                                }
+                                HyperlinkKind::LocalPath => {
+                                    pane::effects::Hyperlink::File(link.value.clone())
+                                }
+                            });
+                            link_indices.insert(key, index);
+                            Some(index)
+                        }),
                         text: c.text.chars().take(64).collect(),
                         foreground: encode_color(c.foreground_source),
                         background: encode_color(c.background_source),
@@ -948,7 +1026,9 @@ pub(crate) fn encode_screen(screen: &ScreenSnapshot) -> Screen {
         cursor_color: rgb(screen.cursor.color),
         cursor_text: rgb(screen.cursor.text_color),
         alternate: screen.active_screen == ActiveScreenSnapshot::Alternate,
-    }
+    };
+    encoded.hyperlinks = hyperlinks;
+    encoded
 }
 fn decode_modifiers(bits: u16) -> InputModifiers {
     InputModifiers {
@@ -1000,6 +1080,135 @@ pub(crate) fn decode_key(key: Key) -> Option<KeyInput> {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn server_screen_with_a_long_hyperlink_remains_within_the_transport_limit() {
+        let geometry = TerminalGeometry::from_grid(
+            CellGridSize::new(120, 40),
+            LogicalCellSize::new(10.0, 20.0),
+            BackingScale::ONE,
+        );
+        let mut emulator = crate::terminal::emulator::TerminalEmulator::new(geometry).unwrap();
+        let url = format!("https://example.test/{}", "a".repeat(3980));
+        emulator.feed("x".repeat(120 * 39).as_bytes());
+        let mut screen = (*emulator.snapshot().unwrap().unwrap()).clone();
+        let link = Arc::new(crate::terminal::HyperlinkTarget::url(&url).unwrap());
+        for row in Arc::make_mut(&mut screen.rows).iter_mut().take(39) {
+            for cell in Arc::make_mut(row) {
+                cell.hyperlink = Some(Arc::clone(&link));
+            }
+        }
+        let encoded = encode_screen(&screen);
+        assert_eq!(encoded.hyperlinks.len(), 1);
+        let reply = Reply::Screen(Box::new(encoded));
+        let bytes = serde_json::to_vec(&reply).unwrap();
+        assert!(
+            bytes.len() < pane::MAX_TERMINAL_FRAME,
+            "screen frame has {} bytes",
+            bytes.len()
+        );
+    }
+    #[test]
+    fn server_screen_with_many_distinct_links_retains_text_with_bounded_metadata() {
+        let geometry = TerminalGeometry::from_grid(
+            CellGridSize::new(120, 40),
+            LogicalCellSize::new(10.0, 20.0),
+            BackingScale::ONE,
+        );
+        let mut emulator = crate::terminal::emulator::TerminalEmulator::new(geometry).unwrap();
+        emulator.feed(b"fixture");
+        let mut screen = (*emulator.snapshot().unwrap().unwrap()).clone();
+        let mut index = 0;
+        for row in Arc::make_mut(&mut screen.rows) {
+            for cell in Arc::make_mut(row) {
+                let url = format!("https://example.test/{index}/{}", "a".repeat(3970));
+                cell.hyperlink = Some(Arc::new(
+                    crate::terminal::HyperlinkTarget::url(&url).unwrap(),
+                ));
+                index += 1;
+            }
+        }
+        let encoded = encode_screen(&screen);
+        assert!(encoded.rows[0][0].hyperlink.is_some());
+        assert!(
+            encoded
+                .rows
+                .last()
+                .unwrap()
+                .last()
+                .unwrap()
+                .hyperlink
+                .is_none()
+        );
+        assert_eq!(encoded.rows[0][0].text, "f");
+        assert!(
+            serde_json::to_vec(&Reply::Screen(Box::new(encoded)))
+                .unwrap()
+                .len()
+                < pane::MAX_TERMINAL_FRAME
+        );
+    }
+
+    pub(super) fn native_command(
+        host: &mut impl PaneService,
+        lease: Lease,
+        generation: u64,
+        text: &str,
+    ) {
+        assert!(matches!(
+            input(host, lease, generation, text_key(text, false)),
+            Reply::Unchanged
+        ));
+        let mut enter = match text_key("", false) {
+            InteractiveInput::Key(key) => key,
+            _ => unreachable!(),
+        };
+        enter.physical = PhysicalKey::Enter as u32;
+        enter.logical = "enter".into();
+        enter.text = None;
+        assert!(matches!(
+            input(host, lease, generation, InteractiveInput::Key(enter)),
+            Reply::Unchanged
+        ));
+    }
+
+    #[test]
+    fn native_clipboard_requests_reach_only_the_current_controller() {
+        let mut host = host();
+        let lease = attach(&mut host, 1, true);
+        focus(&mut host, lease, 1, FocusTarget::Terminal);
+        native_command(&mut host, lease, 1, "printf '\\033]52;c;aGVsbG8=\\007'");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let reply = host.request(
+                [1; 32],
+                lease.connection,
+                Request::NativeEffects {
+                    lease,
+                    generation: 1,
+                },
+            );
+            match reply {
+                Reply::NativeEffects {
+                    request: Some(request),
+                    ..
+                } => {
+                    assert!(
+                        matches!(request.effect, pane::effects::Effect::ClipboardWrite { text, .. } if text == "hello")
+                    );
+                    break;
+                }
+                Reply::NativeEffects { request: None, .. } => {}
+                other => panic!("native effects unavailable: {other:?}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "clipboard request did not arrive"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        host.shutdown().unwrap();
+    }
 
     #[test]
     fn interactive_input_requires_current_focus_and_legacy_keys_cannot_bypass_it() {
@@ -1077,7 +1286,12 @@ mod tests {
         host.shutdown().unwrap();
     }
 
-    fn focus(host: &mut impl PaneService, lease: Lease, generation: u64, target: FocusTarget) {
+    pub(super) fn focus(
+        host: &mut impl PaneService,
+        lease: Lease,
+        generation: u64,
+        target: FocusTarget,
+    ) {
         assert!(matches!(
             host.request(
                 [1; 32],
@@ -2467,7 +2681,7 @@ mod tests {
             cell_height: 18,
         }
     }
-    fn attach(host: &mut DevelopmentPaneHost, connection: u8, create: bool) -> Lease {
+    pub(super) fn attach(host: &mut DevelopmentPaneHost, connection: u8, create: bool) -> Lease {
         let Reply::Attached { lease } = host.request(
             [1; 32],
             [connection; 32],

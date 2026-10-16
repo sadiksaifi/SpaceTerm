@@ -1197,6 +1197,10 @@ impl TerminalEmulator {
         })
     }
 
+    pub(crate) fn enable_client_clipboard(&mut self) {
+        self.xtgettcap.enable_clipboard();
+    }
+
     pub(crate) fn restrict_client_effects(&mut self) -> Result<(), Error> {
         self.client_effects = false;
         self.xtgettcap.disable_clipboard();
