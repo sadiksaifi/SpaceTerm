@@ -35,6 +35,7 @@ pub(crate) struct DevelopmentPaneState {
     close: AtomicU64,
     epoch: AtomicU64,
     connected_epoch: AtomicU64,
+    paste_unconfirmed: AtomicBool,
     interaction: Mutex<Interaction>,
 }
 impl DevelopmentPaneState {
@@ -48,6 +49,7 @@ impl DevelopmentPaneState {
             close: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
             connected_epoch: AtomicU64::new(0),
+            paste_unconfirmed: AtomicBool::new(false),
             interaction: Mutex::new(Interaction::default()),
         }
     }
@@ -91,6 +93,7 @@ impl DevelopmentPaneState {
             *status = DevelopmentPaneStatus::Reconnecting;
         }
         self.close.store(0, Ordering::Release);
+        self.paste_unconfirmed.store(false, Ordering::Release);
         self.interaction
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -131,9 +134,18 @@ impl DevelopmentPaneState {
         retryable
     }
     fn set(&self, status: DevelopmentPaneStatus) {
-        *self.status.lock().unwrap_or_else(|e| e.into_inner()) = status;
+        let mut current = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        if status != DevelopmentPaneStatus::Connected {
+            self.paste_unconfirmed.store(false, Ordering::Release);
+        }
+        *current = status;
     }
-    fn connected(&self, epoch: u64, screen: ScreenMapping) -> Result<(), ServerError> {
+    fn connected(
+        &self,
+        epoch: u64,
+        screen: ScreenMapping,
+        paste_unconfirmed: bool,
+    ) -> Result<(), ServerError> {
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if self.epoch.load(Ordering::Acquire) != epoch {
             return Err(ServerError::Protocol);
@@ -143,6 +155,9 @@ impl DevelopmentPaneState {
             .unwrap_or_else(|e| e.into_inner())
             .screen = Some(screen);
         self.connected_epoch.store(epoch, Ordering::Release);
+        if paste_unconfirmed {
+            self.paste_unconfirmed.store(true, Ordering::Release);
+        }
         *status = DevelopmentPaneStatus::Connected;
         Ok(())
     }
@@ -1004,6 +1019,7 @@ fn present(
                     return Err(ServerError::SessionUnavailable);
                 }
                 expected_target = Some(target);
+                state.paste_unconfirmed.store(false, Ordering::Release);
                 if !takeover {
                     takeover = true;
                     paste_unconfirmed = false;
@@ -1148,7 +1164,7 @@ fn present(
                             })?;
                             ready = true;
                         }
-                        state.connected(epoch, mapping)?;
+                        state.connected(epoch, mapping, paste_unconfirmed)?;
                         let _ = events.force_send(TerminalSessionEvent::Screen(screen));
                         takeover = false;
                         if paste_unconfirmed {
@@ -1336,6 +1352,9 @@ impl TerminalSessionHandle for PresentationHandle {
     }
     fn input_generation(&self) -> u64 {
         self.state.epoch.load(Ordering::Acquire)
+    }
+    fn take_paste_unconfirmed(&self) -> bool {
+        self.state.paste_unconfirmed.swap(false, Ordering::AcqRel)
     }
     fn focus_paste_confirmation(&self, id: super::paste::PasteConfirmationId) {
         let mut interaction = self
@@ -1918,41 +1937,136 @@ mod tests {
 
     #[test]
     fn modal_paste_is_single_use_and_lost_confirmation_reply_is_typed_as_uncertain() {
-        let mut adapter = Adapter::new();
-        let confirmation = adapter.confirmation();
-        adapter.handle.focus_paste_confirmation(confirmation.id);
-        let response = adapter
-            .handle
-            .resolve_paste(confirmation.id, super::super::PasteDecision::Confirm);
-        let expected_lease = adapter.active.lease;
-        let result = adapter.drain(|request| match request {
-            Request::Input {
-                lease,
-                input:
-                    pane::InteractiveInput::ResolvePaste {
-                        id: 17,
-                        confirm: true,
-                    },
-                ..
-            } => {
-                assert_eq!(*lease, expected_lease);
-                Err(ServerError::Protocol)
+        for acknowledgement in [
+            Err(ServerError::Protocol),
+            Ok(Reply::Unchanged),
+            Ok(Reply::Paste(pane::PasteOutcome::Rejected(
+                pane::PasteRejection::Empty,
+            ))),
+        ] {
+            let mut adapter = Adapter::new();
+            let confirmation = adapter.confirmation();
+            adapter.handle.focus_paste_confirmation(confirmation.id);
+            let response = adapter
+                .handle
+                .resolve_paste(confirmation.id, super::super::PasteDecision::Confirm);
+            let expected_lease = adapter.active.lease;
+            let result = adapter.drain(|request| match request {
+                Request::Input {
+                    lease,
+                    input:
+                        pane::InteractiveInput::ResolvePaste {
+                            id: 17,
+                            confirm: true,
+                        },
+                    ..
+                } => {
+                    assert_eq!(*lease, expected_lease);
+                    acknowledgement.clone()
+                }
+                _ => Ok(Reply::Unchanged),
+            });
+            assert_eq!(result, Err(ServerError::Protocol));
+            assert_eq!(
+                response.try_recv().unwrap().unwrap(),
+                super::super::PasteResolution::Unconfirmed
+            );
+            assert!(adapter.unconfirmed);
+            let duplicate = adapter
+                .handle
+                .resolve_paste(confirmation.id, super::super::PasteDecision::Confirm);
+            assert_eq!(
+                duplicate.try_recv().unwrap().unwrap(),
+                super::super::PasteResolution::Stale
+            );
+
+            // Reconnection publishes the retained outcome before its replaceable
+            // wakeup. Later screen frames may replace that wakeup while UI is busy.
+            let epoch = adapter.handle.state.invalidate();
+            let mapping = ScreenMapping {
+                epoch,
+                local: PresentationGeneration::test(10),
+                wire: 3,
+                size: *adapter.handle.size.lock().unwrap(),
+                mouse_tracking: false,
+                alternate: false,
+                alternate_scroll: false,
+            };
+            adapter
+                .handle
+                .state
+                .connected(epoch, mapping, true)
+                .unwrap();
+            let (events, output) = async_channel::bounded(2);
+            events
+                .force_send(TerminalSessionEvent::PasteUnconfirmed)
+                .unwrap();
+            let screen = ScreenSnapshot::empty_with_appearance(
+                crate::local_path::LocalPathSemantics::Posix,
+                &adapter.handle.appearance.lock().unwrap(),
+            );
+            for _ in 0..2 {
+                events
+                    .force_send(TerminalSessionEvent::Screen(Arc::clone(&screen)))
+                    .unwrap();
             }
-            _ => Ok(Reply::Unchanged),
-        });
-        assert_eq!(result, Err(ServerError::Protocol));
-        assert_eq!(
-            response.try_recv().unwrap().unwrap(),
-            super::super::PasteResolution::Unconfirmed
-        );
-        assert!(adapter.unconfirmed);
-        let duplicate = adapter
-            .handle
-            .resolve_paste(confirmation.id, super::super::PasteDecision::Confirm);
-        assert_eq!(
-            duplicate.try_recv().unwrap().unwrap(),
-            super::super::PasteResolution::Stale
-        );
+            while let Ok(event) = output.try_recv() {
+                assert!(matches!(event, TerminalSessionEvent::Screen(_)));
+            }
+            assert!(
+                adapter.handle.take_paste_unconfirmed(),
+                "screen replacement lost the retained paste warning"
+            );
+            assert!(
+                !adapter.handle.take_paste_unconfirmed(),
+                "warning was delivered twice"
+            );
+
+            adapter
+                .handle
+                .state
+                .connected(epoch, mapping, true)
+                .unwrap();
+            adapter.handle.state.invalidate();
+            assert!(
+                !adapter.handle.take_paste_unconfirmed(),
+                "a stale warning crossed a connection epoch"
+            );
+        }
+    }
+
+    #[test]
+    fn incompatible_paste_request_acknowledgements_do_not_claim_that_nothing_was_written() {
+        for acknowledgement in [
+            Reply::Unchanged,
+            Reply::Paste(pane::PasteOutcome::Cancelled),
+        ] {
+            let mut adapter = Adapter::new();
+            let response = adapter
+                .handle
+                .request_paste(super::super::PastePayload::from("safe".to_owned()));
+            let result = adapter.drain(|request| {
+                Ok(
+                    if matches!(
+                        request,
+                        Request::Input {
+                            input: pane::InteractiveInput::Paste { .. },
+                            ..
+                        }
+                    ) {
+                        acknowledgement.clone()
+                    } else {
+                        Reply::Unchanged
+                    },
+                )
+            });
+            assert_eq!(result, Err(ServerError::Protocol));
+            assert_eq!(
+                response.try_recv().unwrap().unwrap(),
+                super::super::PasteRequestOutcome::Unconfirmed
+            );
+            assert!(adapter.unconfirmed);
+        }
     }
 
     #[test]
