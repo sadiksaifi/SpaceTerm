@@ -528,6 +528,9 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
     fn is_server_backed(&self) -> bool {
         self.server_backed
     }
+    fn allows_local_file_insertion(&self) -> bool {
+        self.server_backed
+    }
 }
 
 struct TestTerminalSessionHandle {

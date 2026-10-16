@@ -632,7 +632,7 @@ pub(crate) struct TerminalPane {
     preedit_layout_key: Option<PreeditLayoutKey>,
     marked_revision: u64,
     delivered_key_presses: DeliveredKeyPresses,
-    pending_file_insertion: Option<PastePayload>,
+    pending_file_insertion: Option<(PastePayload, u64)>,
     /// The newest Paste whose Clipboard or PRIMARY read has not completed. Replacing or dropping it
     /// discards that read.
     pending_paste_read: Option<Task<()>>,
@@ -1737,6 +1737,7 @@ impl TerminalPane {
         let was_available = self.terminal_session_available();
         self.terminal_session.remote_input_blocked = interrupted;
         if interrupted {
+            self.pending_file_insertion = None;
             self.reset_hidden_input();
             self.context_menu = None;
             self.pressed_button = None;
@@ -3505,6 +3506,9 @@ impl TerminalPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.server_backed() && !self.interactive_input_available() {
+            return;
+        }
         let insertion = match PastePayload::prepare_dropped_files(
             self.file_insertion,
             paths,
@@ -3521,7 +3525,7 @@ impl TerminalPane {
                 return;
             }
         };
-        self.pending_file_insertion = Some(insertion);
+        self.pending_file_insertion = Some((insertion, self.current_input_generation()));
         window.activate_window();
         self.request_focus(window, cx);
         cx.notify();
@@ -3531,9 +3535,12 @@ impl TerminalPane {
         if !self.terminal_input_focus || self.terminal_session.session.is_none() {
             return;
         }
-        let Some(insertion) = self.pending_file_insertion.take() else {
+        let Some((insertion, generation)) = self.pending_file_insertion.take() else {
             return;
         };
+        if self.server_backed() && generation != self.current_input_generation() {
+            return;
+        }
         self.request_paste_text(insertion, cx);
     }
 

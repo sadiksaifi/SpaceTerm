@@ -2668,6 +2668,28 @@ fn server_pane_accepts_host_input_method_text_without_terminal_input_focus(
 }
 
 #[gpui::test]
+fn server_pane_discards_a_file_drop_when_its_connection_changes_before_insertion(
+    cx: &mut TestAppContext,
+) {
+    let (pane, cx, records) = server_terminal_pane(cx, true);
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.insert_dropped_file_paths(&[PathBuf::from("/tmp/native fixture")], window, cx);
+            assert!(pane.pending_file_insertion.is_some());
+            records.advance_input_generation(1);
+            pane.flush_pending_file_insertion(cx);
+        });
+    });
+    cx.run_until_parked();
+    assert!(
+        !records
+            .commands()
+            .iter()
+            .any(|call| matches!(call.command, RecordedCommand::RequestPaste(_)))
+    );
+}
+
+#[gpui::test]
 fn server_pane_takeover_discards_preedit_without_replaying_it(cx: &mut TestAppContext) {
     let (pane, cx, records) = server_terminal_pane(cx, true);
     cx.update(|window, cx| {
