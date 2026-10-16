@@ -4138,30 +4138,41 @@ impl TerminalPane {
         };
         let receiver = session.resolve_paste(confirmation.id, decision);
         cx.notify();
-        cx.spawn(async move |this, cx| match receiver.recv().await {
-            Ok(Ok(PasteResolution::Written)) => {
-                let _ = this.update(cx, |this, cx| this.clear_attention(cx));
-            }
-            Ok(Ok(PasteResolution::Cancelled)) => {}
-            Ok(Ok(PasteResolution::Unconfirmed)) => {}
-            Ok(Ok(PasteResolution::Stale)) => {
-                let _ = this.update(cx, |this, cx| {
-                    this.status = Some(
-                        "Paste confirmation expired without writing terminal input".to_owned(),
-                    );
-                    this.status_intent = StatusIntent::Warning;
-                    cx.notify();
-                });
-            }
-            Ok(Err(_)) | Err(_) => {
-                let _ = this.update(cx, |this, cx| {
-                    this.status = Some(
-                        "Paste confirmation was lost without writing terminal input".to_owned(),
-                    );
-                    this.status_intent = StatusIntent::Error;
-                    cx.notify();
-                });
-            }
+        let window_handle = self.window_handle;
+        cx.spawn(async move |this, cx| {
+            let outcome = receiver.recv().await;
+            let _ = cx.update_window(window_handle, |_, window, cx| {
+                this.update(cx, |this, cx| {
+                    this.sync_terminal_input_focus(window, cx);
+                    if this.terminal_session.native_service_session_identity
+                        != guard.session_identity
+                        || this.current_input_generation() != guard.input_generation
+                        || !this.terminal_input_focus
+                    {
+                        return;
+                    }
+                    match outcome {
+                        Ok(Ok(PasteResolution::Written)) => this.clear_attention(cx),
+                        Ok(Ok(PasteResolution::Cancelled | PasteResolution::Unconfirmed)) => {}
+                        Ok(Ok(PasteResolution::Stale)) => {
+                            this.status = Some(
+                                "Paste confirmation expired without writing terminal input"
+                                    .to_owned(),
+                            );
+                            this.status_intent = StatusIntent::Warning;
+                            cx.notify();
+                        }
+                        Ok(Err(_)) | Err(_) => {
+                            this.status = Some(
+                                "Paste confirmation was lost without writing terminal input"
+                                    .to_owned(),
+                            );
+                            this.status_intent = StatusIntent::Error;
+                            cx.notify();
+                        }
+                    }
+                })
+            });
         })
         .detach();
     }
