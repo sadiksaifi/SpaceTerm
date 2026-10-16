@@ -999,16 +999,6 @@ pub(crate) fn initialize_application(
     }
     #[cfg(feature = "developer-tools")]
     crate::ui::developer_workbench::configure_window_chrome(Rc::clone(&host.window_movement), cx);
-    cx.set_global(
-        crate::ui::development_pane::DevelopmentPaneComposition::new(
-            Rc::clone(&host.adapters.key_input),
-            host.adapters.native_services.clone(),
-            host.adapters.lifecycle.clone(),
-            host.home_directory.clone(),
-            host.adapters.local_filesystem.clone(),
-            Rc::clone(&host.window_movement),
-        ),
-    );
     crate::ui::about_window::configure_window_chrome(Rc::clone(&host.window_movement), cx);
     if let (Some(access), Some(guide)) =
         (&host.adapters.permission_access, &host.adapters.setup_guide)
@@ -1020,6 +1010,19 @@ pub(crate) fn initialize_application(
         );
         let _ = host.permission_setup.set(setup);
     }
+    cx.set_global(
+        crate::ui::development_pane::DevelopmentPaneComposition::new(
+            Rc::clone(&host.adapters.key_input),
+            host.adapters.native_services.clone(),
+            crate::ui::pane_lifecycle::PaneLifecycleDependencies {
+                permission_setup: host.permission_setup.get().cloned(),
+                ..host.adapters.lifecycle.clone()
+            },
+            host.home_directory.clone(),
+            host.adapters.local_filesystem.clone(),
+            Rc::clone(&host.window_movement),
+        ),
+    );
     crate::ui::settings_window::configure_window_chrome(
         Rc::clone(&host.window_movement),
         crate::ui::settings_window::PermissionCapabilities {
