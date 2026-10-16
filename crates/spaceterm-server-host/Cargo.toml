@@ -15,6 +15,10 @@ required-features = ["client"]
 name = "pane_takeover"
 required-features = ["client"]
 
+[[example]]
+name = "terminal_input"
+required-features = ["client"]
+
 [[bin]]
 name = "spaceterm-server"
 path = "src/main.rs"

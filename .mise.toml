@@ -440,6 +440,14 @@ run = [
   "cargo run --package spaceterm-server-host --features client --example pane_takeover --locked -- 2",
 ]
 
+[tasks."server:input:smoke"]
+description = "Verify paired interactive terminal input through both protocol majors on an idle server"
+run = [
+  "cargo build --package spaceterm-server-host --features client --examples --bins --locked",
+  "cargo run --package spaceterm-server-host --features client --example terminal_input --locked -- 1",
+  "cargo run --package spaceterm-server-host --features client --example terminal_input --locked -- 2",
+]
+
 [tasks."server:workspace:smoke"]
 description = "Exercise retained Development work through server kill and shutdown with both protocol majors"
 run = [
