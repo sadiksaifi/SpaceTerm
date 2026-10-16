@@ -932,7 +932,11 @@ fn encode_color(color: TerminalColor) -> pane::Color {
     }
 }
 pub(crate) fn encode_screen(screen: &ScreenSnapshot) -> Screen {
-    Screen {
+    let mut hyperlinks = Vec::new();
+    let mut link_indices = std::collections::HashMap::new();
+    let mut link_bytes = 0;
+    let mut encoded = Screen {
+        hyperlinks: Vec::new(),
         generation: 0,
         mouse_tracking: screen.mouse_tracking,
         alternate_scroll: screen.alternate_scroll,
@@ -943,11 +947,32 @@ pub(crate) fn encode_screen(screen: &ScreenSnapshot) -> Screen {
             .map(|row| {
                 row.iter()
                     .map(|c| Cell {
-                        hyperlink: c.hyperlink.as_ref().map(|link| match link.kind {
-                            HyperlinkKind::Url => pane::effects::Hyperlink::Url(link.value.clone()),
-                            HyperlinkKind::LocalPath => {
-                                pane::effects::Hyperlink::File(link.value.clone())
+                        hyperlink: c.hyperlink.as_ref().and_then(|link| {
+                            let key = (link.kind == HyperlinkKind::LocalPath, link.value.as_str());
+                            if let Some(index) = link_indices.get(&key) {
+                                return Some(*index);
                             }
+                            // Link metadata must never make an otherwise renderable screen exceed
+                            // the transport frame. Excess targets lose their action, not their text.
+                            if hyperlinks.len() >= pane::effects::MAX_SCREEN_HYPERLINKS
+                                || link.value.len() > crate::terminal::hyperlink::MAX_LINK_BYTES
+                                || link_bytes + link.value.len()
+                                    > pane::effects::MAX_SCREEN_HYPERLINK_BYTES
+                            {
+                                return None;
+                            }
+                            let index = hyperlinks.len() as u16;
+                            link_bytes += link.value.len();
+                            hyperlinks.push(match link.kind {
+                                HyperlinkKind::Url => {
+                                    pane::effects::Hyperlink::Url(link.value.clone())
+                                }
+                                HyperlinkKind::LocalPath => {
+                                    pane::effects::Hyperlink::File(link.value.clone())
+                                }
+                            });
+                            link_indices.insert(key, index);
+                            Some(index)
                         }),
                         text: c.text.chars().take(64).collect(),
                         foreground: encode_color(c.foreground_source),
@@ -1001,7 +1026,9 @@ pub(crate) fn encode_screen(screen: &ScreenSnapshot) -> Screen {
         cursor_color: rgb(screen.cursor.color),
         cursor_text: rgb(screen.cursor.text_color),
         alternate: screen.active_screen == ActiveScreenSnapshot::Alternate,
-    }
+    };
+    encoded.hyperlinks = hyperlinks;
+    encoded
 }
 fn decode_modifiers(bits: u16) -> InputModifiers {
     InputModifiers {
@@ -1053,6 +1080,74 @@ pub(crate) fn decode_key(key: Key) -> Option<KeyInput> {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn server_screen_with_a_long_hyperlink_remains_within_the_transport_limit() {
+        let geometry = TerminalGeometry::from_grid(
+            CellGridSize::new(120, 40),
+            LogicalCellSize::new(10.0, 20.0),
+            BackingScale::ONE,
+        );
+        let mut emulator = crate::terminal::emulator::TerminalEmulator::new(geometry).unwrap();
+        let url = format!("https://example.test/{}", "a".repeat(3980));
+        emulator.feed("x".repeat(120 * 39).as_bytes());
+        let mut screen = (*emulator.snapshot().unwrap().unwrap()).clone();
+        let link = Arc::new(crate::terminal::HyperlinkTarget::url(&url).unwrap());
+        for row in Arc::make_mut(&mut screen.rows).iter_mut().take(39) {
+            for cell in Arc::make_mut(row) {
+                cell.hyperlink = Some(Arc::clone(&link));
+            }
+        }
+        let encoded = encode_screen(&screen);
+        assert_eq!(encoded.hyperlinks.len(), 1);
+        let reply = Reply::Screen(Box::new(encoded));
+        let bytes = serde_json::to_vec(&reply).unwrap();
+        assert!(
+            bytes.len() < pane::MAX_TERMINAL_FRAME,
+            "screen frame has {} bytes",
+            bytes.len()
+        );
+    }
+    #[test]
+    fn server_screen_with_many_distinct_links_retains_text_with_bounded_metadata() {
+        let geometry = TerminalGeometry::from_grid(
+            CellGridSize::new(120, 40),
+            LogicalCellSize::new(10.0, 20.0),
+            BackingScale::ONE,
+        );
+        let mut emulator = crate::terminal::emulator::TerminalEmulator::new(geometry).unwrap();
+        emulator.feed(b"fixture");
+        let mut screen = (*emulator.snapshot().unwrap().unwrap()).clone();
+        let mut index = 0;
+        for row in Arc::make_mut(&mut screen.rows) {
+            for cell in Arc::make_mut(row) {
+                let url = format!("https://example.test/{index}/{}", "a".repeat(3970));
+                cell.hyperlink = Some(Arc::new(
+                    crate::terminal::HyperlinkTarget::url(&url).unwrap(),
+                ));
+                index += 1;
+            }
+        }
+        let encoded = encode_screen(&screen);
+        assert!(encoded.rows[0][0].hyperlink.is_some());
+        assert!(
+            encoded
+                .rows
+                .last()
+                .unwrap()
+                .last()
+                .unwrap()
+                .hyperlink
+                .is_none()
+        );
+        assert_eq!(encoded.rows[0][0].text, "f");
+        assert!(
+            serde_json::to_vec(&Reply::Screen(Box::new(encoded)))
+                .unwrap()
+                .len()
+                < pane::MAX_TERMINAL_FRAME
+        );
+    }
 
     pub(super) fn native_command(
         host: &mut impl PaneService,

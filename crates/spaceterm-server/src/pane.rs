@@ -346,7 +346,7 @@ pub enum Color {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Cell {
     #[serde(default)]
-    pub hyperlink: Option<effects::Hyperlink>,
+    pub hyperlink: Option<u16>,
     pub text: String,
     pub foreground: Color,
     pub background: Color,
@@ -356,6 +356,9 @@ pub struct Cell {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Screen {
+    /// Per-screen targets; cells refer to indices in this bounded table.
+    #[serde(default)]
+    pub hyperlinks: Vec<effects::Hyperlink>,
     #[serde(default)]
     pub generation: u64,
     #[serde(default)]

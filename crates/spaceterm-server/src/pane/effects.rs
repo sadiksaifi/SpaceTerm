@@ -1,6 +1,9 @@
 //! Bounded native requests. These values carry no client-local file authority.
 use serde::{Deserialize, Serialize};
 
+pub const MAX_SCREEN_HYPERLINKS: usize = 1024;
+pub const MAX_SCREEN_HYPERLINK_BYTES: usize = 256 * 1024;
+
 pub const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]

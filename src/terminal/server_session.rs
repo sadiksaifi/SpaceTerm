@@ -1727,7 +1727,12 @@ fn decode_screen(
         cols: wire.columns,
         rows: wire.rows.len() as u16,
     };
-    let mut links = std::collections::HashMap::new();
+    let links = wire
+        .hyperlinks
+        .iter()
+        .take(pane::effects::MAX_SCREEN_HYPERLINKS)
+        .map(|link| decode_hyperlink(link, local_files))
+        .collect::<Vec<_>>();
     screen.rows = wire
         .rows
         .into_iter()
@@ -1758,12 +1763,11 @@ fn decode_screen(
                         },
                         selected: false,
                         semantic_content: CellSemanticSnapshot::Output,
-                        hyperlink: c.hyperlink.as_ref().and_then(|link| {
-                            links
-                                .entry(link.clone())
-                                .or_insert_with(|| decode_hyperlink(link, local_files))
-                                .clone()
-                        }),
+                        hyperlink: c
+                            .hyperlink
+                            .and_then(|index| links.get(usize::from(index)))
+                            .cloned()
+                            .flatten(),
                     })
                     .collect::<Vec<_>>(),
             )
@@ -2873,6 +2877,7 @@ mod tests {
         let mut overrides = vec![false; 256];
         overrides[1] = true;
         let screen = pane::Screen {
+            hyperlinks: Vec::new(),
             generation: 1,
             mouse_tracking: false,
             alternate_scroll: false,
@@ -2896,9 +2901,13 @@ mod tests {
             alternate: false,
         };
         let mut linked = screen.clone();
-        linked.rows[0][0].hyperlink =
-            Some(pane::effects::Hyperlink::Url("https://example.test".into()));
-        linked.rows[0][1].hyperlink = Some(pane::effects::Hyperlink::File("/etc/passwd".into()));
+        linked.hyperlinks = vec![
+            pane::effects::Hyperlink::Url("https://example.test".into()),
+            pane::effects::Hyperlink::File("/etc/passwd".into()),
+        ];
+        linked.rows[0][0].hyperlink = Some(0);
+        linked.rows[0][1].hyperlink = Some(1);
+        linked.rows[1][0].hyperlink = Some(u16::MAX);
         let linked =
             decode_screen(linked, PresentationGeneration::test(1), &appearance, None).unwrap();
         assert_eq!(
@@ -2906,6 +2915,7 @@ mod tests {
             super::super::hyperlink::HyperlinkKind::Url
         );
         assert!(linked.rows[0][1].hyperlink.is_none());
+        assert!(linked.rows[1][0].hyperlink.is_none());
         let decoded =
             decode_screen(screen, PresentationGeneration::test(1), &appearance, None).unwrap();
         assert_eq!(
