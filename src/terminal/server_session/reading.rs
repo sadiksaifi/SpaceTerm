@@ -32,6 +32,11 @@ impl ReadingState {
         self.queue.clear();
     }
     pub(super) fn enqueue(&mut self, operation: Operation) -> bool {
+        if matches!(&operation, Operation::Pointer(p) if matches!(p.phase, pane::PointerPhase::Motion))
+            && matches!(self.queue.back(), Some(Operation::Pointer(p)) if matches!(p.phase, pane::PointerPhase::Motion))
+        {
+            self.queue.pop_back();
+        }
         // The newest query and scrollbar target supersede queued targets of the same kind.
         if matches!(
             operation,
@@ -49,7 +54,9 @@ impl ReadingState {
             self.queue
                 .retain(|op| !matches!(op, Operation::ScrollTo { .. }));
         }
-        if self.queue.len() < 128 {
+        let release = matches!(&operation, Operation::Pointer(p) if matches!(p.phase, pane::PointerPhase::Release));
+        // Preserve the final edge of an accepted gesture even when local reading is saturated.
+        if self.queue.len() < 128 || release && self.queue.len() == 128 {
             self.queue.push_back(operation);
             true
         } else {

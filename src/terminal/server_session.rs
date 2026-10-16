@@ -636,15 +636,11 @@ impl ActiveInput {
         };
         let (request, paste_reply) = match submitted.command {
             Input::Read(operation) => {
-                let accepted = state
+                state
                     .reading
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .enqueue(operation);
-                if !accepted {
-                    state.invalidate();
-                    return Err(ServerError::Protocol);
-                }
                 return Ok(());
             }
             Input::Key(key) => (
@@ -2045,6 +2041,79 @@ mod tests {
         assert!(
             adapter.input.try_recv().is_ok(),
             "Scroll must reach the server worker"
+        );
+    }
+
+    #[test]
+    fn a_sustained_drag_coalesces_motion_and_keeps_its_press_and_release() {
+        use super::super::pointer_input::{
+            PointerButton, PointerPhase, ShiftSelectionPolicy, SurfacePosition,
+        };
+        let mut adapter = Adapter::new();
+        let mapping = adapter.tracking_screen(4, 17, false);
+        let pointer = |phase, x| PointerInput {
+            generation: mapping.local,
+            phase,
+            button: Some(PointerButton::Left),
+            position: SurfacePosition { x, y: 1.0 },
+            modifiers: Default::default(),
+            shift_selection: ShiftSelectionPolicy::ReportToApplication,
+        };
+        adapter.handle.pointer(pointer(PointerPhase::Press, 1.0));
+        adapter.drain(|_| Ok(Reply::Unchanged)).unwrap();
+        for index in 0..1000 {
+            adapter
+                .handle
+                .pointer(pointer(PointerPhase::Motion, 1.0 + (index % 100) as f32));
+            adapter.drain(|_| Ok(Reply::Unchanged)).unwrap();
+        }
+        adapter
+            .handle
+            .pointer(pointer(PointerPhase::Release, 100.0));
+        adapter.drain(|_| Ok(Reply::Unchanged)).unwrap();
+        let mut reader = reading::Reader::default();
+        reader.screen(&adapter.handle.state, mapping, false);
+        let mut delivered = vec![];
+        for _ in 0..8 {
+            reader
+                .poll(
+                    &adapter.handle.state,
+                    adapter.active.lease,
+                    &mut |request| match request {
+                        Request::Read {
+                            operation: pane::reading::Operation::Pointer(p),
+                            ..
+                        } => {
+                            delivered.push((
+                                match p.phase {
+                                    pane::PointerPhase::Press => "press",
+                                    pane::PointerPhase::Motion => "motion",
+                                    pane::PointerPhase::Release => "release",
+                                },
+                                p.x,
+                            ));
+                            Ok(Reply::Reading { accepted: true })
+                        }
+                        Request::ReadingStatus { .. } => Ok(Reply::ReadingReady {
+                            generation: 17,
+                            selection_present: false,
+                        }),
+                        _ => panic!("unexpected reading request"),
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            delivered,
+            vec![("press", 1.0), ("motion", 100.0), ("release", 100.0)]
+        );
+        assert_eq!(
+            adapter.handle.state.status(),
+            DevelopmentPaneStatus::Connected
+        );
+        assert_eq!(
+            adapter.handle.state.epoch.load(Ordering::Acquire),
+            mapping.epoch
         );
     }
 
