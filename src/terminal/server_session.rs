@@ -152,11 +152,19 @@ impl DevelopmentPaneState {
         }
         {
             let mut interaction = self.interaction.lock().unwrap_or_else(|e| e.into_inner());
-            interaction.screen = Some(screen).filter(|mapping| {
+            let mapping = Some(screen).filter(|mapping| {
                 interaction
                     .requested_size
                     .is_none_or(|size| size == mapping.size)
             });
+            let same_geometry = interaction
+                .screen
+                .zip(mapping)
+                .is_some_and(|(old, new)| old.epoch == new.epoch && old.size == new.size);
+            if !same_geometry {
+                interaction.pointer_geometry_start = mapping.map(|mapping| mapping.local);
+            }
+            interaction.screen = mapping;
         }
         self.connected_epoch.store(epoch, Ordering::Release);
         if paste_unconfirmed {
@@ -273,6 +281,7 @@ struct Interaction {
     focus_generation: u64,
     target: pane::FocusTarget,
     screen: Option<ScreenMapping>,
+    pointer_geometry_start: Option<PresentationGeneration>,
     requested_size: Option<PaneSize>,
     pending: Option<PendingPaste>,
     resolving: Option<ResolvingPaste>,
@@ -286,6 +295,7 @@ impl Default for Interaction {
             focus_generation: 1,
             target: pane::FocusTarget::Unfocused,
             screen: None,
+            pointer_geometry_start: None,
             requested_size: None,
             pending: None,
             resolving: None,
@@ -298,6 +308,7 @@ impl Interaction {
     fn disconnect(&mut self) {
         self.interactive = false;
         self.screen = None;
+        self.pointer_geometry_start = None;
         self.pending = None;
         self.resolving = None;
         self.paste_request = None;
@@ -365,16 +376,25 @@ impl PresentationHandle {
         &self,
         generation: PresentationGeneration,
         position: super::pointer_input::SurfacePosition,
+        continuation: bool,
     ) -> Option<(ScreenMapping, f32, f32)> {
-        let mapping = self
+        let interaction = self
             .state
             .interaction
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .screen?;
-        if mapping.local != generation || !position.x.is_finite() || !position.y.is_finite() {
+            .unwrap_or_else(|e| e.into_inner());
+        let mapping = interaction.screen?;
+        let generation_matches = if continuation {
+            interaction
+                .pointer_geometry_start
+                .is_some_and(|start| start <= generation && generation <= mapping.local)
+        } else {
+            generation == mapping.local
+        };
+        if !generation_matches || !position.x.is_finite() || !position.y.is_finite() {
             return None;
         }
+        drop(interaction);
         let geometry = *self.geometry.lock().unwrap_or_else(|e| e.into_inner());
         let cell = geometry.logical_cell_size();
         let backing_cell = geometry.to_backing_position(super::geometry::LogicalPosition::new(
@@ -1335,6 +1355,9 @@ impl TerminalSessionHandle for PresentationHandle {
                 .unwrap_or_else(|e| e.into_inner());
             interaction.requested_size = Some(size);
             interaction.screen = interaction.screen.filter(|mapping| mapping.size == size);
+            if interaction.screen.is_none() {
+                interaction.pointer_geometry_start = None;
+            }
         }
         *self.size.lock().unwrap_or_else(|e| e.into_inner()) = size;
         self.send(Input::Resize(size));
@@ -1393,10 +1416,14 @@ impl TerminalSessionHandle for PresentationHandle {
     fn clear_screen_and_scrollback(&self) {}
     fn pointer(&self, input: PointerInput) {
         use super::pointer_input::{PointerButton, PointerPhase, ShiftSelectionPolicy};
-        let Some((mapping, x, y)) = self.pointer_position(input.generation, input.position) else {
+        let continuation = input.phase == PointerPhase::Release
+            || (input.phase == PointerPhase::Motion && input.button.is_some());
+        let Some((mapping, x, y)) =
+            self.pointer_position(input.generation, input.position, continuation)
+        else {
             return;
         };
-        if !mapping.mouse_tracking {
+        if !mapping.mouse_tracking && !continuation {
             return;
         }
         self.send(Input::Pointer(
@@ -1430,7 +1457,8 @@ impl TerminalSessionHandle for PresentationHandle {
     }
     fn wheel(&self, input: WheelInput) {
         use super::pointer_input::{ShiftSelectionPolicy, WheelPhase};
-        let Some((mapping, x, y)) = self.pointer_position(input.generation, input.position) else {
+        let Some((mapping, x, y)) = self.pointer_position(input.generation, input.position, false)
+        else {
             return;
         };
         if !mapping.mouse_tracking && !(mapping.alternate && mapping.alternate_scroll) {
@@ -1777,6 +1805,22 @@ mod tests {
                 )?;
             }
             Ok(())
+        }
+        fn tracking_screen(&self, local: u64, wire: u64, mouse_tracking: bool) -> ScreenMapping {
+            let mapping = ScreenMapping {
+                epoch: self.active.epoch,
+                local: PresentationGeneration::test(local),
+                wire,
+                size: *self.handle.size.lock().unwrap(),
+                mouse_tracking,
+                alternate: false,
+                alternate_scroll: false,
+            };
+            self.handle
+                .state
+                .connected(self.active.epoch, mapping, false)
+                .unwrap();
+            mapping
         }
         fn confirmation(&mut self) -> super::super::paste::PasteConfirmation {
             let reply = self
@@ -2176,6 +2220,193 @@ mod tests {
         adapter
             .drain(|_| panic!("input was sent after capability refusal"))
             .unwrap();
+    }
+
+    fn assert_tracked_continuation_after_output(tracking_after_output: bool) {
+        use super::super::pointer_input::*;
+        let mut adapter = Adapter::new();
+        let press_screen = adapter.tracking_screen(8, 91, true);
+        let pointer = PointerInput {
+            generation: press_screen.local,
+            phase: PointerPhase::Press,
+            button: Some(PointerButton::Left),
+            position: SurfacePosition { x: 15.0, y: 50.0 },
+            modifiers: InputModifiers::default(),
+            shift_selection: ShiftSelectionPolicy::ReportToApplication,
+        };
+        let mut delivered = Vec::new();
+        let lease = adapter.active.lease;
+        let mut server = |request: &Request| {
+            if matches!(
+                request,
+                Request::Input {
+                    input: pane::InteractiveInput::Wheel(_),
+                    ..
+                }
+            ) {
+                panic!("a stale wheel borrowed the continuation range");
+            }
+            if let Request::Input {
+                lease: actual,
+                input: pane::InteractiveInput::Pointer(pointer),
+                ..
+            } = request
+            {
+                assert_eq!(*actual, lease);
+                delivered.push((
+                    match pointer.phase {
+                        pane::PointerPhase::Press => "press",
+                        pane::PointerPhase::Motion => "motion",
+                        pane::PointerPhase::Release => "release",
+                    },
+                    pointer.screen_generation,
+                ));
+            }
+            Ok(Reply::Unchanged)
+        };
+        adapter.handle.pointer(pointer);
+        adapter.drain(&mut server).unwrap();
+        let next_screen = adapter.tracking_screen(9, 92, tracking_after_output);
+        // Starts and buttonless motion must not borrow the continuation range.
+        adapter.handle.pointer(pointer);
+        adapter.handle.pointer(PointerInput {
+            phase: PointerPhase::Motion,
+            button: None,
+            ..pointer
+        });
+        adapter.handle.wheel(WheelInput {
+            generation: pointer.generation,
+            horizontal_steps: 0,
+            vertical_steps: 1,
+            phase: WheelPhase::GestureChanged,
+            position: pointer.position,
+            modifiers: pointer.modifiers,
+            shift_selection: pointer.shift_selection,
+        });
+        let continuation = PointerInput {
+            generation: if tracking_after_output {
+                pointer.generation
+            } else {
+                next_screen.local
+            },
+            ..pointer
+        };
+        adapter.handle.pointer(PointerInput {
+            phase: PointerPhase::Motion,
+            ..continuation
+        });
+        adapter.handle.pointer(PointerInput {
+            phase: PointerPhase::Release,
+            ..continuation
+        });
+        adapter.drain(&mut server).unwrap();
+        let clickable = if tracking_after_output {
+            next_screen
+        } else {
+            adapter.tracking_screen(10, 93, true)
+        };
+        adapter.handle.pointer(PointerInput {
+            generation: clickable.local,
+            ..pointer
+        });
+        adapter.drain(&mut server).unwrap();
+        assert_eq!(
+            delivered,
+            vec![
+                ("press", 91),
+                ("motion", 92),
+                ("release", 92),
+                ("press", clickable.wire)
+            ],
+            "tracking after output: {tracking_after_output}"
+        );
+    }
+
+    #[test]
+    fn tracked_continuations_survive_a_newer_screen() {
+        assert_tracked_continuation_after_output(true);
+    }
+
+    #[test]
+    fn tracked_continuations_survive_tracking_exit() {
+        assert_tracked_continuation_after_output(false);
+    }
+
+    #[test]
+    fn continuations_never_retag_a_previous_epoch_or_replaced_geometry() {
+        use super::super::{
+            geometry::{BackingScale, CellGridSize, LogicalCellSize},
+            pointer_input::*,
+        };
+        for reconnect in [false, true] {
+            let mut adapter = Adapter::new();
+            let old_screen = adapter.tracking_screen(8, 91, true);
+            let pointer = PointerInput {
+                generation: old_screen.local,
+                phase: PointerPhase::Press,
+                button: Some(PointerButton::Left),
+                position: SurfacePosition { x: 15.0, y: 50.0 },
+                modifiers: InputModifiers::default(),
+                shift_selection: ShiftSelectionPolicy::ReportToApplication,
+            };
+            adapter.handle.pointer(pointer);
+            adapter.drain(|_| Ok(Reply::Unchanged)).unwrap();
+            if reconnect {
+                adapter.active.epoch = adapter.handle.state.invalidate();
+                adapter.active.lease.connection = [9; 32];
+                adapter.active.focus_sent = None;
+                adapter.handle.state.interaction.lock().unwrap().interactive = true;
+            } else {
+                let original = *adapter.handle.geometry.lock().unwrap();
+                adapter.handle.resize(TerminalGeometry::from_grid(
+                    CellGridSize::new(21, 6),
+                    LogicalCellSize::new(10.0, 20.0),
+                    BackingScale::ONE,
+                ));
+                adapter.handle.pointer(PointerInput {
+                    phase: PointerPhase::Release,
+                    ..pointer
+                });
+                // Returning to the same size must not resurrect the old range.
+                adapter.handle.resize(original);
+                adapter
+                    .drain(|request| {
+                        assert!(!matches!(request, Request::Input { .. }));
+                        Ok(Reply::Unchanged)
+                    })
+                    .unwrap();
+            }
+            let replacement = adapter.tracking_screen(9, 92, true);
+            adapter.handle.pointer(PointerInput {
+                phase: PointerPhase::Release,
+                ..pointer
+            });
+            adapter.handle.pointer(PointerInput {
+                phase: PointerPhase::Motion,
+                ..pointer
+            });
+            adapter.handle.pointer(PointerInput {
+                generation: replacement.local,
+                ..pointer
+            });
+            let mut delivered = Vec::new();
+            adapter
+                .drain(|request| {
+                    if let Request::Input {
+                        input: pane::InteractiveInput::Pointer(pointer),
+                        ..
+                    } = request
+                    {
+                        delivered.push((
+                            matches!(pointer.phase, pane::PointerPhase::Press),
+                            pointer.screen_generation,
+                        ));
+                    }
+                    Ok(Reply::Unchanged)
+                })
+                .unwrap();
+            assert_eq!(delivered, vec![(true, 92)], "reconnect: {reconnect}");
+        }
     }
 
     #[test]
