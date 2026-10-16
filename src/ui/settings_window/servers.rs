@@ -1,11 +1,12 @@
 //! The Servers section: the SpaceTerm Server for this account, this device's pairing with it, its
-//! authenticated status, and the service that runs it while the person is logged in.
-//! [`crate::local_server`] owns setup, pairing, authentication, and the service.
+//! authenticated status, and the service that runs it. On macOS the service runs while the person
+//! is logged in. On Linux it starts at boot and keeps running after logout once the account's
+//! lingering is on. [`crate::local_server`] owns setup, pairing, authentication, and the service.
 //!
 //! Every build offers the section for its own identity's server. Opening Settings asks the server
 //! nothing. Presenting the section checks the saved pairing, reads the service, and lists the
 //! verified server builds it could install. Only the person's explicit Set Up, Install, Start,
-//! Stop, Restart, or Uninstall changes either.
+//! Stop, Restart, Uninstall, or startup authorization changes either.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,7 +20,9 @@ use spaceterm_ui::{
 
 use super::SettingsWindow;
 use crate::application_identity::ApplicationIdentity;
-use crate::local_server::service::{RetainedInstallation, Service, ServiceStatus};
+use crate::local_server::service::{
+    LingerAuthorization, RetainedInstallation, Service, ServiceStatus,
+};
 use crate::local_server::{AuthenticatedStatus, LocalServer, ServerError};
 use crate::ui::appearance::ChromeAppearance;
 use crate::ui::sidebar_window::form::{CaptionTone, action_button, badge};
@@ -85,6 +88,12 @@ pub(super) trait ServerServiceControl: Send + Sync {
     fn restart(&self) -> Result<ServiceStatus, ServerError>;
     /// Stops and removes the service. Workspaces, pairings, and installations are kept.
     fn uninstall(&self) -> Result<ServiceStatus, ServerError>;
+    /// When the service starts the server.
+    fn startup(&self) -> ServiceStartup;
+    /// Asks the operating system to let this account's services run at boot and after logout.
+    /// Runs only from the person's confirmed authorization step. A cancelled or refused
+    /// authorization returns an error and changes nothing.
+    fn authorize_startup(&self) -> Result<(), ServerError>;
 }
 
 impl ServerServiceControl for Service {
@@ -115,6 +124,32 @@ impl ServerServiceControl for Service {
     fn uninstall(&self) -> Result<ServiceStatus, ServerError> {
         Service::uninstall(self)
     }
+
+    fn startup(&self) -> ServiceStartup {
+        if cfg!(target_os = "linux") {
+            ServiceStartup::AtBoot
+        } else {
+            ServiceStartup::AtLogin
+        }
+    }
+
+    fn authorize_startup(&self) -> Result<(), ServerError> {
+        // The desktop asks through pkexec for the one fixed loginctl command, for this account
+        // only. No SpaceTerm code runs as root.
+        Service::enable_linger(self, LingerAuthorization::Desktop)
+    }
+}
+
+/// When the platform's service starts the server, which decides what the row promises.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum ServiceStartup {
+    /// A macOS LaunchAgent: it starts at login and stops at logout. Installing needs no
+    /// administrator password.
+    #[default]
+    AtLogin,
+    /// A Linux systemd user service: it starts at boot and survives logout only while the
+    /// account's lingering is on, which takes one administrator authorization to turn on.
+    AtBoot,
 }
 
 /// The local server a Settings window presents, and the service that runs it where the platform
@@ -363,6 +398,12 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
                 ServerError::NotInstalled => {
                     guidance("Install the server's service below to start it.")
                 }
+                // Only the service's explicit Start can ask for this authorization.
+                ServerError::AuthorizationRequired => guidance(
+                    "Linux needs an administrator password before the server can run at startup \
+                     and after you log out. Choose Start Server for the background service below \
+                     to continue.",
+                ),
                 _ => (SharedString::from(error.to_string()), CaptionTone::Error),
             };
             (state, state_selector, explanation, action, false)
@@ -467,7 +508,7 @@ fn failure(error: ServerError) -> (&'static str, &'static str, Option<LocalServe
         ServerError::AuthorizationRequired => (
             "Authorization Required",
             "settings-local-server-state-authorization-required",
-            Some(Action::Check),
+            None,
         ),
         ServerError::CleanupUnresolved => (
             "Cleanup Unresolved",
@@ -484,9 +525,10 @@ fn failure(error: ServerError) -> (&'static str, &'static str, Option<LocalServe
     }
 }
 
-/// The connection row's guidance once the person has stopped the server.
-const STOPPED_GUIDANCE: &str =
-    "You stopped the server. It stays stopped, even after you log in again, until you start it.";
+/// The connection row's guidance once the person has stopped the server. A stopped server stays
+/// stopped through login on macOS and boot on Linux alike.
+const STOPPED_GUIDANCE: &str = "You stopped the server. It stays stopped, even after you \
+                                restart the computer, until you start it.";
 
 pub(super) const SERVICE_CONTROL_SELECTOR: &str = "settings-server-service-control";
 pub(super) const SERVICE_PROGRESS_SELECTOR: &str = "settings-server-service-progress";
@@ -504,6 +546,10 @@ pub(super) const RESTART_CONFIRM_SELECTOR: &str = "settings-server-restart-confi
 pub(super) const RESTART_CANCEL_SELECTOR: &str = "settings-server-restart-cancel";
 pub(super) const UNINSTALL_CONFIRM_SELECTOR: &str = "settings-server-uninstall-confirm";
 pub(super) const UNINSTALL_CANCEL_SELECTOR: &str = "settings-server-uninstall-cancel";
+pub(super) const AUTHORIZE_INSTALL_SELECTOR: &str = "settings-server-service-authorize-install";
+pub(super) const AUTHORIZE_START_SELECTOR: &str = "settings-server-service-authorize-start";
+pub(super) const AUTHORIZE_CONFIRM_SELECTOR: &str = "settings-server-authorize-confirm";
+pub(super) const AUTHORIZE_CANCEL_SELECTOR: &str = "settings-server-authorize-cancel";
 
 /// The step a person can take from the service row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -517,6 +563,11 @@ pub(super) enum ServiceAction {
     Stop,
     Restart,
     Uninstall,
+    /// Explains startup authorization, asks the operating system for it, then installs the build
+    /// whose installation it refused.
+    AuthorizeInstall,
+    /// Explains startup authorization, asks the operating system for it, then starts the server.
+    AuthorizeStart,
 }
 
 impl ServiceAction {
@@ -529,6 +580,8 @@ impl ServiceAction {
             Self::Stop => "Stop Server",
             Self::Restart => "Restart Server",
             Self::Uninstall => "Uninstall",
+            Self::AuthorizeInstall => "Authorize and Install\u{2026}",
+            Self::AuthorizeStart => "Authorize and Start\u{2026}",
         }
     }
 
@@ -540,16 +593,22 @@ impl ServiceAction {
             Self::Stop => STOP_SELECTOR,
             Self::Restart => RESTART_SELECTOR,
             Self::Uninstall => UNINSTALL_SELECTOR,
+            Self::AuthorizeInstall => AUTHORIZE_INSTALL_SELECTOR,
+            Self::AuthorizeStart => AUTHORIZE_START_SELECTOR,
         }
     }
 
-    /// The element identity of the slot the button occupies. Install, Start, Stop, and Check share
-    /// the leading slot, so keyboard focus stays on it when one replaces another.
+    /// The element identity of the slot the button occupies. Install, Start, Stop, Check, and the
+    /// authorization steps share the leading slot, so keyboard focus stays on it when one replaces
+    /// another.
     const fn slot(self) -> &'static str {
         match self {
-            Self::Check | Self::Install | Self::Start | Self::Stop => {
-                "settings-server-service-primary"
-            }
+            Self::Check
+            | Self::Install
+            | Self::Start
+            | Self::Stop
+            | Self::AuthorizeInstall
+            | Self::AuthorizeStart => "settings-server-service-primary",
             Self::Restart => "settings-server-service-secondary",
             Self::Uninstall => "settings-server-service-removal",
         }
@@ -562,6 +621,14 @@ impl ServiceAction {
             Self::Stop => Some("Ends the server's Terminal Sessions. SpaceTerm asks first."),
             Self::Restart => Some("Ends the server's Terminal Sessions. SpaceTerm asks first."),
             Self::Uninstall => Some("Removes the service. SpaceTerm asks first."),
+            Self::AuthorizeInstall => Some(
+                "SpaceTerm explains the change first. Linux then asks for an administrator \
+                 password, and SpaceTerm installs and starts the server.",
+            ),
+            Self::AuthorizeStart => Some(
+                "SpaceTerm explains the change first. Linux then asks for an administrator \
+                 password, and SpaceTerm starts the server.",
+            ),
             Self::Check | Self::Install | Self::Start => None,
         }
     }
@@ -591,8 +658,41 @@ impl ServiceAction {
                 "Restarting the server. Its Terminal Sessions end\u{2026}",
             ),
             Self::Uninstall => ("Uninstalling", "Stopping and removing the service\u{2026}"),
+            Self::AuthorizeInstall | Self::AuthorizeStart => (
+                "Authorizing",
+                "Waiting for administrator authorization\u{2026}",
+            ),
         }
     }
+}
+
+/// The Install or Start the service refused until the person authorizes startup at boot. The
+/// authorization step retries only this request, and only after the person confirms it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum AuthorizedRequest {
+    /// Installs and starts the named verified build.
+    Install(PathBuf),
+    /// Starts the installed server. A Restart refused after stopping retries as Start.
+    Start,
+}
+
+impl AuthorizedRequest {
+    /// The step it replaces and the authorization step that takes its place.
+    const fn steps(&self) -> (ServiceAction, ServiceAction) {
+        match self {
+            Self::Install(_) => (ServiceAction::Install, ServiceAction::AuthorizeInstall),
+            Self::Start => (ServiceAction::Start, ServiceAction::AuthorizeStart),
+        }
+    }
+}
+
+/// A request waiting for startup authorization.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct PendingAuthorization {
+    pub(super) request: AuthorizedRequest,
+    /// Whether the person already tried and the operating system's prompt was cancelled, refused,
+    /// or timed out.
+    pub(super) declined: bool,
 }
 
 /// The alert that asks before Stop, Restart, or Uninstall.
@@ -609,15 +709,28 @@ pub(super) struct ServiceConfirmation {
 
 impl ServiceConfirmation {
     /// The confirmation for one action, or `None` for an action that needs none. Uninstalling a
-    /// server that is not running ends no Terminal Session, and the message says so.
-    pub(super) const fn for_action(action: ServiceAction, running: bool) -> Option<Self> {
+    /// server that is not running ends no Terminal Session, and the message says so. The detail
+    /// names the platform's startup, since a stopped or uninstalled server misses it.
+    pub(super) const fn for_action(
+        action: ServiceAction,
+        running: bool,
+        startup: ServiceStartup,
+    ) -> Option<Self> {
         Some(match action {
             ServiceAction::Stop => Self {
                 id: "settings-server-stop",
                 title: "Stop Server",
                 message: "Stop the server and end its Terminal Sessions?",
-                detail: "Programs running in them stop. Workspaces are kept. The server stays \
-                         stopped, even after you log in again, until you choose Start Server.",
+                detail: match startup {
+                    ServiceStartup::AtLogin => {
+                        "Programs running in them stop. Workspaces are kept. The server stays \
+                         stopped, even after you log in again, until you choose Start Server."
+                    }
+                    ServiceStartup::AtBoot => {
+                        "Programs running in them stop. Workspaces are kept. The server stays \
+                         stopped, even after the computer restarts, until you choose Start Server."
+                    }
+                },
                 confirm: "Stop Server",
                 confirm_selector: STOP_CONFIRM_SELECTOR,
                 cancel_selector: STOP_CANCEL_SELECTOR,
@@ -640,14 +753,72 @@ impl ServiceConfirmation {
                 } else {
                     "Uninstall the server?"
                 },
-                detail: "It no longer starts when you log in. Workspaces, paired devices, and \
-                         verified server installations are kept, so you can install it again.",
+                detail: match startup {
+                    ServiceStartup::AtLogin => {
+                        "It no longer starts when you log in. Workspaces, paired devices, and \
+                         verified server installations are kept, so you can install it again."
+                    }
+                    // Lingering is account policy other services may rely on, so it stays on.
+                    ServiceStartup::AtBoot => {
+                        "It no longer starts when the computer starts. Workspaces, paired \
+                         devices, and verified server installations are kept, so you can install \
+                         it again. Lingering stays on for your account, because other services \
+                         may rely on it. To turn it off, run loginctl disable-linger."
+                    }
+                },
                 confirm: "Uninstall",
                 confirm_selector: UNINSTALL_CONFIRM_SELECTOR,
                 cancel_selector: UNINSTALL_CANCEL_SELECTOR,
             },
-            ServiceAction::Check | ServiceAction::Install | ServiceAction::Start => return None,
+            ServiceAction::Check
+            | ServiceAction::Install
+            | ServiceAction::Start
+            | ServiceAction::AuthorizeInstall
+            | ServiceAction::AuthorizeStart => return None,
         })
+    }
+}
+
+/// The alert that explains startup authorization before the operating system asks for an
+/// administrator password. Cancel takes initial focus, and cancelling here or in the operating
+/// system's prompt changes nothing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct AuthorizationPrompt {
+    pub(super) title: &'static str,
+    pub(super) message: &'static str,
+    pub(super) detail: SharedString,
+    pub(super) confirm: &'static str,
+}
+
+impl AuthorizationPrompt {
+    /// The prompt for one waiting request. `build` names the build Install installs.
+    pub(super) fn for_request(request: &AuthorizedRequest, build: Option<&str>) -> Self {
+        let (then, confirm) = match (request, build) {
+            (AuthorizedRequest::Install(_), Some(build)) => (
+                format!("SpaceTerm then installs {build} and starts the server."),
+                "Authorize and Install",
+            ),
+            (AuthorizedRequest::Install(_), None) => (
+                "SpaceTerm then installs and starts the server.".to_owned(),
+                "Authorize and Install",
+            ),
+            (AuthorizedRequest::Start, _) => (
+                "SpaceTerm then starts the server.".to_owned(),
+                "Authorize and Start",
+            ),
+        };
+        Self {
+            title: "Run the Server at Startup",
+            message: "Let your account\u{2019}s services start at boot and keep running after you \
+                      log out?",
+            detail: SharedString::from(format!(
+                "Linux asks for an administrator password to turn on lingering for your \
+                 account. Lingering applies to every service your account runs, and \
+                 uninstalling the server leaves it on. {then} If you cancel here or in the \
+                 password prompt, nothing changes."
+            )),
+            confirm,
+        }
     }
 }
 
@@ -702,6 +873,9 @@ pub(super) struct ServicePresentation {
     pub(super) install_choices: Vec<InstallChoice>,
     /// The action awaiting its result. The row shows progress and withholds its steps meanwhile.
     pub(super) working: Option<ServiceAction>,
+    /// The refused request the row's authorization step retries, while the service still offers
+    /// it.
+    pub(super) authorization: Option<PendingAuthorization>,
 }
 
 /// A verified server build Install can install, named by its version and source commit.
@@ -749,6 +923,8 @@ impl InstallChoice {
 /// What the service row last learned and what it is doing.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct ServiceState {
+    /// When the platform's service starts the server.
+    pub(super) startup: ServiceStartup,
     /// The last status read. `None` until the first read succeeds, or after a read failed.
     pub(super) status: Option<ServiceStatus>,
     /// Why the last read or operation failed, until the next action.
@@ -756,10 +932,14 @@ pub(super) struct ServiceState {
     /// The verified builds found with the last status read that showed no installed service.
     pub(super) installations: Vec<RetainedInstallation>,
     pub(super) working: Option<ServiceAction>,
+    /// The Install or Start refused for want of startup authorization, until the next action.
+    pub(super) authorization: Option<PendingAuthorization>,
 }
 
 /// The presentation of one service state. A failed operation keeps the badge and steps of the
 /// status read after it, so the row says what is true now and why the operation did not finish.
+/// A request refused for want of startup authorization instead offers the step that authorizes
+/// and retries it.
 pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
     let guidance = |text: &'static str| (SharedString::new_static(text), CaptionTone::Guidance);
     let phase = state.status.map(ServicePhase::of);
@@ -770,18 +950,37 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
     } else {
         Vec::new()
     };
-    let (badge, state_selector, (explanation, tone)) = match (phase, state.failure) {
-        (None, None) => (
+    // The authorization applies only while the service still offers the step it replaces, and
+    // Install only while its build is still listed.
+    let authorization = state.authorization.filter(|pending| {
+        let (step, _) = pending.request.steps();
+        let listed = match &pending.request {
+            AuthorizedRequest::Install(directory) => install_choices
+                .iter()
+                .any(|choice| &choice.directory == directory),
+            AuthorizedRequest::Start => true,
+        };
+        listed && phase.is_some_and(|phase| phase.actions().contains(&step))
+    });
+    let at_boot = state.startup == ServiceStartup::AtBoot;
+    let (badge, state_selector, (explanation, tone)) = match (phase, state.failure, &authorization)
+    {
+        (None, None, _) => (
             "Not Checked",
             "settings-server-service-state-not-checked",
             guidance("SpaceTerm reads the service when you open this section."),
         ),
-        (None, Some(error)) => (
+        (None, Some(error), _) => (
             "Unknown",
             "settings-server-service-state-unknown",
             (SharedString::from(error.to_string()), CaptionTone::Error),
         ),
-        (Some(phase), failure) => {
+        (Some(phase), _, Some(pending)) => (
+            "Authorization Required",
+            "settings-server-service-state-authorization-required",
+            authorization_caption(pending, phase),
+        ),
+        (Some(phase), failure, None) => {
             let (badge, selector, caption) = match phase {
                 ServicePhase::NotInstalled => (
                     "Not Installed",
@@ -792,11 +991,23 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                              command to keep a signed package for this account, then choose \
                              Check Now.",
                         ),
+                        // Installing a stopped server starts nothing, so it needs no
+                        // authorization on either platform.
                         [only] if stopped => (
                             SharedString::from(format!(
                                 "{} is verified and ready to install. You stopped the server. \
                                  Installing keeps it stopped until you start it. No \
                                  administrator password is needed.",
+                                only.label
+                            )),
+                            CaptionTone::Guidance,
+                        ),
+                        [only] if at_boot => (
+                            SharedString::from(format!(
+                                "{} is verified and ready to install. The server then starts for \
+                                 your account when the computer starts and keeps running after \
+                                 you log out or quit SpaceTerm. If Linux needs an administrator \
+                                 password to allow that, SpaceTerm asks you first.",
                                 only.label
                             )),
                             CaptionTone::Guidance,
@@ -815,6 +1026,12 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                              server. Installing keeps it stopped until you start it. No \
                              administrator password is needed.",
                         ),
+                        _ if at_boot => guidance(
+                            "Choose a verified server version from Install. It starts for your \
+                             account when the computer starts and keeps running after you log \
+                             out or quit SpaceTerm. If Linux needs an administrator password to \
+                             allow that, SpaceTerm asks you first.",
+                        ),
                         _ => guidance(
                             "Choose a verified server version from Install. It runs for your \
                              account whenever you\u{2019}re logged in, even after SpaceTerm \
@@ -825,18 +1042,27 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                 ServicePhase::Running => (
                     "Running",
                     "settings-server-service-state-running",
-                    guidance(
+                    // The status does not report lingering, which can be turned off outside
+                    // SpaceTerm, so only surviving SpaceTerm's quit is promised outright.
+                    guidance(if at_boot {
+                        "The server keeps running after SpaceTerm quits. While lingering stays \
+                         on for your account, it also starts when the computer starts and keeps \
+                         running after you log out."
+                    } else {
                         "The server starts when you log in and keeps running after SpaceTerm \
-                         quits.",
-                    ),
+                         quits."
+                    }),
                 ),
                 ServicePhase::Stopped => (
                     "Stopped",
                     "settings-server-service-state-stopped",
-                    guidance(
+                    guidance(if at_boot {
+                        "You stopped the server. It stays stopped, even after the computer \
+                         restarts or you open SpaceTerm, until you start it."
+                    } else {
                         "You stopped the server. It stays stopped, even after you log in again \
-                         or open SpaceTerm, until you start it.",
-                    ),
+                         or open SpaceTerm, until you start it."
+                    }),
                 ),
                 ServicePhase::NotRunning => (
                     "Not Running",
@@ -859,6 +1085,17 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
         || vec![ServiceAction::Check],
         |phase| phase.actions().to_vec(),
     );
+    // The authorization step takes the place of the Install or Start it retries.
+    let actions = match &authorization {
+        Some(pending) => {
+            let (step, authorize) = pending.request.steps();
+            actions
+                .into_iter()
+                .map(|action| if action == step { authorize } else { action })
+                .collect()
+        }
+        None => actions,
+    };
     // Without a verified build, Install has nothing to install. Another check finds a build the
     // person has since kept.
     let actions = if phase == Some(ServicePhase::NotInstalled) && install_choices.is_empty() {
@@ -885,7 +1122,38 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
         actions,
         install_choices,
         working: state.working,
+        authorization,
     }
+}
+
+/// Why the row asks for startup authorization, what is true meanwhile, and the step that
+/// continues.
+fn authorization_caption(
+    pending: &PendingAuthorization,
+    phase: ServicePhase,
+) -> (SharedString, CaptionTone) {
+    let reason = if pending.declined {
+        "Authorization did not complete, so nothing changed."
+    } else {
+        "Linux needs an administrator password before the server can start at boot and keep \
+         running after you log out."
+    };
+    let now = match phase {
+        ServicePhase::NotInstalled => "The server is not installed.",
+        ServicePhase::Stopped => "The server is stopped.",
+        ServicePhase::NotRunning | ServicePhase::Running => "The server is not running.",
+    };
+    let (_, step) = pending.request.steps();
+    let step = step.label().trim_end_matches('\u{2026}');
+    let next = if pending.declined {
+        "to try again"
+    } else {
+        "to continue"
+    };
+    (
+        SharedString::from(format!("{reason} {now} Choose {step} {next}.")),
+        CaptionTone::Warning,
+    )
 }
 
 /// Owns the offered service, its last state, and the pending operation.
@@ -898,9 +1166,15 @@ pub(super) struct ServerServiceRow {
 
 impl ServerServiceRow {
     pub(super) fn new(control: Result<Arc<dyn ServerServiceControl>, ServerError>) -> Self {
+        let startup = control
+            .as_ref()
+            .map_or_else(|_| ServiceStartup::default(), |control| control.startup());
         Self {
             control,
-            state: ServiceState::default(),
+            state: ServiceState {
+                startup,
+                ..ServiceState::default()
+            },
             _operation: None,
         }
     }
@@ -1014,8 +1288,8 @@ impl SettingsWindow {
     }
 
     /// Runs one action from the service row. Install installs the one verified build the row
-    /// names; several builds are chosen from Install's menu instead. Stop, Restart, and Uninstall
-    /// ask for confirmation first, so they need a window.
+    /// names; several builds are chosen from Install's menu instead. Stop, Restart, Uninstall, and
+    /// the authorization steps ask for confirmation first, so they need a window.
     pub(super) fn request_server_service(
         &mut self,
         action: ServiceAction,
@@ -1039,14 +1313,47 @@ impl SettingsWindow {
             ServiceAction::Stop | ServiceAction::Restart | ServiceAction::Uninstall => {
                 self.confirm_server_service(action, window, cx);
             }
+            ServiceAction::AuthorizeInstall | ServiceAction::AuthorizeStart => {
+                self.confirm_startup_authorization(action, window, cx);
+            }
         }
     }
 
     /// Runs an action that needs no installation. Stop, Restart, and Uninstall run only after the
     /// person confirms.
     pub(super) fn run_server_service(&mut self, action: ServiceAction, cx: &mut Context<Self>) {
-        debug_assert_ne!(action, ServiceAction::Install);
+        debug_assert!(!matches!(
+            action,
+            ServiceAction::Install
+                | ServiceAction::AuthorizeInstall
+                | ServiceAction::AuthorizeStart
+        ));
         self.run_service_operation(action, None, cx);
+    }
+
+    /// Asks the operating system for startup authorization, then retries the request it refused.
+    /// Runs only after the person confirms the explanation, and only for the request the row
+    /// still offers to authorize.
+    pub(super) fn authorize_server_startup(
+        &mut self,
+        action: ServiceAction,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pending) = self
+            .server_service_presentation()
+            .and_then(|presentation| presentation.authorization)
+        else {
+            return;
+        };
+        let (_, step) = pending.request.steps();
+        if step != action {
+            return;
+        }
+        let installation = match pending.request {
+            AuthorizedRequest::Install(installation) => Some(installation),
+            AuthorizedRequest::Start => None,
+        };
+        self.run_service_operation(action, installation, cx);
     }
 
     /// Installs the build the person chose. Only a build the last read verified and listed is
@@ -1067,12 +1374,18 @@ impl SettingsWindow {
     /// the operation failed, so the row presents the status that is true afterwards. While no
     /// service is installed, it also lists the verified builds Install can offer. Only one runs at
     /// a time, and a change waits for the connection row to finish.
+    ///
+    /// An Install, Start, or Restart refused for want of startup authorization waits for the
+    /// person's authorization step. That step asks the operating system, and only when it
+    /// succeeds does it retry the refused request. Nothing else asks for authorization.
     fn run_service_operation(
         &mut self,
         action: ServiceAction,
         installation: Option<PathBuf>,
         cx: &mut Context<Self>,
     ) {
+        use ServiceAction as Action;
+
         if !self.server_service_ready(action) {
             return;
         }
@@ -1083,21 +1396,28 @@ impl SettingsWindow {
             return;
         };
         let control = Arc::clone(control);
+        let startup = row.state.startup;
         row.state.working = Some(action);
         row.state.failure = None;
+        let authorizing = matches!(action, Action::AuthorizeInstall | Action::AuthorizeStart);
+        let retry = installation.clone();
         let result = cx.background_spawn(async move {
-            let outcome = match (action, installation) {
-                (ServiceAction::Install, Some(installation)) => control.install(&installation),
-                (ServiceAction::Install, None) => Err(ServerError::RuntimeUnavailable),
-                (ServiceAction::Check, _) => control.status(),
-                (ServiceAction::Start, _) => control.start(),
-                (ServiceAction::Stop, _) => control.stop(),
-                (ServiceAction::Restart, _) => control.restart(),
-                (ServiceAction::Uninstall, _) => control.uninstall(),
+            let outcome = match (action, installation.as_deref()) {
+                (Action::Install, Some(installation)) => control.install(installation),
+                (Action::Install, None) => Err(ServerError::RuntimeUnavailable),
+                (Action::Check, _) => control.status(),
+                (Action::Start, _) => control.start(),
+                (Action::Stop, _) => control.stop(),
+                (Action::Restart, _) => control.restart(),
+                (Action::Uninstall, _) => control.uninstall(),
+                (Action::AuthorizeInstall | Action::AuthorizeStart, _) => {
+                    control.authorize_startup().and_then(|()| control.status())
+                }
             };
+            let authorized = authorizing && outcome.is_ok();
             let (status, failure) = match outcome {
                 Ok(status) => (Some(status), None),
-                Err(error) if action == ServiceAction::Check => (None, Some(error)),
+                Err(error) if action == Action::Check => (None, Some(error)),
                 Err(error) => (control.status().ok(), Some(error)),
             };
             // Listing verifies each build and never installs or starts one. An installed service
@@ -1109,21 +1429,48 @@ impl SettingsWindow {
                 },
                 _ => (Vec::new(), failure),
             };
-            ServiceState {
+            // A request that would start the server waits for authorization. A Restart refused
+            // after stopping continues as Start, which is what the person asked for.
+            let request = match (failure, action) {
+                (
+                    Some(ServerError::AuthorizationRequired),
+                    Action::Install | Action::AuthorizeInstall,
+                ) => installation.map(AuthorizedRequest::Install),
+                (
+                    Some(ServerError::AuthorizationRequired),
+                    Action::Start | Action::Restart | Action::AuthorizeStart,
+                ) => Some(AuthorizedRequest::Start),
+                _ => None,
+            };
+            let state = ServiceState {
+                startup,
                 status,
                 failure,
                 installations,
                 working: None,
-            }
+                authorization: request.map(|request| PendingAuthorization {
+                    request,
+                    declined: authorizing,
+                }),
+            };
+            (state, authorized)
         });
         row._operation = Some(cx.spawn(async move |settings, cx| {
-            let state = result.await;
+            let (state, authorized) = result.await;
             let _ = settings.update(cx, |settings, cx| {
                 if let Some(row) = &mut settings.server_service {
                     row.state = state;
                 }
+                // The authorization the person confirmed continues with the request it was asked
+                // for. Install still installs only a build the last read listed.
+                if authorized {
+                    match retry {
+                        Some(installation) => settings.install_server_service(installation, cx),
+                        None => settings.run_server_service(Action::Start, cx),
+                    }
+                }
                 // A change starts, stops, or replaces the server the connection row authenticates
-                // with, so the connection is checked afresh.
+                // with, so the connection is checked afresh. A retry checks it when it finishes.
                 if action.changes_service() {
                     settings.check_local_server(cx);
                 }
@@ -1131,6 +1478,73 @@ impl SettingsWindow {
             });
         }));
         cx.notify();
+    }
+
+    /// Explains what startup authorization changes before the operating system asks for an
+    /// administrator password. Cancel takes initial focus and Return does nothing, so only an
+    /// explicit choice continues. Cancelling leaves everything as it is.
+    fn confirm_startup_authorization(
+        &mut self,
+        action: ServiceAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(presentation) = self.server_service_presentation() else {
+            return;
+        };
+        let Some(pending) = presentation.authorization else {
+            return;
+        };
+        let build = match &pending.request {
+            AuthorizedRequest::Install(directory) => presentation
+                .install_choices
+                .iter()
+                .find(|choice| &choice.directory == directory)
+                .map(|choice| choice.label.clone()),
+            AuthorizedRequest::Start => None,
+        };
+        let prompt = AuthorizationPrompt::for_request(&pending.request, build.as_deref());
+        let owner = cx.weak_entity();
+        let result = Alert::new(
+            ModalId::new("settings-server-authorize"),
+            prompt.title,
+            prompt.title,
+            prompt.message,
+            vec![
+                ModalAction::new(
+                    true,
+                    prompt.confirm,
+                    ModalActionRole::Affirmative,
+                    AUTHORIZE_CONFIRM_SELECTOR,
+                )
+                .with_emphasis(ModalActionEmphasis::Prominent),
+                ModalAction::new(
+                    false,
+                    "Cancel",
+                    ModalActionRole::Cancel,
+                    AUTHORIZE_CANCEL_SELECTOR,
+                ),
+            ],
+        )
+        .intent(AlertIntent::Warning)
+        .detail(prompt.detail)
+        .present(window, cx, move |outcome, cx| {
+            if !matches!(
+                outcome,
+                AlertOutcome::Activated {
+                    action_id: true,
+                    ..
+                }
+            ) {
+                return;
+            }
+            let _ = owner.update(cx, |settings, cx| {
+                settings.authorize_server_startup(action, cx);
+            });
+        });
+        if result.is_err() {
+            eprintln!("failed to present the SpaceTerm server startup authorization");
+        }
     }
 
     /// Asks before an action that ends the server's Terminal Sessions or removes the service.
@@ -1141,12 +1555,14 @@ impl SettingsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let running = self
-            .server_service
-            .as_ref()
-            .and_then(|row| row.state.status)
+        let Some(state) = self.server_service.as_ref().map(|row| &row.state) else {
+            return;
+        };
+        let running = state
+            .status
             .is_some_and(|status| ServicePhase::of(status) == ServicePhase::Running);
-        let Some(confirmation) = ServiceConfirmation::for_action(action, running) else {
+        let Some(confirmation) = ServiceConfirmation::for_action(action, running, state.startup)
+        else {
             return;
         };
         let owner = cx.weak_entity();
@@ -1227,6 +1643,14 @@ impl SettingsWindow {
         // ignored, and the status says why.
         let owner = cx.weak_entity();
         let install_choices = presentation.install_choices;
+        // The authorization step names the build it installs, as Install does.
+        let authorized_build = match presentation.authorization.map(|pending| pending.request) {
+            Some(AuthorizedRequest::Install(directory)) => install_choices
+                .iter()
+                .find(|choice| choice.directory == directory)
+                .map(|choice| choice.label.clone()),
+            _ => None,
+        };
         let actions = presentation.actions.iter().map(|&action| {
             let owner = owner.clone();
             // Several verified builds make Install a menu of them, so the person names the build
@@ -1250,9 +1674,16 @@ impl SettingsWindow {
                     })
                     .into_any_element();
             }
-            let consequence = match (action, install_choices.as_slice()) {
-                (ServiceAction::Install, [only]) => {
+            let consequence = match (action, install_choices.as_slice(), &authorized_build) {
+                (ServiceAction::Install, [only], _) => {
                     Some(SharedString::from(format!("Installs {}.", only.label)))
+                }
+                (ServiceAction::AuthorizeInstall, _, Some(build)) => {
+                    Some(SharedString::from(format!(
+                        "SpaceTerm explains the change first. Linux then asks for an \
+                         administrator password, and SpaceTerm installs {build} and starts the \
+                         server."
+                    )))
                 }
                 _ => action.consequence().map(SharedString::new_static),
             };
@@ -1374,7 +1805,7 @@ pub(super) mod testing {
 
     use std::path::{Path, PathBuf};
 
-    use super::{LocalServerControl, ServerConnection, ServerServiceControl};
+    use super::{LocalServerControl, ServerConnection, ServerServiceControl, ServiceStartup};
     use crate::local_server::ServerError;
     use crate::local_server::service::{RetainedInstallation, ServiceStatus};
 
@@ -1443,6 +1874,16 @@ pub(super) mod testing {
         Stop,
         Restart,
         Uninstall,
+        AuthorizeStartup,
+    }
+
+    /// What the operating system's authorization prompt does when the service asks.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(in crate::ui::settings_window) enum Prompt {
+        /// The person enters an administrator password, and the account's lingering turns on.
+        Approve,
+        /// The person dismisses the prompt, and nothing changes.
+        Cancel,
     }
 
     /// A service that changes its status as a real one would, refuses what the test tells it to,
@@ -1453,6 +1894,11 @@ pub(super) mod testing {
         installations: Mutex<Result<Vec<RetainedInstallation>, ServerError>>,
         /// The refusal the next changing operation returns, leaving the status unchanged.
         refusal: Mutex<Option<ServerError>>,
+        startup: ServiceStartup,
+        /// Whether the account may run services at boot and after logout. A Linux service refuses
+        /// to start the server until it may.
+        authorized: Mutex<bool>,
+        prompt: Mutex<Prompt>,
         calls: Mutex<Vec<ServiceCall>>,
     }
 
@@ -1460,12 +1906,36 @@ pub(super) mod testing {
         pub(in crate::ui::settings_window) fn new(
             status: Result<ServiceStatus, ServerError>,
         ) -> Arc<Self> {
+            Self::with_startup(status, ServiceStartup::AtLogin)
+        }
+
+        /// A Linux systemd user service on an account whose lingering is off, so starting the
+        /// server waits for startup authorization.
+        pub(in crate::ui::settings_window) fn linux(
+            status: Result<ServiceStatus, ServerError>,
+        ) -> Arc<Self> {
+            Self::with_startup(status, ServiceStartup::AtBoot)
+        }
+
+        fn with_startup(
+            status: Result<ServiceStatus, ServerError>,
+            startup: ServiceStartup,
+        ) -> Arc<Self> {
             Arc::new(Self {
                 status: Mutex::new(status),
                 installations: Mutex::new(Ok(vec![retained("1.4.0", 'a')])),
                 refusal: Mutex::new(None),
+                startup,
+                // A LaunchAgent needs no authorization to start.
+                authorized: Mutex::new(startup == ServiceStartup::AtLogin),
+                prompt: Mutex::new(Prompt::Approve),
                 calls: Mutex::new(Vec::new()),
             })
+        }
+
+        /// Sets what the next authorization prompt does.
+        pub(in crate::ui::settings_window) fn answer_prompt(&self, prompt: Prompt) {
+            *self.prompt.lock().expect("prompt") = prompt;
         }
 
         pub(in crate::ui::settings_window) fn keep(
@@ -1507,6 +1977,10 @@ pub(super) mod testing {
             }
             let mut status = self.status.lock().expect("status");
             let changed = next((*status).unwrap_or(not_installed()));
+            // Starting needs authorization first, and a refused start changes nothing.
+            if changed.running && !*self.authorized.lock().expect("authorized") {
+                return Err(ServerError::AuthorizationRequired);
+            }
             *status = Ok(changed);
             Ok(changed)
         }
@@ -1549,12 +2023,36 @@ pub(super) mod testing {
         }
 
         fn restart(&self) -> Result<ServiceStatus, ServerError> {
-            self.change(ServiceCall::Restart, |_| running())
+            let restarted = self.change(ServiceCall::Restart, |_| running());
+            // Restarting stops the server before it starts again, so a refused start leaves it
+            // stopped, as the service does.
+            if restarted == Err(ServerError::AuthorizationRequired) {
+                *self.status.lock().expect("status") = Ok(stopped());
+            }
+            restarted
         }
 
         fn uninstall(&self) -> Result<ServiceStatus, ServerError> {
             // Uninstalling stops the server first and keeps that Stop, as the service does.
             self.change(ServiceCall::Uninstall, |_| uninstalled())
+        }
+
+        fn startup(&self) -> ServiceStartup {
+            self.startup
+        }
+
+        fn authorize_startup(&self) -> Result<(), ServerError> {
+            self.calls
+                .lock()
+                .expect("calls")
+                .push(ServiceCall::AuthorizeStartup);
+            match *self.prompt.lock().expect("prompt") {
+                Prompt::Approve => {
+                    *self.authorized.lock().expect("authorized") = true;
+                    Ok(())
+                }
+                Prompt::Cancel => Err(ServerError::AuthorizationRequired),
+            }
         }
     }
 
