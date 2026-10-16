@@ -2576,7 +2576,11 @@ impl TerminalPane {
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if !window.is_offering_key_equivalent()
             && self.server_backed()
+            && self.terminal_session_available()
             && !self.interactive_input_available()
+            && self.focus_handle.is_focused(window)
+            && !window_modal_is_open(window, cx)
+            && self.product_focus.blocker.is_none()
         {
             cx.stop_propagation();
             return;
