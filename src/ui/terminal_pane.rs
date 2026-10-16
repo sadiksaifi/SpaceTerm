@@ -2425,10 +2425,7 @@ impl TerminalPane {
                 self.sync_secure_input();
             }
             TerminalSessionEvent::PasteUnconfirmed => {
-                self.status = Some(
-                    "Paste was not confirmed. Check the shell before pasting again.".to_owned(),
-                );
-                self.status_intent = StatusIntent::Warning;
+                self.sync_paste_unconfirmed();
             }
             TerminalSessionEvent::PermissionRequested(request) => {
                 return self.offer_permission_setup(request.permissions(), cx);
@@ -3741,6 +3738,20 @@ impl TerminalPane {
         }
     }
 
+    fn sync_paste_unconfirmed(&mut self) {
+        if self.interactive_input_available()
+            && self
+                .terminal_session
+                .session
+                .as_ref()
+                .is_some_and(|session| session.take_paste_unconfirmed())
+        {
+            self.status =
+                Some("Paste was not confirmed. Check the shell before pasting again.".to_owned());
+            self.status_intent = StatusIntent::Warning;
+        }
+    }
+
     fn paste_request_guard_is_current(&self, guard: PasteRequestGuard) -> bool {
         self.terminal_session.session.is_some()
             && self.terminal_input_focus
@@ -4672,6 +4683,7 @@ impl Render for TerminalPane {
                 cx,
             );
         self.flush_pending_file_insertion(cx);
+        self.sync_paste_unconfirmed();
         let surface_active = terminal_surface_active(self.product_focus, native_activity);
         let native_visibility = self
             .visibility_source

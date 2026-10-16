@@ -2568,15 +2568,13 @@ fn server_pane_takeover_discards_preedit_without_replaying_it(cx: &mut TestAppCo
 #[gpui::test]
 fn server_pane_uncertain_paste_warns_without_sending_a_second_payload(cx: &mut TestAppContext) {
     use spaceterm_ui::a11y_testing::A11yTree;
-    let (_pane, cx, records) = server_terminal_pane(cx, true);
+    let (pane, cx, records) = server_terminal_pane(cx, true);
     cx.write_to_clipboard(ClipboardItem::new_string("echo once".into()));
     cx.dispatch_action(PasteClipboard);
     cx.run_until_parked();
-    records
-        .event_sender(1)
-        .unwrap()
-        .try_send(TerminalSessionEvent::PasteUnconfirmed)
-        .unwrap();
+    // Screen replacement may evict the wakeup. The retained outcome still reaches the next paint.
+    records.retain_unconfirmed_paste(1);
+    pane.update(cx, |_, cx| cx.notify());
     let tree = A11yTree::read(cx);
     assert_eq!(tree.node("Terminal status")["aria"]["value"], "Warning");
     assert_eq!(

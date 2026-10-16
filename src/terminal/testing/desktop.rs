@@ -187,11 +187,18 @@ pub(crate) struct TestTerminalSessionRecords {
         Rc<RefCell<BTreeMap<usize, async_channel::Sender<Arc<TerminalAccessibilityModel>>>>>,
     interactive_availability: Rc<RefCell<BTreeMap<usize, bool>>>,
     input_generations: Rc<RefCell<BTreeMap<usize, u64>>>,
+    unconfirmed_pastes: Rc<RefCell<BTreeMap<usize, bool>>>,
     dropped_session_ids: Rc<RefCell<Vec<usize>>>,
     commands: Rc<RefCell<Vec<RecordedCall>>>,
 }
 
 impl TestTerminalSessionRecords {
+    pub(crate) fn retain_unconfirmed_paste(&self, session_id: usize) {
+        self.unconfirmed_pastes
+            .borrow_mut()
+            .insert(session_id, true);
+    }
+
     pub(crate) fn advance_input_generation(&self, session_id: usize) {
         *self
             .input_generations
@@ -545,6 +552,14 @@ impl Drop for TestTerminalSessionHandle {
 }
 
 impl TerminalSessionHandle for TestTerminalSessionHandle {
+    fn take_paste_unconfirmed(&self) -> bool {
+        self.records
+            .unconfirmed_pastes
+            .borrow_mut()
+            .remove(&self.session_id)
+            .unwrap_or(false)
+    }
+
     fn input_generation(&self) -> u64 {
         self.records
             .input_generations

@@ -454,6 +454,11 @@ pub trait TerminalSessionHandle {
         0
     }
 
+    /// Consumes a retained uncertain-paste notice after control has been reconciled.
+    fn take_paste_unconfirmed(&self) -> bool {
+        false
+    }
+
     /// Transfers Terminal Input Focus to this Terminal Session's Paste Confirmation.
     fn focus_paste_confirmation(&self, _id: PasteConfirmationId) {
         self.focus(false);
