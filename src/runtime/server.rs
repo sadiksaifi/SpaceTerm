@@ -550,6 +550,7 @@ impl OwnedPane {
             if generation <= self.focus_generation {
                 return Err(Refusal::Stale);
             }
+            self.runtime.cancel_application_pointer();
             // Even a new Terminal generation cancels approvals from a preceding local focus.
             if let Some(id) = self.pending_paste.take() {
                 self.runtime
@@ -582,39 +583,52 @@ impl OwnedPane {
             }
             InteractiveInput::Pointer(input) => {
                 self.require_terminal_focus()?;
-                if input.screen_generation != self.screen_generation {
-                    return Ok(Reply::Unchanged);
-                }
                 let generation = self.pointer_generation(
-                    input.screen_generation,
+                    self.screen_generation,
                     input.x,
                     input.y,
                     input.modifiers,
-                )?;
+                );
+                let generation = match generation {
+                    Ok(generation) => generation,
+                    Err(reason) => {
+                        if !matches!(input.phase, pane::PointerPhase::Press) {
+                            self.runtime.cancel_application_pointer();
+                        }
+                        return Err(reason);
+                    }
+                };
                 if !matches!(input.phase, pane::PointerPhase::Motion) && input.button.is_none() {
+                    if matches!(input.phase, pane::PointerPhase::Release) {
+                        self.runtime.cancel_application_pointer();
+                    }
                     return Err(Refusal::Unsupported);
                 }
-                self.runtime.application_pointer(PointerInput {
-                    generation,
-                    phase: match input.phase {
-                        pane::PointerPhase::Press => super::PointerPhase::Press,
-                        pane::PointerPhase::Motion => super::PointerPhase::Motion,
-                        pane::PointerPhase::Release => super::PointerPhase::Release,
+                self.runtime.application_pointer(
+                    PointerInput {
+                        generation,
+                        phase: match input.phase {
+                            pane::PointerPhase::Press => super::PointerPhase::Press,
+                            pane::PointerPhase::Motion => super::PointerPhase::Motion,
+                            pane::PointerPhase::Release => super::PointerPhase::Release,
+                        },
+                        button: input.button.map(|button| match button {
+                            pane::PointerButton::Left => super::PointerButton::Left,
+                            pane::PointerButton::Middle => super::PointerButton::Middle,
+                            pane::PointerButton::Right => super::PointerButton::Right,
+                        }),
+                        position: SurfacePosition {
+                            x: input.x,
+                            y: input.y,
+                        },
+                        modifiers: decode_modifiers(input.modifiers),
+                        shift_selection: ShiftSelectionPolicy::from_selection_override(
+                            input.shift_selection,
+                        ),
                     },
-                    button: input.button.map(|button| match button {
-                        pane::PointerButton::Left => super::PointerButton::Left,
-                        pane::PointerButton::Middle => super::PointerButton::Middle,
-                        pane::PointerButton::Right => super::PointerButton::Right,
-                    }),
-                    position: SurfacePosition {
-                        x: input.x,
-                        y: input.y,
-                    },
-                    modifiers: decode_modifiers(input.modifiers),
-                    shift_selection: ShiftSelectionPolicy::from_selection_override(
-                        input.shift_selection,
-                    ),
-                });
+                    input.screen_generation,
+                    self.screen_generation,
+                );
                 Ok(Reply::Unchanged)
             }
             InteractiveInput::Wheel(input) => {
@@ -1255,6 +1269,218 @@ mod tests {
             Reply::Paste(PasteOutcome::Stale)
         ));
         await_text(&mut host, 1, lease, "6f6b610d62");
+        host.shutdown().unwrap();
+    }
+
+    fn screen_with_marker(
+        host: &mut DevelopmentPaneHost,
+        lease: Lease,
+        marker: &str,
+    ) -> Box<Screen> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Reply::Screen(screen) = host.request([1; 32], [1; 32], Request::Poll { lease })
+                && screen.rows.iter().any(|row| {
+                    row.iter()
+                        .map(|cell| cell.text.as_str())
+                        .collect::<String>()
+                        .trim_end()
+                        .starts_with(marker)
+                })
+            {
+                return screen;
+            }
+            assert!(Instant::now() < deadline, "missing PTY marker {marker}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn redraw_between_pointer_press_and_release_does_not_swallow_the_next_click() {
+        let mut host = host();
+        let lease = attach(&mut host, 1, true);
+        command(
+            &mut host,
+            1,
+            lease,
+            "stty raw -echo; printf '\\033[?1002h\\033[?1006h\\033[2J\\033[HREADY\\r\\n'; dd bs=1 count=9 >/dev/null 2>/dev/null; printf 'CHANGED\\r\\n'; reports=; while :; do byte=$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n'); [ \"$byte\" = 21 ] && break; reports=$reports$byte; done; printf 'R:%s\\r\\n' \"$reports\"",
+        );
+        let original = screen_with_marker(&mut host, lease, "READY");
+        focus(&mut host, lease, 1, FocusTarget::Terminal);
+        let press = Pointer {
+            screen_generation: original.generation,
+            phase: pane::PointerPhase::Press,
+            button: Some(pane::PointerButton::Left),
+            x: 4.0,
+            y: 5.0,
+            modifiers: 0,
+            shift_selection: false,
+        };
+        assert!(matches!(
+            input(&mut host, lease, 1, InteractiveInput::Pointer(press)),
+            Reply::Unchanged
+        ));
+        let changed = screen_with_marker(&mut host, lease, "CHANGED");
+        assert_ne!(changed.generation, original.generation);
+        // An accepted application gesture continues across output in the same geometry.
+        assert!(matches!(
+            input(
+                &mut host,
+                lease,
+                1,
+                InteractiveInput::Pointer(Pointer {
+                    phase: pane::PointerPhase::Motion,
+                    x: 20.0,
+                    y: 23.0,
+                    ..press
+                })
+            ),
+            Reply::Unchanged
+        ));
+        assert!(matches!(
+            input(
+                &mut host,
+                lease,
+                1,
+                InteractiveInput::Pointer(Pointer {
+                    phase: pane::PointerPhase::Release,
+                    x: 24.0,
+                    y: 41.0,
+                    ..press
+                })
+            ),
+            Reply::Unchanged
+        ));
+        let fresh = Pointer {
+            screen_generation: changed.generation,
+            x: 12.0,
+            y: 23.0,
+            ..press
+        };
+        for phase in [pane::PointerPhase::Press, pane::PointerPhase::Release] {
+            assert!(matches!(
+                input(
+                    &mut host,
+                    lease,
+                    1,
+                    InteractiveInput::Pointer(Pointer { phase, ..fresh })
+                ),
+                Reply::Unchanged
+            ));
+        }
+        // With no active gesture, the old snapshot cannot start another click.
+        input(&mut host, lease, 1, InteractiveInput::Pointer(press));
+        input(&mut host, lease, 1, text_key("!", false));
+        let screen = screen_with_marker(&mut host, lease, "R:");
+        let report = screen
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>()
+            })
+            .find(|row| row.starts_with("R:"))
+            .unwrap();
+        assert_eq!(
+            report.trim_end(),
+            "R:1b5b3c33323b333b324d1b5b3c303b343b336d1b5b3c303b323b324d1b5b3c303b323b326d"
+        );
+        assert!(
+            !host
+                .pane
+                .as_ref()
+                .unwrap()
+                .screen
+                .as_ref()
+                .unwrap()
+                .selection_present
+        );
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn geometry_change_balances_pointer_release_and_publishes_without_program_output() {
+        let mut host = host();
+        let lease = attach(&mut host, 1, true);
+        command(
+            &mut host,
+            1,
+            lease,
+            "stty raw -echo; printf '\\033[?1000h\\033[?1006h\\033[2J\\033[HREADY\\r\\n'; reports=; while :; do byte=$(dd bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n'); [ \"$byte\" = 21 ] && break; reports=$reports$byte; done; printf 'R:%s\\r\\n' \"$reports\"",
+        );
+        let original = screen_with_marker(&mut host, lease, "READY");
+        focus(&mut host, lease, 1, FocusTarget::Terminal);
+        let press = Pointer {
+            screen_generation: original.generation,
+            phase: pane::PointerPhase::Press,
+            button: Some(pane::PointerButton::Left),
+            x: 4.0,
+            y: 5.0,
+            modifiers: 0,
+            shift_selection: false,
+        };
+        input(&mut host, lease, 1, InteractiveInput::Pointer(press));
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [1; 32],
+                Request::Resize {
+                    lease,
+                    size: PaneSize {
+                        cell_width: 9,
+                        ..size()
+                    }
+                }
+            ),
+            Reply::Unchanged
+        ));
+        let resized = next_screen(&mut host, lease);
+        assert!(resized.generation > original.generation);
+        assert_eq!((resized.columns, resized.rows.len()), (80, 24));
+        // A discarded gesture cannot be resumed by its delayed release or a stale press.
+        input(
+            &mut host,
+            lease,
+            1,
+            InteractiveInput::Pointer(Pointer {
+                phase: pane::PointerPhase::Release,
+                x: 24.0,
+                y: 41.0,
+                ..press
+            }),
+        );
+        input(&mut host, lease, 1, InteractiveInput::Pointer(press));
+        let fresh = Pointer {
+            screen_generation: resized.generation,
+            x: 12.0,
+            y: 23.0,
+            ..press
+        };
+        for phase in [pane::PointerPhase::Press, pane::PointerPhase::Release] {
+            input(
+                &mut host,
+                lease,
+                1,
+                InteractiveInput::Pointer(Pointer { phase, ..fresh }),
+            );
+        }
+        input(&mut host, lease, 1, text_key("!", false));
+        let screen = screen_with_marker(&mut host, lease, "R:");
+        let report = screen
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>()
+            })
+            .find(|row| row.starts_with("R:"))
+            .unwrap();
+        assert_eq!(
+            report.trim_end(),
+            "R:1b5b3c303b313b314d1b5b3c303b313b316d1b5b3c303b323b324d1b5b3c303b323b326d"
+        );
         host.shutdown().unwrap();
     }
 

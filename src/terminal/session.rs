@@ -564,9 +564,20 @@ fn test_launch_planner() -> ShellLaunchPlanner {
 
 impl TerminalRuntime {
     /// Sends application mouse input without starting a server-owned Selection.
-    pub fn application_pointer(&self, input: PointerInput) {
+    /// Adapter snapshot numbers fence starts; accepted gestures retain their starting snapshot.
+    pub fn application_pointer(&self, input: PointerInput, snapshot: u64, current_snapshot: u64) {
         if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::ApplicationPointer(input));
+            let _ = commands.send(Command::ApplicationPointer(
+                input,
+                snapshot,
+                current_snapshot,
+            ));
+        }
+    }
+    /// Balances a rejected continuation at the last accepted application pointer position.
+    pub fn cancel_application_pointer(&self) {
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::CancelApplicationPointer);
         }
     }
     /// Sends application wheel input without moving server-owned Scrollback.
@@ -969,7 +980,8 @@ enum Command {
     FocusPasteConfirmation(PasteConfirmationId),
     Resize,
     Pointer(PointerInput),
-    ApplicationPointer(PointerInput),
+    ApplicationPointer(PointerInput, u64, u64),
+    CancelApplicationPointer,
     ApplicationWheel(WheelInput),
     PointerAndCopySelection(
         PointerInput,
@@ -1038,6 +1050,7 @@ impl Command {
         matches!(
             self,
             Self::Pointer(..)
+                | Self::ApplicationPointer(..)
                 | Self::PointerAndCopySelection(..)
                 | Self::Wheel(..)
                 | Self::ScrollTo(..)
@@ -1060,6 +1073,7 @@ impl fmt::Debug for Command {
             Self::Resize => "Resize",
             Self::Pointer(..) => "Pointer",
             Self::ApplicationPointer(..) => "ApplicationPointer",
+            Self::CancelApplicationPointer => "CancelApplicationPointer",
             Self::ApplicationWheel(..) => "ApplicationWheel",
             Self::PointerAndCopySelection(..) => "PointerAndCopySelection",
             Self::Wheel(..) => "Wheel",
@@ -1552,6 +1566,19 @@ impl TerminalWorker {
                 let Some(geometry) = self.schedules.take_resize() else {
                     return true;
                 };
+                if geometry != self.emulator.geometry() {
+                    match self.emulator.cancel_application_pointer() {
+                        Ok(action) => {
+                            if !self.apply_emulator_action(action) {
+                                return false;
+                            }
+                        }
+                        Err(message) => {
+                            self.send_runtime_failure(message);
+                            return false;
+                        }
+                    }
+                }
                 let size = pty_size(geometry);
                 let winsize_changed = size != pty_size(self.emulator.geometry());
                 let result = (|| {
@@ -1577,7 +1604,17 @@ impl TerminalWorker {
                     }
                 }
             }
-            Command::ApplicationPointer(input) => match self.emulator.application_pointer(input) {
+            Command::ApplicationPointer(input, snapshot, current_snapshot) => match self
+                .emulator
+                .application_pointer(input, snapshot, current_snapshot)
+            {
+                Ok(action) => self.apply_emulator_action(action),
+                Err(message) => {
+                    self.send_runtime_failure(message);
+                    false
+                }
+            },
+            Command::CancelApplicationPointer => match self.emulator.cancel_application_pointer() {
                 Ok(action) => self.apply_emulator_action(action),
                 Err(message) => {
                     self.send_runtime_failure(message);

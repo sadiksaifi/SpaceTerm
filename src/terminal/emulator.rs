@@ -723,6 +723,7 @@ pub(crate) struct TerminalEmulator {
     previous_feed_byte: Option<u8>,
     cached_cols: u16,
     cached_rows: u16,
+    cached_geometry: Option<TerminalGeometry>,
     cached_colors: Option<TerminalColorsSnapshot>,
     cached_cursor: Option<CursorSnapshot>,
     cached_scrollbar: Option<ScrollbarSnapshot>,
@@ -734,6 +735,7 @@ pub(crate) struct TerminalEmulator {
     cached_appearance_generation: Option<AppearanceGeneration>,
     geometry: TerminalGeometry,
     active_pointer: Option<ActivePointer>,
+    application_pointer_generation: Option<u64>,
     selection_drag_position: Option<SurfacePosition>,
     pointer_mapping_invalidated: bool,
     gesture_clock: GestureClock,
@@ -1171,6 +1173,7 @@ impl TerminalEmulator {
             previous_feed_byte: None,
             cached_cols: 0,
             cached_rows: 0,
+            cached_geometry: None,
             cached_colors: None,
             cached_cursor: None,
             cached_scrollbar: None,
@@ -1182,6 +1185,7 @@ impl TerminalEmulator {
             cached_appearance_generation: None,
             geometry,
             active_pointer: None,
+            application_pointer_generation: None,
             selection_drag_position: None,
             pointer_mapping_invalidated: false,
             gesture_clock: GestureClock::System(Instant::now()),
@@ -1394,6 +1398,9 @@ impl TerminalEmulator {
         geometry: TerminalGeometry,
         winsize_changed: bool,
     ) -> Result<(), Error> {
+        if self.application_pointer_generation.is_some() && geometry == self.geometry {
+            return Ok(());
+        }
         self.end_synchronized_output()?;
         self.selection_gesture.reset(&self.terminal);
         self.active_pointer = None;
@@ -1520,14 +1527,66 @@ impl TerminalEmulator {
     pub(crate) fn application_pointer(
         &mut self,
         input: PointerInput,
+        snapshot: u64,
+        current_snapshot: u64,
     ) -> Result<EmulatorAction, TerminalFailure> {
-        if !self.terminal.is_mouse_tracking().map_err(|error| {
-            TerminalFailure::emulator_error("query-terminal-mouse-tracking-mode", error)
-        })? || shift_overrides_application_mouse(input.modifiers, input.shift_selection)
+        let active = self
+            .active_pointer
+            .filter(|active| matches!(active.route, PointerRoute::Application));
+        if active.is_none() {
+            self.application_pointer_generation = None;
+        }
+        if active.is_some() && input.phase == PointerPhase::Press {
+            return Ok(EmulatorAction::none());
+        }
+        let continuing = active.is_some() && input.phase != PointerPhase::Press;
+        let eligible = if continuing {
+            self.application_pointer_generation
+                .is_some_and(|start| (start..=current_snapshot).contains(&snapshot))
+        } else {
+            snapshot != 0 && snapshot == current_snapshot
+        };
+        if !eligible {
+            return if continuing {
+                self.cancel_application_pointer()
+            } else {
+                Ok(EmulatorAction::none())
+            };
+        }
+        if active.is_none()
+            && (input.phase == PointerPhase::Release
+                || (input.phase == PointerPhase::Motion && input.button.is_some()))
         {
             return Ok(EmulatorAction::none());
         }
-        self.pointer(input)
+        if input.phase == PointerPhase::Release
+            && active.is_some_and(|active| input.button != Some(active.button))
+        {
+            return self.cancel_application_pointer();
+        }
+        if !self.terminal.is_mouse_tracking().map_err(|error| {
+            TerminalFailure::emulator_error("query-terminal-mouse-tracking-mode", error)
+        })? || shift_overrides_application_mouse(input.modifiers, input.shift_selection)
+            || self.terminal.mode(Mode::SYNC_OUTPUT).map_err(|error| {
+                TerminalFailure::emulator_error("query-synchronized-output-mode", error)
+            })?
+        {
+            return self.cancel_application_pointer();
+        }
+        let action = self.pointer(input)?;
+        if self.active_pointer.is_some() && input.phase == PointerPhase::Press {
+            self.application_pointer_generation = Some(snapshot);
+        } else if self.active_pointer.is_none() {
+            self.application_pointer_generation = None;
+        }
+        Ok(action)
+    }
+
+    pub(crate) fn cancel_application_pointer(&mut self) -> Result<EmulatorAction, TerminalFailure> {
+        if self.application_pointer_generation.is_none() {
+            return Ok(EmulatorAction::none());
+        }
+        self.cancel_pointer_drag()
     }
 
     pub(crate) fn application_wheel(
@@ -2121,6 +2180,7 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn cancel_pointer_drag(&mut self) -> Result<EmulatorAction, TerminalFailure> {
+        self.application_pointer_generation = None;
         let Some(active) = self.active_pointer.take() else {
             return Ok(EmulatorAction::none());
         };
@@ -2527,7 +2587,9 @@ impl TerminalEmulator {
                         || previous.visible_rows != scrollbar.visible_rows
                 }),
                 active_screen: self.cached_active_screen != Some(active_screen),
-                resize: self.cached_cols != cols || self.cached_rows != rows,
+                resize: self.cached_cols != cols
+                    || self.cached_rows != rows
+                    || self.cached_geometry != Some(self.geometry),
                 mouse_tracking: self.cached_mouse_tracking != Some(mouse_tracking)
                     || self.cached_alternate_scroll != Some(alternate_scroll),
                 selection_presence: self.cached_selection_present != Some(selection_present),
@@ -2734,6 +2796,7 @@ impl TerminalEmulator {
         };
         self.cached_cols = cols;
         self.cached_rows = rows;
+        self.cached_geometry = Some(self.geometry);
         self.cached_colors = Some(terminal_colors.clone());
         self.cached_cursor = Some(cursor);
         self.cached_scrollbar = Some(scrollbar);
