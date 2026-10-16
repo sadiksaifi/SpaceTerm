@@ -35,7 +35,7 @@ impl TextClipboard for TestTextClipboard {
 struct TestSelectionClipboard;
 impl SelectionClipboard for TestSelectionClipboard {
     fn publish(&self, copy: &SelectionCopy, cx: &mut App) -> Result<(), ClipboardError> {
-        cx.write_to_clipboard(ClipboardItem::new_string(copy.plain_text.clone()));
+        cx.write_to_clipboard(ClipboardItem::new_string(copy.plain_text.to_string()));
         Ok(())
     }
 }

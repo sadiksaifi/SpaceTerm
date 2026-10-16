@@ -94,6 +94,8 @@ pub enum TerminalSessionEvent {
     Attention(AttentionEvent),
     ClientEffect(ClientEffectRequest),
     ClientEffectsReady,
+    /// A complete asynchronous pointer selection is ready for the initiating client.
+    SelectionCopyReady,
     HiddenInputChanged(bool),
     /// A paste may have been written before the connection lost its acknowledgement.
     PasteUnconfirmed,
@@ -460,6 +462,12 @@ pub trait TerminalSessionHandle {
     fn interactive_input_available(&self) -> bool {
         true
     }
+    fn reading_available(&self) -> bool {
+        true
+    }
+    fn selection_copy_ready(&self) -> bool {
+        true
+    }
 
     /// Changes whenever a connection or control grant can no longer authorize delayed input.
     fn input_generation(&self) -> u64 {
@@ -497,6 +505,9 @@ pub trait TerminalSessionHandle {
         decision: PasteDecision,
     ) -> async_channel::Receiver<Result<PasteResolution, String>>;
     fn copy_selection(&self) -> Result<Option<SelectionCopy>, SelectionCopyError>;
+    fn take_prepared_pointer_copy(&self) -> Option<SelectionCopy> {
+        None
+    }
     /// Copy the Selection, or forward the host Copy chord to enhanced keyboard applications.
     fn copy_or_forward(
         &self,
@@ -585,6 +596,38 @@ fn test_launch_planner() -> ShellLaunchPlanner {
 }
 
 impl TerminalRuntime {
+    pub(crate) fn reading_pointer(&self, input: PointerInput) {
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::ReadingPointer(input));
+        }
+    }
+    pub(crate) fn reading_wheel(&self, input: WheelInput) {
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::ReadingWheel(input));
+        }
+    }
+    pub(crate) fn reading_barrier(&self) -> mpsc::Receiver<()> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::ReadingBarrier(tx));
+        }
+        rx
+    }
+    pub(crate) fn reset_reading(&self) {
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::ResetReading);
+        }
+    }
+    pub(crate) fn prepare_server_selection(
+        &self,
+        generation: PresentationGeneration,
+    ) -> mpsc::Receiver<Result<Option<Vec<u8>>, SelectionCopyError>> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::PrepareServerSelection(generation, tx));
+        }
+        rx
+    }
     /// Sends application mouse input without starting a server-owned Selection.
     /// Adapter snapshot numbers fence starts; accepted gestures retain their starting snapshot.
     pub fn application_pointer(&self, input: PointerInput, snapshot: u64, current_snapshot: u64) {
@@ -1002,6 +1045,14 @@ struct ReaderEventBatch {
 }
 
 enum Command {
+    ReadingPointer(PointerInput),
+    ReadingWheel(WheelInput),
+    ResetReading,
+    ReadingBarrier(mpsc::SyncSender<()>),
+    PrepareServerSelection(
+        PresentationGeneration,
+        mpsc::SyncSender<Result<Option<Vec<u8>>, SelectionCopyError>>,
+    ),
     RouteClientEffects,
     Subscribe {
         accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
@@ -1083,11 +1134,15 @@ impl Command {
         matches!(
             self,
             Self::Pointer(..)
+                | Self::ReadingPointer(..)
+                | Self::ReadingWheel(..)
                 | Self::ApplicationPointer(..)
                 | Self::PointerAndCopySelection(..)
                 | Self::Wheel(..)
                 | Self::ScrollTo(..)
                 | Self::SelectionCopy(Some(_), _)
+                | Self::PrepareServerSelection(..)
+                | Self::ReadingBarrier(_)
                 | Self::AccessibilitySelection(..)
                 | Self::AccessibilityContinue
                 | Self::PublishAccessibility
@@ -1098,6 +1153,11 @@ impl Command {
 impl fmt::Debug for Command {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
+            Self::ReadingPointer(_) => "ReadingPointer",
+            Self::ReadingWheel(_) => "ReadingWheel",
+            Self::ResetReading => "ResetReading",
+            Self::ReadingBarrier(_) => "ReadingBarrier",
+            Self::PrepareServerSelection(..) => "PrepareServerSelection",
             Self::RouteClientEffects => "RouteClientEffects",
             Self::Subscribe { .. } => "Subscribe",
             Self::Key(..) => "Key",
@@ -1547,6 +1607,64 @@ impl TerminalWorker {
 
     fn process_command(&mut self, command: Command) -> bool {
         match command {
+            Command::ReadingPointer(input) => match self.emulator.reading_pointer(input) {
+                Ok(action) => {
+                    self.apply_emulator_action(action) && self.refresh_selection_autoscroll()
+                }
+                Err(error) => {
+                    self.send_runtime_failure(error);
+                    false
+                }
+            },
+            Command::ReadingWheel(input) => match self.emulator.reading_wheel(input) {
+                Ok(action) => self.apply_emulator_action(action),
+                Err(error) => {
+                    self.send_runtime_failure(error);
+                    false
+                }
+            },
+            Command::ReadingBarrier(reply) => {
+                let _ = reply.send(());
+                true
+            }
+            Command::ResetReading => match self.emulator.reset_reading() {
+                Ok(action) => self.apply_emulator_action(action),
+                Err(error) => {
+                    self.send_runtime_failure(error);
+                    false
+                }
+            },
+            Command::PrepareServerSelection(generation, reply) => {
+                let selection = if generation != self.emulator.presentation_generation()
+                    || self.emulator.synchronized_output_deadline().is_some()
+                {
+                    Ok(None)
+                } else {
+                    self.emulator
+                        .selection_copy(SelectionCopyOptions::default())
+                        .map_err(|_| SelectionCopyError::Formatting)
+                        .and_then(|copy| {
+                            copy.map(|copy| {
+                                let bytes = serde_json::to_vec(
+                                    &spaceterm_server::pane::reading::Selection {
+                                        plain_text: copy.plain_text.to_string(),
+                                        html: copy.html.map(|text| text.to_string()),
+                                    },
+                                )
+                                .map_err(|_| SelectionCopyError::Formatting)?;
+                                if bytes.len()
+                                    > spaceterm_server::pane::reading::MAX_SELECTION_BYTES
+                                {
+                                    return Err(SelectionCopyError::Formatting);
+                                }
+                                Ok(bytes)
+                            })
+                            .transpose()
+                        })
+                };
+                let _ = reply.send(selection);
+                true
+            }
             Command::RouteClientEffects => {
                 self.emulator.enable_client_clipboard();
                 true

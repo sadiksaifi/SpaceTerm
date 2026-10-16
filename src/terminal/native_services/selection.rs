@@ -30,8 +30,8 @@ impl Default for SelectionCopyOptions {
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct SelectionCopy {
-    pub plain_text: String,
-    pub html: Option<String>,
+    pub plain_text: std::sync::Arc<str>,
+    pub html: Option<std::sync::Arc<str>>,
 }
 
 impl std::fmt::Debug for SelectionCopy {

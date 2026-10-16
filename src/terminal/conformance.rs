@@ -1280,7 +1280,7 @@ fn check_selection_and_copy(copy_semantics: bool) -> Result<(), String> {
         })
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "selection produced no copy payload".to_owned())?;
-    require_eq("selection-text", copy.plain_text.as_str(), "hello")?;
+    require_eq("selection-text", copy.plain_text.as_ref(), "hello")?;
     require_eq("selection-html", copy.html.is_some(), copy_semantics)
 }
 

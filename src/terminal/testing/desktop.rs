@@ -368,6 +368,7 @@ pub(crate) struct TestTerminalSessionFactory {
     server_backed: bool,
     client_files: Option<crate::platform::local_filesystem::LocalFilesystemAuthority>,
     interactive_input_available: bool,
+    reading_available: bool,
 }
 
 impl TestTerminalSessionFactory {
@@ -386,12 +387,14 @@ impl TestTerminalSessionFactory {
             server_backed: false,
             client_files: None,
             interactive_input_available: true,
+            reading_available: true,
         }
     }
 
     /// Starts Terminal Sessions that report themselves as running in a SpaceTerm Server.
     pub(crate) fn server_backed(mut self) -> Self {
         self.server_backed = true;
+        self.reading_available = false;
         self
     }
 
@@ -400,6 +403,11 @@ impl TestTerminalSessionFactory {
         filesystem: crate::platform::local_filesystem::LocalFilesystemAuthority,
     ) -> Self {
         self.client_files = Some(filesystem);
+        self
+    }
+
+    pub(crate) fn with_reading_available(mut self, available: bool) -> Self {
+        self.reading_available = available;
         self
     }
 
@@ -518,6 +526,7 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
             clipboard,
             handle: Box::new(TestTerminalSessionHandle {
                 session_id,
+                reading_available: self.reading_available,
                 selection_sender,
                 records: self.records.clone(),
                 selection_response: self.selection_response.clone(),
@@ -549,6 +558,7 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
 }
 
 struct TestTerminalSessionHandle {
+    reading_available: bool,
     session_id: usize,
     selection_sender: crate::terminal::AccessibilitySelectionSender,
     records: TestTerminalSessionRecords,
@@ -582,6 +592,9 @@ impl Drop for TestTerminalSessionHandle {
 }
 
 impl TerminalSessionHandle for TestTerminalSessionHandle {
+    fn reading_available(&self) -> bool {
+        self.reading_available
+    }
     fn take_paste_unconfirmed(&self) -> bool {
         self.records
             .unconfirmed_pastes

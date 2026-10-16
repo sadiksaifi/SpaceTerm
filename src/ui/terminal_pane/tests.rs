@@ -2176,7 +2176,7 @@ impl SelectionClipboard for FailOnceSelectionClipboard {
         if self.0.replace(false) {
             return Err(ClipboardError::Unavailable);
         }
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.plain_text.clone()));
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.plain_text.to_string()));
         Ok(())
     }
 }
@@ -2263,6 +2263,67 @@ fn server_terminal_pane(
             .server_backed()
             .with_interactive_input_available(available)
     })
+}
+
+#[gpui::test]
+fn capable_server_pane_reuses_find_scroll_copy_and_services(cx: &mut TestAppContext) {
+    let (pane, cx, records) = terminal_pane_with_session_options(cx, |sessions| {
+        sessions
+            .server_backed()
+            .with_reading_available(true)
+            .with_selection_copy_response(Ok(Some(SelectionCopy {
+                plain_text: "complete retained selection".into(),
+                html: None,
+            })))
+    });
+    records
+        .event_sender(1)
+        .unwrap()
+        .try_send(TerminalSessionEvent::Screen(context_action_screen(
+            crate::terminal::HyperlinkTarget::url("https://example.test"),
+            true,
+        )))
+        .unwrap();
+    cx.run_until_parked();
+    cx.dispatch_action(crate::ui::CopySelection);
+    cx.dispatch_action(crate::ui::ScrollPageUp);
+    cx.dispatch_action(crate::ui::OpenTerminalFind);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("terminal-find-bar").is_some());
+    assert!(
+        records
+            .commands()
+            .iter()
+            .any(|call| matches!(call.command, RecordedCommand::RequestSelectionCopy))
+    );
+    assert!(records.commands().iter().any(|call| matches!(
+        call.command,
+        RecordedCommand::ScrollScrollback(ScrollbackMovement::PageUp)
+    )));
+    assert_eq!(
+        cx.read_from_clipboard().unwrap().text().as_deref(),
+        Some("complete retained selection")
+    );
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            let status = pane.native_service_status(
+                crate::domain::WorkspaceId::new(1),
+                crate::domain::TabId::new(1),
+                crate::domain::PaneId::new(1),
+                0,
+                window,
+                cx,
+            );
+            assert!(status.capabilities.send_text);
+            assert_eq!(
+                pane.native_service_selection(status.origin.unwrap(), window, cx)
+                    .unwrap()
+                    .plain_text
+                    .as_ref(),
+                "complete retained selection"
+            );
+        })
+    });
 }
 
 #[gpui::test]
@@ -4733,8 +4794,8 @@ fn copy_action_requests_semantic_selection_and_writes_plain_text_pasteboard(
     let (_pane, cx, records) = terminal_pane_with_selection_copy(
         cx,
         SelectionCopy {
-            plain_text: "alpha\nbeta".to_owned(),
-            html: Some("<pre>alpha\nbeta</pre>".to_owned()),
+            plain_text: "alpha\nbeta".into(),
+            html: Some("<pre>alpha\nbeta</pre>".into()),
         },
     );
 
@@ -4801,8 +4862,8 @@ fn completed_local_selection_copies_to_the_pasteboard_after_release(cx: &mut Tes
     let (pane, cx, records) = terminal_pane_with_selection_copy(
         cx,
         SelectionCopy {
-            plain_text: "selected text".to_owned(),
-            html: Some("<pre>selected text</pre>".to_owned()),
+            plain_text: "selected text".into(),
+            html: Some("<pre>selected text</pre>".into()),
         },
     );
     let position = pane.read_with(cx, |pane, _| {
@@ -4851,7 +4912,7 @@ fn application_mouse_release_does_not_copy_the_existing_selection(cx: &mut TestA
     let (pane, cx, records) = terminal_pane_with_selection_copy(
         cx,
         SelectionCopy {
-            plain_text: "existing selection".to_owned(),
+            plain_text: "existing selection".into(),
             html: None,
         },
     );
@@ -4891,7 +4952,7 @@ fn shift_override_selection_copies_while_application_mouse_tracking_is_active(
     let (pane, cx, records) = terminal_pane_with_selection_copy(
         cx,
         SelectionCopy {
-            plain_text: "shift selection".to_owned(),
+            plain_text: "shift selection".into(),
             html: None,
         },
     );
@@ -4932,7 +4993,7 @@ fn empty_completed_selection_preserves_the_pasteboard(cx: &mut TestAppContext) {
     let (pane, cx, _records) = terminal_pane_with_selection_copy(
         cx,
         SelectionCopy {
-            plain_text: String::new(),
+            plain_text: "".into(),
             html: None,
         },
     );
@@ -4957,7 +5018,7 @@ fn copy_updates_the_pasteboard_before_the_action_returns(cx: &mut TestAppContext
     let (pane, cx, _records) = terminal_pane_with_selection_copy(
         cx,
         SelectionCopy {
-            plain_text: "new selection".to_owned(),
+            plain_text: "new selection".into(),
             html: None,
         },
     );
@@ -4980,7 +5041,7 @@ fn native_service_selection_uses_the_ordered_terminal_selection_query(cx: &mut T
     let (pane, cx, records) = terminal_pane_with_selection_copy(
         cx,
         SelectionCopy {
-            plain_text: "authoritative selection".to_owned(),
+            plain_text: "authoritative selection".into(),
             html: None,
         },
     );
@@ -4998,7 +5059,7 @@ fn native_service_selection_uses_the_ordered_terminal_selection_query(cx: &mut T
 
     assert_eq!(
         (selection.map(|copy| copy.plain_text), requested_selection),
-        (Some("authoritative selection".to_owned()), true),
+        (Some("authoritative selection".into()), true),
     );
 }
 
@@ -8518,7 +8579,7 @@ fn native_platform_retry_keeps_the_terminal_session_usable_and_clears_transient_
     let (pane, cx, records) = terminal_pane_with_selection_copy(
         cx,
         SelectionCopy {
-            plain_text: "recovered selection".to_owned(),
+            plain_text: "recovered selection".into(),
             html: None,
         },
     );
@@ -8575,7 +8636,7 @@ fn native_platform_retry_requires_a_successful_selection_write_to_clear_failure(
     let (pane, cx, records) = terminal_pane_with_selection_copy(
         cx,
         SelectionCopy {
-            plain_text: "recovered selection".to_owned(),
+            plain_text: "recovered selection".into(),
             html: None,
         },
     );
@@ -9083,7 +9144,7 @@ fn primary_selection_publishes_selection_and_middle_click_obeys_terminal_mouse_t
     struct Primary(Rc<std::cell::RefCell<Option<String>>>);
     impl crate::terminal::native_services::clipboard::PrimarySelection for Primary {
         fn publish(&self, copy: &SelectionCopy, _: &mut App) {
-            *self.0.borrow_mut() = Some(copy.plain_text.clone());
+            *self.0.borrow_mut() = Some(copy.plain_text.to_string());
         }
         fn read(&self, _: &mut App) -> ClipboardRead<Option<String>> {
             Box::pin(std::future::ready(Ok(self.0.borrow().clone())))

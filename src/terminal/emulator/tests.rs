@@ -865,6 +865,33 @@ fn current_wheel(emulator: &TerminalEmulator, mut input: WheelInput) -> WheelInp
     input
 }
 
+#[test]
+fn reading_requests_never_write_application_input_after_a_mode_change() {
+    let mut emulator = emulator(12, 3);
+    emulator.feed(b"first\r\nsecond\r\nthird\r\nfourth");
+    _ = emulator.snapshot().unwrap();
+    let delayed = current_pointer(
+        &emulator,
+        pointer(
+            PointerPhase::Press,
+            Some(PointerButton::Left),
+            1.0,
+            1.0,
+            false,
+        ),
+    );
+    emulator.feed(b"\x1b[?1000h\x1b[?1006h");
+    // A delayed reading request keeps reading authority even if its observed mode is obsolete.
+    assert!(emulator.reading_pointer(delayed).unwrap().bytes.is_empty());
+    _ = emulator.snapshot().unwrap();
+    let input = current_wheel(&emulator, wheel(1, false));
+    assert!(emulator.reading_wheel(input).unwrap().bytes.is_empty());
+    emulator.feed(b"\x1b[?1000l\x1b[?1049h\x1b[?1007h");
+    _ = emulator.snapshot().unwrap();
+    let input = current_wheel(&emulator, wheel(1, true));
+    assert!(emulator.reading_wheel(input).unwrap().bytes.is_empty());
+}
+
 fn key(physical_key: PhysicalKey, modifiers: InputModifiers) -> KeyInput {
     KeyInput {
         action: KeyAction::Press,
@@ -3625,7 +3652,7 @@ fn selection_copy_distinguishes_soft_wraps_and_hard_lines() {
         .unwrap()
         .unwrap();
 
-    assert_eq!(copy.plain_text, "abcdefgh\nxy");
+    assert_eq!(copy.plain_text.as_ref(), "abcdefgh\nxy");
     let html = copy.html.unwrap();
     assert!(html.contains("abcdefgh\nxy"));
     assert!(!html.contains("abcde\nfgh"));
@@ -3652,7 +3679,7 @@ fn selection_copy_wide_cells_and_trailing_space_policy_are_deterministic() {
         .unwrap();
 
     assert_eq!(trimmed.plain_text.matches('😀').count(), 1);
-    assert_eq!(trimmed.plain_text, "😀\nx");
+    assert_eq!(trimmed.plain_text.as_ref(), "😀\nx");
     assert!(preserved.plain_text.starts_with("😀  \n"));
     assert_eq!(preserved.plain_text.matches('😀').count(), 1);
     assert_eq!(preserved.html, None);

@@ -1642,6 +1642,51 @@ impl TerminalEmulator {
         EmulatorAction::screen_changed()
     }
 
+    /// Reading operations must not become application input when terminal modes change in flight.
+    pub(crate) fn reading_pointer(
+        &mut self,
+        input: PointerInput,
+    ) -> Result<EmulatorAction, TerminalFailure> {
+        let selection_gesture = self
+            .active_pointer
+            .as_ref()
+            .is_some_and(|p| matches!(p.route, PointerRoute::Selection));
+        if input.phase == PointerPhase::Press {
+            if input.button != Some(PointerButton::Left)
+                || (self.terminal.is_mouse_tracking().map_err(|error| {
+                    TerminalFailure::emulator_error("query-terminal-mouse-tracking-mode", error)
+                })? && !shift_overrides_application_mouse(
+                    input.modifiers,
+                    input.shift_selection,
+                ))
+            {
+                return Ok(EmulatorAction::none());
+            }
+        } else if !selection_gesture {
+            return Ok(EmulatorAction::none());
+        }
+        self.pointer(input)
+    }
+
+    pub(crate) fn reading_wheel(
+        &mut self,
+        input: WheelInput,
+    ) -> Result<EmulatorAction, TerminalFailure> {
+        if self.terminal.is_mouse_tracking().map_err(|error| {
+            TerminalFailure::emulator_error("query-terminal-mouse-tracking-mode", error)
+        })? && !shift_overrides_application_mouse(input.modifiers, input.shift_selection)
+        {
+            return Ok(EmulatorAction::none());
+        }
+        if self.terminal.active_screen().map_err(|error| {
+            TerminalFailure::emulator_error("query-active-terminal-screen", error)
+        })? == Screen::Alternate
+        {
+            return Ok(EmulatorAction::none());
+        }
+        self.wheel(input)
+    }
+
     /// Moves the viewport through Scrollback a page at a time or to either end, writing nothing
     /// to the PTY. The alternate screen has no Scrollback, so its viewport stays put, as it does
     /// for the wheel when the program has not requested alternate-scroll mode.
@@ -1812,7 +1857,17 @@ impl TerminalEmulator {
         } else {
             None
         };
-        Ok(Some(SelectionCopy { plain_text, html }))
+        Ok(Some(SelectionCopy {
+            plain_text: plain_text.into(),
+            html: html.map(Into::into),
+        }))
+    }
+
+    pub(crate) fn reset_reading(&mut self) -> Result<EmulatorAction, TerminalFailure> {
+        self.clear_selection()?;
+        self.find = TerminalFindState::default();
+        self.terminal.scroll_viewport(ScrollViewport::Bottom);
+        Ok(EmulatorAction::screen_changed())
     }
 
     fn format_selection(

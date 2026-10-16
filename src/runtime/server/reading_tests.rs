@@ -1,0 +1,243 @@
+use super::tests::{attach, command, host};
+use super::*;
+use pane::reading::{Operation, SELECTION_CHUNK_BYTES, Scroll};
+use std::time::Instant;
+
+fn read(host: &mut DevelopmentPaneHost, lease: Lease, operation: Operation) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match host.request(
+            [1; 32],
+            lease.connection,
+            Request::Read {
+                lease,
+                operation: operation.clone(),
+            },
+        ) {
+            Reply::Reading { accepted: true } => return,
+            Reply::Reading { accepted: false } => {}
+            reply => panic!("reading refused: {reply:?}"),
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+#[track_caller]
+fn screen(
+    host: &mut DevelopmentPaneHost,
+    lease: Lease,
+    matches: impl Fn(&Screen) -> bool,
+) -> Box<Screen> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match host.request([1; 32], lease.connection, Request::Poll { lease }) {
+            Reply::Screen(screen) if matches(&screen) => return screen,
+            Reply::Screen(_) | Reply::Unchanged => {}
+            reply => panic!("screen refused: {reply:?}"),
+        }
+        assert!(Instant::now() < deadline, "reading screen missing");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+fn pointer(
+    host: &mut DevelopmentPaneHost,
+    lease: Lease,
+    generation: u64,
+    phase: pane::PointerPhase,
+    y: f32,
+) {
+    read(
+        host,
+        lease,
+        Operation::Pointer(pane::Pointer {
+            screen_generation: generation,
+            phase,
+            button: Some(pane::PointerButton::Left),
+            x: 1.0,
+            y,
+            modifiers: 0,
+            shift_selection: false,
+        }),
+    );
+}
+
+#[test]
+fn old_scrollback_find_and_multichunk_copy_use_the_retained_terminal_content() {
+    let mut host = host();
+    let lease = attach(&mut host, 1, true);
+    command(
+        &mut host,
+        1,
+        lease,
+        "stty -echo; printf '\\033[2J\\033[H'; i=0; while [ $i -lt 2000 ]; do printf 'retained-%04d-abcdefghijklmnopqrstuvwxyz\\n' $i; i=$((i+1)); done; printf 'FINISHED\\n'",
+    );
+    screen(&mut host, lease, |s| {
+        s.reading.as_ref().unwrap().total_rows >= 2000
+    });
+    read(
+        &mut host,
+        lease,
+        Operation::Query {
+            generation: 7,
+            text: "retained-0000".into(),
+        },
+    );
+    let found = screen(&mut host, lease, |s| {
+        s.reading
+            .as_ref()
+            .unwrap()
+            .find
+            .as_ref()
+            .is_some_and(|f| f.generation == 7 && f.total == 1)
+    });
+    assert!(found.reading.as_ref().unwrap().offset_rows > 0);
+    read(
+        &mut host,
+        lease,
+        Operation::Navigate {
+            generation: 7,
+            backwards: false,
+        },
+    );
+    let found = screen(&mut host, lease, |s| {
+        s.reading
+            .as_ref()
+            .unwrap()
+            .find
+            .as_ref()
+            .is_some_and(|f| f.current == Some(1))
+    });
+    assert!(found.rows.iter().any(|r| {
+        r.iter()
+            .map(|c| c.text.as_str())
+            .collect::<String>()
+            .contains("retained-0000")
+    }));
+    let top = if found.reading.as_ref().unwrap().offset_rows == 0 {
+        found
+    } else {
+        read(&mut host, lease, Operation::Scroll(Scroll::Top));
+        screen(&mut host, lease, |s| {
+            s.reading.as_ref().unwrap().offset_rows == 0
+        })
+    };
+    pointer(
+        &mut host,
+        lease,
+        top.generation,
+        pane::PointerPhase::Press,
+        1.0,
+    );
+    // Reading acknowledgements fence worker admission, not formatting on the dispatch thread.
+    read(&mut host, lease, Operation::Scroll(Scroll::Bottom));
+    let bottom = screen(&mut host, lease, |s| {
+        let r = s.reading.as_ref().unwrap();
+        r.offset_rows + r.visible_rows == r.total_rows
+    });
+    pointer(
+        &mut host,
+        lease,
+        bottom.generation,
+        pane::PointerPhase::Motion,
+        400.0,
+    );
+    let selected = screen(&mut host, lease, |s| {
+        s.reading.as_ref().unwrap().selection_present
+    });
+    pointer(
+        &mut host,
+        lease,
+        selected.generation,
+        pane::PointerPhase::Release,
+        400.0,
+    );
+    // Release can publish another generation. Drain it before requesting a prepared copy.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut generation = selected.generation;
+    let mut bytes = Vec::new();
+    let mut chunks = 0;
+    loop {
+        if let Reply::Screen(s) = host.request([1; 32], lease.connection, Request::Poll { lease }) {
+            generation = s.generation;
+            bytes.clear();
+            chunks = 0;
+        }
+        match host.request(
+            [1; 32],
+            lease.connection,
+            Request::SelectionChunk {
+                lease,
+                generation,
+                offset: bytes.len(),
+            },
+        ) {
+            Reply::SelectionChunk {
+                generation: actual,
+                offset,
+                total,
+                bytes: part,
+            } => {
+                assert_eq!(actual, generation);
+                assert_eq!(offset, bytes.len());
+                assert!(part.len() <= SELECTION_CHUNK_BYTES);
+                bytes.extend(part);
+                chunks += 1;
+                if bytes.len() == total {
+                    break;
+                }
+            }
+            Reply::SelectionPending => {}
+            reply => panic!("selection refused: {reply:?}"),
+        }
+        assert!(Instant::now() < deadline, "complete selection missing");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let copy: pane::reading::Selection = serde_json::from_slice(&bytes).unwrap();
+    assert!(chunks > 2);
+    assert!(
+        copy.plain_text
+            .contains("retained-0000-abcdefghijklmnopqrstuvwxyz")
+    );
+    assert!(
+        copy.plain_text
+            .contains("retained-1999-abcdefghijklmnopqrstuvwxyz")
+    );
+    assert!(copy.html.is_some());
+    let Reply::Attached { lease: other } = host.request(
+        [2; 32],
+        [2; 32],
+        Request::TakeOver {
+            target: lease.into(),
+            size: super::tests::size(),
+            style: None,
+        },
+    ) else {
+        panic!("takeover refused")
+    };
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            lease.connection,
+            Request::SelectionChunk {
+                lease,
+                generation,
+                offset: 0
+            }
+        ),
+        Reply::Refused(Refusal::Stale)
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Reply::Screen(screen) =
+            host.request([2; 32], other.connection, Request::Poll { lease: other })
+        {
+            let reading = screen.reading.unwrap();
+            assert!(!reading.selection_present);
+            assert!(reading.find.is_none());
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    host.shutdown().unwrap();
+}

@@ -1649,7 +1649,12 @@ fn physical_key_up_after_refocus_is_suppressed_after_synthetic_release() {
         SurfacePosition { x: 63.0, y: 1.0 },
     ));
     assert_eq!(
-        session.copy_selection().unwrap().unwrap().plain_text,
+        session
+            .copy_selection()
+            .unwrap()
+            .unwrap()
+            .plain_text
+            .as_ref(),
         "selected"
     );
 
@@ -1671,7 +1676,12 @@ fn physical_key_up_after_refocus_is_suppressed_after_synthetic_release() {
 
     assert_eq!(records.snapshot().written, before_physical_release);
     assert_eq!(
-        session.copy_selection().unwrap().unwrap().plain_text,
+        session
+            .copy_selection()
+            .unwrap()
+            .unwrap()
+            .plain_text
+            .as_ref(),
         "selected"
     );
 
@@ -2988,7 +2998,8 @@ fn copy_selection_at_rejects_a_stale_menu_generation_when_the_worker_is_ahead() 
             .pointer_and_copy_selection(pointer(PointerPhase::Release, 63.0))
             .unwrap()
             .unwrap()
-            .plain_text,
+            .plain_text
+            .as_ref(),
         "selected",
     );
     let mut menu_generation = screen.generation;
@@ -3002,7 +3013,8 @@ fn copy_selection_at_rejects_a_stale_menu_generation_when_the_worker_is_ahead() 
             .copy_selection_at(menu_generation)
             .unwrap()
             .unwrap()
-            .plain_text,
+            .plain_text
+            .as_ref(),
         "selected"
     );
 
@@ -3015,7 +3027,12 @@ fn copy_selection_at_rejects_a_stale_menu_generation_when_the_worker_is_ahead() 
     });
     assert_eq!(session.copy_selection_at(menu_generation).unwrap(), None);
     assert_eq!(
-        session.copy_selection().unwrap().unwrap().plain_text,
+        session
+            .copy_selection()
+            .unwrap()
+            .unwrap()
+            .plain_text
+            .as_ref(),
         "selected"
     );
 
@@ -3032,7 +3049,8 @@ fn copy_selection_at_rejects_a_stale_menu_generation_when_the_worker_is_ahead() 
             .copy_selection_at(current.generation)
             .unwrap()
             .unwrap()
-            .plain_text,
+            .plain_text
+            .as_ref(),
         "selected"
     );
     // A synchronized transaction retains its published generation while hiding mutations.
@@ -4084,7 +4102,8 @@ fn accessibility_selection_authority_uses_the_reliable_worker_command_lane() {
             .selection_copy(SelectionCopyOptions::default())
             .unwrap()
             .unwrap()
-            .plain_text,
+            .plain_text
+            .as_ref(),
         "😀"
     );
     assert!(records.snapshot().written.is_empty());
@@ -4754,7 +4773,7 @@ fn fullscreen_application_mouse_capture_and_shift_selection_keep_copy_priority()
         let (reply, result) = mpsc::sync_channel(1);
         assert!(worker.process_command(Command::CopyOrForward(modifiers, reply)));
         assert_eq!(
-            result.recv().unwrap().unwrap().unwrap().plain_text,
+            result.recv().unwrap().unwrap().unwrap().plain_text.as_ref(),
             "selected"
         );
         assert_eq!(records.snapshot().written, mouse_bytes);

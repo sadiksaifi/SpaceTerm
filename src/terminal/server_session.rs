@@ -1,5 +1,6 @@
 //! Desktop presentation and fenced input for an authenticated server Pane.
 mod effects;
+mod reading;
 use super::pointer_input::{PointerInput, WheelInput};
 use super::session::clipboard::ClipboardAuthority;
 use super::session::*;
@@ -42,6 +43,7 @@ pub(crate) struct DevelopmentPaneState {
     interaction: Mutex<Interaction>,
     effect_authority: Arc<ClipboardAuthority>,
     hidden_input: AtomicBool,
+    reading: Mutex<reading::ReadingState>,
     client_effects: Mutex<std::collections::VecDeque<ClientEffectRequest>>,
 }
 impl DevelopmentPaneState {
@@ -58,6 +60,7 @@ impl DevelopmentPaneState {
             paste_unconfirmed: AtomicBool::new(false),
             interaction: Mutex::new(Interaction::default()),
             hidden_input: AtomicBool::new(false),
+            reading: Mutex::default(),
             client_effects: Mutex::new(std::collections::VecDeque::new()),
             effect_authority: {
                 let authority = ClipboardAuthority::default();
@@ -101,6 +104,10 @@ impl DevelopmentPaneState {
         }
     }
     fn invalidate(&self) -> u64 {
+        self.reading
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .disconnect();
         self.effect_authority.client_focus(None);
         self.client_effects
             .lock()
@@ -155,6 +162,10 @@ impl DevelopmentPaneState {
     fn set(&self, status: DevelopmentPaneStatus) {
         let mut current = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if status != DevelopmentPaneStatus::Connected {
+            self.reading
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .disconnect();
             self.effect_authority.client_focus(None);
             self.hidden_input.store(false, Ordering::Release);
             self.paste_unconfirmed.store(false, Ordering::Release);
@@ -244,6 +255,7 @@ impl DevelopmentServerSessionFactory {
 }
 
 enum Input {
+    Read(pane::reading::Operation),
     Key(KeyInput),
     Pointer(u64, pane::Pointer),
     Wheel(u64, pane::Wheel),
@@ -262,6 +274,7 @@ enum Input {
 impl Input {
     fn eligible(&self, target: pane::FocusTarget) -> bool {
         match self {
+            Self::Read(_) => true,
             Self::Key(key) if key.is_input_method_commit() => matches!(
                 target,
                 pane::FocusTarget::Terminal | pane::FocusTarget::FocusedPane
@@ -310,11 +323,13 @@ struct ScreenMapping {
 }
 struct Interaction {
     interactive: bool,
+    reading: bool,
     focus_generation: u64,
     target: pane::FocusTarget,
     screen: Option<ScreenMapping>,
     pointer_geometry_start: Option<PresentationGeneration>,
     requested_size: Option<PaneSize>,
+    application_pointer_active: bool,
     pending: Option<PendingPaste>,
     resolving: Option<ResolvingPaste>,
     paste_request: Option<(u64, u64)>,
@@ -324,11 +339,13 @@ impl Default for Interaction {
     fn default() -> Self {
         Self {
             interactive: false,
+            reading: false,
             focus_generation: 1,
             target: pane::FocusTarget::Unfocused,
             screen: None,
             pointer_geometry_start: None,
             requested_size: None,
+            application_pointer_active: false,
             pending: None,
             resolving: None,
             paste_request: None,
@@ -338,7 +355,9 @@ impl Default for Interaction {
 }
 impl Interaction {
     fn disconnect(&mut self) {
+        self.application_pointer_active = false;
         self.interactive = false;
+        self.reading = false;
         self.screen = None;
         self.pointer_geometry_start = None;
         self.pending = None;
@@ -439,13 +458,7 @@ impl PresentationHandle {
         if !x.is_finite() || !y.is_finite() {
             return None;
         }
-        let width = f32::from(mapping.size.columns) * f32::from(mapping.size.cell_width);
-        let height = f32::from(mapping.size.rows) * f32::from(mapping.size.cell_height);
-        Some((
-            mapping,
-            x.clamp(0.0, width - 1.0),
-            y.clamp(0.0, height - 1.0),
-        ))
+        Some((mapping, x, y))
     }
     fn send(&self, input: Input) {
         let current_epoch = self.state.epoch.load(Ordering::Acquire);
@@ -467,7 +480,9 @@ impl PresentationHandle {
             };
         let available = connected
             && epoch == current_epoch
-            && (interaction.interactive || matches!(input, Input::Resize(_) | Input::Style(_)))
+            && (interaction.interactive
+                || matches!(input, Input::Resize(_) | Input::Style(_))
+                || matches!(input, Input::Read(_)) && interaction.reading)
             && eligible;
         if !available {
             drop(interaction);
@@ -601,11 +616,13 @@ impl ActiveInput {
         let valid = {
             let interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
             state.epoch.load(Ordering::Acquire) == self.epoch
-                && (matches!(submitted.command, Input::Resize(_) | Input::Style(_))
-                    || (interaction.interactive
-                        && (submitted.focus_generation == interaction.focus_generation
-                            || matches!(&submitted.command, Input::ResolvePaste(pending, ..) if interaction.resolution_is_current(*pending)))
-                        && submitted.command.eligible(interaction.target)))
+                && (matches!(
+                    submitted.command,
+                    Input::Resize(_) | Input::Style(_) | Input::Read(_)
+                ) || (interaction.interactive
+                    && (submitted.focus_generation == interaction.focus_generation
+                        || matches!(&submitted.command, Input::ResolvePaste(pending, ..) if interaction.resolution_is_current(*pending)))
+                    && submitted.command.eligible(interaction.target)))
         };
         if !valid {
             discard_input(state, submitted.epoch, submitted.command);
@@ -618,6 +635,18 @@ impl ActiveInput {
             input,
         };
         let (request, paste_reply) = match submitted.command {
+            Input::Read(operation) => {
+                let accepted = state
+                    .reading
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .enqueue(operation);
+                if !accepted {
+                    state.invalidate();
+                    return Err(ServerError::Protocol);
+                }
+                return Ok(());
+            }
             Input::Key(key) => (
                 input_request(pane::InteractiveInput::Key(encode_key(key))),
                 None,
@@ -1179,6 +1208,7 @@ fn present(
             };
             let mut active_size = grant_size;
             let mut ready = false;
+            let mut reader = reading::Reader::default();
             loop {
                 if !alive.load(Ordering::Acquire)
                     || attachment.as_ref().is_some_and(|permit| !permit.active())
@@ -1242,12 +1272,18 @@ fn present(
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner())
                                 .interactive = connection.supports_interactive_input();
+                            state
+                                .interaction
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .reading = connection.supports_reading();
                             active_input.sync_focus(&state, &mut |request| {
                                 exchange(&attachment, &mut connection, request)
                             })?;
                             ready = true;
                         }
                         state.connected(epoch, mapping, paste_unconfirmed)?;
+                        reader.screen(&state, mapping, screen.selection_present);
                         let _ = events.force_send(TerminalSessionEvent::Screen(screen));
                         takeover = false;
                         if paste_unconfirmed {
@@ -1301,6 +1337,13 @@ fn present(
                         },
                         &mut paste_unconfirmed,
                     )?;
+                }
+                if ready && connection.supports_reading() {
+                    reader.poll(&state, lease, &mut |request| {
+                        exchange(&attachment, &mut connection, request)
+                    })?;
+                    let mut reading = state.reading.lock().unwrap_or_else(|e| e.into_inner());
+                    reading.publish_ready(&events);
                 }
                 if ready
                     && connection.supports_native_effects()
@@ -1395,6 +1438,18 @@ fn encode_key(k: KeyInput) -> pane::Key {
     }
 }
 impl TerminalSessionHandle for PresentationHandle {
+    fn reading_available(&self) -> bool {
+        self.state.status() == DevelopmentPaneStatus::Connected
+            && self
+                .state
+                .interaction
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .reading
+    }
+    fn selection_copy_ready(&self) -> bool {
+        self.prepared_selection(None).is_some()
+    }
     fn key(&self, k: KeyInput) {
         if k.validate().is_err()
             || k.text.as_ref().is_some_and(|s| s.len() > 4096)
@@ -1506,36 +1561,62 @@ impl TerminalSessionHandle for PresentationHandle {
         else {
             return;
         };
-        if !mapping.mouse_tracking && !continuation {
-            return;
-        }
-        self.send(Input::Pointer(
-            mapping.epoch,
-            pane::Pointer {
-                screen_generation: mapping.wire,
-                phase: match input.phase {
-                    PointerPhase::Press => pane::PointerPhase::Press,
-                    PointerPhase::Motion => pane::PointerPhase::Motion,
-                    PointerPhase::Release => pane::PointerPhase::Release,
-                },
-                button: input.button.map(|button| match button {
-                    PointerButton::Left => pane::PointerButton::Left,
-                    PointerButton::Middle => pane::PointerButton::Middle,
-                    PointerButton::Right => pane::PointerButton::Right,
-                }),
-                x,
-                y,
-                modifiers: encode_modifiers(input.modifiers),
-                shift_selection: input.shift_selection
-                    == ShiftSelectionPolicy::OverrideApplicationMouse,
+
+        let width = f32::from(mapping.size.columns) * f32::from(mapping.size.cell_width);
+        let height = f32::from(mapping.size.rows) * f32::from(mapping.size.cell_height);
+        let mut pointer = pane::Pointer {
+            screen_generation: mapping.wire,
+            phase: match input.phase {
+                PointerPhase::Press => pane::PointerPhase::Press,
+                PointerPhase::Motion => pane::PointerPhase::Motion,
+                PointerPhase::Release => pane::PointerPhase::Release,
             },
-        ));
+            button: input.button.map(|button| match button {
+                PointerButton::Left => pane::PointerButton::Left,
+                PointerButton::Middle => pane::PointerButton::Middle,
+                PointerButton::Right => pane::PointerButton::Right,
+            }),
+            x,
+            y,
+            modifiers: encode_modifiers(input.modifiers),
+            shift_selection: input.shift_selection
+                == ShiftSelectionPolicy::OverrideApplicationMouse,
+        };
+        let application = {
+            let mut interaction = self
+                .state
+                .interaction
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if input.phase == PointerPhase::Press {
+                interaction.application_pointer_active =
+                    mapping.mouse_tracking && !(pointer.shift_selection && input.modifiers.shift);
+            }
+            let application = interaction.application_pointer_active;
+            if input.phase == PointerPhase::Release {
+                interaction.application_pointer_active = false;
+            }
+            application
+                || input.phase == PointerPhase::Motion
+                    && input.button.is_none()
+                    && mapping.mouse_tracking
+        };
+        if !application {
+            pointer.x = pointer.x.clamp(-width, 2.0 * width);
+            pointer.y = pointer.y.clamp(-height, 2.0 * height);
+            self.read(pane::reading::Operation::Pointer(pointer));
+        } else {
+            pointer.x = pointer.x.clamp(0.0, width - 1.0);
+            pointer.y = pointer.y.clamp(0.0, height - 1.0);
+            self.send(Input::Pointer(mapping.epoch, pointer));
+        }
     }
     fn pointer_and_copy_selection(
         &self,
         input: PointerInput,
     ) -> Result<Option<super::selection::SelectionCopy>, SelectionCopyError> {
         self.pointer(input);
+        self.request_pointer_copy();
         Ok(None)
     }
     fn wheel(&self, input: WheelInput) {
@@ -1544,38 +1625,89 @@ impl TerminalSessionHandle for PresentationHandle {
         else {
             return;
         };
-        if !mapping.mouse_tracking && !(mapping.alternate && mapping.alternate_scroll) {
-            return;
-        }
-        self.send(Input::Wheel(
-            mapping.epoch,
-            pane::Wheel {
-                screen_generation: mapping.wire,
-                horizontal_steps: input.horizontal_steps,
-                vertical_steps: input.vertical_steps,
-                phase: match input.phase {
-                    WheelPhase::GestureStarted => pane::WheelPhase::GestureStarted,
-                    WheelPhase::GestureChanged => pane::WheelPhase::GestureChanged,
-                    WheelPhase::GestureEnded => pane::WheelPhase::GestureEnded,
-                    WheelPhase::GestureCancelled => pane::WheelPhase::GestureCancelled,
-                    WheelPhase::MomentumStarted => pane::WheelPhase::MomentumStarted,
-                    WheelPhase::MomentumChanged => pane::WheelPhase::MomentumChanged,
-                    WheelPhase::MomentumEnded => pane::WheelPhase::MomentumEnded,
-                    WheelPhase::MomentumCancelled => pane::WheelPhase::MomentumCancelled,
-                },
-                x,
-                y,
-                modifiers: encode_modifiers(input.modifiers),
-                shift_selection: input.shift_selection
-                    == ShiftSelectionPolicy::OverrideApplicationMouse,
+
+        let x = x.clamp(
+            0.0,
+            f32::from(mapping.size.columns) * f32::from(mapping.size.cell_width) - 1.0,
+        );
+        let y = y.clamp(
+            0.0,
+            f32::from(mapping.size.rows) * f32::from(mapping.size.cell_height) - 1.0,
+        );
+        let wheel = pane::Wheel {
+            screen_generation: mapping.wire,
+            horizontal_steps: input.horizontal_steps,
+            vertical_steps: input.vertical_steps,
+            phase: match input.phase {
+                WheelPhase::GestureStarted => pane::WheelPhase::GestureStarted,
+                WheelPhase::GestureChanged => pane::WheelPhase::GestureChanged,
+                WheelPhase::GestureEnded => pane::WheelPhase::GestureEnded,
+                WheelPhase::GestureCancelled => pane::WheelPhase::GestureCancelled,
+                WheelPhase::MomentumStarted => pane::WheelPhase::MomentumStarted,
+                WheelPhase::MomentumChanged => pane::WheelPhase::MomentumChanged,
+                WheelPhase::MomentumEnded => pane::WheelPhase::MomentumEnded,
+                WheelPhase::MomentumCancelled => pane::WheelPhase::MomentumCancelled,
             },
-        ));
+            x,
+            y,
+            modifiers: encode_modifiers(input.modifiers),
+            shift_selection: input.shift_selection
+                == ShiftSelectionPolicy::OverrideApplicationMouse,
+        };
+        if !mapping.mouse_tracking && !(mapping.alternate && mapping.alternate_scroll)
+            || mapping.mouse_tracking && wheel.shift_selection && input.modifiers.shift
+        {
+            self.read(pane::reading::Operation::Wheel(wheel));
+        } else {
+            self.send(Input::Wheel(mapping.epoch, wheel));
+        }
     }
-    fn scroll_to(&self, _: u64, _: PresentationGeneration) {}
-    fn scroll_scrollback(&self, _: ScrollbackMovement) {}
-    fn set_find_query(&self, _: super::FindQueryGeneration, _: String) {}
-    fn navigate_find(&self, _: super::FindQueryGeneration, _: super::FindDirection) {}
-    fn end_find(&self, _: super::FindQueryGeneration) {}
+    fn scroll_to(&self, offset: u64, generation: PresentationGeneration) {
+        let mapping = self
+            .state
+            .interaction
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .screen;
+        if let Some(mapping) = mapping.filter(|m| m.local == generation) {
+            self.read(pane::reading::Operation::ScrollTo {
+                offset,
+                screen: mapping.wire,
+            });
+        }
+    }
+    fn scroll_scrollback(&self, movement: ScrollbackMovement) {
+        use pane::reading::Scroll;
+        self.read(pane::reading::Operation::Scroll(match movement {
+            ScrollbackMovement::PageUp => Scroll::PageUp,
+            ScrollbackMovement::PageDown => Scroll::PageDown,
+            ScrollbackMovement::Top => Scroll::Top,
+            ScrollbackMovement::Bottom => Scroll::Bottom,
+        }));
+    }
+    fn set_find_query(&self, generation: super::FindQueryGeneration, text: String) {
+        if text.len() <= pane::reading::MAX_QUERY_BYTES {
+            self.read(pane::reading::Operation::Query {
+                generation: generation.value(),
+                text,
+            });
+        }
+    }
+    fn navigate_find(
+        &self,
+        generation: super::FindQueryGeneration,
+        direction: super::FindDirection,
+    ) {
+        self.read(pane::reading::Operation::Navigate {
+            generation: generation.value(),
+            backwards: direction == super::FindDirection::Previous,
+        });
+    }
+    fn end_find(&self, generation: super::FindQueryGeneration) {
+        self.read(pane::reading::Operation::EndFind {
+            generation: generation.value(),
+        });
+    }
     fn request_paste(
         &self,
         payload: super::PastePayload,
@@ -1625,13 +1757,16 @@ impl TerminalSessionHandle for PresentationHandle {
         rx
     }
     fn copy_selection(&self) -> Result<Option<super::SelectionCopy>, SelectionCopyError> {
-        Ok(None)
+        Ok(self.prepared_selection(None))
+    }
+    fn take_prepared_pointer_copy(&self) -> Option<super::SelectionCopy> {
+        self.take_pointer_copy()
     }
     fn copy_selection_at(
         &self,
-        _: PresentationGeneration,
+        generation: PresentationGeneration,
     ) -> Result<Option<super::SelectionCopy>, SelectionCopyError> {
-        Ok(None)
+        Ok(self.prepared_selection(Some(generation)))
     }
     fn update_appearance(&self, update: TerminalAppearanceUpdate) {
         let style = encode_style(&update);
@@ -1721,6 +1856,42 @@ fn decode_screen(
     ))
     .clone();
     screen.generation = generation;
+    if let Some(reading) = wire.reading {
+        if reading.visible_rows != wire.rows.len() as u64
+            || reading.offset_rows > reading.total_rows.saturating_sub(reading.visible_rows)
+        {
+            return Err(ServerError::Protocol);
+        }
+        screen.viewport = ViewportSnapshot {
+            offset_rows: reading.offset_rows,
+            visible_rows: reading.visible_rows,
+        };
+        screen.scrollbar = ScrollbarSnapshot {
+            total_rows: reading.total_rows,
+            offset_rows: reading.offset_rows,
+            visible_rows: reading.visible_rows,
+        };
+        screen.selection_present = reading.selection_present;
+        screen.find = reading.find.map(|find| {
+            Arc::new(super::TerminalFindSnapshot {
+                generation: super::FindQueryGeneration::from_value(find.generation),
+                total_matches: find.total,
+                current_match: find.current,
+                visible_spans: find
+                    .spans
+                    .into_iter()
+                    .map(
+                        |(row, start_column, end_column, current)| super::FindHighlightSpan {
+                            row,
+                            start_column,
+                            end_column,
+                            current,
+                        },
+                    )
+                    .collect(),
+            })
+        });
+    }
     screen.mouse_tracking = wire.mouse_tracking;
     screen.alternate_scroll = wire.alternate_scroll;
     screen.size = ScreenSizeSnapshot {
@@ -1761,7 +1932,7 @@ fn decode_screen(
                             5 => TerminalUnderlineSnapshot::Dashed,
                             _ => TerminalUnderlineSnapshot::None,
                         },
-                        selected: false,
+                        selected: c.flags & 512 != 0,
                         semantic_content: CellSemanticSnapshot::Output,
                         hyperlink: c
                             .hyperlink
@@ -1866,6 +2037,17 @@ fn decode_screen(
 mod tests {
     use super::*;
 
+    #[test]
+    fn reading_commands_are_queued_without_terminal_input_focus() {
+        let adapter = Adapter::new();
+        adapter.handle.interactive_focus(false, true);
+        adapter.handle.scroll_scrollback(ScrollbackMovement::Top);
+        assert!(
+            adapter.input.try_recv().is_ok(),
+            "Scroll must reach the server worker"
+        );
+    }
+
     pub(super) struct Adapter {
         pub(super) handle: PresentationHandle,
         input: mpsc::Receiver<SubmittedInput>,
@@ -1884,6 +2066,7 @@ mod tests {
             let epoch = state.invalidate();
             state.set(DevelopmentPaneStatus::Connected);
             state.interaction.lock().unwrap().interactive = true;
+            state.interaction.lock().unwrap().reading = true;
             let (sender, input) = mpsc::sync_channel(512);
             let handle = PresentationHandle {
                 input: sender,
@@ -2877,6 +3060,7 @@ mod tests {
         let mut overrides = vec![false; 256];
         overrides[1] = true;
         let screen = pane::Screen {
+            reading: None,
             hyperlinks: Vec::new(),
             generation: 1,
             mouse_tracking: false,
