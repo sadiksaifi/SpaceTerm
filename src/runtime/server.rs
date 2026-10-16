@@ -397,7 +397,11 @@ impl DevelopmentPaneHost {
             Request::SelectionChunk {
                 generation, offset, ..
             } => {
-                if generation != pane.screen_generation {
+                if pane
+                    .screen
+                    .as_ref()
+                    .is_none_or(|screen| screen.selection_revision != generation)
+                {
                     return Err(Refusal::Stale);
                 }
                 pane.reading.chunk(generation, offset)
@@ -905,8 +909,7 @@ impl OwnedPane {
             }
         }
         if let Some(screen) = &self.screen {
-            self.reading
-                .update(&self.runtime, screen, self.screen_generation);
+            self.reading.update(&self.runtime, screen);
         }
     }
 }
@@ -980,6 +983,7 @@ pub(crate) fn encode_screen(screen: &ScreenSnapshot) -> Screen {
             offset_rows: screen.scrollbar.offset_rows,
             visible_rows: screen.scrollbar.visible_rows,
             selection_present: screen.selection_present,
+            selection_revision: screen.selection_revision,
             find: screen.find.as_ref().map(|find| pane::reading::Find {
                 generation: find.generation.value(),
                 total: find.total_matches,

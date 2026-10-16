@@ -317,6 +317,7 @@ struct ScreenMapping {
     epoch: u64,
     local: PresentationGeneration,
     wire: u64,
+    selection: u64,
     size: PaneSize,
     mouse_tracking: bool,
     alternate: bool,
@@ -644,12 +645,14 @@ impl ActiveInput {
                     .enqueue(operation);
                 return Ok(());
             }
-            Input::CopyOrForward(modifiers) => (
-                input_request(pane::InteractiveInput::CopyOrForward {
-                    modifiers: encode_modifiers(modifiers),
-                }),
-                None,
-            ),
+            Input::CopyOrForward(modifiers) => {
+                state
+                    .reading
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .pending_copy = Some((self.epoch, generation, modifiers));
+                return Ok(());
+            }
             Input::Key(key) => (
                 input_request(pane::InteractiveInput::Key(encode_key(key))),
                 None,
@@ -1232,6 +1235,10 @@ fn present(
                             epoch,
                             local: generation,
                             wire: screen.generation,
+                            selection: screen
+                                .reading
+                                .as_ref()
+                                .map_or(0, |reading| reading.selection_revision),
                             size: active_size,
                             mouse_tracking: screen.mouse_tracking,
                             alternate: screen.alternate,
@@ -2070,6 +2077,56 @@ mod tests {
     }
 
     #[test]
+    fn copy_fallback_waits_for_queued_selection_input() {
+        let mut adapter = Adapter::new();
+        adapter
+            .handle
+            .read(pane::reading::Operation::Scroll(pane::reading::Scroll::Top));
+        adapter
+            .handle
+            .copy_or_forward(InputModifiers::default())
+            .unwrap();
+        adapter
+            .drain(|request| {
+                assert!(
+                    !matches!(
+                        request,
+                        Request::Input {
+                            input: pane::InteractiveInput::CopyOrForward { .. },
+                            ..
+                        }
+                    ),
+                    "Copy overtook pending reading input"
+                );
+                Ok(Reply::Unchanged)
+            })
+            .unwrap();
+        let mapping = adapter.tracking_screen(4, 17, false);
+        let mut reader = reading::Reader::default();
+        reader.screen(&adapter.handle.state, mapping, false);
+        for _ in 0..3 {
+            reader
+                .poll(
+                    &adapter.handle.state,
+                    adapter.active.lease,
+                    &mut |request| match request {
+                        Request::Read { .. } => Ok(Reply::Reading { accepted: true }),
+                        Request::ReadingStatus { .. } => Ok(Reply::ReadingReady {
+                            generation: mapping.wire,
+                            selection_revision: mapping.selection,
+                            selection_present: true,
+                        }),
+                        Request::SelectionChunk { .. } => Ok(Reply::SelectionPending),
+                        _ => panic!(
+                            "Copy must not reach the application after selection input completes"
+                        ),
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
     fn copy_without_a_prepared_selection_reaches_the_fenced_server_input_path() {
         let mut adapter = Adapter::new();
         assert!(
@@ -2097,12 +2154,37 @@ mod tests {
                 Ok(Reply::Unchanged)
             })
             .unwrap();
+        let mut reader = reading::Reader::default();
+        reader
+            .poll(
+                &adapter.handle.state,
+                adapter.active.lease,
+                &mut |request| {
+                    if matches!(
+                        request,
+                        Request::Input {
+                            input: pane::InteractiveInput::CopyOrForward { modifiers: 8 },
+                            ..
+                        }
+                    ) {
+                        requests += 1;
+                    }
+                    Ok(Reply::Unchanged)
+                },
+            )
+            .unwrap();
         assert_eq!(
             requests, 1,
             "the server worker must decide whether Copy forwards a key"
         );
         adapter.handle.copy_or_forward(Default::default()).unwrap();
+        adapter.drain(|_| Ok(Reply::Unchanged)).unwrap();
         adapter.handle.interactive_focus(false, true);
+        reader
+            .poll(&adapter.handle.state, adapter.active.lease, &mut |_| {
+                panic!("deferred Copy must not cross a changed focus generation")
+            })
+            .unwrap();
         adapter
             .drain(|request| {
                 assert!(
@@ -2179,6 +2261,7 @@ mod tests {
                         }
                         Request::ReadingStatus { .. } => Ok(Reply::ReadingReady {
                             generation: 17,
+                            selection_revision: 17,
                             selection_present: false,
                         }),
                         _ => panic!("unexpected reading request"),
@@ -2264,6 +2347,7 @@ mod tests {
                 epoch: self.active.epoch,
                 local: PresentationGeneration::test(local),
                 wire,
+                selection: wire,
                 size: *self.handle.size.lock().unwrap(),
                 mouse_tracking,
                 alternate: false,
@@ -2499,6 +2583,7 @@ mod tests {
                 epoch,
                 local: PresentationGeneration::test(10),
                 wire: 3,
+                selection: 3,
                 size: *adapter.handle.size.lock().unwrap(),
                 mouse_tracking: false,
                 alternate: false,
@@ -2889,6 +2974,7 @@ mod tests {
                     epoch: adapter.active.epoch,
                     local: PresentationGeneration::test(8),
                     wire: 91,
+                    selection: 91,
                     size: pane_size(original),
                     mouse_tracking: true,
                     alternate: false,
@@ -2981,6 +3067,7 @@ mod tests {
             epoch: adapter.active.epoch,
             local: PresentationGeneration::test(8),
             wire: 91,
+            selection: 91,
             size: original,
             mouse_tracking: true,
             alternate: false,
@@ -3020,6 +3107,7 @@ mod tests {
         let replacement = ScreenMapping {
             local: PresentationGeneration::test(9),
             wire: 92,
+            selection: 92,
             size: pane_size(resized),
             ..mapping
         };
@@ -3067,6 +3155,7 @@ mod tests {
             epoch: adapter.active.epoch,
             local: PresentationGeneration::test(8),
             wire: 91,
+            selection: 91,
             size: pane_size(geometry),
             mouse_tracking: true,
             alternate: false,

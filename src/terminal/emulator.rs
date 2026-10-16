@@ -450,6 +450,7 @@ pub struct ScreenSnapshot {
     pub mouse_tracking: bool,
     pub alternate_scroll: bool,
     pub selection_present: bool,
+    pub selection_revision: u64,
     pub title: Arc<str>,
     pub metadata: Arc<TerminalMetadataSnapshot>,
     pub find: Option<Arc<TerminalFindSnapshot>>,
@@ -477,6 +478,7 @@ impl PartialEq for ScreenSnapshot {
             && self.mouse_tracking == other.mouse_tracking
             && self.alternate_scroll == other.alternate_scroll
             && self.selection_present == other.selection_present
+            && self.selection_revision == other.selection_revision
             && self.title == other.title
             && self.metadata == other.metadata
             && self.find == other.find
@@ -521,6 +523,7 @@ impl ScreenSnapshot {
             mouse_tracking: false,
             alternate_scroll: false,
             selection_present: false,
+            selection_revision: 0,
             title: Arc::from(""),
             metadata: MetadataTracker::new(paths, "", "", Default::default(), Instant::now())
                 .snapshot(),
@@ -606,6 +609,7 @@ impl ScreenSnapshot {
             rows,
             text_blinking,
             selection_present,
+            selection_revision: 0,
             scrollbar,
             title: title.into(),
             ..Self::empty_value()
@@ -627,6 +631,7 @@ impl ScreenSnapshot {
             rows,
             text_blinking,
             selection_present,
+            selection_revision: 0,
             scrollbar,
             title: title.into(),
             ..Self::empty_value()
@@ -655,6 +660,7 @@ impl ScreenSnapshot {
             mouse_tracking: false,
             alternate_scroll: false,
             selection_present: false,
+            selection_revision: 0,
             title: Arc::from(""),
             metadata: MetadataTracker::new(
                 crate::local_path::LocalPathSemantics::Posix,
@@ -731,6 +737,8 @@ pub(crate) struct TerminalEmulator {
     cached_mouse_tracking: Option<bool>,
     cached_alternate_scroll: Option<bool>,
     cached_selection_present: Option<bool>,
+    selection_revision: u64,
+    cached_selection_revision: Option<u64>,
     cached_metadata_revision: Option<u64>,
     cached_appearance_generation: Option<AppearanceGeneration>,
     geometry: TerminalGeometry,
@@ -1181,6 +1189,8 @@ impl TerminalEmulator {
             cached_mouse_tracking: None,
             cached_alternate_scroll: None,
             cached_selection_present: None,
+            selection_revision: 0,
+            cached_selection_revision: None,
             cached_metadata_revision: None,
             cached_appearance_generation: None,
             geometry,
@@ -1838,6 +1848,10 @@ impl TerminalEmulator {
         self.terminal
             .mode(Mode::BRACKETED_PASTE)
             .map_err(|error| TerminalFailure::emulator_error("query-bracketed-paste-mode", error))
+    }
+
+    pub(super) fn set_selection_revision(&mut self, revision: u64) {
+        self.selection_revision = revision;
     }
 
     #[cfg(test)]
@@ -2651,7 +2665,8 @@ impl TerminalEmulator {
                     || self.cached_geometry != Some(self.geometry),
                 mouse_tracking: self.cached_mouse_tracking != Some(mouse_tracking)
                     || self.cached_alternate_scroll != Some(alternate_scroll),
-                selection_presence: self.cached_selection_present != Some(selection_present),
+                selection_presence: self.cached_selection_present != Some(selection_present)
+                    || self.cached_selection_revision != Some(self.selection_revision),
                 search: find_changed,
                 graphics_content: graphics_content_changed,
                 graphics_geometry: graphics_geometry_changed,
@@ -2863,6 +2878,7 @@ impl TerminalEmulator {
         self.cached_mouse_tracking = Some(mouse_tracking);
         self.cached_alternate_scroll = Some(alternate_scroll);
         self.cached_selection_present = Some(selection_present);
+        self.cached_selection_revision = Some(self.selection_revision);
         self.cached_metadata_revision = Some(metadata.revision);
         self.cached_appearance_generation = Some(self.applied_appearance.generation);
         self.title = Arc::clone(&title);
@@ -2892,6 +2908,7 @@ impl TerminalEmulator {
             mouse_tracking,
             alternate_scroll,
             selection_present,
+            selection_revision: self.selection_revision,
             title,
             metadata,
             find,

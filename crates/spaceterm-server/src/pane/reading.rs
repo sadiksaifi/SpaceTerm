@@ -31,6 +31,7 @@ pub struct Snapshot {
     pub offset_rows: u64,
     pub visible_rows: u64,
     pub selection_present: bool,
+    pub selection_revision: u64,
     pub find: Option<Find>,
 }
 

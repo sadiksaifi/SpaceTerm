@@ -63,13 +63,20 @@ fn pointer(
 
 #[test]
 fn old_scrollback_find_and_multichunk_copy_use_the_retained_terminal_content() {
+    let gate = std::env::temp_dir().join(format!(
+        "spaceterm-reading-{:x}",
+        u128::from_ne_bytes(nonce().unwrap()[..16].try_into().unwrap())
+    ));
+    let quoted_gate = format!("'{}'", gate.to_string_lossy().replace('\'', "'\\''"));
     let mut host = host();
     let lease = attach(&mut host, 1, true);
     command(
         &mut host,
         1,
         lease,
-        "stty -echo; printf '\\033[2J\\033[H'; i=0; while [ $i -lt 2000 ]; do printf 'retained-%04d-abcdefghijklmnopqrstuvwxyz\\n' $i; i=$((i+1)); done; printf 'FINISHED\\n'",
+        &format!(
+            "stty -echo; printf '\\033[2J\\033[H'; i=0; while [ $i -lt 2000 ]; do printf 'retained-%04d-abcdefghijklmnopqrstuvwxyz\\n' $i; i=$((i+1)); done; printf 'FINISHED\\n'; while [ ! -f {quoted_gate} ]; do sleep 0.01; done; i=0; while [ $i -lt 200 ]; do printf 'live-%s\\n' \"$i\"; i=$((i+1)); sleep 0.02; done"
+        ),
     );
     screen(&mut host, lease, |s| {
         s.reading.as_ref().unwrap().total_rows >= 2000
@@ -151,16 +158,24 @@ fn old_scrollback_find_and_multichunk_copy_use_the_retained_terminal_content() {
         pane::PointerPhase::Release,
         400.0,
     );
+    std::fs::write(&gate, []).unwrap();
     // Release can publish another generation. Drain it before requesting a prepared copy.
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut generation = selected.generation;
+    let mut generation = selected.reading.as_ref().unwrap().selection_revision;
     let mut bytes = Vec::new();
     let mut chunks = 0;
+    let mut intervening_screens = 0;
     loop {
         if let Reply::Screen(s) = host.request([1; 32], lease.connection, Request::Poll { lease }) {
-            generation = s.generation;
-            bytes.clear();
-            chunks = 0;
+            let current = s.reading.as_ref().unwrap().selection_revision;
+            if generation != current {
+                generation = current;
+                bytes.clear();
+                chunks = 0;
+                intervening_screens = 0;
+            } else if !bytes.is_empty() {
+                intervening_screens += 1;
+            }
         }
         match host.request(
             [1; 32],
@@ -190,10 +205,14 @@ fn old_scrollback_find_and_multichunk_copy_use_the_retained_terminal_content() {
             reply => panic!("selection refused: {reply:?}"),
         }
         assert!(Instant::now() < deadline, "complete selection missing");
-        std::thread::sleep(Duration::from_millis(5));
+        std::thread::sleep(Duration::from_millis(40));
     }
     let copy: pane::reading::Selection = serde_json::from_slice(&bytes).unwrap();
     assert!(chunks > 2);
+    assert!(
+        intervening_screens > 0,
+        "output must continue during this transfer"
+    );
     assert!(
         copy.plain_text
             .contains("retained-0000-abcdefghijklmnopqrstuvwxyz")
@@ -203,6 +222,7 @@ fn old_scrollback_find_and_multichunk_copy_use_the_retained_terminal_content() {
             .contains("retained-1999-abcdefghijklmnopqrstuvwxyz")
     );
     assert!(copy.html.is_some());
+    std::fs::remove_file(gate).unwrap();
     let Reply::Attached { lease: other } = host.request(
         [2; 32],
         [2; 32],

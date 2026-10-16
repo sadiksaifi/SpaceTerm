@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 pub(super) struct ReadingState {
     revision: u64,
     pub(super) selection_present: bool,
+    pub(super) pending_copy: Option<(u64, u64, InputModifiers)>,
     queue: VecDeque<Operation>,
     prepared: Option<(u64, ScreenMapping, super::super::SelectionCopy)>,
     pointer_copy: Option<u64>,
@@ -32,6 +33,7 @@ impl ReadingState {
         self.invalidate();
         self.queue.clear();
         self.selection_present = false;
+        self.pending_copy = None;
     }
     pub(super) fn enqueue(&mut self, operation: Operation) -> bool {
         if matches!(&operation, Operation::Pointer(p) if matches!(p.phase, pane::PointerPhase::Motion))
@@ -84,12 +86,32 @@ impl Reader {
     ) {
         let mut reading = state.reading.lock().unwrap_or_else(|e| e.into_inner());
         self.latest = Some(mapping);
-        reading.prepared = None;
         reading.selection_present = selection;
+        let current_revision = reading.revision;
+        if let Some((revision, saved, _)) = &mut reading.prepared
+            && selection
+            && *revision == current_revision
+            && saved.epoch == mapping.epoch
+            && saved.selection == mapping.selection
+        {
+            *saved = mapping;
+            return;
+        }
+        reading.prepared = None;
+        if let Some((saved, revision)) = &mut self.target
+            && selection
+            && *revision == current_revision
+            && saved.epoch == mapping.epoch
+            && saved.selection == mapping.selection
+        {
+            *saved = mapping;
+            return;
+        }
         self.target = selection.then_some((mapping, reading.revision));
         self.bytes.clear();
         self.total = None;
     }
+
     pub(super) fn poll(
         &mut self,
         state: &DevelopmentPaneState,
@@ -100,10 +122,13 @@ impl Reader {
             match exchange(&Request::ReadingStatus { lease })? {
                 Reply::SelectionPending => return Ok(()),
                 Reply::ReadingReady {
-                    generation,
+                    generation: _,
+                    selection_revision,
                     selection_present,
                 } => {
-                    let Some(mapping) = self.latest.filter(|mapping| mapping.wire == generation)
+                    let Some(mapping) = self
+                        .latest
+                        .filter(|mapping| mapping.selection == selection_revision)
                     else {
                         return Ok(());
                     };
@@ -159,6 +184,35 @@ impl Reader {
                 _ => return Err(ServerError::Protocol),
             }
         }
+        let pending_copy = {
+            let mut reading = state.reading.lock().unwrap_or_else(|e| e.into_inner());
+            reading
+                .pending_copy
+                .take()
+                .filter(|_| !reading.selection_present)
+        };
+        if let Some((epoch, generation, modifiers)) = pending_copy {
+            let valid = {
+                let interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
+                state.epoch.load(Ordering::Acquire) == epoch
+                    && interaction.interactive
+                    && interaction.focus_generation == generation
+                    && interaction.target == pane::FocusTarget::Terminal
+            };
+            if valid {
+                match exchange(&Request::Input {
+                    lease,
+                    generation,
+                    input: pane::InteractiveInput::CopyOrForward {
+                        modifiers: encode_modifiers(modifiers),
+                    },
+                }) {
+                    Ok(Reply::Unchanged) | Err(ServerError::StaleControl) => {}
+                    Err(error) => return Err(error),
+                    _ => return Err(ServerError::Protocol),
+                }
+            }
+        }
         let Some((mapping, revision)) = self.target else {
             return Ok(());
         };
@@ -175,7 +229,7 @@ impl Reader {
         }
         let reply = exchange(&Request::SelectionChunk {
             lease,
-            generation: mapping.wire,
+            generation: mapping.selection,
             offset: self.bytes.len(),
         });
         match reply {
@@ -191,7 +245,7 @@ impl Reader {
                 total,
                 bytes,
             }) => {
-                if generation != mapping.wire
+                if generation != mapping.selection
                     || offset != self.bytes.len()
                     || total == 0
                     || total > MAX_SELECTION_BYTES
@@ -237,7 +291,7 @@ impl PresentationHandle {
             return None;
         }
         let mut reading = self.state.reading.lock().unwrap_or_else(|e| e.into_inner());
-        if reading.pointer_copy.take() != Some(reading.revision) {
+        if reading.pointer_copy != Some(reading.revision) {
             return None;
         }
         let (revision, mapping, copy) = reading.prepared.as_ref()?;
@@ -246,7 +300,9 @@ impl PresentationHandle {
         {
             return None;
         }
-        Some(copy.clone())
+        let copy = copy.clone();
+        reading.pointer_copy = None;
+        Some(copy)
     }
     pub(super) fn request_pointer_copy(&self) {
         let mut reading = self.state.reading.lock().unwrap_or_else(|e| e.into_inner());
@@ -292,6 +348,7 @@ mod tests {
             epoch: adapter.active.epoch,
             local: PresentationGeneration::test(4),
             wire: 17,
+            selection: 17,
             size: *adapter.handle.size.lock().unwrap(),
             mouse_tracking: false,
             alternate: false,
@@ -329,6 +386,33 @@ mod tests {
             .unwrap();
     }
     #[test]
+    fn unrelated_output_does_not_restart_a_complete_selection_transfer() {
+        let adapter = Adapter::new();
+        let mut current = mapping(&adapter);
+        let bytes = selection_bytes();
+        let mut reader = Reader::default();
+        reader.screen(&adapter.handle.state, current, true);
+        for _ in 0..bytes.len().div_ceil(SELECTION_CHUNK_BYTES) + 2 {
+            if reader.target.is_some() {
+                deliver(&mut reader, &adapter, &bytes);
+            }
+            current.wire += 1;
+            current.local = PresentationGeneration::test(current.wire);
+            reader.screen(&adapter.handle.state, current, true);
+        }
+        assert_eq!(
+            adapter
+                .handle
+                .copy_selection_at(current.local)
+                .unwrap()
+                .unwrap()
+                .plain_text
+                .as_ref(),
+            "older retained row\n".repeat(5000)
+        );
+    }
+
+    #[test]
     fn native_copy_publishes_only_a_complete_current_selection_and_shares_prepared_text() {
         let adapter = Adapter::new();
         let mapping = mapping(&adapter);
@@ -338,6 +422,7 @@ mod tests {
         adapter.handle.request_pointer_copy();
         deliver(&mut reader, &adapter, &bytes);
         assert!(adapter.handle.copy_selection().unwrap().is_none());
+        assert!(adapter.handle.take_prepared_pointer_copy().is_none());
         while reader.target.is_some() {
             deliver(&mut reader, &adapter, &bytes);
         }
@@ -484,6 +569,7 @@ mod tests {
                         Request::Read { .. } => Ok(Reply::Reading { accepted: true }),
                         Request::ReadingStatus { .. } => Ok(Reply::ReadingReady {
                             generation: mapping.wire,
+                            selection_revision: mapping.selection,
                             selection_present: true,
                         }),
                         Request::SelectionChunk {

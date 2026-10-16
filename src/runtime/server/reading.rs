@@ -2,7 +2,7 @@ use super::*;
 use pane::reading::{Operation, SELECTION_CHUNK_BYTES, Scroll};
 use std::sync::mpsc::{Receiver, TryRecvError};
 
-type Prepared = Receiver<Result<Option<Vec<u8>>, crate::terminal::SelectionCopyError>>;
+type Prepared = Receiver<Result<Option<Arc<[u8]>>, crate::terminal::SelectionCopyError>>;
 
 #[derive(Default)]
 pub(super) struct Reading {
@@ -10,7 +10,7 @@ pub(super) struct Reading {
     resetting: bool,
     pending: Option<Receiver<()>>,
     preparing: Option<(u64, Prepared)>,
-    prepared: Option<(u64, Vec<u8>)>,
+    prepared: Option<(u64, Arc<[u8]>)>,
     attempted: Option<u64>,
 }
 
@@ -45,12 +45,8 @@ impl Reading {
         self.prepared = None;
         self.attempted = None;
     }
-    pub(super) fn update(
-        &mut self,
-        runtime: &TerminalRuntime,
-        screen: &ScreenSnapshot,
-        generation: u64,
-    ) {
+    pub(super) fn update(&mut self, runtime: &TerminalRuntime, screen: &ScreenSnapshot) {
+        let generation = screen.selection_revision;
         if self
             .prepared
             .as_ref()
@@ -63,6 +59,7 @@ impl Reading {
                 Ok(Ok(Some(bytes))) if *saved == generation => {
                     self.prepared = Some((generation, bytes))
                 }
+                Ok(Ok(None)) => self.attempted = None,
                 Err(TryRecvError::Empty) => return,
                 _ => {}
             }
@@ -70,10 +67,7 @@ impl Reading {
         }
         if screen.selection_present && self.attempted != Some(generation) && !self.busy() {
             self.attempted = Some(generation);
-            self.preparing = Some((
-                generation,
-                runtime.prepare_server_selection(screen.generation),
-            ));
+            self.preparing = Some((generation, runtime.prepare_server_selection(generation)));
         }
     }
     pub(super) fn chunk(&self, generation: u64, offset: usize) -> Result<Reply, Refusal> {
@@ -111,6 +105,7 @@ impl OwnedPane {
         };
         Ok(Reply::ReadingReady {
             generation: self.screen_generation,
+            selection_revision: screen.selection_revision,
             selection_present: screen.selection_present,
         })
     }

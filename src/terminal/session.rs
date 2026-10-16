@@ -3,6 +3,7 @@ use super::native_services::PastePayload;
 use crate::terminal::key::InputModifiers;
 pub(crate) mod clipboard;
 mod input;
+mod server_reading;
 mod subscriptions;
 pub use clipboard::ClipboardCompletion;
 pub use clipboard::{ClientEffectGrant, ClientEffectRequest, ClipboardRequest};
@@ -626,8 +627,8 @@ impl TerminalRuntime {
     }
     pub(crate) fn prepare_server_selection(
         &self,
-        generation: PresentationGeneration,
-    ) -> mpsc::Receiver<Result<Option<Vec<u8>>, SelectionCopyError>> {
+        generation: u64,
+    ) -> mpsc::Receiver<server_reading::PreparedSelection> {
         let (tx, rx) = mpsc::sync_channel(1);
         if let Some(commands) = &self.commands {
             let _ = commands.send(Command::PrepareServerSelection(generation, tx));
@@ -1055,10 +1056,7 @@ enum Command {
     ReadingWheel(WheelInput),
     ResetReading,
     ReadingBarrier(mpsc::SyncSender<()>),
-    PrepareServerSelection(
-        PresentationGeneration,
-        mpsc::SyncSender<Result<Option<Vec<u8>>, SelectionCopyError>>,
-    ),
+    PrepareServerSelection(u64, mpsc::SyncSender<server_reading::PreparedSelection>),
     RouteClientEffects,
     Subscribe {
         accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
@@ -1216,6 +1214,7 @@ struct TerminalWorker {
     native_pty: NativePtyOwner,
     input: PtyInput,
     emulator: TerminalEmulator,
+    server_reading: Option<server_reading::ServerReading>,
     commands: CommandReceiver<Command>,
     reader_events: mpsc::Receiver<NativePtyOutput>,
     events: TerminalEventPublisher,
@@ -1412,6 +1411,7 @@ impl TerminalWorker {
             native_pty,
             input: PtyInput::default(),
             emulator,
+            server_reading: None,
             commands,
             reader_events: reader_event_rx,
             events,
@@ -1641,38 +1641,19 @@ impl TerminalWorker {
                 }
             },
             Command::PrepareServerSelection(generation, reply) => {
-                let selection = if generation != self.emulator.presentation_generation()
-                    || self.emulator.synchronized_output_deadline().is_some()
-                {
+                let selection = if self.emulator.synchronized_output_deadline().is_some() {
                     Ok(None)
                 } else {
-                    self.emulator
-                        .selection_copy(SelectionCopyOptions::default())
-                        .map_err(|_| SelectionCopyError::Formatting)
-                        .and_then(|copy| {
-                            copy.map(|copy| {
-                                let bytes = serde_json::to_vec(
-                                    &spaceterm_server::pane::reading::Selection {
-                                        plain_text: copy.plain_text.to_string(),
-                                        html: copy.html.map(|text| text.to_string()),
-                                    },
-                                )
-                                .map_err(|_| SelectionCopyError::Formatting)?;
-                                if bytes.len()
-                                    > spaceterm_server::pane::reading::MAX_SELECTION_BYTES
-                                {
-                                    return Err(SelectionCopyError::Formatting);
-                                }
-                                Ok(bytes)
-                            })
-                            .transpose()
-                        })
+                    self.server_reading
+                        .as_ref()
+                        .map_or(Ok(None), |reading| reading.prepared(generation))
                 };
                 let _ = reply.send(selection);
                 true
             }
             Command::RouteClientEffects => {
                 self.emulator.enable_client_clipboard();
+                self.server_reading = Some(server_reading::ServerReading::default());
                 true
             }
             Command::Subscribe {
@@ -2548,6 +2529,9 @@ impl TerminalWorker {
 
     fn publish_screen_snapshot(&mut self) -> bool {
         self.metadata_state.publish(self.emulator.metadata());
+        if let Some(reading) = &mut self.server_reading {
+            reading.update(&mut self.emulator);
+        }
         let snapshot = self.emulator.snapshot();
         self.schedules
             .update_graphics_animation(self.emulator.graphics_animation_deadline());

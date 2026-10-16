@@ -290,6 +290,7 @@ pub enum Reply {
     },
     ReadingReady {
         generation: u64,
+        selection_revision: u64,
         selection_present: bool,
     },
     SelectionChunk {
