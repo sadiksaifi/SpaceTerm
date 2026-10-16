@@ -197,7 +197,7 @@ fn native_effects(c: &mut PaneConnection, lease: Lease) -> Result<(), Box<dyn Er
         c,
         lease,
         3,
-        "stty raw -echo; printf '\\033]52;c;?\\007'; dd bs=1 count=12 2>/dev/null | od -An -tx1 | tr -d ' \\n'; stty sane; printf '\\r\\n'",
+        "stty raw -echo; printf '\\033[2J\\033[H\\033]52;c;?\\007'; dd bs=1 count=12 2>/dev/null | od -An -tx1 | tr -d ' \\n'; stty sane; printf '\\r\\n'",
     )?;
     let request = await_effect(c, lease, 3)?;
     assert!(matches!(request.effect, Effect::ClipboardRead { .. }));
@@ -233,7 +233,7 @@ fn native_effects(c: &mut PaneConnection, lease: Lease) -> Result<(), Box<dyn Er
         c,
         lease,
         5,
-        "stty raw -echo; printf '\\033]52;c;?\\007'; dd bs=1 count=8 2>/dev/null | od -An -tx1 | tr -d ' \\n'; stty sane; printf '\\r\\n'",
+        "stty raw -echo; printf '\\033[2J\\033[H\\033]52;c;?\\007'; dd bs=1 count=8 2>/dev/null | od -An -tx1 | tr -d ' \\n'; stty sane; printf '\\r\\n'",
     )?;
     let request = await_effect(c, lease, 5)?;
     focus(c, lease, 6, FocusTarget::Unfocused)?;
