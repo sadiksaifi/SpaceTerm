@@ -401,7 +401,7 @@ impl DevelopmentPaneHost {
                 if generation != pane.focus_generation {
                     return Err(Refusal::Stale);
                 }
-                pane.effects.complete(id, completion)?;
+                pane.effects.complete(id, completion);
                 Ok(Reply::Unchanged)
             }
             Request::Poll { .. } => {

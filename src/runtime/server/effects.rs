@@ -70,17 +70,13 @@ impl NativeEffects {
         }
         None
     }
-    pub(super) fn complete(&mut self, id: u64, completion: Completion) -> Result<(), Refusal> {
-        if !self
-            .clipboard
-            .as_ref()
-            .is_some_and(|(pending, request, sent)| {
-                *pending == id && *sent && request.remaining().is_some()
-            })
-        {
-            return Ok(());
+    pub(super) fn complete(&mut self, id: u64, completion: Completion) {
+        let Some((pending, request, sent)) = &mut self.clipboard else {
+            return;
+        };
+        if *pending != id || !*sent || request.remaining().is_none() {
+            return;
         }
-        let (_, mut request, _) = self.clipboard.take().ok_or(Refusal::Stale)?;
         let completion = match completion {
             Completion::Denied => ClipboardCompletion::Denied,
             Completion::Written => ClipboardCompletion::Written,
@@ -90,7 +86,7 @@ impl NativeEffects {
             Completion::Text(_) => ClipboardCompletion::Denied,
         };
         request.complete(completion);
-        Ok(())
+        self.clipboard = None;
     }
 }
 
