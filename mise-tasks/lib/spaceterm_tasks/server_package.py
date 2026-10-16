@@ -139,6 +139,11 @@ def unpack_verified(archive, signature, destination, expected):
                 raise TaskError("the server artifact differs from the requested exact build")
             # A failure above cannot create any destination entry.
             source.extractall(destination, members=members, filter="data")
+            # Archives may omit directory entries. Tarfile creates those parents using the
+            # account's umask, which must not grant group write access to a retained runtime.
+            tree = destination / "server"
+            for directory in [tree, *(path for path in tree.rglob("*") if path.is_dir())]:
+                directory.chmod(0o755)
     except (OSError, tarfile.TarError, KeyError):
         raise TaskError("the server archive could not be read") from None
     return info
@@ -279,6 +284,8 @@ def install(archive, signature, expected):
                 raise TaskError("this server installation already exists; it was left unchanged")
             shutil.copyfile(private, tree / "artifact.tar.gz")
             shutil.copyfile(raw, tree / "artifact.sig")
+            (tree / "artifact.tar.gz").chmod(0o644)
+            (tree / "artifact.sig").chmod(0o644)
             # Only a fully verified new directory is published. Existing installations
             # and active-version selection are never replaced or cleaned up here.
             for path in tree.rglob("*"):

@@ -7,17 +7,19 @@ use std::sync::Arc;
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 
 use super::testing::{
-    ScriptedServer, ScriptedService, ServiceCall, connected, not_installed, not_running, retained,
-    running, status_only, stopped, uninstalled,
+    Prompt, ScriptedServer, ScriptedService, ServiceCall, connected, not_installed, not_running,
+    retained, running, status_only, stopped, uninstalled,
 };
 use super::{
-    CHECK_SELECTOR, CONTROL_SELECTOR, INSTALL_CHOICE_SELECTOR, INSTALL_SELECTOR, InstallChoice,
-    LocalServerAction, LocalServerControl, LocalServerPresentation, LocalServerStatus,
-    OPEN_DEVELOPMENT_PANE_SELECTOR, OfferedLocalServer, OfferedServer, RESTART_CANCEL_SELECTOR,
-    RESTART_CONFIRM_SELECTOR, RESTART_SELECTOR, SERVICE_CHECK_SELECTOR, SERVICE_CONTROL_SELECTOR,
-    SET_UP_SELECTOR, START_SELECTOR, START_SERVICE_SELECTOR, STOP_CANCEL_SELECTOR,
-    STOP_CONFIRM_SELECTOR, STOP_SELECTOR, ServerServiceControl, ServiceAction, ServiceConfirmation,
-    ServicePresentation, ServiceState, UNINSTALL_CANCEL_SELECTOR, UNINSTALL_CONFIRM_SELECTOR,
+    AUTHORIZE_CANCEL_SELECTOR, AUTHORIZE_CONFIRM_SELECTOR, AUTHORIZE_INSTALL_SELECTOR,
+    AUTHORIZE_START_SELECTOR, AuthorizationPrompt, AuthorizedRequest, CHECK_SELECTOR,
+    CONTROL_SELECTOR, INSTALL_CHOICE_SELECTOR, INSTALL_SELECTOR, InstallChoice, LocalServerAction,
+    LocalServerControl, LocalServerPresentation, LocalServerStatus, OPEN_DEVELOPMENT_PANE_SELECTOR,
+    OfferedLocalServer, OfferedServer, RESTART_CANCEL_SELECTOR, RESTART_CONFIRM_SELECTOR,
+    RESTART_SELECTOR, SERVICE_CHECK_SELECTOR, SERVICE_CONTROL_SELECTOR, SET_UP_SELECTOR,
+    START_SELECTOR, START_SERVICE_SELECTOR, STOP_CANCEL_SELECTOR, STOP_CONFIRM_SELECTOR,
+    STOP_SELECTOR, ServerServiceControl, ServiceAction, ServiceConfirmation, ServicePresentation,
+    ServiceStartup, ServiceState, UNINSTALL_CANCEL_SELECTOR, UNINSTALL_CONFIRM_SELECTOR,
     UNINSTALL_SELECTOR, present, present_service,
 };
 use crate::appearance::Appearance;
@@ -190,8 +192,11 @@ fn each_failure_offers_the_one_step_that_can_recover_from_it() {
         let expected = match error {
             ServerError::NotPaired => Some(LocalServerAction::SetUp),
             ServerError::NotRunning | ServerError::StartupFailed => Some(LocalServerAction::Start),
-            // Only the service's explicit Start or Install reverses these.
-            ServerError::Stopped | ServerError::NotInstalled => None,
+            // Only the service's explicit Start or Install reverses these, and only the service's
+            // Start asks for startup authorization.
+            ServerError::Stopped
+            | ServerError::NotInstalled
+            | ServerError::AuthorizationRequired => None,
             // Setting up again cannot repair storage or a refused, incompatible, or faulty server.
             _ => Some(LocalServerAction::Check),
         };
@@ -209,7 +214,8 @@ fn a_failure_needing_attention_reads_as_an_error_in_its_bounded_wording() {
             ServerError::NotPaired
             | ServerError::NotRunning
             | ServerError::Stopped
-            | ServerError::NotInstalled => {
+            | ServerError::NotInstalled
+            | ServerError::AuthorizationRequired => {
                 assert_eq!(presented.tone, CaptionTone::Guidance, "{error:?}");
             }
             _ => {
@@ -631,21 +637,28 @@ fn an_unreadable_service_offers_only_another_check() {
 
 #[test]
 fn only_actions_that_end_sessions_or_remove_the_service_ask_first() {
+    let login = ServiceStartup::AtLogin;
+    // The authorization steps ask through their own explanation instead.
     for action in [
         ServiceAction::Check,
         ServiceAction::Install,
         ServiceAction::Start,
+        ServiceAction::AuthorizeInstall,
+        ServiceAction::AuthorizeStart,
     ] {
-        assert_eq!(ServiceConfirmation::for_action(action, true), None);
+        assert_eq!(ServiceConfirmation::for_action(action, true, login), None);
     }
     for action in [ServiceAction::Stop, ServiceAction::Restart] {
-        let confirmation = ServiceConfirmation::for_action(action, true).expect("confirmation");
+        let confirmation =
+            ServiceConfirmation::for_action(action, true, login).expect("confirmation");
         assert!(confirmation.message.contains("end its Terminal Sessions"));
         assert_eq!(confirmation.confirm, action.label());
     }
     // Uninstalling a server that is not running ends no Terminal Session.
-    let idle = ServiceConfirmation::for_action(ServiceAction::Uninstall, false).expect("idle");
-    let live = ServiceConfirmation::for_action(ServiceAction::Uninstall, true).expect("live");
+    let idle =
+        ServiceConfirmation::for_action(ServiceAction::Uninstall, false, login).expect("idle");
+    let live =
+        ServiceConfirmation::for_action(ServiceAction::Uninstall, true, login).expect("live");
     assert!(!idle.message.contains("Terminal Sessions"));
     assert!(live.message.contains("end its Terminal Sessions"));
 }
@@ -1071,6 +1084,25 @@ fn settings_search_reaches_the_service(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn settings_search_reaches_the_service_by_its_linux_names(cx: &mut TestAppContext) {
+    for query in ["systemd", "linger"] {
+        let server = ScriptedServer::new(Ok(connected(2)));
+        let service = ScriptedService::linux(Ok(running()));
+        let (window, cx) = open_settings(offered_with_service(&server, &service), cx);
+
+        search(&window, query, cx);
+
+        assert_eq!(
+            window.read_with(cx, |settings, _| settings.active_section),
+            SettingsSectionId::Servers,
+            "{query}"
+        );
+        assert!(rendered(SERVICE_ROW_SELECTOR, cx), "{query}");
+        assert!(service.changes().is_empty(), "{query}");
+    }
+}
+
+#[gpui::test]
 fn assistive_technology_hears_the_service_state_and_what_each_step_does(cx: &mut TestAppContext) {
     use gpui::accesskit::Action;
     use spaceterm_ui::a11y_testing::{A11yTree, perform};
@@ -1148,5 +1180,330 @@ fn keyboard_focus_stays_on_the_leading_step_when_stop_gives_way_to_start(cx: &mu
     assert_eq!(
         tree.focused().map(|node| node["aria"]["label"].clone()),
         Some("Start Server".into())
+    );
+}
+
+#[test]
+fn linux_wording_names_boot_and_logout_and_keeps_lingering_after_uninstall() {
+    let presented = |startup, status| {
+        present_service(ServiceState {
+            startup,
+            status: Some(status),
+            installations: vec![retained("1.4.0", 'a')],
+            ..ServiceState::default()
+        })
+        .explanation
+    };
+    for status in [not_installed(), running(), stopped()] {
+        let linux = presented(ServiceStartup::AtBoot, status);
+        let macos = presented(ServiceStartup::AtLogin, status);
+        assert!(
+            linux.contains("computer starts") || linux.contains("computer restarts"),
+            "{linux}"
+        );
+        assert!(
+            !linux.contains("log in") && !linux.contains("logged in"),
+            "{linux}"
+        );
+        assert!(
+            macos.contains("log in") || macos.contains("logged in"),
+            "{macos}"
+        );
+    }
+    // Lingering can be turned off outside SpaceTerm, and the status does not report it, so a
+    // running server promises boot and logout only while lingering stays on. Surviving
+    // SpaceTerm's quit does not depend on it.
+    assert_eq!(
+        presented(ServiceStartup::AtBoot, running()).as_ref(),
+        "The server keeps running after SpaceTerm quits. While lingering stays on for your \
+         account, it also starts when the computer starts and keeps running after you log out."
+    );
+    // Installing may need authorization on Linux, and SpaceTerm says it asks first.
+    let install = presented(ServiceStartup::AtBoot, not_installed());
+    assert!(install.contains("keeps running after you log out"));
+    assert!(install.contains("SpaceTerm asks you first"));
+    assert!(!install.contains("No administrator password is needed"));
+    // Installing a stopped server starts nothing, so it needs no authorization.
+    assert!(
+        presented(ServiceStartup::AtBoot, uninstalled())
+            .contains("Installing keeps it stopped until you start it. No administrator password")
+    );
+
+    let boot = ServiceStartup::AtBoot;
+    let stop = ServiceConfirmation::for_action(ServiceAction::Stop, true, boot).expect("stop");
+    assert!(stop.detail.contains("even after the computer restarts"));
+    let uninstall =
+        ServiceConfirmation::for_action(ServiceAction::Uninstall, true, boot).expect("uninstall");
+    assert!(
+        uninstall
+            .detail
+            .contains("no longer starts when the computer starts")
+    );
+    assert!(
+        uninstall
+            .detail
+            .contains("Lingering stays on for your account")
+    );
+    assert!(uninstall.detail.contains("loginctl disable-linger"));
+}
+
+#[test]
+fn the_authorization_prompt_names_its_consequences_and_what_follows() {
+    let install = AuthorizationPrompt::for_request(
+        &AuthorizedRequest::Install(retained("1.4.0", 'a').directory),
+        Some("Version 1.4.0 (commit aaaaaaa)"),
+    );
+    assert_eq!(install.confirm, "Authorize and Install");
+    assert_eq!(
+        install.detail.as_ref(),
+        "Linux asks for an administrator password to turn on lingering for your account. \
+         Lingering applies to every service your account runs, and uninstalling the server \
+         leaves it on. SpaceTerm then installs Version 1.4.0 (commit aaaaaaa) and starts the \
+         server. If you cancel here or in the password prompt, nothing changes."
+    );
+    let start = AuthorizationPrompt::for_request(&AuthorizedRequest::Start, None);
+    assert_eq!(start.confirm, "Authorize and Start");
+    assert!(start.detail.contains("SpaceTerm then starts the server."));
+    assert!(!start.detail.contains("installs"));
+}
+
+#[gpui::test]
+fn a_linux_installation_waits_for_explained_authorization_then_installs_its_build(
+    cx: &mut TestAppContext,
+) {
+    let server = ScriptedServer::new(Ok(connected(2)));
+    let service = ScriptedService::linux(Ok(not_installed()));
+    let (window, cx) = open_settings(offered_with_service(&server, &service), cx);
+    click(NAVIGATION_SELECTOR, cx);
+    let build = retained("1.4.0", 'a').directory;
+
+    click(INSTALL_SELECTOR, cx);
+
+    // The refusal asks the operating system nothing by itself.
+    assert_eq!(service.changes(), vec![ServiceCall::Install(build.clone())]);
+    assert!(rendered(
+        "settings-server-service-state-authorization-required",
+        cx
+    ));
+    let presented = service_presentation(&window, cx);
+    assert_eq!(presented.state, "Authorization Required");
+    assert_eq!(presented.tone, CaptionTone::Warning);
+    assert_eq!(
+        presented.explanation.as_ref(),
+        "Linux needs an administrator password before the server can start at boot and keep \
+         running after you log out. The server is not installed. Choose Authorize and Install to \
+         continue."
+    );
+    assert_eq!(presented.actions, vec![ServiceAction::AuthorizeInstall]);
+
+    click(AUTHORIZE_INSTALL_SELECTOR, cx);
+    assert!(alert_open(AUTHORIZE_CONFIRM_SELECTOR, cx));
+    assert_eq!(service.changes().len(), 1, "the explanation asks nothing");
+    let checks = server.refreshes();
+
+    click_modal(AUTHORIZE_CONFIRM_SELECTOR, cx);
+
+    // Authorization continues with the build the person chose, and nothing more.
+    assert_eq!(
+        service.changes(),
+        vec![
+            ServiceCall::Install(build.clone()),
+            ServiceCall::AuthorizeStartup,
+            ServiceCall::Install(build),
+        ]
+    );
+    assert!(rendered("settings-server-service-state-running", cx));
+    let presented = service_presentation(&window, cx);
+    assert_eq!(presented.authorization, None);
+    assert!(
+        presented
+            .explanation
+            .contains("keeps running after you log out")
+    );
+    assert_eq!(server.refreshes(), checks + 1);
+}
+
+#[gpui::test]
+fn cancelling_the_operating_systems_prompt_changes_nothing_and_keeps_the_stop(
+    cx: &mut TestAppContext,
+) {
+    let server = ScriptedServer::new(Err(ServerError::Stopped));
+    let service = ScriptedService::linux(Ok(stopped()));
+    let (window, cx) = open_settings(offered_with_service(&server, &service), cx);
+    click(NAVIGATION_SELECTOR, cx);
+    click(START_SERVICE_SELECTOR, cx);
+    assert_eq!(service.changes(), vec![ServiceCall::Start]);
+    assert_eq!(
+        service_presentation(&window, cx).actions,
+        vec![ServiceAction::AuthorizeStart, ServiceAction::Uninstall]
+    );
+    service.answer_prompt(Prompt::Cancel);
+
+    click(AUTHORIZE_START_SELECTOR, cx);
+    click_modal(AUTHORIZE_CONFIRM_SELECTOR, cx);
+
+    // The cancelled prompt starts nothing, and the server stays stopped.
+    assert_eq!(
+        service.changes(),
+        vec![ServiceCall::Start, ServiceCall::AuthorizeStartup]
+    );
+    let presented = service_presentation(&window, cx);
+    assert_eq!(presented.state, "Authorization Required");
+    assert_eq!(
+        presented.explanation.as_ref(),
+        "Authorization did not complete, so nothing changed. The server is stopped. Choose \
+         Authorize and Start to try again."
+    );
+    assert_eq!(
+        presented.actions,
+        vec![ServiceAction::AuthorizeStart, ServiceAction::Uninstall]
+    );
+    assert_eq!(presentation(&window, cx).action, None);
+
+    // Presenting the section again only reads. The Stop stands until an explicit Start.
+    click("settings-navigation-settings-section-git", cx);
+    click(NAVIGATION_SELECTOR, cx);
+    assert_eq!(
+        service.changes(),
+        vec![ServiceCall::Start, ServiceCall::AuthorizeStartup]
+    );
+    let presented = service_presentation(&window, cx);
+    assert_eq!(presented.state, "Stopped");
+    assert_eq!(
+        presented.actions,
+        vec![ServiceAction::Start, ServiceAction::Uninstall]
+    );
+    assert!(
+        presented
+            .explanation
+            .contains("even after the computer restarts")
+    );
+}
+
+#[gpui::test]
+fn a_stopped_linux_server_reinstalls_stopped_and_only_start_asks_for_authorization(
+    cx: &mut TestAppContext,
+) {
+    let (window, _server, service, cx) = {
+        let server = ScriptedServer::new(Err(ServerError::Stopped));
+        let service = ScriptedService::linux(Ok(uninstalled()));
+        let (window, cx) = open_settings(offered_with_service(&server, &service), cx);
+        click(NAVIGATION_SELECTOR, cx);
+        (window, server, service, cx)
+    };
+    let build = retained("1.4.0", 'a').directory;
+
+    click(INSTALL_SELECTOR, cx);
+
+    // Installing keeps the Stop, so it starts nothing and needs no authorization.
+    assert_eq!(service.changes(), vec![ServiceCall::Install(build.clone())]);
+    assert_eq!(service_presentation(&window, cx).state, "Stopped");
+
+    click(START_SERVICE_SELECTOR, cx);
+    click(AUTHORIZE_START_SELECTOR, cx);
+    click_modal(AUTHORIZE_CONFIRM_SELECTOR, cx);
+
+    assert_eq!(
+        service.changes(),
+        vec![
+            ServiceCall::Install(build),
+            ServiceCall::Start,
+            ServiceCall::AuthorizeStartup,
+            ServiceCall::Start,
+        ]
+    );
+    assert_eq!(service_presentation(&window, cx).state, "Running");
+}
+
+#[gpui::test]
+fn a_linux_restart_refused_after_stopping_offers_to_authorize_and_start(cx: &mut TestAppContext) {
+    let server = ScriptedServer::new(Ok(connected(2)));
+    let service = ScriptedService::linux(Ok(running()));
+    let (window, cx) = open_settings(offered_with_service(&server, &service), cx);
+    click(NAVIGATION_SELECTOR, cx);
+
+    click(RESTART_SELECTOR, cx);
+    click_modal(RESTART_CONFIRM_SELECTOR, cx);
+
+    assert_eq!(service.changes(), vec![ServiceCall::Restart]);
+    let presented = service_presentation(&window, cx);
+    assert_eq!(
+        presented.explanation.as_ref(),
+        "Linux needs an administrator password before the server can start at boot and keep \
+         running after you log out. The server is stopped. Choose Authorize and Start to \
+         continue."
+    );
+    assert_eq!(
+        presented.actions,
+        vec![ServiceAction::AuthorizeStart, ServiceAction::Uninstall]
+    );
+
+    click(AUTHORIZE_START_SELECTOR, cx);
+    click_modal(AUTHORIZE_CONFIRM_SELECTOR, cx);
+
+    assert_eq!(
+        service.changes(),
+        vec![
+            ServiceCall::Restart,
+            ServiceCall::AuthorizeStartup,
+            ServiceCall::Start,
+        ]
+    );
+    assert_eq!(service_presentation(&window, cx).state, "Running");
+}
+
+#[gpui::test]
+fn assistive_technology_hears_the_authorization_step_and_escape_leaves_it_unasked(
+    cx: &mut TestAppContext,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let (window, _server, service, cx) = {
+        let server = ScriptedServer::new(Ok(connected(2)));
+        let service = ScriptedService::linux(Ok(not_running()));
+        let (window, cx) = open_settings(offered_with_service(&server, &service), cx);
+        click(NAVIGATION_SELECTOR, cx);
+        (window, server, service, cx)
+    };
+    click(START_SERVICE_SELECTOR, cx);
+
+    let tree = A11yTree::read(cx);
+    // The status announces why the server did not start.
+    assert!(
+        tree.with_role("Status")
+            .iter()
+            .any(|status| status["aria"]["label"] == "Authorization Required")
+    );
+    let authorize = tree.node("Authorize and Start\u{2026}");
+    assert_eq!(authorize["aria"]["role"], "Button");
+    assert_eq!(
+        authorize["aria"]["description"],
+        "SpaceTerm explains the change first. Linux then asks for an administrator password, \
+         and SpaceTerm starts the server."
+    );
+
+    // The explanation opens with Cancel focused, so Return and Escape ask nothing.
+    perform(cx, authorize, Action::Click);
+    cx.run_until_parked();
+    assert!(alert_open(AUTHORIZE_CANCEL_SELECTOR, cx));
+    let tree = A11yTree::read(cx);
+    let prompt = tree.node("Run the Server at Startup");
+    assert_eq!(prompt["aria"]["role"], "AlertDialog");
+    assert_eq!(
+        prompt["aria"]["description"],
+        "Let your account\u{2019}s services start at boot and keep running after you log out?"
+    );
+    assert_eq!(
+        tree.focused().map(|node| node["aria"]["label"].clone()),
+        Some("Cancel".into())
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert_eq!(service.changes(), vec![ServiceCall::Start]);
+    assert_eq!(
+        service_presentation(&window, cx).actions,
+        vec![ServiceAction::AuthorizeStart, ServiceAction::Uninstall]
     );
 }
