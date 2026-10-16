@@ -9,6 +9,7 @@ pub mod organization;
 pub mod pane;
 mod protocol;
 pub mod repository;
+pub mod service;
 mod storage;
 
 #[cfg(feature = "client")]
@@ -25,6 +26,16 @@ pub struct AuthenticatedStatus {
 pub enum ServerError {
     #[error("This device has not been paired with the local server.")]
     NotPaired,
+    #[error("The local server service is unavailable. Try again after signing in.")]
+    ServiceUnavailable,
+    #[error("Install the local server service first.")]
+    NotInstalled,
+    #[error("The local server was stopped. Use Start Server to start it again.")]
+    Stopped,
+    #[error("This server package could not be verified for this application identity.")]
+    RuntimeUnavailable,
+    #[error("Administrator authorization is required to enable linger for this account.")]
+    AuthorizationRequired,
     #[error("The local server is not running.")]
     NotRunning,
     #[error("Native credential storage is locked or unavailable. Unlock it and try again.")]

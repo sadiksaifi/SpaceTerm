@@ -5852,6 +5852,8 @@ dependencies = [
 name = "spaceterm-server"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
+ "flate2",
  "keyring",
  "libc",
  "ring",
@@ -5859,6 +5861,7 @@ dependencies = [
  "serde_json",
  "socket2",
  "spaceterm-directories",
+ "tar",
  "thiserror 2.0.19",
  "zeroize",
 ]

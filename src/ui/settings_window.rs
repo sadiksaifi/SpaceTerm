@@ -288,6 +288,8 @@ pub(crate) struct SettingsWindow {
     worktree_location: git::WorktreeLocationField,
     /// The local server this window presents. `None` omits the Servers section.
     local_server: Option<servers::LocalServerRow>,
+    /// The service that runs the local server. `None` omits its row.
+    server_service: Option<servers::ServerServiceRow>,
 }
 
 impl SidebarOwner for SettingsWindow {
@@ -547,6 +549,10 @@ impl SettingsWindow {
             .filter(|row| {
                 row_feature(*row).is_some_and(|feature| !presentation.has_feature(feature))
                     || (*row == SettingsRowId::BackgroundImage && !presents_background_image)
+                    || (*row == SettingsRowId::ServerService
+                        && local_server
+                            .as_ref()
+                            .is_none_or(|offered| offered.service.is_none()))
             })
             .collect();
         Self {
@@ -581,7 +587,12 @@ impl SettingsWindow {
             shortcuts,
             settings_file,
             worktree_location,
-            local_server: local_server.map(servers::LocalServerRow::new),
+            server_service: local_server
+                .as_ref()
+                .and_then(|offered| offered.service.clone())
+                .map(servers::ServerServiceRow::new),
+            local_server: local_server
+                .map(|offered| servers::LocalServerRow::new(offered.connection)),
         }
     }
 
@@ -592,6 +603,7 @@ impl SettingsWindow {
             && previous != SettingsSectionId::Servers
         {
             self.check_local_server(cx);
+            self.check_server_service(cx);
         }
     }
 
@@ -1185,6 +1197,10 @@ impl SettingsWindow {
             if let Some(presentation) = self.local_server_presentation() {
                 rendered = rendered.caption(presentation.explanation, presentation.tone);
             }
+        } else if row == SettingsRowId::ServerService {
+            if let Some(presentation) = self.server_service_presentation() {
+                rendered = rendered.caption(presentation.explanation, presentation.tone);
+            }
         } else if let SettingsRowId::Shortcut(command) = row {
             if let Some(description) = self.shortcut_description(command, cx) {
                 rendered = rendered.caption(description.text, description.tone);
@@ -1237,6 +1253,7 @@ impl SettingsWindow {
             }
             SettingsRowId::WorktreeLocation => self.render_worktree_location(appearance, cx),
             SettingsRowId::LocalServer => self.render_local_server(appearance, cx),
+            SettingsRowId::ServerService => self.render_server_service(appearance, cx),
             SettingsRowId::UpdateStatus => self.render_update_status(cx),
             SettingsRowId::AutomaticUpdateDownloads => self.render_automatic_update_downloads(cx),
             SettingsRowId::UpdateCheckInterval => self.render_update_check_interval(cx),

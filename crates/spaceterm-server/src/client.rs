@@ -175,10 +175,26 @@ impl LocalServer {
     }
     /// Reads the saved native credential and authenticates an existing server. Never starts it.
     pub fn refresh(&self) -> Result<AuthenticatedStatus, ServerError> {
+        crate::service::check_start(&self.paths)?;
         self.authenticate(&self.credential()?.ok_or(ServerError::NotPaired)?)
     }
     /// Local owning-account authority is granted only by this explicit setup action.
     pub fn setup_and_start(&self) -> Result<AuthenticatedStatus, ServerError> {
+        crate::service::check_start(&self.paths)?;
+        self.pair()?;
+        #[cfg(target_os = "macos")]
+        if crate::service::Service::for_identity(&self.identity)?
+            .status()?
+            .installed
+        {
+            crate::service::Service::for_identity(&self.identity)?.start_if_enabled()?;
+            return self.refresh();
+        }
+        self.start_temporary()
+    }
+
+    /// Explicit local pairing, without starting a process or changing retained Stop.
+    pub fn pair(&self) -> Result<(), ServerError> {
         // Locked or unavailable storage is refused before touching server identity.
         self.credential()?;
         let data = Directory::open(&self.paths.data, true)?;
@@ -234,6 +250,12 @@ impl LocalServer {
         // Runtime restoration and directory publication use this same retained record.
         // Release setup serialization before waiting for the server to admit a connection.
         drop(_setup);
+        Ok(())
+    }
+
+    fn start_temporary(&self) -> Result<AuthenticatedStatus, ServerError> {
+        crate::service::check_start(&self.paths)?;
+        let credential = self.credential()?.ok_or(ServerError::NotPaired)?;
         match self.authenticate(&credential) {
             Ok(status) => return Ok(status),
             Err(ServerError::NotRunning) => {}
