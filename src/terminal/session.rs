@@ -93,6 +93,8 @@ pub enum TerminalSessionEvent {
     MetadataChanged(MetadataWakeup),
     Attention(AttentionEvent),
     HiddenInputChanged(bool),
+    /// A paste may have been written before the connection lost its acknowledgement.
+    PasteUnconfirmed,
     /// A program asked for a Permission Setup.
     PermissionRequested(PermissionRequest),
     Exited(TerminalSessionExit),
@@ -437,6 +439,26 @@ pub trait TerminalSessionHandle {
     fn clear_screen_and_scrollback(&self);
     fn focus(&self, focused: bool);
 
+    /// Supplies the client facts for terminal input and host-addressed Input Method Text.
+    fn interactive_focus(&self, terminal_input: bool, _input_method: bool) {
+        self.focus(terminal_input);
+    }
+
+    /// Whether the current connection can carry interactive terminal operations.
+    fn interactive_input_available(&self) -> bool {
+        true
+    }
+
+    /// Changes whenever a connection or control grant can no longer authorize delayed input.
+    fn input_generation(&self) -> u64 {
+        0
+    }
+
+    /// Consumes a retained uncertain-paste notice after control has been reconciled.
+    fn take_paste_unconfirmed(&self) -> bool {
+        false
+    }
+
     /// Transfers Terminal Input Focus to this Terminal Session's Paste Confirmation.
     fn focus_paste_confirmation(&self, _id: PasteConfirmationId) {
         self.focus(false);
@@ -541,6 +563,29 @@ fn test_launch_planner() -> ShellLaunchPlanner {
 }
 
 impl TerminalRuntime {
+    /// Sends application mouse input without starting a server-owned Selection.
+    /// Adapter snapshot numbers fence starts; accepted gestures retain their starting snapshot.
+    pub fn application_pointer(&self, input: PointerInput, snapshot: u64, current_snapshot: u64) {
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::ApplicationPointer(
+                input,
+                snapshot,
+                current_snapshot,
+            ));
+        }
+    }
+    /// Balances a rejected continuation at the last accepted application pointer position.
+    pub fn cancel_application_pointer(&self) {
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::CancelApplicationPointer);
+        }
+    }
+    /// Sends application wheel input without moving server-owned Scrollback.
+    pub fn application_wheel(&self, input: WheelInput) {
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::ApplicationWheel(input));
+        }
+    }
     /// Opens one presentation subscription, replacing the previous subscription.
     /// Dropping its receivers leaves this runtime and its PTY alive.
     pub fn subscribe(&self) -> TerminalSubscription {
@@ -935,6 +980,9 @@ enum Command {
     FocusPasteConfirmation(PasteConfirmationId),
     Resize,
     Pointer(PointerInput),
+    ApplicationPointer(PointerInput, u64, u64),
+    CancelApplicationPointer,
+    ApplicationWheel(WheelInput),
     PointerAndCopySelection(
         PointerInput,
         mpsc::SyncSender<Result<Option<SelectionCopy>, SelectionCopyError>>,
@@ -1002,6 +1050,7 @@ impl Command {
         matches!(
             self,
             Self::Pointer(..)
+                | Self::ApplicationPointer(..)
                 | Self::PointerAndCopySelection(..)
                 | Self::Wheel(..)
                 | Self::ScrollTo(..)
@@ -1023,6 +1072,9 @@ impl fmt::Debug for Command {
             Self::FocusPasteConfirmation(..) => "FocusPasteConfirmation",
             Self::Resize => "Resize",
             Self::Pointer(..) => "Pointer",
+            Self::ApplicationPointer(..) => "ApplicationPointer",
+            Self::CancelApplicationPointer => "CancelApplicationPointer",
+            Self::ApplicationWheel(..) => "ApplicationWheel",
             Self::PointerAndCopySelection(..) => "PointerAndCopySelection",
             Self::Wheel(..) => "Wheel",
             Self::ScrollTo(..) => "ScrollTo",
@@ -1514,6 +1566,19 @@ impl TerminalWorker {
                 let Some(geometry) = self.schedules.take_resize() else {
                     return true;
                 };
+                if geometry != self.emulator.geometry() {
+                    match self.emulator.cancel_application_pointer() {
+                        Ok(action) => {
+                            if !self.apply_emulator_action(action) {
+                                return false;
+                            }
+                        }
+                        Err(message) => {
+                            self.send_runtime_failure(message);
+                            return false;
+                        }
+                    }
+                }
                 let size = pty_size(geometry);
                 let winsize_changed = size != pty_size(self.emulator.geometry());
                 let result = (|| {
@@ -1539,6 +1604,30 @@ impl TerminalWorker {
                     }
                 }
             }
+            Command::ApplicationPointer(input, snapshot, current_snapshot) => match self
+                .emulator
+                .application_pointer(input, snapshot, current_snapshot)
+            {
+                Ok(action) => self.apply_emulator_action(action),
+                Err(message) => {
+                    self.send_runtime_failure(message);
+                    false
+                }
+            },
+            Command::CancelApplicationPointer => match self.emulator.cancel_application_pointer() {
+                Ok(action) => self.apply_emulator_action(action),
+                Err(message) => {
+                    self.send_runtime_failure(message);
+                    false
+                }
+            },
+            Command::ApplicationWheel(input) => match self.emulator.application_wheel(input) {
+                Ok(action) => self.apply_emulator_action(action),
+                Err(message) => {
+                    self.send_runtime_failure(message);
+                    false
+                }
+            },
             Command::Pointer(input) => match self.emulator.pointer(input) {
                 Ok(action) => {
                     self.apply_emulator_action(action) && self.refresh_selection_autoscroll()

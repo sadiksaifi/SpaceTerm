@@ -185,11 +185,34 @@ pub(crate) struct TestTerminalSessionRecords {
         Rc<RefCell<BTreeMap<usize, crate::terminal::permission_request::PermissionRequest>>>,
     accessibility_senders:
         Rc<RefCell<BTreeMap<usize, async_channel::Sender<Arc<TerminalAccessibilityModel>>>>>,
+    interactive_availability: Rc<RefCell<BTreeMap<usize, bool>>>,
+    input_generations: Rc<RefCell<BTreeMap<usize, u64>>>,
+    unconfirmed_pastes: Rc<RefCell<BTreeMap<usize, bool>>>,
     dropped_session_ids: Rc<RefCell<Vec<usize>>>,
     commands: Rc<RefCell<Vec<RecordedCall>>>,
 }
 
 impl TestTerminalSessionRecords {
+    pub(crate) fn retain_unconfirmed_paste(&self, session_id: usize) {
+        self.unconfirmed_pastes
+            .borrow_mut()
+            .insert(session_id, true);
+    }
+
+    pub(crate) fn advance_input_generation(&self, session_id: usize) {
+        *self
+            .input_generations
+            .borrow_mut()
+            .entry(session_id)
+            .or_default() += 1;
+    }
+
+    pub(crate) fn set_interactive_input_available(&self, session_id: usize, available: bool) {
+        self.interactive_availability
+            .borrow_mut()
+            .insert(session_id, available);
+    }
+
     pub(crate) fn retain_permission_request(
         &self,
         session_id: usize,
@@ -341,7 +364,9 @@ pub(crate) struct TestTerminalSessionFactory {
     paste_response: Result<PasteRequestOutcome, String>,
     pending_paste_response: Option<async_channel::Receiver<Result<PasteRequestOutcome, String>>>,
     paste_resolution: Result<PasteResolution, String>,
+    pending_paste_resolution: Option<async_channel::Receiver<Result<PasteResolution, String>>>,
     server_backed: bool,
+    interactive_input_available: bool,
 }
 
 impl TestTerminalSessionFactory {
@@ -356,13 +381,20 @@ impl TestTerminalSessionFactory {
             paste_response: Ok(PasteRequestOutcome::Written),
             pending_paste_response: None,
             paste_resolution: Ok(PasteResolution::Written),
+            pending_paste_resolution: None,
             server_backed: false,
+            interactive_input_available: true,
         }
     }
 
     /// Starts Terminal Sessions that report themselves as running in a SpaceTerm Server.
     pub(crate) fn server_backed(mut self) -> Self {
         self.server_backed = true;
+        self
+    }
+
+    pub(crate) fn with_interactive_input_available(mut self, available: bool) -> Self {
+        self.interactive_input_available = available;
         self
     }
 
@@ -408,6 +440,14 @@ impl TestTerminalSessionFactory {
         receiver: async_channel::Receiver<Result<PasteRequestOutcome, String>>,
     ) -> Self {
         self.pending_paste_response = Some(receiver);
+        self
+    }
+
+    pub(crate) fn with_pending_paste_resolution(
+        mut self,
+        receiver: async_channel::Receiver<Result<PasteResolution, String>>,
+    ) -> Self {
+        self.pending_paste_resolution = Some(receiver);
         self
     }
 
@@ -462,6 +502,8 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
             .borrow_mut()
             .insert(session_id, selection_receiver);
         let (_, clipboard) = async_channel::bounded(1);
+        self.records
+            .set_interactive_input_available(session_id, self.interactive_input_available);
         Ok(StartedTerminalSession {
             clipboard,
             handle: Box::new(TestTerminalSessionHandle {
@@ -472,6 +514,7 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
                 paste_response: self.paste_response.clone(),
                 pending_paste_response: self.pending_paste_response.clone(),
                 paste_resolution: self.paste_resolution.clone(),
+                pending_paste_resolution: self.pending_paste_resolution.clone(),
             }),
             events,
             accessibility,
@@ -495,6 +538,7 @@ struct TestTerminalSessionHandle {
     paste_response: Result<PasteRequestOutcome, String>,
     pending_paste_response: Option<async_channel::Receiver<Result<PasteRequestOutcome, String>>>,
     paste_resolution: Result<PasteResolution, String>,
+    pending_paste_resolution: Option<async_channel::Receiver<Result<PasteResolution, String>>>,
 }
 
 impl TestTerminalSessionHandle {
@@ -520,6 +564,32 @@ impl Drop for TestTerminalSessionHandle {
 }
 
 impl TerminalSessionHandle for TestTerminalSessionHandle {
+    fn take_paste_unconfirmed(&self) -> bool {
+        self.records
+            .unconfirmed_pastes
+            .borrow_mut()
+            .remove(&self.session_id)
+            .unwrap_or(false)
+    }
+
+    fn input_generation(&self) -> u64 {
+        self.records
+            .input_generations
+            .borrow()
+            .get(&self.session_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn interactive_input_available(&self) -> bool {
+        self.records
+            .interactive_availability
+            .borrow()
+            .get(&self.session_id)
+            .copied()
+            .unwrap_or(true)
+    }
+
     fn permission_request(&self) -> Option<crate::terminal::permission_request::PermissionRequest> {
         self.records
             .permission_requests
@@ -614,6 +684,9 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
         decision: PasteDecision,
     ) -> async_channel::Receiver<Result<PasteResolution, String>> {
         self.record(RecordedCommand::ResolvePaste(id, decision));
+        if let Some(receiver) = &self.pending_paste_resolution {
+            return receiver.clone();
+        }
         let (sender, receiver) = async_channel::bounded(1);
         let _ = sender.try_send(self.paste_resolution.clone());
         receiver

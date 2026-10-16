@@ -3034,7 +3034,7 @@ impl TabView {
                     let _ = owner.update(cx, |view, cx| view.retry_shared_pane(pane_id, cx));
                 })
             });
-            server_pane::render_notice(selector("notice"), title, detail, intent, retry, cx)
+            server_pane::render_notice(selector("notice"), title, detail, intent, retry, true, cx)
         });
         SharedPaneSurface { screen, notice }
     }

@@ -895,6 +895,7 @@ mod window {
                 detail,
                 intent,
                 Some(retry),
+                true,
                 cx,
             ))
         }

@@ -21,6 +21,9 @@ impl PasteConfirmationId {
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
+    pub const fn value(self) -> u64 {
+        self.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,6 +50,7 @@ pub struct PasteConfirmation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PasteRequestOutcome {
     Written,
+    Unconfirmed,
     ConfirmationRequired(PasteConfirmation),
     Rejected(PasteRejection),
 }
@@ -85,6 +89,7 @@ pub enum PasteDecision {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PasteResolution {
     Written,
+    Unconfirmed,
     Cancelled,
     Stale,
 }
