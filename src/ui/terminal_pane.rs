@@ -1357,7 +1357,8 @@ impl TerminalPane {
     }
 
     fn apply_interactive_focus(&mut self, focused: bool, input_method: bool) {
-        if self.terminal_input_focus != focused || self.input_method_focus != input_method {
+        let focus_changed = self.terminal_input_focus != focused;
+        if focus_changed || self.input_method_focus != input_method {
             self.terminal_input_focus = focused;
             self.input_method_focus = input_method;
             self.advance_native_service_focus_epoch();
@@ -1388,7 +1389,7 @@ impl TerminalPane {
                     && let Some(confirmation) = self.pending_paste
                 {
                     session.focus_paste_confirmation(confirmation.id);
-                } else {
+                } else if focus_changed || self.server_backed() {
                     session.interactive_focus(focused, input_method);
                 }
             }
@@ -2437,6 +2438,7 @@ impl TerminalPane {
                     return false;
                 }
                 self.context_menu = None;
+                self.cancel_pending_paste();
                 self.file_preview.dismiss();
                 self.requested_permissions.clear();
                 self.permission_request.clear();
