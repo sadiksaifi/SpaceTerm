@@ -1,4 +1,5 @@
-//! Desktop presentation subscription to the single Development server Pane.
+//! Desktop presentation and fenced input for an authenticated server Pane.
+use super::pointer_input::{PointerInput, WheelInput};
 use super::session::*;
 use super::{emulator::*, geometry::TerminalGeometry, key::*};
 use crate::local_server::{LocalServer, ServerError};
@@ -34,6 +35,7 @@ pub(crate) struct DevelopmentPaneState {
     close: AtomicU64,
     epoch: AtomicU64,
     connected_epoch: AtomicU64,
+    interaction: Mutex<Interaction>,
 }
 impl DevelopmentPaneState {
     fn new() -> Self {
@@ -46,6 +48,7 @@ impl DevelopmentPaneState {
             close: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
             connected_epoch: AtomicU64::new(0),
+            interaction: Mutex::new(Interaction::default()),
         }
     }
 
@@ -88,6 +91,10 @@ impl DevelopmentPaneState {
             *status = DevelopmentPaneStatus::Reconnecting;
         }
         self.close.store(0, Ordering::Release);
+        self.interaction
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .disconnect();
         let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
         self.connected_epoch.store(epoch, Ordering::Release);
         epoch
@@ -125,6 +132,19 @@ impl DevelopmentPaneState {
     }
     fn set(&self, status: DevelopmentPaneStatus) {
         *self.status.lock().unwrap_or_else(|e| e.into_inner()) = status;
+    }
+    fn connected(&self, epoch: u64, screen: ScreenMapping) -> Result<(), ServerError> {
+        let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        if self.epoch.load(Ordering::Acquire) != epoch {
+            return Err(ServerError::Protocol);
+        }
+        self.interaction
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .screen = Some(screen);
+        self.connected_epoch.store(epoch, Ordering::Release);
+        *status = DevelopmentPaneStatus::Connected;
+        Ok(())
     }
 }
 #[derive(Clone)]
@@ -165,16 +185,154 @@ impl DevelopmentServerSessionFactory {
 }
 
 enum Input {
-    Key(pane::Key),
+    Key(KeyInput),
+    Pointer(u64, pane::Pointer),
+    Wheel(u64, pane::Wheel),
+    Paste(
+        String,
+        async_channel::Sender<Result<super::PasteRequestOutcome, String>>,
+    ),
+    ResolvePaste(
+        PendingPaste,
+        super::PasteDecision,
+        async_channel::Sender<Result<super::PasteResolution, String>>,
+    ),
     Resize(PaneSize),
     Style(pane::PresentationStyle),
 }
+impl Input {
+    fn eligible(&self, target: pane::FocusTarget) -> bool {
+        match self {
+            Self::Key(key) if key.is_input_method_commit() => matches!(
+                target,
+                pane::FocusTarget::Terminal | pane::FocusTarget::FocusedPane
+            ),
+            Self::Key(_) | Self::Pointer(..) | Self::Wheel(..) => {
+                target == pane::FocusTarget::Terminal
+            }
+            Self::Paste(_, reply) => target == pane::FocusTarget::Terminal && !reply.is_closed(),
+            Self::ResolvePaste(pending, _, _) => {
+                target == pane::FocusTarget::Terminal
+                    || target
+                        == (pane::FocusTarget::PasteConfirmation {
+                            id: pending.wire_id,
+                        })
+            }
+            Self::Resize(_) | Self::Style(_) => true,
+        }
+    }
+}
+struct SubmittedInput {
+    epoch: u64,
+    focus_generation: u64,
+    command: Input,
+}
+#[derive(Clone, Copy)]
+struct PendingPaste {
+    id: super::paste::PasteConfirmationId,
+    wire_id: u64,
+    epoch: u64,
+    focus_generation: u64,
+    deadline: std::time::Instant,
+}
+struct ResolvingPaste {
+    pending: PendingPaste,
+    restored_generation: Option<u64>,
+}
+#[derive(Clone, Copy)]
+struct ScreenMapping {
+    epoch: u64,
+    local: PresentationGeneration,
+    wire: u64,
+    size: PaneSize,
+    mouse_tracking: bool,
+    alternate: bool,
+    alternate_scroll: bool,
+}
+struct Interaction {
+    interactive: bool,
+    focus_generation: u64,
+    target: pane::FocusTarget,
+    screen: Option<ScreenMapping>,
+    pending: Option<PendingPaste>,
+    resolving: Option<ResolvingPaste>,
+    paste_request: Option<(u64, u64)>,
+    next_paste: u64,
+}
+impl Default for Interaction {
+    fn default() -> Self {
+        Self {
+            interactive: false,
+            focus_generation: 1,
+            target: pane::FocusTarget::Unfocused,
+            screen: None,
+            pending: None,
+            resolving: None,
+            paste_request: None,
+            next_paste: 0,
+        }
+    }
+}
+impl Interaction {
+    fn disconnect(&mut self) {
+        self.interactive = false;
+        self.screen = None;
+        self.pending = None;
+        self.resolving = None;
+        self.paste_request = None;
+        if matches!(self.target, pane::FocusTarget::PasteConfirmation { .. }) {
+            self.target = pane::FocusTarget::Unfocused;
+        }
+        self.focus_generation = self.focus_generation.saturating_add(1);
+    }
+    fn focus(&mut self, target: pane::FocusTarget) {
+        if self.target != target {
+            let restore = target == pane::FocusTarget::Terminal
+                && matches!(self.target, pane::FocusTarget::PasteConfirmation { .. })
+                && self.resolving.is_some();
+            self.focus_generation = self.focus_generation.saturating_add(1);
+            self.target = target;
+            self.pending = None;
+            if restore {
+                if let Some(resolving) = &mut self.resolving {
+                    resolving.restored_generation = Some(self.focus_generation);
+                }
+            } else {
+                self.resolving = None;
+            }
+        }
+    }
+    fn wire_focus(&self) -> (u64, pane::FocusTarget) {
+        // Modal dismissal restores local focus immediately. Preserve the wire
+        // authority until its already-approved paste has been resolved in order.
+        if let Some(resolving) = &self.resolving
+            && resolving.restored_generation == Some(self.focus_generation)
+        {
+            return (
+                resolving.pending.focus_generation,
+                pane::FocusTarget::PasteConfirmation {
+                    id: resolving.pending.wire_id,
+                },
+            );
+        }
+        (self.focus_generation, self.target)
+    }
+    fn resolution_is_current(&self, pending: PendingPaste) -> bool {
+        self.resolving.as_ref().is_some_and(|resolving| {
+            resolving.pending.id == pending.id
+                && resolving.pending.epoch == pending.epoch
+                && (self.focus_generation == pending.focus_generation
+                    || resolving.restored_generation == Some(self.focus_generation))
+        })
+    }
+}
 struct PresentationHandle {
-    input: mpsc::SyncSender<(u64, Input)>,
+    input: mpsc::SyncSender<SubmittedInput>,
     state: Arc<DevelopmentPaneState>,
     alive: Arc<AtomicBool>,
     size: Arc<Mutex<PaneSize>>,
     appearance: Arc<Mutex<TerminalAppearanceUpdate>>,
+    geometry: Mutex<TerminalGeometry>,
 }
 impl Drop for PresentationHandle {
     fn drop(&mut self) {
@@ -182,14 +340,461 @@ impl Drop for PresentationHandle {
     }
 }
 impl PresentationHandle {
-    fn send(&self, input: Input) {
-        let epoch = self.state.epoch.load(Ordering::Acquire);
-        if self.state.status() == DevelopmentPaneStatus::Connected
-            && self.input.try_send((epoch, input)).is_err()
-        {
-            self.state.epoch.fetch_add(1, Ordering::AcqRel);
-            self.state.set(DevelopmentPaneStatus::Reconnecting);
+    fn pointer_position(
+        &self,
+        generation: PresentationGeneration,
+        position: super::pointer_input::SurfacePosition,
+    ) -> Option<(ScreenMapping, f32, f32)> {
+        let mapping = self
+            .state
+            .interaction
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .screen?;
+        if mapping.local != generation || !position.x.is_finite() || !position.y.is_finite() {
+            return None;
         }
+        let geometry = *self.geometry.lock().unwrap_or_else(|e| e.into_inner());
+        let cell = geometry.logical_cell_size();
+        let backing_cell = geometry.to_backing_position(super::geometry::LogicalPosition::new(
+            cell.width,
+            cell.height,
+        ));
+        let x = position.x * f32::from(mapping.size.cell_width) / backing_cell.x;
+        let y = position.y * f32::from(mapping.size.cell_height) / backing_cell.y;
+        if !x.is_finite() || !y.is_finite() {
+            return None;
+        }
+        let width = f32::from(mapping.size.columns) * f32::from(mapping.size.cell_width);
+        let height = f32::from(mapping.size.rows) * f32::from(mapping.size.cell_height);
+        Some((
+            mapping,
+            x.clamp(0.0, width - 1.0),
+            y.clamp(0.0, height - 1.0),
+        ))
+    }
+    fn send(&self, input: Input) {
+        let current_epoch = self.state.epoch.load(Ordering::Acquire);
+        let epoch = match &input {
+            Input::ResolvePaste(pending, ..) => pending.epoch,
+            Input::Pointer(epoch, _) | Input::Wheel(epoch, _) => *epoch,
+            _ => current_epoch,
+        };
+        let connected = self.state.status() == DevelopmentPaneStatus::Connected;
+        let mut interaction = self
+            .state
+            .interaction
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let eligible = input.eligible(interaction.target)
+            && match &input {
+                Input::ResolvePaste(pending, ..) => interaction.resolution_is_current(*pending),
+                _ => true,
+            };
+        let available = connected
+            && epoch == current_epoch
+            && (interaction.interactive || matches!(input, Input::Resize(_) | Input::Style(_)))
+            && eligible;
+        if !available {
+            drop(interaction);
+            discard_input(&self.state, epoch, input);
+            return;
+        }
+        if let Input::Paste(_, reply) = &input {
+            if interaction
+                .pending
+                .is_some_and(|pending| std::time::Instant::now() >= pending.deadline)
+            {
+                interaction.pending = None;
+            }
+            if interaction.paste_request.is_some()
+                || interaction.pending.is_some()
+                || interaction.resolving.is_some()
+            {
+                let _ = reply.try_send(Ok(super::PasteRequestOutcome::Rejected(
+                    super::paste::PasteRejection::ConfirmationPending,
+                )));
+                return;
+            }
+            interaction.paste_request = Some((epoch, interaction.focus_generation));
+        }
+        let focus_generation = match &input {
+            Input::ResolvePaste(pending, ..) => pending.focus_generation,
+            _ => interaction.focus_generation,
+        };
+        let submitted = SubmittedInput {
+            epoch,
+            focus_generation,
+            command: input,
+        };
+        let sent = self.input.try_send(submitted);
+        drop(interaction);
+        if let Err(error) = sent {
+            discard_input(
+                &self.state,
+                epoch,
+                match error {
+                    mpsc::TrySendError::Full(input) | mpsc::TrySendError::Disconnected(input) => {
+                        input.command
+                    }
+                },
+            );
+            self.state.invalidate();
+        }
+    }
+}
+fn discard_input(state: &DevelopmentPaneState, epoch: u64, input: Input) {
+    match input {
+        Input::Paste(_, reply) => {
+            let mut interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
+            if interaction
+                .paste_request
+                .is_some_and(|(submitted_epoch, _)| submitted_epoch == epoch)
+            {
+                interaction.paste_request = None;
+            }
+            let _ = reply.try_send(Ok(super::PasteRequestOutcome::Rejected(
+                super::paste::PasteRejection::TerminalUnfocused,
+            )));
+        }
+        Input::ResolvePaste(pending, _, reply) => {
+            let mut interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
+            if interaction.resolving.as_ref().is_some_and(|resolving| {
+                resolving.pending.id == pending.id && resolving.pending.epoch == pending.epoch
+            }) {
+                interaction.resolving = None;
+            }
+            let _ = reply.try_send(Ok(super::PasteResolution::Stale));
+        }
+        _ => {}
+    }
+}
+
+struct ActiveInput {
+    epoch: u64,
+    lease: Lease,
+    focus_sent: Option<(u64, pane::FocusTarget)>,
+}
+impl ActiveInput {
+    fn sync_focus(
+        &mut self,
+        state: &DevelopmentPaneState,
+        exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
+    ) -> Result<(), ServerError> {
+        let focus = {
+            let interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
+            if !interaction.interactive {
+                return Ok(());
+            }
+            interaction.wire_focus()
+        };
+        if self.focus_sent != Some(focus) {
+            match exchange(&Request::Focus {
+                lease: self.lease,
+                generation: focus.0,
+                target: focus.1,
+            }) {
+                Ok(Reply::Unchanged) => self.focus_sent = Some(focus),
+                Err(ServerError::Unsupported) => self.disable(state),
+                Err(error) => return Err(error),
+                _ => return Err(ServerError::Protocol),
+            }
+        }
+        Ok(())
+    }
+    fn disable(&self, state: &DevelopmentPaneState) {
+        let mut interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
+        interaction.interactive = false;
+        interaction.pending = None;
+        interaction.resolving = None;
+    }
+    fn process(
+        &mut self,
+        state: &DevelopmentPaneState,
+        submitted: SubmittedInput,
+        exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
+        paste_unconfirmed: &mut bool,
+    ) -> Result<(), ServerError> {
+        if submitted.epoch != self.epoch || state.epoch.load(Ordering::Acquire) != self.epoch {
+            discard_input(state, submitted.epoch, submitted.command);
+            return Ok(());
+        }
+        if let Err(error) = self.sync_focus(state, exchange) {
+            state.invalidate();
+            discard_input(state, submitted.epoch, submitted.command);
+            return Err(error);
+        }
+        let valid = {
+            let interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
+            state.epoch.load(Ordering::Acquire) == self.epoch
+                && (matches!(submitted.command, Input::Resize(_) | Input::Style(_))
+                    || (interaction.interactive
+                        && (submitted.focus_generation == interaction.focus_generation
+                            || matches!(&submitted.command, Input::ResolvePaste(pending, ..) if interaction.resolution_is_current(*pending)))
+                        && submitted.command.eligible(interaction.target)))
+        };
+        if !valid {
+            discard_input(state, submitted.epoch, submitted.command);
+            return Ok(());
+        }
+        let generation = submitted.focus_generation;
+        let input_request = |input| Request::Input {
+            lease: self.lease,
+            generation,
+            input,
+        };
+        let (request, paste_reply) = match submitted.command {
+            Input::Key(key) => (
+                input_request(pane::InteractiveInput::Key(encode_key(key))),
+                None,
+            ),
+            Input::Pointer(_, pointer) => (
+                input_request(pane::InteractiveInput::Pointer(pointer)),
+                None,
+            ),
+            Input::Wheel(_, wheel) => (input_request(pane::InteractiveInput::Wheel(wheel)), None),
+            Input::Resize(size) => (
+                Request::Resize {
+                    lease: self.lease,
+                    size,
+                },
+                None,
+            ),
+            Input::Style(style) => (
+                Request::Style {
+                    lease: self.lease,
+                    style,
+                },
+                None,
+            ),
+            Input::Paste(text, reply) => (
+                input_request(pane::InteractiveInput::Paste { text }),
+                Some(PasteReply::Request(reply)),
+            ),
+            Input::ResolvePaste(pending, decision, reply) => {
+                if pending.epoch != self.epoch
+                    || pending.focus_generation != generation
+                    || std::time::Instant::now() >= pending.deadline
+                {
+                    discard_input(
+                        state,
+                        self.epoch,
+                        Input::ResolvePaste(pending, decision, reply),
+                    );
+                    return Ok(());
+                }
+                (
+                    input_request(pane::InteractiveInput::ResolvePaste {
+                        id: pending.wire_id,
+                        confirm: decision == super::PasteDecision::Confirm,
+                    }),
+                    Some(PasteReply::Resolution(reply)),
+                )
+            }
+        };
+        let result = exchange(&request);
+        if let Request::Input {
+            input: pane::InteractiveInput::ResolvePaste { id, .. },
+            ..
+        } = &request
+        {
+            let mut interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
+            if interaction.resolving.as_ref().is_some_and(|resolving| {
+                resolving.pending.wire_id == *id && resolving.pending.epoch == self.epoch
+            }) {
+                interaction.resolving = None;
+            }
+        }
+        let uncertain_write = matches!(
+            request,
+            Request::Input {
+                input: pane::InteractiveInput::Paste { .. }
+                    | pane::InteractiveInput::ResolvePaste { confirm: true, .. },
+                ..
+            }
+        );
+        let result = match result {
+            Err(ServerError::Unsupported) if matches!(request, Request::Input { .. }) => {
+                self.disable(state);
+                self.finish_paste_request(state, generation);
+                if let Some(reply) = paste_reply {
+                    reply.stale();
+                }
+                return Ok(());
+            }
+            Err(error) => {
+                let refused = matches!(
+                    error,
+                    ServerError::StaleControl
+                        | ServerError::Controlled
+                        | ServerError::SessionUnavailable
+                        | ServerError::Unsupported
+                );
+                if uncertain_write && !refused {
+                    *paste_unconfirmed = true;
+                }
+                // Native async readers must observe the lost epoch before their
+                // outcome is published, even if the UI has not polled status yet.
+                state.invalidate();
+                self.finish_paste_request(state, generation);
+                if let Some(reply) = paste_reply {
+                    if uncertain_write && !refused {
+                        reply.unconfirmed();
+                    } else {
+                        reply.stale();
+                    }
+                }
+                return Err(error);
+            }
+            Ok(reply) => reply,
+        };
+        let Some(reply) = paste_reply else {
+            return if matches!(result, Reply::Unchanged) {
+                Ok(())
+            } else {
+                Err(ServerError::Protocol)
+            };
+        };
+        let Reply::Paste(outcome) = result else {
+            self.finish_paste_request(state, generation);
+            if uncertain_write {
+                *paste_unconfirmed = true;
+                reply.unconfirmed();
+            } else {
+                reply.stale();
+            }
+            return Err(ServerError::Protocol);
+        };
+        let mut interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
+        if interaction.paste_request == Some((self.epoch, generation)) {
+            interaction.paste_request = None;
+        }
+        let current = state.epoch.load(Ordering::Acquire) == self.epoch
+            && interaction.focus_generation == generation;
+        match reply {
+            PasteReply::Request(reply) => {
+                let outcome = match outcome {
+                    pane::PasteOutcome::Written => super::PasteRequestOutcome::Written,
+                    pane::PasteOutcome::Rejected(rejection) => {
+                        super::PasteRequestOutcome::Rejected(decode_paste_rejection(rejection))
+                    }
+                    pane::PasteOutcome::ConfirmationRequired(confirmation) => {
+                        if !current || reply.is_closed() {
+                            drop(interaction);
+                            let _ =
+                                exchange(&input_request(pane::InteractiveInput::ResolvePaste {
+                                    id: confirmation.id,
+                                    confirm: false,
+                                }));
+                            let _ = reply.try_send(Ok(super::PasteRequestOutcome::Rejected(
+                                super::paste::PasteRejection::TerminalUnfocused,
+                            )));
+                            return Ok(());
+                        }
+                        interaction.next_paste = interaction.next_paste.saturating_add(1);
+                        let id = super::paste::PasteConfirmationId::new(interaction.next_paste);
+                        interaction.pending = Some(PendingPaste {
+                            id,
+                            wire_id: confirmation.id,
+                            epoch: self.epoch,
+                            focus_generation: generation,
+                            deadline: std::time::Instant::now() + Duration::from_secs(30),
+                        });
+                        super::PasteRequestOutcome::ConfirmationRequired(
+                            super::paste::PasteConfirmation {
+                                id,
+                                byte_len: confirmation.byte_len as usize,
+                                line_count: confirmation.line_count as usize,
+                                risk: super::paste::PasteRisk {
+                                    multiline: confirmation.multiline,
+                                    control_bytes: confirmation.control_bytes,
+                                    closing_fence: confirmation.closing_fence,
+                                },
+                            },
+                        )
+                    }
+                    _ => {
+                        drop(interaction);
+                        *paste_unconfirmed = true;
+                        let _ = reply.try_send(Ok(super::PasteRequestOutcome::Unconfirmed));
+                        return Err(ServerError::Protocol);
+                    }
+                };
+                if reply.try_send(Ok(outcome)).is_err()
+                    && let Some(pending) = interaction.pending.take()
+                {
+                    drop(interaction);
+                    let _ = exchange(&input_request(pane::InteractiveInput::ResolvePaste {
+                        id: pending.wire_id,
+                        confirm: false,
+                    }));
+                }
+            }
+            PasteReply::Resolution(reply) => {
+                let resolution = match outcome {
+                    pane::PasteOutcome::Written => super::PasteResolution::Written,
+                    pane::PasteOutcome::Cancelled => super::PasteResolution::Cancelled,
+                    pane::PasteOutcome::Stale => super::PasteResolution::Stale,
+                    _ => {
+                        if uncertain_write {
+                            *paste_unconfirmed = true;
+                            let _ = reply.try_send(Ok(super::PasteResolution::Unconfirmed));
+                        } else {
+                            let _ = reply.try_send(Ok(super::PasteResolution::Stale));
+                        }
+                        return Err(ServerError::Protocol);
+                    }
+                };
+                let _ = reply.try_send(Ok(resolution));
+            }
+        }
+        Ok(())
+    }
+    fn finish_paste_request(&self, state: &DevelopmentPaneState, generation: u64) {
+        let mut interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
+        if interaction.paste_request == Some((self.epoch, generation)) {
+            interaction.paste_request = None;
+        }
+    }
+}
+enum PasteReply {
+    Request(async_channel::Sender<Result<super::PasteRequestOutcome, String>>),
+    Resolution(async_channel::Sender<Result<super::PasteResolution, String>>),
+}
+impl PasteReply {
+    fn stale(self) {
+        match self {
+            Self::Request(reply) => {
+                let _ = reply.try_send(Ok(super::PasteRequestOutcome::Rejected(
+                    super::paste::PasteRejection::TerminalUnfocused,
+                )));
+            }
+            Self::Resolution(reply) => {
+                let _ = reply.try_send(Ok(super::PasteResolution::Stale));
+            }
+        }
+    }
+    fn unconfirmed(self) {
+        match self {
+            Self::Request(reply) => {
+                let _ = reply.try_send(Ok(super::PasteRequestOutcome::Unconfirmed));
+            }
+            Self::Resolution(reply) => {
+                let _ = reply.try_send(Ok(super::PasteResolution::Unconfirmed));
+            }
+        }
+    }
+}
+fn decode_paste_rejection(rejection: pane::PasteRejection) -> super::paste::PasteRejection {
+    match rejection {
+        pane::PasteRejection::Empty => super::paste::PasteRejection::Empty,
+        pane::PasteRejection::TooLarge { limit } => super::paste::PasteRejection::TooLarge {
+            limit: limit as usize,
+        },
+        pane::PasteRejection::ConfirmationPending => {
+            super::paste::PasteRejection::ConfirmationPending
+        }
+        pane::PasteRejection::TerminalUnfocused => super::paste::PasteRejection::TerminalUnfocused,
     }
 }
 fn pane_size(geometry: TerminalGeometry) -> PaneSize {
@@ -228,6 +833,7 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
             alive: Arc::clone(&alive),
             size: Arc::clone(&measured_size),
             appearance: Arc::clone(&appearance),
+            geometry: Mutex::new(geometry),
         };
         let factory = self.clone();
         std::thread::Builder::new()
@@ -256,10 +862,18 @@ fn exchange(
     }
 }
 
+fn expect_unchanged(reply: Reply) -> Result<(), ServerError> {
+    if matches!(reply, Reply::Unchanged) {
+        Ok(())
+    } else {
+        Err(ServerError::Protocol)
+    }
+}
+
 fn present(
     factory: DevelopmentServerSessionFactory,
     alive: Arc<AtomicBool>,
-    input: mpsc::Receiver<(u64, Input)>,
+    input: mpsc::Receiver<SubmittedInput>,
     events: async_channel::Sender<TerminalSessionEvent>,
     size: Arc<Mutex<PaneSize>>,
     appearance: Arc<Mutex<TerminalAppearanceUpdate>>,
@@ -275,6 +889,7 @@ fn present(
     let mut expected_target: Option<pane::PaneTarget> = None;
     let mut generation = PresentationGeneration::default();
     let mut takeover = false;
+    let mut paste_unconfirmed = false;
     while alive.load(Ordering::Acquire) {
         if attachment.as_ref().is_some_and(|permit| !permit.active()) {
             return;
@@ -288,28 +903,28 @@ fn present(
             };
             let intent = create;
             create = false;
-            let measured = *size.lock().unwrap_or_else(|e| e.into_inner());
-            let style = Some(encode_style(
-                &appearance.lock().unwrap_or_else(|e| e.into_inner()),
-            ));
+            let mut grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
+            let grant_update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let mut grant_appearance = Some(grant_update.generation);
+            let style = Some(encode_style(&grant_update));
             let request = if let Some(pane) = pane_id {
                 Request::SelectPane {
                     pane,
                     explicit: state.selected.swap(false, Ordering::AcqRel),
-                    size: measured,
+                    size: grant_size,
                     style,
                 }
             } else if connection.supports_takeover() {
                 Request::Select {
                     create: intent,
-                    size: measured,
+                    size: grant_size,
                     resume: expected_target,
                     style,
                 }
             } else {
                 Request::Attach {
                     create: intent,
-                    size: measured,
+                    size: grant_size,
                     resume: expected_session,
                     style,
                 }
@@ -330,9 +945,10 @@ fn present(
                     expected_session = None;
                     expected_target = None;
                     takeover = false;
+                    paste_unconfirmed = false;
                     state.invalidate();
                     state.start_restored.store(false, Ordering::Release);
-                    while input.try_recv().is_ok() {}
+                    drain_input(&state, &input);
                     clear_presentation(&events, &mut generation, &appearance);
                 }
                 state.set(DevelopmentPaneStatus::Restored);
@@ -344,21 +960,24 @@ fn present(
                 if state.start_restored.swap(false, Ordering::AcqRel)
                     || state.selected.swap(false, Ordering::AcqRel)
                 {
+                    grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
+                    let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    grant_appearance = Some(update.generation);
                     reply = exchange(
                         &attachment,
                         &mut connection,
                         &Request::StartRestored {
                             server: boot,
                             pane,
-                            size: *size.lock().unwrap_or_else(|e| e.into_inner()),
-                            style: Some(encode_style(
-                                &appearance.lock().unwrap_or_else(|e| e.into_inner()),
-                            )),
+                            size: grant_size,
+                            style: Some(encode_style(&update)),
                         },
                     )?;
                 } else {
                     std::thread::sleep(Duration::from_millis(100));
                     let size = *size.lock().unwrap_or_else(|e| e.into_inner());
+                    grant_size = size;
+                    grant_appearance = None;
                     reply = exchange(
                         &attachment,
                         &mut connection,
@@ -387,8 +1006,9 @@ fn present(
                 expected_target = Some(target);
                 if !takeover {
                     takeover = true;
+                    paste_unconfirmed = false;
                     state.invalidate();
-                    while input.try_recv().is_ok() {}
+                    drain_input(&state, &input);
                     // Erase cached terminal presentation before the window replaces its surface.
                     clear_presentation(&events, &mut generation, &appearance);
                 }
@@ -405,20 +1025,23 @@ fn present(
                 }
                 if state.take_over.swap(false, Ordering::AcqRel) {
                     state.set(DevelopmentPaneStatus::TakingOver);
+                    grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
+                    let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    grant_appearance = Some(update.generation);
                     reply = exchange(
                         &attachment,
                         &mut connection,
                         &Request::TakeOver {
                             target,
-                            size: *size.lock().unwrap_or_else(|e| e.into_inner()),
-                            style: Some(encode_style(
-                                &appearance.lock().unwrap_or_else(|e| e.into_inner()),
-                            )),
+                            size: grant_size,
+                            style: Some(encode_style(&update)),
                         },
                     )?;
                 } else {
                     std::thread::sleep(Duration::from_millis(100));
                     let size = *size.lock().unwrap_or_else(|e| e.into_inner());
+                    grant_size = size;
+                    grant_appearance = None;
                     reply = exchange(
                         &attachment,
                         &mut connection,
@@ -450,7 +1073,14 @@ fn present(
             expected_target = Some(lease.into());
             // Authenticate and receive the authoritative screen before enabling input.
             let epoch = state.invalidate();
-            while input.try_recv().is_ok() {}
+            drain_input(&state, &input);
+            let mut active_input = ActiveInput {
+                epoch,
+                lease,
+                focus_sent: None,
+            };
+            let mut active_size = grant_size;
+            let mut ready = false;
             loop {
                 if !alive.load(Ordering::Acquire)
                     || attachment.as_ref().is_some_and(|permit| !permit.active())
@@ -467,15 +1097,64 @@ fn present(
                 match reply {
                     Reply::Screen(screen) => {
                         generation = generation.next();
+                        let mapping = ScreenMapping {
+                            epoch,
+                            local: generation,
+                            wire: screen.generation,
+                            size: active_size,
+                            mouse_tracking: screen.mouse_tracking,
+                            alternate: screen.alternate,
+                            alternate_scroll: screen.alternate_scroll,
+                        };
                         let screen = decode_screen(
                             *screen,
                             generation,
                             &appearance.lock().unwrap_or_else(|e| e.into_inner()),
                         )?;
+                        if !ready {
+                            // Claims apply their measured controller facts once.
+                            // Reconcile changes made while attachment was in flight.
+                            let current_size = *size.lock().unwrap_or_else(|e| e.into_inner());
+                            let update =
+                                appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                            if current_size != grant_size {
+                                expect_unchanged(exchange(
+                                    &attachment,
+                                    &mut connection,
+                                    &Request::Resize {
+                                        lease,
+                                        size: current_size,
+                                    },
+                                )?)?;
+                                active_size = current_size;
+                            }
+                            if grant_appearance != Some(update.generation) {
+                                expect_unchanged(exchange(
+                                    &attachment,
+                                    &mut connection,
+                                    &Request::Style {
+                                        lease,
+                                        style: encode_style(&update),
+                                    },
+                                )?)?;
+                            }
+                            state
+                                .interaction
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .interactive = connection.supports_interactive_input();
+                            active_input.sync_focus(&state, &mut |request| {
+                                exchange(&attachment, &mut connection, request)
+                            })?;
+                            ready = true;
+                        }
+                        state.connected(epoch, mapping)?;
                         let _ = events.force_send(TerminalSessionEvent::Screen(screen));
-                        state.connected_epoch.store(epoch, Ordering::Release);
                         takeover = false;
-                        state.set(DevelopmentPaneStatus::Connected);
+                        if paste_unconfirmed {
+                            paste_unconfirmed = false;
+                            let _ = events.force_send(TerminalSessionEvent::PasteUnconfirmed);
+                        }
                     }
                     Reply::Ended => {
                         state.set(DevelopmentPaneStatus::Ended);
@@ -485,6 +1164,11 @@ fn present(
                     }
                     Reply::Unchanged => {}
                     _ => return Err(ServerError::Protocol),
+                }
+                if ready {
+                    active_input.sync_focus(&state, &mut |request| {
+                        exchange(&attachment, &mut connection, request)
+                    })?;
                 }
                 if state.close.swap(0, Ordering::AcqRel) == epoch {
                     if !matches!(
@@ -500,21 +1184,24 @@ fn present(
                     return Ok(());
                 }
                 for _ in 0..32 {
-                    let Ok((submitted_epoch, command)) = input.try_recv() else {
+                    let Ok(submitted) = input.try_recv() else {
                         break;
                     };
                     if state.epoch.load(Ordering::Acquire) != epoch {
                         return Err(ServerError::Protocol);
                     }
-                    if epoch != submitted_epoch {
-                        continue;
-                    }
-                    let request = match command {
-                        Input::Key(key) => Request::Key { lease, key },
-                        Input::Resize(size) => Request::Resize { lease, size },
-                        Input::Style(style) => Request::Style { lease, style },
-                    };
-                    exchange(&attachment, &mut connection, &request)?;
+                    active_input.process(
+                        &state,
+                        submitted,
+                        &mut |request| {
+                            let reply = exchange(&attachment, &mut connection, request)?;
+                            if let Request::Resize { size, .. } = request {
+                                active_size = *size;
+                            }
+                            Ok(reply)
+                        },
+                        &mut paste_unconfirmed,
+                    )?;
                 }
                 std::thread::sleep(Duration::from_millis(30));
             }
@@ -531,9 +1218,10 @@ fn present(
                 if !takeover {
                     state.invalidate();
                 }
-                while input.try_recv().is_ok() {}
+                drain_input(&state, &input);
                 if matches!(error, ServerError::StaleControl | ServerError::Controlled) {
                     takeover = true;
+                    paste_unconfirmed = false;
                     clear_presentation(&events, &mut generation, &appearance);
                 }
                 let retryable = state.connection_failed(error, takeover);
@@ -565,6 +1253,12 @@ fn clear_presentation(
     let _ = events.force_send(TerminalSessionEvent::Screen(Arc::new(empty)));
 }
 
+fn drain_input(state: &DevelopmentPaneState, input: &mpsc::Receiver<SubmittedInput>) {
+    while let Ok(submitted) = input.try_recv() {
+        discard_input(state, submitted.epoch, submitted.command);
+    }
+}
+
 fn encode_modifiers(m: InputModifiers) -> u16 {
     u16::from(m.shift)
         | (u16::from(m.alt) << 1)
@@ -577,41 +1271,161 @@ fn encode_modifiers(m: InputModifiers) -> u16 {
         | (u16::from(m.control_right) << 8)
         | (u16::from(m.platform_right) << 9)
 }
+fn encode_key(k: KeyInput) -> pane::Key {
+    pane::Key {
+        physical: k.physical_key as u32,
+        action: match k.action {
+            KeyAction::Press => 0,
+            KeyAction::Repeat => 1,
+            KeyAction::Release => 2,
+        },
+        logical: k.logical_key,
+        text: k.text,
+        unshifted: k.unshifted_codepoint,
+        modifiers: encode_modifiers(k.modifiers),
+        consumed: encode_modifiers(k.consumed_modifiers),
+        option_as_alt: k.option_as_alt == OptionAsAltPolicy::Both,
+    }
+}
 impl TerminalSessionHandle for PresentationHandle {
     fn key(&self, k: KeyInput) {
-        if k.text.as_ref().is_some_and(|s| s.len() > 4096) || k.logical_key.len() > 128 {
+        if k.validate().is_err()
+            || k.text.as_ref().is_some_and(|s| s.len() > 4096)
+            || k.logical_key.len() > 128
+        {
             return;
         }
-        self.send(Input::Key(pane::Key {
-            physical: k.physical_key as u32,
-            action: match k.action {
-                KeyAction::Press => 0,
-                KeyAction::Repeat => 1,
-                KeyAction::Release => 2,
-            },
-            logical: k.logical_key,
-            text: k.text,
-            unshifted: k.unshifted_codepoint,
-            modifiers: encode_modifiers(k.modifiers),
-            consumed: encode_modifiers(k.consumed_modifiers),
-            option_as_alt: k.option_as_alt == OptionAsAltPolicy::Both,
-        }));
+        self.send(Input::Key(k));
     }
     fn resize(&self, geometry: TerminalGeometry) {
         let size = pane_size(geometry);
+        *self.geometry.lock().unwrap_or_else(|e| e.into_inner()) = geometry;
+        self.state
+            .interaction
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .screen = None;
         *self.size.lock().unwrap_or_else(|e| e.into_inner()) = size;
         self.send(Input::Resize(size));
     }
-    fn focus(&self, _: bool) {}
+    fn focus(&self, focused: bool) {
+        self.interactive_focus(focused, focused);
+    }
+    fn interactive_focus(&self, terminal_input: bool, input_method: bool) {
+        let target = if terminal_input {
+            pane::FocusTarget::Terminal
+        } else if input_method {
+            pane::FocusTarget::FocusedPane
+        } else {
+            pane::FocusTarget::Unfocused
+        };
+        self.state
+            .interaction
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .focus(target);
+    }
+    fn interactive_input_available(&self) -> bool {
+        self.state.status() == DevelopmentPaneStatus::Connected
+            && self
+                .state
+                .interaction
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .interactive
+    }
+    fn input_generation(&self) -> u64 {
+        self.state.epoch.load(Ordering::Acquire)
+    }
+    fn focus_paste_confirmation(&self, id: super::paste::PasteConfirmationId) {
+        let mut interaction = self
+            .state
+            .interaction
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(pending) = interaction.pending.filter(|pending| {
+            pending.id == id
+                && pending.epoch == self.state.epoch.load(Ordering::Acquire)
+                && pending.focus_generation == interaction.focus_generation
+                && std::time::Instant::now() < pending.deadline
+        }) {
+            interaction.target = pane::FocusTarget::PasteConfirmation {
+                id: pending.wire_id,
+            };
+        } else {
+            interaction.focus(pane::FocusTarget::Unfocused);
+        }
+    }
     fn clear_screen_and_scrollback(&self) {}
-    fn pointer(&self, _: super::pointer_input::PointerInput) {}
+    fn pointer(&self, input: PointerInput) {
+        use super::pointer_input::{PointerButton, PointerPhase, ShiftSelectionPolicy};
+        let Some((mapping, x, y)) = self.pointer_position(input.generation, input.position) else {
+            return;
+        };
+        if !mapping.mouse_tracking {
+            return;
+        }
+        self.send(Input::Pointer(
+            mapping.epoch,
+            pane::Pointer {
+                screen_generation: mapping.wire,
+                phase: match input.phase {
+                    PointerPhase::Press => pane::PointerPhase::Press,
+                    PointerPhase::Motion => pane::PointerPhase::Motion,
+                    PointerPhase::Release => pane::PointerPhase::Release,
+                },
+                button: input.button.map(|button| match button {
+                    PointerButton::Left => pane::PointerButton::Left,
+                    PointerButton::Middle => pane::PointerButton::Middle,
+                    PointerButton::Right => pane::PointerButton::Right,
+                }),
+                x,
+                y,
+                modifiers: encode_modifiers(input.modifiers),
+                shift_selection: input.shift_selection
+                    == ShiftSelectionPolicy::OverrideApplicationMouse,
+            },
+        ));
+    }
     fn pointer_and_copy_selection(
         &self,
-        _: super::pointer_input::PointerInput,
+        input: PointerInput,
     ) -> Result<Option<super::selection::SelectionCopy>, SelectionCopyError> {
+        self.pointer(input);
         Ok(None)
     }
-    fn wheel(&self, _: super::pointer_input::WheelInput) {}
+    fn wheel(&self, input: WheelInput) {
+        use super::pointer_input::{ShiftSelectionPolicy, WheelPhase};
+        let Some((mapping, x, y)) = self.pointer_position(input.generation, input.position) else {
+            return;
+        };
+        if !mapping.mouse_tracking && !(mapping.alternate && mapping.alternate_scroll) {
+            return;
+        }
+        self.send(Input::Wheel(
+            mapping.epoch,
+            pane::Wheel {
+                screen_generation: mapping.wire,
+                horizontal_steps: input.horizontal_steps,
+                vertical_steps: input.vertical_steps,
+                phase: match input.phase {
+                    WheelPhase::GestureStarted => pane::WheelPhase::GestureStarted,
+                    WheelPhase::GestureChanged => pane::WheelPhase::GestureChanged,
+                    WheelPhase::GestureEnded => pane::WheelPhase::GestureEnded,
+                    WheelPhase::GestureCancelled => pane::WheelPhase::GestureCancelled,
+                    WheelPhase::MomentumStarted => pane::WheelPhase::MomentumStarted,
+                    WheelPhase::MomentumChanged => pane::WheelPhase::MomentumChanged,
+                    WheelPhase::MomentumEnded => pane::WheelPhase::MomentumEnded,
+                    WheelPhase::MomentumCancelled => pane::WheelPhase::MomentumCancelled,
+                },
+                x,
+                y,
+                modifiers: encode_modifiers(input.modifiers),
+                shift_selection: input.shift_selection
+                    == ShiftSelectionPolicy::OverrideApplicationMouse,
+            },
+        ));
+    }
     fn scroll_to(&self, _: u64, _: PresentationGeneration) {}
     fn scroll_scrollback(&self, _: ScrollbackMovement) {}
     fn set_find_query(&self, _: super::FindQueryGeneration, _: String) {}
@@ -619,19 +1433,50 @@ impl TerminalSessionHandle for PresentationHandle {
     fn end_find(&self, _: super::FindQueryGeneration) {}
     fn request_paste(
         &self,
-        _: super::PastePayload,
+        payload: super::PastePayload,
     ) -> async_channel::Receiver<Result<super::PasteRequestOutcome, String>> {
         let (tx, rx) = async_channel::bounded(1);
-        let _ = tx.try_send(Err("Paste is unavailable for this Development Pane.".into()));
+        if payload.text().len() > super::paste::MAX_PASTE_BYTES {
+            let _ = tx.try_send(Ok(super::PasteRequestOutcome::Rejected(
+                super::paste::PasteRejection::TooLarge {
+                    limit: super::paste::MAX_PASTE_BYTES,
+                },
+            )));
+            return rx;
+        }
+        self.send(Input::Paste(payload.text().to_owned(), tx));
         rx
     }
     fn resolve_paste(
         &self,
-        _: super::paste::PasteConfirmationId,
-        _: super::PasteDecision,
+        id: super::paste::PasteConfirmationId,
+        decision: super::PasteDecision,
     ) -> async_channel::Receiver<Result<super::PasteResolution, String>> {
         let (tx, rx) = async_channel::bounded(1);
-        let _ = tx.try_send(Err("Paste is unavailable for this Development Pane.".into()));
+        let pending = {
+            let mut interaction = self
+                .state
+                .interaction
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if interaction.pending.is_some_and(|pending| pending.id == id) {
+                let pending = interaction.pending.take();
+                if let Some(pending) = pending {
+                    interaction.resolving = Some(ResolvingPaste {
+                        pending,
+                        restored_generation: None,
+                    });
+                }
+                pending
+            } else {
+                None
+            }
+        };
+        if let Some(pending) = pending {
+            self.send(Input::ResolvePaste(pending, decision, tx));
+        } else {
+            let _ = tx.try_send(Ok(super::PasteResolution::Stale));
+        }
         rx
     }
     fn copy_selection(&self) -> Result<Option<super::SelectionCopy>, SelectionCopyError> {
@@ -706,6 +1551,8 @@ fn decode_screen(
     ))
     .clone();
     screen.generation = generation;
+    screen.mouse_tracking = wire.mouse_tracking;
+    screen.alternate_scroll = wire.alternate_scroll;
     screen.size = ScreenSizeSnapshot {
         cols: wire.columns,
         rows: wire.rows.len() as u16,
@@ -839,6 +1686,443 @@ fn decode_screen(
 mod tests {
     use super::*;
 
+    struct Adapter {
+        handle: PresentationHandle,
+        input: mpsc::Receiver<SubmittedInput>,
+        active: ActiveInput,
+        unconfirmed: bool,
+    }
+    impl Adapter {
+        fn new() -> Self {
+            use super::super::geometry::{BackingScale, CellGridSize, LogicalCellSize};
+            let geometry = TerminalGeometry::from_grid(
+                CellGridSize::new(20, 6),
+                LogicalCellSize::new(10.0, 20.0),
+                BackingScale::ONE,
+            );
+            let state = Arc::new(DevelopmentPaneState::new());
+            let epoch = state.invalidate();
+            state.set(DevelopmentPaneStatus::Connected);
+            state.interaction.lock().unwrap().interactive = true;
+            let (sender, input) = mpsc::sync_channel(512);
+            let handle = PresentationHandle {
+                input: sender,
+                state,
+                alive: Arc::new(AtomicBool::new(true)),
+                size: Arc::new(Mutex::new(pane_size(geometry))),
+                appearance: Arc::new(Mutex::new(TerminalAppearanceUpdate::builtin().unwrap())),
+                geometry: Mutex::new(geometry),
+            };
+            handle.interactive_focus(true, true);
+            Self {
+                handle,
+                input,
+                active: ActiveInput {
+                    epoch,
+                    lease: Lease {
+                        server: [1; 32],
+                        session: [2; 32],
+                        control: [3; 32],
+                        connection: [4; 32],
+                    },
+                    focus_sent: None,
+                },
+                unconfirmed: false,
+            }
+        }
+        fn drain(
+            &mut self,
+            mut exchange: impl FnMut(&Request) -> Result<Reply, ServerError>,
+        ) -> Result<(), ServerError> {
+            while let Ok(input) = self.input.try_recv() {
+                self.active.process(
+                    &self.handle.state,
+                    input,
+                    &mut exchange,
+                    &mut self.unconfirmed,
+                )?;
+            }
+            Ok(())
+        }
+        fn confirmation(&mut self) -> super::super::paste::PasteConfirmation {
+            let reply = self
+                .handle
+                .request_paste(super::super::PastePayload::from("one\ntwo".to_owned()));
+            self.drain(|request| {
+                Ok(
+                    if matches!(
+                        request,
+                        Request::Input {
+                            input: pane::InteractiveInput::Paste { .. },
+                            ..
+                        }
+                    ) {
+                        Reply::Paste(pane::PasteOutcome::ConfirmationRequired(
+                            pane::PasteConfirmation {
+                                id: 17,
+                                byte_len: 7,
+                                line_count: 2,
+                                multiline: true,
+                                control_bytes: false,
+                                closing_fence: false,
+                            },
+                        ))
+                    } else {
+                        Reply::Unchanged
+                    },
+                )
+            })
+            .unwrap();
+            let Ok(Ok(super::super::PasteRequestOutcome::ConfirmationRequired(confirmation))) =
+                reply.try_recv()
+            else {
+                panic!("expected paste confirmation")
+            };
+            confirmation
+        }
+    }
+
+    #[test]
+    fn queued_key_is_discarded_when_focus_moves_to_its_paste_confirmation() {
+        let mut adapter = Adapter::new();
+        let confirmation = adapter.confirmation();
+        adapter.handle.key(KeyInput::text_input("queued"));
+        adapter.handle.focus_paste_confirmation(confirmation.id);
+        let mut written = false;
+        adapter
+            .drain(|request| {
+                written |= matches!(
+                    request,
+                    Request::Input {
+                        input: pane::InteractiveInput::Key(_),
+                        ..
+                    }
+                );
+                Ok(Reply::Unchanged)
+            })
+            .unwrap();
+        assert!(
+            !written,
+            "a queued key must not enter the terminal after modal focus transfer"
+        );
+    }
+
+    #[test]
+    fn blur_and_refocus_discard_queued_keys_but_allow_current_input_method_text() {
+        let mut adapter = Adapter::new();
+        adapter.handle.key(KeyInput::text_input("stale"));
+        adapter.handle.interactive_focus(false, false);
+        adapter.handle.interactive_focus(false, true);
+        adapter.handle.key(KeyInput::text_input("not-focused"));
+        adapter.handle.key(KeyInput::input_method_commit("日本語"));
+        let mut text = Vec::new();
+        adapter
+            .drain(|request| {
+                if let Request::Input {
+                    input: pane::InteractiveInput::Key(key),
+                    ..
+                } = request
+                {
+                    text.push(key.text.clone());
+                }
+                Ok(Reply::Unchanged)
+            })
+            .unwrap();
+        assert_eq!(text, vec![Some("日本語".into())]);
+    }
+
+    #[test]
+    fn an_inflight_paste_confirmation_is_cancelled_after_local_focus_loss() {
+        let mut adapter = Adapter::new();
+        let response = adapter
+            .handle
+            .request_paste(super::super::PastePayload::from("one\ntwo".to_owned()));
+        let state = Arc::clone(&adapter.handle.state);
+        let mut cancelled = Vec::new();
+        adapter
+            .drain(|request| match request {
+                Request::Input {
+                    input: pane::InteractiveInput::Paste { .. },
+                    ..
+                } => {
+                    state
+                        .interaction
+                        .lock()
+                        .unwrap()
+                        .focus(pane::FocusTarget::Unfocused);
+                    Ok(Reply::Paste(pane::PasteOutcome::ConfirmationRequired(
+                        pane::PasteConfirmation {
+                            id: 42,
+                            byte_len: 7,
+                            line_count: 2,
+                            multiline: true,
+                            control_bytes: false,
+                            closing_fence: false,
+                        },
+                    )))
+                }
+                Request::Input {
+                    input: pane::InteractiveInput::ResolvePaste { id, confirm },
+                    ..
+                } => {
+                    cancelled.push((*id, *confirm));
+                    Ok(Reply::Paste(pane::PasteOutcome::Cancelled))
+                }
+                _ => Ok(Reply::Unchanged),
+            })
+            .unwrap();
+        assert_eq!(cancelled, vec![(42, false)]);
+        assert_eq!(
+            response.try_recv().unwrap().unwrap(),
+            super::super::PasteRequestOutcome::Rejected(
+                super::super::paste::PasteRejection::TerminalUnfocused
+            )
+        );
+        assert!(
+            adapter
+                .handle
+                .state
+                .interaction
+                .lock()
+                .unwrap()
+                .pending
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_confirmation_queued_before_reconnection_cannot_authorize_the_replacement_lease() {
+        let mut adapter = Adapter::new();
+        let confirmation = adapter.confirmation();
+        adapter.handle.focus_paste_confirmation(confirmation.id);
+        let response = adapter
+            .handle
+            .resolve_paste(confirmation.id, super::super::PasteDecision::Confirm);
+        let previous_generation = adapter.handle.input_generation();
+        let epoch = adapter.handle.state.invalidate();
+        adapter.handle.state.set(DevelopmentPaneStatus::Connected);
+        adapter.handle.state.interaction.lock().unwrap().interactive = true;
+        adapter.handle.interactive_focus(true, true);
+        adapter.active.epoch = epoch;
+        adapter.active.lease.connection = [9; 32];
+        adapter.active.focus_sent = None;
+        adapter
+            .drain(|_| panic!("stale approval reached the replacement connection"))
+            .unwrap();
+        assert_ne!(adapter.handle.input_generation(), previous_generation);
+        assert_eq!(
+            response.try_recv().unwrap().unwrap(),
+            super::super::PasteResolution::Stale
+        );
+    }
+
+    #[test]
+    fn modal_paste_is_single_use_and_lost_confirmation_reply_is_typed_as_uncertain() {
+        let mut adapter = Adapter::new();
+        let confirmation = adapter.confirmation();
+        adapter.handle.focus_paste_confirmation(confirmation.id);
+        let response = adapter
+            .handle
+            .resolve_paste(confirmation.id, super::super::PasteDecision::Confirm);
+        let expected_lease = adapter.active.lease;
+        let result = adapter.drain(|request| match request {
+            Request::Input {
+                lease,
+                input:
+                    pane::InteractiveInput::ResolvePaste {
+                        id: 17,
+                        confirm: true,
+                    },
+                ..
+            } => {
+                assert_eq!(*lease, expected_lease);
+                Err(ServerError::Protocol)
+            }
+            _ => Ok(Reply::Unchanged),
+        });
+        assert_eq!(result, Err(ServerError::Protocol));
+        assert_eq!(
+            response.try_recv().unwrap().unwrap(),
+            super::super::PasteResolution::Unconfirmed
+        );
+        assert!(adapter.unconfirmed);
+        let duplicate = adapter
+            .handle
+            .resolve_paste(confirmation.id, super::super::PasteDecision::Confirm);
+        assert_eq!(
+            duplicate.try_recv().unwrap().unwrap(),
+            super::super::PasteResolution::Stale
+        );
+    }
+
+    #[test]
+    fn modal_dismissal_restores_focus_after_the_already_approved_paste() {
+        let mut adapter = Adapter::new();
+        let confirmation = adapter.confirmation();
+        adapter.handle.focus_paste_confirmation(confirmation.id);
+        let response = adapter
+            .handle
+            .resolve_paste(confirmation.id, super::super::PasteDecision::Confirm);
+        adapter.handle.interactive_focus(true, true);
+        adapter.handle.key(KeyInput::text_input("after"));
+        let mut order = Vec::new();
+        adapter
+            .drain(|request| match request {
+                Request::Input {
+                    input: pane::InteractiveInput::ResolvePaste { confirm: true, .. },
+                    ..
+                } => {
+                    order.push("paste");
+                    Ok(Reply::Paste(pane::PasteOutcome::Written))
+                }
+                Request::Input {
+                    input: pane::InteractiveInput::Key(_),
+                    ..
+                } => {
+                    order.push("key");
+                    Ok(Reply::Unchanged)
+                }
+                Request::Focus {
+                    target: pane::FocusTarget::Terminal,
+                    ..
+                } => {
+                    order.push("focus");
+                    Ok(Reply::Unchanged)
+                }
+                _ => Ok(Reply::Unchanged),
+            })
+            .unwrap();
+        assert_eq!(order, vec!["paste", "focus", "key"]);
+        assert_eq!(
+            response.try_recv().unwrap().unwrap(),
+            super::super::PasteResolution::Written
+        );
+    }
+
+    #[test]
+    fn leaving_the_pane_cancels_an_approval_even_after_modal_focus_restoration() {
+        let mut adapter = Adapter::new();
+        let confirmation = adapter.confirmation();
+        adapter.handle.focus_paste_confirmation(confirmation.id);
+        let response = adapter
+            .handle
+            .resolve_paste(confirmation.id, super::super::PasteDecision::Confirm);
+        adapter.handle.interactive_focus(true, true);
+        adapter.handle.interactive_focus(false, false);
+        adapter.handle.interactive_focus(true, true);
+        adapter
+            .drain(|request| {
+                assert!(
+                    !matches!(request, Request::Input { .. }),
+                    "an approval crossed unrelated focus loss"
+                );
+                Ok(Reply::Unchanged)
+            })
+            .unwrap();
+        assert_eq!(
+            response.try_recv().unwrap().unwrap(),
+            super::super::PasteResolution::Stale
+        );
+    }
+
+    #[test]
+    fn unsupported_interaction_disables_typing_without_starting_reconnection() {
+        let mut adapter = Adapter::new();
+        adapter.handle.key(KeyInput::text_input("before"));
+        adapter
+            .drain(|request| {
+                if matches!(request, Request::Input { .. }) {
+                    Err(ServerError::Unsupported)
+                } else {
+                    Ok(Reply::Unchanged)
+                }
+            })
+            .unwrap();
+        assert!(!adapter.handle.interactive_input_available());
+        assert_eq!(
+            adapter.handle.state.status(),
+            DevelopmentPaneStatus::Connected
+        );
+        adapter.handle.key(KeyInput::input_method_commit("after"));
+        adapter
+            .drain(|_| panic!("input was sent after capability refusal"))
+            .unwrap();
+    }
+
+    #[test]
+    fn pointer_coordinates_use_fitted_cells_and_the_authoritative_screen_revision() {
+        use super::super::{
+            geometry::{BackingScale, CellGridSize, LogicalCellSize, LogicalPosition, LogicalSize},
+            pointer_input::*,
+        };
+        let mut adapter = Adapter::new();
+        let geometry = TerminalGeometry::from_viewport(
+            LogicalSize::new(201.0, 122.0),
+            LogicalCellSize::new(10.0, 20.0),
+            BackingScale::new(1.5).unwrap(),
+            CellGridSize::new(2, 2),
+        );
+        adapter.handle.resize(geometry);
+        adapter.drain(|_| Ok(Reply::Unchanged)).unwrap();
+        adapter.handle.state.interaction.lock().unwrap().screen = Some(ScreenMapping {
+            epoch: adapter.active.epoch,
+            local: PresentationGeneration::test(8),
+            wire: 91,
+            size: pane_size(geometry),
+            mouse_tracking: true,
+            alternate: false,
+            alternate_scroll: false,
+        });
+        let cell = geometry.logical_cell_size();
+        let position =
+            geometry.to_backing_position(LogicalPosition::new(cell.width * 1.5, cell.height * 2.5));
+        let input = PointerInput {
+            generation: PresentationGeneration::test(8),
+            phase: PointerPhase::Press,
+            button: Some(PointerButton::Left),
+            position: SurfacePosition {
+                x: position.x,
+                y: position.y,
+            },
+            modifiers: InputModifiers::default(),
+            shift_selection: ShiftSelectionPolicy::ReportToApplication,
+        };
+        adapter.handle.pointer(PointerInput {
+            generation: PresentationGeneration::test(7),
+            ..input
+        });
+        adapter.handle.pointer(input);
+        let mut coordinates = Vec::new();
+        adapter
+            .drain(|request| {
+                if let Request::Input {
+                    input: pane::InteractiveInput::Pointer(pointer),
+                    ..
+                } = request
+                {
+                    coordinates.push((pointer.screen_generation, pointer.x, pointer.y));
+                }
+                Ok(Reply::Unchanged)
+            })
+            .unwrap();
+        assert_eq!(
+            coordinates.len(),
+            1,
+            "stale presentation input must be discarded"
+        );
+        assert_eq!(coordinates[0].0, 91);
+        assert!(
+            (coordinates[0].1 - 22.5).abs() < 0.001,
+            "wrong fitted-cell x: {:?}",
+            coordinates[0]
+        );
+        assert!(
+            (coordinates[0].2 - 75.0).abs() < 0.001,
+            "wrong fitted-cell y: {:?}",
+            coordinates[0]
+        );
+    }
+
     #[test]
     fn end_session_approval_cannot_transfer_to_a_new_connection() {
         let state = DevelopmentPaneState::new();
@@ -889,6 +2173,9 @@ mod tests {
         let mut overrides = vec![false; 256];
         overrides[1] = true;
         let screen = pane::Screen {
+            generation: 1,
+            mouse_tracking: false,
+            alternate_scroll: false,
             columns: 2,
             rows: vec![vec![cell.clone(); 2]; 2],
             wrapped: vec![false; 2],
