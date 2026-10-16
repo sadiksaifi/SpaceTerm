@@ -2,7 +2,9 @@
 
 import io
 import json
+import os
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -53,6 +55,15 @@ class ServerArchiveTests(unittest.TestCase):
     def test_signed_archive_retains_exact_candidate_identity(self):
         self.archive_with([("server/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)])
         self.assertEqual(self.unpack(), self.info)
+
+    def test_verified_extraction_does_not_leave_group_writable_implicit_directories(self):
+        self.archive_with([("server/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)])
+        previous = os.umask(0o002)
+        try:
+            self.unpack()
+        finally:
+            os.umask(previous)
+        self.assertEqual(stat.S_IMODE((self.root / "unpacked/server").stat().st_mode), 0o755)
 
     def test_unsigned_and_tampered_archives_are_refused_before_extraction(self):
         self.archive_with([("server/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)])
