@@ -42,6 +42,7 @@ pub(crate) struct DevelopmentPaneState {
     interaction: Mutex<Interaction>,
     effect_authority: Arc<ClipboardAuthority>,
     hidden_input: AtomicBool,
+    client_effects: Mutex<std::collections::VecDeque<ClientEffectRequest>>,
 }
 impl DevelopmentPaneState {
     fn new() -> Self {
@@ -57,6 +58,7 @@ impl DevelopmentPaneState {
             paste_unconfirmed: AtomicBool::new(false),
             interaction: Mutex::new(Interaction::default()),
             hidden_input: AtomicBool::new(false),
+            client_effects: Mutex::new(std::collections::VecDeque::new()),
             effect_authority: {
                 let authority = ClipboardAuthority::default();
                 authority.route();
@@ -100,6 +102,10 @@ impl DevelopmentPaneState {
     }
     fn invalidate(&self) -> u64 {
         self.effect_authority.client_focus(None);
+        self.client_effects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         self.hidden_input.store(false, Ordering::Release);
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         if *status == DevelopmentPaneStatus::Connected {
@@ -1412,6 +1418,14 @@ impl TerminalSessionHandle for PresentationHandle {
         }
         *self.size.lock().unwrap_or_else(|e| e.into_inner()) = size;
         self.send(Input::Resize(size));
+    }
+    fn take_client_effects(&self) -> Vec<ClientEffectRequest> {
+        self.state
+            .client_effects
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect()
     }
     fn hidden_input(&self) -> Option<bool> {
         Some(self.state.hidden_input.load(Ordering::Acquire))

@@ -124,7 +124,15 @@ impl ClientEffects {
                     epoch,
                     remaining,
                 );
-                let _ = events.try_send(TerminalSessionEvent::ClientEffect(request));
+                let mut pending = state
+                    .client_effects
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                pending.retain(|request| request.grant.current());
+                if pending.len() < 8 {
+                    pending.push_back(request);
+                }
+                let _ = events.try_send(TerminalSessionEvent::ClientEffectsReady);
                 None
             }
         };
@@ -158,6 +166,48 @@ mod tests {
     use super::super::tests::Adapter;
     use super::*;
     use crate::terminal::native_services::{clipboard::ClipboardPreferences, testing::adapters};
+
+    #[test]
+    fn native_requests_survive_a_full_presentation_queue_and_are_drained_once() {
+        let adapter = Adapter::new();
+        let (mut effects, _requests) = ClientEffects::new();
+        let (events, receiver) = async_channel::bounded(1);
+        let generation = adapter
+            .handle
+            .state
+            .interaction
+            .lock()
+            .unwrap()
+            .focus_generation;
+        effects
+            .poll(
+                &adapter.handle.state,
+                adapter.active.lease,
+                &events,
+                &mut |_| {
+                    Ok(Reply::NativeEffects {
+                        hidden_input: false,
+                        request: Some(pane::effects::Request {
+                            id: 1,
+                            generation,
+                            remaining_ms: 1000,
+                            effect: Effect::Bell,
+                        }),
+                    })
+                },
+            )
+            .unwrap();
+        // Hidden-input publication filled the sole presentation slot before the native wakeup.
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(TerminalSessionEvent::HiddenInputChanged(false))
+        ));
+        let requests = adapter.handle.take_client_effects();
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(requests[0].effect, Effect::Bell));
+        assert!(requests[0].grant.current());
+        assert!(adapter.handle.take_client_effects().is_empty());
+    }
 
     #[gpui::test]
     fn relayed_clipboard_uses_client_preferences_and_rejects_delayed_local_authority(

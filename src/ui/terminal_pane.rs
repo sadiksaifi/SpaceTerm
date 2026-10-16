@@ -468,6 +468,7 @@ impl PaneTerminalSessionLifecycle {
                         for event in events {
                             changed |= this.handle_session_event(session_epoch, event, cx);
                         }
+                        changed |= this.sync_client_effects(cx);
                         changed |= this.sync_permission_request(session_epoch, cx);
                         presentation_changed |= this.sync_metadata(session_epoch);
                         if presentation_changed {
@@ -2366,6 +2367,20 @@ impl TerminalPane {
         self.accept_metadata(snapshot)
     }
 
+    fn sync_client_effects(&mut self, cx: &mut Context<Self>) -> bool {
+        let requests = self
+            .terminal_session
+            .session
+            .as_ref()
+            .map(|session| session.take_client_effects())
+            .unwrap_or_default();
+        let mut changed = false;
+        for request in requests {
+            changed |= self.handle_event(TerminalSessionEvent::ClientEffect(request), cx);
+        }
+        changed
+    }
+
     /// Screen and lifecycle events can replace the request's wakeup before the Pane reads it.
     fn sync_permission_request(&mut self, session_epoch: u64, cx: &mut Context<Self>) -> bool {
         if self.terminal_session.session_epoch != session_epoch
@@ -2429,6 +2444,7 @@ impl TerminalPane {
                 self.reconcile_pending_accessibility();
                 self.sync_scrollbar(cx);
             }
+            TerminalSessionEvent::ClientEffectsReady => return self.sync_client_effects(cx),
             TerminalSessionEvent::ClientEffect(request) => {
                 if !request.grant.current() {
                     return false;

@@ -93,6 +93,7 @@ pub enum TerminalSessionEvent {
     MetadataChanged(MetadataWakeup),
     Attention(AttentionEvent),
     ClientEffect(ClientEffectRequest),
+    ClientEffectsReady,
     HiddenInputChanged(bool),
     /// A paste may have been written before the connection lost its acknowledgement.
     PasteUnconfirmed,
@@ -426,6 +427,11 @@ impl TerminalSessionPermissionRequestState {
 }
 
 pub trait TerminalSessionHandle {
+    /// Drains bounded native requests independently of replaceable presentation wakeups.
+    fn take_client_effects(&self) -> Vec<ClientEffectRequest> {
+        Vec::new()
+    }
+
     /// Retained host hidden-input state when presentation notifications can coalesce.
     fn hidden_input(&self) -> Option<bool> {
         None
