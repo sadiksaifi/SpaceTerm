@@ -9,6 +9,58 @@ use std::{
     time::{Duration, Instant},
 };
 
+struct WorkspaceCleanup<'a> {
+    client: &'a LocalServer,
+    boot: Id,
+    workspace: Option<Id>,
+}
+impl WorkspaceCleanup<'_> {
+    fn cleanup(&mut self) -> Result<(), Box<dyn Error>> {
+        let Some(workspace) = self.workspace else {
+            return Ok(());
+        };
+        let mut connection = self.client.connect_pane()?;
+        let Reply::Inventory {
+            inventory,
+            next_sequence,
+        } = connection.exchange(&Request::Inventory)?
+        else {
+            return Err("cleanup inventory missing".into());
+        };
+        if inventory.close.as_ref().map(|live| live.boot) != Some(self.boot) {
+            return Err("cleanup refused a replacement server".into());
+        }
+        if inventory.workspaces.iter().any(|w| w.id == workspace) {
+            let target = CloseTarget::Workspace { workspace };
+            let confirmation = inventory
+                .close_confirmation(target)
+                .ok_or("cleanup authority missing")?;
+            let Reply::Outcome(result) = connection.exchange(&Request::Mutate {
+                sequence: next_sequence,
+                mutation: Mutation::Close {
+                    target,
+                    confirmation,
+                },
+            })?
+            else {
+                return Err("cleanup outcome missing".into());
+            };
+            if result.outcome != (Outcome::Accepted { target: workspace }) {
+                return Err("test Workspace cleanup refused".into());
+            }
+        }
+        self.workspace = None;
+        Ok(())
+    }
+}
+impl Drop for WorkspaceCleanup<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = self.cleanup() {
+            eprintln!("test Workspace cleanup failed: {error}");
+        }
+    }
+}
+
 fn focus(
     c: &mut PaneConnection,
     lease: Lease,
@@ -161,9 +213,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut server = Server::start()?;
     let mut a = connect(&first)?;
     assert!(a.supports_interactive_input());
-    let Reply::Inventory { next_sequence, .. } = a.exchange(&Request::Inventory)? else {
+    let Reply::Inventory {
+        next_sequence,
+        inventory,
+    } = a.exchange(&Request::Inventory)?
+    else {
         return Err("inventory missing".into());
     };
+    let boot = inventory.close.as_ref().ok_or("server boot missing")?.boot;
     let Reply::Outcome(created) = a.exchange(&Request::Mutate {
         sequence: next_sequence,
         mutation: Mutation::CreateWorkspace {
@@ -175,6 +232,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     let Outcome::Accepted { target: workspace } = created.outcome else {
         return Err("creation refused".into());
+    };
+    let mut cleanup = WorkspaceCleanup {
+        client: &first,
+        boot,
+        workspace: Some(workspace),
     };
     let Reply::Inventory { inventory, .. } = a.exchange(&Request::Inventory)? else {
         return Err("inventory missing".into());
@@ -424,6 +486,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             == "31 91"
     }));
     b.exchange(&Request::Close { lease })?;
+    cleanup.cleanup()?;
     b.exchange(&Request::Shutdown)?;
     let _ = server.kill();
     println!(
