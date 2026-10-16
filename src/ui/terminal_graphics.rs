@@ -765,6 +765,7 @@ mod tests {
             unicode_placeholder: false,
         };
         let snapshot = GraphicsSnapshot {
+            failure: None,
             generation: 3,
             placement_generation: 1,
             images: Arc::from([image_snapshot]),

@@ -1,6 +1,4 @@
-use crate::terminal::failure::TerminalFailure;
 use crate::terminal::graphics::{GraphicsReservation, GraphicsSnapshot, ImageSnapshot};
-use crate::terminal::session::{TerminalSessionEvent, TerminalSessionFailure};
 use pane::graphics::{CHUNK_BYTES, Error, Image, ImageKey, Snapshot};
 use spaceterm_server::{
     ServerError,
@@ -21,6 +19,7 @@ pub(crate) struct Graphics {
     manifest: Option<Snapshot>,
     alternate: bool,
     images: HashMap<u32, Arc<ImageSnapshot>>,
+    valid: bool,
     transfer: Option<Transfer>,
     missing: HashSet<ImageKey>,
     reported: Option<Error>,
@@ -65,14 +64,19 @@ impl Graphics {
             self.missing.clear();
         }
         self.manifest = manifest;
+        self.valid = true;
         Ok(())
     }
 
     pub(crate) fn snapshot(&self) -> GraphicsSnapshot {
         let Some(manifest) = &self.manifest else {
-            return GraphicsSnapshot::default();
+            return GraphicsSnapshot {
+                failure: self.reported,
+                ..GraphicsSnapshot::default()
+            };
         };
         GraphicsSnapshot {
+            failure: self.reported,
             generation: manifest.generation,
             placement_generation: manifest.placement_generation,
             images: manifest
@@ -99,24 +103,23 @@ impl Graphics {
     }
 
     /// Return at most one new recoverable failure per unchanged failure class.
-    pub(crate) fn failure(&mut self, error: Error) -> Option<TerminalSessionEvent> {
+    pub(crate) fn failure(&mut self, error: Error) -> bool {
         if self.reported == Some(error) {
-            return None;
+            return false;
         }
         self.reported = Some(error);
-        let reason = match error {
-            Error::Malformed | Error::Missing => {
-                crate::terminal::failure::FailureReason::InvalidValue
-            }
-            Error::TooLarge | Error::Capacity => {
-                crate::terminal::failure::FailureReason::CapacityExceeded
-            }
-        };
-        Some(TerminalSessionEvent::Failed(
-            TerminalSessionFailure::Runtime(
-                TerminalFailure::resource("receive-terminal-graphics").with_reason(reason),
-            ),
-        ))
+        true
+    }
+
+    pub(crate) fn recovered(&mut self) -> bool {
+        let ready = self.valid
+            && self.manifest.as_ref().is_none_or(|manifest| {
+                manifest
+                    .images
+                    .iter()
+                    .all(|image| self.images.contains_key(&image.key.image_id))
+            });
+        ready && self.reported.take().is_some()
     }
 
     pub(crate) fn poll(
@@ -206,7 +209,6 @@ impl Graphics {
                 reservation: Some(transfer.reservation),
             }),
         );
-        self.reported = None;
         Ok(Ok(true))
     }
 }
@@ -345,10 +347,9 @@ mod tests {
             assert_eq!(result, Err(error));
             assert!(graphics.snapshot().images.is_empty());
             assert!(graphics.snapshot().placements.is_empty());
-            assert!(
-                matches!(graphics.failure(error), Some(TerminalSessionEvent::Failed(TerminalSessionFailure::Runtime(failure))) if !failure.is_fatal())
-            );
-            assert!(graphics.failure(error).is_none());
+            assert!(graphics.failure(error));
+            assert_eq!(graphics.snapshot().failure, Some(error));
+            assert!(!graphics.failure(error));
             assert_eq!(
                 graphics
                     .poll(lease(), &mut |_| panic!("failed resource must not spin"))
@@ -403,6 +404,8 @@ mod tests {
                 .unwrap(),
             Err(Error::Capacity)
         );
+        assert!(graphics.failure(Error::Capacity));
+        assert_eq!(graphics.snapshot().failure, Some(Error::Capacity));
         drop(reservation);
         assert_eq!(
             graphics
@@ -410,5 +413,7 @@ mod tests {
                 .unwrap(),
             Ok(true)
         );
+        assert!(graphics.recovered());
+        assert_eq!(graphics.snapshot().failure, None);
     }
 }

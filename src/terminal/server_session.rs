@@ -1236,9 +1236,11 @@ fn present(
                         let graphics_error = graphics
                             .update(screen.graphics.take(), screen.alternate)
                             .err();
-                        if graphics_error.is_some() {
+                        if let Some(error) = graphics_error {
                             graphics.clear();
+                            graphics.failure(error);
                         }
+                        graphics.recovered();
                         generation = generation.next();
                         let mapping = ScreenMapping {
                             epoch,
@@ -1315,11 +1317,6 @@ fn present(
                         reader.screen(&state, mapping, screen.selection_present);
                         latest_screen = Some((Arc::clone(&screen), mapping));
                         let _ = events.force_send(TerminalSessionEvent::Screen(screen));
-                        if let Some(error) = graphics_error
-                            && let Some(event) = graphics.failure(error)
-                        {
-                            let _ = events.force_send(event);
-                        }
                         takeover = false;
                         if paste_unconfirmed {
                             paste_unconfirmed = false;
@@ -1395,27 +1392,22 @@ fn present(
                     if state.epoch.load(Ordering::Acquire) != epoch {
                         return Err(ServerError::Protocol);
                     }
-                    match result {
-                        Ok(true) => {
-                            if let Some((screen, mapping)) = &mut latest_screen {
-                                generation = generation.next();
-                                let screen = Arc::make_mut(screen);
-                                screen.generation = generation;
-                                screen.graphics = graphics.snapshot();
-                                mapping.local = generation;
-                                state.connected(epoch, *mapping, paste_unconfirmed)?;
-                                reader.screen(&state, *mapping, screen.selection_present);
-                                let _ = events.force_send(TerminalSessionEvent::Screen(Arc::new(
-                                    screen.clone(),
-                                )));
-                            }
-                        }
-                        Err(error) => {
-                            if let Some(event) = graphics.failure(error) {
-                                let _ = events.force_send(event);
-                            }
-                        }
-                        Ok(false) => {}
+                    let changed = match result {
+                        Ok(changed) => changed,
+                        Err(error) => graphics.failure(error),
+                    };
+                    let recovered = graphics.recovered();
+                    if (changed || recovered)
+                        && let Some((screen, mapping)) = &mut latest_screen
+                    {
+                        generation = generation.next();
+                        let next = Arc::make_mut(screen);
+                        next.generation = generation;
+                        next.graphics = graphics.snapshot();
+                        mapping.local = generation;
+                        state.connected(epoch, *mapping, paste_unconfirmed)?;
+                        reader.screen(&state, *mapping, next.selection_present);
+                        let _ = events.force_send(TerminalSessionEvent::Screen(Arc::clone(screen)));
                     }
                 }
                 std::thread::sleep(Duration::from_millis(30));

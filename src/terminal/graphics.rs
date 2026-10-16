@@ -187,6 +187,7 @@ pub struct ImageSnapshot {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct GraphicsSnapshot {
+    pub failure: Option<spaceterm_server::pane::graphics::Error>,
     pub generation: u64,
     pub placement_generation: u64,
     pub images: Arc<[Arc<ImageSnapshot>]>,
@@ -292,6 +293,7 @@ impl GraphicsState {
             self.published.placement_generation.saturating_add(1)
         };
         let next = GraphicsSnapshot {
+            failure: None,
             generation,
             placement_generation,
             images,

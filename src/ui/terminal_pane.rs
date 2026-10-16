@@ -2446,6 +2446,36 @@ impl TerminalPane {
                 let caption_changed = self.accept_metadata(Arc::clone(&screen.metadata));
                 self.screen = screen;
                 self.screen_session_epoch = self.terminal_session.session_epoch;
+                const OPERATION: &str = "receive-terminal-graphics";
+                match self.screen.graphics.failure {
+                    Some(error) => {
+                        use spaceterm_server::pane::graphics::Error;
+                        let reason = match error {
+                            Error::Malformed | Error::Missing => {
+                                crate::terminal::failure::FailureReason::InvalidValue
+                            }
+                            Error::TooLarge | Error::Capacity => {
+                                crate::terminal::failure::FailureReason::CapacityExceeded
+                            }
+                        };
+                        let failure = TerminalFailure::resource(OPERATION).with_reason(reason);
+                        if self.pane_state.failure() != Some(&failure) {
+                            self.present_failure(failure, true, None);
+                        }
+                    }
+                    None if self.pane_state.failure().is_some_and(|failure| {
+                        failure.operation() == OPERATION && !failure.is_fatal()
+                    }) =>
+                    {
+                        self.state_revision = self.state_revision.wrapping_add(1);
+                        self.pane_state = PaneTerminalState::Running;
+                        self.pending_recovery = None;
+                        self.recovery_retry_requested = None;
+                        self.status = None;
+                    }
+                    None => {}
+                }
+
                 self.sync_secure_input();
                 if caption_changed {
                     cx.emit(TerminalPaneEvent::CaptionChanged);
