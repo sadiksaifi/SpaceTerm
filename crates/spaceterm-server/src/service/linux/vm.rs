@@ -84,14 +84,34 @@ fn installed_service_preserves_sessions_and_restores_dormant_organization() {
     );
     let phase =
         std::env::var("SPACETERM_VM_SERVICE_PHASE").expect("explicit fixture phase required");
-    assert!(matches!(phase.as_str(), "prepare" | "resume" | "restored"));
+    assert!(matches!(
+        phase.as_str(),
+        "prepare" | "resume" | "restored" | "stopped"
+    ));
     let service = Service::for_identity("spaceterm-preflight").unwrap();
     let paths = service.paths.clone();
     assert_eq!(
         paths.data,
         Path::new("/home/stvm/.local/share/spaceterm-preflight/server")
     );
+    let native = crate::LocalServer::for_identity("spaceterm-preflight").unwrap();
+    if phase == "stopped" {
+        assert!(service.status().unwrap().stopped);
+        assert_eq!(native.setup_and_start(), Err(ServerError::Stopped));
+        assert!(native.connect_pane().is_err());
+        let status = service.status().unwrap();
+        assert!(status.stopped && !status.running);
+        println!("Stop survived native client setup and reconnect without starting a server.");
+        return;
+    }
     assert!(service.status().unwrap().running);
+    if phase == "prepare" {
+        assert_eq!(
+            native.pair(),
+            Err(ServerError::CredentialUnavailable),
+            "the headless guest must not acquire a fallback credential store"
+        );
+    }
     let key = crate::protocol::key(&crate::protocol::random().unwrap()).unwrap();
     let public = crate::protocol::public(&key);
     let data = Directory::open(&paths.data, false).unwrap();
@@ -182,7 +202,7 @@ fn installed_service_preserves_sessions_and_restores_dormant_organization() {
         let witness: Witness =
             serde_json::from_slice(&std::fs::read(witness_path).unwrap()).unwrap();
         assert_eq!(pin, witness.pin, "server identity changed");
-        let reply = connection
+        let mut reply = connection
             .exchange(&Request::SelectPane {
                 pane: witness.pane,
                 explicit: phase == "resume",
@@ -190,6 +210,21 @@ fn installed_service_preserves_sessions_and_restores_dormant_organization() {
                 style: None,
             })
             .unwrap();
+        if phase == "resume"
+            && let Reply::Takeover { target } = reply
+        {
+            assert_eq!(
+                (target.server, target.session),
+                (witness.server, witness.session)
+            );
+            reply = connection
+                .exchange(&Request::TakeOver {
+                    target,
+                    size,
+                    style: None,
+                })
+                .unwrap();
+        }
         if phase == "restored" {
             assert!(
                 matches!(reply, Reply::Restored { .. }),
