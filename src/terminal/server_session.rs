@@ -1,5 +1,6 @@
 //! Desktop presentation and fenced input for an authenticated server Pane.
 mod effects;
+use super::server_graphics as graphics;
 mod reading;
 use super::pointer_input::{PointerInput, WheelInput};
 use super::session::clipboard::ClipboardAuthority;
@@ -1215,6 +1216,8 @@ fn present(
             let mut active_size = grant_size;
             let mut ready = false;
             let mut reader = reading::Reader::default();
+            let mut graphics = graphics::Graphics::default();
+            let mut latest_screen = None;
             loop {
                 if !alive.load(Ordering::Acquire)
                     || attachment.as_ref().is_some_and(|permit| !permit.active())
@@ -1229,7 +1232,13 @@ fn present(
                     return Err(ServerError::Protocol);
                 }
                 match reply {
-                    Reply::Screen(screen) => {
+                    Reply::Screen(mut screen) => {
+                        let graphics_error = graphics
+                            .update(screen.graphics.take(), screen.alternate)
+                            .err();
+                        if graphics_error.is_some() {
+                            graphics.clear();
+                        }
                         generation = generation.next();
                         let mapping = ScreenMapping {
                             epoch,
@@ -1239,17 +1248,27 @@ fn present(
                                 .reading
                                 .as_ref()
                                 .map_or(0, |reading| reading.selection_revision),
-                            size: active_size,
+                            size: PaneSize {
+                                columns: screen.columns,
+                                rows: screen.rows.len() as u16,
+                                cell_width: screen
+                                    .cell_pixels
+                                    .map_or(active_size.cell_width, |p| p.0),
+                                cell_height: screen
+                                    .cell_pixels
+                                    .map_or(active_size.cell_height, |p| p.1),
+                            },
                             mouse_tracking: screen.mouse_tracking,
                             alternate: screen.alternate,
                             alternate_scroll: screen.alternate_scroll,
                         };
-                        let screen = decode_screen(
+                        let mut screen = decode_screen(
                             *screen,
                             generation,
                             &appearance.lock().unwrap_or_else(|e| e.into_inner()),
                             Some(&local_files),
                         )?;
+                        Arc::make_mut(&mut screen).graphics = graphics.snapshot();
                         if !ready {
                             // Claims apply their measured controller facts once.
                             // Reconcile changes made while attachment was in flight.
@@ -1294,7 +1313,13 @@ fn present(
                         }
                         state.connected(epoch, mapping, paste_unconfirmed)?;
                         reader.screen(&state, mapping, screen.selection_present);
+                        latest_screen = Some((Arc::clone(&screen), mapping));
                         let _ = events.force_send(TerminalSessionEvent::Screen(screen));
+                        if let Some(error) = graphics_error
+                            && let Some(event) = graphics.failure(error)
+                        {
+                            let _ = events.force_send(event);
+                        }
                         takeover = false;
                         if paste_unconfirmed {
                             paste_unconfirmed = false;
@@ -1362,6 +1387,36 @@ fn present(
                     effects.poll(&state, lease, generation, &events, &mut |request| {
                         exchange(&attachment, &mut connection, request)
                     })?;
+                }
+                if ready && connection.supports_graphics() {
+                    let result = graphics.poll(lease, &mut |request| {
+                        exchange(&attachment, &mut connection, request)
+                    })?;
+                    if state.epoch.load(Ordering::Acquire) != epoch {
+                        return Err(ServerError::Protocol);
+                    }
+                    match result {
+                        Ok(true) => {
+                            if let Some((screen, mapping)) = &mut latest_screen {
+                                generation = generation.next();
+                                let screen = Arc::make_mut(screen);
+                                screen.generation = generation;
+                                screen.graphics = graphics.snapshot();
+                                mapping.local = generation;
+                                state.connected(epoch, *mapping, paste_unconfirmed)?;
+                                reader.screen(&state, *mapping, screen.selection_present);
+                                let _ = events.force_send(TerminalSessionEvent::Screen(Arc::new(
+                                    screen.clone(),
+                                )));
+                            }
+                        }
+                        Err(error) => {
+                            if let Some(event) = graphics.failure(error) {
+                                let _ = events.force_send(event);
+                            }
+                        }
+                        Ok(false) => {}
+                    }
                 }
                 std::thread::sleep(Duration::from_millis(30));
             }
@@ -1884,6 +1939,12 @@ fn decode_screen(
     ))
     .clone();
     screen.generation = generation;
+    if let Some((width, height)) = wire.cell_pixels {
+        if !(1..=256).contains(&width) || !(1..=256).contains(&height) {
+            return Err(ServerError::Protocol);
+        }
+        screen.cell_pixels = (u32::from(width), u32::from(height));
+    }
     if let Some(reading) = wire.reading {
         if reading.visible_rows != wire.rows.len() as u64
             || reading.offset_rows > reading.total_rows.saturating_sub(reading.visible_rows)
@@ -3301,6 +3362,8 @@ mod tests {
         let mut overrides = vec![false; 256];
         overrides[1] = true;
         let screen = pane::Screen {
+            graphics: None,
+            cell_pixels: None,
             reading: None,
             hyperlinks: Vec::new(),
             generation: 1,

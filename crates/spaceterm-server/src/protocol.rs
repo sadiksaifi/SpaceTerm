@@ -532,6 +532,63 @@ mod rejection_tests {
             Err(ServerError::Protocol)
         );
     }
+
+    #[test]
+    fn authenticated_graphics_chunks_round_trip_through_both_majors() {
+        use crate::pane::{Lease, Reply, Request, graphics::*};
+        for major in [1, 2] {
+            let (mut client, mut server) = UnixStream::pair().unwrap();
+            let server_key = key(&random().unwrap()).unwrap();
+            let pin = public(&server_key);
+            let device = key(&random().unwrap()).unwrap();
+            let paired = [public(&device)];
+            let image = ImageKey {
+                image_id: 7,
+                generation: 9,
+            };
+            let lease = Lease {
+                server: [1; 32],
+                session: [2; 32],
+                control: [3; 32],
+                connection: [4; 32],
+            };
+            let thread = std::thread::spawn(move || {
+                assert_eq!(
+                    authenticate_server(&mut server, &server_key, &paired)
+                        .unwrap()
+                        .protocol_major,
+                    major
+                );
+                let mut wire = Wire::terminal(&mut server).unwrap();
+                assert!(
+                    matches!(wire.read::<Request>().unwrap(), Request::GraphicsChunk { lease: actual, image: key, offset: CHUNK_BYTES } if actual == lease && key == image)
+                );
+                wire.write(&Reply::GraphicsChunk(Ok(Chunk {
+                    image,
+                    offset: CHUNK_BYTES,
+                    bytes: vec![255; CHUNK_BYTES],
+                })))
+                .unwrap();
+            });
+            assert_eq!(
+                authenticate_client(&mut client, &device, &pin, &[major])
+                    .unwrap()
+                    .protocol_major,
+                major
+            );
+            let mut wire = Wire::terminal(&mut client).unwrap();
+            wire.write(&Request::GraphicsChunk {
+                lease,
+                image,
+                offset: CHUNK_BYTES,
+            })
+            .unwrap();
+            assert!(
+                matches!(wire.read::<Reply>().unwrap(), Reply::GraphicsChunk(Ok(chunk)) if chunk.image == image && chunk.offset == CHUNK_BYTES && chunk.bytes == vec![255; CHUNK_BYTES])
+            );
+            thread.join().unwrap();
+        }
+    }
     #[test]
     fn stalled_connections_obey_an_absolute_deadline() {
         let (_client, mut server) = UnixStream::pair().unwrap();

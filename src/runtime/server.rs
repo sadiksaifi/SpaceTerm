@@ -12,6 +12,9 @@ use std::{sync::Arc, time::Duration};
 mod effect_tests;
 mod effects;
 use self::effects::NativeEffects;
+mod graphics;
+#[cfg(test)]
+mod graphics_tests;
 mod reading;
 #[cfg(test)]
 mod reading_tests;
@@ -287,6 +290,7 @@ impl DevelopmentPaneHost {
                 interactive_input: true,
                 native_effects: true,
                 reading: true,
+                graphics: true,
             });
         }
         self.recover()?;
@@ -370,6 +374,7 @@ impl DevelopmentPaneHost {
         let lease = match &request {
             Request::Read { lease, .. }
             | Request::ReadingStatus { lease }
+            | Request::GraphicsChunk { lease, .. }
             | Request::SelectionChunk { lease, .. } => lease,
             Request::Poll { lease }
             | Request::NativeEffects { lease, .. }
@@ -392,6 +397,9 @@ impl DevelopmentPaneHost {
         }
         pane.drain();
         match request {
+            Request::GraphicsChunk { image, offset, .. } => {
+                Ok(Reply::GraphicsChunk(pane.graphics_chunk(image, offset)))
+            }
             Request::Read { operation, .. } => pane.read(operation),
             Request::ReadingStatus { .. } => pane.reading_status(),
             Request::SelectionChunk {
@@ -978,6 +986,8 @@ pub(crate) fn encode_screen(screen: &ScreenSnapshot) -> Screen {
     let mut link_indices = std::collections::HashMap::new();
     let mut link_bytes = 0;
     let mut encoded = Screen {
+        graphics: Some(graphics::encode(&screen.graphics)),
+        cell_pixels: Some((screen.cell_pixels.0 as u16, screen.cell_pixels.1 as u16)),
         reading: Some(pane::reading::Snapshot {
             total_rows: screen.scrollbar.total_rows,
             offset_rows: screen.scrollbar.offset_rows,
@@ -1140,6 +1150,26 @@ pub(crate) fn decode_key(key: Key) -> Option<KeyInput> {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn server_screen_carries_graphics_geometry_without_inline_pixels() {
+        let _guard = crate::terminal::graphics::test_lock();
+        let mut emulator = crate::terminal::emulator::TerminalEmulator::new(geometry(PaneSize {
+            columns: 8,
+            rows: 4,
+            cell_width: 13,
+            cell_height: 27,
+        }))
+        .unwrap();
+        emulator.feed(b"\x1b_Ga=T,t=d,f=32,i=7,p=3,s=1,v=1,c=2,r=1;AQIDBA==\x1b\\");
+        let screen = emulator.snapshot().unwrap().unwrap();
+        let encoded = serde_json::to_value(encode_screen(&screen)).unwrap();
+        assert_eq!(
+            encoded["graphics"]["Ok"]["placements"][0]["destination_width"],
+            26
+        );
+        assert!(!encoded.to_string().contains("rgba"));
+    }
 
     #[test]
     fn server_screen_with_a_long_hyperlink_remains_within_the_transport_limit() {

@@ -153,6 +153,8 @@ pub(crate) use pointer_input::{
 pub(crate) struct TerminalSessionChannelUnavailable;
 
 #[cfg(feature = "desktop")]
+pub(crate) mod server_graphics;
+#[cfg(feature = "desktop")]
 pub(crate) mod server_session;
 #[cfg(feature = "desktop")]
 pub(crate) mod shared_workspace;

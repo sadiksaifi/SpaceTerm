@@ -794,6 +794,101 @@ mod tests {
         }
     }
 
+    #[gpui::test]
+    fn server_graphics_reach_the_desktop_image_atlas_and_paint_measured_geometry(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::terminal::server_graphics::Graphics;
+        use gpui::{Bounds, point, px, size};
+        use spaceterm_server::pane::{
+            Lease, Reply, Request,
+            graphics::{Chunk, Image, ImageKey, Placement, Snapshot},
+        };
+        let _guard = crate::terminal::graphics::test_lock();
+        let mut graphics = Graphics::default();
+        let key = ImageKey {
+            image_id: 7,
+            generation: 1,
+        };
+        let manifest = Snapshot {
+            generation: 1,
+            placement_generation: 1,
+            images: vec![Image {
+                key,
+                width: 1,
+                height: 1,
+            }],
+            placements: vec![Placement {
+                image: key,
+                placement_id: 3,
+                z: 0,
+                viewport_col: 1,
+                viewport_row: 1,
+                cell_offset_x: 0,
+                cell_offset_y: 0,
+                source_x: 0,
+                source_y: 0,
+                source_width: 1,
+                source_height: 1,
+                destination_width: 26,
+                destination_height: 27,
+                unicode_placeholder: false,
+            }],
+        };
+        graphics.update(Some(Ok(manifest)), false).unwrap();
+        graphics
+            .poll(
+                Lease {
+                    server: [1; 32],
+                    session: [2; 32],
+                    control: [3; 32],
+                    connection: [4; 32],
+                },
+                &mut |request| {
+                    let Request::GraphicsChunk { image, offset, .. } = request else {
+                        panic!("unexpected request")
+                    };
+                    Ok(Reply::GraphicsChunk(Ok(Chunk {
+                        image: *image,
+                        offset: *offset,
+                        bytes: vec![255; 4],
+                    })))
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let snapshot = graphics.snapshot();
+        let cx = cx.add_empty_window();
+        let plan = cx.update(|window, cx| {
+            let mut cache = TerminalGraphicsCache::default();
+            let prepared = cache
+                .sync(ActiveScreenSnapshot::Primary, &snapshot, window, cx)
+                .unwrap();
+            prepared.graphics.paint_plan(
+                Bounds::new(point(px(0.), px(0.)), size(px(104.), px(108.))),
+                px(13. / window.scale_factor()),
+                px(27. / window.scale_factor()),
+                window.scale_factor(),
+            )
+        });
+        cx.draw(point(px(0.), px(0.)), size(px(104.), px(108.)), |_, _| {
+            gpui::canvas(
+                |_, _, _| (),
+                move |_, (), window, _| {
+                    plan.paint_layer(GraphicsLayer::AboveText, window).unwrap();
+                },
+            )
+        });
+        cx.update(|window, _| {
+            let sprites = window.painted_polychrome_sprites();
+            assert_eq!(sprites.len(), 1);
+            assert_eq!(sprites[0].bounds.origin.x.0, 13.);
+            assert_eq!(sprites[0].bounds.origin.y.0, 27.);
+            assert_eq!(sprites[0].bounds.size.width.0, 26.);
+            assert_eq!(sprites[0].bounds.size.height.0, 27.);
+        });
+    }
+
     #[test]
     fn z_layers_use_the_protocol_thresholds() {
         assert_eq!(layer_for_z(i32::MIN), GraphicsLayer::BelowBackground);

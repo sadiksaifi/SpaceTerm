@@ -442,6 +442,7 @@ pub struct ScreenSnapshot {
     pub background: Color,
     pub colors: TerminalColorsSnapshot,
     pub size: ScreenSizeSnapshot,
+    pub cell_pixels: (u32, u32),
     pub viewport: ViewportSnapshot,
     pub scrollbar: ScrollbarSnapshot,
     pub active_screen: ActiveScreenSnapshot,
@@ -470,6 +471,7 @@ impl PartialEq for ScreenSnapshot {
             && self.background == other.background
             && self.colors == other.colors
             && self.size == other.size
+            && self.cell_pixels == other.cell_pixels
             && self.viewport == other.viewport
             && self.scrollbar == other.scrollbar
             && self.active_screen == other.active_screen
@@ -508,6 +510,7 @@ impl ScreenSnapshot {
             background: appearance.colors.background,
             colors,
             size: ScreenSizeSnapshot::default(),
+            cell_pixels: (0, 0),
             viewport: ViewportSnapshot::default(),
             scrollbar: ScrollbarSnapshot::default(),
             active_screen: ActiveScreenSnapshot::default(),
@@ -652,6 +655,7 @@ impl ScreenSnapshot {
             background: configured.background,
             colors: TerminalColorsSnapshot::configured(&configured, true),
             size: ScreenSizeSnapshot::default(),
+            cell_pixels: (0, 0),
             viewport: ViewportSnapshot::default(),
             scrollbar: ScrollbarSnapshot::default(),
             active_screen: ActiveScreenSnapshot::default(),
@@ -715,7 +719,6 @@ pub(crate) struct TerminalEmulator {
     title: Arc<str>,
     metadata: MetadataTracker,
     local_file_capabilities: crate::terminal::metadata::TerminalLocalFileCapabilities,
-    client_effects: bool,
     xtgettcap: XtGetTcapObserver,
     primary_row_cache: Vec<RowSnapshot>,
     alternate_row_cache: Vec<RowSnapshot>,
@@ -1167,7 +1170,6 @@ impl TerminalEmulator {
             title,
             metadata,
             local_file_capabilities,
-            client_effects: true,
             xtgettcap: XtGetTcapObserver::new(terminal_name),
             primary_row_cache: Vec::new(),
             alternate_row_cache: Vec::new(),
@@ -1212,11 +1214,8 @@ impl TerminalEmulator {
     }
 
     pub(crate) fn restrict_client_effects(&mut self) -> Result<(), Error> {
-        self.client_effects = false;
         self.xtgettcap.disable_clipboard();
-        self.terminal
-            .set_apc_max_bytes_kitty(Some(0))?
-            .set_glyph_protocol_enabled(false)?;
+        self.terminal.set_glyph_protocol_enabled(false)?;
         self.terminal.on_device_attributes(|_| {
             let mut attributes = identity::device_attributes();
             attributes.primary = libghostty_vt::terminal::PrimaryDeviceAttributes::new(
@@ -1250,10 +1249,7 @@ impl TerminalEmulator {
         self.xtgettcap
             .feed(bytes, &mut self.pty_responses.borrow_mut());
         let synchronized_before = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
-        if self.client_effects
-            && self.graphics_reservation.is_none()
-            && starts_apc(self.previous_feed_byte, bytes)
-        {
+        if self.graphics_reservation.is_none() && starts_apc(self.previous_feed_byte, bytes) {
             self.graphics_reservation = Some(GraphicsReservation::default());
         }
         if let Some(reservation) = &mut self.graphics_reservation {
@@ -1880,6 +1876,8 @@ impl TerminalEmulator {
     pub(crate) fn reset_reading(&mut self) -> Result<EmulatorAction, TerminalFailure> {
         self.clear_selection()?;
         self.find = TerminalFindState::default();
+        // A new controller needs an authoritative frame even when reading was already reset.
+        self.cached_geometry = None;
         self.terminal.scroll_viewport(ScrollViewport::Bottom);
         Ok(EmulatorAction::screen_changed())
     }
@@ -2900,6 +2898,10 @@ impl TerminalEmulator {
             background: terminal_colors.effective_background(),
             colors: terminal_colors,
             size,
+            cell_pixels: (
+                self.geometry.backing_cell_size().width,
+                self.geometry.backing_cell_size().height,
+            ),
             viewport,
             scrollbar,
             active_screen,

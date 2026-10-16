@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, Weak};
 use libghostty_vt::kitty::graphics::{ImageFormat, ResolvedPlacement};
 use libghostty_vt::{Error, Terminal};
 
-pub(crate) const IMAGE_STORAGE_LIMIT: usize = 96 * 1024 * 1024;
+pub(crate) const IMAGE_STORAGE_LIMIT: usize = spaceterm_server::pane::graphics::MAX_RESIDENT_BYTES;
 pub(crate) const APC_TRANSMISSION_LIMIT: usize = 128 * 1024 * 1024;
 // Bound resident native image/frame data and owned RGBA snapshots together. Transient
 // parser and decoder allocations have their own transmission and image-size limits.
@@ -93,7 +93,7 @@ pub(crate) struct GraphicsReservation {
 }
 
 impl GraphicsReservation {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "desktop"))]
     pub(crate) fn try_acquire(bytes: usize) -> Option<Self> {
         Self::try_acquire_or_wait(bytes, None)
     }
@@ -174,11 +174,7 @@ fn storage_limits(resident: [usize; 2], available: usize) -> [usize; 2] {
     ]
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ImageKey {
-    pub image_id: u32,
-    pub generation: u64,
-}
+pub use spaceterm_server::pane::graphics::{ImageKey, Placement as ImagePlacementSnapshot};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImageSnapshot {
@@ -187,24 +183,6 @@ pub struct ImageSnapshot {
     pub height: u32,
     pub rgba: Arc<[u8]>,
     pub(crate) reservation: Option<Arc<GraphicsReservation>>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ImagePlacementSnapshot {
-    pub image: ImageKey,
-    pub placement_id: u32,
-    pub z: i32,
-    pub viewport_col: i32,
-    pub viewport_row: i32,
-    pub cell_offset_x: u32,
-    pub cell_offset_y: u32,
-    pub source_x: u32,
-    pub source_y: u32,
-    pub source_width: u32,
-    pub source_height: u32,
-    pub destination_width: u32,
-    pub destination_height: u32,
-    pub unicode_placeholder: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
