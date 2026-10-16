@@ -150,10 +150,14 @@ impl DevelopmentPaneState {
         if self.epoch.load(Ordering::Acquire) != epoch {
             return Err(ServerError::Protocol);
         }
-        self.interaction
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .screen = Some(screen);
+        {
+            let mut interaction = self.interaction.lock().unwrap_or_else(|e| e.into_inner());
+            interaction.screen = Some(screen).filter(|mapping| {
+                interaction
+                    .requested_size
+                    .is_none_or(|size| size == mapping.size)
+            });
+        }
         self.connected_epoch.store(epoch, Ordering::Release);
         if paste_unconfirmed {
             self.paste_unconfirmed.store(true, Ordering::Release);
@@ -269,6 +273,7 @@ struct Interaction {
     focus_generation: u64,
     target: pane::FocusTarget,
     screen: Option<ScreenMapping>,
+    requested_size: Option<PaneSize>,
     pending: Option<PendingPaste>,
     resolving: Option<ResolvingPaste>,
     paste_request: Option<(u64, u64)>,
@@ -281,6 +286,7 @@ impl Default for Interaction {
             focus_generation: 1,
             target: pane::FocusTarget::Unfocused,
             screen: None,
+            requested_size: None,
             pending: None,
             resolving: None,
             paste_request: None,
@@ -841,6 +847,11 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
         let (_, clipboard) = async_channel::bounded(1);
         let alive = Arc::new(AtomicBool::new(true));
         let measured_size = Arc::new(Mutex::new(pane_size(geometry)));
+        self.state
+            .interaction
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .requested_size = Some(pane_size(geometry));
         let appearance = Arc::new(Mutex::new(appearance));
         let handle = PresentationHandle {
             input,
@@ -1316,11 +1327,15 @@ impl TerminalSessionHandle for PresentationHandle {
     fn resize(&self, geometry: TerminalGeometry) {
         let size = pane_size(geometry);
         *self.geometry.lock().unwrap_or_else(|e| e.into_inner()) = geometry;
-        self.state
-            .interaction
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .screen = None;
+        {
+            let mut interaction = self
+                .state
+                .interaction
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            interaction.requested_size = Some(size);
+            interaction.screen = interaction.screen.filter(|mapping| mapping.size == size);
+        }
         *self.size.lock().unwrap_or_else(|e| e.into_inner()) = size;
         self.send(Input::Resize(size));
     }
@@ -2161,6 +2176,192 @@ mod tests {
         adapter
             .drain(|_| panic!("input was sent after capability refusal"))
             .unwrap();
+    }
+
+    #[test]
+    fn same_wire_size_resize_keeps_quiet_pointer_and_wheel_input_at_the_new_fitted_cells() {
+        use super::super::{
+            geometry::{BackingScale, CellGridSize, LogicalCellSize, LogicalPosition, LogicalSize},
+            pointer_input::*,
+        };
+        let mut adapter = Adapter::new();
+        let geometry = |width| {
+            TerminalGeometry::from_viewport(
+                LogicalSize::new(width, 432.0),
+                LogicalCellSize::new(8.0, 18.0),
+                BackingScale::ONE,
+                CellGridSize::new(2, 2),
+            )
+        };
+        let original = geometry(640.0);
+        adapter.handle.resize(original);
+        adapter.drain(|_| Ok(Reply::Unchanged)).unwrap();
+        adapter
+            .handle
+            .state
+            .connected(
+                adapter.active.epoch,
+                ScreenMapping {
+                    epoch: adapter.active.epoch,
+                    local: PresentationGeneration::test(8),
+                    wire: 91,
+                    size: pane_size(original),
+                    mouse_tracking: true,
+                    alternate: false,
+                    alternate_scroll: false,
+                },
+                false,
+            )
+            .unwrap();
+        let resized = geometry(641.0);
+        assert_eq!(pane_size(original), pane_size(resized));
+        adapter.handle.resize(resized);
+        // A quiet server acknowledges this unchanged wire size without a Screen.
+        adapter.drain(|_| Ok(Reply::Unchanged)).unwrap();
+        let cell = resized.logical_cell_size();
+        let position =
+            resized.to_backing_position(LogicalPosition::new(cell.width * 10.5, cell.height * 5.5));
+        let position = SurfacePosition {
+            x: position.x,
+            y: position.y,
+        };
+        adapter.handle.pointer(PointerInput {
+            generation: PresentationGeneration::test(8),
+            phase: PointerPhase::Press,
+            button: Some(PointerButton::Left),
+            position,
+            modifiers: InputModifiers::default(),
+            shift_selection: ShiftSelectionPolicy::ReportToApplication,
+        });
+        adapter.handle.wheel(WheelInput {
+            generation: PresentationGeneration::test(8),
+            horizontal_steps: 0,
+            vertical_steps: 1,
+            phase: WheelPhase::GestureChanged,
+            position,
+            modifiers: InputModifiers::default(),
+            shift_selection: ShiftSelectionPolicy::ReportToApplication,
+        });
+        let mut delivered = Vec::new();
+        let lease = adapter.active.lease;
+        adapter
+            .drain(|request| {
+                if let Request::Input {
+                    lease: actual,
+                    input,
+                    ..
+                } = request
+                {
+                    assert_eq!(*actual, lease);
+                    match input {
+                        pane::InteractiveInput::Pointer(pointer) => delivered.push((
+                            "pointer",
+                            pointer.screen_generation,
+                            pointer.x,
+                            pointer.y,
+                        )),
+                        pane::InteractiveInput::Wheel(wheel) => {
+                            delivered.push(("wheel", wheel.screen_generation, wheel.x, wheel.y))
+                        }
+                        _ => panic!("unexpected interactive input"),
+                    }
+                }
+                Ok(Reply::Unchanged)
+            })
+            .unwrap();
+        assert_eq!(
+            delivered.len(),
+            2,
+            "same-grid resize disabled quiet application mouse input"
+        );
+        assert_eq!((delivered[0].0, delivered[0].1), ("pointer", 91));
+        assert_eq!((delivered[1].0, delivered[1].1), ("wheel", 91));
+        for (_, _, x, y) in delivered {
+            assert!(
+                (x - 84.0).abs() < 0.001,
+                "pointer mapping used the old fitted width: {x}"
+            );
+            assert!((y - 99.0).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn a_wire_size_change_waits_for_its_authoritative_pointer_mapping() {
+        use super::super::{
+            geometry::{BackingScale, CellGridSize, LogicalCellSize},
+            pointer_input::*,
+        };
+        let mut adapter = Adapter::new();
+        let original = *adapter.handle.size.lock().unwrap();
+        let mapping = ScreenMapping {
+            epoch: adapter.active.epoch,
+            local: PresentationGeneration::test(8),
+            wire: 91,
+            size: original,
+            mouse_tracking: true,
+            alternate: false,
+            alternate_scroll: false,
+        };
+        adapter
+            .handle
+            .state
+            .connected(adapter.active.epoch, mapping, false)
+            .unwrap();
+        let resized = TerminalGeometry::from_grid(
+            CellGridSize::new(21, 6),
+            LogicalCellSize::new(10.0, 20.0),
+            BackingScale::ONE,
+        );
+        adapter.handle.resize(resized);
+        adapter.drain(|_| Ok(Reply::Unchanged)).unwrap();
+        // Initial readiness can receive the old Screen before its resize is applied.
+        adapter
+            .handle
+            .state
+            .connected(adapter.active.epoch, mapping, false)
+            .unwrap();
+        let pointer = PointerInput {
+            generation: mapping.local,
+            phase: PointerPhase::Press,
+            button: Some(PointerButton::Left),
+            position: SurfacePosition { x: 15.0, y: 50.0 },
+            modifiers: InputModifiers::default(),
+            shift_selection: ShiftSelectionPolicy::ReportToApplication,
+        };
+        adapter.handle.pointer(pointer);
+        adapter
+            .drain(|_| panic!("obsolete dimensions restored pointer mapping"))
+            .unwrap();
+        // The resize itself publishes this authoritative replacement, without shell output.
+        let replacement = ScreenMapping {
+            local: PresentationGeneration::test(9),
+            wire: 92,
+            size: pane_size(resized),
+            ..mapping
+        };
+        adapter
+            .handle
+            .state
+            .connected(adapter.active.epoch, replacement, false)
+            .unwrap();
+        adapter.handle.pointer(PointerInput {
+            generation: replacement.local,
+            ..pointer
+        });
+        let mut delivered = Vec::new();
+        adapter
+            .drain(|request| {
+                if let Request::Input {
+                    input: pane::InteractiveInput::Pointer(pointer),
+                    ..
+                } = request
+                {
+                    delivered.push((pointer.screen_generation, pointer.x, pointer.y));
+                }
+                Ok(Reply::Unchanged)
+            })
+            .unwrap();
+        assert_eq!(delivered, vec![(92, 15.0, 50.0)]);
     }
 
     #[test]
