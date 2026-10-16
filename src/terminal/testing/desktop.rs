@@ -185,11 +185,27 @@ pub(crate) struct TestTerminalSessionRecords {
         Rc<RefCell<BTreeMap<usize, crate::terminal::permission_request::PermissionRequest>>>,
     accessibility_senders:
         Rc<RefCell<BTreeMap<usize, async_channel::Sender<Arc<TerminalAccessibilityModel>>>>>,
+    interactive_availability: Rc<RefCell<BTreeMap<usize, bool>>>,
+    input_generations: Rc<RefCell<BTreeMap<usize, u64>>>,
     dropped_session_ids: Rc<RefCell<Vec<usize>>>,
     commands: Rc<RefCell<Vec<RecordedCall>>>,
 }
 
 impl TestTerminalSessionRecords {
+    pub(crate) fn advance_input_generation(&self, session_id: usize) {
+        *self
+            .input_generations
+            .borrow_mut()
+            .entry(session_id)
+            .or_default() += 1;
+    }
+
+    pub(crate) fn set_interactive_input_available(&self, session_id: usize, available: bool) {
+        self.interactive_availability
+            .borrow_mut()
+            .insert(session_id, available);
+    }
+
     pub(crate) fn retain_permission_request(
         &self,
         session_id: usize,
@@ -342,6 +358,7 @@ pub(crate) struct TestTerminalSessionFactory {
     pending_paste_response: Option<async_channel::Receiver<Result<PasteRequestOutcome, String>>>,
     paste_resolution: Result<PasteResolution, String>,
     server_backed: bool,
+    interactive_input_available: bool,
 }
 
 impl TestTerminalSessionFactory {
@@ -357,12 +374,18 @@ impl TestTerminalSessionFactory {
             pending_paste_response: None,
             paste_resolution: Ok(PasteResolution::Written),
             server_backed: false,
+            interactive_input_available: true,
         }
     }
 
     /// Starts Terminal Sessions that report themselves as running in a SpaceTerm Server.
     pub(crate) fn server_backed(mut self) -> Self {
         self.server_backed = true;
+        self
+    }
+
+    pub(crate) fn with_interactive_input_available(mut self, available: bool) -> Self {
+        self.interactive_input_available = available;
         self
     }
 
@@ -462,6 +485,8 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
             .borrow_mut()
             .insert(session_id, selection_receiver);
         let (_, clipboard) = async_channel::bounded(1);
+        self.records
+            .set_interactive_input_available(session_id, self.interactive_input_available);
         Ok(StartedTerminalSession {
             clipboard,
             handle: Box::new(TestTerminalSessionHandle {
@@ -520,6 +545,24 @@ impl Drop for TestTerminalSessionHandle {
 }
 
 impl TerminalSessionHandle for TestTerminalSessionHandle {
+    fn input_generation(&self) -> u64 {
+        self.records
+            .input_generations
+            .borrow()
+            .get(&self.session_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn interactive_input_available(&self) -> bool {
+        self.records
+            .interactive_availability
+            .borrow()
+            .get(&self.session_id)
+            .copied()
+            .unwrap_or(true)
+    }
+
     fn permission_request(&self) -> Option<crate::terminal::permission_request::PermissionRequest> {
         self.records
             .permission_requests

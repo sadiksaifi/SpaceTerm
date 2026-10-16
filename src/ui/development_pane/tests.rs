@@ -37,6 +37,14 @@ struct OpenPane<'a> {
 }
 
 fn open_pane(status: DevelopmentPaneStatus, cx: &mut TestAppContext) -> OpenPane<'_> {
+    open_pane_with_session_options(status, cx, |sessions| sessions)
+}
+
+fn open_pane_with_session_options(
+    status: DevelopmentPaneStatus,
+    cx: &mut TestAppContext,
+    configure: impl FnOnce(TestTerminalSessionFactory) -> TestTerminalSessionFactory,
+) -> OpenPane<'_> {
     let settings =
         crate::settings::Settings::load(MemoryStorage::with_document(&SettingsDocument::default()));
     let platform = RecordingAppearancePlatform::default();
@@ -49,7 +57,7 @@ fn open_pane(status: DevelopmentPaneStatus, cx: &mut TestAppContext) -> OpenPane
     let records = TestTerminalSessionRecords::default();
     let session_factory = WorkspaceTerminalSessionFactory::new_server(
         Rc::new(
-            TestTerminalSessionFactory::new(records.clone())
+            configure(TestTerminalSessionFactory::new(records.clone()))
                 .server_backed()
                 .with_fallback_title(WINDOW_TITLE),
         ),
@@ -362,12 +370,25 @@ fn end_session_waits_for_a_connection(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_server_backed_pane_performs_no_local_terminal_operations(cx: &mut TestAppContext) {
+fn a_server_backed_pane_pastes_text_without_local_terminal_operations(cx: &mut TestAppContext) {
     use crate::ui::{OpenTerminalFind, PasteClipboard, ScrollPageUp};
 
     let mut pane = open_pane(DevelopmentPaneStatus::Connected, cx);
 
+    pane.cx
+        .write_to_clipboard(gpui::ClipboardItem::new_string("echo hello".into()));
     pane.cx.dispatch_action(PasteClipboard);
+    pane.cx.run_until_parked();
+    let pastes = pane
+        .records
+        .commands()
+        .into_iter()
+        .filter_map(|call| match call.command {
+            RecordedCommand::RequestPaste(text) => Some(text),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(pastes, ["echo hello"]);
     pane.cx.dispatch_action(OpenTerminalFind);
     pane.cx.dispatch_action(ScrollPageUp);
     pane.click("development-pane-terminal");
@@ -381,6 +402,7 @@ fn a_server_backed_pane_performs_no_local_terminal_operations(cx: &mut TestAppCo
             !matches!(
                 call.command,
                 RecordedCommand::Key(_)
+                    | RecordedCommand::RequestPaste(_)
                     | RecordedCommand::Focus(_)
                     | RecordedCommand::Resize(_)
                     | RecordedCommand::SetPresentable(_)
@@ -390,6 +412,122 @@ fn a_server_backed_pane_performs_no_local_terminal_operations(cx: &mut TestAppCo
         .collect::<Vec<_>>();
     assert_eq!(unsupported, Vec::new());
     assert!(!pane.rendered("terminal-find-bar"));
+}
+
+#[gpui::test]
+fn unsupported_terminal_input_keeps_output_and_session_controls_available(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+    let mut pane =
+        open_pane_with_session_options(DevelopmentPaneStatus::Connected, cx, |sessions| {
+            sessions.with_interactive_input_available(false)
+        });
+    pane.publish_title("running-build");
+    assert!(pane.rendered(TERMINAL_SELECTOR));
+    assert!(pane.rendered(TERMINAL_TITLE_SELECTOR));
+    assert!(pane.rendered("terminal-input-unavailable"));
+    assert!(!pane.rendered(RETRY_SELECTOR));
+    let tree = A11yTree::read(pane.cx);
+    assert_eq!(tree.node("Typing Unavailable")["aria"]["role"], "Status");
+    assert_eq!(
+        tree.node("Typing Unavailable")["aria"]["description"],
+        "Typing Unavailable This server doesn't accept terminal input from this version of SpaceTerm. The shell keeps running on the server."
+    );
+    pane.press("a");
+    pane.press("cmd-v");
+    assert_eq!(pane.keys(), 0);
+    pane.click(END_SESSION_SELECTOR);
+    assert!(pane.rendered("modal-action-development-pane-end-session-confirm"));
+    pane.press("escape");
+    pane.lose_control();
+    assert!(pane.rendered(TAKEOVER_SELECTOR));
+    assert!(!pane.rendered("terminal-input-unavailable"));
+    pane.click(TAKE_OVER_SELECTOR);
+    assert_eq!(pane.connection.take_overs(), 1);
+}
+
+#[gpui::test]
+fn reconnecting_notice_takes_precedence_over_unsupported_terminal_input(cx: &mut TestAppContext) {
+    let mut pane =
+        open_pane_with_session_options(DevelopmentPaneStatus::Connected, cx, |sessions| {
+            sessions.with_interactive_input_available(false)
+        });
+    pane.publish_title("running-build");
+    assert!(pane.rendered("terminal-input-unavailable"));
+    pane.set(DevelopmentPaneStatus::Reconnecting);
+    assert!(pane.rendered(NOTICE_SELECTOR));
+    assert!(pane.rendered(RETRY_SELECTOR));
+    assert!(!pane.rendered("terminal-input-unavailable"));
+    pane.click(RETRY_SELECTOR);
+    assert_eq!(pane.connection.retries(), 1);
+    pane.reconnect_to(DevelopmentPaneStatus::Connected);
+    assert!(pane.rendered("terminal-input-unavailable"));
+    assert!(
+        pane.rendered(TERMINAL_TITLE_SELECTOR),
+        "the unsupported connection still presents the shell's output"
+    );
+}
+
+#[gpui::test]
+fn server_state_changes_cancel_paste_confirmation_before_any_later_approval(
+    cx: &mut TestAppContext,
+) {
+    use crate::terminal::{
+        PasteConfirmation, PasteConfirmationId, PasteDecision, PasteRequestOutcome, PasteRisk,
+    };
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+    let confirmation = PasteConfirmation {
+        id: PasteConfirmationId::new(544),
+        byte_len: 12,
+        line_count: 2,
+        risk: PasteRisk {
+            multiline: true,
+            control_bytes: false,
+            closing_fence: false,
+        },
+    };
+    let mut pane =
+        open_pane_with_session_options(DevelopmentPaneStatus::Connected, cx, |sessions| {
+            sessions
+                .with_paste_response(Ok(PasteRequestOutcome::ConfirmationRequired(confirmation)))
+        });
+    for status in [
+        DevelopmentPaneStatus::Reconnecting,
+        DevelopmentPaneStatus::Takeover,
+        DevelopmentPaneStatus::Restored,
+    ] {
+        pane.cx
+            .write_to_clipboard(gpui::ClipboardItem::new_string("first\nsecond".into()));
+        pane.cx.dispatch_action(crate::ui::PasteClipboard);
+        let tree = A11yTree::read(pane.cx);
+        let confirm = tree.node("Paste").clone();
+        assert_eq!(tree.with_role("AlertDialog").len(), 1);
+        let before = pane.records.commands().len();
+        if status == DevelopmentPaneStatus::Takeover {
+            pane.lose_control();
+        } else {
+            pane.set(status);
+        }
+        assert!(
+            A11yTree::read(pane.cx).with_role("AlertDialog").is_empty(),
+            "{status:?}"
+        );
+        perform(pane.cx, &confirm, Action::Click);
+        pane.press("enter");
+        let resolutions = pane.records.commands()[before..]
+            .iter()
+            .filter_map(|call| match call.command {
+                RecordedCommand::ResolvePaste(id, decision) => Some((id, decision)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            resolutions,
+            [(confirmation.id, PasteDecision::Cancel)],
+            "{status:?}"
+        );
+        pane.reconnect_to(DevelopmentPaneStatus::Connected);
+    }
 }
 
 #[gpui::test]
