@@ -2443,6 +2443,48 @@ fn server_pane_program_pointer_and_wheel_follow_screen_modes(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn server_pane_forwards_active_drag_after_program_tracking_ends(cx: &mut TestAppContext) {
+    let (pane, cx, records) = server_terminal_pane(cx, true);
+    let mut screen =
+        ScreenSnapshot::from_test_parts_at(Arc::from([]), Default::default(), "program", 1);
+    Arc::make_mut(&mut screen).mouse_tracking = true;
+    let events = records.event_sender(1).unwrap();
+    events
+        .try_send(TerminalSessionEvent::Screen(screen))
+        .unwrap();
+    cx.run_until_parked();
+    let position = pane.read_with(cx, |pane, _| pane.grid_bounds.unwrap().center());
+    let before = records.commands().len();
+    cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
+    events
+        .try_send(TerminalSessionEvent::Screen(
+            ScreenSnapshot::from_test_parts_at(Arc::from([]), Default::default(), "shell", 2),
+        ))
+        .unwrap();
+    cx.run_until_parked();
+    cx.simulate_mouse_move(position, Some(MouseButton::Left), Modifiers::none());
+    cx.simulate_mouse_up(position, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(position, None, Modifiers::none());
+    cx.run_until_parked();
+    let phases = records.commands()[before..]
+        .iter()
+        .filter_map(|call| match call.command {
+            RecordedCommand::Pointer(input) => Some(input.phase),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        phases,
+        [
+            PointerPhase::Press,
+            PointerPhase::Motion,
+            PointerPhase::Release
+        ],
+        "the server must receive the continuation to balance its active gesture"
+    );
+}
+
+#[gpui::test]
 fn server_pane_shift_right_and_middle_clicks_reach_tracking_programs(cx: &mut TestAppContext) {
     let (pane, cx, records) = server_terminal_pane(cx, true);
     let (owner, answer) = async_channel::unbounded();

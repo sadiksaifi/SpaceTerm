@@ -3028,11 +3028,12 @@ impl TerminalPane {
         self.pointer_modifiers = input_modifiers(event.modifiers);
         if self.server_backed()
             && (!self.interactive_input_available()
-                || pointer_uses_text_cursor(
-                    self.screen.mouse_tracking,
-                    self.pointer_modifiers.shift,
-                    self.pointer_selection_policy(),
-                ))
+                || (self.pressed_button.is_none()
+                    && pointer_uses_text_cursor(
+                        self.screen.mouse_tracking,
+                        self.pointer_modifiers.shift,
+                        self.pointer_selection_policy(),
+                    )))
         {
             return;
         }
