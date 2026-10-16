@@ -1302,8 +1302,11 @@ fn present(
                         &mut paste_unconfirmed,
                     )?;
                 }
-                if ready && connection.supports_native_effects() {
-                    effects.poll(&state, lease, &events, &mut |request| {
+                if ready
+                    && connection.supports_native_effects()
+                    && let Some((generation, _)) = active_input.focus_sent
+                {
+                    effects.poll(&state, lease, generation, &events, &mut |request| {
                         exchange(&attachment, &mut connection, request)
                     })?;
                 }

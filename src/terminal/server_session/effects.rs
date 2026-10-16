@@ -31,15 +31,10 @@ impl ClientEffects {
         &mut self,
         state: &DevelopmentPaneState,
         lease: Lease,
+        generation: u64,
         events: &async_channel::Sender<TerminalSessionEvent>,
         exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
     ) -> Result<(), ServerError> {
-        let generation = state
-            .interaction
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .wire_focus()
-            .0;
         while let Ok((id, completion)) = self.completed.try_recv() {
             if let Some((pending, old_generation, epoch)) = self.pending
                 && pending == id
@@ -168,6 +163,40 @@ mod tests {
     use crate::terminal::native_services::{clipboard::ClipboardPreferences, testing::adapters};
 
     #[test]
+    fn native_poll_after_a_local_focus_change_keeps_the_acknowledged_generation() {
+        let mut adapter = Adapter::new();
+        let state = &adapter.handle.state;
+        let mut acknowledged = 0;
+        adapter
+            .active
+            .sync_focus(state, &mut |request| {
+                if let Request::Focus { generation, .. } = request {
+                    acknowledged = *generation;
+                }
+                Ok(Reply::Unchanged)
+            })
+            .unwrap();
+        adapter.handle.interactive_focus(false, false);
+        adapter.handle.interactive_focus(true, true);
+        let (mut effects, requests) = ClientEffects::new();
+        let (events, _receiver) = async_channel::bounded(8);
+        effects.poll(state, adapter.active.lease, acknowledged, &events, &mut |request| {
+            assert!(matches!(request, Request::NativeEffects { generation, .. } if *generation == acknowledged), "poll used unacknowledged focus: {request:?}");
+            Ok(Reply::NativeEffects {
+                hidden_input: false,
+                request: Some(pane::effects::Request {
+                    id: 1,
+                    generation: acknowledged,
+                    remaining_ms: 1000,
+                    effect: Effect::ClipboardRead { target: ClipboardTarget::Standard },
+                }),
+            })
+        }).unwrap();
+        assert!(requests.try_recv().is_err());
+        assert!(adapter.handle.take_client_effects().is_empty());
+    }
+
+    #[test]
     fn native_requests_survive_a_full_presentation_queue_and_are_drained_once() {
         let adapter = Adapter::new();
         let (mut effects, _requests) = ClientEffects::new();
@@ -183,6 +212,7 @@ mod tests {
             .poll(
                 &adapter.handle.state,
                 adapter.active.lease,
+                generation,
                 &events,
                 &mut |_| {
                     Ok(Reply::NativeEffects {
@@ -221,7 +251,7 @@ mod tests {
             let lease = adapter.active.lease;
             let generation = state.interaction.lock().unwrap().focus_generation;
             effects
-                .poll(state, lease, &events, &mut |request| {
+                .poll(state, lease, generation, &events, &mut |request| {
                     assert!(matches!(request, Request::NativeEffects { .. }));
                     Ok(Reply::NativeEffects {
                         hidden_input: false,
@@ -288,6 +318,7 @@ mod tests {
             .poll(
                 &adapter.handle.state,
                 adapter.active.lease,
+                generation,
                 &events,
                 &mut |_| {
                     adapter.handle.interactive_focus(false, false);
