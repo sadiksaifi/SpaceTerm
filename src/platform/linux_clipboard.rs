@@ -62,9 +62,9 @@ fn native_target(target: TextClipboardTarget) -> ClipboardSelection {
 }
 
 fn selection_item(copy: &SelectionCopy) -> ClipboardItem {
-    let mut string = ClipboardString::new(copy.plain_text.clone());
+    let mut string = ClipboardString::new(copy.plain_text.to_string());
     if let Some(html) = copy.html.as_ref().filter(|html| !html.is_empty()) {
-        string = string.with_html(html.clone());
+        string = string.with_html(html.to_string());
     }
     ClipboardEntry::String(string).into()
 }

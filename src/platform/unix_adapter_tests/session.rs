@@ -127,6 +127,7 @@ fn real_shell_output_round_trips_through_the_pty_and_emulator() {
                 | TerminalSessionEvent::PasteUnconfirmed
                 | TerminalSessionEvent::PermissionRequested(_)
                 | TerminalSessionEvent::MetadataChanged(_)
+                | TerminalSessionEvent::SelectionCopyReady
                 | TerminalSessionEvent::ClientEffectsReady
                 | TerminalSessionEvent::ClientEffect(_)
                 | TerminalSessionEvent::Attention(_),
@@ -182,6 +183,7 @@ fn real_shell_exit_command_emits_an_exited_event() {
                 | TerminalSessionEvent::PasteUnconfirmed
                 | TerminalSessionEvent::PermissionRequested(_)
                 | TerminalSessionEvent::MetadataChanged(_)
+                | TerminalSessionEvent::SelectionCopyReady
                 | TerminalSessionEvent::ClientEffectsReady
                 | TerminalSessionEvent::ClientEffect(_)
                 | TerminalSessionEvent::Attention(_),

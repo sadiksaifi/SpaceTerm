@@ -420,7 +420,7 @@ mod tests {
         fn selection(&self, requested: NativeServiceOrigin) -> Option<SelectionCopy> {
             self.calls.set(self.calls.get() + 1);
             (self.status.get().origin == Some(requested)).then(|| SelectionCopy {
-                plain_text: "selected".to_owned(),
+                plain_text: "selected".into(),
                 html: None,
             })
         }

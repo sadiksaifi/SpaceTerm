@@ -288,7 +288,7 @@ mod tests {
     impl SelectionClipboard for RecordingClipboard {
         fn publish(&self, copy: &SelectionCopy, cx: &mut App) -> Result<(), ClipboardError> {
             self.0.borrow_mut().push(copy.clone());
-            cx.write_to_clipboard(ClipboardItem::new_string(copy.plain_text.clone()));
+            cx.write_to_clipboard(ClipboardItem::new_string(copy.plain_text.to_string()));
             Ok(())
         }
     }
@@ -309,12 +309,12 @@ mod tests {
                 cx.read_from_clipboard()
                     .and_then(|item| item.text())
                     .as_deref()
-                    == Some(copy.plain_text.as_str())
+                    == Some(copy.plain_text.as_ref())
             );
             publication
                 .write(
                     SelectionCopy {
-                        plain_text: String::new(),
+                        plain_text: "".into(),
                         html: None,
                     },
                     cx,

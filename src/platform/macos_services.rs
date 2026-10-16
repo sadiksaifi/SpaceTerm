@@ -529,7 +529,7 @@ pub(in crate::platform) mod tests {
         ) -> Option<crate::terminal::SelectionCopy> {
             Self::invoke(&self.on_selection);
             (origin == self.origin.get()).then(|| crate::terminal::SelectionCopy {
-                plain_text: self.selection.to_owned(),
+                plain_text: self.selection.into(),
                 html: None,
             })
         }

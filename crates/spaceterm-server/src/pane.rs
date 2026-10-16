@@ -1,5 +1,6 @@
 //! Authenticated terminal operations. Native requests never grant local file authority.
 pub mod effects;
+pub mod reading;
 use crate::ServerError;
 use serde::{Deserialize, Serialize};
 
@@ -122,6 +123,7 @@ pub struct Wheel {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum InteractiveInput {
     Key(Key),
+    CopyOrForward { modifiers: u16 },
     Pointer(Pointer),
     Wheel(Wheel),
     Paste { text: String },
@@ -172,6 +174,18 @@ pub enum AttachmentClaim {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
+    Read {
+        lease: Lease,
+        operation: reading::Operation,
+    },
+    ReadingStatus {
+        lease: Lease,
+    },
+    SelectionChunk {
+        lease: Lease,
+        generation: u64,
+        offset: usize,
+    },
     NativeEffects {
         lease: Lease,
         generation: u64,
@@ -271,6 +285,21 @@ pub enum Request {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Reply {
+    Reading {
+        accepted: bool,
+    },
+    ReadingReady {
+        generation: u64,
+        selection_revision: u64,
+        selection_present: bool,
+    },
+    SelectionChunk {
+        generation: u64,
+        offset: usize,
+        total: usize,
+        bytes: Vec<u8>,
+    },
+    SelectionPending,
     NativeEffects {
         request: Option<effects::Request>,
         hidden_input: bool,
@@ -289,6 +318,8 @@ pub enum Reply {
         interactive_input: bool,
         #[serde(default)]
         native_effects: bool,
+        #[serde(default)]
+        reading: bool,
     },
     Restored {
         server: [u8; 32],
@@ -356,6 +387,8 @@ pub struct Cell {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Screen {
+    #[serde(default)]
+    pub reading: Option<reading::Snapshot>,
     /// Per-screen targets; cells refer to indices in this bounded table.
     #[serde(default)]
     pub hyperlinks: Vec<effects::Hyperlink>,
@@ -409,6 +442,7 @@ struct PaneTransport {
     takeover: bool,
     interactive_input: bool,
     native_effects: bool,
+    reading: bool,
 }
 /// One transport for a desktop's inventory and Pane workers. It retains no credential.
 #[cfg(feature = "client")]
@@ -450,6 +484,7 @@ impl PaneConnection {
                 pane_takeover,
                 interactive_input,
                 native_effects,
+                reading,
             } => {
                 let mut connection = Self::new(stream, pane_takeover);
                 std::sync::Arc::get_mut(&mut connection.transport)
@@ -458,6 +493,9 @@ impl PaneConnection {
                 std::sync::Arc::get_mut(&mut connection.transport)
                     .ok_or(ServerError::Protocol)?
                     .native_effects = native_effects;
+                std::sync::Arc::get_mut(&mut connection.transport)
+                    .ok_or(ServerError::Protocol)?
+                    .reading = reading;
                 Ok(connection)
             }
             Reply::Refused(reason) => Err(reason.into()),
@@ -471,11 +509,15 @@ impl PaneConnection {
                 takeover,
                 interactive_input: false,
                 native_effects: false,
+                reading: false,
             }),
         }
     }
     pub fn supports_native_effects(&self) -> bool {
         self.transport.native_effects
+    }
+    pub fn supports_reading(&self) -> bool {
+        self.transport.reading
     }
     pub fn supports_takeover(&self) -> bool {
         self.transport.takeover

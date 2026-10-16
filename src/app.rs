@@ -1191,7 +1191,7 @@ mod tests {
         let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
             TestTerminalSessionFactory::new(records.clone()).with_selection_copy_response(Ok(
                 Some(SelectionCopy {
-                    plain_text: "native command copy".to_owned(),
+                    plain_text: "native command copy".into(),
                     html: None,
                 }),
             )),

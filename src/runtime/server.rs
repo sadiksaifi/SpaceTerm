@@ -12,6 +12,9 @@ use std::{sync::Arc, time::Duration};
 mod effect_tests;
 mod effects;
 use self::effects::NativeEffects;
+mod reading;
+#[cfg(test)]
+mod reading_tests;
 mod repositories;
 #[cfg(test)]
 #[path = "server/repository_tests.rs"]
@@ -46,6 +49,7 @@ struct OwnedPane {
     screen_generation: u64,
     size: PaneSize,
     effects: NativeEffects,
+    reading: reading::Reading,
 }
 fn nonce() -> Result<[u8; 32], ServerError> {
     let mut bytes = [0; 32];
@@ -227,6 +231,7 @@ impl DevelopmentPaneHost {
             screen_generation: 0,
             size,
             effects: NativeEffects::default(),
+            reading: reading::Reading::default(),
         });
         Ok(lease)
     }
@@ -281,6 +286,7 @@ impl DevelopmentPaneHost {
                 pane_takeover: true,
                 interactive_input: true,
                 native_effects: true,
+                reading: true,
             });
         }
         self.recover()?;
@@ -362,6 +368,9 @@ impl DevelopmentPaneHost {
         }
         let pane = self.pane.as_mut().ok_or(Refusal::Missing)?;
         let lease = match &request {
+            Request::Read { lease, .. }
+            | Request::ReadingStatus { lease }
+            | Request::SelectionChunk { lease, .. } => lease,
             Request::Poll { lease }
             | Request::NativeEffects { lease, .. }
             | Request::CompleteClipboard { lease, .. }
@@ -383,6 +392,20 @@ impl DevelopmentPaneHost {
         }
         pane.drain();
         match request {
+            Request::Read { operation, .. } => pane.read(operation),
+            Request::ReadingStatus { .. } => pane.reading_status(),
+            Request::SelectionChunk {
+                generation, offset, ..
+            } => {
+                if pane
+                    .screen
+                    .as_ref()
+                    .is_none_or(|screen| screen.selection_revision != generation)
+                {
+                    return Err(Refusal::Stale);
+                }
+                pane.reading.chunk(generation, offset)
+            }
             Request::NativeEffects { generation, .. } => {
                 if generation == 0 || generation != pane.focus_generation {
                     return Err(Refusal::Stale);
@@ -553,6 +576,7 @@ impl PaneService for DevelopmentPaneHost {
 }
 impl OwnedPane {
     fn invalidate_input(&mut self) {
+        self.reading.invalidate();
         self.runtime.client_effect_focus(None);
         self.effects.clear();
         self.focus = FocusTarget::Unfocused;
@@ -607,6 +631,15 @@ impl OwnedPane {
             return Err(Refusal::Stale);
         }
         match input {
+            InteractiveInput::CopyOrForward { modifiers } => {
+                self.require_terminal_focus()?;
+                if modifiers > 1023 {
+                    return Err(Refusal::Unsupported);
+                }
+                self.runtime
+                    .forward_copy_shortcut(decode_modifiers(modifiers));
+                Ok(Reply::Unchanged)
+            }
             InteractiveInput::Key(key) => {
                 let key = decode_key(key).ok_or(Refusal::Unsupported)?;
                 if self.focus != FocusTarget::Terminal
@@ -822,6 +855,9 @@ impl OwnedPane {
         };
         if transfer {
             self.attachment_generation = None;
+            self.reading.reset(&self.runtime);
+            self.screen = None;
+            self.reading.invalidate();
         }
         if transfer || connection != self.lease.connection || !self.connected {
             self.invalidate_input();
@@ -841,6 +877,9 @@ impl OwnedPane {
         Ok(Reply::Attached { lease: self.lease })
     }
     fn drain(&mut self) {
+        if self.reading.reset_pending() {
+            return;
+        }
         self.effects.drain_clipboard(&self.subscription.clipboard);
         for request in self.subscription.take_client_effects() {
             self.effects.push(request);
@@ -868,6 +907,9 @@ impl OwnedPane {
                 }
                 _ => {}
             }
+        }
+        if let Some(screen) = &self.screen {
+            self.reading.update(&self.runtime, screen);
         }
     }
 }
@@ -936,6 +978,23 @@ pub(crate) fn encode_screen(screen: &ScreenSnapshot) -> Screen {
     let mut link_indices = std::collections::HashMap::new();
     let mut link_bytes = 0;
     let mut encoded = Screen {
+        reading: Some(pane::reading::Snapshot {
+            total_rows: screen.scrollbar.total_rows,
+            offset_rows: screen.scrollbar.offset_rows,
+            visible_rows: screen.scrollbar.visible_rows,
+            selection_present: screen.selection_present,
+            selection_revision: screen.selection_revision,
+            find: screen.find.as_ref().map(|find| pane::reading::Find {
+                generation: find.generation.value(),
+                total: find.total_matches,
+                current: find.current_match,
+                spans: find
+                    .visible_spans
+                    .iter()
+                    .map(|s| (s.row, s.start_column, s.end_column, s.current))
+                    .collect(),
+            }),
+        }),
         hyperlinks: Vec::new(),
         generation: 0,
         mouse_tracking: screen.mouse_tracking,
@@ -986,7 +1045,8 @@ pub(crate) fn encode_screen(screen: &ScreenSnapshot) -> Screen {
                             | (u16::from(c.invisible) << 5)
                             | (u16::from(c.strikethrough) << 6)
                             | (u16::from(c.overline) << 7)
-                            | (u16::from(c.spacer_tail) << 8),
+                            | (u16::from(c.spacer_tail) << 8)
+                            | (u16::from(c.selected) << 9),
                         underline: match c.underline {
                             TerminalUnderlineSnapshot::None => 0,
                             TerminalUnderlineSnapshot::Single => 1,

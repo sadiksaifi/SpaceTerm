@@ -296,6 +296,7 @@ impl SharedWorkspaceHost {
                 pane_takeover: true,
                 interactive_input: true,
                 native_effects: true,
+                reading: true,
             }),
             Request::Inventory => Ok(Reply::Inventory {
                 inventory: self.inventory(),
@@ -415,7 +416,10 @@ impl SharedWorkspaceHost {
             request => {
                 let target = match &request {
                     Request::TakeOver { target, .. } => *target,
-                    Request::Poll { lease }
+                    Request::ReadingStatus { lease }
+                    | Request::Read { lease, .. }
+                    | Request::SelectionChunk { lease, .. }
+                    | Request::Poll { lease }
                     | Request::NativeEffects { lease, .. }
                     | Request::CompleteClipboard { lease, .. }
                     | Request::Focus { lease, .. }

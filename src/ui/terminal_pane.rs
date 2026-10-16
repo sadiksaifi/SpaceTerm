@@ -1566,17 +1566,26 @@ impl TerminalPane {
         }
     }
 
-    /// Whether the shell runs in a SpaceTerm Server, without client-local file or content actions.
+    /// Whether the shell runs in a SpaceTerm Server.
     fn server_backed(&self) -> bool {
         self.terminal_session.session_factory.is_server_backed()
     }
 
     fn pointer_selection_policy(&self) -> ShiftSelectionPolicy {
-        if self.server_backed() {
+        if self.server_backed() && !self.reading_available() {
             ShiftSelectionPolicy::ReportToApplication
         } else {
             self.shift_selection
         }
+    }
+
+    fn reading_available(&self) -> bool {
+        self.terminal_session_available()
+            && self
+                .terminal_session
+                .session
+                .as_ref()
+                .is_some_and(|session| session.reading_available())
     }
 
     fn interactive_input_available(&self) -> bool {
@@ -2445,6 +2454,19 @@ impl TerminalPane {
                 self.sync_scrollbar(cx);
             }
             TerminalSessionEvent::ClientEffectsReady => return self.sync_client_effects(cx),
+            TerminalSessionEvent::SelectionCopyReady => {
+                if let Some(copy) = self
+                    .terminal_session
+                    .session
+                    .as_ref()
+                    .and_then(|session| session.take_prepared_pointer_copy())
+                {
+                    if let Some(primary) = &self.primary_selection {
+                        primary.publish(&copy, cx);
+                    }
+                    self.publish_selection_copy(Ok(Some(copy)), None, cx);
+                }
+            }
             TerminalSessionEvent::ClientEffect(request) => {
                 if !request.grant.current() {
                     return false;
@@ -3030,7 +3052,7 @@ impl TerminalPane {
             return;
         }
 
-        if self.server_backed()
+        if !self.reading_available()
             && pointer_uses_text_cursor(
                 self.screen.mouse_tracking,
                 self.pointer_modifiers.shift,
@@ -3042,7 +3064,7 @@ impl TerminalPane {
         }
 
         self.pressed_button = Some(button);
-        self.selection_copy_pending = !self.server_backed()
+        self.selection_copy_pending = self.reading_available()
             && button == PointerButton::Left
             && pointer_uses_text_cursor(
                 self.screen.mouse_tracking,
@@ -3241,6 +3263,7 @@ impl TerminalPane {
             return;
         }
         if self.server_backed()
+            && !self.reading_available()
             && (!self.interactive_input_available()
                 || (self.screen.mouse_tracking
                     && pointer_uses_text_cursor(
@@ -3258,7 +3281,7 @@ impl TerminalPane {
         let Some(position) = self.surface_position(event.position, false) else {
             return;
         };
-        if !self.server_backed() {
+        if self.reading_available() {
             self.reveal_scrollbar(cx);
         }
         if self.terminal_session.remote_input_blocked {
@@ -3566,6 +3589,12 @@ impl TerminalPane {
             self.screen.selection_present,
             self.current_hovered_link(),
         );
+        actions.copy &= !self.server_backed()
+            || self
+                .terminal_session
+                .session
+                .as_ref()
+                .is_some_and(|session| session.selection_copy_ready());
         actions.file_preview &= self.file_preview_available;
         actions
     }
@@ -3674,10 +3703,10 @@ impl TerminalPane {
 
         match command {
             TerminalContextMenuCommand::Paste => self.paste_clipboard(&PasteClipboard, window, cx),
-            TerminalContextMenuCommand::Find if !self.server_backed() => {
+            TerminalContextMenuCommand::Find if self.reading_available() => {
                 self.open_find(&OpenTerminalFind, window, cx)
             }
-            TerminalContextMenuCommand::Copy if !self.server_backed() && actions.copy => {
+            TerminalContextMenuCommand::Copy if self.reading_available() && actions.copy => {
                 if let Some(session) = &self.terminal_session.session {
                     self.publish_selection_copy(
                         session.copy_selection_at(menu.generation),
@@ -3762,7 +3791,7 @@ impl TerminalPane {
         self.sync_terminal_input_focus(window, cx);
         let session_available = self.terminal_session.session.is_some();
         let capabilities = NativeServiceCapabilities::new(
-            !self.server_backed() && session_available && self.native_context_actions().copy,
+            self.reading_available() && session_available && self.native_context_actions().copy,
             session_available && self.terminal_input_focus && self.interactive_input_available(),
         );
         let origin = session_available.then(|| {
@@ -5106,7 +5135,7 @@ impl Render for TerminalPane {
         let context_menu_entries = terminal_context_menu_entries(
             context_menu_actions,
             self.interactive_input_available(),
-            !self.server_backed(),
+            self.reading_available(),
             crate::desktop_profile::DesktopPresentation::get(cx),
         );
         let context_open_pane = pane.clone();
@@ -5206,10 +5235,13 @@ impl Render for TerminalPane {
             .on_action(cx.listener(Self::decline_permission_request_action))
             .when(self.terminal_session.session_factory.file_insertion_capabilities() == TerminalLocalFileCapabilities::Enabled && self.interactive_input_available(), |root| root.on_drop(cx.listener(Self::insert_dropped_files)))
             .when(local_operations, |root| {
+                root.on_action(cx.listener(Self::clear_screen_and_scrollback))
+                    .on_action(cx.listener(Self::show_repository_status))
+            })
+            .when(self.reading_available(), |root| {
                 root.on_action(cx.listener(Self::copy_selection))
                     .on_action(cx.listener(Self::edit_copy))
 
-                    .on_action(cx.listener(Self::clear_screen_and_scrollback))
                     .on_action(cx.listener(Self::scroll_page_up))
                     .on_action(cx.listener(Self::scroll_page_down))
                     .on_action(cx.listener(Self::scroll_to_top))
@@ -5218,7 +5250,6 @@ impl Render for TerminalPane {
                     .on_action(cx.listener(Self::find_next))
                     .on_action(cx.listener(Self::find_previous))
                     .on_action(cx.listener(Self::close_find))
-                    .on_action(cx.listener(Self::show_repository_status))
             })
             .when(self.interactive_input_available(), |root| {
                 root.on_action(cx.listener(Self::paste_clipboard))

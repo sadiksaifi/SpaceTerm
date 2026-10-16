@@ -287,6 +287,7 @@ pub(crate) fn serve_runtime(
                                         pane_takeover: false,
                                         interactive_input: false,
                                         native_effects: false,
+                                        reading: false,
                                     }
                                 }
                                 None => {
@@ -567,6 +568,7 @@ mod startup_tests {
                         pane_takeover: true,
                         interactive_input: true,
                         native_effects: true,
+                        reading: false,
                     },
                     Request::Inventory => Reply::Inventory {
                         inventory: crate::hierarchy::State::empty().inventory,
@@ -577,6 +579,14 @@ mod startup_tests {
                         workspace: [2; 32],
                         tab: pane,
                         pane,
+                    },
+                    Request::SelectionChunk {
+                        generation, offset, ..
+                    } => Reply::SelectionChunk {
+                        generation,
+                        offset,
+                        total: 32 * crate::pane::reading::SELECTION_CHUNK_BYTES,
+                        bytes: vec![65; crate::pane::reading::SELECTION_CHUNK_BYTES],
                     },
                     Request::Shutdown => Reply::Closed,
                     _ => Reply::Unchanged,
@@ -596,6 +606,67 @@ mod startup_tests {
             Some(Box::new(Service)),
         )
         .unwrap();
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn a_client_that_stops_reading_selection_chunks_does_not_stall_another_client() {
+        use crate::pane::{Lease, PaneConnection, Reply, Request};
+        for major in [1, 2] {
+            let fixture = Fixture::new();
+            let _child = fixture.start_test("host::startup_tests::shared_transport_child", false);
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !fixture.paths.socket().exists() {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let mut slow = loop {
+                match UnixStream::connect(fixture.paths.socket()) {
+                    Ok(stream) => break stream,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::ConnectionRefused
+                            && Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("test listener unavailable: {error}"),
+                }
+            };
+            protocol::authenticate_client(&mut slow, &fixture.device, &fixture.pin, &[major])
+                .unwrap();
+            let lease = Lease {
+                server: [1; 32],
+                session: [2; 32],
+                control: [3; 32],
+                connection: [4; 32],
+            };
+            // Replies exceed socket buffering. This authenticated reader deliberately consumes none.
+            for index in 0..16 {
+                protocol::Wire::terminal(&mut slow)
+                    .unwrap()
+                    .write(&Request::SelectionChunk {
+                        lease,
+                        generation: 1,
+                        offset: index * crate::pane::reading::SELECTION_CHUNK_BYTES,
+                    })
+                    .unwrap();
+            }
+            let mut stream = UnixStream::connect(fixture.paths.socket()).unwrap();
+            protocol::authenticate_client(&mut stream, &fixture.device, &fixture.pin, &[major])
+                .unwrap();
+            let mut current = PaneConnection::negotiate(stream).unwrap();
+            let started = Instant::now();
+            for _ in 0..16 {
+                assert!(matches!(
+                    current.exchange(&Request::Inventory).unwrap(),
+                    Reply::Inventory { .. }
+                ));
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "a slow reader blocked another connection"
+            );
+        }
     }
 
     #[cfg(feature = "client")]
