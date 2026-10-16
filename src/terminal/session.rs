@@ -93,6 +93,8 @@ pub enum TerminalSessionEvent {
     MetadataChanged(MetadataWakeup),
     Attention(AttentionEvent),
     HiddenInputChanged(bool),
+    /// A paste may have been written before the connection lost its acknowledgement.
+    PasteUnconfirmed,
     /// A program asked for a Permission Setup.
     PermissionRequested(PermissionRequest),
     Exited(TerminalSessionExit),
@@ -436,6 +438,16 @@ pub trait TerminalSessionHandle {
     fn key(&self, input: KeyInput);
     fn clear_screen_and_scrollback(&self);
     fn focus(&self, focused: bool);
+
+    /// Supplies the client facts for terminal input and host-addressed Input Method Text.
+    fn interactive_focus(&self, terminal_input: bool, _input_method: bool) {
+        self.focus(terminal_input);
+    }
+
+    /// Whether the current connection can carry interactive terminal operations.
+    fn interactive_input_available(&self) -> bool {
+        true
+    }
 
     /// Transfers Terminal Input Focus to this Terminal Session's Paste Confirmation.
     fn focus_paste_confirmation(&self, _id: PasteConfirmationId) {
