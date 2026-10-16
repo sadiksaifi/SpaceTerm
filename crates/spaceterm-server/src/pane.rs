@@ -177,6 +177,9 @@ pub enum Request {
         lease: Lease,
         operation: reading::Operation,
     },
+    ReadingStatus {
+        lease: Lease,
+    },
     SelectionChunk {
         lease: Lease,
         generation: u64,
@@ -283,6 +286,10 @@ pub enum Request {
 pub enum Reply {
     Reading {
         accepted: bool,
+    },
+    ReadingReady {
+        generation: u64,
+        selection_present: bool,
     },
     SelectionChunk {
         generation: u64,

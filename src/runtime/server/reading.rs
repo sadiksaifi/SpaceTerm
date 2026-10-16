@@ -99,6 +99,21 @@ impl Reading {
 }
 
 impl OwnedPane {
+    pub(super) fn reading_status(&mut self) -> Result<Reply, Refusal> {
+        if self.reading.busy() {
+            return Ok(Reply::SelectionPending);
+        }
+        // A worker completion follows its presentation barrier. Drain again after observing
+        // completion so this fence includes a newly published screen as well as a quiet release.
+        self.drain();
+        let Some(screen) = &self.screen else {
+            return Ok(Reply::SelectionPending);
+        };
+        Ok(Reply::ReadingReady {
+            generation: self.screen_generation,
+            selection_present: screen.selection_present,
+        })
+    }
     pub(super) fn read(&mut self, operation: Operation) -> Result<Reply, Refusal> {
         if self.ended || self.failed {
             return Err(Refusal::Missing);

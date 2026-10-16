@@ -60,6 +60,8 @@ impl ReadingState {
 
 #[derive(Default)]
 pub(super) struct Reader {
+    latest: Option<ScreenMapping>,
+    awaiting_read: bool,
     target: Option<(ScreenMapping, u64)>,
     bytes: Vec<u8>,
     total: Option<usize>,
@@ -72,6 +74,7 @@ impl Reader {
         selection: bool,
     ) {
         let mut reading = state.reading.lock().unwrap_or_else(|e| e.into_inner());
+        self.latest = Some(mapping);
         reading.prepared = None;
         self.target = selection.then_some((mapping, reading.revision));
         self.bytes.clear();
@@ -83,6 +86,30 @@ impl Reader {
         lease: Lease,
         exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
     ) -> Result<(), ServerError> {
+        if self.awaiting_read {
+            match exchange(&Request::ReadingStatus { lease })? {
+                Reply::SelectionPending => return Ok(()),
+                Reply::ReadingReady {
+                    generation,
+                    selection_present,
+                } => {
+                    let Some(mapping) = self.latest.filter(|mapping| mapping.wire == generation)
+                    else {
+                        return Ok(());
+                    };
+                    self.awaiting_read = false;
+                    let revision = state
+                        .reading
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .revision;
+                    self.target = selection_present.then_some((mapping, revision));
+                    self.bytes.clear();
+                    self.total = None;
+                }
+                _ => return Err(ServerError::Protocol),
+            }
+        }
         let operation = state
             .reading
             .lock()
@@ -93,7 +120,20 @@ impl Reader {
         if let Some(operation) = operation {
             match exchange(&Request::Read { lease, operation }) {
                 Ok(Reply::Reading { accepted: false }) => return Ok(()),
-                Ok(Reply::Reading { accepted: true }) | Err(ServerError::StaleControl) => {
+                Ok(Reply::Reading { accepted: true }) => {
+                    state
+                        .reading
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .queue
+                        .pop_front();
+                    self.target = None;
+                    self.bytes.clear();
+                    self.total = None;
+                    self.awaiting_read = true;
+                    return Ok(());
+                }
+                Err(ServerError::StaleControl) => {
                     state
                         .reading
                         .lock()
@@ -400,5 +440,60 @@ mod tests {
             })
             .unwrap();
         assert_eq!(queries, vec![(1000, "query-1000".into())]);
+    }
+
+    #[test]
+    fn a_quiet_release_resumes_preparing_the_last_authoritative_selection() {
+        let adapter = Adapter::new();
+        let mapping = mapping(&adapter);
+        let bytes = selection_bytes();
+        let mut reader = Reader::default();
+        reader.screen(&adapter.handle.state, mapping, true);
+        adapter
+            .handle
+            .state
+            .reading
+            .lock()
+            .unwrap()
+            .enqueue(Operation::Pointer(pane::Pointer {
+                screen_generation: mapping.wire,
+                phase: pane::PointerPhase::Release,
+                button: Some(pane::PointerButton::Left),
+                x: 1.0,
+                y: 1.0,
+                modifiers: 0,
+                shift_selection: false,
+            }));
+        adapter.handle.request_pointer_copy();
+        for _ in 0..16 {
+            reader
+                .poll(
+                    &adapter.handle.state,
+                    adapter.active.lease,
+                    &mut |request| match request {
+                        Request::Read { .. } => Ok(Reply::Reading { accepted: true }),
+                        Request::ReadingStatus { .. } => Ok(Reply::ReadingReady {
+                            generation: mapping.wire,
+                            selection_present: true,
+                        }),
+                        Request::SelectionChunk {
+                            generation, offset, ..
+                        } => Ok(Reply::SelectionChunk {
+                            generation: *generation,
+                            offset: *offset,
+                            total: bytes.len(),
+                            bytes: bytes
+                                [*offset..(*offset + SELECTION_CHUNK_BYTES).min(bytes.len())]
+                                .to_vec(),
+                        }),
+                        _ => Ok(Reply::Unchanged),
+                    },
+                )
+                .unwrap();
+        }
+        assert!(
+            adapter.handle.take_prepared_pointer_copy().is_some(),
+            "a release with no new screen must still complete Copy"
+        );
     }
 }

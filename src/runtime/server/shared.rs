@@ -416,7 +416,8 @@ impl SharedWorkspaceHost {
             request => {
                 let target = match &request {
                     Request::TakeOver { target, .. } => *target,
-                    Request::Read { lease, .. }
+                    Request::ReadingStatus { lease }
+                    | Request::Read { lease, .. }
                     | Request::SelectionChunk { lease, .. }
                     | Request::Poll { lease }
                     | Request::NativeEffects { lease, .. }

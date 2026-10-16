@@ -368,7 +368,9 @@ impl DevelopmentPaneHost {
         }
         let pane = self.pane.as_mut().ok_or(Refusal::Missing)?;
         let lease = match &request {
-            Request::Read { lease, .. } | Request::SelectionChunk { lease, .. } => lease,
+            Request::Read { lease, .. }
+            | Request::ReadingStatus { lease }
+            | Request::SelectionChunk { lease, .. } => lease,
             Request::Poll { lease }
             | Request::NativeEffects { lease, .. }
             | Request::CompleteClipboard { lease, .. }
@@ -391,6 +393,7 @@ impl DevelopmentPaneHost {
         pane.drain();
         match request {
             Request::Read { operation, .. } => pane.read(operation),
+            Request::ReadingStatus { .. } => pane.reading_status(),
             Request::SelectionChunk {
                 generation, offset, ..
             } => {
