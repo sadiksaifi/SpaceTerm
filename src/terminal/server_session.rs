@@ -257,6 +257,7 @@ impl DevelopmentServerSessionFactory {
 enum Input {
     Read(pane::reading::Operation),
     Key(KeyInput),
+    CopyOrForward(InputModifiers),
     Pointer(u64, pane::Pointer),
     Wheel(u64, pane::Wheel),
     Paste(
@@ -279,7 +280,7 @@ impl Input {
                 target,
                 pane::FocusTarget::Terminal | pane::FocusTarget::FocusedPane
             ),
-            Self::Key(_) | Self::Pointer(..) | Self::Wheel(..) => {
+            Self::Key(_) | Self::CopyOrForward(_) | Self::Pointer(..) | Self::Wheel(..) => {
                 target == pane::FocusTarget::Terminal
             }
             Self::Paste(_, reply) => target == pane::FocusTarget::Terminal && !reply.is_closed(),
@@ -643,6 +644,12 @@ impl ActiveInput {
                     .enqueue(operation);
                 return Ok(());
             }
+            Input::CopyOrForward(modifiers) => (
+                input_request(pane::InteractiveInput::CopyOrForward {
+                    modifiers: encode_modifiers(modifiers),
+                }),
+                None,
+            ),
             Input::Key(key) => (
                 input_request(pane::InteractiveInput::Key(encode_key(key))),
                 None,
@@ -1443,6 +1450,24 @@ impl TerminalSessionHandle for PresentationHandle {
                 .unwrap_or_else(|e| e.into_inner())
                 .reading
     }
+    fn copy_or_forward(
+        &self,
+        modifiers: InputModifiers,
+    ) -> Result<Option<super::SelectionCopy>, super::SelectionCopyError> {
+        if let Some(copy) = self.prepared_selection(None) {
+            return Ok(Some(copy));
+        }
+        let selection_present = self
+            .state
+            .reading
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .selection_present;
+        if !selection_present {
+            self.send(Input::CopyOrForward(modifiers));
+        }
+        Ok(None)
+    }
     fn selection_copy_ready(&self) -> bool {
         self.prepared_selection(None).is_some()
     }
@@ -2041,6 +2066,64 @@ mod tests {
         assert!(
             adapter.input.try_recv().is_ok(),
             "Scroll must reach the server worker"
+        );
+    }
+
+    #[test]
+    fn copy_without_a_prepared_selection_reaches_the_fenced_server_input_path() {
+        let mut adapter = Adapter::new();
+        assert!(
+            adapter
+                .handle
+                .copy_or_forward(InputModifiers {
+                    platform: true,
+                    ..Default::default()
+                })
+                .unwrap()
+                .is_none()
+        );
+        let mut requests = 0;
+        adapter
+            .drain(|request| {
+                if matches!(
+                    request,
+                    Request::Input {
+                        input: pane::InteractiveInput::CopyOrForward { modifiers: 8 },
+                        ..
+                    }
+                ) {
+                    requests += 1;
+                }
+                Ok(Reply::Unchanged)
+            })
+            .unwrap();
+        assert_eq!(
+            requests, 1,
+            "the server worker must decide whether Copy forwards a key"
+        );
+        adapter.handle.copy_or_forward(Default::default()).unwrap();
+        adapter.handle.interactive_focus(false, true);
+        adapter
+            .drain(|request| {
+                assert!(
+                    !matches!(request, Request::Input { .. }),
+                    "Copy must not cross a changed focus generation"
+                );
+                Ok(Reply::Unchanged)
+            })
+            .unwrap();
+        adapter.handle.interactive_focus(true, true);
+        adapter
+            .handle
+            .state
+            .reading
+            .lock()
+            .unwrap()
+            .selection_present = true;
+        adapter.handle.copy_or_forward(Default::default()).unwrap();
+        assert!(
+            adapter.input.try_recv().is_err(),
+            "an unprepared selection must not forward Copy"
         );
     }
 

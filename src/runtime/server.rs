@@ -627,6 +627,15 @@ impl OwnedPane {
             return Err(Refusal::Stale);
         }
         match input {
+            InteractiveInput::CopyOrForward { modifiers } => {
+                self.require_terminal_focus()?;
+                if modifiers > 1023 {
+                    return Err(Refusal::Unsupported);
+                }
+                self.runtime
+                    .forward_copy_shortcut(decode_modifiers(modifiers));
+                Ok(Reply::Unchanged)
+            }
             InteractiveInput::Key(key) => {
                 let key = decode_key(key).ok_or(Refusal::Unsupported)?;
                 if self.focus != FocusTarget::Terminal

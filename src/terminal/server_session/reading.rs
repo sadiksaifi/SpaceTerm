@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 #[derive(Default)]
 pub(super) struct ReadingState {
     revision: u64,
+    pub(super) selection_present: bool,
     queue: VecDeque<Operation>,
     prepared: Option<(u64, ScreenMapping, super::super::SelectionCopy)>,
     pointer_copy: Option<u64>,
@@ -30,6 +31,7 @@ impl ReadingState {
     pub(super) fn disconnect(&mut self) {
         self.invalidate();
         self.queue.clear();
+        self.selection_present = false;
     }
     pub(super) fn enqueue(&mut self, operation: Operation) -> bool {
         if matches!(&operation, Operation::Pointer(p) if matches!(p.phase, pane::PointerPhase::Motion))
@@ -83,6 +85,7 @@ impl Reader {
         let mut reading = state.reading.lock().unwrap_or_else(|e| e.into_inner());
         self.latest = Some(mapping);
         reading.prepared = None;
+        reading.selection_present = selection;
         self.target = selection.then_some((mapping, reading.revision));
         self.bytes.clear();
         self.total = None;
@@ -105,11 +108,11 @@ impl Reader {
                         return Ok(());
                     };
                     self.awaiting_read = false;
-                    let revision = state
-                        .reading
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .revision;
+                    let revision = {
+                        let mut reading = state.reading.lock().unwrap_or_else(|e| e.into_inner());
+                        reading.selection_present = selection_present;
+                        reading.revision
+                    };
                     self.target = selection_present.then_some((mapping, revision));
                     self.bytes.clear();
                     self.total = None;

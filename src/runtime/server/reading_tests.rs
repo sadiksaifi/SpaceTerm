@@ -241,3 +241,69 @@ fn old_scrollback_find_and_multichunk_copy_use_the_retained_terminal_content() {
     }
     host.shutdown().unwrap();
 }
+
+#[test]
+fn copy_shortcuts_use_the_authoritative_keyboard_mode_and_focus_fence() {
+    use super::tests::{await_text, focus};
+    for (modifiers, expected) in [
+        (8, "1b5b39393b39751b5b39393b393a3375"),
+        (5, "1b5b39393b36751b5b39393b363a3375"),
+    ] {
+        let mut host = host();
+        let lease = attach(&mut host, 1, true);
+        command(
+            &mut host,
+            1,
+            lease,
+            "stty raw -echo; printf '\\033[2J\\033[HREADY\\r\\n'; dd bs=1 count=1 >/dev/null 2>/dev/null; printf '\\033[>11uENHANCED\\r\\n'; dd bs=1 count=16 2>/dev/null | od -An -tx1 | tr -d ' \\n'; printf '\\r\\n'",
+        );
+        await_text(&mut host, 1, lease, "READY");
+        // Finish the command's Enter gesture before enabling keyboard release reports.
+        focus(&mut host, lease, 1, FocusTarget::Terminal);
+        focus(&mut host, lease, 2, FocusTarget::FocusedPane);
+        focus(&mut host, lease, 3, FocusTarget::Terminal);
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                lease.connection,
+                Request::Input {
+                    lease,
+                    generation: 3,
+                    input: InteractiveInput::Key(Key {
+                        physical: PhysicalKey::Unidentified as u32,
+                        action: 0,
+                        logical: "text-input".into(),
+                        text: Some("!".into()),
+                        unshifted: None,
+                        modifiers: 0,
+                        consumed: 0,
+                        option_as_alt: false,
+                    }),
+                }
+            ),
+            Reply::Unchanged
+        ));
+        await_text(&mut host, 1, lease, "ENHANCED");
+        focus(&mut host, lease, 4, FocusTarget::FocusedPane);
+        let request = |generation| Request::Input {
+            lease,
+            generation,
+            input: InteractiveInput::CopyOrForward { modifiers },
+        };
+        assert!(matches!(
+            host.request([1; 32], lease.connection, request(3)),
+            Reply::Refused(Refusal::Stale)
+        ));
+        assert!(matches!(
+            host.request([1; 32], lease.connection, request(4)),
+            Reply::Refused(Refusal::Stale)
+        ));
+        focus(&mut host, lease, 5, FocusTarget::Terminal);
+        assert!(matches!(
+            host.request([1; 32], lease.connection, request(5)),
+            Reply::Unchanged
+        ));
+        await_text(&mut host, 1, lease, expected);
+        host.shutdown().unwrap();
+    }
+}

@@ -596,6 +596,12 @@ fn test_launch_planner() -> ShellLaunchPlanner {
 }
 
 impl TerminalRuntime {
+    pub(crate) fn forward_copy_shortcut(&self, modifiers: InputModifiers) {
+        let (reply, _receiver) = mpsc::sync_channel(1);
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::CopyOrForward(modifiers, reply));
+        }
+    }
     pub(crate) fn reading_pointer(&self, input: PointerInput) {
         if let Some(commands) = &self.commands {
             let _ = commands.send(Command::ReadingPointer(input));

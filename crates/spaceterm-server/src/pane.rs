@@ -123,6 +123,7 @@ pub struct Wheel {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum InteractiveInput {
     Key(Key),
+    CopyOrForward { modifiers: u16 },
     Pointer(Pointer),
     Wheel(Wheel),
     Paste { text: String },
