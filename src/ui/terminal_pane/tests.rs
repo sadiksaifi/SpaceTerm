@@ -9453,8 +9453,15 @@ mod permission_requests {
     fn server_permission_setup_reuses_the_notice_and_revalidates_its_grant(
         cx: &mut TestAppContext,
     ) {
-        for revoke in [false, true] {
-            let (pane, cx, _) = connected_terminal_pane(cx);
+        for (local_authority, revoke) in [(false, false), (true, false), (true, true)] {
+            let (pane, cx, _) = terminal_pane_with_session_options(cx, |sessions| {
+                let sessions = sessions.server_backed();
+                if local_authority {
+                    sessions.with_client_filesystem(crate::platform::runtime_local_filesystem())
+                } else {
+                    sessions
+                }
+            });
             let access = install_setup(
                 &pane,
                 PermissionAuthorization::NotGranted,
@@ -9479,7 +9486,14 @@ mod permission_requests {
                 cx.notify();
             });
             cx.run_until_parked();
-            assert!(cx.debug_bounds("permission-request").is_some());
+            assert_eq!(
+                cx.debug_bounds("permission-request").is_some(),
+                local_authority
+            );
+            if !local_authority {
+                assert!(access.prepared.borrow().is_empty());
+                continue;
+            }
             cx.executor().advance_clock(PERMISSION_REQUEST_ARMING_DELAY);
             if revoke {
                 authority.client_focus(Some(false));

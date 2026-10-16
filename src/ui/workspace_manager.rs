@@ -3903,8 +3903,12 @@ impl WorkspaceManager {
         let edits = SharedEditSource::new(std::rc::Rc::new(
             crate::terminal::shared_workspace::SharedWorkspaceClient::new(server.clone()),
         ));
-        let sessions =
-            SharedPaneSessions::new(server.clone(), client_home, &self.pane_construction);
+        let sessions = SharedPaneSessions::new(
+            server.clone(),
+            client_home,
+            self.local_filesystem.clone(),
+            &self.pane_construction,
+        );
         self.present_shared_workspaces(edits, sessions, window, cx);
         if let Some(shared) = self.shared.as_mut() {
             shared.retain_client_views(server);

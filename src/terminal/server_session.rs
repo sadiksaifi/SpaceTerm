@@ -197,16 +197,21 @@ impl DevelopmentPaneState {
 #[derive(Clone)]
 pub(crate) struct DevelopmentServerSessionFactory {
     server: LocalServer,
+    local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
     pane_id: Option<spaceterm_server::hierarchy::Id>,
     attachment: Option<spaceterm_server::attachments::AttachmentPermit>,
     state: Arc<DevelopmentPaneState>,
 }
 impl DevelopmentServerSessionFactory {
-    pub(crate) fn new(server: LocalServer) -> (Self, Arc<DevelopmentPaneState>) {
+    pub(crate) fn new(
+        server: LocalServer,
+        local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
+    ) -> (Self, Arc<DevelopmentPaneState>) {
         let state = Arc::new(DevelopmentPaneState::new());
         (
             Self {
                 server,
+                local_files,
                 pane_id: None,
                 attachment: None,
                 state: Arc::clone(&state),
@@ -223,9 +228,10 @@ impl DevelopmentServerSessionFactory {
     }
     pub(crate) fn for_pane(
         server: LocalServer,
+        local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
         pane: spaceterm_server::hierarchy::Id,
     ) -> (Self, Arc<DevelopmentPaneState>) {
-        let (mut factory, state) = Self::new(server);
+        let (mut factory, state) = Self::new(server, local_files);
         factory.pane_id = Some(pane);
         (factory, state)
     }
@@ -876,6 +882,11 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
     fn allows_local_file_insertion(&self) -> bool {
         true
     }
+    fn local_file_authority(
+        &self,
+    ) -> Option<&crate::platform::local_filesystem::LocalFilesystemAuthority> {
+        Some(&self.local_files)
+    }
     fn fallback_title(&self) -> String {
         "Development Pane".into()
     }
@@ -959,6 +970,7 @@ fn present(
 ) {
     let DevelopmentServerSessionFactory {
         server,
+        local_files,
         pane_id,
         attachment,
         state,
@@ -1190,6 +1202,7 @@ fn present(
                             *screen,
                             generation,
                             &appearance.lock().unwrap_or_else(|e| e.into_inner()),
+                            Some(&local_files),
                         )?;
                         if !ready {
                             // Claims apply their measured controller facts once.
@@ -1643,10 +1656,35 @@ fn decode_color(c: pane::Color) -> TerminalColor {
         pane::Color::Rgb(c) => TerminalColor::Rgb(color(c)),
     }
 }
+fn decode_hyperlink(
+    link: &pane::effects::Hyperlink,
+    local_files: Option<&crate::platform::local_filesystem::LocalFilesystemAuthority>,
+) -> Option<Arc<super::hyperlink::HyperlinkTarget>> {
+    use super::hyperlink::{HyperlinkTarget, MAX_LINK_BYTES};
+    let target = match link {
+        pane::effects::Hyperlink::Url(value) => HyperlinkTarget::url(value)?,
+        pane::effects::Hyperlink::File(value) => {
+            let filesystem = local_files?;
+            if value.len() > MAX_LINK_BYTES
+                || !filesystem
+                    .path_semantics()
+                    .is_absolute(std::path::Path::new(value))
+            {
+                return None;
+            }
+            HyperlinkTarget::from_local_file(
+                filesystem.local_file(value, std::path::Path::new("/"))?,
+            )?
+        }
+    };
+    Some(Arc::new(target))
+}
+
 fn decode_screen(
     wire: pane::Screen,
     generation: PresentationGeneration,
     appearance: &TerminalAppearanceUpdate,
+    local_files: Option<&crate::platform::local_filesystem::LocalFilesystemAuthority>,
 ) -> Result<Arc<ScreenSnapshot>, ServerError> {
     if !(2..=pane::MAX_COLUMNS).contains(&wire.columns)
         || wire.rows.len() > usize::from(pane::MAX_ROWS)
@@ -1672,6 +1710,7 @@ fn decode_screen(
         cols: wire.columns,
         rows: wire.rows.len() as u16,
     };
+    let mut links = std::collections::HashMap::new();
     screen.rows = wire
         .rows
         .into_iter()
@@ -1702,11 +1741,12 @@ fn decode_screen(
                         },
                         selected: false,
                         semantic_content: CellSemanticSnapshot::Output,
-                        hyperlink: c
-                            .hyperlink
-                            .as_deref()
-                            .and_then(super::hyperlink::HyperlinkTarget::url)
-                            .map(Arc::new),
+                        hyperlink: c.hyperlink.as_ref().and_then(|link| {
+                            links
+                                .entry(link.clone())
+                                .or_insert_with(|| decode_hyperlink(link, local_files))
+                                .clone()
+                        }),
                     })
                     .collect::<Vec<_>>(),
             )
@@ -2760,6 +2800,45 @@ mod tests {
     }
 
     #[test]
+    fn server_file_links_need_client_authority_and_revalidate_before_preview() {
+        use crate::terminal::{TerminalLocalFileCapabilities, native_services::FilePreviewTarget};
+        let directory = std::env::temp_dir().join(format!(
+            "spaceterm-client-link-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let directory = std::fs::canonicalize(directory).unwrap();
+        let path = directory.join("preview");
+        std::fs::write(&path, b"fixture").unwrap();
+        let link = pane::effects::Hyperlink::File(path.to_str().unwrap().into());
+        assert!(decode_hyperlink(&link, None).is_none());
+        let filesystem = crate::platform::runtime_local_filesystem();
+        let target = decode_hyperlink(&link, Some(&filesystem)).unwrap();
+        assert!(
+            FilePreviewTarget::from_link(&target, TerminalLocalFileCapabilities::Disabled)
+                .is_none()
+        );
+        let preview =
+            FilePreviewTarget::from_link(&target, TerminalLocalFileCapabilities::Enabled).unwrap();
+        assert_eq!(preview.revalidated_path(), Some(path.clone()));
+        std::fs::rename(&path, directory.join("original")).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+        assert!(preview.revalidated_path().is_none());
+        assert!(
+            decode_hyperlink(
+                &pane::effects::Hyperlink::File("relative".into()),
+                Some(&filesystem)
+            )
+            .is_none()
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn screen_reconciliation_keeps_program_colors_and_projects_client_defaults() {
         let mut appearance = TerminalAppearanceUpdate::builtin().unwrap();
         let configured = Arc::make_mut(&mut appearance.appearance);
@@ -2800,15 +2879,18 @@ mod tests {
             alternate: false,
         };
         let mut linked = screen.clone();
-        linked.rows[0][0].hyperlink = Some("https://example.test".into());
-        linked.rows[0][1].hyperlink = Some("file:///etc/passwd".into());
-        let linked = decode_screen(linked, PresentationGeneration::test(1), &appearance).unwrap();
+        linked.rows[0][0].hyperlink =
+            Some(pane::effects::Hyperlink::Url("https://example.test".into()));
+        linked.rows[0][1].hyperlink = Some(pane::effects::Hyperlink::File("/etc/passwd".into()));
+        let linked =
+            decode_screen(linked, PresentationGeneration::test(1), &appearance, None).unwrap();
         assert_eq!(
             linked.rows[0][0].hyperlink.as_ref().unwrap().kind,
             super::super::hyperlink::HyperlinkKind::Url
         );
         assert!(linked.rows[0][1].hyperlink.is_none());
-        let decoded = decode_screen(screen, PresentationGeneration::test(1), &appearance).unwrap();
+        let decoded =
+            decode_screen(screen, PresentationGeneration::test(1), &appearance, None).unwrap();
         assert_eq!(
             decoded.colors.foreground,
             crate::appearance::Color::rgb(0x0a141e)

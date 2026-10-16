@@ -3946,7 +3946,11 @@ impl TerminalPane {
         permissions: &[SystemPermission],
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.terminal_session.session_factory.is_remote() {
+        if !self
+            .terminal_session
+            .session_factory
+            .allows_permission_setup()
+        {
             return false;
         }
         let Some(setup) = self.lifecycle_dependencies.permission_setup.clone() else {

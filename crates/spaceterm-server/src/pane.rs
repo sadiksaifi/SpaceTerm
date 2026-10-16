@@ -346,7 +346,7 @@ pub enum Color {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Cell {
     #[serde(default)]
-    pub hyperlink: Option<String>,
+    pub hyperlink: Option<effects::Hyperlink>,
     pub text: String,
     pub foreground: Color,
     pub background: Color,

@@ -943,11 +943,12 @@ pub(crate) fn encode_screen(screen: &ScreenSnapshot) -> Screen {
             .map(|row| {
                 row.iter()
                     .map(|c| Cell {
-                        hyperlink: c
-                            .hyperlink
-                            .as_ref()
-                            .filter(|link| link.kind == HyperlinkKind::Url)
-                            .map(|link| link.value.clone()),
+                        hyperlink: c.hyperlink.as_ref().map(|link| match link.kind {
+                            HyperlinkKind::Url => pane::effects::Hyperlink::Url(link.value.clone()),
+                            HyperlinkKind::LocalPath => {
+                                pane::effects::Hyperlink::File(link.value.clone())
+                            }
+                        }),
                         text: c.text.chars().take(64).collect(),
                         foreground: encode_color(c.foreground_source),
                         background: encode_color(c.background_source),

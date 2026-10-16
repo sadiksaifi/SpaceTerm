@@ -67,3 +67,18 @@ impl std::fmt::Debug for Completion {
         })
     }
 }
+
+/// File values become local targets only after validation by an explicitly composed client adapter.
+#[derive(Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum Hyperlink {
+    Url(String),
+    File(String),
+}
+impl std::fmt::Debug for Hyperlink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Url(_) => "Url { .. }",
+            Self::File(_) => "File { .. }",
+        })
+    }
+}

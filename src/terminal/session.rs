@@ -535,6 +535,12 @@ pub trait TerminalSessionFactory {
         false
     }
 
+    /// Client filesystem authority supplied only for an authenticated same-machine server route.
+    /// Received paths cannot supply or replace this adapter.
+    fn local_file_authority(&self) -> Option<&LocalFilesystemAuthority> {
+        None
+    }
+
     /// Whether the shell runs in a SpaceTerm Server rather than this application.
     fn is_server_backed(&self) -> bool {
         false
