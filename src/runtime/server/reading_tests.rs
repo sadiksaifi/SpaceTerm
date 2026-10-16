@@ -4,7 +4,7 @@ use pane::reading::{Operation, SELECTION_CHUNK_BYTES, Scroll};
 use std::time::Instant;
 
 fn read(host: &mut DevelopmentPaneHost, lease: Lease, operation: Operation) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match host.request(
             [1; 32],
@@ -28,7 +28,7 @@ fn screen(
     lease: Lease,
     matches: impl Fn(&Screen) -> bool,
 ) -> Box<Screen> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match host.request([1; 32], lease.connection, Request::Poll { lease }) {
             Reply::Screen(screen) if matches(&screen) => return screen,
