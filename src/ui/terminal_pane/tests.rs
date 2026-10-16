@@ -2581,7 +2581,9 @@ fn server_pane_status_stacks_above_typing_unavailable_without_hiding_either_noti
 }
 
 #[gpui::test]
-fn server_pane_context_menu_offers_paste_without_local_content_actions(cx: &mut TestAppContext) {
+fn server_pane_context_menu_offers_native_links_and_paste_without_selection_or_find(
+    cx: &mut TestAppContext,
+) {
     let (pane, cx, records) = server_terminal_pane(cx, true);
     records
         .event_sender(1)
@@ -2607,6 +2609,8 @@ fn server_pane_context_menu_offers_paste_without_local_content_actions(cx: &mut 
         "terminal-context-menu-row-paste-enabled",
         "terminal-context-menu-row-copy-disabled",
         "terminal-context-menu-row-find-disabled",
+        "terminal-context-menu-row-open-link-enabled",
+        "terminal-context-menu-row-file-preview-disabled",
     ] {
         assert!(
             cx.debug_bounds(selector).is_some(),
@@ -2614,14 +2618,12 @@ fn server_pane_context_menu_offers_paste_without_local_content_actions(cx: &mut 
         );
     }
     for selector in [
-        "terminal-context-menu-row-open-link-enabled",
-        "terminal-context-menu-row-file-preview-disabled",
         "terminal-context-menu-row-open-link-disabled",
         "terminal-context-menu-row-file-preview-enabled",
     ] {
         assert!(
             cx.debug_bounds(selector).is_none(),
-            "{selector} requires local content support"
+            "{selector} has no eligible native action"
         );
     }
     cx.write_to_clipboard(ClipboardItem::new_string("menu paste".into()));
