@@ -340,6 +340,8 @@ fn running_multichunk_animation_and_another_image_both_display_while_the_server_
     let mut displayed_animation = None;
     let mut static_visible = false;
     let mut generations = std::collections::HashSet::new();
+    let mut advanced_before_request = false;
+    let mut stale_first_request = false;
     while Instant::now() < deadline && (completed < 3 || !static_visible) {
         let reply = host.request([1; 32], lease.connection, Request::Poll { lease });
         assert!(
@@ -360,13 +362,55 @@ fn running_multichunk_animation_and_another_image_both_display_while_the_server_
                 .update(screen.graphics.take(), screen.alternate)
                 .unwrap();
         }
-        if graphics
+        let mut requested_offset = None;
+        let painted = graphics
             .poll(lease, &mut |request| {
+                if let Request::GraphicsChunk { offset, .. } = request {
+                    requested_offset = Some(*offset);
+                }
+                if let Request::GraphicsChunk {
+                    image, offset: 0, ..
+                } = request
+                    && image.image_id == 10
+                    && !advanced_before_request
+                {
+                    // The first chunk can race a newer animation manifest before the server
+                    // pins its source. Witness that real transition instead of relying on load.
+                    loop {
+                        if let Reply::Screen(screen) =
+                            host.request([1; 32], lease.connection, Request::Poll { lease })
+                            && screen.graphics.as_ref().is_some_and(|manifest| {
+                                manifest.as_ref().is_ok_and(|manifest| {
+                                    manifest.images.iter().any(|current| {
+                                        current.key.image_id == 10 && current.key != *image
+                                    })
+                                })
+                            })
+                        {
+                            advanced_before_request = true;
+                            break;
+                        }
+                        assert!(Instant::now() < deadline, "animation did not advance");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
                 Ok(host.request([1; 32], lease.connection, request.clone()))
             })
-            .unwrap()
-            .unwrap()
-        {
+            .unwrap();
+        let painted = match painted {
+            Ok(painted) => painted,
+            Err(Error::Missing) => {
+                assert_eq!(
+                    requested_offset,
+                    Some(0),
+                    "a pinned transfer lost its source"
+                );
+                stale_first_request = true;
+                false
+            }
+            Err(error) => panic!("animation transfer failed: {error:?}"),
+        };
+        if painted {
             let snapshot = graphics.snapshot();
             for image in snapshot.images.iter() {
                 if image.key.image_id == 20 {
@@ -393,6 +437,10 @@ fn running_multichunk_animation_and_another_image_both_display_while_the_server_
     }
     host.shutdown().unwrap();
     std::fs::remove_file(path).unwrap();
+    assert!(
+        stale_first_request,
+        "the first request race was not exercised"
+    );
     assert!(
         generations.len() >= 2,
         "the animation must keep advancing during download: {} keys, {completed} completions",

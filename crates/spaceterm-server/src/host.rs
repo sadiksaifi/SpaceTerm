@@ -706,17 +706,24 @@ mod startup_tests {
             data.write(&record).unwrap();
             let _child = fixture.start_test("host::startup_tests::shared_transport_child", false);
             let deadline = Instant::now() + Duration::from_secs(3);
-            while !fixture.paths.socket().exists() {
-                assert!(
-                    Instant::now() < deadline,
-                    "shared transport server did not start"
-                );
-                std::thread::sleep(Duration::from_millis(10));
-            }
             let first = SharedPaneConnection::default();
             let second = SharedPaneConnection::default();
             let open = |device: &ring::signature::Ed25519KeyPair| {
-                let mut stream = UnixStream::connect(fixture.paths.socket()).unwrap();
+                let mut stream = loop {
+                    match UnixStream::connect(fixture.paths.socket()) {
+                        Ok(stream) => break stream,
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::NotFound
+                                    | std::io::ErrorKind::ConnectionRefused
+                            ) && Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("shared transport listener unavailable: {error}"),
+                    }
+                };
                 protocol::authenticate_client(&mut stream, device, &fixture.pin, &[major])?;
                 PaneConnection::negotiate(stream)
             };

@@ -2538,14 +2538,18 @@ fn selection_stays_anchored_when_output_moves_scrollback_pages() {
 }
 
 #[test]
-fn pixel_only_resize_updates_backing_geometry_without_a_grid_presentation() {
+fn pixel_only_resize_publishes_geometry_without_changing_grid_content() {
     let mut emulator = emulator(10, 2);
     let before = emulator.snapshot().unwrap().unwrap();
 
     emulator.resize(geometry(10, 2, 9.0, 20.0)).unwrap();
 
-    assert!(emulator.snapshot().unwrap().is_none());
-    assert_eq!(emulator.presentation_generation, before.generation);
+    let resized = emulator.snapshot().unwrap().unwrap();
+    assert!(resized.generation > before.generation);
+    assert_eq!(resized.size, before.size);
+    assert_eq!(resized.cell_pixels, (9, 20));
+    assert!(resized.damage.resize);
+    assert_eq!(resized.rows, before.rows);
     assert_eq!(
         emulator.mouse_encoder_size(),
         MouseEncoderSize {
@@ -2562,7 +2566,7 @@ fn pixel_only_resize_updates_backing_geometry_without_a_grid_presentation() {
 }
 
 #[test]
-fn resize_releases_synchronized_output_without_spurious_grid_damage() {
+fn resize_publishes_geometry_and_releases_synchronized_output() {
     let mut emulator = emulator(10, 2);
     let _ = emulator.snapshot().unwrap().unwrap();
     emulator.feed(b"\x1b[?2026hpending");
@@ -2572,7 +2576,8 @@ fn resize_releases_synchronized_output_without_spurious_grid_damage() {
     let released = emulator.snapshot().unwrap().unwrap();
 
     assert!(row_text(&released, 0).starts_with("pending"));
-    assert!(!released.damage.resize);
+    assert!(released.damage.resize);
+    assert_eq!(released.cell_pixels, (9, 20));
 }
 
 #[test]

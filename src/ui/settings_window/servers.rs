@@ -1,7 +1,6 @@
 //! The Servers section: the SpaceTerm Server for this account, this device's pairing with it, its
-//! authenticated status, and the service that runs it. On macOS the service runs while the person
-//! is logged in. On Linux it starts at boot and keeps running after logout once the account's
-//! lingering is on. [`crate::local_server`] owns setup, pairing, authentication, and the service.
+//! authenticated status, and the service that runs it. The service supplies its startup policy.
+//! [`crate::local_server`] owns setup, pairing, authentication, and the service.
 //!
 //! Every build offers the section for its own identity's server. Opening Settings asks the server
 //! nothing. Presenting the section checks the saved pairing, reads the service, and lists the
@@ -20,6 +19,7 @@ use spaceterm_ui::{
 
 use super::SettingsWindow;
 use crate::application_identity::ApplicationIdentity;
+pub(super) use crate::local_server::service::ServiceStartup;
 use crate::local_server::service::{
     LingerAuthorization, RetainedInstallation, Service, ServiceStatus,
 };
@@ -126,11 +126,7 @@ impl ServerServiceControl for Service {
     }
 
     fn startup(&self) -> ServiceStartup {
-        if cfg!(target_os = "linux") {
-            ServiceStartup::AtBoot
-        } else {
-            ServiceStartup::AtLogin
-        }
+        Service::startup(self)
     }
 
     fn authorize_startup(&self) -> Result<(), ServerError> {
@@ -138,18 +134,6 @@ impl ServerServiceControl for Service {
         // only. No SpaceTerm code runs as root.
         Service::enable_linger(self, LingerAuthorization::Desktop)
     }
-}
-
-/// When the platform's service starts the server, which decides what the row promises.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) enum ServiceStartup {
-    /// A macOS LaunchAgent: it starts at login and stops at logout. Installing needs no
-    /// administrator password.
-    #[default]
-    AtLogin,
-    /// A Linux systemd user service: it starts at boot and survives logout only while the
-    /// account's lingering is on, which takes one administrator authorization to turn on.
-    AtBoot,
 }
 
 /// The local server a Settings window presents, and the service that runs it where the platform
@@ -400,7 +384,7 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
                 }
                 // Only the service's explicit Start can ask for this authorization.
                 ServerError::AuthorizationRequired => guidance(
-                    "Linux needs an administrator password before the server can run at startup \
+                    "Your computer needs an administrator password before the server can run at startup \
                      and after you log out. Choose Start Server for the background service below \
                      to continue.",
                 ),
@@ -526,7 +510,7 @@ fn failure(error: ServerError) -> (&'static str, &'static str, Option<LocalServe
 }
 
 /// The connection row's guidance once the person has stopped the server. A stopped server stays
-/// stopped through login on macOS and boot on Linux alike.
+/// stopped through account login and computer startup alike.
 const STOPPED_GUIDANCE: &str = "You stopped the server. It stays stopped, even after you \
                                 restart the computer, until you start it.";
 
@@ -622,11 +606,11 @@ impl ServiceAction {
             Self::Restart => Some("Ends the server's Terminal Sessions. SpaceTerm asks first."),
             Self::Uninstall => Some("Removes the service. SpaceTerm asks first."),
             Self::AuthorizeInstall => Some(
-                "SpaceTerm explains the change first. Linux then asks for an administrator \
+                "SpaceTerm explains the change first. Your computer then asks for an administrator \
                  password, and SpaceTerm installs and starts the server.",
             ),
             Self::AuthorizeStart => Some(
-                "SpaceTerm explains the change first. Linux then asks for an administrator \
+                "SpaceTerm explains the change first. Your computer then asks for an administrator \
                  password, and SpaceTerm starts the server.",
             ),
             Self::Check | Self::Install | Self::Start => None,
@@ -812,7 +796,7 @@ impl AuthorizationPrompt {
             message: "Let your account\u{2019}s services start at boot and keep running after you \
                       log out?",
             detail: SharedString::from(format!(
-                "Linux asks for an administrator password to turn on lingering for your \
+                "Your computer asks for an administrator password to turn on lingering for your \
                  account. Lingering applies to every service your account runs, and \
                  uninstalling the server leaves it on. {then} If you cancel here or in the \
                  password prompt, nothing changes."
@@ -1006,7 +990,7 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                             SharedString::from(format!(
                                 "{} is verified and ready to install. The server then starts for \
                                  your account when the computer starts and keeps running after \
-                                 you log out or quit SpaceTerm. If Linux needs an administrator \
+                                 you log out or quit SpaceTerm. If your computer needs an administrator \
                                  password to allow that, SpaceTerm asks you first.",
                                 only.label
                             )),
@@ -1029,7 +1013,7 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
                         _ if at_boot => guidance(
                             "Choose a verified server version from Install. It starts for your \
                              account when the computer starts and keeps running after you log \
-                             out or quit SpaceTerm. If Linux needs an administrator password to \
+                             out or quit SpaceTerm. If your computer needs an administrator password to \
                              allow that, SpaceTerm asks you first.",
                         ),
                         _ => guidance(
@@ -1135,7 +1119,7 @@ fn authorization_caption(
     let reason = if pending.declined {
         "Authorization did not complete, so nothing changed."
     } else {
-        "Linux needs an administrator password before the server can start at boot and keep \
+        "Your computer needs an administrator password before the server can start at boot and keep \
          running after you log out."
     };
     let now = match phase {
@@ -1680,7 +1664,7 @@ impl SettingsWindow {
                 }
                 (ServiceAction::AuthorizeInstall, _, Some(build)) => {
                     Some(SharedString::from(format!(
-                        "SpaceTerm explains the change first. Linux then asks for an \
+                        "SpaceTerm explains the change first. Your computer then asks for an \
                          administrator password, and SpaceTerm installs {build} and starts the \
                          server."
                     )))
@@ -1895,7 +1879,7 @@ pub(super) mod testing {
         /// The refusal the next changing operation returns, leaving the status unchanged.
         refusal: Mutex<Option<ServerError>>,
         startup: ServiceStartup,
-        /// Whether the account may run services at boot and after logout. A Linux service refuses
+        /// Whether the account may run services at boot and after logout. An account service refuses
         /// to start the server until it may.
         authorized: Mutex<bool>,
         prompt: Mutex<Prompt>,
@@ -1909,9 +1893,9 @@ pub(super) mod testing {
             Self::with_startup(status, ServiceStartup::AtLogin)
         }
 
-        /// A Linux systemd user service on an account whose lingering is off, so starting the
+        /// An account service on an account whose lingering is off, so starting the
         /// server waits for startup authorization.
-        pub(in crate::ui::settings_window) fn linux(
+        pub(in crate::ui::settings_window) fn with_boot_startup(
             status: Result<ServiceStatus, ServerError>,
         ) -> Arc<Self> {
             Self::with_startup(status, ServiceStartup::AtBoot)

@@ -2379,7 +2379,9 @@ mod tests {
             lease,
             1,
             text_key(
-                "stty -echo; stty size; stty raw -echo; printf '\\033[?996n'; dd bs=1 count=9 2>/dev/null | od -An -tx1 | tr -d ' \\n'; printf '\\r\\n'",
+                // Keep terminal-mode setup, readiness, query and read in one process. Starting
+                // another foreground reader after the query can reset or flush its queued reply.
+                r#"python3 -c 'import os,sys,tty,fcntl,struct,termios; rows,cols,_,_=struct.unpack("HHHH",fcntl.ioctl(0,termios.TIOCGWINSZ,b"\0"*8)); tty.setraw(0,when=termios.TCSANOW); os.write(1,b"\033[2J\033[HSIZE:%d %d\r\nQUERY-READY\r\n"%(rows,cols)); sys.stdin.buffer.read(1); os.write(1,b"\033[?996n"); reply=sys.stdin.buffer.read(9); os.write(1,b"APPEARANCE:"+reply.hex().encode()+b"\r\n")'"#,
                 false,
             ),
         );
@@ -2400,6 +2402,26 @@ mod tests {
         );
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
+            if let Reply::Screen(screen) = host.request([1; 32], [1; 32], Request::Poll { lease })
+                && screen.rows.iter().any(|row| {
+                    row.iter()
+                        .map(|cell| cell.text.as_str())
+                        .collect::<String>()
+                        .trim_end()
+                        == "QUERY-READY"
+                })
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "appearance query reader was not ready"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        input(&mut host, lease, 1, text_key(" ", false));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
             if let Reply::Screen(screen) = host.request([1; 32], [1; 32], Request::Poll { lease }) {
                 let rows = screen
                     .rows
@@ -2412,11 +2434,11 @@ mod tests {
                     .collect::<Vec<_>>();
                 if rows
                     .iter()
-                    .any(|row| row.trim_end() == "1b5b3f3939373b326e")
+                    .any(|row| row.trim_end() == "APPEARANCE:1b5b3f3939373b326e")
                 {
                     assert_eq!((screen.columns, screen.rows.len()), (91, 31));
                     assert_eq!(screen.background, [240; 3]);
-                    assert!(rows.iter().any(|row| row.trim_end() == "31 91"));
+                    assert!(rows.iter().any(|row| row.trim_end() == "SIZE:31 91"));
                     break;
                 }
             }
@@ -2867,7 +2889,32 @@ mod tests {
         host.shutdown().unwrap();
     }
 
+    #[cfg(feature = "native-tests")]
+    #[test]
+    fn repeated_real_zsh_shutdown_confirms_owned_process_cleanup() {
+        for attempt in 0..64 {
+            let mut host = host_with_shell("/bin/zsh");
+            let lease = attach(&mut host, 1, true);
+            command(
+                &mut host,
+                1,
+                lease,
+                "stty -echo; printf '\\033[2J\\033[HCLEANUP-READY\\r\\n'",
+            );
+            await_text(&mut host, 1, lease, "CLEANUP-READY");
+            assert_eq!(
+                host.shutdown(),
+                Ok(()),
+                "native zsh cleanup attempt {attempt}"
+            );
+        }
+    }
+
     pub(super) fn host() -> DevelopmentPaneHost {
+        host_with_shell("/bin/sh")
+    }
+
+    fn host_with_shell(shell: &str) -> DevelopmentPaneHost {
         let filesystem = local_filesystem();
         let directory = filesystem
             .validate_directory(&std::env::temp_dir())
@@ -2875,7 +2922,7 @@ mod tests {
         let factory = NativeTerminalSessionFactory::new(
             native_pty_factory(),
             ShellLaunchPlanner::new(
-                "/bin/sh".into(),
+                shell.into(),
                 std::path::PathBuf::new(),
                 ShellIntegrationMode::Disabled,
                 ShellEnvironment::default(),

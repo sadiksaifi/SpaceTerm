@@ -75,7 +75,7 @@ fn old_scrollback_find_and_multichunk_copy_use_the_retained_terminal_content() {
         1,
         lease,
         &format!(
-            "stty -echo; printf '\\033[2J\\033[H'; i=0; while [ $i -lt 2000 ]; do printf 'retained-%04d-abcdefghijklmnopqrstuvwxyz\\n' $i; i=$((i+1)); done; printf 'FINISHED\\n'; while [ ! -f {quoted_gate} ]; do sleep 0.01; done; i=0; while [ $i -lt 200 ]; do printf 'live-%s\\n' \"$i\"; i=$((i+1)); sleep 0.02; done"
+            "stty -echo; printf '\\033[2J\\033[H'; i=0; while [ $i -lt 2000 ]; do printf 'retained-%04d-abcdefghijklmnopqrstuvwxyz\\n' $i; i=$((i+1)); done; printf 'FINISHED\\n'; while [ ! -f {quoted_gate} ]; do sleep 0.01; done; i=0; while [ -f {quoted_gate} ]; do printf 'live-%s\\n' \"$i\"; i=$((i+1)); sleep 0.02; done"
         ),
     );
     screen(&mut host, lease, |s| {
@@ -158,23 +158,53 @@ fn old_scrollback_find_and_multichunk_copy_use_the_retained_terminal_content() {
         pane::PointerPhase::Release,
         400.0,
     );
-    std::fs::write(&gate, []).unwrap();
-    // Release can publish another generation. Drain it before requesting a prepared copy.
+    // Fence the release on the existing worker barrier before preparing the copy.
     let deadline = Instant::now() + Duration::from_secs(10);
-    let mut generation = selected.reading.as_ref().unwrap().selection_revision;
+    let mut generation = loop {
+        match host.request([1; 32], lease.connection, Request::ReadingStatus { lease }) {
+            Reply::ReadingReady {
+                selection_revision,
+                selection_present: true,
+                ..
+            } => break selection_revision,
+            Reply::SelectionPending => {}
+            reply => panic!("selection release refused: {reply:?}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "selection release did not complete"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let initial_rows = selected.reading.as_ref().unwrap().total_rows;
     let mut bytes = Vec::new();
     let mut chunks = 0;
-    let mut intervening_screens = 0;
+    let mut output_started = false;
+    let mut output_during_transfer = false;
     loop {
-        if let Reply::Screen(s) = host.request([1; 32], lease.connection, Request::Poll { lease }) {
-            let current = s.reading.as_ref().unwrap().selection_revision;
+        let update = if !bytes.is_empty() && !output_started {
+            // Start real output only after receiving a partial copy, and witness it before
+            // requesting the remaining chunks. Transfer speed cannot skip the interleaving.
+            std::fs::write(&gate, []).unwrap();
+            output_started = true;
+            Some(screen(&mut host, lease, |s| {
+                s.reading.as_ref().unwrap().total_rows > initial_rows
+            }))
+        } else if let Reply::Screen(s) =
+            host.request([1; 32], lease.connection, Request::Poll { lease })
+        {
+            Some(s)
+        } else {
+            None
+        };
+        if let Some(s) = update {
+            let reading = s.reading.as_ref().unwrap();
+            output_during_transfer |= !bytes.is_empty() && reading.total_rows > initial_rows;
+            let current = reading.selection_revision;
             if generation != current {
                 generation = current;
                 bytes.clear();
                 chunks = 0;
-                intervening_screens = 0;
-            } else if !bytes.is_empty() {
-                intervening_screens += 1;
             }
         }
         match host.request(
@@ -201,7 +231,7 @@ fn old_scrollback_find_and_multichunk_copy_use_the_retained_terminal_content() {
                     break;
                 }
             }
-            Reply::SelectionPending => {}
+            Reply::SelectionPending | Reply::Refused(Refusal::Stale) => {}
             reply => panic!("selection refused: {reply:?}"),
         }
         assert!(Instant::now() < deadline, "complete selection missing");
@@ -210,7 +240,7 @@ fn old_scrollback_find_and_multichunk_copy_use_the_retained_terminal_content() {
     let copy: pane::reading::Selection = serde_json::from_slice(&bytes).unwrap();
     assert!(chunks > 2);
     assert!(
-        intervening_screens > 0,
+        output_during_transfer,
         "output must continue during this transfer"
     );
     assert!(

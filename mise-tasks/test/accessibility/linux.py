@@ -310,6 +310,12 @@ class Input:
         else:
             self.key(0xFF08)
 
+    def keyboard_barrier(self):
+        if self.backend == "x11":
+            run(["xdotool", "key", "--clearmodifiers", "Shift_R"])
+        else:
+            self.key(0xFFE2)
+
     def command(self, command, *, wait_for_echo=False):
         if self.backend == "x11":
             run(["xdotool", "type", "--clearmodifiers", "--delay", "2", "--", command])
@@ -986,6 +992,22 @@ def start_orca(processes, probe, output, startup, readiness):
     return child, stream, proof
 
 
+KEYBOARD_WORKLOAD = """import pathlib, sys, termios
+directory = pathlib.Path(sys.argv[1])
+original = termios.tcgetattr(sys.stdin)
+echo = termios.tcgetattr(sys.stdin)
+echo[3] |= termios.ECHO | termios.ICANON
+try:
+    termios.tcsetattr(sys.stdin, termios.TCSANOW, echo)
+    print("\\r\\nKEYBOARD-READY", flush=True)
+    (directory / "keyboard.ready").touch()
+    sys.stdin.readline()
+finally:
+    termios.tcsetattr(sys.stdin, termios.TCSANOW, original)
+(directory / "keyboard.done").touch()
+"""
+
+
 PERFORMANCE_WORKLOAD = """import pathlib, sys, time
 directory, phase = pathlib.Path(sys.argv[1]), sys.argv[2]
 (directory / (phase + ".ready")).touch()
@@ -1649,6 +1671,27 @@ def private_session(args):
             lambda: orca_terminal_script() and orca_stream.terminal_focus_processed,
         )
         report["tree"] = validate_tree(probe, input_driver, output, orca_fixture_speech, readiness)
+        # A shell line editor can erase and redraw a character after its first publication.
+        # Kernel canonical echo stays visible until the real key-release speech check finishes.
+        keyboard = output / "keyboard.py"
+        keyboard.write_text(KEYBOARD_WORKLOAD)
+        input_driver.command(
+            f"python3 {shlex.quote(str(keyboard))} {shlex.quote(str(output))}",
+            wait_for_echo=True,
+        )
+        probe.wait(
+            lambda: (output / "keyboard.ready").exists() and probe.contains("KEYBOARD-READY"),
+            "keyboard_reader_not_ready",
+        )
+        # Native publication and Orca's keyboard pipeline run independently. Fence the earlier
+        # command keys with a harmless modifier release processed by the real reader.
+        before = orca_stream.keyboard_barriers
+        input_driver.keyboard_barrier()
+        probe.wait(
+            lambda: orca_stream.keyboard_barriers > before and orca_stream.active_terminal_script,
+            "orca_keyboard_pipeline_not_ready",
+        )
+        report["keyboard_pipeline_barrier"] = True
         probe.begin("keyboard_echo")
         typed_text = probe.terminal.queryText()
         typed_caret = typed_text.caretOffset
@@ -1683,8 +1726,20 @@ def private_session(args):
             )
 
         probe.wait(orca_character_speech, "orca_typed_character_speech_missing")
+        report["keyboard_input"] = dict(probe.counts)
         input_driver.backspace()
+        probe.wait(
+            lambda: (
+                typed_text.caretOffset == typed_caret
+                and not typed_text.getText(
+                    typed_caret, min(typed_caret + 1, typed_text.characterCount)
+                ).strip()
+            ),
+            "keyboard_erase_not_published",
+        )
         report["keyboard_echo"] = probe.end()
+        input_driver.command("")
+        probe.wait(lambda: (output / "keyboard.done").exists(), "keyboard_reader_not_finished")
         report["churn"] = {}
         measure_churn(probe, input_driver, output, report["churn"])
         require(orca_process.poll() is None, "orca_process_exited")
@@ -1705,6 +1760,11 @@ def private_session(args):
         )
         report["orca"] = orca_stream.summary()
         require(report["orca"]["speech_backend_initialized"], "orca_speech_backend_unavailable")
+        require(
+            not report["orca"]["process_output"].get("invalid_cache_add_signature", 0)
+            and not report["orca"]["process_output"].get("invalid_cache_remove_signature", 0),
+            "orca_invalid_cache_signal_signature",
+        )
         processes.stop(orca_process)
         orca_stream.close()
         orca_stream = None

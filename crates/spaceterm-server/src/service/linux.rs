@@ -198,6 +198,9 @@ fn property<'a>(observation: &'a [(String, String)], key: &str) -> Result<&'a st
         .ok_or(ServerError::ServiceUnavailable)
 }
 impl Supervisor for UserService {
+    fn startup(&self) -> ServiceStartup {
+        ServiceStartup::AtBoot
+    }
     fn check(&self, runtime: &Path, removing: bool) -> Result<(), ServerError> {
         self.registration()
             .check(&self.contents(runtime)?, removing)?;

@@ -32,6 +32,16 @@ pub enum LingerAuthorization {
     Desktop,
 }
 
+/// When the owning account's service manager can automatically start this server.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ServiceStartup {
+    /// Starts at account login and stops at logout.
+    #[default]
+    AtLogin,
+    /// Starts at boot and survives logout after account startup authorization.
+    AtBoot,
+}
+
 /// The retained policy and the service manager's current process observation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ServiceStatus {
@@ -77,6 +87,7 @@ pub struct Service {
 }
 
 trait Supervisor: Send + Sync {
+    fn startup(&self) -> ServiceStartup;
     fn check(&self, runtime: &Path, removing: bool) -> Result<(), ServerError>;
     fn install(&self, runtime: &Path) -> Result<(), ServerError>;
     fn prepare_start(&self) -> Result<(), ServerError>;
@@ -90,6 +101,10 @@ trait Supervisor: Send + Sync {
 }
 
 impl Service {
+    /// The startup policy of the selected service manager; reads no service or credentials.
+    pub fn startup(&self) -> ServiceStartup {
+        self.supervisor.startup()
+    }
     pub fn for_identity(identity: &str) -> Result<Self, ServerError> {
         let paths = Paths::for_identity(identity)?;
         #[cfg(target_os = "macos")]
@@ -677,6 +692,9 @@ mod tests {
         stop_data: Option<PathBuf>,
     }
     impl Supervisor for TestSupervisor {
+        fn startup(&self) -> ServiceStartup {
+            ServiceStartup::AtLogin
+        }
         fn check(&self, _: &Path, _: bool) -> Result<(), ServerError> {
             if self.stop_data.is_some() {
                 Ok(())

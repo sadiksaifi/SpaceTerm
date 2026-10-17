@@ -58,6 +58,9 @@ impl LaunchAgent {
     }
 }
 impl Supervisor for LaunchAgent {
+    fn startup(&self) -> ServiceStartup {
+        ServiceStartup::AtLogin
+    }
     fn install(&self, runtime: &Path) -> Result<(), ServerError> {
         self.registration().install(&self.contents(runtime)?)
     }

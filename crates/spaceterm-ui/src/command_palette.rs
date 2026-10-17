@@ -3371,7 +3371,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                 let message = self.empty_status.clone();
                 move |builder| {
                     let mut status = accesskit::Node::new(accesskit::Role::Status);
-                    // AT-SPI announces name changes; macOS announces live-region values.
+                    // Native adapters announce either name changes or live-region values.
                     status.set_label(message.as_ref());
                     status.set_value(message.as_ref());
                     status.set_live(accesskit::Live::Polite);

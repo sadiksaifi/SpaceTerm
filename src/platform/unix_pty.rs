@@ -329,6 +329,20 @@ impl ChildTermination {
 
         target.force()?;
         self.forced.store(true, Ordering::Release);
+        // Signal delivery does not prove that every owned process has exited. Descendants can
+        // outlive the reaped leader while the kernel schedules forced exit.
+        let forced_deadline = Instant::now() + FORCED_SHUTDOWN_TIMEOUT;
+        loop {
+            if !target.is_alive()? {
+                target_slot.take();
+                break;
+            }
+            let remaining = forced_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            thread::sleep(CHILD_EXIT_POLL_INTERVAL.min(remaining));
+        }
         Ok(ShutdownDisposition::Forced)
     }
 
@@ -495,6 +509,12 @@ struct SpawnedPty {
     master: Box<dyn MasterPty + Send>,
     reader: Option<Box<dyn Read + Send>>,
     writer: Box<dyn Write + Send>,
+    // Fields drop in declaration order. Close the PTY handles before waiting for a child whose
+    // kernel exit can be waiting for terminal teardown.
+    process: SpawnedChild,
+}
+
+struct SpawnedChild {
     child: Option<Box<dyn Child + Send + Sync>>,
     termination: Arc<ChildTermination>,
 }
@@ -546,7 +566,9 @@ impl SpawnedPty {
             .ok_or_else(|| io::Error::other("PTY master descriptor is unavailable"))?;
         read_termios(descriptor).map(|termios| termios_hidden_input(&termios))
     }
+}
 
+impl SpawnedChild {
     fn wait_for_child(&mut self, timeout: Duration) -> io::Result<ShellExit> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -771,6 +793,7 @@ impl NativePtyAdapter for SpawnedPty {
 
     fn wait_for_exit(&mut self, timeout: Duration) -> Result<NativePtyExit, NativePtyWaitFailure> {
         let exit = self
+            .process
             .wait_for_child(timeout)
             .map_err(|error| NativePtyWaitFailure::new(error.kind()))?;
         Ok(native_exit(exit))
@@ -802,7 +825,7 @@ impl NativePtyTermination for PtyTerminator {
     }
 }
 
-impl Drop for SpawnedPty {
+impl Drop for SpawnedChild {
     fn drop(&mut self) {
         self.cleanup_child();
     }
@@ -935,14 +958,16 @@ fn spawn_command_in_pty(
             return Err(PtyError::CloneReader(source));
         }
     };
-    let reader: Box<dyn Read + Send> = Box::new(PtyReader { reader, readiness });
-    let writer = match pair.master.take_writer() {
-        Ok(writer) => writer,
+    // portable-pty's writer sends newline and EOF on drop. Closing a Terminal Session must
+    // only close its descriptor, without submitting a pending command or confirmation.
+    let writer: Box<dyn Write + Send> = match readiness.try_clone() {
+        Ok(writer) => Box::new(std::fs::File::from(writer)),
         Err(source) => {
             terminate_after_startup_failure(child.as_mut());
-            return Err(PtyError::TakeWriter(source));
+            return Err(PtyError::TakeWriter(source.into()));
         }
     };
+    let reader: Box<dyn Read + Send> = Box::new(PtyReader { reader, readiness });
 
     let process_group = child
         .process_id()
@@ -978,8 +1003,10 @@ fn spawn_command_in_pty(
             master: pair.master,
             reader: Some(Box::new(reader)),
             writer,
-            child: Some(child),
-            termination,
+            process: SpawnedChild {
+                child: Some(child),
+                termination,
+            },
         },
         terminator,
     ))
@@ -1226,6 +1253,44 @@ mod tests {
     }
 
     #[test]
+    fn closing_a_native_pty_does_not_submit_pending_canonical_input() {
+        const NAME: &str = "platform::unix_pty::tests::closing_a_native_pty_does_not_submit_pending_canonical_input";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _lock = lock_real_pty_test();
+        let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+        let accepted = fixture.path().join("unrequested-input");
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args([
+            "-c",
+            "trap '' HUP TERM; stty icanon -echo; printf READY; \
+             IFS= read -r line || exit; printf 'ACCEPTED:%s:READY-TO-CLOSE' \"$line\"; \
+             if IFS= read -r line; then printf '%s' \"$line\" > \"$1\"; fi; exec sleep 30",
+            "spaceterm-close-check",
+        ]);
+        command.arg(&accepted);
+        let (mut pty, terminator) =
+            spawn_command_in_pty(test_host(), PtySize::default(), command).unwrap();
+        let mut reader = pty.take_reader().unwrap();
+        read_output_marker(&mut reader, b"READY");
+        pty.write_all(b"confirmed\n").unwrap();
+        read_output_marker(&mut reader, b"ACCEPTED:confirmed:READY-TO-CLOSE");
+        pty.write_all(b"unsubmitted").unwrap();
+
+        // Keep a master reader alive so closing the owner cannot hide injected input behind
+        // terminal hangup. The child ignores graceful signals and must be forcefully reaped.
+        drop(pty);
+        drop(reader);
+
+        assert!(terminator.cleanup_confirmed());
+        assert!(
+            !accepted.exists(),
+            "closing the PTY submitted a line the user never confirmed"
+        );
+    }
+
+    #[test]
     #[ignore = "runs only as a child of the controlled PTY integration tests"]
     fn controlled_pty_child_reports_runtime_configuration() {
         if env::var_os(CONTROLLED_CHILD_ENV).is_none() {
@@ -1313,7 +1378,7 @@ mod tests {
         pty.write_all(CONTROLLED_CHILD_ACK.as_bytes()).unwrap();
         pty.flush().unwrap();
         reader.read_to_string(&mut output).unwrap();
-        let status = pty.wait_for_child(Duration::from_secs(2)).unwrap();
+        let status = pty.process.wait_for_child(Duration::from_secs(2)).unwrap();
         assert!(
             status.status.success(),
             "controlled PTY child failed ({}): {output}",
@@ -1465,7 +1530,7 @@ mod tests {
 
         let started = Instant::now();
         terminator.terminate().unwrap();
-        pty.cleanup_child();
+        pty.process.cleanup_child();
         let elapsed = started.elapsed();
 
         assert!(
@@ -1476,7 +1541,7 @@ mod tests {
             elapsed <= GRACEFUL_SHUTDOWN_TIMEOUT + FORCED_SHUTDOWN_TIMEOUT + Duration::from_secs(1),
             "forced shutdown exceeded its bound: {elapsed:?}"
         );
-        assert!(pty.termination.forced.load(Ordering::Acquire));
+        assert!(pty.process.termination.forced.load(Ordering::Acquire));
         assert_process_disappears(leader);
         assert_process_disappears(child);
     }
@@ -1515,6 +1580,7 @@ mod tests {
 
         let (leader, child) = read_process_report(&mut reader, "SPACETERM_FOREGROUND");
         let shell_process_group = pty
+            .process
             .termination
             .lock_target()
             .as_ref()
@@ -1527,8 +1593,8 @@ mod tests {
         });
 
         terminator.terminate().unwrap();
-        pty.cleanup_child();
-        assert!(pty.termination.forced.load(Ordering::Acquire));
+        pty.process.cleanup_child();
+        assert!(pty.process.termination.forced.load(Ordering::Acquire));
         drop(pty);
         drain.join().unwrap().unwrap();
 
@@ -1577,6 +1643,7 @@ mod tests {
         let (leader, child) = read_process_report(&mut reader, "SPACETERM_BACKGROUND");
         std::fs::remove_file(&readiness).unwrap();
         let shell_process_group = pty
+            .process
             .termination
             .lock_target()
             .as_ref()
@@ -1584,6 +1651,7 @@ mod tests {
             .unwrap();
         assert_ne!(leader, shell_process_group);
         let session = pty
+            .process
             .termination
             .lock_target()
             .as_ref()
@@ -1600,8 +1668,8 @@ mod tests {
         });
 
         terminator.terminate().unwrap();
-        pty.cleanup_child();
-        assert!(pty.termination.forced.load(Ordering::Acquire));
+        pty.process.cleanup_child();
+        assert!(pty.process.termination.forced.load(Ordering::Acquire));
         drop(pty);
         drain.join().unwrap().unwrap();
 
@@ -1785,8 +1853,8 @@ mod tests {
             io::copy(&mut reader, &mut sink)
         });
 
-        pty.cleanup_child();
-        assert!(pty.termination.forced.load(Ordering::Acquire));
+        pty.process.cleanup_child();
+        assert!(pty.process.termination.forced.load(Ordering::Acquire));
         drop(pty);
         drain.join().unwrap().unwrap();
 
@@ -1825,18 +1893,19 @@ mod tests {
         let (leader, child) = read_process_report(&mut reader, "SPACETERM_LATE_CLOSE");
         drop(reader);
         let session = pty
+            .process
             .termination
             .lock_target()
             .as_ref()
             .and_then(|target| target.session)
             .unwrap();
 
-        let exit = pty.wait_for_child(Duration::from_secs(1)).unwrap();
+        let exit = pty.process.wait_for_child(Duration::from_secs(1)).unwrap();
         assert_eq!(exit.shutdown, ShutdownDisposition::NotRequested);
         let child_identity = test_host().observe_process(child).unwrap().identity;
 
         terminator.terminate().unwrap();
-        pty.cleanup_child();
+        pty.process.cleanup_child();
         drop(pty);
 
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -1906,10 +1975,10 @@ mod tests {
 
         let started = Instant::now();
         terminator.terminate().unwrap();
-        pty.cleanup_child();
+        pty.process.cleanup_child();
 
         assert!(started.elapsed() < GRACEFUL_SHUTDOWN_TIMEOUT);
-        assert!(!pty.termination.forced.load(Ordering::Acquire));
+        assert!(!pty.process.termination.forced.load(Ordering::Acquire));
         assert_process_disappears(leader);
         assert_process_disappears(child);
     }
@@ -1967,7 +2036,17 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct TestMasterPty;
+    struct TestMasterPty {
+        closed: Option<Arc<AtomicBool>>,
+    }
+
+    impl Drop for TestMasterPty {
+        fn drop(&mut self) {
+            if let Some(closed) = &self.closed {
+                closed.store(true, Ordering::Release);
+            }
+        }
+    }
 
     impl MasterPty for TestMasterPty {
         fn resize(&self, _size: PtySize) -> Result<(), AnyError> {
@@ -2381,14 +2460,67 @@ mod tests {
         let terminator = PtyTerminator::new(Arc::clone(&termination));
         (
             SpawnedPty {
-                master: Box::new(TestMasterPty),
+                master: Box::new(TestMasterPty::default()),
                 reader: Some(Box::new(io::empty())),
                 writer: Box::new(io::sink()),
-                child: Some(child),
-                termination,
+                process: SpawnedChild {
+                    child: Some(child),
+                    termination,
+                },
             },
             terminator,
         )
+    }
+
+    #[test]
+    fn pty_handles_close_before_waiting_for_a_child_that_is_draining_its_terminal() {
+        #[derive(Clone, Debug)]
+        struct DrainingChild {
+            master_closed: Arc<AtomicBool>,
+            reaped: Arc<AtomicBool>,
+        }
+        impl ChildKiller for DrainingChild {
+            fn kill(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+            fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+                Box::new(self.clone())
+            }
+        }
+        impl Child for DrainingChild {
+            fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+                if self.master_closed.load(Ordering::Acquire) {
+                    self.reaped.store(true, Ordering::Release);
+                    Ok(Some(ExitStatus::with_exit_code(0)))
+                } else {
+                    Ok(None)
+                }
+            }
+            fn wait(&mut self) -> io::Result<ExitStatus> {
+                assert!(
+                    self.master_closed.load(Ordering::Acquire),
+                    "child exit is waiting for the PTY master to close"
+                );
+                self.reaped.store(true, Ordering::Release);
+                Ok(ExitStatus::with_exit_code(0))
+            }
+            fn process_id(&self) -> Option<u32> {
+                None
+            }
+        }
+        let master_closed = Arc::new(AtomicBool::new(false));
+        let reaped = Arc::new(AtomicBool::new(false));
+        let (mut pty, terminator) = spawned_pty(Box::new(DrainingChild {
+            master_closed: master_closed.clone(),
+            reaped: reaped.clone(),
+        }));
+        pty.master = Box::new(TestMasterPty {
+            closed: Some(master_closed),
+        });
+        terminator.terminate().unwrap();
+        drop(pty);
+        assert!(reaped.load(Ordering::Acquire));
+        assert!(terminator.cleanup_confirmed());
     }
 
     #[test]
@@ -2587,7 +2719,7 @@ mod tests {
             cleanup: cleanup.clone(),
         }));
 
-        pty.wait_for_child(Duration::from_secs(1)).unwrap();
+        pty.process.wait_for_child(Duration::from_secs(1)).unwrap();
         drop(pty);
         terminator.terminate().unwrap();
 
@@ -2609,7 +2741,7 @@ mod tests {
             cleanup: cleanup.clone(),
         }));
 
-        let error = pty.wait_for_child(Duration::ZERO).unwrap_err();
+        let error = pty.process.wait_for_child(Duration::ZERO).unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert_eq!(
@@ -2650,12 +2782,13 @@ mod tests {
         terminator.terminate().unwrap();
         terminator.terminate().unwrap();
         assert_eq!(
-            pty.termination
+            pty.process
+                .termination
                 .complete_process_group(Instant::now())
                 .unwrap(),
             ShutdownDisposition::Graceful,
         );
-        assert!(pty.termination.lock_target().is_none());
+        assert!(pty.process.termination.lock_target().is_none());
         drop(pty);
 
         assert_eq!(
@@ -2702,7 +2835,7 @@ mod tests {
         }));
         let (wait_finished, wait_completion) = mpsc::sync_channel(1);
         let wait_thread = thread::spawn(move || {
-            let result = pty.wait_for_child(Duration::from_secs(1));
+            let result = pty.process.wait_for_child(Duration::from_secs(1));
             wait_finished.send((result, pty)).unwrap();
         });
         try_wait_control.wait_until_entered("child try_wait");

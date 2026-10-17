@@ -16,11 +16,11 @@ default-members = [".", "crates/spaceterm-directories", "crates/spaceterm-server
 resolver = "2"
 
 [patch.crates-io]
-accesskit = { git = "https://github.com/sadiksaifi/accesskit", rev = "437ae88cdfffd0f8d2674b6d366c062151a62d0c" }
-accesskit_consumer = { git = "https://github.com/sadiksaifi/accesskit", rev = "437ae88cdfffd0f8d2674b6d366c062151a62d0c" }
-accesskit_atspi_common = { git = "https://github.com/sadiksaifi/accesskit", rev = "437ae88cdfffd0f8d2674b6d366c062151a62d0c" }
-accesskit_macos = { git = "https://github.com/sadiksaifi/accesskit", rev = "437ae88cdfffd0f8d2674b6d366c062151a62d0c" }
-accesskit_unix = { git = "https://github.com/sadiksaifi/accesskit", rev = "437ae88cdfffd0f8d2674b6d366c062151a62d0c" }
+accesskit = { git = "https://github.com/sadiksaifi/accesskit", tag = "spaceterm-2026-10-17" }
+accesskit_consumer = { git = "https://github.com/sadiksaifi/accesskit", tag = "spaceterm-2026-10-17" }
+accesskit_atspi_common = { git = "https://github.com/sadiksaifi/accesskit", tag = "spaceterm-2026-10-17" }
+accesskit_macos = { git = "https://github.com/sadiksaifi/accesskit", tag = "spaceterm-2026-10-17" }
+accesskit_unix = { git = "https://github.com/sadiksaifi/accesskit", tag = "spaceterm-2026-10-17" }
 
 [features]
 # Every build outside the packaging script is SpaceTerm Development and carries its developer tools.
