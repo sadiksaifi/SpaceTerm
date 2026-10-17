@@ -1357,12 +1357,20 @@ mod edits {
             confirmation: [9; 32],
         }));
         shared.poll();
-        assert_eq!(shared.worktree_status(), Some("Removing Worktree…"));
+        assert_eq!(
+            shared.worktree_status(WORKSPACE, Some(std::path::Path::new("/fixture"))),
+            Some("Removing Worktree…")
+        );
+        assert_eq!(
+            shared.worktree_status([10; 32], Some(std::path::Path::new("/other-repository"))),
+            None,
+            "an unrelated Workspace must keep its common waiting status"
+        );
         assert!(shared.removing_worktree(&path));
         edits.set_connected(false);
         shared.poll();
         assert_eq!(
-            shared.worktree_status(),
+            shared.worktree_status(WORKSPACE, Some(std::path::Path::new("/fixture"))),
             None,
             "the Workspace row must show its offline status"
         );

@@ -1137,17 +1137,23 @@ mod development {
             self.retained_views.take();
         }
 
-        pub(crate) fn worktree_status(&self) -> Option<&'static str> {
+        pub(crate) fn worktree_status(
+            &self,
+            workspace: Id,
+            repository: Option<&Path>,
+        ) -> Option<&'static str> {
             if !self.pending || !self.connected {
                 return None;
             }
             match self.pending_operation.as_ref() {
                 Some(Mutation::Worktree(spaceterm_server::worktree::Operation::Create {
+                    workspace: target,
                     ..
-                })) => Some("Creating Worktree…"),
+                })) if *target == workspace => Some("Creating Worktree…"),
                 Some(Mutation::Worktree(spaceterm_server::worktree::Operation::Remove {
+                    root,
                     ..
-                })) => Some("Removing Worktree…"),
+                })) if repository == Some(root.as_path()) => Some("Removing Worktree…"),
                 _ => None,
             }
         }
