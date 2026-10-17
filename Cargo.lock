@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "accesskit"
 version = "0.24.1"
-source = "git+https://github.com/sadiksaifi/accesskit?rev=437ae88cdfffd0f8d2674b6d366c062151a62d0c#437ae88cdfffd0f8d2674b6d366c062151a62d0c"
+source = "git+https://github.com/sadiksaifi/accesskit?rev=6e2a7745b240444ac3162297a8cc5300b598c9b2#6e2a7745b240444ac3162297a8cc5300b598c9b2"
 dependencies = [
  "enumn",
  "uuid",
@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "accesskit_atspi_common"
 version = "0.19.1"
-source = "git+https://github.com/sadiksaifi/accesskit?rev=437ae88cdfffd0f8d2674b6d366c062151a62d0c#437ae88cdfffd0f8d2674b6d366c062151a62d0c"
+source = "git+https://github.com/sadiksaifi/accesskit?rev=6e2a7745b240444ac3162297a8cc5300b598c9b2#6e2a7745b240444ac3162297a8cc5300b598c9b2"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -27,7 +27,7 @@ dependencies = [
 [[package]]
 name = "accesskit_consumer"
 version = "0.38.0"
-source = "git+https://github.com/sadiksaifi/accesskit?rev=437ae88cdfffd0f8d2674b6d366c062151a62d0c#437ae88cdfffd0f8d2674b6d366c062151a62d0c"
+source = "git+https://github.com/sadiksaifi/accesskit?rev=6e2a7745b240444ac3162297a8cc5300b598c9b2#6e2a7745b240444ac3162297a8cc5300b598c9b2"
 dependencies = [
  "accesskit",
  "hashbrown 0.16.1",
@@ -36,7 +36,7 @@ dependencies = [
 [[package]]
 name = "accesskit_macos"
 version = "0.26.3"
-source = "git+https://github.com/sadiksaifi/accesskit?rev=437ae88cdfffd0f8d2674b6d366c062151a62d0c#437ae88cdfffd0f8d2674b6d366c062151a62d0c"
+source = "git+https://github.com/sadiksaifi/accesskit?rev=6e2a7745b240444ac3162297a8cc5300b598c9b2#6e2a7745b240444ac3162297a8cc5300b598c9b2"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -49,7 +49,7 @@ dependencies = [
 [[package]]
 name = "accesskit_unix"
 version = "0.22.1"
-source = "git+https://github.com/sadiksaifi/accesskit?rev=437ae88cdfffd0f8d2674b6d366c062151a62d0c#437ae88cdfffd0f8d2674b6d366c062151a62d0c"
+source = "git+https://github.com/sadiksaifi/accesskit?rev=6e2a7745b240444ac3162297a8cc5300b598c9b2#6e2a7745b240444ac3162297a8cc5300b598c9b2"
 dependencies = [
  "accesskit",
  "accesskit_atspi_common",
