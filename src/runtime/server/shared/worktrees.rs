@@ -203,53 +203,15 @@ impl SharedWorkspaceHost {
                     self.state.worktree_settings.clone().unwrap_or_default(),
                 ))
             }
-            Read::Branches { root } => {
-                let (git, _) = git(None)?;
-                list(&git, &root)?;
-                let branches = git
-                    .branches(&root, &SshCancellationToken::default())
-                    .map_err(|_| Error::Unavailable)?;
-                if branches.local.len() + branches.remote.len() > 4096 {
-                    return Err(Error::Unavailable);
-                }
-                Ok(ReadReply::Branches(branches))
-            }
-            Read::Location {
-                root,
-                branch,
-                location,
-            } => {
+            Read::Location { root, location } => {
                 let (git, home) = git(None)?;
                 list(&git, &root)?;
-                let template = self
-                    .state
-                    .worktree_settings
-                    .clone()
-                    .unwrap_or_default()
-                    .template;
-                let location = location.map_or_else(
-                    || {
-                        path_template::expand(
-                            &template,
-                            &home,
-                            root.file_name()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("repository"),
-                            &branch,
-                        )
-                        .map_err(|_| Error::Location)
-                    },
-                    |s| {
-                        let path = s
-                            .strip_prefix("~/")
-                            .map_or_else(|| PathBuf::from(&s), |s| home.join(s));
-                        if path.is_absolute() {
-                            Ok(path)
-                        } else {
-                            Err(Error::Location)
-                        }
-                    },
-                )?;
+                let location = location
+                    .strip_prefix("~/")
+                    .map_or_else(|| PathBuf::from(&location), |suffix| home.join(suffix));
+                if !location.is_absolute() {
+                    return Err(Error::Location);
+                }
                 match local_filesystem().probe_new_directory(&location) {
                     Ok(crate::platform::local_filesystem::NewDirectoryTarget::Free) => {
                         Ok(ReadReply::Location(location))

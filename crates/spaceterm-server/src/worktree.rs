@@ -134,25 +134,11 @@ impl Default for Settings {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Read {
-    Context {
-        root: PathBuf,
-    },
+    Context { root: PathBuf },
     Settings,
-    SeedLocation {
-        template: String,
-    },
-    Branches {
-        root: PathBuf,
-    },
-    CheckRemoval {
-        root: PathBuf,
-        path: PathBuf,
-    },
-    Location {
-        root: PathBuf,
-        branch: String,
-        location: Option<String>,
-    },
+    SeedLocation { template: String },
+    CheckRemoval { root: PathBuf, path: PathBuf },
+    Location { root: PathBuf, location: String },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ReadReply {
@@ -162,7 +148,6 @@ pub enum ReadReply {
         branches: Branches,
     },
     Settings(Settings),
-    Branches(Branches),
     Location(PathBuf),
     Removal(Removal),
 }

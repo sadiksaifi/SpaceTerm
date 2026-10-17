@@ -139,8 +139,7 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
         let read = client.read(
             Read::Location {
                 root: root.clone(),
-                branch: branch.name().into(),
-                location: Some(path.display().to_string()),
+                location: path.display().to_string(),
             },
             cx,
         );
