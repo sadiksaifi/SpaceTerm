@@ -11,6 +11,13 @@ from pathlib import Path
 from spaceterm_tasks import TaskError, developer_environment
 from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.macos_bundle import ICON_NAME, compile_icon, identity, identity_directory
+from spaceterm_tasks.packaging import (
+    NOTICES,
+    SHELL_INTEGRATION,
+    TERMINFO,
+    checked,
+    verify_resources,
+)
 
 IDENTITY = "development"
 # Development builds are never releases.
@@ -62,6 +69,14 @@ def stage_bundle(executable, server_executable):
         (contents / "MacOS" / name).chmod(0o755)
         shutil.copyfile(server_executable, contents / "MacOS" / "spaceterm-server")
         (contents / "MacOS" / "spaceterm-server").chmod(0o755)
+        resources = contents / "Resources"
+        shutil.copytree(SHELL_INTEGRATION, resources / "shell-integration")
+        shutil.copyfile(NOTICES, resources / NOTICES.name)
+        checked(
+            ["tic", "-x", "-o", str(resources / "terminfo"), str(TERMINFO)],
+            "Development terminfo compilation failed",
+        )
+        verify_resources(resources, "Development bundle")
         signed = subprocess.run(
             ["codesign", "--force", "--sign", "-", "--timestamp=none", str(contents.parent)],
             stdout=subprocess.DEVNULL,
