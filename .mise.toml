@@ -518,3 +518,12 @@ run = [
   "cargo build --package spaceterm-server-host --features client --examples --bins --locked",
   "cargo run --package spaceterm-server-host --features client --example directory_recovery --locked -- {{usage.major}} {% if usage.prepare_desktop %}--prepare-desktop{% endif %} {% if usage.cleanup_exercise %}--cleanup{% endif %}",
 ]
+
+[tasks."server:directory:run"]
+description = "Run a built directory-recovery check without replacing its code signature"
+usage = '''
+arg "[major]" default="2" help="Protocol major 1 or 2"
+flag "--prepare-desktop" help="Leave the test Workspace unavailable for a real desktop exercise"
+flag "--cleanup-exercise" help="Remove only the retained directory-recovery test Workspace"
+'''
+run = "target/debug/examples/directory_recovery {{usage.major}} {% if usage.prepare_desktop %}--prepare-desktop{% endif %} {% if usage.cleanup_exercise %}--cleanup{% endif %}"
