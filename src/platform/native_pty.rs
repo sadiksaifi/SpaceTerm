@@ -187,6 +187,13 @@ struct NativePtyCloseState {
 }
 
 impl NativePtyCloseHandle {
+    /// Preparation ended before the adapter factory was called, so no process needs cleanup.
+    pub(crate) fn confirm_unstarted(&self) {
+        let mut state = self.lock_state();
+        debug_assert!(state.supervisor.is_none());
+        state.cleanup_confirmed = true;
+    }
+
     pub fn cleanup_confirmed(&self) -> bool {
         self.lock_state().cleanup_confirmed
     }

@@ -340,7 +340,9 @@ impl TerminalRuntime {
             filesystem,
             initial_appearance,
             move |size, output, close_handle| {
-                let prepared = launch.process.prepare()?;
+                let prepared = launch.process.prepare().inspect_err(|_| {
+                    close_handle.confirm_unstarted();
+                })?;
                 let terminal_name = prepared.terminal_name();
                 let owner =
                     NativePtyOwner::start(factory.as_ref(), prepared, size, output, close_handle)?;

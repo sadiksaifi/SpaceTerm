@@ -2,6 +2,57 @@ use super::tests::{host, size};
 use super::*;
 
 #[test]
+fn directory_recovery_poll_retires_a_worker_directory_failure_before_any_tick() {
+    let root = std::env::temp_dir().join(format!(
+        "spaceterm-poll-directory-{:x}",
+        u64::from_ne_bytes(nonce().unwrap()[..8].try_into().unwrap())
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let directory = local_filesystem().validate_directory(&root).unwrap();
+    let mut host = host();
+    let original = Organization::first(root.clone()).unwrap();
+    host.organization = Some(original.clone());
+    // The owning host validated this object, but it disappears before worker preparation.
+    std::fs::remove_dir(&root).unwrap();
+    let lease = host
+        .start_directory([1; 32], [1; 32], size(), None, directory)
+        .unwrap();
+    let cleanup = host
+        .pane
+        .as_mut()
+        .unwrap()
+        .runtime
+        .shutdown_and_wait(Duration::from_secs(5));
+    assert!(matches!(
+        host.request([1; 32], [1; 32], Request::Poll { lease }),
+        Reply::Refused(Refusal::DirectoryUnavailable)
+    ));
+    assert!(
+        cleanup.is_ok(),
+        "preparation failed before any process was started"
+    );
+    assert!(host.pane.is_none());
+    assert!(host.organization.as_ref() == Some(&original));
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            [2; 32],
+            Request::Select {
+                create: false,
+                size: size(),
+                resume: None,
+                style: None
+            }
+        ),
+        Reply::Restored {
+            directory_unavailable: true,
+            recovery: Some(_),
+            ..
+        }
+    ));
+}
+
+#[test]
 fn directory_repair_preserves_organization_and_cannot_replace_a_running_shell() {
     let mut host = host();
     let mut original = Organization::first(host.directory.clone()).unwrap();

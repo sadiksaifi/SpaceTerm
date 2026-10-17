@@ -760,6 +760,7 @@ impl DirectoryPicker {
         self.operation_generation = self.operation_generation.wrapping_add(1);
         let operation_generation = self.operation_generation;
         let lifecycle_generation = self.lifecycle_generation;
+        let opening_query = self.palette.read(cx).query().to_owned();
         let task = self.source.discover_home();
         self.home_task.take();
         self.home_task = Some(cx.spawn_in(window, async move |picker, cx| {
@@ -774,7 +775,9 @@ impl DirectoryPicker {
                 match result {
                     Ok(home) => {
                         picker.home = Some(home);
-                        if let Some(initial) = picker.source.initial_query() {
+                        if picker.palette.read(cx).query() == opening_query
+                            && let Some(initial) = picker.source.initial_query()
+                        {
                             picker
                                 .palette
                                 .update(cx, |palette, cx| palette.set_query(initial.as_str(), cx));
@@ -1662,6 +1665,77 @@ mod tests {
 
     struct DirectoryPickerHarness {
         picker: gpui::Entity<DirectoryPicker>,
+    }
+
+    #[gpui::test]
+    fn directory_recovery_discovery_preserves_a_path_edited_while_loading(cx: &mut TestAppContext) {
+        struct DelayedSource(async_channel::Receiver<PickerPath>);
+        impl DirectorySource for DelayedSource {
+            fn machine_name(&self) -> Option<&str> {
+                None
+            }
+            fn initial_query(&self) -> Option<PickerPath> {
+                Some(PickerPath::new("/ancestor/".into()).unwrap())
+            }
+            fn discover_home(&self) -> SourceFuture<PickerPath> {
+                let receiver = self.0.clone();
+                Box::pin(async move {
+                    receiver
+                        .recv()
+                        .await
+                        .map_err(|_| DirectorySourceError::Other)
+                })
+            }
+            fn list_directories(&self, _: PickerPath) -> SourceFuture<DirectoryListing> {
+                Box::pin(async { Ok(DirectoryListing::new(Vec::new())) })
+            }
+            fn probe_exact_path(&self, _: PickerPath) -> SourceFuture<ExactPathState> {
+                Box::pin(async { Ok(ExactPathState::ReadableDirectory) })
+            }
+            fn create_directory_recursively(&self, _: PickerPath) -> SourceFuture<()> {
+                Box::pin(async { Err(DirectorySourceError::Other) })
+            }
+            fn pin(&self, _: PickerPath) -> SourceFuture<PinnedDirectory> {
+                Box::pin(async { Err(DirectorySourceError::Other) })
+            }
+        }
+        cx.update(crate::ui::init).unwrap();
+        let (sender, receiver) = async_channel::bounded(1);
+        let (harness, cx) = cx.add_window_view(move |window, cx| DirectoryPickerHarness {
+            picker: cx.new(|cx| {
+                DirectoryPicker::new(
+                    Rc::new(DelayedSource(receiver)),
+                    "Choose Pane Directory",
+                    window,
+                    cx,
+                )
+            }),
+        });
+        let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            picker.update(cx, |picker, cx| {
+                picker.open(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            picker.update(cx, |picker, cx| {
+                picker
+                    .palette
+                    .update(cx, |palette, cx| palette.set_query("/chosen/", cx))
+            });
+        });
+        cx.run_until_parked();
+        sender
+            .try_send(PickerPath::new("/home/tester".into()).unwrap())
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            picker.read_with(cx, |picker, cx| picker.palette.read(cx).query().to_owned()),
+            "/chosen/"
+        );
+        assert!(picker.read_with(cx, |picker, _| picker.can_confirm()));
     }
 
     impl gpui::Render for DirectoryPickerHarness {

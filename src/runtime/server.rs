@@ -486,6 +486,10 @@ impl DevelopmentPaneHost {
             return Err(Refusal::Stale);
         }
         pane.drain();
+        if matches!(request, Request::Poll { .. }) && pane.directory_failed {
+            self.retire_exited()?;
+            return Err(Refusal::DirectoryUnavailable);
+        }
         match request {
             Request::GraphicsChunk { image, offset, .. } => {
                 Ok(Reply::GraphicsChunk(pane.graphics_chunk(image, offset)))
