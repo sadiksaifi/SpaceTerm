@@ -607,7 +607,7 @@ fn removal_revalidates_other_workspace_sessions_and_closes_unattached_work_befor
         &mut host,
         3,
         lease,
-        "printf 'unattached-work\\n'; sleep 30\n",
+        "printf '\\nunattached-work\\n'; sleep 30\n",
     );
     await_text(&mut host, 3, lease, "unattached-work");
     assert!(matches!(

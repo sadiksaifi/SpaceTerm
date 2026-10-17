@@ -305,7 +305,7 @@ fn copy_shortcuts_use_the_authoritative_keyboard_mode_and_focus_fence() {
             &mut host,
             1,
             lease,
-            "stty raw -echo; printf '\\033[2J\\033[HREADY\\r\\n'; dd bs=1 count=1 >/dev/null 2>/dev/null; printf '\\033[>11uENHANCED\\r\\n'; dd bs=1 count=16 2>/dev/null | od -An -tx1 | tr -d ' \\n'; printf '\\r\\n'",
+            "set +m; stty raw -echo; printf '\\033[2J\\033[HREADY\\r\\n'; dd bs=1 count=1 >/dev/null 2>/dev/null; printf '\\033[>11uENHANCED\\r\\n'; dd bs=1 count=16 2>/dev/null | od -An -tx1 | tr -d ' \\n'; printf '\\r\\n'",
         );
         await_text(&mut host, 1, lease, "READY");
         // Finish the command's Enter gesture before enabling keyboard release reports.
