@@ -3686,7 +3686,7 @@ fn write_failure_should_emit_a_runtime_failure_and_stop_the_worker() {
         )
     );
     let state = records.wait_for("the failed PTY worker to release ownership", |state| {
-        state.pty_drops == 1
+        state.pty_drops == 1 && state.terminator_drops == 1
     });
     assert_eq!((state.write_attempts, state.written.len()), (1, 0));
 
