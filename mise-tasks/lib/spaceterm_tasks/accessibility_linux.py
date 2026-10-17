@@ -531,6 +531,14 @@ class OrcaOutput:
             self.active_terminal_script = b"module=orca.scripts.terminal.script" in line
             self.terminal_script |= self.active_terminal_script
         if self.probe.phase == "keyboard_echo":
+            for name, marker in (
+                ("character_echo_disabled", b"Not character echoable, setting disabled."),
+                ("character_echo_object", b"Character echoable, is editable or terminal."),
+                ("character_echo_no_object", b"Not character echoable, no reason to echo."),
+                ("character_echo_password", b"Not character echoable, is password text."),
+                ("character_echo_modifiers", b"Not character echoable due to modifier mask."),
+            ):
+                self.keyboard_counts[name] += int(marker in line)
             for kind in ("PRESSED", "RELEASED"):
                 if b"vvvvv PROCESS ATSPI_KEY_" + kind.encode() + b"_EVENT: 'q' " in line:
                     self.keyboard_counts["typed_key_" + kind.lower() + "_events"] += 1
@@ -593,6 +601,12 @@ class OrcaOutput:
 
     def process_line(self, line):
         self.process_counts["lines"] += 1
+        self.process_counts["invalid_cache_add_signature"] += int(
+            b"AddAccessible with unknown signature" in line
+        )
+        self.process_counts["invalid_cache_remove_signature"] += int(
+            b"Unknown signature" in line and b"for RemoveAccessible" in line
+        )
         self.process_counts["tracebacks"] += int(
             line.startswith(b"Traceback (most recent call last):")
         )

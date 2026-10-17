@@ -1705,6 +1705,11 @@ def private_session(args):
         )
         report["orca"] = orca_stream.summary()
         require(report["orca"]["speech_backend_initialized"], "orca_speech_backend_unavailable")
+        require(
+            not report["orca"]["process_output"]["invalid_cache_add_signature"]
+            and not report["orca"]["process_output"]["invalid_cache_remove_signature"],
+            "orca_invalid_cache_signal_signature",
+        )
         processes.stop(orca_process)
         orca_stream.close()
         orca_stream = None
