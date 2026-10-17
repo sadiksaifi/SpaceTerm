@@ -1558,12 +1558,14 @@ mod tests {
         })
     }
     fn capture(host: &mut DevelopmentPaneHost, lease: Lease, bytes: usize, modes: &str) {
+        // macOS sh can race process-group creation when a short pipeline leader exits.
+        // Keep this byte-capture pipeline in the shell's group so job-control diagnostics cannot corrupt its witness.
         command(
             host,
             1,
             lease,
             &format!(
-                "stty raw -echo; printf '{modes}\\033[2J\\033[HREADY\\r\\n'; dd bs=1 count={bytes} 2>/dev/null | od -An -tx1 | tr -d ' \\n'; printf '\\r\\n'"
+                "set +m; stty raw -echo; printf '{modes}\\033[2J\\033[HREADY\\r\\n'; dd bs=1 count={bytes} 2>/dev/null | od -An -tx1 | tr -d ' \\n'; printf '\\r\\n'"
             ),
         );
         await_text(host, 1, lease, "READY");
@@ -3013,9 +3015,18 @@ mod tests {
         text: &str,
     ) {
         let deadline = Instant::now() + Duration::from_secs(10);
+        let mut diagnostic = String::new();
         loop {
-            if let Reply::Screen(screen) =
-                host.request([1; 32], [connection; 32], Request::Poll { lease })
+            let reply = host.request([1; 32], [connection; 32], Request::Poll { lease });
+            if let Reply::Screen(screen) = &reply {
+                diagnostic = screen
+                    .rows
+                    .iter()
+                    .map(|r| r.iter().map(|c| c.text.as_str()).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            }
+            if let Reply::Screen(screen) = reply
                 && screen.rows.iter().any(|row| {
                     row.iter()
                         .map(|c| c.text.as_str())
@@ -3026,7 +3037,10 @@ mod tests {
             {
                 return;
             }
-            assert!(Instant::now() < deadline, "expected terminal output {text}");
+            assert!(
+                Instant::now() < deadline,
+                "expected terminal output {text}; fixture screen: {diagnostic:?}"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
     }
