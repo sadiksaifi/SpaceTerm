@@ -19,8 +19,7 @@
 //! Requests from its own GitHub CLI, and never reads git for a shared Workspace itself.
 //!
 //! Operations the server path does not support yet stay unavailable here rather than falling back
-//! to the desktop: creating and removing Worktrees, opening a Tab in
-//! a chosen Worktree, reading shell content with assistive technology, and paste.
+//! to the desktop: reading shell content with assistive technology and paste.
 
 #[cfg(test)]
 pub(crate) use development::testing;
@@ -183,7 +182,7 @@ mod development {
         }
 
         /// Submits one edit and records that this process asked for it.
-        fn submit(&self, mutation: Mutation) -> SharedSubmission {
+        pub(crate) fn submit(&self, mutation: Mutation) -> SharedSubmission {
             let editability = self.editability();
             if !editability.available() {
                 return SharedSubmission::Refused(editability.into());
@@ -208,7 +207,7 @@ mod development {
             false
         }
 
-        fn snapshot(&self) -> SharedWorkspaceSnapshot {
+        pub(crate) fn snapshot(&self) -> SharedWorkspaceSnapshot {
             let snapshot = self.edits.snapshot();
             // Every submitting surface shares this gate. A completed reply must reach the
             // foreground before another request can replace the worker's retained answer.
@@ -851,6 +850,10 @@ mod development {
         /// A refused same-field edit waiting for the local Workspace that presents its target.
         conflict: Option<PendingConflict>,
         refusal: Option<SharedRefusal>,
+        worktree_failure: Option<(
+            spaceterm_server::worktree::Operation,
+            spaceterm_server::worktree::Error,
+        )>,
         /// The inventory the server published last, including the live Session facts a close
         /// confirmation reads. Those facts can change without a new membership revision.
         latest: Option<Inventory>,
@@ -895,6 +898,7 @@ mod development {
                 consumed: None,
                 conflict: None,
                 refusal: None,
+                worktree_failure: None,
                 latest: None,
                 repositories: super::SharedRepositories::default(),
                 review: None,
@@ -1089,6 +1093,24 @@ mod development {
             self.retained_views.take();
         }
 
+        pub(crate) fn worktree_status(&self) -> Option<&'static str> {
+            if !self.pending {
+                return None;
+            }
+            match self.edits.submitted.borrow().as_ref() {
+                Some(Mutation::Worktree(spaceterm_server::worktree::Operation::Create {
+                    ..
+                })) => Some("Creating Worktree…"),
+                Some(Mutation::Worktree(spaceterm_server::worktree::Operation::Remove {
+                    ..
+                })) => Some("Removing Worktree…"),
+                _ => None,
+            }
+        }
+        pub(crate) fn removing_worktree(&self, path: &Path) -> bool {
+            self.pending
+                && matches!(self.edits.submitted.borrow().as_ref(),Some(Mutation::Worktree(spaceterm_server::worktree::Operation::Remove {path:target,..})) if target==path)
+        }
         pub(crate) const fn sessions(&self) -> &SharedPaneSessions {
             &self.sessions
         }
@@ -1171,6 +1193,14 @@ mod development {
 
         /// A close the server refused as stale, once, with the local target this process asked
         /// to close when it is the one that asked. A recovered answer names no local target.
+        pub(crate) fn take_worktree_failure(
+            &mut self,
+        ) -> Option<(
+            spaceterm_server::worktree::Operation,
+            spaceterm_server::worktree::Error,
+        )> {
+            self.worktree_failure.take()
+        }
         pub(crate) fn take_stale_close(
             &mut self,
         ) -> Option<(ServerCloseTarget, Option<CloseTarget>)> {
@@ -1322,6 +1352,12 @@ mod development {
             poll: &mut SharedPoll,
         ) {
             match outcome.outcome {
+                Outcome::Pending => {}
+                Outcome::WorktreeFailed(error) => {
+                    if let Mutation::Worktree(operation) = &outcome.mutation {
+                        self.worktree_failure = Some((operation.clone(), error));
+                    }
+                }
                 // An accepted change reaches every client through the inventory, which names the
                 // server's own identities rather than a reply this client could have lost. The
                 // client that asked for a creation also opens it, once.
@@ -1386,7 +1422,7 @@ mod development {
                 | Mutation::CreateTab { .. }
                 | Mutation::SplitPane { .. } => None,
                 // A stale close is answered with its own outcome rather than a field conflict.
-                Mutation::Close { .. } => None,
+                Mutation::Close { .. } | Mutation::Worktree(_) => None,
             }
         }
 
@@ -1879,6 +1915,7 @@ mod development {
             pub(crate) fn new(inventory: Option<Inventory>) -> Self {
                 Self {
                     snapshot: Mutex::new(SharedWorkspaceSnapshot {
+                        worktree_writes: false,
                         inventory,
                         connected: true,
                         pending: false,

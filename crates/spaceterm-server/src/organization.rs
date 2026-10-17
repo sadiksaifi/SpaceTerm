@@ -80,6 +80,11 @@ impl Organization {
 /// Every operation revalidates and synchronizes retained state before admitting a mutation.
 pub struct OrganizationStore(pub(crate) Directory);
 impl OrganizationStore {
+    /// A Git child retains this lock across exec, fencing recovery after a server crash until
+    /// the original write exits. Never infer process authority from a saved PID.
+    pub fn worktree_lock(&self) -> Result<std::fs::File, ServerError> {
+        self.0.lock("worktree.lock", true)
+    }
     pub fn read(&self) -> Result<Option<Organization>, ServerError> {
         let _lock = self.0.lock("setup.lock", false)?;
         Ok(self.0.read()?.organization.clone())

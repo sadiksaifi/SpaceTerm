@@ -3,7 +3,10 @@ use super::*;
 use spaceterm_server::hierarchy::{CloseInventory, ConfirmedPane, Id, Inventory, State};
 use std::collections::BTreeMap;
 
+mod worktrees;
+
 pub struct SharedWorkspaceHost {
+    writes: worktrees::Writes,
     prototype: DevelopmentPaneHost,
     repositories: super::repositories::ServerRepositories,
     state: State,
@@ -22,6 +25,7 @@ impl SharedWorkspaceHost {
         let repositories = super::repositories::ServerRepositories::new(prototype.boot);
         Self {
             prototype,
+            writes: worktrees::Writes::new(),
             repositories,
             state,
             panes: BTreeMap::new(),
@@ -230,8 +234,12 @@ impl SharedWorkspaceHost {
         if matches!(request, Request::Inventory) {
             self.repositories.subscribe(connection);
         }
+        self.finish_worktrees(false)?;
         self.synchronize()?;
         match request {
+            Request::WorktreeRead(read) => {
+                Ok(Reply::WorktreeRead(self.worktree_read(device, read)))
+            }
             Request::DirectoryRead(request) => Ok(Reply::DirectoryRead(
                 self.prototype.directories.request(connection, request),
             )),
@@ -372,6 +380,7 @@ impl SharedWorkspaceHost {
                 reading: true,
                 graphics: true,
                 directory_recovery: true,
+                worktree_writes: true,
             }),
             Request::Inventory => Ok(Reply::Inventory {
                 inventory: self.inventory(),
@@ -382,10 +391,20 @@ impl SharedWorkspaceHost {
                 // turn an already committed pin into a different outcome.
                 if let Some(old) = self.state.outcome(device, sequence) {
                     return if old.mutation == mutation {
-                        Ok(Reply::Outcome(old.clone()))
+                        if old.outcome == spaceterm_server::hierarchy::Outcome::Pending {
+                            Ok(Reply::MutationPending)
+                        } else {
+                            Ok(Reply::Outcome(old.clone()))
+                        }
                     } else {
                         Err(Refusal::Stale)
                     };
+                }
+                if let spaceterm_server::hierarchy::Mutation::Worktree(operation) = mutation {
+                    return self.begin_worktree(device, sequence, operation);
+                }
+                if !self.state.pending_worktrees().is_empty() {
+                    return Err(Refusal::Capacity);
                 }
                 let mut next = self.state.clone();
                 next.inventory = self.inventory();
@@ -403,6 +422,13 @@ impl SharedWorkspaceHost {
                 self.commit(next)?;
                 self.synchronize()?;
                 Ok(Reply::Outcome(outcome))
+            }
+            Request::Resolve { sequence }
+                if self.state.outcome(device, sequence).is_some_and(|o| {
+                    o.outcome == spaceterm_server::hierarchy::Outcome::Pending
+                }) =>
+            {
+                Ok(Reply::MutationPending)
             }
             Request::Resolve { sequence } => Ok(Reply::Outcome(
                 self.state
@@ -554,10 +580,15 @@ impl PaneService for SharedWorkspaceHost {
             .map_or_else(State::empty, State::from_legacy);
         // This also fences a later recovery read of the previous boot's retained record.
         self.state.begin_boot(self.prototype.boot);
+        // Existing organization predates seeding and must never be overwritten by a client.
+        if self.state.worktree_settings.is_none() && store.read()?.is_some() {
+            self.state.worktree_settings = Some(Default::default());
+        }
         self.store = Some(store);
         Ok(())
     }
     fn tick(&mut self) {
+        let _ = self.finish_worktrees(false);
         self.prototype.directories.tick();
         let _ = self.synchronize();
     }
@@ -573,6 +604,8 @@ impl PaneService for SharedWorkspaceHost {
         }
     }
     fn shutdown(&mut self) -> Result<(), ServerError> {
+        self.finish_worktrees(true)
+            .map_err(|_| ServerError::StorageUnavailable)?;
         self.prototype.directories.stop();
         self.repositories.shutdown();
         self.synchronize()

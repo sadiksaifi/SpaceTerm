@@ -468,6 +468,14 @@ run = [
 description = "Test shared Workspace integration and server Pane presentation in the main app"
 run = "cargo test --package spaceterm --lib --all-features --locked -- shared server_pane"
 
+[tasks."server:worktree:smoke"]
+description = "Exercise owning-server Worktree writes and interrupted originals on both protocol majors"
+run = [
+  "cargo build --package spaceterm-server-host --features client --example worktree_writes --bins --locked",
+  "cargo run --package spaceterm-server-host --features client --example worktree_writes --locked -- 1",
+  "cargo run --package spaceterm-server-host --features client --example worktree_writes --locked -- 2",
+]
+
 [tasks."server:repository:smoke"]
 description = "Read owning-server Git facts and external Worktrees through two clients on both protocol majors"
 run = [

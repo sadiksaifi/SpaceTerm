@@ -362,6 +362,7 @@ impl DevelopmentPaneHost {
                 reading: true,
                 graphics: true,
                 directory_recovery: true,
+                worktree_writes: false,
             });
         }
         self.recover()?;

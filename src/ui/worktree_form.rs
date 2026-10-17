@@ -31,6 +31,12 @@ const CREATE_FAILED: &str = "Git couldn\u{2019}t create the Worktree.";
 
 /// Runs the dialog's git work for one repository.
 pub(crate) trait WorktreeFormBackend {
+    fn server(&self) -> bool {
+        false
+    }
+    fn connected(&self) -> bool {
+        true
+    }
     /// The repository's branches, or `None` when git cannot read them.
     fn branches(&self, cx: &mut App) -> Task<Option<BranchList>>;
     fn create(
@@ -61,6 +67,7 @@ pub(crate) struct WorktreeFormContext {
 pub(crate) enum WorktreeFormEvent {
     /// Git created the Worktree at this directory.
     Created(PathBuf),
+    Interrupted,
     Cancelled,
 }
 
@@ -139,6 +146,7 @@ pub(crate) struct WorktreeForm {
     pending_path: Option<PathBuf>,
     pending_cancel: Option<DialogPendingCompletion>,
     _branches: Task<()>,
+    _status: Task<()>,
 }
 
 impl EventEmitter<WorktreeFormEvent> for WorktreeForm {}
@@ -191,6 +199,7 @@ impl WorktreeForm {
             pending_path: None,
             pending_cancel: None,
             _branches: Task::ready(()),
+            _status: Task::ready(()),
         };
         form.propose(cx);
         form
@@ -235,10 +244,16 @@ impl WorktreeForm {
             ],
             DialogInitialFocus::Body(self.name.read(cx).focus_handle()),
         )
-        .description(format!(
-            "Check out a branch of {} in its own directory.",
-            self.context.repository_name
-        ))
+        .description(
+            format!(
+                "Check out a branch of {} in its own directory.",
+                self.context.repository_name
+            ) + if self.backend.server() {
+                " The local server runs Git and creates it."
+            } else {
+                ""
+            },
+        )
         .size(DialogSize::Wide)
         .body(cx.entity());
         let completion = dialog.present(
@@ -457,6 +472,11 @@ impl WorktreeForm {
         cx: &mut Context<Self>,
     ) -> DialogCloseDecision {
         match action {
+            FormAction::Cancel
+                if self.pending && self.backend.server() && !self.backend.connected() =>
+            {
+                DialogCloseDecision::Allow
+            }
             FormAction::Cancel if self.pending => {
                 if self.pending_cancel.is_some() {
                     return DialogCloseDecision::Deny {
@@ -518,6 +538,26 @@ impl WorktreeForm {
         cx: &mut Context<Self>,
     ) {
         self.pending = true;
+        if self.backend.server() {
+            self._status = cx.spawn(async move |form, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(150))
+                        .await;
+                    if !form
+                        .update(cx, |f, cx| {
+                            if f.pending {
+                                cx.notify();
+                            }
+                            f.pending && f.open
+                        })
+                        .unwrap_or(false)
+                    {
+                        break;
+                    }
+                }
+            });
+        }
         self.set_editable(false, cx);
         let generation = self.generation;
         let task = self.backend.create(path, branch, cx);
@@ -544,6 +584,15 @@ impl WorktreeForm {
         if !self.open || !self.pending || self.generation != generation {
             return None;
         }
+        if result
+            == Err(WorktreeCreateError::Server(
+                spaceterm_server::worktree::Error::Interrupted,
+            ))
+        {
+            self.pending_path = None;
+            cx.emit(WorktreeFormEvent::Interrupted);
+            return Some(Settlement::Success { primary });
+        }
         if let Ok(path) = result {
             self.pending_path = Some(path);
             return Some(Settlement::Success { primary });
@@ -552,6 +601,8 @@ impl WorktreeForm {
         self.pending_path = None;
         self.set_editable(true, cx);
         let (field, message): (Option<FormField>, SharedString) = match result {
+            Err(WorktreeCreateError::Server(spaceterm_server::worktree::Error::Location)) => (Some(FormField::Location),"SpaceTerm can't use this location on the local server.".into()),
+            Err(WorktreeCreateError::Server(_)) => (None,"The server could not confirm the Worktree operation. Check the Worktrees from Git before trying again.".into()),
             Err(WorktreeCreateError::InvalidName) => (
                 Some(FormField::Name),
                 "Git doesn\u{2019}t accept this name.".into(),
@@ -775,6 +826,10 @@ impl Render for WorktreeForm {
                             .child(note)
                     })),
             )
+            .when(self.pending && self.backend.server(),|body| {
+                let status=if self.backend.connected() {"Creating the Worktree on the local server…"} else {"Lost the connection to the local server. Git may still create the Worktree. Closing this dialog doesn't cancel the request, and SpaceTerm checks its result when it reconnects."};
+                body.child(div().id("new-worktree-status").debug_selector(||"new-worktree-status".to_owned()).role(accesskit::Role::Label).aria_value(status).child(status))
+            })
             .when_some(
                 self.backend_error
                     .or(self.branches_failed.then_some(BRANCHES_FAILED)),

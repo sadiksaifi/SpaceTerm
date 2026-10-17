@@ -481,6 +481,7 @@ impl WorkspaceSidebar {
                             // The button keeps its place while hidden, so the row never shifts.
                             if selected { 1.0 } else { hover },
                             sidebar.clone(),
+                            shared.as_ref().is_none_or(|s| s.edits),
                             appearance,
                         ))
                     },
@@ -1581,6 +1582,7 @@ fn remove_worktree_entry<A: Clone>(
 ) -> Option<MenuEntry<A>> {
     let reason = match removal {
         WorktreeRemoval::Allowed => None,
+        WorktreeRemoval::NeedsServer => Some("Remove Worktree Needs the Server"),
         WorktreeRemoval::Main => Some("Main Worktree Can\u{2019}t Be Removed"),
         WorktreeRemoval::Locked => Some("Locked Worktree Can\u{2019}t Be Removed"),
         WorktreeRemoval::HoldsPinnedDirectory => Some("Unpin the Directory to Remove"),
@@ -1607,9 +1609,17 @@ fn remove_worktree_entry<A: Clone>(
 fn new_worktree_entry<A: Clone>(
     command: A,
     selector: &'static str,
+    enabled: bool,
     presentation: &crate::desktop_profile::DesktopPresentation,
 ) -> MenuEntry<A> {
-    let entry = MenuEntry::action(NEW_WORKTREE_LABEL, command);
+    let entry = MenuEntry::action(
+        if enabled {
+            NEW_WORKTREE_LABEL
+        } else {
+            "New Worktree Needs the Server"
+        },
+        command,
+    );
     match presentation.shortcut(&crate::ui::NewWorktree) {
         Some(shortcut) => entry.shortcut(shortcut),
         None => entry,
@@ -1625,8 +1635,14 @@ fn new_worktree_button(
     workspace_id: WorkspaceId,
     reveal: f32,
     sidebar: WeakEntity<WorkspaceSidebar>,
+    enabled: bool,
     appearance: &crate::ui::appearance::ChromeAppearance,
 ) -> AnyElement {
+    let label = if enabled {
+        NEW_WORKTREE_LABEL
+    } else {
+        "New Worktree Needs the Server"
+    };
     let glyph_size = appearance.icons.metrics(IconRole::Caption).glyph_size;
     div()
         .flex_shrink_0()
@@ -1635,11 +1651,12 @@ fn new_worktree_button(
         .child(
             IconButton::new(
                 ("workspace-new-worktree", workspace_id.get()),
-                NEW_WORKTREE_LABEL,
+                label,
                 move |foreground| {
                     Icon::new(IconName::Plus, glyph_size, foreground).into_any_element()
                 },
             )
+            .disabled(!enabled)
             .variant(ButtonVariant::Ghost)
             .size(ButtonSize::Small)
             .tab_stop(false)
@@ -1648,7 +1665,7 @@ fn new_worktree_button(
             .tooltip(
                 Tooltip::new(
                     ("workspace-new-worktree-tooltip", workspace_id.get()),
-                    NEW_WORKTREE_LABEL,
+                    label,
                 )
                 .debug_selector(format!(
                     "workspace-new-worktree-tooltip-{}",
@@ -1714,8 +1731,7 @@ fn workspace_menu_entries(
         .map(|shared| shared.edits_reason);
     let new_tab = new_tab && shared_edits;
     // Worktrees are read and written on the owning server, which is not available yet.
-    let new_worktree = new_worktree && shared.is_none();
-    let active_worktree = active_worktree.filter(|_| shared.is_none());
+
     let mut entries = Vec::new();
     if new_tab {
         entries.push(new_tab_entry(
@@ -1725,11 +1741,15 @@ fn workspace_menu_entries(
         ));
     }
     if new_worktree {
-        entries.push(new_worktree_entry(
-            RowMenuCommand::Workspace(WorkspaceMenuCommand::NewWorktree),
-            "workspace-menu-row-new-worktree",
-            presentation,
-        ));
+        entries.push(
+            new_worktree_entry(
+                RowMenuCommand::Workspace(WorkspaceMenuCommand::NewWorktree),
+                "workspace-menu-row-new-worktree",
+                shared_edits,
+                presentation,
+            )
+            .disabled(!shared_edits),
+        );
     }
     entries.push(
         MenuEntry::action(

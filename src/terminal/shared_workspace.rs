@@ -13,6 +13,7 @@ use std::time::Duration;
 
 #[derive(Clone)]
 pub(crate) struct SharedWorkspaceSnapshot {
+    pub worktree_writes: bool,
     pub inventory: Option<Inventory>,
     pub connected: bool,
     pub pending: bool,
@@ -30,8 +31,9 @@ impl Drop for SharedWorkspaceClient {
     }
 }
 impl SharedWorkspaceClient {
-    pub(crate) fn new(server: LocalServer) -> Self {
+    pub(crate) fn new(server: LocalServer, legacy_location: String) -> Self {
         let snapshot = Arc::new(Mutex::new(SharedWorkspaceSnapshot {
+            worktree_writes: false,
             inventory: None,
             connected: false,
             pending: false,
@@ -44,7 +46,7 @@ impl SharedWorkspaceClient {
         let running = Arc::clone(&alive);
         if std::thread::Builder::new()
             .name("spaceterm-shared-workspaces".into())
-            .spawn(move || run(server, state, receiver, running))
+            .spawn(move || run(server, state, receiver, running, legacy_location))
             .is_err()
         {
             snapshot.lock().unwrap_or_else(|e| e.into_inner()).error =
@@ -55,6 +57,12 @@ impl SharedWorkspaceClient {
             commands,
             alive,
         }
+    }
+    pub(crate) fn supports_worktree_writes(&self) -> bool {
+        self.snapshot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .worktree_writes
     }
     pub(crate) fn snapshot(&self) -> SharedWorkspaceSnapshot {
         self.snapshot
@@ -106,15 +114,22 @@ fn finish(
     let result = if let Some(result) = pending.result {
         result
     } else {
-        let resolved = match connection.exchange(&Request::Resolve {
-            sequence: pending.sequence,
-        }) {
-            Ok(reply) => reply,
-            Err(ServerError::SessionUnavailable) => connection.exchange(&Request::Mutate {
+        let resolved = loop {
+            let reply = match connection.exchange(&Request::Resolve {
                 sequence: pending.sequence,
-                mutation: pending.mutation.clone(),
-            })?,
-            Err(error) => return Err(error),
+            }) {
+                Ok(reply) => reply,
+                Err(ServerError::SessionUnavailable) => connection.exchange(&Request::Mutate {
+                    sequence: pending.sequence,
+                    mutation: pending.mutation.clone(),
+                })?,
+                Err(error) => return Err(error),
+            };
+            if matches!(reply, Reply::MutationPending) {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            break reply;
         };
         let Reply::Outcome(outcome) = resolved else {
             return Err(ServerError::Protocol);
@@ -139,16 +154,25 @@ fn run(
     state: Arc<Mutex<SharedWorkspaceSnapshot>>,
     commands: mpsc::Receiver<Mutation>,
     alive: Arc<AtomicBool>,
+    legacy_location: String,
 ) {
     while alive.load(Ordering::Acquire) {
         let result = (|| {
             let attachments = server.attachments()?;
             let mut journal = server.shared_journal()?;
             let mut connection = server.connect_shared_pane()?;
+            if connection.worktree_writes() {
+                connection.exchange(&Request::WorktreeRead(
+                    spaceterm_server::worktree::Read::SeedLocation {
+                        template: legacy_location.clone(),
+                    },
+                ))?;
+            }
             // Authoritative reconciliation always precedes a retry of a previously submitted edit.
             let (initial, _) = inventory(&mut connection)?;
             {
                 let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+                s.worktree_writes = connection.worktree_writes();
                 s.inventory = Some(initial);
                 s.pending = journal.pending().is_some();
             }

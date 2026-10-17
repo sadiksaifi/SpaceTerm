@@ -153,6 +153,7 @@ pub enum Axis {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mutation {
+    Worktree(crate::worktree::Operation),
     Close {
         target: CloseTarget,
         confirmation: CloseConfirmation,
@@ -183,6 +184,7 @@ pub enum Mutation {
 impl Mutation {
     pub fn is_bounded(&self) -> bool {
         match self {
+            Self::Worktree(operation) => operation.is_bounded(),
             Self::Close { confirmation, .. } => {
                 !confirmation.panes.is_empty() && confirmation.panes.len() <= MAX_PANES
             }
@@ -199,6 +201,8 @@ impl Mutation {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Outcome {
+    Pending,
+    WorktreeFailed(crate::worktree::Error),
     Accepted { target: Id },
     Conflict,
     Missing,
@@ -220,6 +224,8 @@ struct DeviceOutcomes {
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {
+    #[serde(default)]
+    pub worktree_settings: Option<crate::worktree::Settings>,
     pub inventory: Inventory,
     devices: Vec<DeviceOutcomes>,
     #[serde(default)]
@@ -228,6 +234,7 @@ pub struct State {
 impl State {
     pub fn empty() -> Self {
         Self {
+            worktree_settings: None,
             inventory: Inventory {
                 repositories: None,
                 revision: 0,
@@ -267,6 +274,7 @@ impl State {
     }
     pub fn from_legacy(org: &crate::organization::Organization) -> Self {
         org.shared.as_deref().cloned().unwrap_or_else(|| Self {
+            worktree_settings: None,
             inventory: Inventory {
                 repositories: None,
                 revision: 0,
@@ -347,6 +355,74 @@ impl State {
                 d.pending.last().map_or(d.retired + 1, |o| o.sequence + 1)
             })
     }
+    pub fn pending_worktrees(&self) -> Vec<(Id, RetainedOutcome)> {
+        self.devices
+            .iter()
+            .flat_map(|d| {
+                d.pending
+                    .iter()
+                    .filter(|o| o.outcome == Outcome::Pending)
+                    .map(|o| (d.device, o.clone()))
+            })
+            .collect()
+    }
+    pub fn finish_worktree(
+        &mut self,
+        device: Id,
+        sequence: u64,
+        outcome: Outcome,
+    ) -> Result<(), Refusal> {
+        let record = self
+            .devices
+            .iter_mut()
+            .find(|d| d.device == device)
+            .and_then(|d| d.pending.iter_mut().find(|o| o.sequence == sequence))
+            .ok_or(Refusal::Missing)?;
+        if record.outcome != Outcome::Pending
+            || !matches!(record.mutation, Mutation::Worktree(_))
+            || outcome == Outcome::Pending
+        {
+            return Err(Refusal::Stale);
+        }
+        record.outcome = outcome;
+        Ok(())
+    }
+    pub fn add_worktree_tab(
+        &mut self,
+        device: Id,
+        workspace: Id,
+        root: PathBuf,
+        path: PathBuf,
+    ) -> Result<Id, Refusal> {
+        if self.tab_count() >= MAX_TABS || self.pane_count() >= MAX_PANES {
+            return Err(Refusal::Capacity);
+        }
+        let w = self
+            .inventory
+            .workspaces
+            .iter_mut()
+            .find(|w| w.id == workspace)
+            .ok_or(Refusal::Missing)?;
+        let id = crate::protocol::random().map_err(|_| Refusal::Failed)?;
+        let pane = crate::protocol::random().map_err(|_| Refusal::Failed)?;
+        w.tabs.push(Tab {
+            id,
+            root_pane: pane,
+            worktree: Some(path.clone()),
+            worktree_repository: Some(root),
+            worktree_membership_fixed: true,
+            panes: vec![Pane {
+                id: pane,
+                source: None,
+                axis: Axis::Right,
+                starting_directory: path,
+                confirmed_directory: None,
+                creator: Some(device),
+            }],
+        });
+        self.inventory.revision = self.inventory.revision.saturating_add(1);
+        Ok(id)
+    }
     pub fn apply(
         &mut self,
         device: Id,
@@ -395,6 +471,12 @@ impl State {
         Ok(outcome)
     }
     pub fn acknowledge(&mut self, device: Id, sequence: u64) -> Result<(), Refusal> {
+        if self
+            .outcome(device, sequence)
+            .is_some_and(|o| o.outcome == Outcome::Pending)
+        {
+            return Err(Refusal::Stale);
+        }
         let d = self
             .devices
             .iter_mut()
@@ -422,6 +504,7 @@ impl State {
             !name.trim().is_empty() && name.len() <= 256 && !name.chars().any(char::is_control)
         };
         let target = match mutation {
+            Mutation::Worktree(_) => return Ok(Outcome::Pending),
             Mutation::Close {
                 target,
                 confirmation,
@@ -749,7 +832,8 @@ impl State {
                 return Err(invalid());
             }
             for (index, o) in d.pending.iter().enumerate() {
-                if !o.mutation.is_bounded()
+                if (o.outcome == Outcome::Pending && !matches!(o.mutation, Mutation::Worktree(_)))
+                    || !o.mutation.is_bounded()
                     || o.sequence
                         != d.retired
                             .checked_add(index as u64 + 1)
