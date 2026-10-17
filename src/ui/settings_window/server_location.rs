@@ -288,7 +288,7 @@ impl SettingsWindow {
             );
         }
         (
-            format!("Where this server creates new Worktrees for shared Workspaces. Use {{repository}} and {{branch}}. For example: {}", super::git::nonbreaking_path("~/.worktrees/my-app/feature-login")).into(),
+            "Where this server creates new Worktrees for shared Workspaces. Use {repository} and {branch}. For example: ~/.worktrees/my-app/feature-login".into(),
             CaptionTone::Guidance,
         )
     }

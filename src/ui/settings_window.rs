@@ -1210,10 +1210,10 @@ impl SettingsWindow {
             );
         } else if row == SettingsRowId::ServerWorktreeLocation {
             let (caption, tone) = self.server_location_caption(cx);
-            rendered = rendered.caption(caption, tone);
+            rendered = rendered.caption_with_example(caption, tone);
         } else if row == SettingsRowId::WorktreeLocation {
             let (caption, tone) = self.worktree_location_caption(cx);
-            rendered = rendered.caption(caption, tone);
+            rendered = rendered.caption_with_example(caption, tone);
         } else if row == SettingsRowId::LocalServer {
             if let Some(presentation) = self.local_server_presentation() {
                 rendered = rendered.caption(presentation.explanation, presentation.tone);

@@ -101,18 +101,6 @@ impl WorktreeLocationField {
     }
 }
 
-// Keep the example's leading ~/ and path segments together when the caption wraps.
-pub(super) fn nonbreaking_path(path: &str) -> String {
-    let mut text = String::with_capacity(path.len() * 4);
-    for character in path.chars() {
-        if !text.is_empty() {
-            text.push('\u{2060}');
-        }
-        text.push(character);
-    }
-    text
-}
-
 /// What the person reads under the location field.
 pub(super) fn worktree_location_caption(
     text: &str,
@@ -126,7 +114,7 @@ pub(super) fn worktree_location_caption(
             return (
                 format!(
                     "Use {{repository}} and {{branch}}. For example: {}",
-                    nonbreaking_path(&example)
+                    example
                 )
                 .into(),
                 CaptionTone::Guidance,
@@ -467,11 +455,7 @@ mod tests {
         use crate::worktrees::path_template::DEFAULT_WORKTREE_PATH_TEMPLATE;
 
         assert_eq!(
-            {
-                let (caption, tone) =
-                    worktree_location_caption(DEFAULT_WORKTREE_PATH_TEMPLATE, None);
-                (SharedString::from(caption.replace('\u{2060}', "")), tone)
-            },
+            worktree_location_caption(DEFAULT_WORKTREE_PATH_TEMPLATE, None),
             (
                 SharedString::from(
                     "Use {repository} and {branch}. For example: ~/.worktrees/my-app/feature-login"
