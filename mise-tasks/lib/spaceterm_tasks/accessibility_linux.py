@@ -462,6 +462,7 @@ class OrcaOutput:
         self.speech_record_bytes = 0
         self.speech_backend = Counter()
         self.keyboard_counts = Counter()
+        self.keyboard_barriers = 0
         self.input_counts = Counter()
         self.routing_counts = Counter()
         self.routing_phases = {}
@@ -482,6 +483,7 @@ class OrcaOutput:
         self.counts["discarded_record_resets"] += 1
 
     def line(self, line):
+        self.keyboard_barriers += int(b"^^^^^ PROCESS ATSPI_KEY_RELEASED_EVENT: 'Shift_R' " in line)
         for kind in ("PRESSED", "RELEASED"):
             if b"vvvvv PROCESS ATSPI_KEY_" + kind.encode() + b"_EVENT:" in line:
                 self.input_counts[kind.lower() + "_events"] += 1
