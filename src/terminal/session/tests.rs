@@ -87,7 +87,7 @@ fn native_factory_routes_local_launches_through_injected_factory() {
     let plan = TerminalLaunchPlan::Local(LocalTerminalLaunchPlan::new(
         crate::domain::ValidatedLocalDirectory::new(
             working_directory.clone(),
-            LocalDirectoryIdentity::for_test(7011),
+            LocalFilesystemAuthority::testing().validate_directory(&working_directory).unwrap().identity().clone(),
         ),
     ));
 
@@ -1304,7 +1304,7 @@ fn native_factory_reports_local_launch_directory_failure_through_terminal_sessio
         matches!(
             event,
             TerminalSessionEvent::Failed(TerminalSessionFailure::Startup {
-                stage: TerminalSessionStartupStage::Pty,
+                stage: TerminalSessionStartupStage::Directory,
                 ..
             })
         )
@@ -1356,7 +1356,7 @@ fn remote_factory_rejects_missing_local_home_before_adapter_construction() {
         matches!(
             event,
             TerminalSessionEvent::Failed(TerminalSessionFailure::Startup {
-                stage: TerminalSessionStartupStage::Pty,
+                stage: TerminalSessionStartupStage::Directory,
                 ..
             })
         )
