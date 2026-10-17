@@ -2887,7 +2887,32 @@ mod tests {
         host.shutdown().unwrap();
     }
 
+    #[cfg(feature = "native-tests")]
+    #[test]
+    fn repeated_real_zsh_shutdown_confirms_owned_process_cleanup() {
+        for attempt in 0..64 {
+            let mut host = host_with_shell("/bin/zsh");
+            let lease = attach(&mut host, 1, true);
+            command(
+                &mut host,
+                1,
+                lease,
+                "stty -echo; printf '\\033[2J\\033[HCLEANUP-READY\\r\\n'",
+            );
+            await_text(&mut host, 1, lease, "CLEANUP-READY");
+            assert_eq!(
+                host.shutdown(),
+                Ok(()),
+                "native zsh cleanup attempt {attempt}"
+            );
+        }
+    }
+
     pub(super) fn host() -> DevelopmentPaneHost {
+        host_with_shell("/bin/sh")
+    }
+
+    fn host_with_shell(shell: &str) -> DevelopmentPaneHost {
         let filesystem = local_filesystem();
         let directory = filesystem
             .validate_directory(&std::env::temp_dir())
