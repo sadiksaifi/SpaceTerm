@@ -4058,6 +4058,100 @@ fn deactivation_should_dismiss_without_restoring_prior_focus(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn settled_empty_results_explain_disabled_confirmation_without_moving_focus(
+    cx: &mut TestAppContext,
+) {
+    use crate::a11y_testing::A11yTree;
+
+    let (root, palette, _, _, cx) = palette_window(cx);
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(
+            Some(CommandPalettePrimaryAction::new("choose", "Choose").disabled(true)),
+            cx,
+        );
+    });
+    show_empty_state(
+        &root,
+        &palette,
+        CommandPaletteEmpty::new("Directory doesn’t exist")
+            .description("Choose an existing directory on the server."),
+        cx,
+    );
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.with_role("Status").len(), 1);
+    assert_eq!(tree.with_role("Status")[0]["aria"]["value"], "");
+    let status_id = tree.with_role("Status")[0]["accesskit_id"].clone();
+    cx.executor().advance_clock(Duration::from_millis(749));
+    cx.simulate_keystrokes("z");
+    cx.executor().advance_clock(Duration::from_millis(749));
+    assert_eq!(
+        A11yTree::read(cx).with_role("Status")[0]["aria"]["value"],
+        ""
+    );
+    cx.executor().advance_clock(Duration::from_millis(1));
+    let tree = A11yTree::read(cx);
+    let message = "Directory doesn’t exist. Choose an existing directory on the server.";
+    assert_eq!(tree.with_role("Status")[0]["aria"]["value"], message);
+    assert_eq!(tree.with_role("Status")[0]["aria"]["label"], message);
+    assert_eq!(tree.node("Choose")["aria"]["description"], message);
+    assert_eq!(tree.focused().unwrap()["aria"]["role"], "TextInput");
+
+    cx.simulate_keystrokes("z");
+    palette.update(cx, |palette, cx| {
+        palette.set_loading(true, cx);
+        palette.set_empty(CommandPaletteEmpty::new("Permission denied"), cx);
+    });
+    cx.executor().advance_clock(Duration::from_secs(1));
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.with_role("Status")[0]["accesskit_id"], status_id);
+    assert_eq!(tree.with_role("Status")[0]["aria"]["value"], message);
+    assert!(tree.node("Choose")["aria"]["description"].is_null());
+    palette.update(cx, |palette, cx| palette.set_loading(false, cx));
+    assert_eq!(
+        A11yTree::read(cx).with_role("Status")[0]["aria"]["value"],
+        "Permission denied"
+    );
+
+    palette.update(cx, |palette, cx| {
+        palette.set_query("readable", cx);
+        palette.set_items(vec![CommandPaletteItem::new(9, "readable")], cx);
+        palette.set_primary_action(
+            Some(CommandPalettePrimaryAction::new("choose", "Choose")),
+            cx,
+        );
+    });
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.with_role("Status")[0]["aria"]["value"], "");
+    assert!(tree.node("Choose")["aria"]["description"].is_null());
+    assert_eq!(tree.focused().unwrap()["aria"]["role"], "TextInput");
+    palette.update(cx, |palette, cx| palette.set_items(Vec::new(), cx));
+    cx.executor().advance_clock(Duration::from_millis(750));
+    assert_eq!(
+        A11yTree::read(cx).with_role("Status")[0]["aria"]["value"],
+        ""
+    );
+    palette.update(cx, |palette, cx| {
+        palette.set_primary_action(
+            Some(CommandPalettePrimaryAction::new("choose", "Choose").disabled(true)),
+            cx,
+        );
+    });
+    assert_eq!(
+        A11yTree::read(cx).with_role("Status")[0]["aria"]["value"],
+        "Permission denied"
+    );
+    cx.simulate_keystrokes("escape");
+    assert!(A11yTree::read(cx).with_role("Status").is_empty());
+    palette.update(cx, |palette, cx| palette.set_items(Vec::new(), cx));
+    open_palette(&root, &palette, cx);
+    cx.executor().advance_clock(Duration::from_millis(750));
+    assert_eq!(
+        A11yTree::read(cx).with_role("Status")[0]["aria"]["value"],
+        "Permission denied"
+    );
+}
+
+#[gpui::test]
 fn command_palettes_publish_a_modal_dialog_with_a_list_of_options(cx: &mut TestAppContext) {
     use crate::a11y_testing::{A11yTree, perform, supports};
     use gpui::accesskit::Action;

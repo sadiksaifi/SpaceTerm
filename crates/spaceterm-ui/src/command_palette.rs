@@ -31,6 +31,8 @@ const EMPTY_DESCRIPTION_LINE_LIMIT: usize = 3;
 const LOADING_GRACE_PERIOD: Duration = Duration::from_millis(100);
 /// How long a shown loading state stays before results replace it, so it never flickers.
 const LOADING_MINIMUM_DISPLAY: Duration = Duration::from_millis(400);
+/// Let path editing settle before announcing an empty result.
+const EMPTY_STATUS_DELAY: Duration = Duration::from_millis(750);
 /// The loading state's visible text, which also names its progress bar.
 const LOADING_TEXT: &str = "Loading\u{2026}";
 
@@ -1430,6 +1432,9 @@ pub struct CommandPalette<I: Clone + Eq + 'static> {
     loading_presentation: LoadingPresentation,
     /// Advances `loading_presentation` when its current phase ends.
     loading_timer: Option<Task<()>>,
+    empty_status: SharedString,
+    empty_status_quiet: bool,
+    empty_status_timer: Option<Task<()>>,
     /// Whether the panel has been visible since the palette opened.
     presented: bool,
     /// The results area's height when results were last presented, kept during a reload.
@@ -1820,6 +1825,9 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             loading: false,
             loading_presentation: LoadingPresentation::Settled,
             loading_timer: None,
+            empty_status: SharedString::default(),
+            empty_status_quiet: false,
+            empty_status_timer: None,
             presented: false,
             results_height: None,
             dismissible: true,
@@ -2087,6 +2095,8 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             },
         };
         self.open = true;
+        self.empty_status = SharedString::default();
+        self.wait_for_empty_status(cx);
         if self.coordinator_registration.is_none() {
             let (registration, modal_suspension, inherited) =
                 register_open_palette(cx.entity().downgrade(), window, cx);
@@ -2334,6 +2344,9 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             return;
         }
         self.query = query;
+        if self.open {
+            self.wait_for_empty_status(cx);
+        }
         self.set_loading_state(false, cx);
         self.recompute_matches();
         self.emit_query(cx);
@@ -2342,6 +2355,41 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
 
     fn emit_query(&self, cx: &mut gpui::Context<Self>) {
         cx.emit(CommandPaletteEvent::QueryChanged(self.query.clone()));
+    }
+
+    fn wait_for_empty_status(&mut self, cx: &mut gpui::Context<Self>) {
+        self.empty_status_quiet = false;
+        self.empty_status_timer = Some(cx.spawn(async move |palette, cx| {
+            cx.background_executor().timer(EMPTY_STATUS_DELAY).await;
+            let _ = palette.update(cx, |palette, cx| {
+                palette.empty_status_quiet = true;
+                palette.empty_status_timer = None;
+                cx.notify();
+            });
+        }));
+    }
+
+    fn empty_explanation(&self) -> Option<SharedString> {
+        if self.loading_presentation != LoadingPresentation::Settled
+            || !self.matches.is_empty()
+            || self
+                .primary_action
+                .as_ref()
+                .is_some_and(|action| !action.disabled)
+        {
+            return None;
+        }
+        Some(match &self.empty.description {
+            Some(description) => {
+                let separator = if self.empty.title.ends_with(['.', '!', '?', '…']) {
+                    " "
+                } else {
+                    ". "
+                };
+                format!("{}{separator}{description}", self.empty.title).into()
+            }
+            None => self.empty.title.clone(),
+        })
     }
 
     fn recompute_matches(&mut self) {
@@ -2822,6 +2870,8 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             return false;
         }
         self.open = false;
+        self.empty_status_timer = None;
+        self.empty_status = SharedString::default();
         let suspended_generation = self.suspended_by_modal.take();
         if let Some(registration) = self.coordinator_registration.take() {
             unregister_palette(
@@ -2905,6 +2955,13 @@ impl<I: Clone + Eq + 'static> Render for CommandPalette<I> {
             return div().into_any_element();
         }
         crate::modal::present_modal_transient();
+        if self.loading_presentation == LoadingPresentation::Settled {
+            match self.empty_explanation() {
+                Some(message) if self.empty_status_quiet => self.empty_status = message,
+                None => self.empty_status = SharedString::default(),
+                _ => {}
+            }
+        }
         // A disabled button gives up focus. The query takes it, so the palette's keys, such as
         // Escape during a cancellable operation, keep reaching the palette.
         if self
@@ -3310,6 +3367,20 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
             .role(accesskit::Role::Dialog)
             .aria_label(self.accessibility_name.clone())
             .aria_modal(true)
+            .a11y_synthetic_children({
+                let message = self.empty_status.clone();
+                move |builder| {
+                    let mut status = accesskit::Node::new(accesskit::Role::Status);
+                    // AT-SPI announces name changes; macOS announces live-region values.
+                    status.set_label(message.as_ref());
+                    status.set_value(message.as_ref());
+                    status.set_live(accesskit::Live::Polite);
+                    if let Some(bounds) = builder.parent_node().bounds() {
+                        status.set_bounds(bounds);
+                    }
+                    builder.push_child(builder.synthetic_node_id("empty-status"), status);
+                }
+            })
             .debug_selector(|| "command-palette-panel".to_owned())
             .w(width)
             .h(height)
@@ -3417,6 +3488,7 @@ impl<I: Clone + Eq + 'static> CommandPalette<I> {
                     palette.clone(),
                     action,
                     self.primary_action_focus.clone(),
+                    self.empty_explanation(),
                 ))
             })
             .into_any_element()
@@ -3615,6 +3687,7 @@ fn render_primary_action<I: Clone + Eq + 'static>(
     palette: WeakEntity<CommandPalette<I>>,
     action: &CommandPalettePrimaryAction,
     focus_handle: gpui::FocusHandle,
+    explanation: Option<SharedString>,
 ) -> AnyElement {
     let id = action.id.clone();
     let menu_palette = palette.clone();
@@ -3637,6 +3710,10 @@ fn render_primary_action<I: Clone + Eq + 'static>(
         button.shortcut(shortcut)
     })
     .disabled(action.disabled)
+    .when_some(
+        explanation.filter(|_| action.disabled),
+        |button, description| button.accessibility_description(description),
+    )
     .menu_disabled(action.menu_disabled)
     .focus_handle(focus_handle)
     .tab_stop(true)
