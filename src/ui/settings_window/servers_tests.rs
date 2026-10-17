@@ -1084,10 +1084,10 @@ fn settings_search_reaches_the_service(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn settings_search_reaches_the_service_by_its_linux_names(cx: &mut TestAppContext) {
+fn settings_search_reaches_the_service_by_its_startup_names(cx: &mut TestAppContext) {
     for query in ["systemd", "linger"] {
         let server = ScriptedServer::new(Ok(connected(2)));
-        let service = ScriptedService::linux(Ok(running()));
+        let service = ScriptedService::with_boot_startup(Ok(running()));
         let (window, cx) = open_settings(offered_with_service(&server, &service), cx);
 
         search(&window, query, cx);
@@ -1184,7 +1184,7 @@ fn keyboard_focus_stays_on_the_leading_step_when_stop_gives_way_to_start(cx: &mu
 }
 
 #[test]
-fn linux_wording_names_boot_and_logout_and_keeps_lingering_after_uninstall() {
+fn boot_wording_names_boot_and_logout_and_keeps_lingering_after_uninstall() {
     let presented = |startup, status| {
         present_service(ServiceState {
             startup,
@@ -1218,7 +1218,7 @@ fn linux_wording_names_boot_and_logout_and_keeps_lingering_after_uninstall() {
         "The server keeps running after SpaceTerm quits. While lingering stays on for your \
          account, it also starts when the computer starts and keeps running after you log out."
     );
-    // Installing may need authorization on Linux, and SpaceTerm says it asks first.
+    // Installing may need authorization for boot startup, and SpaceTerm says it asks first.
     let install = presented(ServiceStartup::AtBoot, not_installed());
     assert!(install.contains("keeps running after you log out"));
     assert!(install.contains("SpaceTerm asks you first"));
@@ -1256,7 +1256,7 @@ fn the_authorization_prompt_names_its_consequences_and_what_follows() {
     assert_eq!(install.confirm, "Authorize and Install");
     assert_eq!(
         install.detail.as_ref(),
-        "Linux asks for an administrator password to turn on lingering for your account. \
+        "Your computer asks for an administrator password to turn on lingering for your account. \
          Lingering applies to every service your account runs, and uninstalling the server \
          leaves it on. SpaceTerm then installs Version 1.4.0 (commit aaaaaaa) and starts the \
          server. If you cancel here or in the password prompt, nothing changes."
@@ -1268,11 +1268,11 @@ fn the_authorization_prompt_names_its_consequences_and_what_follows() {
 }
 
 #[gpui::test]
-fn a_linux_installation_waits_for_explained_authorization_then_installs_its_build(
+fn a_boot_installation_waits_for_explained_authorization_then_installs_its_build(
     cx: &mut TestAppContext,
 ) {
     let server = ScriptedServer::new(Ok(connected(2)));
-    let service = ScriptedService::linux(Ok(not_installed()));
+    let service = ScriptedService::with_boot_startup(Ok(not_installed()));
     let (window, cx) = open_settings(offered_with_service(&server, &service), cx);
     click(NAVIGATION_SELECTOR, cx);
     let build = retained("1.4.0", 'a').directory;
@@ -1290,7 +1290,7 @@ fn a_linux_installation_waits_for_explained_authorization_then_installs_its_buil
     assert_eq!(presented.tone, CaptionTone::Warning);
     assert_eq!(
         presented.explanation.as_ref(),
-        "Linux needs an administrator password before the server can start at boot and keep \
+        "Your computer needs an administrator password before the server can start at boot and keep \
          running after you log out. The server is not installed. Choose Authorize and Install to \
          continue."
     );
@@ -1328,7 +1328,7 @@ fn cancelling_the_operating_systems_prompt_changes_nothing_and_keeps_the_stop(
     cx: &mut TestAppContext,
 ) {
     let server = ScriptedServer::new(Err(ServerError::Stopped));
-    let service = ScriptedService::linux(Ok(stopped()));
+    let service = ScriptedService::with_boot_startup(Ok(stopped()));
     let (window, cx) = open_settings(offered_with_service(&server, &service), cx);
     click(NAVIGATION_SELECTOR, cx);
     click(START_SERVICE_SELECTOR, cx);
@@ -1381,12 +1381,12 @@ fn cancelling_the_operating_systems_prompt_changes_nothing_and_keeps_the_stop(
 }
 
 #[gpui::test]
-fn a_stopped_linux_server_reinstalls_stopped_and_only_start_asks_for_authorization(
+fn a_stopped_boot_service_reinstalls_stopped_and_only_start_asks_for_authorization(
     cx: &mut TestAppContext,
 ) {
     let (window, _server, service, cx) = {
         let server = ScriptedServer::new(Err(ServerError::Stopped));
-        let service = ScriptedService::linux(Ok(uninstalled()));
+        let service = ScriptedService::with_boot_startup(Ok(uninstalled()));
         let (window, cx) = open_settings(offered_with_service(&server, &service), cx);
         click(NAVIGATION_SELECTOR, cx);
         (window, server, service, cx)
@@ -1416,9 +1416,11 @@ fn a_stopped_linux_server_reinstalls_stopped_and_only_start_asks_for_authorizati
 }
 
 #[gpui::test]
-fn a_linux_restart_refused_after_stopping_offers_to_authorize_and_start(cx: &mut TestAppContext) {
+fn a_boot_service_restart_refused_after_stopping_offers_to_authorize_and_start(
+    cx: &mut TestAppContext,
+) {
     let server = ScriptedServer::new(Ok(connected(2)));
-    let service = ScriptedService::linux(Ok(running()));
+    let service = ScriptedService::with_boot_startup(Ok(running()));
     let (window, cx) = open_settings(offered_with_service(&server, &service), cx);
     click(NAVIGATION_SELECTOR, cx);
 
@@ -1429,7 +1431,7 @@ fn a_linux_restart_refused_after_stopping_offers_to_authorize_and_start(cx: &mut
     let presented = service_presentation(&window, cx);
     assert_eq!(
         presented.explanation.as_ref(),
-        "Linux needs an administrator password before the server can start at boot and keep \
+        "Your computer needs an administrator password before the server can start at boot and keep \
          running after you log out. The server is stopped. Choose Authorize and Start to \
          continue."
     );
@@ -1461,7 +1463,7 @@ fn assistive_technology_hears_the_authorization_step_and_escape_leaves_it_unaske
 
     let (window, _server, service, cx) = {
         let server = ScriptedServer::new(Ok(connected(2)));
-        let service = ScriptedService::linux(Ok(not_running()));
+        let service = ScriptedService::with_boot_startup(Ok(not_running()));
         let (window, cx) = open_settings(offered_with_service(&server, &service), cx);
         click(NAVIGATION_SELECTOR, cx);
         (window, server, service, cx)
@@ -1479,7 +1481,7 @@ fn assistive_technology_hears_the_authorization_step_and_escape_leaves_it_unaske
     assert_eq!(authorize["aria"]["role"], "Button");
     assert_eq!(
         authorize["aria"]["description"],
-        "SpaceTerm explains the change first. Linux then asks for an administrator password, \
+        "SpaceTerm explains the change first. Your computer then asks for an administrator password, \
          and SpaceTerm starts the server."
     );
 
