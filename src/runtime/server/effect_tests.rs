@@ -32,7 +32,7 @@ fn clipboard_reads_reply_to_the_originating_pty_and_do_not_block_screen_queries(
         &mut host,
         lease,
         1,
-        "stty raw -echo; printf '\\033[2J\\033[H\\033]52;c;?\\007'; dd bs=1 count=12 2>/dev/null | od -An -tx1 | tr -d ' \\n'; printf '\\r\\n'",
+        "set +m; stty raw -echo; printf '\\033[2J\\033[H\\033]52;c;?\\007'; dd bs=1 count=12 2>/dev/null | od -An -tx1 | tr -d ' \\n'; printf '\\r\\n'",
     );
     let request = next(&mut host, lease, 1);
     assert!(matches!(request.effect, Effect::ClipboardRead { .. }));
@@ -67,7 +67,7 @@ fn clipboard_completions_cannot_cross_focus_loss_takeover_or_disconnect() {
             &mut host,
             lease,
             1,
-            "stty raw -echo; printf '\\033[2J\\033[H\\033]52;c;?\\007'; dd bs=1 count=8 2>/dev/null | od -An -tx1 | tr -d ' \\n'; printf '\\r\\n'",
+            "set +m; stty raw -echo; printf '\\033[2J\\033[H\\033]52;c;?\\007'; dd bs=1 count=8 2>/dev/null | od -An -tx1 | tr -d ' \\n'; printf '\\r\\n'",
         );
         let request = next(&mut host, lease, 1);
         match invalidate {
