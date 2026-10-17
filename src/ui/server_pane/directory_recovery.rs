@@ -1,8 +1,9 @@
 //! One cancellable server-backed picker, shared by both desktop Pane presentations.
 use crate::{
-    domain::PinnedDirectory,
     local_server::LocalServer,
-    ui::directory_picker::{DirectoryPicker, DirectoryPickerEvent, ServerDirectorySource},
+    ui::directory_picker::{
+        DirectoryPicker, DirectoryPickerEvent, DirectorySelection, ServerDirectorySource,
+    },
 };
 use gpui::{App, Context, Entity, Render, Window, div, prelude::*};
 use spaceterm_server::pane::directories::Target;
@@ -10,7 +11,7 @@ use std::{path::PathBuf, rc::Rc};
 
 type RestoreFocus = dyn Fn(&mut Window, &mut App);
 pub(crate) struct RecoveryActions {
-    pub(crate) current: Rc<dyn Fn() -> bool>,
+    pub(crate) current: Rc<dyn Fn(&App) -> bool>,
     pub(crate) online: Rc<dyn Fn() -> bool>,
     pub(crate) confirm: Rc<dyn Fn(PathBuf)>,
     pub(crate) restore_focus: Rc<RestoreFocus>,
@@ -48,12 +49,12 @@ impl DirectoryRecovery {
             window,
             move |recovery, picker, event, window, cx| {
                 match event {
-                    DirectoryPickerEvent::Confirmed(PinnedDirectory::Remote {
-                        directory, ..
-                    }) if recovery.open && valid() && online() => {
+                    DirectoryPickerEvent::Confirmed(DirectorySelection::Server(directory))
+                        if recovery.open && valid(cx) && online() =>
+                    {
                         recovery.open = false;
                         picker.update(cx, |picker, cx| picker.complete_activation(window, cx));
-                        confirm(PathBuf::from(directory.as_str()));
+                        confirm(directory.clone());
                         restore(window, cx);
                     }
                     DirectoryPickerEvent::Confirmed(_) => {
@@ -76,7 +77,7 @@ impl DirectoryRecovery {
                     .timer(std::time::Duration::from_millis(100))
                     .await;
                 let Ok(keep) = recovery.update_in(cx, |recovery, window, cx| {
-                    if recovery.open && !current() {
+                    if recovery.open && !current(cx) {
                         recovery.open = false;
                         recovery
                             .picker

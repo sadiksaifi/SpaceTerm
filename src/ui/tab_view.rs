@@ -3095,6 +3095,9 @@ impl TabView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if spaceterm_ui::window_modal_is_open(window, cx) {
+            return;
+        }
         if self
             .directory_recovery
             .as_ref()
@@ -3121,11 +3124,15 @@ impl TabView {
         let current = std::sync::Arc::clone(&connection);
         let online = std::sync::Arc::clone(&connection);
         let expected = target.clone();
+        let current_owner = cx.weak_entity();
         let restore_owner = cx.weak_entity();
         let expected_target = target.clone();
         let actions = super::server_pane::RecoveryActions {
-            current: std::rc::Rc::new(move || {
-                current.recovery_target().as_ref() == Some(&expected)
+            current: std::rc::Rc::new(move |cx| {
+                current_owner.upgrade().is_some_and(|owner| {
+                    let view = owner.read(cx);
+                    view.active && view.tab.pane(pane_id).is_some()
+                }) && current.recovery_target().as_ref() == Some(&expected)
                     && matches!(
                         current.status(),
                         crate::terminal::server_session::DevelopmentPaneStatus::Failed(
@@ -3147,11 +3154,30 @@ impl TabView {
                     restore_owner.update(cx, |view, cx| view.restore_directory_focus(window, cx));
             }),
         };
-        self.directory_recovery = Some(cx.new(|cx| {
+        let recovery = cx.new(|cx| {
             super::server_pane::DirectoryRecovery::new(server, expected_target, actions, window, cx)
-        }));
+        });
+        cx.observe(&recovery, |view, _, cx| {
+            cx.emit(TabViewEvent::PresentationChanged {
+                tab_id: view.tab.id(),
+            });
+            cx.notify();
+        })
+        .detach();
+        self.directory_recovery = Some(recovery);
+        cx.emit(TabViewEvent::PresentationChanged {
+            tab_id: self.tab.id(),
+        });
 
         cx.notify();
+    }
+    pub(crate) fn directory_recovery(
+        &self,
+        cx: &App,
+    ) -> Option<Entity<super::server_pane::DirectoryRecovery>> {
+        self.directory_recovery
+            .clone()
+            .filter(|recovery| recovery.read(cx).is_open())
     }
     fn restore_directory_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.active {
@@ -3379,7 +3405,6 @@ impl Render for TabView {
                     }
                 }
             })
-            .children(self.directory_recovery.clone())
             .id(("tab-view", self.tab.id().get()))
             .key_context(TERMINAL_KEY_CONTEXT)
             .relative()

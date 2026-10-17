@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use gpui::BackgroundExecutor;
 
 use super::{
-    DirectoryListing, DirectoryRow, DirectorySource, DirectorySourceError, ExactPathState,
-    MAXIMUM_DIRECTORY_ROWS, PickerPath, SourceFuture,
+    DirectoryListing, DirectoryRow, DirectorySelection, DirectorySource, DirectorySourceError,
+    ExactPathState, MAXIMUM_DIRECTORY_ROWS, PickerPath, SourceFuture,
 };
 use crate::domain::PinnedDirectory;
 use crate::platform::local_filesystem::{LocalFilesystemAuthority, LocalFilesystemError};
@@ -102,11 +102,12 @@ impl DirectorySource for LocalDirectorySource {
         })
     }
 
-    fn pin(&self, directory: PickerPath) -> SourceFuture<PinnedDirectory> {
+    fn select(&self, directory: PickerPath) -> SourceFuture<DirectorySelection> {
         self.run(&directory, |filesystem, path| {
             filesystem
                 .validate_directory(&path)
                 .map(PinnedDirectory::Local)
+                .map(DirectorySelection::Pin)
         })
     }
 }
@@ -214,7 +215,9 @@ mod tests {
             .create_directory_recursively(path("~/New/Nested/"))
             .await
             .unwrap();
-        let Ok(PinnedDirectory::Local(directory)) = source.pin(path("~/New/Nested/")).await else {
+        let Ok(DirectorySelection::Pin(PinnedDirectory::Local(directory))) =
+            source.select(path("~/New/Nested/")).await
+        else {
             panic!("the created directory was not pinned as a local directory");
         };
         assert_eq!(
@@ -222,7 +225,7 @@ mod tests {
             home.0.join("New/Nested").to_str()
         );
         assert_eq!(
-            source.pin(path("~/notes.txt")).await.unwrap_err(),
+            source.select(path("~/notes.txt")).await.unwrap_err(),
             DirectorySourceError::NotDirectory
         );
     }

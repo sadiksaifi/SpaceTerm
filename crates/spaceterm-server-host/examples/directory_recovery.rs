@@ -246,9 +246,30 @@ fn main() -> Result<(), Box<dyn Error>> {
         select(&mut connection, pane, false)?,
         Reply::Restored { .. }
     ));
-    let Reply::Attached { lease } = connection.exchange(&repair(retained, None))? else {
+    let mut rival = connect(&client)?;
+    let request = repair(retained, None);
+    let barrier = std::sync::Barrier::new(2);
+    let (first, second) = std::thread::scope(|scope| {
+        let second = scope.spawn(|| {
+            barrier.wait();
+            rival.exchange(&request)
+        });
+        barrier.wait();
+        (connection.exchange(&request), second.join().unwrap())
+    });
+    let (Reply::Attached { lease: first }, Reply::Attached { lease: second }) = (first?, second?)
+    else {
         return Err("Retry did not start a shell".into());
     };
+    assert_eq!(
+        first.session, second.session,
+        "concurrent first use must start only one Session"
+    );
+    drop(rival);
+    let Reply::Attached { lease } = select(&mut connection, pane, false)? else {
+        return Err("concurrent first-use Session could not be resumed".into());
+    };
+    assert_eq!(lease.session, first.session);
     command(
         &mut connection,
         lease,
@@ -320,7 +341,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     host.0.wait()?;
     std::fs::remove_dir_all(root)?;
     println!(
-        "Protocol {major}: authenticated restart, unavailable/file-changed directories, Retry, replacement, nested reports, identity preservation and passive reconnect passed with real native PTYs and credential storage."
+        "Protocol {major}: authenticated restart, unavailable/file-changed directories, concurrent first-use Retry, replacement, nested reports, identity preservation and passive reconnect passed with real native PTYs and credential storage."
     );
     Ok(())
 }

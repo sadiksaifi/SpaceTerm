@@ -507,6 +507,10 @@ run = [
 description = "Test authenticated graphics transfers and slow readers on both protocol majors with fixture identities"
 run = "cargo test --package spaceterm-server --lib --features client --locked"
 
+[tasks."server:directory:build"]
+description = "Build the server directory-recovery check before native code signing"
+run = "cargo build --package spaceterm-server-host --features client --example directory_recovery --bin spaceterm-server --locked"
+
 [tasks."server:directory:smoke"]
 description = "Exercise directory recovery on an idle Development server using native credentials"
 usage = '''
@@ -515,8 +519,8 @@ flag "--prepare-desktop" help="Leave the test Workspace unavailable for a real d
 flag "--cleanup-exercise" help="Remove only the retained directory-recovery test Workspace"
 '''
 run = [
-  "cargo build --package spaceterm-server-host --features client --examples --bins --locked",
-  "cargo run --package spaceterm-server-host --features client --example directory_recovery --locked -- {{usage.major}} {% if usage.prepare_desktop %}--prepare-desktop{% endif %} {% if usage.cleanup_exercise %}--cleanup{% endif %}",
+  { task = "server:directory:build" },
+  "target/debug/examples/directory_recovery {{usage.major}} {% if usage.prepare_desktop %}--prepare-desktop{% endif %} {% if usage.cleanup_exercise %}--cleanup{% endif %}",
 ]
 
 [tasks."server:directory:run"]

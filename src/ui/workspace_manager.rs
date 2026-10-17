@@ -24,8 +24,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::chrome_typography::{ChromeTextStyleExt, TextRole};
 use super::directory_picker::{
-    DirectoryPicker, DirectoryPickerEvent, DirectorySource, LocalDirectorySource,
-    RemoteDirectorySource,
+    DirectoryPicker, DirectoryPickerEvent, DirectorySelection, DirectorySource,
+    LocalDirectorySource, RemoteDirectorySource,
 };
 use super::remote_workspace_flow::{
     ConnectedControlConnection, RemoteWorkspaceAliasPin, RemoteWorkspaceConnectContext,
@@ -617,6 +617,7 @@ impl WorkspaceManager {
                             .workspaces
                             .update_automatic_directory(workspace_id, directory);
                     }
+                    workspace_manager.sync_terminal_focus_blocker(window, cx);
                     cx.notify();
                 }
             },
@@ -787,7 +788,8 @@ impl WorkspaceManager {
             picker: self
                 .pin_picker
                 .as_ref()
-                .is_some_and(|picker| picker.read(cx).blocks_terminal_input()),
+                .is_some_and(|picker| picker.read(cx).blocks_terminal_input())
+                || self.active_directory_recovery(cx).is_some(),
             remote_flow: self
                 .remote_workspace_flow
                 .as_ref()
@@ -799,6 +801,14 @@ impl WorkspaceManager {
             context_menu: self.sidebar.read(cx).menu_open(),
             sidebar: self.sidebar.read(cx).is_focused(window),
         })
+    }
+
+    fn active_directory_recovery(
+        &self,
+        cx: &App,
+    ) -> Option<Entity<super::server_pane::DirectoryRecovery>> {
+        self.active_tab_manager()
+            .and_then(|manager| manager.read(cx).directory_recovery(cx))
     }
 
     /// The presented Workspaces in sidebar order, then the detached ones the server offers.
@@ -1244,6 +1254,9 @@ impl WorkspaceManager {
     /// Opens the Directory Picker for the target's machine. A local target also offers System
     /// Directory Selection from the picker.
     fn open_pin_picker(&mut self, target: PinTarget, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_directory_recovery(cx).is_some() {
+            return;
+        }
         let (location, placeholder) = match &target {
             PinTarget::Workspace(workspace_id) => {
                 let Some(location) = self
@@ -1314,6 +1327,10 @@ impl WorkspaceManager {
                 }
                 match event {
                     DirectoryPickerEvent::Confirmed(pinned) => {
+                        let DirectorySelection::Pin(pinned) = pinned else {
+                            picker.update(cx, |picker, cx| picker.activation_failed(window, cx));
+                            return;
+                        };
                         let current = manager.pin_operation == operation
                             && remote_generation.is_none_or(|generation| {
                                 let PinTarget::Workspace(workspace_id) = &target else {
@@ -5363,7 +5380,8 @@ impl WorkspaceManager {
             .absolute()
             .inset_0()
             .children(self.remote_workspace_flow.iter().cloned())
-            .children(self.pin_picker.iter().cloned());
+            .children(self.pin_picker.iter().cloned())
+            .children(self.active_directory_recovery(cx));
         ModalLayer::new(super::window_shell::render(content, window, cx)).transient(transients)
     }
 }

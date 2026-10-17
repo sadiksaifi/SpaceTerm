@@ -625,7 +625,7 @@ mod window {
             let restore_owner = cx.weak_entity();
             let expected_target = target.clone();
             let actions = server_pane::RecoveryActions {
-                current: Rc::new(move || {
+                current: Rc::new(move |_| {
                     current.recovery_target().as_ref() == Some(&expected)
                         && matches!(
                             current.status(),
@@ -1037,10 +1037,10 @@ mod window {
                     .flex_col()
                     .bg(gpui_color(appearance.colors.title_bar_background))
                     .child(header)
-                    .child(pane)
-                    .children(self.directory_recovery.clone()),
+                    .child(pane),
             );
             ModalLayer::new(super::super::window_shell::render(content, window, cx))
+                .transient(div().children(self.directory_recovery.clone()))
                 .into_any_element()
         }
     }

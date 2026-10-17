@@ -1,9 +1,6 @@
 //! Reads paths through the authenticated owning server; never validates them on this client.
 use super::*;
-use crate::{
-    domain::{RemoteDirectory, RemoteDirectoryIdentity},
-    local_server::LocalServer,
-};
+use crate::local_server::LocalServer;
 use spaceterm_server::pane::{Reply, Request as PaneRequest, directories::*};
 use std::{
     path::PathBuf,
@@ -182,22 +179,13 @@ impl DirectorySource for ServerDirectorySource {
     fn create_directory_recursively(&self, _: PickerPath) -> SourceFuture<()> {
         Box::pin(async { Err(DirectorySourceError::Other) })
     }
-    fn pin(&self, directory: PickerPath) -> SourceFuture<PinnedDirectory> {
+    fn select(&self, directory: PickerPath) -> SourceFuture<DirectorySelection> {
         let read = self
             .path(directory)
             .map(|path| self.run(Operation::Validate { path }));
         Box::pin(async move {
             match read?.await? {
-                Value::Directory(path) => {
-                    let path = path.to_str().ok_or(DirectorySourceError::Other)?.to_owned();
-                    // A remote directory value carries no client-local authority.
-                    Ok(PinnedDirectory::Remote {
-                        directory: RemoteDirectory::new(path.clone())
-                            .map_err(|_| DirectorySourceError::Other)?,
-                        identity: RemoteDirectoryIdentity::new(path)
-                            .map_err(|_| DirectorySourceError::Other)?,
-                    })
-                }
+                Value::Directory(path) => Ok(DirectorySelection::Server(path)),
                 _ => Err(DirectorySourceError::Other),
             }
         })

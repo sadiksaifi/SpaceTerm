@@ -102,6 +102,21 @@ pub(crate) enum DirectorySourceError {
 
 pub(crate) type SourceFuture<T> = Pin<Box<dyn Future<Output = Result<T, DirectorySourceError>>>>;
 
+/// A server path grants no authority to the client's filesystem or Workspace pin.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) enum DirectorySelection {
+    Pin(PinnedDirectory),
+    Server(std::path::PathBuf),
+}
+impl fmt::Debug for DirectorySelection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Pin(_) => "DirectorySelection::Pin(<redacted>)",
+            Self::Server(_) => "DirectorySelection::Server(<redacted>)",
+        })
+    }
+}
+
 /// The boundary through which the Directory Picker reads and changes one machine's directories.
 ///
 /// Each source converts [`PickerPath`] spellings into its own machine's path type.
@@ -127,8 +142,8 @@ pub(crate) trait DirectorySource {
 
     fn create_directory_recursively(&self, directory: PickerPath) -> SourceFuture<()>;
 
-    /// Validates the directory's physical identity as a Pinned Directory.
-    fn pin(&self, directory: PickerPath) -> SourceFuture<PinnedDirectory>;
+    /// Validates a selection using only the authority owned by this source.
+    fn select(&self, directory: PickerPath) -> SourceFuture<DirectorySelection>;
 }
 
 /// A directory path as spelled in the Directory Picker: absolute, or relative to the home
@@ -403,7 +418,7 @@ pub(crate) enum ExactPathState {
 pub(super) enum DirectoryPickerEvent {
     StateChanged,
     Dismissed,
-    Confirmed(PinnedDirectory),
+    Confirmed(DirectorySelection),
     /// The picker closed so System Directory Selection can choose the directory instead.
     SystemSelectionRequested,
 }
@@ -468,7 +483,7 @@ struct ValidationCompletion {
     lifecycle_generation: u64,
     operation_generation: u64,
     directory: PickerPath,
-    result: Result<PinnedDirectory, DirectorySourceError>,
+    result: Result<DirectorySelection, DirectorySourceError>,
 }
 
 /// One machine's directory chooser built on the reusable Command Palette.
@@ -1092,11 +1107,11 @@ impl DirectoryPicker {
             let result = match kind {
                 DirectoryValidationKind::Creation => {
                     match source.create_directory_recursively(request.clone()).await {
-                        Ok(()) => source.pin(request).await,
+                        Ok(()) => source.select(request).await,
                         Err(error) => Err(error),
                     }
                 }
-                DirectoryValidationKind::Existing => source.pin(request).await,
+                DirectoryValidationKind::Existing => source.select(request).await,
             };
             let completion = ValidationCompletion {
                 lifecycle_generation,
@@ -1513,7 +1528,7 @@ mod tests {
             directory: RemoteDirectory::new("/sensitive/project".to_owned()).unwrap(),
             identity: RemoteDirectoryIdentity::new("/sensitive/project".to_owned()).unwrap(),
         };
-        let event = DirectoryPickerEvent::Confirmed(pinned);
+        let event = DirectoryPickerEvent::Confirmed(DirectorySelection::Pin(pinned));
 
         for debug in [
             format!("{parsed:?}"),
@@ -1521,6 +1536,10 @@ mod tests {
             format!("{listing:?}"),
             format!("{account:?}"),
             format!("{event:?}"),
+            format!(
+                "{:?}",
+                DirectorySelection::Server("/sensitive/server/".into())
+            ),
         ] {
             assert!(!debug.contains("sensitive"));
         }
@@ -1695,8 +1714,10 @@ mod tests {
             fn create_directory_recursively(&self, _: PickerPath) -> SourceFuture<()> {
                 Box::pin(async { Err(DirectorySourceError::Other) })
             }
-            fn pin(&self, _: PickerPath) -> SourceFuture<PinnedDirectory> {
-                Box::pin(async { Err(DirectorySourceError::Other) })
+            fn select(&self, directory: PickerPath) -> SourceFuture<DirectorySelection> {
+                Box::pin(
+                    async move { Ok(DirectorySelection::Server(directory.into_string().into())) },
+                )
             }
         }
         cx.update(crate::ui::init).unwrap();
@@ -1712,6 +1733,16 @@ mod tests {
             }),
         });
         let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
+        let confirmed = Rc::new(RefCell::new(Vec::new()));
+        let observed = Rc::clone(&confirmed);
+        cx.update(|_, cx| {
+            cx.subscribe(&picker, move |_, event: &DirectoryPickerEvent, _| {
+                if let DirectoryPickerEvent::Confirmed(selection) = event {
+                    observed.borrow_mut().push(selection.clone());
+                }
+            })
+            .detach();
+        });
         cx.update(|window, cx| {
             window.activate_window();
             picker.update(cx, |picker, cx| {
@@ -1736,6 +1767,12 @@ mod tests {
             "/chosen/"
         );
         assert!(picker.read_with(cx, |picker, _| picker.can_confirm()));
+        cx.update(|window, cx| picker.update(cx, |picker, cx| picker.confirm_current(window, cx)));
+        cx.run_until_parked();
+        assert_eq!(
+            *confirmed.borrow(),
+            vec![DirectorySelection::Server("/chosen/".into())]
+        );
     }
 
     impl gpui::Render for DirectoryPickerHarness {
@@ -1969,7 +2006,7 @@ mod tests {
         );
         assert!(events.borrow().iter().any(|event| matches!(
             event,
-            DirectoryPickerEvent::Confirmed(PinnedDirectory::Remote { identity: pinned, .. })
+            DirectoryPickerEvent::Confirmed(DirectorySelection::Pin(PinnedDirectory::Remote { identity: pinned, .. }))
                 if pinned == &identity
         )));
     }
@@ -2080,7 +2117,9 @@ mod tests {
         assert_eq!(records.validated_directories, vec![expected.clone()]);
         drop(records);
         let pinned = events.borrow().iter().find_map(|event| match event {
-            DirectoryPickerEvent::Confirmed(pinned) => Some(pinned.clone()),
+            DirectoryPickerEvent::Confirmed(DirectorySelection::Pin(pinned)) => {
+                Some(pinned.clone())
+            }
             _ => None,
         });
         assert_eq!(
@@ -2744,12 +2783,12 @@ mod tests {
                         lifecycle_generation,
                         operation_generation,
                         directory,
-                        result: Ok(PinnedDirectory::Remote {
+                        result: Ok(DirectorySelection::Pin(PinnedDirectory::Remote {
                             directory: crate::domain::RemoteDirectory::new("~/".to_owned())
                                 .unwrap(),
                             identity: RemoteDirectoryIdentity::new("/home/tester".to_owned())
                                 .unwrap(),
-                        }),
+                        })),
                     },
                     window,
                     cx,

@@ -4,8 +4,8 @@ use std::sync::Arc;
 use gpui::Task;
 
 use super::{
-    DirectoryListing, DirectorySource, DirectorySourceError, ExactPathState, PickerPath,
-    SourceFuture,
+    DirectoryListing, DirectorySelection, DirectorySource, DirectorySourceError, ExactPathState,
+    PickerPath, SourceFuture,
 };
 use crate::domain::{PinnedDirectory, RemoteDirectory, RemoteDirectoryIdentity};
 use crate::ssh::remote_account::RemoteWorkspaceAccount;
@@ -104,7 +104,7 @@ impl DirectorySource for RemoteDirectorySource {
         }
     }
 
-    fn pin(&self, directory: PickerPath) -> SourceFuture<PinnedDirectory> {
+    fn select(&self, directory: PickerPath) -> SourceFuture<DirectorySelection> {
         let directory = match remote_directory(directory) {
             Ok(directory) => directory,
             Err(error) => return Box::pin(async move { Err(error) }),
@@ -112,10 +112,10 @@ impl DirectorySource for RemoteDirectorySource {
         let identity = self.provider.validate_physical_identity(directory.clone());
         Box::pin(async move {
             let identity = identity.await.map_err(source_error)?;
-            Ok(PinnedDirectory::Remote {
+            Ok(DirectorySelection::Pin(PinnedDirectory::Remote {
                 directory,
                 identity,
-            })
+            }))
         })
     }
 }

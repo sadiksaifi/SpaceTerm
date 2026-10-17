@@ -1508,10 +1508,12 @@ impl RemoteWorkspaceFlow {
             return;
         }
         match event {
-            DirectoryPickerEvent::Confirmed(PinnedDirectory::Remote {
-                directory,
-                identity,
-            }) => {
+            DirectoryPickerEvent::Confirmed(super::directory_picker::DirectorySelection::Pin(
+                PinnedDirectory::Remote {
+                    directory,
+                    identity,
+                },
+            )) => {
                 let RemoteWorkspaceFlowState::ChoosingDirectory(choice) =
                     std::mem::replace(&mut self.state, RemoteWorkspaceFlowState::Idle)
                 else {
@@ -1539,7 +1541,7 @@ impl RemoteWorkspaceFlow {
                     cx,
                 );
             }
-            DirectoryPickerEvent::Confirmed(PinnedDirectory::Local(_)) => {
+            DirectoryPickerEvent::Confirmed(_) => {
                 picker.update(cx, |picker, cx| picker.activation_failed(window, cx));
             }
             DirectoryPickerEvent::Dismissed => self.cancel_flow(window, cx),
