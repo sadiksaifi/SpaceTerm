@@ -523,6 +523,7 @@ mod window {
                 self.terminal
                     .update(cx, |terminal, cx| terminal.clear_server_presentation(cx));
             }
+            let recovery_open = self.directory_recovery_is_open(cx);
             if entering_takeover {
                 self.takeover_shown = true;
                 // Another client started the shell, so nothing here waits to start it.
@@ -531,18 +532,23 @@ mod window {
                 self.start_unconfirmed = false;
                 // Focus rests on the window, so typing meant for the shell reaches nothing and
                 // never takes control back by accident. Tab reaches Take Over.
-                self.focus_content(window, cx);
+                if !recovery_open {
+                    self.focus_content(window, cx);
+                }
             }
-            // Close Window replaces Take Over or Start New Shell, which may hold focus. The window
-            // keeps focus, so typing never closes it and Tab reaches Close Window.
-            if self.session_ended()
-                || self.status == DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
+            // A disabled action gives up focus, so the window takes it: on the Session Ended
+            // screen Tab then reaches Close Window, and on the directory screen it reaches Retry
+            // and Choose Directory.
+            if !recovery_open
+                && (self.session_ended()
+                    || self.status
+                        == DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable))
             {
                 self.focus_handle.focus(window, cx);
             }
             // Retry held focus during the interruption and leaves with it, so typing returns to
             // the Pane once input resumes.
-            if !interrupted && !spaceterm_ui::window_modal_is_open(window, cx) {
+            if !recovery_open && !interrupted && !spaceterm_ui::window_modal_is_open(window, cx) {
                 self.focus_content(window, cx);
             }
             cx.notify();
@@ -605,13 +611,17 @@ mod window {
             cx.notify();
         }
 
+        /// The recovery picker holds the keyboard while it is open and restores focus when it
+        /// closes, including when a stale target cancels it. Nothing else here moves focus
+        /// meanwhile, or the keyboard is stranded outside the open picker.
+        fn directory_recovery_is_open(&self, cx: &App) -> bool {
+            self.directory_recovery
+                .as_ref()
+                .is_some_and(|picker| picker.read(cx).is_open())
+        }
+
         fn choose_directory(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
-            if !self.can_start_shell()
-                || self
-                    .directory_recovery
-                    .as_ref()
-                    .is_some_and(|picker| picker.read(cx).is_open())
-            {
+            if !self.can_start_shell() || self.directory_recovery_is_open(cx) {
                 return;
             }
             let (Some(server), Some(target)) = (
@@ -1140,12 +1150,8 @@ mod window {
             cx: &mut gpui::Context<Self>,
         ) -> AnyElement {
             if dormant == Dormant::DirectoryUnavailable {
-                let picker_open = self
-                    .directory_recovery
-                    .as_ref()
-                    .is_some_and(|picker| picker.read(cx).is_open());
                 let starting = self.start_pending || self.directory_progress.0;
-                let enabled = self.can_start_shell() && !picker_open;
+                let enabled = self.can_start_shell() && !self.directory_recovery_is_open(cx);
                 let retry = Button::new("development-pane-directory-retry", "Retry")
                     .variant(ButtonVariant::Secondary).size(ButtonSize::Regular).disabled(!enabled).tab_stop(true)
                     .accessibility_description("Checks this directory on the server again and starts a shell if it's available.")
@@ -1261,7 +1267,9 @@ mod window {
         use std::sync::Mutex;
         use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-        use super::{DevelopmentPaneConnection, DevelopmentPaneStatus};
+        use spaceterm_server::pane::directories::Target;
+
+        use super::{DevelopmentPaneConnection, DevelopmentPaneStatus, LocalServer};
 
         /// A connection whose status and reconnections the test sets and whose requests it
         /// counts.
@@ -1273,6 +1281,7 @@ mod window {
             restored_starts: AtomicUsize,
             take_overs: AtomicUsize,
             end_session_generations: Mutex<Vec<u64>>,
+            recovery: Mutex<Option<(LocalServer, Target)>>,
         }
 
         impl ScriptedConnection {
@@ -1285,11 +1294,26 @@ mod window {
                     restored_starts: AtomicUsize::new(0),
                     take_overs: AtomicUsize::new(0),
                     end_session_generations: Mutex::new(Vec::new()),
+                    recovery: Mutex::new(None),
                 }
             }
 
             pub(in crate::ui::development_pane) fn set(&self, status: DevelopmentPaneStatus) {
                 *self.status.lock().expect("status") = status;
+            }
+
+            /// The owning server negotiated directory recovery and retains a target for this
+            /// Pane. Resolving the handle reads no storage, starts no process, and reads no
+            /// credential; a picker opened against it reports the server as unreachable.
+            pub(in crate::ui::development_pane) fn offer_directory_recovery(&self) {
+                let server = LocalServer::for_identity("spaceterm-development")
+                    .expect("the Development identity resolves paths without storage");
+                let target = Target {
+                    boot: [7; 32],
+                    pane: [8; 32],
+                    original: std::path::PathBuf::from("/tmp/spaceterm-development-pane-test"),
+                };
+                *self.recovery.lock().expect("recovery") = Some((server, target));
             }
 
             /// A new connection reaches the Session and supplies its screen.
@@ -1344,6 +1368,22 @@ mod window {
         impl DevelopmentPaneConnection for ScriptedConnection {
             fn status(&self) -> DevelopmentPaneStatus {
                 *self.status.lock().expect("status")
+            }
+
+            fn directory_server(&self) -> Option<LocalServer> {
+                self.recovery
+                    .lock()
+                    .expect("recovery")
+                    .as_ref()
+                    .map(|(server, _)| server.clone())
+            }
+
+            fn recovery_target(&self) -> Option<Target> {
+                self.recovery
+                    .lock()
+                    .expect("recovery")
+                    .as_ref()
+                    .map(|(_, target)| target.clone())
             }
 
             fn connection_generation(&self) -> u64 {

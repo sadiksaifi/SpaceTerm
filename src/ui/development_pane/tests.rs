@@ -172,6 +172,37 @@ impl OpenPane<'_> {
         self.window.upgrade().is_none()
     }
 
+    /// Whether the server-backed Choose Pane Directory picker is on screen.
+    fn directory_picker_open(&mut self) -> bool {
+        use spaceterm_ui::a11y_testing::A11yTree;
+
+        A11yTree::read(self.cx)
+            .find("Choose Pane Directory")
+            .is_some()
+    }
+
+    /// The role of whatever holds the keyboard, or the empty string when nothing does.
+    fn focused_role(&mut self) -> String {
+        use spaceterm_ui::a11y_testing::A11yTree;
+
+        A11yTree::read(self.cx)
+            .focused()
+            .and_then(|node| node["aria"]["role"].as_str().map(str::to_owned))
+            .unwrap_or_default()
+    }
+
+    /// Offers recovery, reaches the directory screen, and opens its picker while the connection
+    /// is interrupted, so the picker reads nothing from the owning server.
+    fn open_directory_picker(&mut self) {
+        self.connection.offer_directory_recovery();
+        self.set(DevelopmentPaneStatus::Failed(
+            ServerError::DirectoryUnavailable,
+        ));
+        // The connection drops between the window's last status read and this click.
+        self.connection.set(DevelopmentPaneStatus::Reconnecting);
+        self.click("development-pane-choose-directory");
+    }
+
     fn keys(&self) -> usize {
         self.records
             .commands()
@@ -1244,6 +1275,55 @@ fn an_interrupted_start_says_it_was_not_confirmed_and_can_be_tried_again(cx: &mu
         2,
         "Start New Shell is offered again"
     );
+}
+
+#[gpui::test]
+fn an_interruption_leaves_the_open_recovery_picker_holding_the_keyboard(cx: &mut TestAppContext) {
+    let mut pane = open_pane(DevelopmentPaneStatus::Connected, cx);
+    pane.open_directory_picker();
+    assert!(pane.directory_picker_open());
+    assert_eq!(pane.focused_role(), "TextInput");
+
+    // The window reads the interruption, then a new connection answers Directory Unavailable
+    // again. The picker stays open across both, so the keyboard must stay in it.
+    pane.set(DevelopmentPaneStatus::Reconnecting);
+    assert!(pane.directory_picker_open());
+    assert_eq!(pane.focused_role(), "TextInput");
+    pane.reconnect_to(DevelopmentPaneStatus::Failed(
+        ServerError::DirectoryUnavailable,
+    ));
+    assert!(
+        pane.directory_picker_open(),
+        "the reconnected screen never takes focus from the picker, which closes without it"
+    );
+    assert_eq!(pane.focused_role(), "TextInput");
+
+    // A further connection answers the same status, so only the generation changed.
+    pane.reconnect_to(DevelopmentPaneStatus::Failed(
+        ServerError::DirectoryUnavailable,
+    ));
+    assert!(pane.directory_picker_open());
+    assert_eq!(pane.focused_role(), "TextInput");
+
+    // Escape reaches the picker, which dismisses and hands focus back to the window.
+    pane.press("escape");
+    assert!(!pane.directory_picker_open());
+    assert_ne!(pane.focused_role(), "TextInput");
+    assert!(pane.rendered("development-pane-directory-retry"));
+}
+
+#[gpui::test]
+fn a_stale_recovery_target_closes_the_picker_and_returns_the_keyboard(cx: &mut TestAppContext) {
+    let mut pane = open_pane(DevelopmentPaneStatus::Connected, cx);
+    pane.open_directory_picker();
+    assert!(pane.directory_picker_open());
+
+    // The Pane is no longer waiting on its directory, so nothing is left to repair.
+    pane.set(DevelopmentPaneStatus::Restored);
+
+    assert!(!pane.directory_picker_open());
+    assert_ne!(pane.focused_role(), "TextInput");
+    assert!(pane.rendered(START_SHELL_SELECTOR));
 }
 
 #[gpui::test]
