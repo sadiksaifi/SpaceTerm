@@ -1239,58 +1239,38 @@ fn a_start_lost_between_two_reads_is_offered_again(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn an_unavailable_directory_explains_itself_without_paths_or_repair(cx: &mut TestAppContext) {
+fn an_unavailable_directory_offers_retry_without_exposing_terminal_content(
+    cx: &mut TestAppContext,
+) {
     use spaceterm_ui::a11y_testing::A11yTree;
-
     let mut pane = open_pane(DevelopmentPaneStatus::Restored, cx);
     pane.click(START_SHELL_SELECTOR);
-
     pane.set(DevelopmentPaneStatus::Failed(
         ServerError::DirectoryUnavailable,
     ));
-
     assert!(pane.rendered(RESTORED_SELECTOR));
     assert!(!pane.rendered(TERMINAL_SELECTOR));
-    assert!(
-        !pane.rendered(NOTICE_SELECTOR),
-        "the screen explains the failure"
-    );
-    assert!(!pane.rendered(RETRY_SELECTOR), "repair arrives separately");
-    assert!(!pane.rendered(START_SHELL_SELECTOR));
-    assert!(!pane.rendered(START_SHELL_STATUS_SELECTOR));
+    assert!(!pane.rendered(NOTICE_SELECTOR));
     let tree = A11yTree::read(pane.cx);
-    let screen = tree.node("Directory Unavailable");
-    assert_eq!(screen["aria"]["role"], "Group");
-    let description = screen["aria"]["description"].as_str().unwrap_or_default();
-    assert!(description.contains("no shell started"));
-    assert!(!description.contains('/'), "the screen names no path");
-    assert!(tree.find("Choose Directory").is_none());
-    assert!(tree.find("Retry").is_none());
+    assert_eq!(tree.node("Directory Unavailable")["aria"]["role"], "Group");
+    assert!(tree.find("Retry").is_some());
+    assert!(tree.find("Choose Directory…").is_some());
+    assert!(tree.find("Close Window").is_none());
     assert!(tree.find("Terminal context actions").is_none());
-    assert_eq!(
-        tree.node(
-            "This Pane's directory is no longer available on the server, so no shell started. \
-             Programs that were running here ended when the server stopped."
-        )["aria"]["role"],
-        "Status",
-        "the refusal is announced"
-    );
-    assert!(tree.exposed(tree.node("Close Window")));
-
-    // Typing reaches nothing, and nothing retries or starts a shell.
     pane.press("space");
     pane.press("enter");
     pane.press("x");
     assert_eq!(pane.keys(), 0);
-    assert!(!pane.closed(), "typing never closes the window");
-    assert_eq!(pane.connection.retries(), 0);
     assert_eq!(pane.connection.restored_starts(), 1);
-
-    // Tab passes over End Session to Close Window, which leaves the Pane on the server.
-    pane.press("tab");
-    pane.press("space");
-    assert!(pane.closed());
-    assert_eq!(pane.connection.end_sessions(), 0);
+    pane.click("development-pane-directory-retry");
+    assert_eq!(pane.connection.restored_starts(), 2);
+    pane.click("development-pane-directory-retry");
+    assert_eq!(
+        pane.connection.restored_starts(),
+        2,
+        "a pending Retry submits once"
+    );
+    assert!(!pane.closed());
 }
 
 #[gpui::test]

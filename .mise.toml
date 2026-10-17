@@ -506,3 +506,15 @@ run = [
 [tasks."server:graphics:transport:test"]
 description = "Test authenticated graphics transfers and slow readers on both protocol majors with fixture identities"
 run = "cargo test --package spaceterm-server --lib --features client --locked"
+
+[tasks."server:directory:smoke"]
+description = "Exercise directory recovery on an idle Development server using native credentials"
+usage = '''
+arg "[major]" default="2" help="Protocol major 1 or 2"
+flag "--prepare-desktop" help="Leave the test Workspace unavailable for a real desktop exercise"
+flag "--cleanup-exercise" help="Remove only the retained directory-recovery test Workspace"
+'''
+run = [
+  "cargo build --package spaceterm-server-host --features client --examples --bins --locked",
+  "cargo run --package spaceterm-server-host --features client --example directory_recovery --locked -- {{usage.major}} {% if usage.prepare_desktop %}--prepare-desktop{% endif %} {% if usage.cleanup_exercise %}--cleanup{% endif %}",
+]

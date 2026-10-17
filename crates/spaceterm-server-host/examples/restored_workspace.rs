@@ -78,6 +78,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         workspace,
         tab,
         pane,
+        ..
     } = restored
     else {
         return Err("retained Pane missing".into());

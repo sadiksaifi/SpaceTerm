@@ -56,6 +56,7 @@ fn pane(id: Id, source: Option<Id>, axis: Axis) -> Pane {
 fn tab(id: Id, panes: Vec<Pane>) -> Tab {
     Tab {
         worktree: None,
+        worktree_membership_fixed: false,
         worktree_repository: None,
         id,
         root_pane: panes[0].id,
@@ -697,6 +698,31 @@ fn a_restored_pane_should_offer_start_new_shell_without_starting_one(cx: &mut Te
         1,
         "Start New Shell should ask the server once"
     );
+}
+
+#[gpui::test]
+fn an_unavailable_shared_pane_offers_explicit_retry_and_keeps_terminal_content_hidden(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = shared_tab_manager(cx);
+    harness
+        .panes
+        .pane(ROOT_PANE)
+        .set(DevelopmentPaneStatus::Failed(
+            crate::local_server::ServerError::DirectoryUnavailable,
+        ));
+    settle(&harness, cx);
+    assert!(
+        cx.debug_bounds("shared-pane-directory-unavailable-1")
+            .is_some()
+    );
+    assert!(cx.debug_bounds("shared-pane-directory-retry-1").is_some());
+    assert!(cx.debug_bounds("shared-pane-choose-directory-1").is_some());
+    assert_eq!(harness.panes.pane(ROOT_PANE).restored_starts(), 0);
+    click("shared-pane-directory-retry-1", cx);
+    assert_eq!(harness.panes.pane(ROOT_PANE).restored_starts(), 1);
+    click("shared-pane-directory-retry-1", cx);
+    assert_eq!(harness.panes.pane(ROOT_PANE).restored_starts(), 1);
 }
 
 /// Two desktop clients presenting the same server Workspace, each through its own Tab strip.

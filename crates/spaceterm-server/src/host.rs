@@ -289,6 +289,7 @@ pub(crate) fn serve_runtime(
                                         native_effects: false,
                                         reading: false,
                                         graphics: false,
+                                        directory_recovery: true,
                                     }
                                 }
                                 None => {
@@ -571,12 +572,15 @@ mod startup_tests {
                         native_effects: true,
                         reading: false,
                         graphics: false,
+                        directory_recovery: true,
                     },
                     Request::Inventory => Reply::Inventory {
                         inventory: crate::hierarchy::State::empty().inventory,
                         next_sequence: 1,
                     },
                     Request::SelectPane { pane, .. } => Reply::Restored {
+                        recovery: None,
+                        directory_unavailable: false,
                         server: [1; 32],
                         workspace: [2; 32],
                         tab: pane,

@@ -31,6 +31,8 @@ use crate::domain::PinnedDirectory;
 
 mod local_source;
 mod remote_source;
+mod server_source;
+pub(crate) use server_source::ServerDirectorySource;
 
 pub(crate) use local_source::LocalDirectorySource;
 pub(crate) use remote_source::{
@@ -104,6 +106,15 @@ pub(crate) type SourceFuture<T> = Pin<Box<dyn Future<Output = Result<T, Director
 ///
 /// Each source converts [`PickerPath`] spellings into its own machine's path type.
 pub(crate) trait DirectorySource {
+    fn allows_creation(&self) -> bool {
+        true
+    }
+    fn initial_query(&self) -> Option<PickerPath> {
+        None
+    }
+    fn selection_label(&self) -> &'static str {
+        "Open"
+    }
     /// Names the machine when it is not the local one.
     fn machine_name(&self) -> Option<&str>;
 
@@ -763,6 +774,11 @@ impl DirectoryPicker {
                 match result {
                     Ok(home) => {
                         picker.home = Some(home);
+                        if let Some(initial) = picker.source.initial_query() {
+                            picker
+                                .palette
+                                .update(cx, |palette, cx| palette.set_query(initial.as_str(), cx));
+                        }
                         let query = picker.palette.read(cx).query().to_owned();
                         picker.refresh_for_input(query, window, cx);
                     }
@@ -1131,6 +1147,7 @@ impl DirectoryPicker {
                 self.status,
                 DirectoryPickerStatus::Readable | DirectoryPickerStatus::Missing
             )
+            && (self.status != DirectoryPickerStatus::Missing || self.source.allows_creation())
             && self
                 .parsed
                 .as_ref()
@@ -1140,7 +1157,8 @@ impl DirectoryPicker {
     /// Returns the search line's action that opens the exact path, creating it when missing, with
     /// System Directory Selection in its menu when offered.
     fn confirm_action(&self, cx: &App) -> CommandPalettePrimaryAction {
-        let action = CommandPalettePrimaryAction::new(CONFIRM_ACTION, "Open");
+        let action =
+            CommandPalettePrimaryAction::new(CONFIRM_ACTION, self.source.selection_label());
         let action = match crate::desktop_profile::DesktopPresentation::get(cx)
             .shortcut(&spaceterm_ui::CommandPaletteConfirm)
         {
@@ -1199,6 +1217,26 @@ impl DirectoryPicker {
 
     /// An unusable exact path outranks the listing, and a missing path offers creation.
     fn empty_notice(&self) -> EmptyNotice {
+        if !self.source.allows_creation() {
+            match self.status {
+                DirectoryPickerStatus::Missing => {
+                    return EmptyNotice::new(IconName::CircleAlert, "Directory doesn’t exist")
+                        .description("Choose an existing directory on the server.");
+                }
+                DirectoryPickerStatus::NotDirectory => {
+                    return EmptyNotice::new(IconName::File, "Not a directory")
+                        .description("Only a directory can be this Pane’s directory.");
+                }
+                DirectoryPickerStatus::ConnectionLost => {
+                    return EmptyNotice::new(
+                        IconName::TriangleAlert,
+                        "Not connected to the server",
+                    )
+                    .description("Edit the path to try again once SpaceTerm reconnects.");
+                }
+                _ => {}
+            }
+        }
         match self.status {
             DirectoryPickerStatus::NotDirectory => {
                 return EmptyNotice::new(IconName::File, "Not a directory")
@@ -1272,8 +1310,9 @@ impl DirectoryPicker {
             .find(|item| matches!(item.id(), DirectoryPickerItemId::Child { .. }))
             .map(|item| item.id().clone());
         let confirm_action = self.confirm_action(cx);
-        let query_note = (self.status == DirectoryPickerStatus::Missing)
-            .then(|| SharedString::from(NEW_DIRECTORY_NOTE));
+        let query_note = (self.status == DirectoryPickerStatus::Missing
+            && self.source.allows_creation())
+        .then(|| SharedString::from(NEW_DIRECTORY_NOTE));
         self.palette.update(cx, |palette, cx| {
             // A stable selection survives republishing; otherwise Return descends into the first
             // child rather than leaving, and the confirm key pins regardless of selection.

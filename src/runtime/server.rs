@@ -1,5 +1,6 @@
 //! The first retained Development Workspace and its independently owned live Terminal Session.
 use super::*;
+use crate::terminal::session::TerminalSessionStartupStage;
 use spaceterm_server::organization::{Organization, OrganizationStore};
 use spaceterm_server::{
     ServerError,
@@ -7,6 +8,9 @@ use spaceterm_server::{
 };
 use std::{sync::Arc, time::Duration};
 
+mod directories;
+#[cfg(test)]
+mod directory_tests;
 #[cfg(test)]
 #[path = "server/effect_tests.rs"]
 mod effect_tests;
@@ -33,6 +37,9 @@ pub struct DevelopmentPaneHost {
     organization: Option<Organization>,
     store: Option<OrganizationStore>,
     uncertain: bool,
+    directory_unavailable: bool,
+    failed_directory_session: Option<PaneTarget>,
+    directories: directories::DirectoryReads,
 }
 struct OwnedPane {
     device: Option<[u8; 32]>,
@@ -46,6 +53,7 @@ struct OwnedPane {
     sent: Option<PresentationGeneration>,
     ended: bool,
     failed: bool,
+    directory_failed: bool,
     appearance_generation: u64,
     focus_generation: u64,
     focus: FocusTarget,
@@ -73,6 +81,9 @@ impl DevelopmentPaneHost {
             organization: None,
             store: None,
             uncertain: false,
+            directory_unavailable: false,
+            failed_directory_session: None,
+            directories: directories::DirectoryReads::default(),
         })
     }
     /// Native composition for the explicitly launched local Development host.
@@ -108,6 +119,9 @@ impl DevelopmentPaneHost {
             organization: None,
             store: None,
             uncertain: false,
+            directory_unavailable: false,
+            failed_directory_session: None,
+            directories: directories::DirectoryReads::default(),
         })
     }
     fn retain(&mut self, organization: Option<Organization>) -> Result<(), Refusal> {
@@ -147,6 +161,12 @@ impl DevelopmentPaneHost {
     fn restored(&self) -> Result<Reply, Refusal> {
         let organization = self.organization.as_ref().ok_or(Refusal::Missing)?;
         Ok(Reply::Restored {
+            recovery: Some(pane::directories::Target {
+                boot: self.boot,
+                pane: organization.pane,
+                original: organization.startup_directory().to_owned(),
+            }),
+            directory_unavailable: self.directory_unavailable,
             server: self.boot,
             workspace: organization.workspace,
             tab: organization.tab,
@@ -198,7 +218,22 @@ impl DevelopmentPaneHost {
                     .ok_or(Refusal::Missing)?
                     .startup_directory(),
             )
-            .map_err(|_| Refusal::DirectoryUnavailable)?;
+            .map_err(|_| {
+                self.directory_unavailable = true;
+                Refusal::DirectoryUnavailable
+            })?;
+        self.start_directory(device, connection, size, style, directory)
+    }
+    fn start_directory(
+        &mut self,
+        device: [u8; 32],
+        connection: [u8; 32],
+        size: PaneSize,
+        style: Option<PresentationStyle>,
+        directory: ValidatedLocalDirectory,
+    ) -> Result<Lease, Refusal> {
+        self.directory_unavailable = false;
+        self.failed_directory_session = None;
         let lease = Lease {
             server: self.boot,
             session: nonce().map_err(|_| Refusal::Failed)?,
@@ -229,6 +264,7 @@ impl DevelopmentPaneHost {
             sent: None,
             ended: false,
             failed: false,
+            directory_failed: false,
             appearance_generation: 1,
             focus_generation: 0,
             focus: FocusTarget::Unfocused,
@@ -279,6 +315,38 @@ impl DevelopmentPaneHost {
         self.start(device, connection, size, style)
             .map(|lease| Reply::Attached { lease })
     }
+    fn repair_directory(
+        &mut self,
+        device: [u8; 32],
+        connection: [u8; 32],
+        target: pane::directories::Target,
+        replacement: Option<std::path::PathBuf>,
+        size: PaneSize,
+        style: Option<PresentationStyle>,
+    ) -> Result<Reply, Refusal> {
+        size.validate().map_err(|_| Refusal::Unsupported)?;
+        let org = self.organization.as_ref().ok_or(Refusal::Missing)?;
+        if target.boot != self.boot || target.pane != org.pane {
+            return Err(Refusal::Stale);
+        }
+        // A concurrent first use already won. Repair can observe it, never replace it.
+        if self.pane.is_some() {
+            return self.select(device, connection, false, size, None, style);
+        }
+        if target.original != org.startup_directory() {
+            return Err(Refusal::Stale);
+        }
+        let directory = local_filesystem()
+            .validate_directory(replacement.as_deref().unwrap_or(&target.original))
+            .map_err(|_| Refusal::DirectoryUnavailable)?;
+        if replacement.is_some() {
+            let mut updated = org.clone();
+            updated.confirmed_directory = Some(directory.path().to_owned());
+            self.retain(Some(updated))?;
+        }
+        self.start_directory(device, connection, size, style, directory)
+            .map(|lease| Reply::Attached { lease })
+    }
     fn handle(
         &mut self,
         device: [u8; 32],
@@ -293,11 +361,25 @@ impl DevelopmentPaneHost {
                 native_effects: true,
                 reading: true,
                 graphics: true,
+                directory_recovery: true,
             });
         }
         self.recover()?;
         self.retain_directory()?;
+        if let Request::DirectoryRead(request) = request {
+            return Ok(Reply::DirectoryRead(
+                self.directories.request(connection, request),
+            ));
+        }
         match request {
+            Request::RepairDirectory {
+                target,
+                replacement,
+                size,
+                style,
+            } => {
+                return self.repair_directory(device, connection, target, replacement, size, style);
+            }
             Request::StartRestored {
                 server,
                 pane,
@@ -371,6 +453,12 @@ impl DevelopmentPaneHost {
         if matches!(request, Request::Shutdown) {
             self.shutdown().map_err(|_| Refusal::CleanupUnresolved)?;
             return Ok(Reply::Closed);
+        }
+        if let Request::Poll { lease } = &request
+            && self.pane.is_none()
+            && self.failed_directory_session == Some((*lease).into())
+        {
+            return Err(Refusal::DirectoryUnavailable);
         }
         let pane = self.pane.as_mut().ok_or(Refusal::Missing)?;
         let lease = match &request {
@@ -521,6 +609,15 @@ impl DevelopmentPaneHost {
             return Ok(());
         };
         pane.drain();
+        if pane.directory_failed {
+            pane.runtime
+                .shutdown_and_wait(Duration::from_secs(5))
+                .map_err(|_| Refusal::CleanupUnresolved)?;
+            self.failed_directory_session = Some(pane.lease.into());
+            self.pane = None;
+            self.directory_unavailable = true;
+            return Ok(());
+        }
         if pane.ended {
             pane.runtime
                 .shutdown_and_wait(Duration::from_secs(5))
@@ -551,6 +648,7 @@ impl PaneService for DevelopmentPaneHost {
         Ok(())
     }
     fn tick(&mut self) {
+        self.directories.tick();
         if self.recover().is_ok() && self.retain_directory().is_ok() {
             let _ = self.retire_exited();
         }
@@ -560,6 +658,7 @@ impl PaneService for DevelopmentPaneHost {
             .unwrap_or_else(Reply::Refused)
     }
     fn disconnected(&mut self, connection: [u8; 32]) {
+        self.directories.cancel_connection(connection);
         if let Some(pane) = &mut self.pane
             && pane.lease.connection == connection
         {
@@ -568,6 +667,7 @@ impl PaneService for DevelopmentPaneHost {
         }
     }
     fn shutdown(&mut self) -> Result<(), ServerError> {
+        self.directories.stop();
         // Persist final confirmed metadata before ending live work. Refuse uncertain shutdown.
         self.recover()
             .map_err(|_| ServerError::StorageUnavailable)?;
@@ -926,7 +1026,14 @@ impl OwnedPane {
                     self.invalidate_input();
                     self.ended = true;
                 }
-                TerminalSessionEvent::Failed(_) => {
+                TerminalSessionEvent::Failed(ref failure) => {
+                    self.directory_failed = matches!(
+                        failure,
+                        TerminalSessionFailure::Startup {
+                            stage: TerminalSessionStartupStage::Directory,
+                            ..
+                        }
+                    );
                     self.invalidate_input();
                     self.failed = true;
                 }

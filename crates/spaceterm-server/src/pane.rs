@@ -1,4 +1,5 @@
 //! Authenticated terminal operations. Native requests never grant local file authority.
+pub mod directories;
 pub mod effects;
 pub mod graphics;
 pub mod reading;
@@ -168,13 +169,30 @@ pub struct PresentationStyle {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AttachmentClaim {
-    Select { explicit: bool },
-    Start { server: [u8; 32] },
-    TakeOver { target: PaneTarget },
+    Select {
+        explicit: bool,
+    },
+    Start {
+        server: [u8; 32],
+    },
+    Repair {
+        target: directories::Target,
+        replacement: Option<std::path::PathBuf>,
+    },
+    TakeOver {
+        target: PaneTarget,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
+    DirectoryRead(directories::Request),
+    RepairDirectory {
+        target: directories::Target,
+        replacement: Option<std::path::PathBuf>,
+        size: PaneSize,
+        style: Option<PresentationStyle>,
+    },
     GraphicsChunk {
         lease: Lease,
         image: graphics::ImageKey,
@@ -291,6 +309,7 @@ pub enum Request {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Reply {
+    DirectoryRead(Result<directories::Progress, directories::Error>),
     GraphicsChunk(Result<graphics::Chunk, graphics::Error>),
     Reading {
         accepted: bool,
@@ -329,8 +348,14 @@ pub enum Reply {
         reading: bool,
         #[serde(default)]
         graphics: bool,
+        #[serde(default)]
+        directory_recovery: bool,
     },
     Restored {
+        #[serde(default)]
+        recovery: Option<directories::Target>,
+        #[serde(default)]
+        directory_unavailable: bool,
         server: [u8; 32],
         workspace: [u8; 32],
         tab: [u8; 32],
@@ -457,6 +482,7 @@ struct PaneTransport {
     native_effects: bool,
     reading: bool,
     graphics: bool,
+    directory_recovery: bool,
 }
 /// One transport for a desktop's inventory and Pane workers. It retains no credential.
 #[cfg(feature = "client")]
@@ -500,6 +526,7 @@ impl PaneConnection {
                 native_effects,
                 reading,
                 graphics,
+                directory_recovery,
             } => {
                 let mut connection = Self::new(stream, pane_takeover);
                 std::sync::Arc::get_mut(&mut connection.transport)
@@ -514,6 +541,9 @@ impl PaneConnection {
                 std::sync::Arc::get_mut(&mut connection.transport)
                     .ok_or(ServerError::Protocol)?
                     .graphics = graphics;
+                std::sync::Arc::get_mut(&mut connection.transport)
+                    .ok_or(ServerError::Protocol)?
+                    .directory_recovery = directory_recovery;
                 Ok(connection)
             }
             Reply::Refused(reason) => Err(reason.into()),
@@ -529,8 +559,12 @@ impl PaneConnection {
                 native_effects: false,
                 reading: false,
                 graphics: false,
+                directory_recovery: false,
             }),
         }
+    }
+    pub fn supports_directory_recovery(&self) -> bool {
+        self.transport.directory_recovery
     }
     pub fn supports_native_effects(&self) -> bool {
         self.transport.native_effects

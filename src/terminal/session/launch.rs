@@ -6,6 +6,10 @@ enum TerminalSessionProcess {
         planner: ShellLaunchPlanner,
         directory: std::path::PathBuf,
         prompt_owner: Option<crate::terminal::metadata::PromptOwner>,
+        directory_guard: Option<(
+            crate::domain::ValidatedLocalDirectory,
+            LocalFilesystemAuthority,
+        )>,
     },
     Remote {
         home: std::path::PathBuf,
@@ -20,7 +24,13 @@ impl TerminalSessionProcess {
                 planner,
                 directory,
                 prompt_owner,
+                directory_guard,
             } => {
+                if let Some((expected, filesystem)) = directory_guard {
+                    filesystem.revalidate_directory(&expected).map_err(|_| {
+                        crate::platform::shell_launch::ShellLaunchFailure::DirectoryUnavailable
+                    })?;
+                }
                 let launch = planner.local(&directory)?;
                 Ok(match prompt_owner {
                     Some(owner) => launch.with_environment_value(
@@ -66,6 +76,7 @@ impl TerminalSessionLaunch {
                 planner,
                 directory: directory.to_owned(),
                 prompt_owner,
+                directory_guard: None,
             },
         }
     }
@@ -243,6 +254,15 @@ impl NativeTerminalSessionFactory {
                     self.local_machine.clone(),
                     &self.local_filesystem,
                 );
+                if let TerminalSessionProcess::Local {
+                    directory_guard, ..
+                } = &mut launch.process
+                {
+                    *directory_guard = Some((
+                        local.working_directory().clone(),
+                        self.local_filesystem.clone(),
+                    ));
+                }
                 launch.restricted = local.restricted;
                 launch
             }
@@ -416,6 +436,7 @@ impl TerminalRuntime {
                                 TerminalSessionStartupStage::ReaderThread
                             }
                         };
+                        let stage = if matches!(error, NativePtyStartupFailure::Launch(crate::platform::shell_launch::ShellLaunchFailure::DirectoryUnavailable)) { TerminalSessionStartupStage::Directory } else { stage };
                         send_session_event(
                             &worker_events,
                             TerminalSessionEvent::Failed(TerminalSessionFailure::Startup {
@@ -470,5 +491,38 @@ impl TerminalRuntime {
                 state: event_publisher,
             },
         ))
+    }
+}
+
+#[cfg(test)]
+mod directory_tests {
+    use super::*;
+    #[test]
+    fn replacing_a_validated_directory_before_worker_launch_refuses_the_shell() {
+        let root =
+            std::env::temp_dir().join(format!("spaceterm-launch-directory-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let filesystem = crate::runtime::local_filesystem();
+        let directory = filesystem.validate_directory(&root).unwrap();
+        let launch = TerminalSessionProcess::Local {
+            planner: test_launch_planner(),
+            directory: root.clone(),
+            prompt_owner: None,
+            directory_guard: Some((directory, filesystem)),
+        };
+        std::fs::rename(&root, root.with_extension("old")).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        assert!(matches!(
+            launch.prepare(),
+            Err(NativePtyStartupFailure::Launch(
+                crate::platform::shell_launch::ShellLaunchFailure::DirectoryUnavailable
+            ))
+        ));
+        std::fs::remove_dir(root).unwrap();
+        std::fs::remove_dir(std::env::temp_dir().join(format!(
+            "spaceterm-launch-directory-{}.old",
+            std::process::id()
+        )))
+        .unwrap();
     }
 }

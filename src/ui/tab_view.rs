@@ -521,6 +521,7 @@ pub(crate) struct TabView {
     tab_focus: FocusHandle,
     /// The server Tab this Tab presents, when a SpaceTerm Server owns it.
     shared: Option<SharedPaneBinding>,
+    directory_recovery: Option<Entity<super::server_pane::DirectoryRecovery>>,
     /// Reads every shared Pane's connection status while the Tab lives.
     _shared_status: Option<gpui::Task<()>>,
 }
@@ -612,6 +613,7 @@ impl TabView {
             remote_lifecycle: RemoteHierarchyLifecycle::default(),
             tab_focus: cx.focus_handle(),
             shared: None,
+            directory_recovery: None,
             _shared_status: None,
         }
     }
@@ -3000,17 +3002,30 @@ impl TabView {
                     cx,
                 )
             }
-            // Repairing the directory belongs to directory repair, which is not available yet, so
-            // the screen names no directory and offers no action.
-            ServerPaneScreen::DirectoryUnavailable => server_pane::render_screen(
-                selector("directory-unavailable"),
-                server_pane::DIRECTORY_UNAVAILABLE_TITLE.into(),
-                server_pane::DIRECTORY_UNAVAILABLE_DETAIL.into(),
-                true,
-                None,
-                None,
-                cx,
-            ),
+            ServerPaneScreen::DirectoryUnavailable { starting, offered } => {
+                let picker_open = self.directory_recovery.as_ref().is_some_and(|picker| picker.read(cx).is_open());
+                let enabled = offered && !starting && !picker_open;
+                let connection = pane.connection();
+                let target = connection.recovery_target();
+                let owner = view.clone();
+                let retry = Button::new(selector("directory-retry"), "Retry")
+                    .variant(ButtonVariant::Secondary).size(ButtonSize::Regular).disabled(!enabled).tab_stop(true)
+                    .accessibility_description("Checks this directory on the server again and starts a shell if it's available.")
+                    .debug_selector(selector("directory-retry"))
+                    .on_activate(move |_, window, cx| { let _ = owner.update(cx, |view, cx| view.start_shared_shell(pane_id, window, cx)); });
+                let owner = view.clone();
+                let editability = self.shared.as_ref().map(|shared| shared.editability());
+                let can_choose = enabled && target.is_some() && editability.is_some_and(|e| e.available());
+                let choose = Button::new(selector("choose-directory"), "Choose Directory…")
+                    .variant(ButtonVariant::Primary).size(ButtonSize::Regular).disabled(!can_choose).tab_stop(true)
+                    .accessibility_description(if target.is_none() { "This server can't change a Pane's directory. Update the server to choose another directory." } else if editability.is_some_and(|e| !e.available()) { editability.map_or("", |e| e.explanation()) } else { "Chooses another directory on the server for this Pane. The Workspace's pinned directory and Worktree don't change." })
+                    .debug_selector(selector("choose-directory"))
+                    .on_activate(move |_, window, cx| { let _ = owner.update(cx, |view, cx| view.choose_shared_directory(pane_id, window, cx)); });
+                let missing_worktree = target.as_ref().is_some_and(|target| self.shared.as_ref().is_some_and(|shared| shared.missing_worktree_for_directory(&target.original)));
+                let status = if starting { Some(server_pane::progress_status(selector("directory-status"), selector("directory-progress"), server_pane::STARTING_SHELL.into(), cx)) } else { pane.directory_note().map(|note| server_pane::note_status(selector("directory-status"), note.into(), cx)) };
+                server_pane::render_directory_screen(selector("directory-unavailable"), target.and_then(|target| target.original.to_str().map(|s| gpui::SharedString::from(s.to_owned()))), vec![retry, choose], status, missing_worktree, cx)
+            }
+
         });
         // The screen rests on its own focus, so plain Tab the terminal never took reaches its
         // action while terminal input is paused.
@@ -3074,6 +3089,87 @@ impl TabView {
         cx.notify();
     }
 
+    fn choose_shared_directory(
+        &mut self,
+        pane_id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .directory_recovery
+            .as_ref()
+            .is_some_and(|picker| picker.read(cx).is_open())
+        {
+            return;
+        }
+        let Some(shared) = &self.shared else { return };
+        if !shared.editability().available() {
+            return;
+        }
+        let Some(view) = shared.view(pane_id).filter(|view| view.can_start_shell()) else {
+            return;
+        };
+        let connection = view.connection();
+        let (Some(server), Some(target), Some(_focus)) = (
+            connection.directory_server(),
+            connection.recovery_target(),
+            shared.screen_focus(pane_id).cloned(),
+        ) else {
+            return;
+        };
+        self.focus_shared_screen(pane_id, window, cx);
+        let current = std::sync::Arc::clone(&connection);
+        let online = std::sync::Arc::clone(&connection);
+        let expected = target.clone();
+        let restore_owner = cx.weak_entity();
+        let expected_target = target.clone();
+        let actions = super::server_pane::RecoveryActions {
+            current: std::rc::Rc::new(move || {
+                current.recovery_target().as_ref() == Some(&expected)
+                    && matches!(
+                        current.status(),
+                        crate::terminal::server_session::DevelopmentPaneStatus::Failed(
+                            crate::local_server::ServerError::DirectoryUnavailable
+                        ) | crate::terminal::server_session::DevelopmentPaneStatus::Reconnecting
+                    )
+            }),
+            online: std::rc::Rc::new(move || {
+                online.status()
+                    == crate::terminal::server_session::DevelopmentPaneStatus::Failed(
+                        crate::local_server::ServerError::DirectoryUnavailable,
+                    )
+            }),
+            confirm: std::rc::Rc::new(move |replacement| {
+                connection.repair_directory(target.clone(), replacement)
+            }),
+            restore_focus: std::rc::Rc::new(move |window, cx| {
+                let _ =
+                    restore_owner.update(cx, |view, cx| view.restore_directory_focus(window, cx));
+            }),
+        };
+        self.directory_recovery = Some(cx.new(|cx| {
+            super::server_pane::DirectoryRecovery::new(server, expected_target, actions, window, cx)
+        }));
+
+        cx.notify();
+    }
+    fn restore_directory_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.active {
+            return;
+        }
+        let focused = self.tab.focused_pane_id();
+        if self
+            .shared
+            .as_ref()
+            .and_then(|shared| shared.view(focused))
+            .and_then(|view| view.screen())
+            .is_some()
+        {
+            self.focus_shared_screen(focused, window, cx);
+        } else {
+            self.focus(window, cx);
+        }
+    }
     fn retry_shared_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
         if self
             .shared
@@ -3283,6 +3379,7 @@ impl Render for TabView {
                     }
                 }
             })
+            .children(self.directory_recovery.clone())
             .id(("tab-view", self.tab.id().get()))
             .key_context(TERMINAL_KEY_CONTEXT)
             .relative()

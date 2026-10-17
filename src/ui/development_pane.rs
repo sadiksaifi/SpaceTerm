@@ -30,10 +30,10 @@ mod window {
     use super::super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
     use super::super::pane_lifecycle::{PaneConstruction, PaneLifecycleDependencies};
     use super::super::server_pane::{
-        self, DIRECTORY_UNAVAILABLE_DETAIL, DIRECTORY_UNAVAILABLE_TITLE, Dormant, RESTORED_DETAIL,
-        RESTORED_TITLE, SESSION_ENDED_DETAIL, SESSION_ENDED_TITLE, START_SHELL_UNCONFIRMED,
-        STARTING_SHELL, TAKE_OVER_UNCONFIRMED, TAKEOVER_DETAIL, TAKEOVER_FAILED_DETAIL,
-        TAKEOVER_TITLE, TAKING_OVER, UnavailableTerminalAccessibility, with_tab_traversal,
+        self, Dormant, RESTORED_DETAIL, RESTORED_TITLE, SESSION_ENDED_DETAIL, SESSION_ENDED_TITLE,
+        START_SHELL_UNCONFIRMED, STARTING_SHELL, TAKE_OVER_UNCONFIRMED, TAKEOVER_DETAIL,
+        TAKEOVER_FAILED_DETAIL, TAKEOVER_TITLE, TAKING_OVER, UnavailableTerminalAccessibility,
+        with_tab_traversal,
     };
     use super::super::sidebar_window::WindowMovement;
     use super::super::terminal_pane::StatusIntent;
@@ -85,6 +85,17 @@ mod window {
         /// Asks the server to start a fresh shell in a Pane retained across a server restart. Only
         /// a person's explicit request calls this; rendering, focus, and reconnection never do.
         fn start_restored(&self);
+        fn directory_server(&self) -> Option<LocalServer> {
+            None
+        }
+        fn recovery_target(&self) -> Option<spaceterm_server::pane::directories::Target> {
+            None
+        }
+        fn directory_progress(&self) -> (bool, Option<&'static str>) {
+            (false, None)
+        }
+        fn repair_directory(&self, _: spaceterm_server::pane::directories::Target, _: PathBuf) {}
+
         /// Asks the server to make this client the Controlling Client. From Takeover, the status
         /// reads TakingOver once this returns.
         fn take_over(&self);
@@ -106,6 +117,22 @@ mod window {
             DevelopmentPaneState::retry(self);
         }
 
+        fn directory_server(&self) -> Option<LocalServer> {
+            Self::directory_server(self)
+        }
+        fn recovery_target(&self) -> Option<spaceterm_server::pane::directories::Target> {
+            Self::recovery_target(self)
+        }
+        fn directory_progress(&self) -> (bool, Option<&'static str>) {
+            Self::directory_progress(self)
+        }
+        fn repair_directory(
+            &self,
+            target: spaceterm_server::pane::directories::Target,
+            replacement: PathBuf,
+        ) {
+            Self::repair_directory(self, target, replacement);
+        }
         fn start_restored(&self) {
             DevelopmentPaneState::start_restored(self);
         }
@@ -295,6 +322,8 @@ mod window {
         /// The last Start New Shell ended without a shell reaching this client, so the screen says
         /// so. The server may still have started it before the reply was lost.
         start_unconfirmed: bool,
+        directory_progress: (bool, Option<&'static str>),
+        directory_recovery: Option<Entity<server_pane::DirectoryRecovery>>,
         focus_handle: FocusHandle,
         window_appearance: WindowAppearanceOwner,
         window_traffic_lights: WindowTrafficLightOwner,
@@ -380,6 +409,8 @@ mod window {
                 dormant: None,
                 start_pending: false,
                 start_unconfirmed: false,
+                directory_progress: (false, None),
+                directory_recovery: None,
                 focus_handle,
                 window_appearance,
                 window_traffic_lights,
@@ -400,7 +431,12 @@ mod window {
             // missed the interruption between two reads.
             let superseded = self.end_request.is_some_and(|sent| sent != generation);
             let generation_changed = generation != self.generation;
-            if status == self.status && !superseded && !generation_changed {
+            let progress = self.connection.directory_progress();
+            if status == self.status
+                && !superseded
+                && !generation_changed
+                && progress == self.directory_progress
+            {
                 return;
             }
             // Take Over that returns to the Takeover Screen on the same connection generation is
@@ -425,6 +461,7 @@ mod window {
                 self.start_pending = false;
                 self.start_unconfirmed = true;
             }
+            self.directory_progress = progress;
             self.status = status;
             self.generation = generation;
             if superseded {
@@ -495,7 +532,9 @@ mod window {
             }
             // Close Window replaces Take Over or Start New Shell, which may hold focus. The window
             // keeps focus, so typing never closes it and Tab reaches Close Window.
-            if self.session_ended() || self.directory_unavailable() {
+            if self.session_ended()
+                || self.status == DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
+            {
                 self.focus_handle.focus(window, cx);
             }
             // Retry held focus during the interruption and leaves with it, so typing returns to
@@ -563,8 +602,62 @@ mod window {
             cx.notify();
         }
 
+        fn choose_directory(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) {
+            if !self.can_start_shell()
+                || self
+                    .directory_recovery
+                    .as_ref()
+                    .is_some_and(|picker| picker.read(cx).is_open())
+            {
+                return;
+            }
+            let (Some(server), Some(target)) = (
+                self.connection.directory_server(),
+                self.connection.recovery_target(),
+            ) else {
+                return;
+            };
+            self.focus_handle.focus(window, cx);
+            let current = Arc::clone(&self.connection);
+            let confirm = Arc::clone(&self.connection);
+            let online = Arc::clone(&self.connection);
+            let expected = target.clone();
+            let restore_owner = cx.weak_entity();
+            let expected_target = target.clone();
+            let actions = server_pane::RecoveryActions {
+                current: Rc::new(move || {
+                    current.recovery_target().as_ref() == Some(&expected)
+                        && matches!(
+                            current.status(),
+                            DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
+                                | DevelopmentPaneStatus::Reconnecting
+                        )
+                }),
+                online: Rc::new(move || {
+                    online.status()
+                        == DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
+                }),
+                confirm: Rc::new(move |replacement| {
+                    confirm.repair_directory(target.clone(), replacement)
+                }),
+                restore_focus: Rc::new(move |window, cx| {
+                    let _ = restore_owner.update(cx, |view, cx| view.focus_content(window, cx));
+                }),
+            };
+            self.directory_recovery = Some(cx.new(|cx| {
+                server_pane::DirectoryRecovery::new(server, expected_target, actions, window, cx)
+            }));
+
+            cx.notify();
+        }
+
         fn can_start_shell(&self) -> bool {
-            self.status == DevelopmentPaneStatus::Restored && !self.start_pending
+            matches!(
+                self.status,
+                DevelopmentPaneStatus::Restored
+                    | DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
+            ) && !self.start_pending
+                && !self.directory_progress.0
         }
 
         /// Moves focus to what the window presents: the Pane, or the window itself while a
@@ -877,7 +970,11 @@ mod window {
                 ),
                 DevelopmentPaneStatus::TakeoverFailed(_) if self.session_ended() => return None,
                 // The screen replacing the Pane explains it, and nothing here can repair it.
-                DevelopmentPaneStatus::Failed(_) if self.directory_unavailable() => return None,
+                DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
+                    if self.directory_unavailable() =>
+                {
+                    return None;
+                }
                 DevelopmentPaneStatus::Failed(error)
                 | DevelopmentPaneStatus::TakeoverFailed(error) => (
                     SharedString::new_static("Not Connected"),
@@ -940,7 +1037,8 @@ mod window {
                     .flex_col()
                     .bg(gpui_color(appearance.colors.title_bar_background))
                     .child(header)
-                    .child(pane),
+                    .child(pane)
+                    .children(self.directory_recovery.clone()),
             );
             ModalLayer::new(super::super::window_shell::render(content, window, cx))
                 .into_any_element()
@@ -1039,26 +1137,55 @@ mod window {
             cx: &mut gpui::Context<Self>,
         ) -> AnyElement {
             if dormant == Dormant::DirectoryUnavailable {
-                // Retry and Choose Directory belong to directory repair, so only closing remains.
-                // The screen names no directory.
-                return server_pane::render_screen(
+                let picker_open = self
+                    .directory_recovery
+                    .as_ref()
+                    .is_some_and(|picker| picker.read(cx).is_open());
+                let starting = self.start_pending || self.directory_progress.0;
+                let enabled = self.can_start_shell() && !picker_open;
+                let retry = Button::new("development-pane-directory-retry", "Retry")
+                    .variant(ButtonVariant::Secondary).size(ButtonSize::Regular).disabled(!enabled).tab_stop(true)
+                    .accessibility_description("Checks this directory on the server again and starts a shell if it's available.")
+                    .debug_selector("development-pane-directory-retry")
+                    .on_activate({ let owner = cx.weak_entity(); move |_, window, cx| { let _ = owner.update(cx, |view, cx| view.start_shell(window, cx)); } });
+                let target = self.connection.recovery_target();
+                let choose = Button::new("development-pane-choose-directory", "Choose Directory…")
+                    .variant(ButtonVariant::Primary).size(ButtonSize::Regular).disabled(!enabled || target.is_none()).tab_stop(true)
+                    .accessibility_description(if target.is_some() { "Chooses another directory on the server for this Pane. The Workspace's pinned directory and Worktree don't change." } else { "This server can't change a Pane's directory. Update the server to choose another directory." })
+                    .debug_selector("development-pane-choose-directory")
+                    .on_activate({ let owner = cx.weak_entity(); move |_, window, cx| { let _ = owner.update(cx, |view, cx| view.choose_directory(window, cx)); } });
+                let status = if starting {
+                    Some(server_pane::progress_status(
+                        "development-pane-directory-status".into(),
+                        "development-pane-directory-progress".into(),
+                        STARTING_SHELL.into(),
+                        cx,
+                    ))
+                } else {
+                    self.directory_progress.1.map(|note| {
+                        server_pane::note_status(
+                            "development-pane-directory-status".into(),
+                            note.into(),
+                            cx,
+                        )
+                    })
+                };
+                return server_pane::render_directory_screen(
                     RESTORED_SELECTOR.into(),
-                    DIRECTORY_UNAVAILABLE_TITLE.into(),
-                    DIRECTORY_UNAVAILABLE_DETAIL.into(),
-                    true,
-                    Some(close_window_button(
-                        "Closes this window. The Pane stays on the server.",
-                    )),
-                    None,
+                    target.and_then(|target| {
+                        target
+                            .original
+                            .to_str()
+                            .map(|s| SharedString::from(s.to_owned()))
+                    }),
+                    vec![retry, choose],
+                    status,
+                    false,
                     cx,
                 );
             }
-            let starting = self.start_pending
-                && matches!(
-                    self.status,
-                    DevelopmentPaneStatus::Restored | DevelopmentPaneStatus::Connecting
-                );
-            let status = if starting {
+
+            let status = if self.start_pending {
                 Some(server_pane::progress_status(
                     START_SHELL_STATUS_SELECTOR.into(),
                     "development-pane-start-shell-progress".into(),

@@ -47,3 +47,7 @@ spaceterm-directories = { path = "../spaceterm-directories" }
 [[example]]
 name = "service_session"
 required-features = ["client"]
+
+[[example]]
+name = "directory_recovery"
+required-features = ["client"]

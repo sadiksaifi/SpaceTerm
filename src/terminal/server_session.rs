@@ -37,6 +37,11 @@ pub(crate) struct DevelopmentPaneState {
     selected: AtomicBool,
     take_over: AtomicBool,
     start_restored: AtomicBool,
+    recovery: Mutex<Option<pane::directories::Target>>,
+    repair: Mutex<Option<(pane::directories::Target, std::path::PathBuf)>>,
+    directory_server: Mutex<Option<LocalServer>>,
+    directory_busy: AtomicBool,
+    directory_note: Mutex<Option<&'static str>>,
     close: AtomicU64,
     epoch: AtomicU64,
     connected_epoch: AtomicU64,
@@ -55,6 +60,11 @@ impl DevelopmentPaneState {
             selected: AtomicBool::new(false),
             take_over: AtomicBool::new(false),
             start_restored: AtomicBool::new(false),
+            recovery: Mutex::default(),
+            repair: Mutex::default(),
+            directory_server: Mutex::default(),
+            directory_busy: AtomicBool::new(false),
+            directory_note: Mutex::default(),
             close: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
             connected_epoch: AtomicU64::new(0),
@@ -92,8 +102,54 @@ impl DevelopmentPaneState {
         self.retry.store(true, Ordering::Release);
     }
     pub(crate) fn start_restored(&self) {
-        if self.status() == DevelopmentPaneStatus::Restored {
+        if matches!(
+            self.status(),
+            DevelopmentPaneStatus::Restored
+                | DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
+        ) {
+            self.directory_busy.store(true, Ordering::Release);
+            *self
+                .directory_note
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
             self.start_restored.store(true, Ordering::Release);
+        }
+    }
+    pub(crate) fn directory_progress(&self) -> (bool, Option<&'static str>) {
+        (
+            self.directory_busy.load(Ordering::Acquire),
+            *self
+                .directory_note
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        )
+    }
+    pub(crate) fn recovery_target(&self) -> Option<pane::directories::Target> {
+        self.recovery
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+    pub(crate) fn directory_server(&self) -> Option<LocalServer> {
+        self.directory_server
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+    pub(crate) fn repair_directory(
+        &self,
+        target: pane::directories::Target,
+        replacement: std::path::PathBuf,
+    ) {
+        if self.status() == DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
+            && self.recovery_target().as_ref() == Some(&target)
+        {
+            self.directory_busy.store(true, Ordering::Release);
+            *self
+                .directory_note
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+            *self.repair.lock().unwrap_or_else(|e| e.into_inner()) = Some((target, replacement));
         }
     }
     pub(crate) fn take_over(&self) {
@@ -137,7 +193,8 @@ impl DevelopmentPaneState {
     fn connection_failed(&self, error: ServerError, has_takeover: bool) -> bool {
         let retryable = matches!(
             error,
-            ServerError::Protocol
+            ServerError::DirectoryUnavailable
+                | ServerError::Protocol
                 | ServerError::NotRunning
                 | ServerError::StaleControl
                 | ServerError::Controlled
@@ -147,8 +204,12 @@ impl DevelopmentPaneState {
             // A click accepted before this interruption is never replayed after it.
             self.take_over.store(false, Ordering::Release);
             self.start_restored.store(false, Ordering::Release);
+            self.repair.lock().unwrap_or_else(|e| e.into_inner()).take();
+
             self.selected.store(false, Ordering::Release);
-            *status = if has_takeover && retryable {
+            *status = if error == ServerError::DirectoryUnavailable {
+                DevelopmentPaneStatus::Failed(error)
+            } else if has_takeover && retryable {
                 DevelopmentPaneStatus::TakeoverReconnecting
             } else if has_takeover {
                 DevelopmentPaneStatus::TakeoverFailed(error)
@@ -226,6 +287,10 @@ impl DevelopmentServerSessionFactory {
         local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
     ) -> (Self, Arc<DevelopmentPaneState>) {
         let state = Arc::new(DevelopmentPaneState::new());
+        *state
+            .directory_server
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(server.clone());
         (
             Self {
                 server,
@@ -1062,15 +1127,39 @@ fn present(
                     style,
                 }
             };
-            let mut reply =
-                exchange(&attachment, &mut connection, &request).map_err(|error| match error {
+            let mut unavailable = false;
+            let mut reply = match exchange(&attachment, &mut connection, &request) {
+                Err(ServerError::DirectoryUnavailable) => {
+                    unavailable = true;
+                    let passive = match request {
+                        Request::SelectPane { pane, size, .. } => Request::SelectPane {
+                            pane,
+                            explicit: false,
+                            size,
+                            style: None,
+                        },
+                        _ => Request::Select {
+                            create: false,
+                            size: grant_size,
+                            resume: None,
+                            style: None,
+                        },
+                    };
+                    exchange(&attachment, &mut connection, &passive)?
+                }
+                other => other.map_err(|error| match error {
                     ServerError::Controlled => ServerError::Unsupported,
                     ServerError::StaleControl => ServerError::SessionUnavailable,
                     other => other,
-                })?;
+                })?,
+            };
             let mut dormant = false;
             while let Reply::Restored {
-                server: boot, pane, ..
+                server: boot,
+                pane,
+                ref recovery,
+                directory_unavailable,
+                ..
             } = reply
             {
                 if !dormant {
@@ -1080,32 +1169,87 @@ fn present(
                     takeover = false;
                     paste_unconfirmed = false;
                     state.invalidate();
+                    if state.directory_busy.swap(false, Ordering::AcqRel) {
+                        *state
+                            .directory_note
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) =
+                            Some("Starting the shell was not confirmed.");
+                    }
                     state.start_restored.store(false, Ordering::Release);
                     drain_input(&state, &input);
                     clear_presentation(&events, &mut generation, &appearance);
                 }
-                state.set(DevelopmentPaneStatus::Restored);
+                *state.recovery.lock().unwrap_or_else(|e| e.into_inner()) = recovery
+                    .clone()
+                    .filter(|_| connection.supports_directory_recovery());
+                unavailable |= directory_unavailable;
+                state.set(if unavailable {
+                    DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
+                } else {
+                    DevelopmentPaneStatus::Restored
+                });
                 if !alive.load(Ordering::Acquire)
                     || attachment.as_ref().is_some_and(|permit| !permit.active())
                 {
                     return Ok(());
                 }
-                if state.start_restored.swap(false, Ordering::AcqRel)
+                let repair = state
+                    .repair
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
+                if repair.is_some()
+                    || state.start_restored.swap(false, Ordering::AcqRel)
                     || state.selected.swap(false, Ordering::AcqRel)
                 {
                     grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     grant_appearance = Some(update.generation);
-                    reply = exchange(
-                        &attachment,
-                        &mut connection,
-                        &Request::StartRestored {
+                    let action = match repair {
+                        Some((target, replacement)) => Request::RepairDirectory {
+                            target,
+                            replacement: Some(replacement),
+                            size: grant_size,
+                            style: Some(encode_style(&update)),
+                        },
+                        None if unavailable && recovery.is_some() => Request::RepairDirectory {
+                            target: recovery.clone().ok_or(ServerError::Protocol)?,
+                            replacement: None,
+                            size: grant_size,
+                            style: Some(encode_style(&update)),
+                        },
+                        None => Request::StartRestored {
                             server: boot,
                             pane,
                             size: grant_size,
                             style: Some(encode_style(&update)),
                         },
-                    )?;
+                    };
+                    let replacing = matches!(
+                        &action,
+                        Request::RepairDirectory {
+                            replacement: Some(_),
+                            ..
+                        }
+                    );
+                    reply = match exchange(&attachment, &mut connection, &action) {
+                        Err(ServerError::DirectoryUnavailable) => {
+                            unavailable = true;
+                            state.directory_busy.store(false, Ordering::Release);
+                            *state
+                                .directory_note
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner()) = Some(if replacing {
+                                "That directory is no longer available. Choose another."
+                            } else {
+                                "The directory is still unavailable."
+                            });
+                            state.invalidate();
+                            reply
+                        }
+                        result => result?,
+                    };
                 } else {
                     std::thread::sleep(Duration::from_millis(100));
                     let size = *size.lock().unwrap_or_else(|e| e.into_inner());
@@ -1132,6 +1276,12 @@ fn present(
                     )?;
                 }
             }
+            state.directory_busy.store(false, Ordering::Release);
+            state
+                .recovery
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
             while let Reply::Takeover { target } = reply {
                 if pane_id.is_none() && expected_target.is_some_and(|old| old != target) {
                     return Err(ServerError::SessionUnavailable);

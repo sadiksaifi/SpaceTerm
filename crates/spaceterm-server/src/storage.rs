@@ -493,6 +493,7 @@ mod tests {
                 root_tab: [2; 32],
                 tabs: vec![Tab {
                     worktree: None,
+                    worktree_membership_fixed: false,
                     worktree_repository: None,
                     id: [2; 32],
                     root_pane: [3; 32],

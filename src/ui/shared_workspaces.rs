@@ -19,7 +19,7 @@
 //! Requests from its own GitHub CLI, and never reads git for a shared Workspace itself.
 //!
 //! Operations the server path does not support yet stay unavailable here rather than falling back
-//! to the desktop: repairing a Pane's directory, creating and removing Worktrees, opening a Tab in
+//! to the desktop: creating and removing Worktrees, opening a Tab in
 //! a chosen Worktree, reading shell content with assistive technology, and paste.
 
 #[cfg(test)]
@@ -689,6 +689,36 @@ mod development {
 
         pub(crate) fn holds(&self, server: Id) -> bool {
             self.panes.values().any(|&pane| pane == server)
+        }
+
+        pub(crate) fn missing_worktree_for_directory(&self, directory: &Path) -> bool {
+            let snapshot = self.edits.snapshot();
+            let Some(inventory) = snapshot.inventory else {
+                return false;
+            };
+            let Some(tab) = inventory
+                .workspaces
+                .iter()
+                .find(|w| w.id == self.workspace)
+                .and_then(|w| w.tabs.iter().find(|tab| tab.id == self.tab))
+            else {
+                return false;
+            };
+            let Some(root) = tab
+                .worktree
+                .as_ref()
+                .filter(|root| directory.starts_with(root))
+            else {
+                return false;
+            };
+            inventory.repositories.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .directories
+                    .iter()
+                    .filter_map(|facts| facts.worktrees.as_ref())
+                    .flat_map(|list| &list.worktrees)
+                    .any(|record| record.root == *root && record.missing)
+            })
         }
 
         pub(crate) fn view(&self, pane_id: PaneId) -> Option<&ServerPaneView> {
