@@ -3854,9 +3854,7 @@ impl WorkspaceManager {
                     available,
                     repository,
                     worktrees,
-                    creates_worktrees: available
-                        && shared.is_none()
-                        && self.creates_worktrees(workspace.id(), cx),
+                    creates_worktrees: available && self.creates_worktrees(workspace.id(), cx),
                     active: Some(workspace.id()) == active_workspace_id,
                     shared: shared.map(|shared| shared.row),
                 }
