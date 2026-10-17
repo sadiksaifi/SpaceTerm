@@ -190,7 +190,7 @@ impl DirectorySource for ServerDirectorySource {
             match read?.await? {
                 Value::Directory(path) => {
                     let path = path.to_str().ok_or(DirectorySourceError::Other)?.to_owned();
-                    // A remote directory value carries no client-local authority, even on this Mac.
+                    // A remote directory value carries no client-local authority.
                     Ok(PinnedDirectory::Remote {
                         directory: RemoteDirectory::new(path.clone())
                             .map_err(|_| DirectorySourceError::Other)?,

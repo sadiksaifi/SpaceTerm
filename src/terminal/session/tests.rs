@@ -87,7 +87,11 @@ fn native_factory_routes_local_launches_through_injected_factory() {
     let plan = TerminalLaunchPlan::Local(LocalTerminalLaunchPlan::new(
         crate::domain::ValidatedLocalDirectory::new(
             working_directory.clone(),
-            LocalFilesystemAuthority::testing().validate_directory(&working_directory).unwrap().identity().clone(),
+            LocalFilesystemAuthority::testing()
+                .validate_directory(&working_directory)
+                .unwrap()
+                .identity()
+                .clone(),
         ),
     ));
 

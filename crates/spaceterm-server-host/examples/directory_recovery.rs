@@ -125,6 +125,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     client.setup_and_start()?;
     let mut connection = connect(&client)?;
+    if !connection.supports_directory_recovery() {
+        return Err(
+            "Running server does not support directory recovery; use this branch's server build."
+                .into(),
+        );
+    }
     if std::env::args().any(|arg| arg == "--cleanup") {
         cleanup_exercise(&mut connection)?;
         connection.exchange(&Request::Shutdown)?;
