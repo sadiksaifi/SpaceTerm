@@ -958,14 +958,16 @@ fn spawn_command_in_pty(
             return Err(PtyError::CloneReader(source));
         }
     };
-    let reader: Box<dyn Read + Send> = Box::new(PtyReader { reader, readiness });
-    let writer = match pair.master.take_writer() {
-        Ok(writer) => writer,
+    // portable-pty's writer sends newline and EOF on drop. Closing a Terminal Session must
+    // only close its descriptor, without submitting a pending command or confirmation.
+    let writer: Box<dyn Write + Send> = match readiness.try_clone() {
+        Ok(writer) => Box::new(std::fs::File::from(writer)),
         Err(source) => {
             terminate_after_startup_failure(child.as_mut());
-            return Err(PtyError::TakeWriter(source));
+            return Err(PtyError::TakeWriter(source.into()));
         }
     };
+    let reader: Box<dyn Read + Send> = Box::new(PtyReader { reader, readiness });
 
     let process_group = child
         .process_id()
@@ -1248,6 +1250,44 @@ mod tests {
         drop(reader);
         drop(pty);
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn closing_a_native_pty_does_not_submit_pending_canonical_input() {
+        const NAME: &str = "platform::unix_pty::tests::closing_a_native_pty_does_not_submit_pending_canonical_input";
+        if isolate_real_pty_test(NAME) {
+            return;
+        }
+        let _lock = lock_real_pty_test();
+        let fixture = crate::terminal::testing::ShellResourcesFixture::new();
+        let accepted = fixture.path().join("unrequested-input");
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args([
+            "-c",
+            "trap '' HUP TERM; stty icanon -echo; printf READY; \
+             IFS= read -r line || exit; printf 'ACCEPTED:%s:READY-TO-CLOSE' \"$line\"; \
+             if IFS= read -r line; then printf '%s' \"$line\" > \"$1\"; fi; exec sleep 30",
+            "spaceterm-close-check",
+        ]);
+        command.arg(&accepted);
+        let (mut pty, terminator) =
+            spawn_command_in_pty(test_host(), PtySize::default(), command).unwrap();
+        let mut reader = pty.take_reader().unwrap();
+        read_output_marker(&mut reader, b"READY");
+        pty.write_all(b"confirmed\n").unwrap();
+        read_output_marker(&mut reader, b"ACCEPTED:confirmed:READY-TO-CLOSE");
+        pty.write_all(b"unsubmitted").unwrap();
+
+        // Keep a master reader alive so closing the owner cannot hide injected input behind
+        // terminal hangup. The child ignores graceful signals and must be forcefully reaped.
+        drop(pty);
+        drop(reader);
+
+        assert!(terminator.cleanup_confirmed());
+        assert!(
+            !accepted.exists(),
+            "closing the PTY submitted a line the user never confirmed"
+        );
     }
 
     #[test]
