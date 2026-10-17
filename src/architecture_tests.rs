@@ -687,7 +687,12 @@ fn shared_presentation_violation(source: &str) -> Option<&'static str> {
         ".SystemUIFont",
     ]
     .into_iter()
-    .find(|forbidden| source.contains(forbidden))
+    .find(|forbidden| {
+        source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .any(|line| line.contains(forbidden))
+    })
 }
 
 #[test]
