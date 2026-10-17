@@ -17,6 +17,8 @@ pub(crate) struct SharedWorkspaceSnapshot {
     pub inventory: Option<Inventory>,
     pub connected: bool,
     pub pending: bool,
+    pub pending_operation: Option<Mutation>,
+    pub rejected: Option<Mutation>,
     pub outcome: Option<RetainedOutcome>,
     pub error: Option<ServerError>,
 }
@@ -37,6 +39,8 @@ impl SharedWorkspaceClient {
             inventory: None,
             connected: false,
             pending: false,
+            pending_operation: None,
+            rejected: None,
             outcome: None,
             error: None,
         }));
@@ -87,8 +91,11 @@ impl SharedWorkspaceClient {
         }
         state.pending = true;
         state.outcome = None;
+        state.rejected = None;
+        state.pending_operation = Some(mutation.clone());
         if self.commands.try_send(mutation).is_err() {
             state.pending = false;
+            state.pending_operation = None;
             return false;
         }
         true
@@ -156,6 +163,7 @@ fn run(
     alive: Arc<AtomicBool>,
     legacy_location: String,
 ) {
+    let mut active: Option<(u64, Mutation)> = None;
     while alive.load(Ordering::Acquire) {
         let result = (|| {
             let attachments = server.attachments()?;
@@ -175,12 +183,26 @@ fn run(
                 s.worktree_writes = connection.worktree_writes();
                 s.inventory = Some(initial);
                 s.pending = journal.pending().is_some();
+                s.pending_operation = journal.pending().map(|p| p.mutation.clone());
+                if let Some((sequence, mutation)) = active.as_ref()
+                    && !journal
+                        .pending()
+                        .is_some_and(|p| p.sequence == *sequence && p.mutation == *mutation)
+                    && !journal
+                        .last()
+                        .is_some_and(|p| p.sequence == *sequence && p.mutation == *mutation)
+                {
+                    s.rejected = Some(mutation.clone());
+                    active = None;
+                }
             }
             let outcome = finish(&mut connection, &mut journal)?;
             {
                 let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
                 s.outcome = outcome;
                 s.pending = false;
+                s.pending_operation = None;
+                active = None;
             }
             loop {
                 if !alive.load(Ordering::Acquire) {
@@ -196,6 +218,7 @@ fn run(
                 }
                 match commands.recv_timeout(Duration::from_millis(150)) {
                     Ok(mutation) => {
+                        active = Some((sequence, mutation.clone()));
                         journal.submit(sequence, mutation)?;
                         let outcome = finish(&mut connection, &mut journal)?;
                         let (current, _) = inventory(&mut connection)?;
@@ -203,6 +226,8 @@ fn run(
                         s.inventory = Some(current);
                         s.outcome = outcome;
                         s.pending = false;
+                        s.pending_operation = None;
+                        active = None;
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -217,7 +242,7 @@ fn run(
             }
             // A command accepted just before loss is either in the durable journal or is rejected.
             // Never carry an unsubmitted edit across a reconnect as a new operation.
-            while commands.try_recv().is_ok() {}
+            reject_queued(&state, &commands);
             for _ in 0..10 {
                 if !alive.load(Ordering::Acquire) {
                     return;
@@ -227,5 +252,53 @@ fn run(
         } else {
             return;
         }
+    }
+}
+
+fn reject_queued(state: &Mutex<SharedWorkspaceSnapshot>, commands: &mpsc::Receiver<Mutation>) {
+    while let Ok(mutation) = commands.try_recv() {
+        let mut snapshot = state.lock().unwrap_or_else(|e| e.into_inner());
+        snapshot.rejected = Some(mutation);
+        snapshot.pending = false;
+        snapshot.pending_operation = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn disconnect_rejects_an_enqueued_edit_without_carrying_it_across_reconnect() {
+        let (commands, receiver) = mpsc::sync_channel(1);
+        let state = Arc::new(Mutex::new(SharedWorkspaceSnapshot {
+            worktree_writes: true,
+            inventory: None,
+            connected: true,
+            pending: false,
+            pending_operation: None,
+            rejected: None,
+            outcome: None,
+            error: None,
+        }));
+        let client = SharedWorkspaceClient {
+            snapshot: state.clone(),
+            commands,
+            alive: Arc::new(AtomicBool::new(true)),
+        };
+        let operation = Mutation::Worktree(spaceterm_server::worktree::Operation::SetLocation {
+            version: 0,
+            template: "~/.worktrees/{repository}/{branch}".into(),
+        });
+        assert!(client.submit(operation.clone()));
+        state.lock().unwrap().connected = false;
+        reject_queued(&state, &receiver);
+        let snapshot = client.snapshot();
+        assert_eq!(snapshot.rejected, Some(operation));
+        assert!(!snapshot.pending);
+        assert!(snapshot.pending_operation.is_none());
+        assert!(
+            receiver.try_recv().is_err(),
+            "reconnection cannot repeat the refused request"
+        );
     }
 }

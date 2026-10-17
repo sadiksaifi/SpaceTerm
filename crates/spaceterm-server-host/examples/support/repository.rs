@@ -112,7 +112,35 @@ impl Repository {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()?;
         if !output.status.success() {
-            return Err("fixture Git command failed".into());
+            let command = args
+                .iter()
+                .find(|arg| {
+                    matches!(
+                        **arg,
+                        "init" | "commit" | "remote" | "worktree" | "add" | "config"
+                    )
+                })
+                .copied()
+                .unwrap_or("unknown");
+            let error = String::from_utf8_lossy(&output.stderr);
+            let reason = if error.contains("not a working tree") {
+                "not-a-worktree"
+            } else if error.contains("contains modified or untracked files") {
+                "dirty-worktree"
+            } else if error.contains("already exists") {
+                "already-exists"
+            } else if error.contains("not a git repository") {
+                "not-a-repository"
+            } else if error.contains("not checked out") {
+                "not-checked-out"
+            } else {
+                "unclassified"
+            };
+            return Err(format!(
+                "fixture Git {command} failed ({reason}, exit {:?})",
+                output.status.code()
+            )
+            .into());
         }
         Ok(())
     }

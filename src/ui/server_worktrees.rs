@@ -2,7 +2,7 @@
 use crate::{
     local_server::LocalServer,
     terminal::shared_workspace::SharedWorkspaceClient,
-    ui::shared_workspaces::{SharedEditSource, SharedSubmission},
+    ui::shared_workspaces::{SharedEditSource, SharedRefusalReason, SharedSubmission},
 };
 use gpui::{App, AppContext as _, Global, Task};
 use spaceterm_server::{
@@ -11,6 +11,17 @@ use spaceterm_server::{
     worktree::{Error, Operation, Read, ReadReply},
 };
 use std::{path::PathBuf, rc::Rc};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WriteError {
+    Refused(SharedRefusalReason),
+    Server(Error),
+}
+impl From<Error> for WriteError {
+    fn from(error: Error) -> Self {
+        Self::Server(error)
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct Client {
@@ -54,17 +65,20 @@ impl Client {
         &self,
         operation: Operation,
         cx: &mut App,
-    ) -> Task<Result<RetainedOutcome, Error>> {
+    ) -> Task<Result<RetainedOutcome, WriteError>> {
         let mutation = Mutation::Worktree(operation);
         self.source.snapshot();
-        if self.source.submit(mutation.clone()) != SharedSubmission::Submitted {
-            return Task::ready(Err(Error::Unavailable));
+        if let SharedSubmission::Refused(reason) = self.source.submit(mutation.clone()) {
+            return Task::ready(Err(WriteError::Refused(reason)));
         }
         let source = self.source.clone();
         cx.spawn(async move |cx| {
             loop {
-                if let Some(outcome) = source
-                    .snapshot()
+                let snapshot = source.snapshot();
+                if snapshot.rejected.as_ref() == Some(&mutation) {
+                    return Err(WriteError::Refused(SharedRefusalReason::Offline));
+                }
+                if let Some(outcome) = snapshot
                     .outcome
                     .filter(|outcome| outcome.mutation == mutation)
                 {
@@ -86,11 +100,11 @@ pub(crate) fn read_server(server: &LocalServer, read: Read) -> Result<ReadReply,
         _ => Err(Error::Unavailable),
     }
 }
-pub(crate) fn result(outcome: RetainedOutcome) -> Result<(), Error> {
+pub(crate) fn result(outcome: RetainedOutcome) -> Result<(), WriteError> {
     match outcome.outcome {
         Outcome::Accepted { .. } => Ok(()),
-        Outcome::WorktreeFailed(error) => Err(error),
-        _ => Err(Error::Unavailable),
+        Outcome::WorktreeFailed(error) => Err(error.into()),
+        _ => Err(Error::Unavailable.into()),
     }
 }
 pub(crate) struct FormBackend {
@@ -130,9 +144,10 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
         cx.spawn(async move |cx| {
             let checked = read.await;
             let Ok(ReadReply::Location(path)) = checked else {
-                return Err(crate::worktrees::git::WorktreeCreateError::Server(
-                    checked.err().unwrap_or(Error::Location),
-                ));
+                return Err(create_error(match checked.err().unwrap_or(Error::Location) {
+                    Error::Unavailable => return Err(crate::worktrees::git::WorktreeCreateError::NotSubmitted(if client.availability().0 {"SpaceTerm couldn\u{2019}t validate the location on the server. Review the location before trying again."} else {SharedRefusalReason::Offline.explanation()})),
+                    error => error.into(),
+                }));
             };
             let completed = cx
                 .update(|cx| {
@@ -147,12 +162,12 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
                     )
                 })
                 .await;
-            let outcome = completed.map_err(crate::worktrees::git::WorktreeCreateError::Server)?;
-            result(outcome.clone()).map_err(crate::worktrees::git::WorktreeCreateError::Server)?;
+            let outcome = completed.map_err(create_error)?;
+            result(outcome.clone()).map_err(create_error)?;
             let Outcome::Accepted { target } = outcome.outcome else {
                 return Err(crate::worktrees::git::WorktreeCreateError::Failed);
             };
-            client
+            Ok(client
                 .source
                 .snapshot()
                 .inventory
@@ -163,7 +178,7 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
                         .find(|t| t.id == target)
                         .and_then(|t| t.worktree)
                 })
-                .ok_or(crate::worktrees::git::WorktreeCreateError::Failed)
+                .unwrap_or(path))
         })
     }
 }
@@ -171,4 +186,12 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
 pub(crate) fn available(cx: &App) -> bool {
     cx.try_global::<Client>()
         .is_some_and(|c| c.edits.supports_worktree_writes())
+}
+
+fn create_error(error: WriteError) -> crate::worktrees::git::WorktreeCreateError {
+    use crate::worktrees::git::WorktreeCreateError;
+    match error {
+        WriteError::Refused(reason) => WorktreeCreateError::NotSubmitted(reason.explanation()),
+        WriteError::Server(error) => WorktreeCreateError::Server(error),
+    }
 }

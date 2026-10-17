@@ -845,6 +845,7 @@ mod development {
         revision: Option<u64>,
         connected: bool,
         pending: bool,
+        pending_operation: Option<Mutation>,
         /// The sequence of the last outcome this client presented, so one answer is read once.
         consumed: Option<u64>,
         /// A refused same-field edit waiting for the local Workspace that presents its target.
@@ -895,6 +896,7 @@ mod development {
                 revision: None,
                 connected: false,
                 pending: false,
+                pending_operation: None,
                 consumed: None,
                 conflict: None,
                 refusal: None,
@@ -1094,10 +1096,10 @@ mod development {
         }
 
         pub(crate) fn worktree_status(&self) -> Option<&'static str> {
-            if !self.pending {
+            if !self.pending || !self.connected {
                 return None;
             }
-            match self.edits.submitted.borrow().as_ref() {
+            match self.pending_operation.as_ref() {
                 Some(Mutation::Worktree(spaceterm_server::worktree::Operation::Create {
                     ..
                 })) => Some("Creating Worktree…"),
@@ -1109,7 +1111,7 @@ mod development {
         }
         pub(crate) fn removing_worktree(&self, path: &Path) -> bool {
             self.pending
-                && matches!(self.edits.submitted.borrow().as_ref(),Some(Mutation::Worktree(spaceterm_server::worktree::Operation::Remove {path:target,..})) if target==path)
+                && matches!(self.pending_operation.as_ref(),Some(Mutation::Worktree(spaceterm_server::worktree::Operation::Remove {path:target,..})) if target==path)
         }
         pub(crate) const fn sessions(&self) -> &SharedPaneSessions {
             &self.sessions
@@ -1276,6 +1278,8 @@ mod development {
         pub(crate) fn poll(&mut self) -> SharedPoll {
             let snapshot = self.edits.snapshot();
             let mut poll = SharedPoll::default();
+            self.pending_operation
+                .clone_from(&snapshot.pending_operation);
             if self.connected != snapshot.connected || self.pending != snapshot.pending {
                 self.connected = snapshot.connected;
                 self.pending = snapshot.pending;
@@ -1919,6 +1923,8 @@ mod development {
                         inventory,
                         connected: true,
                         pending: false,
+                        pending_operation: None,
+                        rejected: None,
                         outcome: None,
                         error: None,
                     }),
@@ -1947,6 +1953,7 @@ mod development {
                 let mut sequence = self.sequence.lock().expect("sequence");
                 let mut snapshot = self.snapshot.lock().expect("snapshot");
                 snapshot.pending = false;
+                snapshot.pending_operation = None;
                 snapshot.outcome = Some(RetainedOutcome {
                     sequence: *sequence,
                     mutation,
@@ -1962,6 +1969,9 @@ mod development {
             /// Records a durable operation an earlier run submitted, which recovery answers after
             /// a relaunch without this process ever asking for it.
             pub(crate) fn submit_for_recovery(&self, mutation: Mutation) {
+                let mut snapshot = self.snapshot.lock().expect("snapshot");
+                snapshot.pending = true;
+                snapshot.pending_operation = Some(mutation.clone());
                 self.submitted.lock().expect("submitted").push(mutation);
             }
         }
@@ -1982,6 +1992,7 @@ mod development {
                     return false;
                 }
                 snapshot.pending = true;
+                snapshot.pending_operation = Some(mutation.clone());
                 snapshot.outcome = None;
                 self.submitted.lock().expect("submitted").push(mutation);
                 true

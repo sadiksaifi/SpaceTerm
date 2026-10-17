@@ -1730,8 +1730,6 @@ fn workspace_menu_entries(
         .filter(|shared| !shared.edits)
         .map(|shared| shared.edits_reason);
     let new_tab = new_tab && shared_edits;
-    // Worktrees are read and written on the owning server, which is not available yet.
-
     let mut entries = Vec::new();
     if new_tab {
         entries.push(new_tab_entry(

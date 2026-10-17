@@ -1,9 +1,9 @@
 use super::tests::{await_text, command, create_shared, host, shared_inventory, size};
 use super::*;
 use std::time::Instant;
-struct GitFixture(std::path::PathBuf);
+pub(super) struct GitFixture(pub(super) std::path::PathBuf);
 impl GitFixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
             "spaceterm-git-{}-{:x}",
             std::process::id(),
@@ -24,7 +24,7 @@ impl GitFixture {
         ]);
         fixture
     }
-    fn git(&self, arguments: &[&str]) {
+    pub(super) fn git(&self, arguments: &[&str]) {
         let output = std::process::Command::new("git")
             .arg("-C")
             .arg(&self.0)
@@ -533,7 +533,7 @@ fn worktree_write_retries_resolve_the_original_and_never_recreate_removed_state(
     host.shutdown().unwrap();
 }
 
-fn finish_write(
+pub(super) fn finish_write(
     host: &mut SharedWorkspaceHost,
     sequence: u64,
     operation: spaceterm_server::worktree::Operation,
@@ -556,7 +556,7 @@ fn finish_write(
         std::thread::sleep(Duration::from_millis(20));
     }
 }
-fn review_removal(
+pub(super) fn review_removal(
     host: &mut SharedWorkspaceHost,
     root: &std::path::Path,
     path: &std::path::Path,

@@ -319,7 +319,7 @@ fn unavailable_window_effect_guidance_names_accessibility_for_floating_surfaces(
     assert!(!window_background_rows(&window, cx).adjustable());
 }
 
-fn open_settings(
+pub(super) fn open_settings(
     cx: &mut TestAppContext,
 ) -> (Entity<SettingsWindow>, Harness, &mut VisualTestContext) {
     open_settings_with(

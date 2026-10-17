@@ -42,7 +42,7 @@ pub(super) struct SidebarWorktrees {
     workspaces: BTreeMap<WorkspaceId, WorkspaceWorktrees>,
     form: Option<Entity<WorktreeForm>>,
     created: Option<CreatedWorktree>,
-    created_shared: Option<(WorkspaceId, PathBuf)>,
+    created_shared: Option<(WorkspaceId, PathBuf, u64)>,
     /// The removal being checked, confirmed, or run. One runs at a time.
     removal: Option<u64>,
     removal_generation: u64,
@@ -113,14 +113,18 @@ impl WorkspaceWorktrees {
 }
 
 impl WorkspaceManager {
-    pub(super) fn worktree_removal_active(&self) -> bool {
-        self.sidebar_worktrees.removal.is_some()
-    }
-    pub(super) fn worktree_form_open(&self, cx: &App) -> bool {
-        self.sidebar_worktrees
-            .form
-            .as_ref()
-            .is_some_and(|f| f.read(cx).is_open())
+    pub(super) fn worktree_creation_failure_presented(
+        &self,
+        path: &std::path::Path,
+        error: spaceterm_server::worktree::Error,
+        cx: &App,
+    ) -> bool {
+        self.sidebar_worktrees.form.as_ref().is_some_and(|form| {
+            let form = form.read(cx);
+            form.is_open()
+                || (error == spaceterm_server::worktree::Error::Interrupted
+                    && form.interrupted_path() == Some(path))
+        })
     }
     /// Follows each local Workspace's repository and keeps its Tabs in its Worktrees.
     pub(super) fn sync_sidebar_worktrees(&mut self, cx: &mut Context<Self>) {
@@ -251,9 +255,9 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        // A shared Workspace's server opens no Tab in a chosen Worktree yet.
+        // A shared Workspace asks its owning server to open the first Tab.
         if self.is_shared_workspace(workspace_id) {
-            return self.open_server_worktree_tab(workspace_id, worktree_id, cx);
+            return self.open_server_worktree_tab(workspace_id, worktree_id, window, cx);
         }
         let had_tabs = self.worktree_has_tabs(workspace_id, worktree_id, cx);
         if !self.open_worktree(workspace_id, worktree_id, true, window, cx) {
@@ -506,6 +510,7 @@ impl WorkspaceManager {
                 repository,
                 main,
                 has_tabs: counts.contains_key(&id),
+                opens_first_tab: true,
                 active: active == Some(id),
                 locked: record.locked,
                 missing: missing || record.missing,

@@ -138,7 +138,11 @@ impl SharedWorkspaceHost {
             .map_err(|_| Refusal::StorageUnavailable)
     }
     fn affected_worktree_tabs(&self, root: &Path, path: &Path) -> Vec<AffectedTab> {
-        self.inventory().affected_worktree_tabs(root, path)
+        self.inventory()
+            .affected_worktree_tabs_in(root, path, |directory| {
+                directory.starts_with(path)
+                    || local_filesystem().physically_contains(path, directory)
+            })
     }
 
     fn pinned_in_worktree(&self, path: &Path) -> Result<bool, Error> {
@@ -649,5 +653,95 @@ fn removal_error(error: WorktreeRemoveError) -> Error {
         WorktreeRemoveError::HoldsPinnedDirectory => Error::Pinned,
         WorktreeRemoveError::Replaced | WorktreeRemoveError::Changed => Error::Changed,
         _ => Error::Unavailable,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::server::{
+        repository_tests::{GitFixture, finish_write, review_removal},
+        tests::{create_shared, host, shared_inventory, size},
+    };
+
+    #[test]
+    fn removal_captures_symlinked_pane_directories_in_other_unattached_workspaces() {
+        let git = GitFixture::new();
+        let tree = git.0.join("linked");
+        git.git(&["worktree", "add", "-b", "linked", tree.to_str().unwrap()]);
+        let alias = git.0.join("alias");
+        std::os::unix::fs::symlink(&tree, &alias).unwrap();
+        let mut prototype = host();
+        prototype.directory = git.0.clone();
+        let mut host = SharedWorkspaceHost::new(prototype);
+        create_shared(&mut host, 1);
+        create_shared(&mut host, 2);
+        let pane = host.state.inventory.workspaces[1].tabs[0].root_pane;
+        // Shell integration retains logical $PWD while the Tab keeps its original membership.
+        host.state.inventory.workspaces[1].tabs[0].worktree = Some(git.0.clone());
+        host.state.inventory.workspaces[1].tabs[0].panes[0].confirmed_directory = Some(alias);
+        let review = review_removal(&mut host, &git.0, &tree);
+        assert_eq!(
+            review.tabs.len(),
+            1,
+            "review includes the physically contained Pane"
+        );
+        assert_eq!(
+            review.tabs[0].tab,
+            host.state.inventory.workspaces[1].tabs[0].id
+        );
+        assert!(review.matches_inventory(&host.inventory()));
+        let Reply::Attached { .. } = host.request(
+            [1; 32],
+            [3; 32],
+            Request::SelectPane {
+                pane,
+                explicit: true,
+                size: size(),
+                style: None,
+            },
+        ) else {
+            panic!("start affected session")
+        };
+        assert!(!review.matches_inventory(&host.inventory()));
+        assert_eq!(
+            finish_write(
+                &mut host,
+                3,
+                Operation::Remove {
+                    root: git.0.clone(),
+                    path: tree.clone(),
+                    boot: review.boot,
+                    confirmation: review.confirmation
+                }
+            ),
+            Outcome::WorktreeFailed(Error::Changed)
+        );
+        assert!(tree.exists());
+        let review = review_removal(&mut host, &git.0, &tree);
+        assert!(review.tabs[0].panes[0].session.is_some());
+        assert!(matches!(
+            finish_write(
+                &mut host,
+                4,
+                Operation::Remove {
+                    root: git.0.clone(),
+                    path: tree.clone(),
+                    boot: review.boot,
+                    confirmation: review.confirmation
+                }
+            ),
+            Outcome::Accepted { .. }
+        ));
+        assert!(!tree.exists());
+        assert!(
+            shared_inventory(&mut host)
+                .close
+                .unwrap()
+                .sessions
+                .iter()
+                .all(|p| p.session.is_none())
+        );
+        host.shutdown().unwrap();
     }
 }

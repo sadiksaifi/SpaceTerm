@@ -334,6 +334,18 @@ mod development {
                     WorktreeRemoval::Main
                 } else if record.locked {
                     WorktreeRemoval::Locked
+                } else if self
+                    .shared
+                    .as_ref()
+                    .and_then(|s| s.latest_inventory())
+                    .is_some_and(|i| {
+                        i.workspaces
+                            .iter()
+                            .filter_map(|w| w.pinned_directory.as_deref())
+                            .any(|pin| pin.starts_with(&record.root))
+                    })
+                {
+                    WorktreeRemoval::HoldsPinnedDirectory
                 } else if !crate::ui::server_worktrees::available(cx) {
                     WorktreeRemoval::Server
                 } else if !self
@@ -366,6 +378,11 @@ mod development {
                     repository,
                     main,
                     has_tabs: counts.contains_key(&id),
+                    opens_first_tab: crate::ui::server_worktrees::available(cx)
+                        && self
+                            .shared
+                            .as_ref()
+                            .is_some_and(|s| s.editability().available()),
                     active: active == Some(id),
                     locked: record.locked,
                     missing: missing || record.missing,
@@ -454,8 +471,7 @@ mod development {
 
         /// Shows a shared Worktree's Tabs. It reports `None` for a Workspace this window owns.
         ///
-        /// A shared Worktree without Tabs opens nothing: a Tab in a chosen Worktree is a change
-        /// the server does not offer yet, and a missing one has no directory to start in.
+        /// An existing Worktree without Tabs requests its first Tab from the owning server.
         pub(in crate::ui::workspace_manager) fn open_shared_worktree(
             &mut self,
             workspace_id: WorkspaceId,
@@ -474,7 +490,7 @@ mod development {
             let shown = manager.update(cx, |manager, cx| {
                 manager.show_shared_worktree(worktree_id, focus, window, cx)
             });
-            Some(shown || self.open_server_worktree_tab(workspace_id, worktree_id, cx))
+            Some(shown || self.open_server_worktree_tab(workspace_id, worktree_id, window, cx))
         }
 
         /// A shared Worktree's root, as the server reported it.

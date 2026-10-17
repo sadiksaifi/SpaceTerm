@@ -20,14 +20,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let a = LocalServer::for_development_client("repository-smoke-a", major)?;
     let b = LocalServer::for_development_client("repository-smoke-b", major)?;
     lifecycle::require_idle(&a)?;
-    let examples = std::env::current_exe()?
-        .parent()
-        .ok_or("example directory")?
-        .to_owned();
-    let companion = examples.join("spaceterm-server");
-    if !companion.try_exists()? {
-        std::os::unix::fs::symlink("../spaceterm-server", companion)?;
-    }
+    lifecycle::prepare_companion()?;
     a.setup_and_start()?;
     b.setup_and_start()?;
     connect(&a)?.exchange(&Request::Shutdown)?;

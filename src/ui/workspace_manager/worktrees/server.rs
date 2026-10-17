@@ -1,6 +1,6 @@
 //! Desktop dialogs submit Worktree operations to the same server edit journal as shared closes.
 use super::*;
-use crate::ui::server_worktrees::{Client, FormBackend};
+use crate::ui::server_worktrees::{Client, FormBackend, WriteError};
 use spaceterm_server::worktree::{Operation, Read, ReadReply};
 impl WorkspaceManager {
     pub(in crate::ui::workspace_manager) fn new_shared_worktree(
@@ -31,15 +31,55 @@ impl WorkspaceManager {
             return false;
         };
         let root = inventory.main_root.clone();
+        let active_path = self
+            .workspaces
+            .workspace(workspace_id)
+            .and_then(|w| w.payload().read(cx).active_worktree())
+            .and_then(|id| {
+                self.sidebar_worktrees
+                    .workspaces
+                    .get(&workspace_id)?
+                    .registry
+                    .key(id)
+            })
+            .map(|key| key.root().to_owned());
         let context = client.read(Read::Context { root: root.clone() }, cx);
         let handle = window.window_handle().downcast::<WorkspaceManager>();
         cx.spawn(async move |_, cx| {
+            let result = context.await;
             let Ok(ReadReply::Context {
                 settings,
                 home,
                 branches,
-            }) = context.await
+            }) = result
             else {
+                if let Some(handle) = handle {
+                    let _ = handle.update(cx, |_, window, cx| {
+                        if !client.availability().0 {
+                            Self::show_shared_refusal(
+                                "create the Worktree",
+                                crate::ui::shared_workspaces::SharedRefusalReason::Offline,
+                                window,
+                                cx,
+                            );
+                        } else {
+                            let _ = Alert::new(
+                                ModalId::new("server-worktree-context"),
+                                "Couldn\u{2019}t Read Branches",
+                                "Couldn\u{2019}t Read Branches",
+                                crate::ui::worktree_form::BRANCHES_FAILED,
+                                vec![ModalAction::new(
+                                    false,
+                                    "OK",
+                                    ModalActionRole::Cancel,
+                                    "server-worktree-context-ok",
+                                )],
+                            )
+                            .intent(AlertIntent::Warning)
+                            .present(window, cx, |_, _| {});
+                        }
+                    });
+                }
                 return;
             };
             let Some(handle) = handle else {
@@ -62,7 +102,12 @@ impl WorkspaceManager {
                     repository_name: directory_name(&root).to_string(),
                     template: settings.template,
                     home,
-                    default_base: inventory.worktrees.iter().find_map(branch_of),
+                    default_base: inventory
+                        .worktrees
+                        .iter()
+                        .find(|r| Some(&r.root) == active_path.as_ref())
+                        .and_then(branch_of)
+                        .or_else(|| inventory.worktrees.iter().find_map(branch_of)),
                     checked_out: inventory
                         .worktrees
                         .iter()
@@ -82,25 +127,26 @@ impl WorkspaceManager {
                     &form,
                     window,
                     move |manager, _, event: &WorktreeFormEvent, window, cx| {
-                        if matches!(event, WorktreeFormEvent::Interrupted) {
+                        if let WorktreeFormEvent::Interrupted(path) = event {
+                            let path = path.clone();
                             let handle = window.window_handle();
                             let owner = cx.weak_entity();
                             cx.defer(move |cx| {
                                 let _ = handle.update(cx, |_, window, cx| {
                                     let _ = owner.update(cx, |m, cx| {
-                                        m.server_worktree_failure(
-                                            "Worktree Creation Interrupted",
-                                            Error::Interrupted,
-                                            None,
-                                            window,
-                                            cx,
-                                        )
+                                        m.server_worktree_interrupted(true, &path, window, cx)
                                     });
                                 });
                             });
                         }
-                        if matches!(event, WorktreeFormEvent::Created(_)) {
+                        if let WorktreeFormEvent::Created(path) = event {
+                            let revision = Client::get(cx)
+                                .and_then(|client| client.source.snapshot().inventory)
+                                .map_or(0, |i| i.revision);
+                            manager.sidebar_worktrees.created_shared =
+                                Some((workspace_id, path.clone(), revision));
                             manager.set_worktrees_expanded(workspace_id, true);
+                            manager.open_created_server_worktree(window, cx);
                             cx.notify();
                         }
                     },
@@ -118,7 +164,9 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((workspace, path)) = self.sidebar_worktrees.created_shared.as_ref() else {
+        let Some((workspace, path, minimum_revision)) =
+            self.sidebar_worktrees.created_shared.as_ref()
+        else {
             return;
         };
         let Some(server) = self
@@ -135,6 +183,14 @@ impl WorkspaceManager {
             .find(|t| t.worktree.as_ref() == Some(path))
             .map(|t| t.id)
         else {
+            if self
+                .shared
+                .as_ref()
+                .and_then(|s| s.latest_inventory())
+                .is_some_and(|i| i.revision >= *minimum_revision)
+            {
+                self.sidebar_worktrees.created_shared = None;
+            }
             return;
         };
         let workspace = *workspace;
@@ -152,6 +208,7 @@ impl WorkspaceManager {
         &mut self,
         workspace_id: WorkspaceId,
         worktree_id: WorktreeId,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(shared) = self.shared.as_ref() else {
@@ -170,6 +227,7 @@ impl WorkspaceManager {
             return false;
         };
         if !shared.editability().available() {
+            Self::show_shared_refusal("open the Worktree", shared.editability().into(), window, cx);
             return false;
         }
         let Some(client) = Client::get(cx) else {
@@ -183,8 +241,18 @@ impl WorkspaceManager {
             },
             cx,
         );
-        cx.spawn(async move |_, _| {
-            let _ = task.await;
+        let handle = window.window_handle();
+        cx.spawn(async move |manager, cx| {
+            let result = task.await.and_then(crate::ui::server_worktrees::result);
+            let _ = handle.update(cx, |_, window, cx| {
+                let _ = manager.update(cx, |_manager, cx| match result {
+                    Err(WriteError::Refused(reason)) => {
+                        Self::show_shared_refusal("open the Worktree", reason, window, cx)
+                    }
+                    Err(WriteError::Server(_)) => (), // The inventory poll presents the retained outcome once.
+                    Ok(()) => (),
+                });
+            });
         })
         .detach();
         true
@@ -241,6 +309,7 @@ impl WorkspaceManager {
             self.sidebar_worktrees.removal_generation.wrapping_add(1);
         let generation = self.sidebar_worktrees.removal_generation;
         self.sidebar_worktrees.removal = Some(generation);
+        let name = sanitize_for_display(&directory_name(&path), MAXIMUM_NAME_CHARS);
         let read = client.read(Read::CheckRemoval { root, path }, cx);
         let handle = window.window_handle().downcast::<WorkspaceManager>();
         cx.spawn(async move |_, cx| {
@@ -263,13 +332,15 @@ impl WorkspaceManager {
                     ),
                     _ => {
                         manager.sidebar_worktrees.removal = None;
-                        manager.server_worktree_failure(
-                            "Couldn't Check Worktree",
-                            result.err().unwrap_or(Error::Unavailable),
-                            None,
-                            window,
-                            cx,
-                        );
+                        let error = result.err().unwrap_or(Error::Unavailable);
+                        if !client.availability().0 {
+                            Self::show_shared_refusal("remove the Worktree", crate::ui::shared_workspaces::SharedRefusalReason::Offline, window, cx);
+                        } else if error == Error::Unavailable {
+                            let title = format!("Couldn\u{2019}t Remove \u{201c}{name}\u{201d}");
+                            let _ = Alert::new(ModalId::new("server-worktree-removal-check"),title.clone(),title,"SpaceTerm couldn\u{2019}t check it for changes, so nothing was removed.",vec![ModalAction::new(false,"OK",ModalActionRole::Cancel,"server-worktree-removal-check-ok")]).intent(AlertIntent::Warning).present(window,cx,|_,_|{});
+                        } else {
+                            manager.server_worktree_failure(&format!("Couldn\u{2019}t Remove \u{201c}{name}\u{201d}"),error,None,window,cx);
+                        }
                     }
                 }
             });
@@ -288,37 +359,56 @@ impl WorkspaceManager {
         let Some(generation) = self.sidebar_worktrees.removal else {
             return;
         };
-        let name = directory_name(&review.path);
-        let title = format!("Remove Worktree \"{name}\"?");
+        let name = sanitize_for_display(&directory_name(&review.path), MAXIMUM_NAME_CHARS);
+        let title = format!("Remove Worktree \u{201c}{name}\u{201d}?");
         let mut message = vec!["The local server deletes its directory with Git.".to_owned()];
         if review.changes {
             message.push("Its uncommitted changes and untracked files will be deleted.".into());
         }
         if review.submodules {
-            message.push("Its submodules' checkouts will be deleted.".into());
+            message.push("Its submodules\u{2019} checkouts will be deleted.".into());
         }
         let other = review
             .tabs
             .iter()
             .filter(|t| self.shared.as_ref().and_then(|s| s.local(t.workspace)) != Some(workspace))
             .count();
-        message.push(format!(
-            "Closes {} {} for every client, including {other} in other Workspaces.",
-            review.tabs.len(),
-            if review.tabs.len() == 1 {
-                "Tab"
-            } else {
-                "Tabs"
-            }
+        if !review.tabs.is_empty() {
+            let elsewhere = match other {
+                0 => String::new(),
+                1 => ", including 1 in another Workspace".into(),
+                n => format!(", including {n} in other Workspaces"),
+            };
+            message.push(format!(
+                "Closes {} {} for every client{elsewhere}.",
+                review.tabs.len(),
+                if review.tabs.len() == 1 {
+                    "Tab"
+                } else {
+                    "Tabs"
+                }
+            ));
+            let sessions = review
+                .tabs
+                .iter()
+                .flat_map(|t| &t.panes)
+                .filter(|p| p.session.is_some())
+                .count();
+            message.push(match sessions {0=>"No shell is running in them, so no Terminal Session ends.".into(),1=>"This ends 1 Terminal Session, even if another client controls its Pane, and stops its running commands.".into(),n=>format!("This ends {n} Terminal Sessions, including in Panes another client controls, and stops their running commands.")});
+        }
+        let branch = self
+            .shared_inventory(workspace)
+            .and_then(|i| i.worktrees.iter().find(|r| r.root == review.path))
+            .and_then(|r| match &r.head {
+                WorktreeHead::Branch(branch) => {
+                    Some(sanitize_for_display(branch, MAXIMUM_NAME_CHARS))
+                }
+                _ => None,
+            });
+        message.push(branch.map_or_else(
+            || "Its commits stay in the repository.".into(),
+            |branch| format!("The branch \u{201c}{branch}\u{201d} is kept."),
         ));
-        let sessions = review
-            .tabs
-            .iter()
-            .flat_map(|t| &t.panes)
-            .filter(|p| p.session.is_some())
-            .count();
-        message.push(match sessions {0=>"No shell is running in them, so no Terminal Session ends.".into(),1=>"This ends 1 Terminal Session, even if another client controls its Pane, and stops its running commands.".into(),n=>format!("This ends {n} Terminal Sessions, including in Panes another client controls, and stops their running commands.")});
-        message.push("Its branch and commits stay in the repository.".into());
         let operation = Operation::Remove {
             root: review.root.clone(),
             path: review.path.clone(),
@@ -353,7 +443,10 @@ impl WorkspaceManager {
                 ),
             ],
         )
-        .detail(review.path.display().to_string())
+        .detail(super::super::compact_home_path(
+            &review.path,
+            &self.local_home_directory_path,
+        ))
         .intent(AlertIntent::Critical)
         .present(window, cx, move |outcome, cx| {
             let confirmed = matches!(
@@ -380,15 +473,10 @@ impl WorkspaceManager {
                             if manager.sidebar_worktrees.removal == Some(generation) {
                                 manager.sidebar_worktrees.removal = None;
                             }
-                            if let Err(error) = result {
-                                manager.server_worktree_failure(
-                                    if error == Error::Interrupted {
-                                        "Worktree Removal Interrupted"
-                                    } else {
-                                        "Couldn't Remove Worktree"
-                                    },
-                                    error,
-                                    Some((workspace, worktree)),
+                            if let Err(WriteError::Refused(reason)) = result {
+                                Self::show_shared_refusal(
+                                    "remove the Worktree",
+                                    reason,
                                     window,
                                     cx,
                                 );
@@ -423,13 +511,10 @@ impl WorkspaceManager {
         let Some(inventory) = self.shared.as_ref().and_then(|s| s.latest_inventory()) else {
             return;
         };
-        if inventory
-            .close
-            .as_ref()
-            .is_none_or(|c| c.boot != review.review.boot)
-            || inventory.affected_worktree_tabs(&review.review.root, &review.review.path)
-                != review.review.tabs
-        {
+        let missing = self
+            .shared_inventory(review.workspace)
+            .is_some_and(|i| !i.worktrees.iter().any(|r| r.root == review.review.path));
+        if missing || !review.review.matches_inventory(inventory) {
             let Some(review) = self.sidebar_worktrees.server_review.take() else {
                 return;
             };
@@ -437,12 +522,138 @@ impl WorkspaceManager {
             let _ = review.presentation.dismiss(window, cx);
             self.server_worktree_failure(
                 "Worktree Changed on Another Client",
-                Error::Changed,
+                if missing {
+                    Error::Missing
+                } else {
+                    Error::Changed
+                },
                 Some((review.workspace, review.worktree)),
                 window,
                 cx,
             );
         }
+    }
+    pub(in crate::ui::workspace_manager) fn server_worktree_interrupted(
+        &mut self,
+        creating: bool,
+        path: &std::path::Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = sanitize_for_display(&directory_name(path), MAXIMUM_NAME_CHARS);
+        let (title, verb, again) = if creating {
+            (
+                "Worktree Creation Interrupted",
+                "created",
+                "To create it, choose New Worktree again.",
+            )
+        } else {
+            (
+                "Worktree Removal Interrupted",
+                "removed",
+                "To remove it, choose Remove Worktree again.",
+            )
+        };
+        let message = format!(
+            "The server stopped before it confirmed whether Git {verb} \u{201c}{name}\u{201d}. SpaceTerm didn\u{2019}t repeat the request and refreshed the Worktrees from Git, so the sidebar shows what Git lists now. {again}"
+        );
+        let _ = Alert::new(
+            ModalId::new("server-worktree-interrupted"),
+            title,
+            title,
+            message,
+            vec![ModalAction::new(
+                false,
+                "OK",
+                ModalActionRole::Cancel,
+                "server-worktree-interrupted-ok",
+            )],
+        )
+        .intent(AlertIntent::Warning)
+        .present(window, cx, |_, _| {});
+    }
+    pub(in crate::ui::workspace_manager) fn server_worktree_operation_failure(
+        &mut self,
+        operation: &Operation,
+        error: Error,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (path, creating) = match operation {
+            Operation::Create { path, .. } => (path, true),
+            Operation::Remove { path, .. } | Operation::OpenTab { path, .. } => (path, false),
+            Operation::SetLocation { .. } => return,
+        };
+        if error == Error::Interrupted && !matches!(operation, Operation::OpenTab { .. }) {
+            self.server_worktree_interrupted(creating, path, window, cx);
+            return;
+        }
+        let name = sanitize_for_display(&directory_name(path), MAXIMUM_NAME_CHARS);
+        if matches!(operation, Operation::Remove { .. }) {
+            let review = self.workspaces.iter().find_map(|workspace| {
+                let id = workspace.id();
+                self.shared_worktree_section(id, cx)?
+                    .rows()
+                    .find_map(|row| {
+                        (self.shared_worktree_root(id, row.worktree_id).as_ref() == Some(path))
+                            .then_some((id, row.worktree_id))
+                    })
+            });
+            self.server_worktree_failure(
+                &format!("Couldn\u{2019}t Remove \u{201c}{name}\u{201d}"),
+                error,
+                review,
+                window,
+                cx,
+            );
+            return;
+        }
+        let (title, message) = if creating {
+            let reason = match error {
+                Error::Location => {
+                    "SpaceTerm couldn\u{2019}t use its location on the local server. Git didn\u{2019}t run, so nothing was created."
+                }
+                Error::Missing => {
+                    "The repository is no longer at its location on the local server. Git didn\u{2019}t run, so nothing was created."
+                }
+                Error::Branch => {
+                    "Git reported an error while creating it and may have left part of it on disk. SpaceTerm didn\u{2019}t repeat the request and refreshed the Worktrees from Git, so the sidebar shows what Git lists now. Review them before choosing New Worktree again."
+                }
+                _ => {
+                    "The server couldn\u{2019}t confirm whether Git created it. SpaceTerm didn\u{2019}t repeat the request and refreshed the Worktrees from Git, so the sidebar shows what Git lists now. Review them before choosing New Worktree again."
+                }
+            };
+            (
+                format!("Couldn\u{2019}t Create \u{201c}{name}\u{201d}"),
+                reason,
+            )
+        } else {
+            let reason = match error {
+                Error::Missing => "Git no longer lists it, so no Tab opened.",
+                Error::Location => {
+                    "Its directory isn\u{2019}t available on the server, so no Tab opened."
+                }
+                _ => "The server couldn\u{2019}t open a Tab in it.",
+            };
+            (
+                format!("Couldn\u{2019}t Open \u{201c}{name}\u{201d}"),
+                reason,
+            )
+        };
+        let _ = Alert::new(
+            ModalId::new("server-worktree-operation-failed"),
+            title.clone(),
+            title,
+            message,
+            vec![ModalAction::new(
+                false,
+                "OK",
+                ModalActionRole::Cancel,
+                "server-worktree-operation-failed-ok",
+            )],
+        )
+        .intent(AlertIntent::Warning)
+        .present(window, cx, |_, _| {});
     }
     pub(in crate::ui::workspace_manager) fn server_worktree_failure(
         &mut self,
@@ -454,14 +665,14 @@ impl WorkspaceManager {
     ) {
         let message = match error {
             Error::Changed => {
-                "A Tab was added or removed, a Terminal Session started or ended, or Git changed the target after the confirmation opened. The confirmed removal did not run."
+                "A Tab was added or removed, a Terminal Session started or ended, or Git changed the target after the confirmation opened. Nothing was removed."
             }
             Error::Main => "The Main Worktree cannot be removed.",
             Error::Locked => "The Worktree is locked. Unlock it with Git before removing it.",
             Error::Pinned => "It holds a Pinned Directory. Unpin the directory before removing it.",
-            Error::Missing => "Git no longer lists that Worktree. Nothing else was removed.",
+            Error::Missing => "Another client or Git removed it first. Nothing else changed.",
             Error::Interrupted => {
-                "The server stopped before it confirmed the Git write. SpaceTerm didn't repeat the request and refreshed the Worktrees from Git, so the sidebar shows what Git lists now. Start a new operation only after reviewing it."
+                "The server stopped before it confirmed the Git write. SpaceTerm didn\u{2019}t repeat the request and refreshed the Worktrees from Git, so the sidebar shows what Git lists now. Start a new operation only after reviewing it."
             }
             Error::Location => {
                 "The server could not use this location. Choose a new or empty folder."
@@ -495,12 +706,24 @@ impl WorkspaceManager {
         let handle = window.window_handle();
         let _ = Alert::new(
             ModalId::new("worktree-removal-changed"),
-            title.to_owned(),
-            title.to_owned(),
+            if error == Error::Missing {
+                "Worktree Already Removed".into()
+            } else {
+                title.to_owned()
+            },
+            if error == Error::Missing {
+                "Worktree Already Removed".into()
+            } else {
+                title.to_owned()
+            },
             message,
             actions,
         )
-        .intent(AlertIntent::Warning)
+        .intent(if error == Error::Missing {
+            AlertIntent::Informational
+        } else {
+            AlertIntent::Warning
+        })
         .present(window, cx, move |outcome, cx| {
             if matches!(
                 outcome,

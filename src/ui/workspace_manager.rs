@@ -4026,24 +4026,15 @@ impl WorkspaceManager {
             self.shared.as_mut().and_then(|s| s.take_worktree_failure())
         {
             use spaceterm_server::worktree::Operation;
-            let presented = match operation {
-                Operation::Create { .. } => self.worktree_form_open(cx),
-                Operation::Remove { .. } => self.worktree_removal_active(),
+            let presented = match &operation {
+                Operation::Create { path, .. } => {
+                    self.worktree_creation_failure_presented(path, error, cx)
+                }
                 Operation::SetLocation { .. } => true,
-                Operation::OpenTab { .. } => false,
+                Operation::Remove { .. } | Operation::OpenTab { .. } => false,
             };
             if !presented {
-                self.server_worktree_failure(
-                    if error == spaceterm_server::worktree::Error::Interrupted {
-                        "Worktree Operation Interrupted"
-                    } else {
-                        "Worktree Operation Not Completed"
-                    },
-                    error,
-                    None,
-                    window,
-                    cx,
-                );
+                self.server_worktree_operation_failure(&operation, error, window, cx);
             }
         }
         self.save_shared_arrangements(cx);

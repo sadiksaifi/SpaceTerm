@@ -189,6 +189,16 @@ impl crate::hierarchy::Inventory {
         root: &std::path::Path,
         path: &std::path::Path,
     ) -> Vec<AffectedTab> {
+        self.affected_worktree_tabs_in(root, path, |directory| directory.starts_with(path))
+    }
+
+    /// The owning server supplies physical containment; clients can only compare known paths.
+    pub fn affected_worktree_tabs_in(
+        &self,
+        root: &std::path::Path,
+        path: &std::path::Path,
+        contains: impl Fn(&std::path::Path) -> bool,
+    ) -> Vec<AffectedTab> {
         self.workspaces
             .iter()
             .flat_map(|w| {
@@ -198,10 +208,11 @@ impl crate::hierarchy::Inventory {
                         (t.worktree.as_deref() == Some(path)
                             && t.worktree_repository.as_deref().is_none_or(|r| r == root))
                             || t.panes.iter().any(|p| {
-                                p.confirmed_directory
-                                    .as_deref()
-                                    .unwrap_or(&p.starting_directory)
-                                    .starts_with(path)
+                                contains(
+                                    p.confirmed_directory
+                                        .as_deref()
+                                        .unwrap_or(&p.starting_directory),
+                                )
                             })
                     })
                     .map(|t| AffectedTab {
@@ -220,5 +231,39 @@ impl crate::hierarchy::Inventory {
                     })
             })
             .collect()
+    }
+}
+
+impl Removal {
+    /// Clients compare the exact reviewed Tabs and Sessions without local filesystem authority.
+    pub fn matches_inventory(&self, inventory: &crate::hierarchy::Inventory) -> bool {
+        let live = inventory.close.as_ref();
+        if live.is_none_or(|c| c.boot != self.boot) {
+            return false;
+        }
+        if self.tabs.iter().any(|reviewed| {
+            let tab = inventory
+                .workspaces
+                .iter()
+                .find(|w| w.id == reviewed.workspace)
+                .and_then(|w| w.tabs.iter().find(|t| t.id == reviewed.tab));
+            tab.is_none_or(|tab| {
+                let panes: Vec<_> = tab
+                    .panes
+                    .iter()
+                    .filter_map(|p| {
+                        live.and_then(|c| c.sessions.iter().find(|s| s.id == p.id))
+                            .cloned()
+                    })
+                    .collect();
+                panes != reviewed.panes
+            })
+        }) {
+            return false;
+        }
+        inventory
+            .affected_worktree_tabs(&self.root, &self.path)
+            .iter()
+            .all(|t| self.tabs.contains(t))
     }
 }

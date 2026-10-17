@@ -38,6 +38,8 @@ pub(crate) use spaceterm_server::worktree::{
 /// discards git's messages.
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub(crate) enum WorktreeCreateError {
+    #[error("the operation was not submitted")]
+    NotSubmitted(&'static str),
     #[error("the server could not complete the Worktree operation")]
     Server(spaceterm_server::worktree::Error),
     #[error("git refuses the branch name")]
