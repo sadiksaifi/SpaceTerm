@@ -157,9 +157,11 @@ impl SharedWorkspaceHost {
                 return Ok(true);
             }
             // Resolve symlinks on the owning server. Unreadable pins cannot authorize deletion.
-            let pin = local_filesystem()
-                .validate_directory(pin)
-                .map_err(|_| Error::Unavailable)?;
+            let pin = match local_filesystem().validate_directory(pin) {
+                Ok(pin) => pin,
+                Err(LocalFilesystemError::Missing | LocalFilesystemError::NotDirectory) => continue,
+                Err(_) => return Err(Error::Unavailable),
+            };
             if local_filesystem().physically_contains(path, pin.path()) {
                 return Ok(true);
             }
@@ -663,6 +665,53 @@ mod tests {
         repository_tests::{GitFixture, finish_write, review_removal},
         tests::{create_shared, host, shared_inventory, size},
     };
+
+    #[test]
+    fn removal_ignores_a_missing_pinned_directory_in_an_unrelated_workspace() {
+        let git = GitFixture::new();
+        let tree = git.0.join("linked");
+        git.git(&["worktree", "add", "-b", "linked", tree.to_str().unwrap()]);
+        let unrelated = git.0.join("unrelated");
+        std::fs::create_dir(&unrelated).unwrap();
+        let mut prototype = host();
+        prototype.directory = git.0.clone();
+        let mut host = SharedWorkspaceHost::new(prototype);
+        create_shared(&mut host, 1);
+        let workspace = create_shared(&mut host, 2);
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                [1; 32],
+                Request::Mutate {
+                    sequence: 3,
+                    mutation: Mutation::PinWorkspace {
+                        workspace,
+                        version: 0,
+                        directory: Some(unrelated.clone())
+                    },
+                }
+            ),
+            Reply::Outcome(_)
+        ));
+        std::fs::remove_dir(&unrelated).unwrap();
+
+        let review = review_removal(&mut host, &git.0, &tree);
+        assert!(matches!(
+            finish_write(
+                &mut host,
+                4,
+                Operation::Remove {
+                    root: git.0.clone(),
+                    path: tree.clone(),
+                    boot: review.boot,
+                    confirmation: review.confirmation,
+                }
+            ),
+            Outcome::Accepted { .. }
+        ));
+        assert!(!tree.exists());
+        host.shutdown().unwrap();
+    }
 
     #[test]
     fn removal_captures_symlinked_pane_directories_in_other_unattached_workspaces() {
