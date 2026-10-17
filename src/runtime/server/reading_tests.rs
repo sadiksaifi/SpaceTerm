@@ -75,7 +75,7 @@ fn old_scrollback_find_and_multichunk_copy_use_the_retained_terminal_content() {
         1,
         lease,
         &format!(
-            "stty -echo; printf '\\033[2J\\033[H'; i=0; while [ $i -lt 2000 ]; do printf 'retained-%04d-abcdefghijklmnopqrstuvwxyz\\n' $i; i=$((i+1)); done; printf 'FINISHED\\n'; while [ ! -f {quoted_gate} ]; do sleep 0.01; done; i=0; while [ $i -lt 200 ]; do printf 'live-%s\\n' \"$i\"; i=$((i+1)); sleep 0.02; done"
+            "stty -echo; printf '\\033[2J\\033[H'; i=0; while [ $i -lt 2000 ]; do printf 'retained-%04d-abcdefghijklmnopqrstuvwxyz\\n' $i; i=$((i+1)); done; printf 'FINISHED\\n'; while [ ! -f {quoted_gate} ]; do sleep 0.01; done; i=0; while [ -f {quoted_gate} ]; do printf 'live-%s\\n' \"$i\"; i=$((i+1)); sleep 0.02; done"
         ),
     );
     screen(&mut host, lease, |s| {
