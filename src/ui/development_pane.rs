@@ -1150,35 +1150,33 @@ mod window {
             cx: &mut gpui::Context<Self>,
         ) -> AnyElement {
             if dormant == Dormant::DirectoryUnavailable {
-                let starting = self.start_pending || self.directory_progress.0;
-                let enabled = self.can_start_shell() && !self.directory_recovery_is_open(cx);
-                let retry = Button::new("development-pane-directory-retry", "Retry")
-                    .variant(ButtonVariant::Secondary).size(ButtonSize::Regular).disabled(!enabled).tab_stop(true)
-                    .accessibility_description("Checks this directory on the server again and starts a shell if it's available.")
-                    .debug_selector("development-pane-directory-retry")
-                    .on_activate({ let owner = cx.weak_entity(); move |_, window, cx| { let _ = owner.update(cx, |view, cx| view.start_shell(window, cx)); } });
                 let target = self.connection.recovery_target();
-                let choose = Button::new("development-pane-choose-directory", "Choose Directory…")
-                    .variant(ButtonVariant::Primary).size(ButtonSize::Regular).disabled(!enabled || target.is_none()).tab_stop(true)
-                    .accessibility_description(if target.is_some() { "Chooses another directory on the server for this Pane. The Workspace's pinned directory and Worktree don't change." } else { "This server can't change a Pane's directory. Update the server to choose another directory." })
-                    .debug_selector("development-pane-choose-directory")
-                    .on_activate({ let owner = cx.weak_entity(); move |_, window, cx| { let _ = owner.update(cx, |view, cx| view.choose_directory(window, cx)); } });
-                let status = if starting {
-                    Some(server_pane::progress_status(
-                        "development-pane-directory-status".into(),
-                        "development-pane-directory-progress".into(),
-                        STARTING_SHELL.into(),
-                        cx,
-                    ))
-                } else {
-                    self.directory_progress.1.map(|note| {
-                        server_pane::note_status(
-                            "development-pane-directory-status".into(),
-                            note.into(),
-                            cx,
-                        )
-                    })
+                let retry_owner = cx.weak_entity();
+                let choose_owner = cx.weak_entity();
+                let actions = server_pane::DirectoryActions {
+                    retry: "development-pane-directory-retry".into(),
+                    choose: "development-pane-choose-directory".into(),
+                    enabled: self.can_start_shell() && !self.directory_recovery_is_open(cx),
+                    offer: if target.is_some() {
+                        server_pane::ChooseDirectory::Offered
+                    } else {
+                        server_pane::ChooseDirectory::Unsupported
+                    },
+                    on_retry: move |window: &mut Window, cx: &mut App| {
+                        let _ = retry_owner.update(cx, |view, cx| view.start_shell(window, cx));
+                    },
+                    on_choose: move |window: &mut Window, cx: &mut App| {
+                        let _ =
+                            choose_owner.update(cx, |view, cx| view.choose_directory(window, cx));
+                    },
                 };
+                let status = server_pane::directory_status(
+                    "development-pane-directory-status".into(),
+                    "development-pane-directory-progress".into(),
+                    self.start_pending || self.directory_progress.0,
+                    self.directory_progress.1,
+                    cx,
+                );
                 return server_pane::render_directory_screen(
                     RESTORED_SELECTOR.into(),
                     target.and_then(|target| {
@@ -1187,7 +1185,7 @@ mod window {
                             .to_str()
                             .map(|s| SharedString::from(s.to_owned()))
                     }),
-                    vec![retry, choose],
+                    actions.buttons(),
                     status,
                     false,
                     &self.announcements,

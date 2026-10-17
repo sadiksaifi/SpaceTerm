@@ -41,8 +41,20 @@ pub(crate) const RESTORED_TITLE: &str = "Server Restarted";
 pub(crate) const RESTORED_DETAIL: &str = "Programs that were running in this Pane ended when the \
                                           server stopped. Start a new shell to keep working here.";
 pub(crate) const DIRECTORY_UNAVAILABLE_TITLE: &str = "Directory Unavailable";
-pub(crate) const DIRECTORY_UNAVAILABLE_DETAIL: &str = "SpaceTerm couldn't start a shell because this directory is missing or inaccessible on the server. Retry once it's available, or choose another directory for this Pane.";
+pub(crate) const DIRECTORY_UNAVAILABLE_DETAIL: &str = "SpaceTerm couldn't start a shell because \
+                                                       this directory is missing or inaccessible \
+                                                       on the server. Retry once it's available, \
+                                                       or choose another directory for this Pane.";
 pub(crate) const STARTING_SHELL: &str = "Starting Shell…";
+const RETRY_DIRECTORY: &str = "Retry";
+const CHOOSE_DIRECTORY: &str = "Choose Directory…";
+const RETRY_DIRECTORY_DESCRIPTION: &str = "Checks this directory on the server again and starts a \
+                                           shell if it's available.";
+const CHOOSE_DIRECTORY_DESCRIPTION: &str = "Chooses another directory on the server for this \
+                                            Pane. The Workspace's pinned directory and Worktree \
+                                            don't change.";
+const CHOOSE_DIRECTORY_UNSUPPORTED: &str = "This server can't change a Pane's directory. Update \
+                                            the server to choose another directory.";
 pub(crate) const START_SHELL_UNCONFIRMED: &str = "Starting the shell was not confirmed.";
 
 /// Why a Pane has no shell after the server restarted. The screen naming it replaces the Pane,
@@ -310,6 +322,104 @@ pub(crate) fn note_status(selector: SharedString, label: SharedString, cx: &App)
         content,
         note: label,
     }
+}
+
+/// The Retry and Choose Directory pair the directory screen offers in both presentations.
+///
+/// The caller owns the element ids, what it knows about availability, and what each action does.
+/// The copy and the enablement policy belong here, so one screen never explains itself differently
+/// in the Development Pane window and in a shared Workspace.
+pub(crate) struct DirectoryActions<Retry, Choose> {
+    /// Element id and debug selector for Retry.
+    pub(crate) retry: SharedString,
+    /// Element id and debug selector for Choose Directory.
+    pub(crate) choose: SharedString,
+    /// Whether the screen can act at all: nothing is starting and no picker is open.
+    pub(crate) enabled: bool,
+    pub(crate) offer: ChooseDirectory,
+    pub(crate) on_retry: Retry,
+    pub(crate) on_choose: Choose,
+}
+
+/// What the owning server and this client allow for Choose Directory, beyond a busy screen.
+#[derive(Clone, Copy)]
+pub(crate) enum ChooseDirectory {
+    /// The owning server offers a recovery target for this Pane.
+    Offered,
+    /// The owning server negotiated no directory recovery.
+    Unsupported,
+    /// This client cannot change the Workspace, for a reason it already explains.
+    Withheld(&'static str),
+}
+
+impl ChooseDirectory {
+    const fn description(self) -> &'static str {
+        match self {
+            Self::Offered => CHOOSE_DIRECTORY_DESCRIPTION,
+            Self::Unsupported => CHOOSE_DIRECTORY_UNSUPPORTED,
+            Self::Withheld(explanation) => explanation,
+        }
+    }
+
+    const fn offered(self) -> bool {
+        matches!(self, Self::Offered)
+    }
+}
+
+impl<Retry, Choose> DirectoryActions<Retry, Choose>
+where
+    Retry: Fn(&mut gpui::Window, &mut App) + 'static,
+    Choose: Fn(&mut gpui::Window, &mut App) + 'static,
+{
+    /// Retry first, then the primary Choose Directory, in reading and Tab order.
+    pub(crate) fn buttons(self) -> Vec<Button> {
+        let Self {
+            retry,
+            choose,
+            enabled,
+            offer,
+            on_retry,
+            on_choose,
+        } = self;
+        vec![
+            Button::new(retry.clone(), RETRY_DIRECTORY)
+                .variant(ButtonVariant::Secondary)
+                .size(ButtonSize::Regular)
+                .disabled(!enabled)
+                .tab_stop(true)
+                .accessibility_description(RETRY_DIRECTORY_DESCRIPTION)
+                .debug_selector(retry)
+                .on_activate(move |_, window, cx| on_retry(window, cx)),
+            Button::new(choose.clone(), CHOOSE_DIRECTORY)
+                .variant(ButtonVariant::Primary)
+                .size(ButtonSize::Regular)
+                .disabled(!enabled || !offer.offered())
+                .tab_stop(true)
+                // A disabled primary still says why, so nothing is refused silently.
+                .accessibility_description(offer.description())
+                .debug_selector(choose)
+                .on_activate(move |_, window, cx| on_choose(window, cx)),
+        ]
+    }
+}
+
+/// The directory screen's status slot: progress while a shell starts, otherwise the last outcome.
+pub(crate) fn directory_status(
+    selector: SharedString,
+    progress: SharedString,
+    starting: bool,
+    note: Option<&'static str>,
+    cx: &App,
+) -> Option<ScreenStatus> {
+    if starting {
+        return Some(progress_status(
+            selector,
+            progress,
+            STARTING_SHELL.into(),
+            cx,
+        ));
+    }
+    note.map(|note| note_status(selector, note.into(), cx))
 }
 
 /// The interruption notice over a frozen server-backed screen, with the action that retries now.

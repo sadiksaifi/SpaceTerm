@@ -2994,7 +2994,10 @@ impl TabView {
                     });
                 server_pane::render_screen(
                     selector("restored"),
-                    server_pane::ScreenCopy::new(server_pane::RESTORED_TITLE.into(), server_pane::RESTORED_DETAIL.into()),
+                    server_pane::ScreenCopy::new(
+                        server_pane::RESTORED_TITLE.into(),
+                        server_pane::RESTORED_DETAIL.into(),
+                    ),
                     true,
                     Some(action),
                     status,
@@ -3003,29 +3006,60 @@ impl TabView {
                 )
             }
             ServerPaneScreen::DirectoryUnavailable { starting, offered } => {
-                let picker_open = self.directory_recovery.as_ref().is_some_and(|picker| picker.read(cx).is_open());
-                let enabled = offered && !starting && !picker_open;
-                let connection = pane.connection();
-                let target = connection.recovery_target();
-                let owner = view.clone();
-                let retry = Button::new(selector("directory-retry"), "Retry")
-                    .variant(ButtonVariant::Secondary).size(ButtonSize::Regular).disabled(!enabled).tab_stop(true)
-                    .accessibility_description("Checks this directory on the server again and starts a shell if it's available.")
-                    .debug_selector(selector("directory-retry"))
-                    .on_activate(move |_, window, cx| { let _ = owner.update(cx, |view, cx| view.start_shared_shell(pane_id, window, cx)); });
-                let owner = view.clone();
+                let target = pane.connection().recovery_target();
                 let editability = self.shared.as_ref().map(|shared| shared.editability());
-                let can_choose = enabled && target.is_some() && editability.is_some_and(|e| e.available());
-                let choose = Button::new(selector("choose-directory"), "Choose Directory…")
-                    .variant(ButtonVariant::Primary).size(ButtonSize::Regular).disabled(!can_choose).tab_stop(true)
-                    .accessibility_description(if target.is_none() { "This server can't change a Pane's directory. Update the server to choose another directory." } else if editability.is_some_and(|e| !e.available()) { editability.map_or("", |e| e.explanation()) } else { "Chooses another directory on the server for this Pane. The Workspace's pinned directory and Worktree don't change." })
-                    .debug_selector(selector("choose-directory"))
-                    .on_activate(move |_, window, cx| { let _ = owner.update(cx, |view, cx| view.choose_shared_directory(pane_id, window, cx)); });
-                let missing_worktree = target.as_ref().is_some_and(|target| self.shared.as_ref().is_some_and(|shared| shared.missing_worktree_for_directory(&target.original)));
-                let status = if starting { Some(server_pane::progress_status(selector("directory-status"), selector("directory-progress"), server_pane::STARTING_SHELL.into(), cx)) } else { pane.directory_note().map(|note| server_pane::note_status(selector("directory-status"), note.into(), cx)) };
-                server_pane::render_directory_screen(selector("directory-unavailable"), target.and_then(|target| target.original.to_str().map(|s| gpui::SharedString::from(s.to_owned()))), vec![retry, choose], status, missing_worktree, pane.announcements(), cx)
+                let retry_owner = view.clone();
+                let choose_owner = view.clone();
+                let actions = server_pane::DirectoryActions {
+                    retry: selector("directory-retry"),
+                    choose: selector("choose-directory"),
+                    enabled: offered && !starting && !self.directory_recovery_is_open(cx),
+                    offer: match editability.filter(|_| target.is_some()) {
+                        Some(editability) if editability.available() => {
+                            server_pane::ChooseDirectory::Offered
+                        }
+                        Some(editability) => {
+                            server_pane::ChooseDirectory::Withheld(editability.explanation())
+                        }
+                        None => server_pane::ChooseDirectory::Unsupported,
+                    },
+                    on_retry: move |window: &mut Window, cx: &mut App| {
+                        let _ = retry_owner
+                            .update(cx, |view, cx| view.start_shared_shell(pane_id, window, cx));
+                    },
+                    on_choose: move |window: &mut Window, cx: &mut App| {
+                        let _ = choose_owner.update(cx, |view, cx| {
+                            view.choose_shared_directory(pane_id, window, cx);
+                        });
+                    },
+                };
+                let status = server_pane::directory_status(
+                    selector("directory-status"),
+                    selector("directory-progress"),
+                    starting,
+                    pane.directory_note(),
+                    cx,
+                );
+                let missing_worktree = target.as_ref().is_some_and(|target| {
+                    self.shared.as_ref().is_some_and(|shared| {
+                        shared.missing_worktree_for_directory(&target.original)
+                    })
+                });
+                server_pane::render_directory_screen(
+                    selector("directory-unavailable"),
+                    target.and_then(|target| {
+                        target
+                            .original
+                            .to_str()
+                            .map(|path| gpui::SharedString::from(path.to_owned()))
+                    }),
+                    actions.buttons(),
+                    status,
+                    missing_worktree,
+                    pane.announcements(),
+                    cx,
+                )
             }
-
         });
         // The screen rests on its own focus, so plain Tab the terminal never took reaches its
         // action while terminal input is paused.
@@ -3098,11 +3132,7 @@ impl TabView {
         if spaceterm_ui::window_modal_is_open(window, cx) {
             return;
         }
-        if self
-            .directory_recovery
-            .as_ref()
-            .is_some_and(|picker| picker.read(cx).is_open())
-        {
+        if self.directory_recovery_is_open(cx) {
             return;
         }
         let Some(shared) = &self.shared else { return };
@@ -3171,6 +3201,13 @@ impl TabView {
 
         cx.notify();
     }
+    /// The recovery picker holds the keyboard while it is open and restores focus when it closes.
+    fn directory_recovery_is_open(&self, cx: &App) -> bool {
+        self.directory_recovery
+            .as_ref()
+            .is_some_and(|picker| picker.read(cx).is_open())
+    }
+
     pub(crate) fn directory_recovery(
         &self,
         cx: &App,
