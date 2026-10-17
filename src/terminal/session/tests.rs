@@ -3165,7 +3165,7 @@ fn resize_should_reach_the_pty_with_pixel_dimensions() {
 }
 
 #[test]
-fn pixel_only_resize_should_reach_the_pty_without_publishing_a_grid_screen() {
+fn pixel_only_resize_should_reach_the_pty_and_publish_geometry() {
     let (result, _reader_steps, records) = start_scripted_session(ScriptedPtyOptions::default());
     let (mut session, events, _accessibility) = result.unwrap();
     let initial = records
@@ -3187,7 +3187,17 @@ fn pixel_only_resize_should_reach_the_pty_without_publishing_a_grid_screen() {
             pixel_height: 504,
         }]
     );
-    assert!(events.try_recv().is_err());
+    let TerminalSessionEvent::Screen(screen) =
+        receive_event(&events, "the resized geometry", |event| {
+            matches!(event, TerminalSessionEvent::Screen(_))
+        })
+    else {
+        unreachable!()
+    };
+    assert_eq!(screen.size, initial.size);
+    assert_eq!(screen.cell_pixels, (9, 21));
+    assert!(screen.damage.resize);
+    assert_eq!(screen.rows, initial.rows);
     assert_eq!(initial.size.cols, grid.cols);
     assert_eq!(initial.size.rows, grid.rows);
     session.shutdown();
