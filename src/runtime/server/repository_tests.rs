@@ -41,7 +41,7 @@ impl Drop for GitFixture {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
-fn git_facts(
+pub(super) fn git_facts(
     host: &mut SharedWorkspaceHost,
     directory: &std::path::Path,
     predicate: impl Fn(&spaceterm_server::repository::DirectoryFacts) -> bool,

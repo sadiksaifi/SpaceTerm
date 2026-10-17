@@ -58,43 +58,8 @@ impl Drop for ServerRepositories {
     }
 }
 impl ServerRepositories {
-    pub(super) fn publish_worktrees(&mut self, list: &crate::worktrees::WorktreeSnapshot) {
+    pub(super) fn refresh(&mut self) {
         self.stop();
-        let main = list.repository.main_root();
-        for facts in &mut self.snapshot.directories {
-            if facts
-                .worktrees
-                .as_ref()
-                .is_some_and(|w| w.main_root == main)
-            {
-                facts.worktrees = Some(WorktreeInventory {
-                    main_root: main.to_owned(),
-                    current: list
-                        .worktrees
-                        .iter()
-                        .position(|r| facts.directory.starts_with(&r.root) && !r.missing),
-                    worktrees: list.worktrees.clone(),
-                });
-            }
-        }
-        if !self
-            .snapshot
-            .directories
-            .iter()
-            .any(|f| f.directory == main)
-        {
-            self.snapshot.directories.push(DirectoryFacts {
-                directory: main.to_owned(),
-                repository: None,
-                failure: None,
-                worktrees: Some(WorktreeInventory {
-                    main_root: main.to_owned(),
-                    current: Some(0),
-                    worktrees: list.worktrees.clone(),
-                }),
-            });
-        }
-        self.snapshot.revision = self.snapshot.revision.saturating_add(1);
     }
     pub(super) fn subscribe(&mut self, connection: Id) {
         self.subscribers.insert(connection);

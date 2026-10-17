@@ -616,9 +616,7 @@ impl SharedWorkspaceHost {
                     result = Err(Error::Changed);
                 }
             }
-            if let Some(snapshot) = snapshot {
-                self.repositories.publish_worktrees(&snapshot);
-            }
+            self.repositories.refresh();
         }
         let target = if let Mutation::Worktree(Operation::Create {
             workspace, root, ..
@@ -661,9 +659,46 @@ fn removal_error(error: WorktreeRemoveError) -> Error {
 mod tests {
     use super::*;
     use crate::runtime::server::{
-        repository_tests::{GitFixture, finish_write, review_removal},
+        repository_tests::{GitFixture, finish_write, git_facts, review_removal},
         tests::{create_shared, host, shared_inventory, size},
     };
+
+    #[test]
+    fn a_worktree_write_never_publishes_main_membership_for_a_nested_worktree() {
+        use spaceterm_server::worktree::{Branch, BranchName, Operation};
+        let git = GitFixture::new();
+        let nested = git.0.join("nested");
+        git.git(&["worktree", "add", "-b", "nested", nested.to_str().unwrap()]);
+        let mut prototype = host();
+        prototype.directory = nested.clone();
+        let mut host = SharedWorkspaceHost::new(prototype);
+        let workspace = create_shared(&mut host, 1);
+        let initial = git_facts(&mut host, &nested, |facts| facts.worktrees.is_some());
+        let root_tab = initial.workspaces[0].root_tab;
+        assert!(matches!(
+            finish_write(
+                &mut host,
+                2,
+                Operation::Create {
+                    workspace,
+                    root: git.0.clone(),
+                    path: git.0.join("other"),
+                    branch: Branch::New {
+                        name: "other".into(),
+                        base: BranchName::Local("main".into())
+                    },
+                }
+            ),
+            spaceterm_server::hierarchy::Outcome::Accepted { .. }
+        ));
+        let tab = host.state.inventory.workspaces[0]
+            .tabs
+            .iter()
+            .find(|t| t.id == root_tab)
+            .unwrap();
+        assert_eq!(tab.worktree.as_ref(), Some(&nested));
+        host.shutdown().unwrap();
+    }
 
     #[test]
     fn interrupted_worktree_recovery_keeps_the_server_usable_when_the_repository_is_gone() {
