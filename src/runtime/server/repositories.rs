@@ -225,7 +225,9 @@ fn reconcile_membership(state: &mut State, snapshot: &Snapshot) -> bool {
         for tab in &mut workspace.tabs {
             // Membership belongs to the saved Tab, not its focused Pane or a later cd in any
             // non-Root Tab. Only the unpinned Root Tab follows the Workspace's directory.
-            if tab.worktree.is_some() && !(follows_root && tab.id == workspace.root_tab) {
+            if tab.worktree_membership_fixed
+                || (tab.worktree.is_some() && !(follows_root && tab.id == workspace.root_tab))
+            {
                 // Older Development records gain a locator without changing saved membership.
                 if let Some(main) = snapshot.directories.iter().find_map(|facts| {
                     let list = facts

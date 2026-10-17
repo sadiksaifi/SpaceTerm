@@ -202,6 +202,7 @@ pub enum TerminalSessionFailure {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminalSessionStartupStage {
+    Directory,
     Pty,
     Reader,
     ReaderThread,
@@ -248,6 +249,7 @@ impl std::error::Error for TerminalSessionFailure {}
 impl fmt::Display for TerminalSessionStartupStage {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Directory => formatter.write_str("directory validation"),
             Self::Pty => formatter.write_str("PTY creation"),
             Self::Reader => formatter.write_str("PTY reader acquisition"),
             Self::ReaderThread => formatter.write_str("PTY reader thread creation"),

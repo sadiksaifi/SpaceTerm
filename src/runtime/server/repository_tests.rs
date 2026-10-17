@@ -396,3 +396,89 @@ fn an_unpinned_root_tab_follows_entering_and_leaving_git_without_moving_other_ta
     );
     host.shutdown().unwrap();
 }
+
+#[test]
+fn repairing_an_unpinned_root_preserves_missing_worktree_membership_after_reads_and_restore() {
+    use spaceterm_server::hierarchy::State;
+    let git = GitFixture::new();
+    let tree = git.0.join("repair-linked");
+    git.git(&["worktree", "add", "-b", "repair", tree.to_str().unwrap()]);
+    let mut prototype = host();
+    prototype.directory = tree.clone();
+    let mut host = SharedWorkspaceHost::new(prototype);
+    create_shared(&mut host, 1);
+    let before = git_facts(&mut host, &tree, |facts| facts.worktrees.is_some());
+    let original = before.workspaces[0].clone();
+    let id = original.tabs[0].root_pane;
+    std::fs::remove_dir_all(&tree).unwrap();
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::SelectPane {
+                pane: id,
+                explicit: true,
+                size: size(),
+                style: None
+            }
+        ),
+        Reply::Refused(Refusal::DirectoryUnavailable)
+    ));
+    let Reply::Restored {
+        recovery: Some(target),
+        ..
+    } = host.request(
+        [1; 32],
+        [1; 32],
+        Request::SelectPane {
+            pane: id,
+            explicit: false,
+            size: size(),
+            style: None,
+        },
+    )
+    else {
+        panic!("dormant recovery target")
+    };
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::RepairDirectory {
+                target,
+                replacement: Some(git.0.clone()),
+                size: size(),
+                style: None
+            }
+        ),
+        Reply::Attached { .. }
+    ));
+    let after = git_facts(&mut host, &git.0, |facts| facts.worktrees.is_some());
+    let mut expected = original.clone();
+    expected.tabs[0].panes[0].confirmed_directory = Some(git.0.clone());
+    expected.tabs[0].worktree_membership_fixed = true;
+    assert_eq!(after.workspaces[0], expected);
+    assert!(
+        !tree.exists(),
+        "repair must never recreate a missing Worktree"
+    );
+    let mut state = State::empty();
+    state.inventory = after;
+    let bytes = serde_json::to_vec(&state.envelope(&git.0).unwrap()).unwrap();
+    host.shutdown().unwrap();
+    let mut restored = State::from_legacy(&serde_json::from_slice(&bytes).unwrap());
+    restored.begin_boot([9; 32]);
+    let mut reads = super::repositories::ServerRepositories::new([9; 32]);
+    reads.subscribe([1; 32]);
+    let until = Instant::now() + Duration::from_secs(10);
+    while reads.snapshot().directories.is_empty() && Instant::now() < until {
+        reads.update(&mut restored);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        restored.inventory.workspaces[0].tabs[0].worktree,
+        original.tabs[0].worktree
+    );
+    assert_eq!(restored.inventory.workspaces[0].root_tab, original.root_tab);
+    reads.shutdown();
+}

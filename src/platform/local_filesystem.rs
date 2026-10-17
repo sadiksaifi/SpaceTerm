@@ -245,9 +245,32 @@ impl LocalFilesystemAuthority {
         directory: &Path,
         limit: usize,
     ) -> Result<LocalChildDirectories, LocalFilesystemError> {
+        self.list_child_directories_cancellable(directory, limit, usize::MAX, || Ok(()))
+    }
+
+    /// Bounds visited entries and returned bytes, and checks cancellation between filesystem reads.
+    pub fn list_child_directories_cancellable(
+        &self,
+        directory: &Path,
+        limit: usize,
+        byte_limit: usize,
+        checkpoint: impl Fn() -> Result<(), LocalFilesystemError>,
+    ) -> Result<LocalChildDirectories, LocalFilesystemError> {
+        checkpoint()?;
         validate_absolute_path(self.paths, directory)?;
         let mut names = Vec::new();
-        for entry in fs::read_dir(directory).map_err(classify_io_error)? {
+        let mut bytes = 0usize;
+        for (visited, entry) in fs::read_dir(directory)
+            .map_err(classify_io_error)?
+            .enumerate()
+        {
+            checkpoint()?;
+            if visited >= 16384 {
+                return Ok(LocalChildDirectories {
+                    names,
+                    truncated: true,
+                });
+            }
             let Ok(entry) = entry else {
                 continue;
             };
@@ -264,12 +287,13 @@ impl LocalFilesystemAuthority {
             else {
                 continue;
             };
-            if names.len() == limit {
+            if names.len() == limit || bytes.saturating_add(name.len()) > byte_limit {
                 return Ok(LocalChildDirectories {
                     names,
                     truncated: true,
                 });
             }
+            bytes += name.len();
             names.push(name);
         }
         Ok(LocalChildDirectories {

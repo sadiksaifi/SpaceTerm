@@ -14166,6 +14166,7 @@ fn a_shared_pin_chosen_while_another_client_pins_should_submit_the_version_it_op
             root_tab: SERVER_TAB,
             tabs: vec![Tab {
                 worktree: None,
+                worktree_membership_fixed: false,
                 worktree_repository: None,
                 id: SERVER_TAB,
                 root_pane: SERVER_PANE,
@@ -14292,6 +14293,7 @@ fn shared_pane_harness(cx: &mut TestAppContext) -> (SharedPaneHarness, &mut Visu
             root_tab: SHARED_FOCUS_TAB,
             tabs: vec![Tab {
                 worktree: None,
+                worktree_membership_fixed: false,
                 worktree_repository: None,
                 id: SHARED_FOCUS_TAB,
                 root_pane: SHARED_FOCUS_PANE,
@@ -14520,6 +14522,7 @@ fn shared_close_inventory(
         .iter()
         .map(|(tab, panes)| Tab {
             worktree: None,
+            worktree_membership_fixed: false,
             worktree_repository: None,
             id: *tab,
             root_pane: panes[0].0,
@@ -15490,6 +15493,7 @@ fn attachment_inventory() -> spaceterm_server::hierarchy::Inventory {
         root_tab: tab,
         tabs: vec![Tab {
             worktree: None,
+            worktree_membership_fixed: false,
             worktree_repository: None,
             id: tab,
             root_pane: pane,
@@ -16010,6 +16014,7 @@ mod shared_repositories {
                 tabs: vec![
                     Tab {
                         worktree: Some(MAIN_ROOT.into()),
+                        worktree_membership_fixed: false,
                         worktree_repository: Some(MAIN_ROOT.into()),
                         id: ROOT_TAB,
                         root_pane: ROOT_PANE,
@@ -16017,6 +16022,7 @@ mod shared_repositories {
                     },
                     Tab {
                         worktree: Some(FEATURE_ROOT.into()),
+                        worktree_membership_fixed: false,
                         worktree_repository: Some(MAIN_ROOT.into()),
                         id: FEATURE_TAB,
                         root_pane: FEATURE_PANE,

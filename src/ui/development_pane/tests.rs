@@ -26,6 +26,7 @@ use crate::terminal::testing::{
 };
 use crate::ui::appearance_runtime;
 use crate::ui::pane_lifecycle::PaneConstruction;
+use crate::ui::server_pane;
 
 struct OpenPane<'a> {
     /// Weak, so closing the window releases the Pane as it does in the application.
@@ -169,6 +170,37 @@ impl OpenPane<'_> {
 
     fn closed(&self) -> bool {
         self.window.upgrade().is_none()
+    }
+
+    /// Whether the server-backed Choose Pane Directory picker is on screen.
+    fn directory_picker_open(&mut self) -> bool {
+        use spaceterm_ui::a11y_testing::A11yTree;
+
+        A11yTree::read(self.cx)
+            .find("Choose Pane Directory")
+            .is_some()
+    }
+
+    /// The role of whatever holds the keyboard, or the empty string when nothing does.
+    fn focused_role(&mut self) -> String {
+        use spaceterm_ui::a11y_testing::A11yTree;
+
+        A11yTree::read(self.cx)
+            .focused()
+            .and_then(|node| node["aria"]["role"].as_str().map(str::to_owned))
+            .unwrap_or_default()
+    }
+
+    /// Offers recovery, reaches the directory screen, and opens its picker while the connection
+    /// is interrupted, so the picker reads nothing from the owning server.
+    fn open_directory_picker(&mut self) {
+        self.connection.offer_directory_recovery();
+        self.set(DevelopmentPaneStatus::Failed(
+            ServerError::DirectoryUnavailable,
+        ));
+        // The connection drops between the window's last status read and this click.
+        self.connection.set(DevelopmentPaneStatus::Reconnecting);
+        self.click("development-pane-choose-directory");
     }
 
     fn keys(&self) -> usize {
@@ -641,7 +673,10 @@ fn assistive_technology_reaches_take_over_and_no_terminal_content(cx: &mut TestA
     let screen = tree.node("Controlled by Another Client");
     assert_eq!(screen["aria"]["role"], "Group");
     assert!(
-        screen["aria"]["description"]
+        tree.node(&format!(
+            "Controlled by Another Client. {}",
+            server_pane::TAKEOVER_DETAIL
+        ))["aria"]["value"]
             .as_str()
             .is_some_and(|description| description.contains("Take Over")),
         "the screen explains what Take Over does"
@@ -659,7 +694,7 @@ fn assistive_technology_reaches_take_over_and_no_terminal_content(cx: &mut TestA
 
     let tree = A11yTree::read(pane.cx);
     let progress = tree.node("Taking Over…");
-    assert_eq!(progress["aria"]["role"], "Status");
+    assert_eq!(progress["aria"]["role"], "ProgressIndicator");
     assert_eq!(tree.node("Take Over")["aria"]["disabled"], true);
 }
 
@@ -934,14 +969,20 @@ fn a_session_ended_while_another_client_controls_it_says_so_without_its_content(
     let tree = A11yTree::read(pane.cx);
     let screen = tree.node("Session Ended");
     assert_eq!(screen["aria"]["role"], "Group");
-    let description = screen["aria"]["description"].as_str().unwrap_or_default();
+    let description = tree.node(&format!(
+        "Session Ended. {}",
+        server_pane::SESSION_ENDED_DETAIL
+    ))["aria"]["value"]
+        .as_str()
+        .unwrap_or_default();
     assert!(description.contains("no longer available"));
     assert!(
         !description.contains("keeps running"),
         "the shell no longer runs"
     );
     assert_eq!(
-        tree.node("This Terminal Session is no longer available on the server.")["aria"]["role"],
+        tree.node("Session Ended. This Terminal Session is no longer available on the server.")["aria"]
+            ["role"],
         "Status",
         "the end is announced"
     );
@@ -1020,9 +1061,12 @@ fn a_permanent_failure_after_losing_control_explains_itself_without_content(
             .is_some_and(|description| description.contains("could not authenticate")),
         "the notice names the failure"
     );
-    let screen = tree.node("Controlled by Another Client");
+    let screen = tree.node(&format!(
+        "Controlled by Another Client. {}",
+        server_pane::TAKEOVER_FAILED_DETAIL
+    ));
     assert!(
-        !screen["aria"]["description"]
+        !screen["aria"]["value"]
             .as_str()
             .unwrap_or_default()
             .contains("keeps running"),
@@ -1123,7 +1167,12 @@ fn a_server_restart_forgets_the_former_screen(cx: &mut TestAppContext) {
     );
     let screen = tree.node("Server Restarted");
     assert_eq!(screen["aria"]["role"], "Group");
-    let description = screen["aria"]["description"].as_str().unwrap_or_default();
+    let description = tree.node(&format!(
+        "Server Restarted. {}",
+        server_pane::RESTORED_DETAIL
+    ))["aria"]["value"]
+        .as_str()
+        .unwrap_or_default();
     assert!(description.contains("ended"), "the former programs ended");
     assert!(
         description.contains("new shell"),
@@ -1154,7 +1203,7 @@ fn assistive_technology_reaches_start_new_shell(cx: &mut TestAppContext) {
     let tree = A11yTree::read(pane.cx);
     assert_eq!(
         tree.node(
-            "Programs that were running in this Pane ended when the server stopped. Start a new \
+            "Server Restarted. Programs that were running in this Pane ended when the server stopped. Start a new \
              shell to keep working here."
         )["aria"]["role"],
         "Status",
@@ -1168,7 +1217,10 @@ fn assistive_technology_reaches_start_new_shell(cx: &mut TestAppContext) {
     assert_eq!(pane.connection.restored_starts(), 1);
 
     let tree = A11yTree::read(pane.cx);
-    assert_eq!(tree.node("Starting Shell…")["aria"]["role"], "Status");
+    assert_eq!(
+        tree.node("Starting Shell…")["aria"]["role"],
+        "ProgressIndicator"
+    );
     assert_eq!(tree.node("Start New Shell")["aria"]["disabled"], true);
 }
 
@@ -1226,6 +1278,55 @@ fn an_interrupted_start_says_it_was_not_confirmed_and_can_be_tried_again(cx: &mu
 }
 
 #[gpui::test]
+fn an_interruption_leaves_the_open_recovery_picker_holding_the_keyboard(cx: &mut TestAppContext) {
+    let mut pane = open_pane(DevelopmentPaneStatus::Connected, cx);
+    pane.open_directory_picker();
+    assert!(pane.directory_picker_open());
+    assert_eq!(pane.focused_role(), "TextInput");
+
+    // The window reads the interruption, then a new connection answers Directory Unavailable
+    // again. The picker stays open across both, so the keyboard must stay in it.
+    pane.set(DevelopmentPaneStatus::Reconnecting);
+    assert!(pane.directory_picker_open());
+    assert_eq!(pane.focused_role(), "TextInput");
+    pane.reconnect_to(DevelopmentPaneStatus::Failed(
+        ServerError::DirectoryUnavailable,
+    ));
+    assert!(
+        pane.directory_picker_open(),
+        "the reconnected screen never takes focus from the picker, which closes without it"
+    );
+    assert_eq!(pane.focused_role(), "TextInput");
+
+    // A further connection answers the same status, so only the generation changed.
+    pane.reconnect_to(DevelopmentPaneStatus::Failed(
+        ServerError::DirectoryUnavailable,
+    ));
+    assert!(pane.directory_picker_open());
+    assert_eq!(pane.focused_role(), "TextInput");
+
+    // Escape reaches the picker, which dismisses and hands focus back to the window.
+    pane.press("escape");
+    assert!(!pane.directory_picker_open());
+    assert_ne!(pane.focused_role(), "TextInput");
+    assert!(pane.rendered("development-pane-directory-retry"));
+}
+
+#[gpui::test]
+fn a_stale_recovery_target_closes_the_picker_and_returns_the_keyboard(cx: &mut TestAppContext) {
+    let mut pane = open_pane(DevelopmentPaneStatus::Connected, cx);
+    pane.open_directory_picker();
+    assert!(pane.directory_picker_open());
+
+    // The Pane is no longer waiting on its directory, so nothing is left to repair.
+    pane.set(DevelopmentPaneStatus::Restored);
+
+    assert!(!pane.directory_picker_open());
+    assert_ne!(pane.focused_role(), "TextInput");
+    assert!(pane.rendered(START_SHELL_SELECTOR));
+}
+
+#[gpui::test]
 fn a_start_lost_between_two_reads_is_offered_again(cx: &mut TestAppContext) {
     let mut pane = open_pane(DevelopmentPaneStatus::Restored, cx);
     pane.click(START_SHELL_SELECTOR);
@@ -1239,58 +1340,47 @@ fn a_start_lost_between_two_reads_is_offered_again(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn an_unavailable_directory_explains_itself_without_paths_or_repair(cx: &mut TestAppContext) {
+fn an_unavailable_directory_offers_retry_without_exposing_terminal_content(
+    cx: &mut TestAppContext,
+) {
     use spaceterm_ui::a11y_testing::A11yTree;
-
     let mut pane = open_pane(DevelopmentPaneStatus::Restored, cx);
     pane.click(START_SHELL_SELECTOR);
-
     pane.set(DevelopmentPaneStatus::Failed(
         ServerError::DirectoryUnavailable,
     ));
-
     assert!(pane.rendered(RESTORED_SELECTOR));
     assert!(!pane.rendered(TERMINAL_SELECTOR));
-    assert!(
-        !pane.rendered(NOTICE_SELECTOR),
-        "the screen explains the failure"
-    );
-    assert!(!pane.rendered(RETRY_SELECTOR), "repair arrives separately");
-    assert!(!pane.rendered(START_SHELL_SELECTOR));
-    assert!(!pane.rendered(START_SHELL_STATUS_SELECTOR));
+    assert!(!pane.rendered(NOTICE_SELECTOR));
     let tree = A11yTree::read(pane.cx);
-    let screen = tree.node("Directory Unavailable");
-    assert_eq!(screen["aria"]["role"], "Group");
-    let description = screen["aria"]["description"].as_str().unwrap_or_default();
-    assert!(description.contains("no shell started"));
-    assert!(!description.contains('/'), "the screen names no path");
-    assert!(tree.find("Choose Directory").is_none());
-    assert!(tree.find("Retry").is_none());
+    assert_eq!(tree.node("Directory Unavailable")["aria"]["role"], "Group");
+    assert!(tree.node("Directory Unavailable")["aria"]["description"].is_null());
+    let statuses = tree.with_role("Status");
+    assert_eq!(statuses.len(), 2);
+    assert!(statuses.iter().any(|node| node["aria"]["value"]
+        == format!(
+            "Directory Unavailable. {}",
+            crate::ui::server_pane::DIRECTORY_UNAVAILABLE_DETAIL
+        )));
+    assert!(statuses.iter().any(|node| node["aria"]["value"] == ""));
+    assert!(tree.find("Retry").is_some());
+    assert!(tree.find("Choose Directory…").is_some());
+    assert!(tree.find("Close Window").is_none());
     assert!(tree.find("Terminal context actions").is_none());
-    assert_eq!(
-        tree.node(
-            "This Pane's directory is no longer available on the server, so no shell started. \
-             Programs that were running here ended when the server stopped."
-        )["aria"]["role"],
-        "Status",
-        "the refusal is announced"
-    );
-    assert!(tree.exposed(tree.node("Close Window")));
-
-    // Typing reaches nothing, and nothing retries or starts a shell.
     pane.press("space");
     pane.press("enter");
     pane.press("x");
     assert_eq!(pane.keys(), 0);
-    assert!(!pane.closed(), "typing never closes the window");
-    assert_eq!(pane.connection.retries(), 0);
     assert_eq!(pane.connection.restored_starts(), 1);
-
-    // Tab passes over End Session to Close Window, which leaves the Pane on the server.
-    pane.press("tab");
-    pane.press("space");
-    assert!(pane.closed());
-    assert_eq!(pane.connection.end_sessions(), 0);
+    pane.click("development-pane-directory-retry");
+    assert_eq!(pane.connection.restored_starts(), 2);
+    pane.click("development-pane-directory-retry");
+    assert_eq!(
+        pane.connection.restored_starts(),
+        2,
+        "a pending Retry submits once"
+    );
+    assert!(!pane.closed());
 }
 
 #[gpui::test]

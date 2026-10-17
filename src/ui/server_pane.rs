@@ -12,6 +12,10 @@ use spaceterm_ui::{
     Button, ButtonSize, ButtonVariant, FloatingRole, Icon, ProgressRing, ProgressSize,
     ProgressState,
 };
+use std::{cell::RefCell, rc::Rc};
+
+mod directory_recovery;
+pub(crate) use directory_recovery::{DirectoryRecovery, RecoveryActions};
 
 use super::appearance::gpui_color;
 use super::appearance_runtime;
@@ -37,9 +41,20 @@ pub(crate) const RESTORED_TITLE: &str = "Server Restarted";
 pub(crate) const RESTORED_DETAIL: &str = "Programs that were running in this Pane ended when the \
                                           server stopped. Start a new shell to keep working here.";
 pub(crate) const DIRECTORY_UNAVAILABLE_TITLE: &str = "Directory Unavailable";
-pub(crate) const DIRECTORY_UNAVAILABLE_DETAIL: &str = "This Pane's directory is no longer available on the server, so no shell started. Programs \
-     that were running here ended when the server stopped.";
+pub(crate) const DIRECTORY_UNAVAILABLE_DETAIL: &str = "SpaceTerm couldn't start a shell because \
+                                                       this directory is missing or inaccessible \
+                                                       on the server. Retry once it's available, \
+                                                       or choose another directory for this Pane.";
 pub(crate) const STARTING_SHELL: &str = "Starting Shell…";
+const RETRY_DIRECTORY: &str = "Retry";
+const CHOOSE_DIRECTORY: &str = "Choose Directory…";
+const RETRY_DIRECTORY_DESCRIPTION: &str = "Checks this directory on the server again and starts a \
+                                           shell if it's available.";
+const CHOOSE_DIRECTORY_DESCRIPTION: &str = "Chooses another directory on the server for this \
+                                            Pane. The Workspace's pinned directory and Worktree \
+                                            don't change.";
+const CHOOSE_DIRECTORY_UNSUPPORTED: &str = "This server can't change a Pane's directory. Update \
+                                            the server to choose another directory.";
 pub(crate) const START_SHELL_UNCONFIRMED: &str = "Starting the shell was not confirmed.";
 
 /// Why a Pane has no shell after the server restarted. The screen naming it replaces the Pane,
@@ -52,28 +67,138 @@ pub(crate) enum Dormant {
     DirectoryUnavailable,
 }
 
+/// Remembers announcements this client actually published, across hidden Tabs and reconnects.
+#[derive(Default)]
+pub(crate) struct ScreenAnnouncements {
+    entry: PublishedAnnouncement,
+    outcome: PublishedAnnouncement,
+}
+
+#[derive(Clone, Default)]
+struct PublishedAnnouncement(Rc<RefCell<Option<SharedString>>>);
+
+impl PublishedAnnouncement {
+    fn node(&self, message: &SharedString, enabled: bool) -> gpui::accesskit::Node {
+        let mut published = self.0.borrow_mut();
+        let changed = enabled && !message.is_empty() && published.as_ref() != Some(message);
+        if enabled {
+            *published = Some(message.clone());
+        }
+        let mut node = gpui::accesskit::Node::new(gpui::accesskit::Role::Status);
+        node.set_label(message.as_ref());
+        node.set_value(message.as_ref());
+        node.set_live(if changed {
+            gpui::accesskit::Live::Polite
+        } else {
+            gpui::accesskit::Live::Off
+        });
+        node
+    }
+}
+
+pub(crate) struct ScreenStatus {
+    content: AnyElement,
+    note: SharedString,
+}
+
 /// A centered screen replacing a Pane: a title, its detail, one action, and a status slot under
 /// the action.
 pub(crate) fn render_screen(
     selector: SharedString,
-    title: SharedString,
-    detail: SharedString,
+    copy: ScreenCopy,
     announce: bool,
     action: Option<Button>,
-    status: Option<AnyElement>,
+    status: Option<ScreenStatus>,
+    announcements: &ScreenAnnouncements,
     cx: &App,
 ) -> AnyElement {
+    render_screen_content(
+        selector,
+        copy,
+        announce,
+        action.into_iter().collect(),
+        status,
+        announcements,
+        cx,
+    )
+}
+
+pub(crate) fn render_directory_screen(
+    selector: SharedString,
+    path: Option<SharedString>,
+    actions: Vec<Button>,
+    status: Option<ScreenStatus>,
+    missing_worktree: bool,
+    announcements: &ScreenAnnouncements,
+    cx: &App,
+) -> AnyElement {
+    let detail = if missing_worktree {
+        "This Tab's Worktree is missing, and SpaceTerm doesn't recreate Worktrees. Retry after restoring it with git, or choose another directory for this Pane."
+    } else {
+        DIRECTORY_UNAVAILABLE_DETAIL
+    };
+    render_screen_content(
+        selector,
+        ScreenCopy {
+            title: DIRECTORY_UNAVAILABLE_TITLE.into(),
+            detail: detail.into(),
+            path,
+        },
+        true,
+        actions,
+        status,
+        announcements,
+        cx,
+    )
+}
+pub(crate) struct ScreenCopy {
+    title: SharedString,
+    detail: SharedString,
+    path: Option<SharedString>,
+}
+impl ScreenCopy {
+    pub(crate) fn new(title: SharedString, detail: SharedString) -> Self {
+        Self {
+            title,
+            detail,
+            path: None,
+        }
+    }
+}
+fn render_screen_content(
+    selector: SharedString,
+    copy: ScreenCopy,
+    announce: bool,
+    actions: Vec<Button>,
+    status: Option<ScreenStatus>,
+    announcements: &ScreenAnnouncements,
+    cx: &App,
+) -> AnyElement {
+    let ScreenCopy {
+        title,
+        detail,
+        path,
+    } = copy;
     let appearance = super::appearance::shared_chrome(cx);
     // The configured terminal background, never one the shell chose.
     let surface =
         appearance.pane_surface(appearance_runtime::current(cx).terminal.colors.background);
     let detail_id = SharedString::from(format!("{selector}-detail"));
+    let slot_id = SharedString::from(format!("{selector}-status-slot"));
+    let message: SharedString = match &path {
+        Some(path) => format!("{title}. {path}. {detail}").into(),
+        None => format!("{title}. {detail}").into(),
+    };
+    let entry = announcements.entry.clone();
+    let outcome = announcements.outcome.clone();
+    let note = status
+        .as_ref()
+        .map_or_else(SharedString::default, |status| status.note.clone());
     let element_selector = selector.clone();
     div()
         .id(selector)
         .role(gpui::accesskit::Role::Group)
         .aria_label(title.clone())
-        .aria_description(detail.clone())
         .debug_selector(move || element_selector.to_string())
         .absolute()
         .inset_0()
@@ -98,13 +223,23 @@ pub(crate) fn render_screen(
                         .text_color(gpui_color(appearance.colors.text))
                         .child(title),
                 )
+                .children(path.map(|path| {
+                    div()
+                        .whitespace_normal()
+                        .chrome_text(appearance.typography.style(TextRole::Body))
+                        .text_color(gpui_color(appearance.colors.text))
+                        .child(path)
+                }))
                 .child(
                     div()
                         .id(detail_id)
-                        .when(announce, |detail_text| {
-                            detail_text
-                                .role(gpui::accesskit::Role::Status)
-                                .aria_label(detail.clone())
+                        .role(gpui::accesskit::Role::Group)
+                        .a11y_synthetic_children(move |builder| {
+                            let mut node = entry.node(&message, announce);
+                            if let Some(bounds) = builder.parent_node().bounds() {
+                                node.set_bounds(bounds);
+                            }
+                            builder.push_child(builder.synthetic_node_id("entry"), node);
                         })
                         .whitespace_normal()
                         .chrome_text(appearance.typography.style(TextRole::Secondary))
@@ -112,31 +247,45 @@ pub(crate) fn render_screen(
                         .child(detail),
                 ),
         )
-        .children(action)
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .justify_center()
+                .gap(appearance.spacing(8.0))
+                .children(actions),
+        )
         // The slot keeps its height, so the action stays put while its status changes.
         .child(
             div()
+                .id(slot_id)
+                .role(gpui::accesskit::Role::Group)
+                .a11y_synthetic_children(move |builder| {
+                    let mut node = outcome.node(&note, true);
+                    if let Some(bounds) = builder.parent_node().bounds() {
+                        node.set_bounds(bounds);
+                    }
+                    builder.push_child(builder.synthetic_node_id("outcome"), node);
+                })
                 .h(appearance.spacing(20.0))
                 .flex()
                 .items_center()
-                .children(status),
+                .children(status.map(|status| status.content)),
         )
         .into_any_element()
 }
 
-/// An action's progress, read by assistive technology as one status.
+/// Progress is available for exploration, without interrupting the action's outcome speech.
 pub(crate) fn progress_status(
     selector: SharedString,
     progress_id: SharedString,
     label: SharedString,
     cx: &App,
-) -> AnyElement {
+) -> ScreenStatus {
     let appearance = super::appearance::shared_chrome(cx);
     let element_selector = selector.clone();
-    div()
+    let content = div()
         .id(selector)
-        .role(gpui::accesskit::Role::Status)
-        .aria_label(label.clone())
         .debug_selector(move || element_selector.to_string())
         .flex()
         .items_center()
@@ -151,22 +300,126 @@ pub(crate) fn progress_status(
                 .text_color(gpui_color(appearance.colors.text_secondary))
                 .child(label),
         )
-        .into_any_element()
+        .into_any_element();
+    ScreenStatus {
+        content,
+        note: SharedString::default(),
+    }
 }
 
 /// An action's outcome as plain text, read by assistive technology as one status.
-pub(crate) fn note_status(selector: SharedString, label: SharedString, cx: &App) -> AnyElement {
+pub(crate) fn note_status(selector: SharedString, label: SharedString, cx: &App) -> ScreenStatus {
     let appearance = super::appearance::shared_chrome(cx);
     let element_selector = selector.clone();
-    div()
+    let content = div()
         .id(selector)
-        .role(gpui::accesskit::Role::Status)
-        .aria_label(label.clone())
         .debug_selector(move || element_selector.to_string())
         .chrome_text(appearance.typography.style(TextRole::Secondary))
         .text_color(gpui_color(appearance.colors.text_secondary))
-        .child(label)
-        .into_any_element()
+        .child(label.clone())
+        .into_any_element();
+    ScreenStatus {
+        content,
+        note: label,
+    }
+}
+
+/// The Retry and Choose Directory pair the directory screen offers in both presentations.
+///
+/// The caller owns the element ids, what it knows about availability, and what each action does.
+/// The copy and the enablement policy belong here, so one screen never explains itself differently
+/// in the Development Pane window and in a shared Workspace.
+pub(crate) struct DirectoryActions<Retry, Choose> {
+    /// Element id and debug selector for Retry.
+    pub(crate) retry: SharedString,
+    /// Element id and debug selector for Choose Directory.
+    pub(crate) choose: SharedString,
+    /// Whether the screen can act at all: nothing is starting and no picker is open.
+    pub(crate) enabled: bool,
+    pub(crate) offer: ChooseDirectory,
+    pub(crate) on_retry: Retry,
+    pub(crate) on_choose: Choose,
+}
+
+/// What the owning server and this client allow for Choose Directory, beyond a busy screen.
+#[derive(Clone, Copy)]
+pub(crate) enum ChooseDirectory {
+    /// The owning server offers a recovery target for this Pane.
+    Offered,
+    /// The owning server negotiated no directory recovery.
+    Unsupported,
+    /// This client cannot change the Workspace, for a reason it already explains.
+    Withheld(&'static str),
+}
+
+impl ChooseDirectory {
+    const fn description(self) -> &'static str {
+        match self {
+            Self::Offered => CHOOSE_DIRECTORY_DESCRIPTION,
+            Self::Unsupported => CHOOSE_DIRECTORY_UNSUPPORTED,
+            Self::Withheld(explanation) => explanation,
+        }
+    }
+
+    const fn offered(self) -> bool {
+        matches!(self, Self::Offered)
+    }
+}
+
+impl<Retry, Choose> DirectoryActions<Retry, Choose>
+where
+    Retry: Fn(&mut gpui::Window, &mut App) + 'static,
+    Choose: Fn(&mut gpui::Window, &mut App) + 'static,
+{
+    /// Retry first, then the primary Choose Directory, in reading and Tab order.
+    pub(crate) fn buttons(self) -> Vec<Button> {
+        let Self {
+            retry,
+            choose,
+            enabled,
+            offer,
+            on_retry,
+            on_choose,
+        } = self;
+        vec![
+            Button::new(retry.clone(), RETRY_DIRECTORY)
+                .variant(ButtonVariant::Secondary)
+                .size(ButtonSize::Regular)
+                .disabled(!enabled)
+                .tab_stop(true)
+                .accessibility_description(RETRY_DIRECTORY_DESCRIPTION)
+                .debug_selector(retry)
+                .on_activate(move |_, window, cx| on_retry(window, cx)),
+            Button::new(choose.clone(), CHOOSE_DIRECTORY)
+                .variant(ButtonVariant::Primary)
+                .size(ButtonSize::Regular)
+                .disabled(!enabled || !offer.offered())
+                .tab_stop(true)
+                // A disabled primary still says why, so nothing is refused silently.
+                .accessibility_description(offer.description())
+                .debug_selector(choose)
+                .on_activate(move |_, window, cx| on_choose(window, cx)),
+        ]
+    }
+}
+
+/// The directory screen's status slot: progress while a shell starts, otherwise the last outcome.
+pub(crate) fn directory_status(
+    selector: SharedString,
+    progress: SharedString,
+    starting: bool,
+    note: Option<&'static str>,
+    cx: &App,
+) -> Option<ScreenStatus> {
+    if starting {
+        return Some(progress_status(
+            selector,
+            progress,
+            STARTING_SHELL.into(),
+            cx,
+        ));
+    }
+    note.map(|note| note_status(selector, note.into(), cx))
 }
 
 /// The interruption notice over a frozen server-backed screen, with the action that retries now.
@@ -326,7 +579,7 @@ pub(crate) use connection::{
 mod connection {
     use std::sync::Arc;
 
-    use super::Dormant;
+    use super::{Dormant, ScreenAnnouncements};
     use crate::local_server::ServerError;
     use crate::terminal::server_session::{DevelopmentPaneState, DevelopmentPaneStatus};
 
@@ -353,6 +606,21 @@ mod connection {
 
         /// Asks the server to start a fresh shell in a Pane retained across a server restart.
         fn start_restored(&self);
+        fn directory_progress(&self) -> (bool, Option<&'static str>) {
+            (false, None)
+        }
+        fn directory_server(&self) -> Option<crate::local_server::LocalServer> {
+            None
+        }
+        fn recovery_target(&self) -> Option<spaceterm_server::pane::directories::Target> {
+            None
+        }
+        fn repair_directory(
+            &self,
+            _: spaceterm_server::pane::directories::Target,
+            _: std::path::PathBuf,
+        ) {
+        }
     }
 
     impl ServerPaneConnection for DevelopmentPaneState {
@@ -379,6 +647,22 @@ mod connection {
         fn start_restored(&self) {
             Self::start_restored(self);
         }
+        fn directory_progress(&self) -> (bool, Option<&'static str>) {
+            Self::directory_progress(self)
+        }
+        fn directory_server(&self) -> Option<crate::local_server::LocalServer> {
+            Self::directory_server(self)
+        }
+        fn recovery_target(&self) -> Option<spaceterm_server::pane::directories::Target> {
+            Self::recovery_target(self)
+        }
+        fn repair_directory(
+            &self,
+            target: spaceterm_server::pane::directories::Target,
+            replacement: std::path::PathBuf,
+        ) {
+            Self::repair_directory(self, target, replacement);
+        }
     }
 
     /// What a server-backed Pane presents in place of its terminal, if anything.
@@ -400,7 +684,7 @@ mod connection {
         },
         /// The server refused to start a shell because the Pane's directory is unavailable.
         /// Repairing it belongs to directory repair, which is not available yet.
-        DirectoryUnavailable,
+        DirectoryUnavailable { starting: bool, offered: bool },
     }
 
     /// What one status reading changed about a Pane's presentation.
@@ -423,6 +707,7 @@ mod connection {
     /// unanswered Take Over or Start New Shell is claimed by nobody, and a screen stays through
     /// interruptions until a fresh screen arrives for this client.
     pub(crate) struct ServerPaneView {
+        announcements: ScreenAnnouncements,
         connection: Arc<dyn ServerPaneConnection>,
         status: DevelopmentPaneStatus,
         generation: u64,
@@ -431,19 +716,22 @@ mod connection {
         dormant: Option<Dormant>,
         start_pending: bool,
         start_unconfirmed: bool,
+        directory_progress: (bool, Option<&'static str>),
     }
 
     impl ServerPaneView {
         pub(crate) fn new(connection: Arc<dyn ServerPaneConnection>) -> Self {
             let mut view = Self {
+                announcements: ScreenAnnouncements::default(),
                 status: connection.status(),
                 generation: connection.connection_generation(),
-                connection,
+                connection: Arc::clone(&connection),
                 takeover_shown: false,
                 take_over_unconfirmed: false,
                 dormant: None,
                 start_pending: false,
                 start_unconfirmed: false,
+                directory_progress: connection.directory_progress(),
             };
             view.apply();
             view
@@ -462,9 +750,11 @@ mod connection {
             let status = self.connection.status();
             let generation = self.connection.connection_generation();
             let generation_changed = generation != self.generation;
-            if status == self.status && !generation_changed {
+            let progress = self.connection.directory_progress();
+            if status == self.status && !generation_changed && progress == self.directory_progress {
                 return ServerPaneSync::default();
             }
+            self.directory_progress = progress;
             // Take Over that returns to the Takeover Screen on the same connection generation is
             // unconfirmed: the server may have refused it, or committed it and lost the reply.
             // A new generation means this client held control and another client took it since.
@@ -494,6 +784,7 @@ mod connection {
 
         fn apply(&mut self) -> ServerPaneSync {
             if self.status == DevelopmentPaneStatus::Connected {
+                self.announcements = ScreenAnnouncements::default();
                 self.takeover_shown = false;
                 self.take_over_unconfirmed = false;
                 self.dormant = None;
@@ -573,7 +864,10 @@ mod connection {
         pub(crate) fn screen(&self) -> Option<ServerPaneScreen> {
             if let Some(dormant) = self.dormant {
                 return Some(match dormant {
-                    Dormant::DirectoryUnavailable => ServerPaneScreen::DirectoryUnavailable,
+                    Dormant::DirectoryUnavailable => ServerPaneScreen::DirectoryUnavailable {
+                        starting: self.start_pending || self.directory_progress.0,
+                        offered: self.can_start_shell(),
+                    },
                     Dormant::Restored => ServerPaneScreen::Restored {
                         starting: self.starting_shell(),
                         unconfirmed: self.start_unconfirmed,
@@ -593,12 +887,29 @@ mod connection {
             self.start_pending
                 && matches!(
                     self.status,
-                    DevelopmentPaneStatus::Restored | DevelopmentPaneStatus::Connecting
+                    DevelopmentPaneStatus::Restored
+                        | DevelopmentPaneStatus::Connecting
+                        | DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
                 )
         }
 
         pub(crate) fn can_start_shell(&self) -> bool {
-            self.status == DevelopmentPaneStatus::Restored && !self.start_pending
+            matches!(
+                self.status,
+                DevelopmentPaneStatus::Restored
+                    | DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
+            ) && !self.start_pending
+                && !self.directory_progress.0
+        }
+
+        pub(crate) fn directory_note(&self) -> Option<&'static str> {
+            self.directory_progress.1
+        }
+        pub(crate) fn announcements(&self) -> &ScreenAnnouncements {
+            &self.announcements
+        }
+        pub(crate) fn connection(&self) -> Arc<dyn ServerPaneConnection> {
+            Arc::clone(&self.connection)
         }
 
         pub(crate) fn can_take_over(&self) -> bool {
@@ -629,7 +940,7 @@ mod connection {
                 )),
                 // The screen replacing the Pane says what happened, and nothing here repairs it.
                 DevelopmentPaneStatus::TakeoverFailed(_) if self.session_ended() => None,
-                DevelopmentPaneStatus::Failed(_)
+                DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
                     if self.dormant == Some(Dormant::DirectoryUnavailable) =>
                 {
                     None
@@ -647,7 +958,7 @@ mod connection {
         /// Whether a person can ask for a connection attempt now.
         pub(crate) fn can_retry(&self) -> bool {
             !self.session_ended()
-                && self.dormant != Some(Dormant::DirectoryUnavailable)
+                && self.status != DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
                 && matches!(
                     self.status,
                     DevelopmentPaneStatus::Reconnecting

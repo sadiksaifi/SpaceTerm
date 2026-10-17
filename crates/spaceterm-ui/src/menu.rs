@@ -1306,6 +1306,12 @@ impl<A: Clone + 'static> ComboButton<A> {
         self
     }
 
+    /// Explains the primary command to assistive technology.
+    pub fn accessibility_description(mut self, description: impl Into<SharedString>) -> Self {
+        self.button = self.button.accessibility_description(description);
+        self
+    }
+
     pub fn menu_disabled(mut self, disabled: bool) -> Self {
         self.menu.disabled = disabled;
         self

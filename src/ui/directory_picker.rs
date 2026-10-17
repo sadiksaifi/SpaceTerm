@@ -31,6 +31,8 @@ use crate::domain::PinnedDirectory;
 
 mod local_source;
 mod remote_source;
+mod server_source;
+pub(crate) use server_source::ServerDirectorySource;
 
 pub(crate) use local_source::LocalDirectorySource;
 pub(crate) use remote_source::{
@@ -100,10 +102,34 @@ pub(crate) enum DirectorySourceError {
 
 pub(crate) type SourceFuture<T> = Pin<Box<dyn Future<Output = Result<T, DirectorySourceError>>>>;
 
+/// A server path grants no authority to the client's filesystem or Workspace pin.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) enum DirectorySelection {
+    Pin(PinnedDirectory),
+    Server(std::path::PathBuf),
+}
+impl fmt::Debug for DirectorySelection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Pin(_) => "DirectorySelection::Pin(<redacted>)",
+            Self::Server(_) => "DirectorySelection::Server(<redacted>)",
+        })
+    }
+}
+
 /// The boundary through which the Directory Picker reads and changes one machine's directories.
 ///
 /// Each source converts [`PickerPath`] spellings into its own machine's path type.
 pub(crate) trait DirectorySource {
+    fn allows_creation(&self) -> bool {
+        true
+    }
+    fn initial_query(&self) -> Option<PickerPath> {
+        None
+    }
+    fn selection_label(&self) -> &'static str {
+        "Open"
+    }
     /// Names the machine when it is not the local one.
     fn machine_name(&self) -> Option<&str>;
 
@@ -116,8 +142,8 @@ pub(crate) trait DirectorySource {
 
     fn create_directory_recursively(&self, directory: PickerPath) -> SourceFuture<()>;
 
-    /// Validates the directory's physical identity as a Pinned Directory.
-    fn pin(&self, directory: PickerPath) -> SourceFuture<PinnedDirectory>;
+    /// Validates a selection using only the authority owned by this source.
+    fn select(&self, directory: PickerPath) -> SourceFuture<DirectorySelection>;
 }
 
 /// A directory path as spelled in the Directory Picker: absolute, or relative to the home
@@ -392,7 +418,7 @@ pub(crate) enum ExactPathState {
 pub(super) enum DirectoryPickerEvent {
     StateChanged,
     Dismissed,
-    Confirmed(PinnedDirectory),
+    Confirmed(DirectorySelection),
     /// The picker closed so System Directory Selection can choose the directory instead.
     SystemSelectionRequested,
 }
@@ -457,7 +483,7 @@ struct ValidationCompletion {
     lifecycle_generation: u64,
     operation_generation: u64,
     directory: PickerPath,
-    result: Result<PinnedDirectory, DirectorySourceError>,
+    result: Result<DirectorySelection, DirectorySourceError>,
 }
 
 /// One machine's directory chooser built on the reusable Command Palette.
@@ -749,6 +775,7 @@ impl DirectoryPicker {
         self.operation_generation = self.operation_generation.wrapping_add(1);
         let operation_generation = self.operation_generation;
         let lifecycle_generation = self.lifecycle_generation;
+        let opening_query = self.palette.read(cx).query().to_owned();
         let task = self.source.discover_home();
         self.home_task.take();
         self.home_task = Some(cx.spawn_in(window, async move |picker, cx| {
@@ -763,6 +790,13 @@ impl DirectoryPicker {
                 match result {
                     Ok(home) => {
                         picker.home = Some(home);
+                        if picker.palette.read(cx).query() == opening_query
+                            && let Some(initial) = picker.source.initial_query()
+                        {
+                            picker
+                                .palette
+                                .update(cx, |palette, cx| palette.set_query(initial.as_str(), cx));
+                        }
                         let query = picker.palette.read(cx).query().to_owned();
                         picker.refresh_for_input(query, window, cx);
                     }
@@ -1073,11 +1107,11 @@ impl DirectoryPicker {
             let result = match kind {
                 DirectoryValidationKind::Creation => {
                     match source.create_directory_recursively(request.clone()).await {
-                        Ok(()) => source.pin(request).await,
+                        Ok(()) => source.select(request).await,
                         Err(error) => Err(error),
                     }
                 }
-                DirectoryValidationKind::Existing => source.pin(request).await,
+                DirectoryValidationKind::Existing => source.select(request).await,
             };
             let completion = ValidationCompletion {
                 lifecycle_generation,
@@ -1131,6 +1165,7 @@ impl DirectoryPicker {
                 self.status,
                 DirectoryPickerStatus::Readable | DirectoryPickerStatus::Missing
             )
+            && (self.status != DirectoryPickerStatus::Missing || self.source.allows_creation())
             && self
                 .parsed
                 .as_ref()
@@ -1140,7 +1175,8 @@ impl DirectoryPicker {
     /// Returns the search line's action that opens the exact path, creating it when missing, with
     /// System Directory Selection in its menu when offered.
     fn confirm_action(&self, cx: &App) -> CommandPalettePrimaryAction {
-        let action = CommandPalettePrimaryAction::new(CONFIRM_ACTION, "Open");
+        let action =
+            CommandPalettePrimaryAction::new(CONFIRM_ACTION, self.source.selection_label());
         let action = match crate::desktop_profile::DesktopPresentation::get(cx)
             .shortcut(&spaceterm_ui::CommandPaletteConfirm)
         {
@@ -1199,6 +1235,26 @@ impl DirectoryPicker {
 
     /// An unusable exact path outranks the listing, and a missing path offers creation.
     fn empty_notice(&self) -> EmptyNotice {
+        if !self.source.allows_creation() {
+            match self.status {
+                DirectoryPickerStatus::Missing => {
+                    return EmptyNotice::new(IconName::CircleAlert, "Directory doesn’t exist")
+                        .description("Choose an existing directory on the server.");
+                }
+                DirectoryPickerStatus::NotDirectory => {
+                    return EmptyNotice::new(IconName::File, "Not a directory")
+                        .description("Only a directory can be this Pane’s directory.");
+                }
+                DirectoryPickerStatus::ConnectionLost => {
+                    return EmptyNotice::new(
+                        IconName::TriangleAlert,
+                        "Not connected to the server",
+                    )
+                    .description("Edit the path to try again once SpaceTerm reconnects.");
+                }
+                _ => {}
+            }
+        }
         match self.status {
             DirectoryPickerStatus::NotDirectory => {
                 return EmptyNotice::new(IconName::File, "Not a directory")
@@ -1272,8 +1328,9 @@ impl DirectoryPicker {
             .find(|item| matches!(item.id(), DirectoryPickerItemId::Child { .. }))
             .map(|item| item.id().clone());
         let confirm_action = self.confirm_action(cx);
-        let query_note = (self.status == DirectoryPickerStatus::Missing)
-            .then(|| SharedString::from(NEW_DIRECTORY_NOTE));
+        let query_note = (self.status == DirectoryPickerStatus::Missing
+            && self.source.allows_creation())
+        .then(|| SharedString::from(NEW_DIRECTORY_NOTE));
         self.palette.update(cx, |palette, cx| {
             // A stable selection survives republishing; otherwise Return descends into the first
             // child rather than leaving, and the confirm key pins regardless of selection.
@@ -1471,7 +1528,7 @@ mod tests {
             directory: RemoteDirectory::new("/sensitive/project".to_owned()).unwrap(),
             identity: RemoteDirectoryIdentity::new("/sensitive/project".to_owned()).unwrap(),
         };
-        let event = DirectoryPickerEvent::Confirmed(pinned);
+        let event = DirectoryPickerEvent::Confirmed(DirectorySelection::Pin(pinned));
 
         for debug in [
             format!("{parsed:?}"),
@@ -1479,6 +1536,10 @@ mod tests {
             format!("{listing:?}"),
             format!("{account:?}"),
             format!("{event:?}"),
+            format!(
+                "{:?}",
+                DirectorySelection::Server("/sensitive/server/".into())
+            ),
         ] {
             assert!(!debug.contains("sensitive"));
         }
@@ -1623,6 +1684,95 @@ mod tests {
 
     struct DirectoryPickerHarness {
         picker: gpui::Entity<DirectoryPicker>,
+    }
+
+    #[gpui::test]
+    fn directory_recovery_discovery_preserves_a_path_edited_while_loading(cx: &mut TestAppContext) {
+        struct DelayedSource(async_channel::Receiver<PickerPath>);
+        impl DirectorySource for DelayedSource {
+            fn machine_name(&self) -> Option<&str> {
+                None
+            }
+            fn initial_query(&self) -> Option<PickerPath> {
+                Some(PickerPath::new("/ancestor/".into()).unwrap())
+            }
+            fn discover_home(&self) -> SourceFuture<PickerPath> {
+                let receiver = self.0.clone();
+                Box::pin(async move {
+                    receiver
+                        .recv()
+                        .await
+                        .map_err(|_| DirectorySourceError::Other)
+                })
+            }
+            fn list_directories(&self, _: PickerPath) -> SourceFuture<DirectoryListing> {
+                Box::pin(async { Ok(DirectoryListing::new(Vec::new())) })
+            }
+            fn probe_exact_path(&self, _: PickerPath) -> SourceFuture<ExactPathState> {
+                Box::pin(async { Ok(ExactPathState::ReadableDirectory) })
+            }
+            fn create_directory_recursively(&self, _: PickerPath) -> SourceFuture<()> {
+                Box::pin(async { Err(DirectorySourceError::Other) })
+            }
+            fn select(&self, directory: PickerPath) -> SourceFuture<DirectorySelection> {
+                Box::pin(
+                    async move { Ok(DirectorySelection::Server(directory.into_string().into())) },
+                )
+            }
+        }
+        cx.update(crate::ui::init).unwrap();
+        let (sender, receiver) = async_channel::bounded(1);
+        let (harness, cx) = cx.add_window_view(move |window, cx| DirectoryPickerHarness {
+            picker: cx.new(|cx| {
+                DirectoryPicker::new(
+                    Rc::new(DelayedSource(receiver)),
+                    "Choose Pane Directory",
+                    window,
+                    cx,
+                )
+            }),
+        });
+        let picker = harness.read_with(cx, |harness, _| harness.picker.clone());
+        let confirmed = Rc::new(RefCell::new(Vec::new()));
+        let observed = Rc::clone(&confirmed);
+        cx.update(|_, cx| {
+            cx.subscribe(&picker, move |_, event: &DirectoryPickerEvent, _| {
+                if let DirectoryPickerEvent::Confirmed(selection) = event {
+                    observed.borrow_mut().push(selection.clone());
+                }
+            })
+            .detach();
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            picker.update(cx, |picker, cx| {
+                picker.open(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            picker.update(cx, |picker, cx| {
+                picker
+                    .palette
+                    .update(cx, |palette, cx| palette.set_query("/chosen/", cx))
+            });
+        });
+        cx.run_until_parked();
+        sender
+            .try_send(PickerPath::new("/home/tester".into()).unwrap())
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            picker.read_with(cx, |picker, cx| picker.palette.read(cx).query().to_owned()),
+            "/chosen/"
+        );
+        assert!(picker.read_with(cx, |picker, _| picker.can_confirm()));
+        cx.update(|window, cx| picker.update(cx, |picker, cx| picker.confirm_current(window, cx)));
+        cx.run_until_parked();
+        assert_eq!(
+            *confirmed.borrow(),
+            vec![DirectorySelection::Server("/chosen/".into())]
+        );
     }
 
     impl gpui::Render for DirectoryPickerHarness {
@@ -1856,7 +2006,7 @@ mod tests {
         );
         assert!(events.borrow().iter().any(|event| matches!(
             event,
-            DirectoryPickerEvent::Confirmed(PinnedDirectory::Remote { identity: pinned, .. })
+            DirectoryPickerEvent::Confirmed(DirectorySelection::Pin(PinnedDirectory::Remote { identity: pinned, .. }))
                 if pinned == &identity
         )));
     }
@@ -1967,7 +2117,9 @@ mod tests {
         assert_eq!(records.validated_directories, vec![expected.clone()]);
         drop(records);
         let pinned = events.borrow().iter().find_map(|event| match event {
-            DirectoryPickerEvent::Confirmed(pinned) => Some(pinned.clone()),
+            DirectoryPickerEvent::Confirmed(DirectorySelection::Pin(pinned)) => {
+                Some(pinned.clone())
+            }
             _ => None,
         });
         assert_eq!(
@@ -2631,12 +2783,12 @@ mod tests {
                         lifecycle_generation,
                         operation_generation,
                         directory,
-                        result: Ok(PinnedDirectory::Remote {
+                        result: Ok(DirectorySelection::Pin(PinnedDirectory::Remote {
                             directory: crate::domain::RemoteDirectory::new("~/".to_owned())
                                 .unwrap(),
                             identity: RemoteDirectoryIdentity::new("/home/tester".to_owned())
                                 .unwrap(),
-                        }),
+                        })),
                     },
                     window,
                     cx,

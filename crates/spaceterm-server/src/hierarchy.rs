@@ -123,6 +123,9 @@ pub struct Workspace {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tab {
+    /// Directory repair must not move this Tab to a different Worktree, including its Root Pane.
+    #[serde(default)]
+    pub worktree_membership_fixed: bool,
     /// Saved membership, retained even when Git no longer lists the directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<PathBuf>,
@@ -277,6 +280,7 @@ impl State {
                     root_tab: org.tab,
                     tabs: vec![Tab {
                         worktree: None,
+                        worktree_membership_fixed: false,
                         worktree_repository: None,
                         id: org.tab,
                         root_pane: org.pane,
@@ -459,6 +463,7 @@ impl State {
                     root_tab: tab,
                     tabs: vec![Tab {
                         worktree: None,
+                        worktree_membership_fixed: false,
                         worktree_repository: None,
                         id: tab,
                         root_pane: pane,
@@ -505,6 +510,7 @@ impl State {
                 let pane = new_id()?;
                 w.tabs.push(Tab {
                     worktree: None,
+                    worktree_membership_fixed: false,
                     worktree_repository: None,
                     id,
                     root_pane: pane,
@@ -656,6 +662,23 @@ impl State {
         }
         self.inventory.workspaces.retain(|w| !w.tabs.is_empty());
         self.inventory.revision += 1;
+    }
+    pub fn repair_directory(&mut self, id: Id, path: PathBuf) -> Result<(), Refusal> {
+        for workspace in &mut self.inventory.workspaces {
+            for tab in &mut workspace.tabs {
+                if let Some(pane) = tab.panes.iter_mut().find(|p| p.id == id) {
+                    pane.confirmed_directory = Some(path);
+                    tab.worktree_membership_fixed = true;
+                    self.inventory.revision = self
+                        .inventory
+                        .revision
+                        .checked_add(1)
+                        .ok_or(Refusal::Capacity)?;
+                    return Ok(());
+                }
+            }
+        }
+        Err(Refusal::Missing)
     }
     pub fn confirm_directory(&mut self, id: Id, path: PathBuf) {
         for w in &mut self.inventory.workspaces {

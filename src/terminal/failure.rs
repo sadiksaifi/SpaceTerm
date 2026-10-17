@@ -122,7 +122,8 @@ impl TerminalFailure {
     pub fn from_session(failure: &TerminalSessionFailure) -> Self {
         match failure {
             TerminalSessionFailure::Startup { stage, .. } => match stage {
-                TerminalSessionStartupStage::Pty
+                TerminalSessionStartupStage::Directory
+                | TerminalSessionStartupStage::Pty
                 | TerminalSessionStartupStage::Reader
                 | TerminalSessionStartupStage::ReaderThread => Self::pty("session-startup"),
                 TerminalSessionStartupStage::Emulator => Self::emulator("session-startup"),

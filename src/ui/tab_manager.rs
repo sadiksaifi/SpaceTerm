@@ -1247,6 +1247,13 @@ impl TabManager {
         self.visible_tabs().map(|(tab_id, _)| tab_id).collect()
     }
 
+    pub(crate) fn directory_recovery(
+        &self,
+        cx: &App,
+    ) -> Option<Entity<super::server_pane::DirectoryRecovery>> {
+        self.tabs.active_tab().read(cx).directory_recovery(cx)
+    }
+
     fn visible_len(&self) -> usize {
         self.visible_tabs().count()
     }

@@ -76,7 +76,9 @@ impl SharedWorkspaceHost {
             host.retain_directory()?;
             host.retire_exited()?;
             if let Some(org) = &host.organization {
-                if let Some(path) = &org.confirmed_directory {
+                if host.pane.is_some()
+                    && let Some(path) = &org.confirmed_directory
+                {
                     next.confirm_directory(*id, path.clone());
                 }
             } else if next.pane(*id).is_some() {
@@ -88,7 +90,9 @@ impl SharedWorkspaceHost {
             self.commit(next)?;
         }
         // Keep an exited runtime until its controller has observed its final screen.
-        self.panes.retain(|_, h| h.pane.is_some());
+        self.panes.retain(|id, h| {
+            self.state.pane(*id).is_some() && (h.pane.is_some() || h.directory_unavailable)
+        });
         self.attachment_generations.retain(|(_, workspace), _| {
             self.state
                 .inventory
@@ -138,10 +142,19 @@ impl SharedWorkspaceHost {
                 organization: Some(org),
                 store: None,
                 uncertain: false,
+                directory_unavailable: false,
+                failed_directory_session: None,
+                directories: super::directories::DirectoryReads::default(),
             };
             self.panes.insert(id, host);
         }
-        self.panes.get_mut(&id).ok_or(Refusal::Missing)
+        let host = self.panes.get_mut(&id).ok_or(Refusal::Missing)?;
+        if host.pane.is_none()
+            && let Some(org) = &mut host.organization
+        {
+            org.confirmed_directory.clone_from(&p.confirmed_directory);
+        }
+        Ok(host)
     }
     fn select(
         &mut self,
@@ -171,12 +184,63 @@ impl SharedWorkspaceHost {
         }
         host.select(device, connection, explicit, size, None, style)
     }
+    fn repair_directory(
+        &mut self,
+        device: Id,
+        connection: Id,
+        target: pane::directories::Target,
+        replacement: Option<std::path::PathBuf>,
+        size: PaneSize,
+        style: Option<PresentationStyle>,
+    ) -> Result<Reply, Refusal> {
+        size.validate().map_err(|_| Refusal::Unsupported)?;
+        if target.boot != self.prototype.boot {
+            return Err(Refusal::Stale);
+        }
+        let id = target.pane;
+        if self.pane_host(id)?.pane.is_some() {
+            return self.select(device, connection, id, false, size, style);
+        }
+        let (_, _, pane) = self.state.pane(id).ok_or(Refusal::Missing)?;
+        if pane.creator.is_some_and(|creator| creator != device) {
+            return self.select(device, connection, id, false, size, style);
+        }
+        if target.original != super::repositories::pane_directory(pane) {
+            return Err(Refusal::Stale);
+        }
+        let directory = local_filesystem()
+            .validate_directory(replacement.as_deref().unwrap_or(&target.original))
+            .map_err(|_| Refusal::DirectoryUnavailable)?;
+        if replacement.is_some() {
+            let mut next = self.state.clone();
+            next.repair_directory(id, directory.path().to_owned())?;
+            // Commit just this Pane's directory before launching. Uncertain writes start nothing.
+            self.commit(next)?;
+            self.pane_host(id)?
+                .organization
+                .as_mut()
+                .ok_or(Refusal::Missing)?
+                .confirmed_directory = Some(directory.path().to_owned());
+        }
+        self.pane_host(id)?
+            .start_directory(device, connection, size, style, directory)
+            .map(|lease| Reply::Attached { lease })
+    }
     fn handle(&mut self, device: Id, connection: Id, request: Request) -> Result<Reply, Refusal> {
         if matches!(request, Request::Inventory) {
             self.repositories.subscribe(connection);
         }
         self.synchronize()?;
         match request {
+            Request::DirectoryRead(request) => Ok(Reply::DirectoryRead(
+                self.prototype.directories.request(connection, request),
+            )),
+            Request::RepairDirectory {
+                target,
+                replacement,
+                size,
+                style,
+            } => self.repair_directory(device, connection, target, replacement, size, style),
             Request::ClaimPane {
                 attachment,
                 pane: id,
@@ -209,6 +273,15 @@ impl SharedWorkspaceHost {
                     });
                 }
                 let reply = match claim {
+                    AttachmentClaim::Repair {
+                        target,
+                        replacement,
+                    } => {
+                        if target.pane != id {
+                            return Err(Refusal::Stale);
+                        }
+                        self.repair_directory(device, connection, target, replacement, size, style)?
+                    }
                     AttachmentClaim::Select { explicit } => {
                         self.select(device, connection, id, explicit, size, style)?
                     }
@@ -298,6 +371,7 @@ impl SharedWorkspaceHost {
                 native_effects: true,
                 reading: true,
                 graphics: true,
+                directory_recovery: true,
             }),
             Request::Inventory => Ok(Reply::Inventory {
                 inventory: self.inventory(),
@@ -433,6 +507,14 @@ impl SharedWorkspaceHost {
                     | Request::Close { lease } => (*lease).into(),
                     _ => return Err(Refusal::Unsupported),
                 };
+                if matches!(request, Request::Poll { .. })
+                    && self
+                        .panes
+                        .values()
+                        .any(|host| host.failed_directory_session == Some(target))
+                {
+                    return Err(Refusal::DirectoryUnavailable);
+                }
                 let host = self
                     .panes
                     .values_mut()
@@ -476,6 +558,7 @@ impl PaneService for SharedWorkspaceHost {
         Ok(())
     }
     fn tick(&mut self) {
+        self.prototype.directories.tick();
         let _ = self.synchronize();
     }
     fn request(&mut self, device: Id, connection: Id, request: Request) -> Reply {
@@ -483,12 +566,14 @@ impl PaneService for SharedWorkspaceHost {
             .unwrap_or_else(Reply::Refused)
     }
     fn disconnected(&mut self, connection: Id) {
+        self.prototype.directories.cancel_connection(connection);
         self.repositories.disconnected(connection);
         for host in self.panes.values_mut() {
             host.disconnected(connection);
         }
     }
     fn shutdown(&mut self) -> Result<(), ServerError> {
+        self.prototype.directories.stop();
         self.repositories.shutdown();
         self.synchronize()
             .map_err(|_| ServerError::StorageUnavailable)?;
