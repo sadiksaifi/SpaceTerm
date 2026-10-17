@@ -51,3 +51,7 @@ required-features = ["client"]
 [[example]]
 name = "directory_recovery"
 required-features = ["client"]
+
+[[example]]
+name = "worktree_writes"
+required-features = ["client"]

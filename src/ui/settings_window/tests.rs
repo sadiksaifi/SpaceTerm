@@ -2688,6 +2688,7 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::ShowPullRequests => "settings-show-pull-requests",
             SettingsRowId::GitTool => "settings-row-git-tool-control",
             SettingsRowId::GitHubCli => "settings-row-github-cli-control",
+            SettingsRowId::ServerWorktreeLocation => "settings-server-worktree-location-frame",
             SettingsRowId::WorktreeLocation => "settings-worktree-location-frame",
             SettingsRowId::LocalServer => "settings-local-server-control",
             SettingsRowId::ServerService => "settings-server-service-control",

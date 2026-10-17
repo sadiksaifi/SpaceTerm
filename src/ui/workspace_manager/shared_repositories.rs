@@ -7,8 +7,7 @@
 //! Worktree rows, with each Tab in the Worktree the server says it belongs to.
 //!
 //! This window reads no git for a shared Workspace. A server path is displayed and copied as
-//! text; it grants no local file action. Creating and removing a shared Worktree, and opening a
-//! Tab in a chosen one, stay unavailable until the server offers them.
+//! text; it grants no local file action. Explicit Worktree writes use the owning server.
 
 pub(super) use development::SharedWorkspaceRepositories;
 
@@ -192,7 +191,10 @@ mod development {
 
         /// The Worktrees of the repository a shared Workspace's row reads, as git on the server
         /// lists them.
-        fn shared_inventory(&self, workspace_id: WorkspaceId) -> Option<&WorktreeInventory> {
+        pub(in crate::ui::workspace_manager) fn shared_inventory(
+            &self,
+            workspace_id: WorkspaceId,
+        ) -> Option<&WorktreeInventory> {
             let shared = self.shared.as_ref()?;
             shared
                 .repositories()
@@ -330,8 +332,18 @@ mod development {
                     WorktreeRemoval::Unlisted
                 } else if main {
                     WorktreeRemoval::Main
-                } else {
+                } else if record.locked {
+                    WorktreeRemoval::Locked
+                } else if !crate::ui::server_worktrees::available(cx) {
                     WorktreeRemoval::Server
+                } else if !self
+                    .shared
+                    .as_ref()
+                    .is_some_and(|s| s.editability().available())
+                {
+                    WorktreeRemoval::NeedsServer
+                } else {
+                    WorktreeRemoval::Allowed
                 };
                 WorktreeRowViewModel {
                     worktree_id: id,
@@ -340,11 +352,16 @@ mod development {
                     label: label.into(),
                     detached,
                     path: record.root.display().to_string().into(),
-                    directory: super::super::compact_home_path(
-                        directory,
-                        &self.local_home_directory_path,
-                    )
-                    .into(),
+                    directory: if self
+                        .shared
+                        .as_ref()
+                        .is_some_and(|s| s.removing_worktree(&record.root))
+                    {
+                        "Removing…".into()
+                    } else {
+                        super::super::compact_home_path(directory, &self.local_home_directory_path)
+                            .into()
+                    },
                     directory_tooltip: directory.display().to_string().into(),
                     repository,
                     main,
@@ -454,9 +471,10 @@ mod development {
                 .workspaces
                 .workspace(workspace_id)
                 .map(|workspace| workspace.payload().clone())?;
-            Some(manager.update(cx, |manager, cx| {
+            let shown = manager.update(cx, |manager, cx| {
                 manager.show_shared_worktree(worktree_id, focus, window, cx)
-            }))
+            });
+            Some(shown || self.open_server_worktree_tab(workspace_id, worktree_id, cx))
         }
 
         /// A shared Worktree's root, as the server reported it.

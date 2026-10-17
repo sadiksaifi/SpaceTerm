@@ -186,6 +186,7 @@ pub enum AttachmentClaim {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
+    WorktreeRead(crate::worktree::Read),
     DirectoryRead(directories::Request),
     RepairDirectory {
         target: directories::Target,
@@ -309,6 +310,8 @@ pub enum Request {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Reply {
+    WorktreeRead(Result<crate::worktree::ReadReply, crate::worktree::Error>),
+    MutationPending,
     DirectoryRead(Result<directories::Progress, directories::Error>),
     GraphicsChunk(Result<graphics::Chunk, graphics::Error>),
     Reading {
@@ -350,6 +353,8 @@ pub enum Reply {
         graphics: bool,
         #[serde(default)]
         directory_recovery: bool,
+        #[serde(default)]
+        worktree_writes: bool,
     },
     Restored {
         #[serde(default)]
@@ -483,6 +488,7 @@ struct PaneTransport {
     reading: bool,
     graphics: bool,
     directory_recovery: bool,
+    worktree_writes: bool,
 }
 /// One transport for a desktop's inventory and Pane workers. It retains no credential.
 #[cfg(feature = "client")]
@@ -513,6 +519,10 @@ impl SharedPaneConnection {
 }
 #[cfg(feature = "client")]
 impl PaneConnection {
+    pub fn worktree_writes(&self) -> bool {
+        self.transport.worktree_writes
+    }
+
     pub(crate) fn negotiate(
         mut stream: std::os::unix::net::UnixStream,
     ) -> Result<Self, ServerError> {
@@ -527,8 +537,12 @@ impl PaneConnection {
                 reading,
                 graphics,
                 directory_recovery,
+                worktree_writes,
             } => {
                 let mut connection = Self::new(stream, pane_takeover);
+                std::sync::Arc::get_mut(&mut connection.transport)
+                    .ok_or(ServerError::Protocol)?
+                    .worktree_writes = worktree_writes;
                 std::sync::Arc::get_mut(&mut connection.transport)
                     .ok_or(ServerError::Protocol)?
                     .interactive_input = interactive_input;
@@ -560,6 +574,7 @@ impl PaneConnection {
                 reading: false,
                 graphics: false,
                 directory_recovery: false,
+                worktree_writes: false,
             }),
         }
     }

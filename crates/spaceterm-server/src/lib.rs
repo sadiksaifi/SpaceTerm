@@ -11,6 +11,7 @@ mod protocol;
 pub mod repository;
 pub mod service;
 mod storage;
+pub mod worktree;
 
 #[cfg(feature = "client")]
 pub use client::LocalServer;

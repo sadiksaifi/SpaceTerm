@@ -128,6 +128,7 @@ pub(super) enum WorktreeRemoval {
     Unlisted,
     /// A SpaceTerm Server owns the Worktree, and removing it there is not available yet.
     Server,
+    NeedsServer,
 }
 
 #[derive(Clone, Copy)]
@@ -264,7 +265,13 @@ pub(super) struct WorktreeRowViewModel {
 impl WorktreeRowViewModel {
     /// Whether activating the row shows Tabs: an existing Tab, or a first Tab in its directory.
     pub(super) fn openable(&self) -> bool {
-        self.has_tabs || (!self.missing && !self.shared)
+        self.has_tabs
+            || (!self.missing
+                && (!self.shared
+                    || !matches!(
+                        self.removal,
+                        WorktreeRemoval::Server | WorktreeRemoval::NeedsServer
+                    )))
     }
 
     /// Whether the row offers New Tab: a Tab in this Worktree's directory.

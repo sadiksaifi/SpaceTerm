@@ -146,6 +146,10 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.is_shared_workspace(workspace_id) {
+            self.request_server_worktree_removal(workspace_id, worktree_id, window, cx);
+            return;
+        }
         if self.sidebar_worktrees.removal.is_some() {
             return;
         }

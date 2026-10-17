@@ -482,3 +482,454 @@ fn repairing_an_unpinned_root_preserves_missing_worktree_membership_after_reads_
     assert_eq!(restored.inventory.workspaces[0].root_tab, original.root_tab);
     reads.shutdown();
 }
+
+#[test]
+fn worktree_write_retries_resolve_the_original_and_never_recreate_removed_state() {
+    use spaceterm_server::{
+        hierarchy::{Mutation, Outcome},
+        worktree::{Branch, BranchName, Operation},
+    };
+    let git = GitFixture::new();
+    let mut prototype = host();
+    prototype.directory = git.0.clone();
+    let mut host = SharedWorkspaceHost::new(prototype);
+    let workspace = create_shared(&mut host, 1);
+    let tree = git.0.join("created");
+    let mutation = Mutation::Worktree(Operation::Create {
+        workspace,
+        root: git.0.clone(),
+        path: tree.clone(),
+        branch: Branch::New {
+            name: "created".into(),
+            base: BranchName::Local("main".into()),
+        },
+    });
+    let until = Instant::now() + Duration::from_secs(12);
+    let result = loop {
+        match host.request(
+            [1; 32],
+            [1; 32],
+            Request::Mutate {
+                sequence: 2,
+                mutation: mutation.clone(),
+            },
+        ) {
+            Reply::MutationPending => {}
+            Reply::Outcome(outcome) => break outcome,
+            reply => panic!("unexpected reply: {reply:?}"),
+        }
+        assert!(Instant::now() < until);
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(
+        matches!(result.outcome, Outcome::Accepted { .. }),
+        "{result:?}"
+    );
+    git.git(&["worktree", "remove", tree.to_str().unwrap()]);
+    assert!(
+        matches!(host.request([1;32], [2;32], Request::Mutate {sequence: 2, mutation}), Reply::Outcome(outcome) if outcome == result)
+    );
+    assert!(!tree.exists());
+    host.shutdown().unwrap();
+}
+
+fn finish_write(
+    host: &mut SharedWorkspaceHost,
+    sequence: u64,
+    operation: spaceterm_server::worktree::Operation,
+) -> spaceterm_server::hierarchy::Outcome {
+    let until = Instant::now() + Duration::from_secs(12);
+    loop {
+        match host.request(
+            [1; 32],
+            [1; 32],
+            Request::Mutate {
+                sequence,
+                mutation: spaceterm_server::hierarchy::Mutation::Worktree(operation.clone()),
+            },
+        ) {
+            Reply::MutationPending => {}
+            Reply::Outcome(result) => return result.outcome,
+            other => panic!("unexpected write reply: {other:?}"),
+        }
+        assert!(Instant::now() < until);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+fn review_removal(
+    host: &mut SharedWorkspaceHost,
+    root: &std::path::Path,
+    path: &std::path::Path,
+) -> spaceterm_server::worktree::Removal {
+    match host.request(
+        [1; 32],
+        [1; 32],
+        Request::WorktreeRead(spaceterm_server::worktree::Read::CheckRemoval {
+            root: root.to_owned(),
+            path: path.to_owned(),
+        }),
+    ) {
+        Reply::WorktreeRead(Ok(spaceterm_server::worktree::ReadReply::Removal(review))) => review,
+        other => panic!("unexpected removal review: {other:?}"),
+    }
+}
+#[test]
+fn removal_revalidates_other_workspace_sessions_and_closes_unattached_work_before_git() {
+    use spaceterm_server::{
+        hierarchy::Outcome,
+        worktree::{Error, Operation},
+    };
+    let git = GitFixture::new();
+    let tree = git.0.join("linked");
+    git.git(&["worktree", "add", "-b", "linked", tree.to_str().unwrap()]);
+    let mut prototype = host();
+    prototype.directory = tree.clone();
+    let mut host = SharedWorkspaceHost::new(prototype);
+    create_shared(&mut host, 1);
+    create_shared(&mut host, 2);
+    git_facts(&mut host, &tree, |facts| facts.worktrees.is_some());
+    let review = review_removal(&mut host, &git.0, &tree);
+    assert_eq!(review.tabs.len(), 2);
+    let pane = review.tabs[1].panes[0].id;
+    let Reply::Attached { lease } = host.request(
+        [1; 32],
+        [3; 32],
+        Request::SelectPane {
+            pane,
+            explicit: true,
+            size: size(),
+            style: None,
+        },
+    ) else {
+        panic!("start other client's Pane")
+    };
+    command(
+        &mut host,
+        3,
+        lease,
+        "printf '\\nunattached-work\\n'; sleep 30\n",
+    );
+    await_text(&mut host, 3, lease, "unattached-work");
+    assert!(matches!(
+        host.request(
+            [3; 32],
+            [4; 32],
+            Request::TakeOver {
+                target: lease.into(),
+                size: size(),
+                style: None
+            }
+        ),
+        Reply::Attached { .. }
+    ));
+    let operation = Operation::Remove {
+        root: git.0.clone(),
+        path: tree.clone(),
+        boot: review.boot,
+        confirmation: review.confirmation,
+    };
+    assert_eq!(
+        finish_write(&mut host, 3, operation),
+        Outcome::WorktreeFailed(Error::Changed)
+    );
+    assert!(tree.exists());
+    let review = review_removal(&mut host, &git.0, &tree);
+    assert_eq!(
+        review
+            .tabs
+            .iter()
+            .flat_map(|t| &t.panes)
+            .filter(|p| p.session.is_some())
+            .count(),
+        1
+    );
+    let operation = Operation::Remove {
+        root: git.0.clone(),
+        path: tree.clone(),
+        boot: review.boot,
+        confirmation: review.confirmation,
+    };
+    assert!(matches!(
+        finish_write(&mut host, 4, operation),
+        Outcome::Accepted { .. }
+    ));
+    assert!(!tree.exists());
+    assert!(
+        shared_inventory(&mut host)
+            .close
+            .unwrap()
+            .sessions
+            .iter()
+            .all(|p| p.session.is_none())
+    );
+    let inventory = shared_inventory(&mut host);
+    assert_eq!(inventory.workspaces.len(), 2);
+    assert!(
+        inventory
+            .workspaces
+            .iter()
+            .all(|w| w.tabs.len() == 1 && w.tabs[0].worktree.as_ref() == Some(&git.0))
+    );
+    host.shutdown().unwrap();
+}
+#[test]
+fn replaced_worktree_and_main_worktree_are_preserved_after_confirmation() {
+    use spaceterm_server::{
+        hierarchy::Outcome,
+        worktree::{Error, Operation, Read},
+    };
+    let git = GitFixture::new();
+    let tree = git.0.join("linked");
+    git.git(&["worktree", "add", "-b", "linked", tree.to_str().unwrap()]);
+    let mut prototype = host();
+    prototype.directory = git.0.clone();
+    let mut host = SharedWorkspaceHost::new(prototype);
+    create_shared(&mut host, 1);
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::WorktreeRead(Read::CheckRemoval {
+                root: git.0.clone(),
+                path: git.0.clone()
+            })
+        ),
+        Reply::WorktreeRead(Err(Error::Main))
+    ));
+    let review = review_removal(&mut host, &git.0, &tree);
+    git.git(&["worktree", "remove", tree.to_str().unwrap()]);
+    git.git(&["worktree", "add", tree.to_str().unwrap(), "linked"]);
+    assert_eq!(
+        finish_write(
+            &mut host,
+            2,
+            Operation::Remove {
+                root: git.0.clone(),
+                path: tree.clone(),
+                boot: review.boot,
+                confirmation: review.confirmation
+            }
+        ),
+        Outcome::WorktreeFailed(Error::Changed)
+    );
+    assert!(tree.exists());
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn worktree_location_is_seeded_once_and_validated_by_the_owning_server() {
+    use spaceterm_server::{
+        hierarchy::Outcome,
+        worktree::{Error, Operation, Read, ReadReply},
+    };
+    let mut host = SharedWorkspaceHost::new(host());
+    let read = |host: &mut SharedWorkspaceHost, template: &str| {
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::WorktreeRead(Read::SeedLocation {
+                template: template.into(),
+            }),
+        )
+    };
+    assert!(
+        matches!(read(&mut host,"~/first/{branch}"),Reply::WorktreeRead(Ok(ReadReply::Settings(s))) if s.template=="~/first/{branch}")
+    );
+    assert!(
+        matches!(read(&mut host,"~/later/{branch}"),Reply::WorktreeRead(Ok(ReadReply::Settings(s))) if s.template=="~/first/{branch}")
+    );
+    assert_eq!(
+        finish_write(
+            &mut host,
+            1,
+            Operation::SetLocation {
+                version: 0,
+                template: "~/missing-placeholder".into()
+            }
+        ),
+        Outcome::WorktreeFailed(Error::Location)
+    );
+    assert!(matches!(
+        finish_write(
+            &mut host,
+            2,
+            Operation::SetLocation {
+                version: 0,
+                template: "~/second/{branch}".into()
+            }
+        ),
+        Outcome::Accepted { .. }
+    ));
+    assert_eq!(
+        finish_write(
+            &mut host,
+            3,
+            Operation::SetLocation {
+                version: 0,
+                template: "~/stale/{branch}".into()
+            }
+        ),
+        Outcome::WorktreeFailed(Error::Changed)
+    );
+    assert!(
+        matches!(host.request([1;32],[1;32],Request::WorktreeRead(Read::Settings)),Reply::WorktreeRead(Ok(ReadReply::Settings(s))) if s.template=="~/second/{branch}" && s.version==1)
+    );
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn server_removal_protects_pins_in_unattached_workspaces_and_rechecks_missing_locations() {
+    use spaceterm_server::{
+        hierarchy::{Mutation, Outcome},
+        worktree::{Error, Operation, Read},
+    };
+    let git = GitFixture::new();
+    let tree = git.0.join("linked");
+    git.git(&["worktree", "add", "-b", "linked", tree.to_str().unwrap()]);
+    let mut prototype = host();
+    prototype.directory = git.0.clone();
+    let mut host = SharedWorkspaceHost::new(prototype);
+    let workspace = create_shared(&mut host, 1);
+    let other = create_shared(&mut host, 2);
+    let alias = git.0.join("pin-alias");
+    std::os::unix::fs::symlink(&tree, &alias).unwrap();
+    host.request(
+        [1; 32],
+        [1; 32],
+        Request::Mutate {
+            sequence: 3,
+            mutation: Mutation::PinWorkspace {
+                workspace: other,
+                version: 0,
+                directory: Some(alias),
+            },
+        },
+    );
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            [1; 32],
+            Request::WorktreeRead(Read::CheckRemoval {
+                root: git.0.clone(),
+                path: tree.clone()
+            })
+        ),
+        Reply::WorktreeRead(Err(Error::Pinned))
+    ));
+    host.request(
+        [1; 32],
+        [1; 32],
+        Request::Mutate {
+            sequence: 4,
+            mutation: Mutation::PinWorkspace {
+                workspace: other,
+                version: 1,
+                directory: None,
+            },
+        },
+    );
+    let review = review_removal(&mut host, &git.0, &tree);
+    std::fs::remove_dir_all(&tree).unwrap();
+    assert!(matches!(
+        finish_write(
+            &mut host,
+            5,
+            Operation::Remove {
+                root: git.0.clone(),
+                path: tree.clone(),
+                boot: review.boot,
+                confirmation: review.confirmation
+            }
+        ),
+        Outcome::WorktreeFailed(_)
+    ));
+    let review = review_removal(&mut host, &git.0, &tree);
+    assert!(!review.changes);
+    // A directory appearing after a missing-target confirmation receives no destructive authority.
+    std::fs::create_dir(&tree).unwrap();
+    std::fs::write(tree.join("keep"), "replacement").unwrap();
+    assert_eq!(
+        finish_write(
+            &mut host,
+            6,
+            Operation::Remove {
+                root: git.0.clone(),
+                path: tree.clone(),
+                boot: review.boot,
+                confirmation: review.confirmation
+            }
+        ),
+        Outcome::WorktreeFailed(Error::Changed)
+    );
+    assert_eq!(std::fs::read(tree.join("keep")).unwrap(), b"replacement");
+    std::fs::remove_dir_all(&tree).unwrap();
+    let review = review_removal(&mut host, &git.0, &tree);
+    std::os::unix::fs::symlink(git.0.join("absent-target"), &tree).unwrap();
+    assert_eq!(
+        finish_write(
+            &mut host,
+            7,
+            Operation::Remove {
+                root: git.0.clone(),
+                path: tree.clone(),
+                boot: review.boot,
+                confirmation: review.confirmation
+            }
+        ),
+        Outcome::WorktreeFailed(Error::Changed)
+    );
+    assert_eq!(
+        std::fs::read_link(&tree).unwrap(),
+        git.0.join("absent-target")
+    );
+
+    assert!(
+        shared_inventory(&mut host)
+            .workspaces
+            .iter()
+            .any(|w| w.id == workspace)
+    );
+    host.shutdown().unwrap();
+}
+
+#[test]
+fn created_worktrees_use_gits_physical_directory_in_saved_membership() {
+    use spaceterm_server::{
+        hierarchy::Outcome,
+        worktree::{Branch, BranchName, Operation},
+    };
+    let git = GitFixture::new();
+    let alias = git.0.join("alias");
+    let actual = git.0.join("actual");
+    std::fs::create_dir(&actual).unwrap();
+    std::os::unix::fs::symlink(&actual, &alias).unwrap();
+    let mut prototype = host();
+    prototype.directory = git.0.clone();
+    let mut host = SharedWorkspaceHost::new(prototype);
+    let workspace = create_shared(&mut host, 1);
+    let result = finish_write(
+        &mut host,
+        2,
+        Operation::Create {
+            workspace,
+            root: git.0.clone(),
+            path: alias.join("created"),
+            branch: Branch::New {
+                name: "physical".into(),
+                base: BranchName::Local("main".into()),
+            },
+        },
+    );
+    let Outcome::Accepted { target } = result else {
+        panic!("creation through alias: {result:?}")
+    };
+    let inventory = shared_inventory(&mut host);
+    let tab = inventory
+        .workspaces
+        .iter()
+        .flat_map(|w| &w.tabs)
+        .find(|t| t.id == target)
+        .unwrap();
+    assert_eq!(tab.worktree.as_ref(), Some(&actual.join("created")));
+    host.shutdown().unwrap();
+}

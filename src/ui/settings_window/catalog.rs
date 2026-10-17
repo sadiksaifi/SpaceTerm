@@ -155,6 +155,7 @@ pub(super) enum SettingsRowId {
     LocalServer,
     /// The service that runs the local server while the person is logged in, and its controls.
     ServerService,
+    ServerWorktreeLocation,
     /// The installed version, the latest check, and the next step the update service offers.
     UpdateStatus,
     AutomaticUpdateDownloads,
@@ -209,6 +210,7 @@ impl SettingsRowId {
             | Self::GitTool
             | Self::ShowPullRequests
             | Self::GitHubCli
+            | Self::ServerWorktreeLocation
             | Self::WorktreeLocation
             // The local server rows hold status and actions, not a preference.
             | Self::LocalServer
@@ -696,6 +698,23 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-server-service",
     },
     SettingsRowDescriptor {
+        id: SettingsRowId::ServerWorktreeLocation,
+        section: SettingsSectionId::Servers,
+        group: "Server Settings",
+        label: "New Worktree Location",
+        keywords: &[
+            "server",
+            "worktree",
+            "path",
+            "folder",
+            "directory",
+            "template",
+            "branch",
+            "repository",
+        ],
+        selector: "settings-row-server-worktree-location",
+    },
+    SettingsRowDescriptor {
         id: SettingsRowId::UpdateStatus,
         section: SettingsSectionId::Updates,
         // The installed version leads the page and needs no title: it is what the page is about.
@@ -951,7 +970,7 @@ mod tests {
     }
 
     /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 35] = [
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 36] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Opacity,
         SettingsRowId::Blur,
@@ -979,6 +998,7 @@ mod tests {
         SettingsRowId::WorktreeLocation,
         SettingsRowId::LocalServer,
         SettingsRowId::ServerService,
+        SettingsRowId::ServerWorktreeLocation,
         SettingsRowId::UpdateStatus,
         SettingsRowId::AutomaticUpdateDownloads,
         SettingsRowId::UpdateCheckInterval,
@@ -1279,6 +1299,7 @@ mod tests {
                     | SettingsRowId::GitTool
                     | SettingsRowId::ShowPullRequests
                     | SettingsRowId::GitHubCli
+                    | SettingsRowId::ServerWorktreeLocation
                     | SettingsRowId::WorktreeLocation
                     | SettingsRowId::LocalServer
                     | SettingsRowId::ServerService
