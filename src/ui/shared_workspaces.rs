@@ -158,6 +158,12 @@ mod development {
         edits: Rc<dyn SharedWorkspaceEdits>,
         submitted: Rc<std::cell::RefCell<Option<Mutation>>>,
         awaiting_poll: Rc<std::cell::Cell<bool>>,
+        completion: Rc<std::cell::RefCell<Option<AwaitedEdit>>>,
+    }
+
+    struct AwaitedEdit {
+        mutation: Mutation,
+        reply: async_channel::Sender<Result<RetainedOutcome, SharedRefusalReason>>,
     }
 
     impl SharedEditSource {
@@ -168,6 +174,7 @@ mod development {
                 edits,
                 submitted: Rc::new(std::cell::RefCell::new(None)),
                 awaiting_poll: Rc::new(std::cell::Cell::new(awaiting_poll)),
+                completion: Rc::new(std::cell::RefCell::new(None)),
             }
         }
 
@@ -197,6 +204,23 @@ mod development {
             SharedSubmission::Submitted
         }
 
+        /// The result belongs to this submission even after another edit replaces the snapshot.
+        pub(crate) fn submit_waiting(
+            &self,
+            mutation: Mutation,
+        ) -> Result<
+            async_channel::Receiver<Result<RetainedOutcome, SharedRefusalReason>>,
+            SharedRefusalReason,
+        > {
+            if let SharedSubmission::Refused(reason) = self.submit(mutation.clone()) {
+                return Err(reason);
+            }
+            let (reply, receiver) = async_channel::bounded(1);
+            self.completion
+                .replace(Some(AwaitedEdit { mutation, reply }));
+            Ok(receiver)
+        }
+
         /// Whether this process asked for the edit an answer settles, which it reports once.
         fn claims(&self, mutation: &Mutation) -> bool {
             let mut submitted = self.submitted.borrow_mut();
@@ -209,8 +233,26 @@ mod development {
 
         pub(crate) fn snapshot(&self) -> SharedWorkspaceSnapshot {
             let snapshot = self.edits.snapshot();
-            // Every submitting surface shares this gate. A completed reply must reach the
-            // foreground before another request can replace the worker's retained answer.
+            // Deliver the current submission before opening the gate to its successor. Each
+            // receiver retains its own result even if its task has not been polled yet.
+            let mut completion = self.completion.borrow_mut();
+            if let Some(awaited) = completion.as_ref() {
+                let result = if snapshot.rejected.as_ref() == Some(&awaited.mutation) {
+                    Some(Err(SharedRefusalReason::Offline))
+                } else {
+                    snapshot
+                        .outcome
+                        .as_ref()
+                        .filter(|outcome| outcome.mutation == awaited.mutation)
+                        .cloned()
+                        .map(Ok)
+                };
+                if let Some(result) = result
+                    && let Some(awaited) = completion.take()
+                {
+                    let _ = awaited.reply.try_send(result);
+                }
+            }
             if snapshot.connected && !snapshot.pending {
                 self.awaiting_poll.set(false);
             }

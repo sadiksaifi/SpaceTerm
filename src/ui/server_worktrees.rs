@@ -2,7 +2,7 @@
 use crate::{
     local_server::LocalServer,
     terminal::shared_workspace::SharedWorkspaceClient,
-    ui::shared_workspaces::{SharedEditSource, SharedRefusalReason, SharedSubmission},
+    ui::shared_workspaces::{SharedEditSource, SharedRefusalReason},
 };
 use gpui::{App, AppContext as _, Global, Task};
 use spaceterm_server::{
@@ -66,31 +66,34 @@ impl Client {
         operation: Operation,
         cx: &mut App,
     ) -> Task<Result<RetainedOutcome, WriteError>> {
-        let mutation = Mutation::Worktree(operation);
-        self.source.snapshot();
-        if let SharedSubmission::Refused(reason) = self.source.submit(mutation.clone()) {
-            return Task::ready(Err(WriteError::Refused(reason)));
-        }
-        let source = self.source.clone();
-        cx.spawn(async move |cx| {
-            loop {
-                let snapshot = source.snapshot();
-                if snapshot.rejected.as_ref() == Some(&mutation) {
-                    return Err(WriteError::Refused(SharedRefusalReason::Offline));
-                }
-                if let Some(outcome) = snapshot
-                    .outcome
-                    .filter(|outcome| outcome.mutation == mutation)
-                {
-                    return Ok(outcome);
-                }
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(50))
-                    .await;
-            }
-        })
+        write(self.source.clone(), operation, cx)
     }
 }
+fn write(
+    source: SharedEditSource,
+    operation: Operation,
+    cx: &mut App,
+) -> Task<Result<RetainedOutcome, WriteError>> {
+    source.snapshot();
+    let completion = match source.submit_waiting(Mutation::Worktree(operation)) {
+        Ok(completion) => completion,
+        Err(reason) => return Task::ready(Err(WriteError::Refused(reason))),
+    };
+    cx.spawn(async move |cx| {
+        loop {
+            source.snapshot();
+            match completion.try_recv() {
+                Ok(result) => return result.map_err(WriteError::Refused),
+                Err(async_channel::TryRecvError::Closed) => return Err(Error::Unavailable.into()),
+                Err(async_channel::TryRecvError::Empty) => (),
+            }
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(50))
+                .await;
+        }
+    })
+}
+
 pub(crate) fn read_server(server: &LocalServer, read: Read) -> Result<ReadReply, Error> {
     match server
         .connect_shared_pane()
@@ -193,5 +196,69 @@ fn create_error(error: WriteError) -> crate::worktrees::git::WorktreeCreateError
     match error {
         WriteError::Refused(reason) => WorktreeCreateError::NotSubmitted(reason.explanation()),
         WriteError::Server(error) => WorktreeCreateError::Server(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::shared_workspaces::testing::ScriptedEdits;
+    use std::cell::RefCell;
+
+    #[gpui::test]
+    fn shared_write_waiters_keep_their_completions_when_later_edits_finish(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let edits = Rc::new(ScriptedEdits::new(None));
+        let source = SharedEditSource::new(edits.clone());
+        let replies = Rc::new(RefCell::new(Vec::new()));
+        let first = Operation::SetLocation {
+            version: 0,
+            template: "~/first/{branch}".into(),
+        };
+        let second = Operation::SetLocation {
+            version: 1,
+            template: "~/second/{branch}".into(),
+        };
+        let first_task = cx.update(|cx| write(source.clone(), first.clone(), cx));
+        let recorded = replies.clone();
+        cx.spawn(async move |_| {
+            let reply = first_task.await;
+            recorded.borrow_mut().push(reply);
+        })
+        .detach();
+        cx.run_until_parked();
+        edits.answer(Outcome::Accepted { target: [1; 32] });
+        // The Workspace poll sees A before its sleeping waiter does. B may now submit.
+        source.snapshot();
+        let second_task = cx.update(|cx| write(source.clone(), second.clone(), cx));
+        let recorded = replies.clone();
+        cx.spawn(async move |_| {
+            let reply = second_task.await;
+            recorded.borrow_mut().push(reply);
+        })
+        .detach();
+        cx.run_until_parked();
+        edits.answer(Outcome::Accepted { target: [1; 32] });
+        source.snapshot();
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_millis(100));
+        cx.run_until_parked();
+        let mut received: Vec<_> = replies
+            .borrow()
+            .iter()
+            .map(|reply| {
+                let reply = reply.as_ref().expect("each submission gets its own answer");
+                (reply.sequence, reply.mutation.clone())
+            })
+            .collect();
+        received.sort_by_key(|(sequence, _)| *sequence);
+        assert_eq!(
+            received,
+            vec![
+                (1, Mutation::Worktree(first)),
+                (2, Mutation::Worktree(second))
+            ]
+        );
     }
 }
