@@ -2946,13 +2946,13 @@ impl TabView {
                 });
                 server_pane::render_screen(
                     selector("takeover"),
-                    title.into(),
-                    detail.into(),
+                    server_pane::ScreenCopy::new(title.into(), detail.into()),
                     // Losing control and the end of a Session both happen without any action
                     // here, so assistive technology announces them.
                     true,
                     action,
                     status,
+                    pane.announcements(),
                     cx,
                 )
             }
@@ -2994,11 +2994,11 @@ impl TabView {
                     });
                 server_pane::render_screen(
                     selector("restored"),
-                    server_pane::RESTORED_TITLE.into(),
-                    server_pane::RESTORED_DETAIL.into(),
+                    server_pane::ScreenCopy::new(server_pane::RESTORED_TITLE.into(), server_pane::RESTORED_DETAIL.into()),
                     true,
                     Some(action),
                     status,
+                    pane.announcements(),
                     cx,
                 )
             }
@@ -3023,7 +3023,7 @@ impl TabView {
                     .on_activate(move |_, window, cx| { let _ = owner.update(cx, |view, cx| view.choose_shared_directory(pane_id, window, cx)); });
                 let missing_worktree = target.as_ref().is_some_and(|target| self.shared.as_ref().is_some_and(|shared| shared.missing_worktree_for_directory(&target.original)));
                 let status = if starting { Some(server_pane::progress_status(selector("directory-status"), selector("directory-progress"), server_pane::STARTING_SHELL.into(), cx)) } else { pane.directory_note().map(|note| server_pane::note_status(selector("directory-status"), note.into(), cx)) };
-                server_pane::render_directory_screen(selector("directory-unavailable"), target.and_then(|target| target.original.to_str().map(|s| gpui::SharedString::from(s.to_owned()))), vec![retry, choose], status, missing_worktree, cx)
+                server_pane::render_directory_screen(selector("directory-unavailable"), target.and_then(|target| target.original.to_str().map(|s| gpui::SharedString::from(s.to_owned()))), vec![retry, choose], status, missing_worktree, pane.announcements(), cx)
             }
 
         });

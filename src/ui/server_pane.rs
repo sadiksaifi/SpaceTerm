@@ -12,6 +12,7 @@ use spaceterm_ui::{
     Button, ButtonSize, ButtonVariant, FloatingRole, Icon, ProgressRing, ProgressSize,
     ProgressState,
 };
+use std::{cell::RefCell, rc::Rc};
 
 mod directory_recovery;
 pub(crate) use directory_recovery::{DirectoryRecovery, RecoveryActions};
@@ -54,27 +55,58 @@ pub(crate) enum Dormant {
     DirectoryUnavailable,
 }
 
+/// Remembers announcements this client actually published, across hidden Tabs and reconnects.
+#[derive(Default)]
+pub(crate) struct ScreenAnnouncements {
+    entry: PublishedAnnouncement,
+    outcome: PublishedAnnouncement,
+}
+
+#[derive(Clone, Default)]
+struct PublishedAnnouncement(Rc<RefCell<Option<SharedString>>>);
+
+impl PublishedAnnouncement {
+    fn node(&self, message: &SharedString, enabled: bool) -> gpui::accesskit::Node {
+        let mut published = self.0.borrow_mut();
+        let changed = enabled && !message.is_empty() && published.as_ref() != Some(message);
+        if enabled {
+            *published = Some(message.clone());
+        }
+        let mut node = gpui::accesskit::Node::new(gpui::accesskit::Role::Status);
+        node.set_label(message.as_ref());
+        node.set_value(message.as_ref());
+        node.set_live(if changed {
+            gpui::accesskit::Live::Polite
+        } else {
+            gpui::accesskit::Live::Off
+        });
+        node
+    }
+}
+
+pub(crate) struct ScreenStatus {
+    content: AnyElement,
+    note: SharedString,
+}
+
 /// A centered screen replacing a Pane: a title, its detail, one action, and a status slot under
 /// the action.
 pub(crate) fn render_screen(
     selector: SharedString,
-    title: SharedString,
-    detail: SharedString,
+    copy: ScreenCopy,
     announce: bool,
     action: Option<Button>,
-    status: Option<AnyElement>,
+    status: Option<ScreenStatus>,
+    announcements: &ScreenAnnouncements,
     cx: &App,
 ) -> AnyElement {
     render_screen_content(
         selector,
-        ScreenCopy {
-            title,
-            detail,
-            path: None,
-        },
+        copy,
         announce,
         action.into_iter().collect(),
         status,
+        announcements,
         cx,
     )
 }
@@ -83,8 +115,9 @@ pub(crate) fn render_directory_screen(
     selector: SharedString,
     path: Option<SharedString>,
     actions: Vec<Button>,
-    status: Option<AnyElement>,
+    status: Option<ScreenStatus>,
     missing_worktree: bool,
+    announcements: &ScreenAnnouncements,
     cx: &App,
 ) -> AnyElement {
     let detail = if missing_worktree {
@@ -102,20 +135,31 @@ pub(crate) fn render_directory_screen(
         true,
         actions,
         status,
+        announcements,
         cx,
     )
 }
-struct ScreenCopy {
+pub(crate) struct ScreenCopy {
     title: SharedString,
     detail: SharedString,
     path: Option<SharedString>,
+}
+impl ScreenCopy {
+    pub(crate) fn new(title: SharedString, detail: SharedString) -> Self {
+        Self {
+            title,
+            detail,
+            path: None,
+        }
+    }
 }
 fn render_screen_content(
     selector: SharedString,
     copy: ScreenCopy,
     announce: bool,
     actions: Vec<Button>,
-    status: Option<AnyElement>,
+    status: Option<ScreenStatus>,
+    announcements: &ScreenAnnouncements,
     cx: &App,
 ) -> AnyElement {
     let ScreenCopy {
@@ -128,15 +172,21 @@ fn render_screen_content(
     let surface =
         appearance.pane_surface(appearance_runtime::current(cx).terminal.colors.background);
     let detail_id = SharedString::from(format!("{selector}-detail"));
+    let slot_id = SharedString::from(format!("{selector}-status-slot"));
+    let message: SharedString = match &path {
+        Some(path) => format!("{title}. {path}. {detail}").into(),
+        None => format!("{title}. {detail}").into(),
+    };
+    let entry = announcements.entry.clone();
+    let outcome = announcements.outcome.clone();
+    let note = status
+        .as_ref()
+        .map_or_else(SharedString::default, |status| status.note.clone());
     let element_selector = selector.clone();
     div()
         .id(selector)
         .role(gpui::accesskit::Role::Group)
         .aria_label(title.clone())
-        .aria_description(
-            path.as_ref()
-                .map_or_else(|| detail.to_string(), |path| format!("{path}. {detail}")),
-        )
         .debug_selector(move || element_selector.to_string())
         .absolute()
         .inset_0()
@@ -171,10 +221,13 @@ fn render_screen_content(
                 .child(
                     div()
                         .id(detail_id)
-                        .when(announce, |detail_text| {
-                            detail_text
-                                .role(gpui::accesskit::Role::Status)
-                                .aria_label(detail.clone())
+                        .role(gpui::accesskit::Role::Group)
+                        .a11y_synthetic_children(move |builder| {
+                            let mut node = entry.node(&message, announce);
+                            if let Some(bounds) = builder.parent_node().bounds() {
+                                node.set_bounds(bounds);
+                            }
+                            builder.push_child(builder.synthetic_node_id("entry"), node);
                         })
                         .whitespace_normal()
                         .chrome_text(appearance.typography.style(TextRole::Secondary))
@@ -193,27 +246,34 @@ fn render_screen_content(
         // The slot keeps its height, so the action stays put while its status changes.
         .child(
             div()
+                .id(slot_id)
+                .role(gpui::accesskit::Role::Group)
+                .a11y_synthetic_children(move |builder| {
+                    let mut node = outcome.node(&note, true);
+                    if let Some(bounds) = builder.parent_node().bounds() {
+                        node.set_bounds(bounds);
+                    }
+                    builder.push_child(builder.synthetic_node_id("outcome"), node);
+                })
                 .h(appearance.spacing(20.0))
                 .flex()
                 .items_center()
-                .children(status),
+                .children(status.map(|status| status.content)),
         )
         .into_any_element()
 }
 
-/// An action's progress, read by assistive technology as one status.
+/// Progress is available for exploration, without interrupting the action's outcome speech.
 pub(crate) fn progress_status(
     selector: SharedString,
     progress_id: SharedString,
     label: SharedString,
     cx: &App,
-) -> AnyElement {
+) -> ScreenStatus {
     let appearance = super::appearance::shared_chrome(cx);
     let element_selector = selector.clone();
-    div()
+    let content = div()
         .id(selector)
-        .role(gpui::accesskit::Role::Status)
-        .aria_label(label.clone())
         .debug_selector(move || element_selector.to_string())
         .flex()
         .items_center()
@@ -228,22 +288,28 @@ pub(crate) fn progress_status(
                 .text_color(gpui_color(appearance.colors.text_secondary))
                 .child(label),
         )
-        .into_any_element()
+        .into_any_element();
+    ScreenStatus {
+        content,
+        note: SharedString::default(),
+    }
 }
 
 /// An action's outcome as plain text, read by assistive technology as one status.
-pub(crate) fn note_status(selector: SharedString, label: SharedString, cx: &App) -> AnyElement {
+pub(crate) fn note_status(selector: SharedString, label: SharedString, cx: &App) -> ScreenStatus {
     let appearance = super::appearance::shared_chrome(cx);
     let element_selector = selector.clone();
-    div()
+    let content = div()
         .id(selector)
-        .role(gpui::accesskit::Role::Status)
-        .aria_label(label.clone())
         .debug_selector(move || element_selector.to_string())
         .chrome_text(appearance.typography.style(TextRole::Secondary))
         .text_color(gpui_color(appearance.colors.text_secondary))
-        .child(label)
-        .into_any_element()
+        .child(label.clone())
+        .into_any_element();
+    ScreenStatus {
+        content,
+        note: label,
+    }
 }
 
 /// The interruption notice over a frozen server-backed screen, with the action that retries now.
@@ -403,7 +469,7 @@ pub(crate) use connection::{
 mod connection {
     use std::sync::Arc;
 
-    use super::Dormant;
+    use super::{Dormant, ScreenAnnouncements};
     use crate::local_server::ServerError;
     use crate::terminal::server_session::{DevelopmentPaneState, DevelopmentPaneStatus};
 
@@ -531,6 +597,7 @@ mod connection {
     /// unanswered Take Over or Start New Shell is claimed by nobody, and a screen stays through
     /// interruptions until a fresh screen arrives for this client.
     pub(crate) struct ServerPaneView {
+        announcements: ScreenAnnouncements,
         connection: Arc<dyn ServerPaneConnection>,
         status: DevelopmentPaneStatus,
         generation: u64,
@@ -545,6 +612,7 @@ mod connection {
     impl ServerPaneView {
         pub(crate) fn new(connection: Arc<dyn ServerPaneConnection>) -> Self {
             let mut view = Self {
+                announcements: ScreenAnnouncements::default(),
                 status: connection.status(),
                 generation: connection.connection_generation(),
                 connection: Arc::clone(&connection),
@@ -606,6 +674,7 @@ mod connection {
 
         fn apply(&mut self) -> ServerPaneSync {
             if self.status == DevelopmentPaneStatus::Connected {
+                self.announcements = ScreenAnnouncements::default();
                 self.takeover_shown = false;
                 self.take_over_unconfirmed = false;
                 self.dormant = None;
@@ -725,6 +794,9 @@ mod connection {
 
         pub(crate) fn directory_note(&self) -> Option<&'static str> {
             self.directory_progress.1
+        }
+        pub(crate) fn announcements(&self) -> &ScreenAnnouncements {
+            &self.announcements
         }
         pub(crate) fn connection(&self) -> Arc<dyn ServerPaneConnection> {
             Arc::clone(&self.connection)

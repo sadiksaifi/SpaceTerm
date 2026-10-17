@@ -324,6 +324,7 @@ mod window {
         start_unconfirmed: bool,
         directory_progress: (bool, Option<&'static str>),
         directory_recovery: Option<Entity<server_pane::DirectoryRecovery>>,
+        announcements: server_pane::ScreenAnnouncements,
         focus_handle: FocusHandle,
         window_appearance: WindowAppearanceOwner,
         window_traffic_lights: WindowTrafficLightOwner,
@@ -410,6 +411,7 @@ mod window {
                 start_pending: false,
                 start_unconfirmed: false,
                 directory_progress: (false, None),
+                announcements: server_pane::ScreenAnnouncements::default(),
                 directory_recovery: None,
                 focus_handle,
                 window_appearance,
@@ -483,6 +485,7 @@ mod window {
                 // A refused End Session leaves the shell running, so the action is offered again.
                 DevelopmentPaneStatus::Failed(_) => self.end_request = None,
                 DevelopmentPaneStatus::Connected => {
+                    self.announcements = server_pane::ScreenAnnouncements::default();
                     self.takeover_shown = false;
                     self.take_over_unconfirmed = false;
                     self.dormant = None;
@@ -1120,11 +1123,11 @@ mod window {
             // Assistive technology announces the end, which happens without any action here.
             server_pane::render_screen(
                 TAKEOVER_SELECTOR.into(),
-                title.into(),
-                detail.into(),
+                server_pane::ScreenCopy::new(title.into(), detail.into()),
                 session_ended,
                 Some(action),
                 status,
+                &self.announcements,
                 cx,
             )
         }
@@ -1181,6 +1184,7 @@ mod window {
                     vec![retry, choose],
                     status,
                     false,
+                    &self.announcements,
                     cx,
                 );
             }
@@ -1220,11 +1224,11 @@ mod window {
             // announces it.
             server_pane::render_screen(
                 RESTORED_SELECTOR.into(),
-                RESTORED_TITLE.into(),
-                RESTORED_DETAIL.into(),
+                server_pane::ScreenCopy::new(RESTORED_TITLE.into(), RESTORED_DETAIL.into()),
                 true,
                 Some(action),
                 status,
+                &self.announcements,
                 cx,
             )
         }

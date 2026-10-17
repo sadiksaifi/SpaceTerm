@@ -26,6 +26,7 @@ use crate::terminal::testing::{
 };
 use crate::ui::appearance_runtime;
 use crate::ui::pane_lifecycle::PaneConstruction;
+use crate::ui::server_pane;
 
 struct OpenPane<'a> {
     /// Weak, so closing the window releases the Pane as it does in the application.
@@ -641,7 +642,10 @@ fn assistive_technology_reaches_take_over_and_no_terminal_content(cx: &mut TestA
     let screen = tree.node("Controlled by Another Client");
     assert_eq!(screen["aria"]["role"], "Group");
     assert!(
-        screen["aria"]["description"]
+        tree.node(&format!(
+            "Controlled by Another Client. {}",
+            server_pane::TAKEOVER_DETAIL
+        ))["aria"]["value"]
             .as_str()
             .is_some_and(|description| description.contains("Take Over")),
         "the screen explains what Take Over does"
@@ -659,7 +663,7 @@ fn assistive_technology_reaches_take_over_and_no_terminal_content(cx: &mut TestA
 
     let tree = A11yTree::read(pane.cx);
     let progress = tree.node("Taking Over…");
-    assert_eq!(progress["aria"]["role"], "Status");
+    assert_eq!(progress["aria"]["role"], "ProgressIndicator");
     assert_eq!(tree.node("Take Over")["aria"]["disabled"], true);
 }
 
@@ -934,14 +938,20 @@ fn a_session_ended_while_another_client_controls_it_says_so_without_its_content(
     let tree = A11yTree::read(pane.cx);
     let screen = tree.node("Session Ended");
     assert_eq!(screen["aria"]["role"], "Group");
-    let description = screen["aria"]["description"].as_str().unwrap_or_default();
+    let description = tree.node(&format!(
+        "Session Ended. {}",
+        server_pane::SESSION_ENDED_DETAIL
+    ))["aria"]["value"]
+        .as_str()
+        .unwrap_or_default();
     assert!(description.contains("no longer available"));
     assert!(
         !description.contains("keeps running"),
         "the shell no longer runs"
     );
     assert_eq!(
-        tree.node("This Terminal Session is no longer available on the server.")["aria"]["role"],
+        tree.node("Session Ended. This Terminal Session is no longer available on the server.")["aria"]
+            ["role"],
         "Status",
         "the end is announced"
     );
@@ -1020,9 +1030,12 @@ fn a_permanent_failure_after_losing_control_explains_itself_without_content(
             .is_some_and(|description| description.contains("could not authenticate")),
         "the notice names the failure"
     );
-    let screen = tree.node("Controlled by Another Client");
+    let screen = tree.node(&format!(
+        "Controlled by Another Client. {}",
+        server_pane::TAKEOVER_FAILED_DETAIL
+    ));
     assert!(
-        !screen["aria"]["description"]
+        !screen["aria"]["value"]
             .as_str()
             .unwrap_or_default()
             .contains("keeps running"),
@@ -1123,7 +1136,12 @@ fn a_server_restart_forgets_the_former_screen(cx: &mut TestAppContext) {
     );
     let screen = tree.node("Server Restarted");
     assert_eq!(screen["aria"]["role"], "Group");
-    let description = screen["aria"]["description"].as_str().unwrap_or_default();
+    let description = tree.node(&format!(
+        "Server Restarted. {}",
+        server_pane::RESTORED_DETAIL
+    ))["aria"]["value"]
+        .as_str()
+        .unwrap_or_default();
     assert!(description.contains("ended"), "the former programs ended");
     assert!(
         description.contains("new shell"),
@@ -1154,7 +1172,7 @@ fn assistive_technology_reaches_start_new_shell(cx: &mut TestAppContext) {
     let tree = A11yTree::read(pane.cx);
     assert_eq!(
         tree.node(
-            "Programs that were running in this Pane ended when the server stopped. Start a new \
+            "Server Restarted. Programs that were running in this Pane ended when the server stopped. Start a new \
              shell to keep working here."
         )["aria"]["role"],
         "Status",
@@ -1168,7 +1186,10 @@ fn assistive_technology_reaches_start_new_shell(cx: &mut TestAppContext) {
     assert_eq!(pane.connection.restored_starts(), 1);
 
     let tree = A11yTree::read(pane.cx);
-    assert_eq!(tree.node("Starting Shell…")["aria"]["role"], "Status");
+    assert_eq!(
+        tree.node("Starting Shell…")["aria"]["role"],
+        "ProgressIndicator"
+    );
     assert_eq!(tree.node("Start New Shell")["aria"]["disabled"], true);
 }
 
@@ -1253,6 +1274,15 @@ fn an_unavailable_directory_offers_retry_without_exposing_terminal_content(
     assert!(!pane.rendered(NOTICE_SELECTOR));
     let tree = A11yTree::read(pane.cx);
     assert_eq!(tree.node("Directory Unavailable")["aria"]["role"], "Group");
+    assert!(tree.node("Directory Unavailable")["aria"]["description"].is_null());
+    let statuses = tree.with_role("Status");
+    assert_eq!(statuses.len(), 2);
+    assert!(statuses.iter().any(|node| node["aria"]["value"]
+        == format!(
+            "Directory Unavailable. {}",
+            crate::ui::server_pane::DIRECTORY_UNAVAILABLE_DETAIL
+        )));
+    assert!(statuses.iter().any(|node| node["aria"]["value"] == ""));
     assert!(tree.find("Retry").is_some());
     assert!(tree.find("Choose Directory…").is_some());
     assert!(tree.find("Close Window").is_none());
