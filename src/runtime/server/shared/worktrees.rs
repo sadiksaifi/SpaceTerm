@@ -566,14 +566,7 @@ impl SharedWorkspaceHost {
         } else if self.writes.worker.is_none() {
             for (device, record) in self.state.pending_worktrees() {
                 // The inherited file lock also covers an orphan Git child from a forced crash.
-                let lock = self.worktree_lock()?;
-                let (git, _) = git(lock).map_err(|_| Refusal::StorageUnavailable)?;
-                if let Mutation::Worktree(
-                    Operation::Create { root, .. } | Operation::Remove { root, .. },
-                ) = &record.mutation
-                {
-                    list(&git, root).map_err(|_| Refusal::StorageUnavailable)?;
-                }
+                let _lock = self.worktree_lock()?;
                 self.settle_worktree(device, record.sequence, Err(Error::Interrupted))?;
             }
         }
@@ -596,8 +589,10 @@ impl SharedWorkspaceHost {
         if let Mutation::Worktree(Operation::Create { root, .. } | Operation::Remove { root, .. }) =
             &operation
         {
-            let (git, _) = git(None).map_err(|_| Refusal::StorageUnavailable)?;
-            let snapshot = list(&git, root).map_err(|_| Refusal::StorageUnavailable)?;
+            let snapshot = git(None).and_then(|(git, _)| list(&git, root)).ok();
+            if result.is_ok() && snapshot.is_none() {
+                result = Err(Error::Interrupted);
+            }
             if result.is_ok()
                 && let Mutation::Worktree(Operation::Create { path, branch, .. }) = &operation
             {
@@ -606,20 +601,24 @@ impl SharedWorkspaceHost {
                     .ok()
                     .and_then(|d| std::fs::canonicalize(d.path()).ok())
                     .filter(|path| {
-                        snapshot.worktrees.iter().any(|r| {
-                            r.root == *path
-                                && !r.missing
-                                && r.head
-                                    == crate::worktrees::listing::WorktreeHead::Branch(
-                                        branch.name().into(),
-                                    )
+                        snapshot.as_ref().is_some_and(|snapshot| {
+                            snapshot.worktrees.iter().any(|r| {
+                                r.root == *path
+                                    && !r.missing
+                                    && r.head
+                                        == crate::worktrees::listing::WorktreeHead::Branch(
+                                            branch.name().into(),
+                                        )
+                            })
                         })
                     });
                 if created_path.is_none() {
                     result = Err(Error::Changed);
                 }
             }
-            self.repositories.publish_worktrees(&snapshot);
+            if let Some(snapshot) = snapshot {
+                self.repositories.publish_worktrees(&snapshot);
+            }
         }
         let target = if let Mutation::Worktree(Operation::Create {
             workspace, root, ..
@@ -665,6 +664,55 @@ mod tests {
         repository_tests::{GitFixture, finish_write, review_removal},
         tests::{create_shared, host, shared_inventory, size},
     };
+
+    #[test]
+    fn interrupted_worktree_recovery_keeps_the_server_usable_when_the_repository_is_gone() {
+        let git = GitFixture::new();
+        let mut prototype = host();
+        prototype.directory = git.0.clone();
+        let mut original = SharedWorkspaceHost::new(prototype);
+        let workspace = create_shared(&mut original, 1);
+        let operation = Operation::Create {
+            workspace,
+            root: git.0.clone(),
+            path: git.0.join("interrupted"),
+            branch: Branch::New {
+                name: "interrupted".into(),
+                base: BranchName::Local("main".into()),
+            },
+        };
+        let mut pending = original.state.clone();
+        pending
+            .apply(
+                [1; 32],
+                2,
+                Mutation::Worktree(operation.clone()),
+                &git.0,
+                |_| false,
+            )
+            .unwrap();
+        let bytes = serde_json::to_vec(&pending.envelope(&git.0).unwrap()).unwrap();
+        original.shutdown().unwrap();
+        std::fs::remove_dir_all(&git.0).unwrap();
+
+        let mut prototype = host();
+        prototype.directory = git.0.clone();
+        let mut restored = SharedWorkspaceHost::new(prototype);
+        restored.state = State::from_legacy(&serde_json::from_slice(&bytes).unwrap());
+        restored.state.begin_boot(restored.prototype.boot);
+        assert!(matches!(
+            restored.request([1; 32], [1; 32], Request::Capabilities),
+            Reply::Capabilities { .. }
+        ));
+        assert!(
+            matches!(restored.request([1; 32], [1; 32], Request::Mutate {
+            sequence: 2, mutation: Mutation::Worktree(operation),
+        }), Reply::Outcome(record) if record.outcome == Outcome::WorktreeFailed(Error::Interrupted))
+        );
+        assert_eq!(shared_inventory(&mut restored).workspaces.len(), 1);
+        restored.shutdown().unwrap();
+        assert!(!git.0.exists());
+    }
 
     #[test]
     fn removal_ignores_a_missing_pinned_directory_in_an_unrelated_workspace() {
