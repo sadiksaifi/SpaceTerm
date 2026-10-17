@@ -2379,7 +2379,9 @@ mod tests {
             lease,
             1,
             text_key(
-                "stty -echo; printf '\\033[2J\\033[HSIZE:'; stty size; stty raw -echo; printf '\\r\\nQUERY-READY\\r\\n'; dd bs=1 count=1 >/dev/null 2>/dev/null; printf '\\033[?996nAPPEARANCE:'; dd bs=1 count=9 2>/dev/null | od -An -tx1 | tr -d ' \\n'; printf '\\r\\n'",
+                // Keep terminal-mode setup, readiness, query and read in one process. Starting
+                // another foreground reader after the query can reset or flush its queued reply.
+                r#"python3 -c 'import os,sys,tty,fcntl,struct,termios; rows,cols,_,_=struct.unpack("HHHH",fcntl.ioctl(0,termios.TIOCGWINSZ,b"\0"*8)); tty.setraw(0,when=termios.TCSANOW); os.write(1,b"\033[2J\033[HSIZE:%d %d\r\nQUERY-READY\r\n"%(rows,cols)); sys.stdin.buffer.read(1); os.write(1,b"\033[?996n"); reply=sys.stdin.buffer.read(9); os.write(1,b"APPEARANCE:"+reply.hex().encode()+b"\r\n")'"#,
                 false,
             ),
         );
