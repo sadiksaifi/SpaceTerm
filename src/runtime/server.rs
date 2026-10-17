@@ -2379,7 +2379,7 @@ mod tests {
             lease,
             1,
             text_key(
-                "stty -echo; stty size; stty raw -echo; printf '\\033[?996n'; dd bs=1 count=9 2>/dev/null | od -An -tx1 | tr -d ' \\n'; printf '\\r\\n'",
+                "stty -echo; printf '\\033[2J\\033[HSIZE:'; stty size; stty raw -echo; printf '\\r\\nQUERY-READY\\r\\n'; dd bs=1 count=1 >/dev/null 2>/dev/null; printf '\\033[?996nAPPEARANCE:'; dd bs=1 count=9 2>/dev/null | od -An -tx1 | tr -d ' \\n'; printf '\\r\\n'",
                 false,
             ),
         );
@@ -2400,6 +2400,26 @@ mod tests {
         );
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
+            if let Reply::Screen(screen) = host.request([1; 32], [1; 32], Request::Poll { lease })
+                && screen.rows.iter().any(|row| {
+                    row.iter()
+                        .map(|cell| cell.text.as_str())
+                        .collect::<String>()
+                        .trim_end()
+                        == "QUERY-READY"
+                })
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "appearance query reader was not ready"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        input(&mut host, lease, 1, text_key(" ", false));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
             if let Reply::Screen(screen) = host.request([1; 32], [1; 32], Request::Poll { lease }) {
                 let rows = screen
                     .rows
@@ -2412,11 +2432,11 @@ mod tests {
                     .collect::<Vec<_>>();
                 if rows
                     .iter()
-                    .any(|row| row.trim_end() == "1b5b3f3939373b326e")
+                    .any(|row| row.trim_end() == "APPEARANCE:1b5b3f3939373b326e")
                 {
                     assert_eq!((screen.columns, screen.rows.len()), (91, 31));
                     assert_eq!(screen.background, [240; 3]);
-                    assert!(rows.iter().any(|row| row.trim_end() == "31 91"));
+                    assert!(rows.iter().any(|row| row.trim_end() == "SIZE:31 91"));
                     break;
                 }
             }
@@ -2875,7 +2895,7 @@ mod tests {
         let factory = NativeTerminalSessionFactory::new(
             native_pty_factory(),
             ShellLaunchPlanner::new(
-                "/bin/sh".into(),
+                shell.into(),
                 std::path::PathBuf::new(),
                 ShellIntegrationMode::Disabled,
                 ShellEnvironment::default(),
