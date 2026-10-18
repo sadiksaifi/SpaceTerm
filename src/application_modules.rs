@@ -101,6 +101,8 @@ mod architecture_tests;
 #[cfg(feature = "desktop")]
 mod directory_selection;
 mod local_path;
+#[cfg(feature = "desktop")]
+pub mod local_startup;
 
 /// Terminal runtime contracts shared by graphical and headless hosts.
 pub mod runtime;

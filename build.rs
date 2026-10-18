@@ -22,6 +22,11 @@ fn main() {
     let identity =
         identity::resolve(&root, release_tag.as_deref()).unwrap_or_else(|error| panic!("{error}"));
     println!("cargo:rustc-env=SPACETERM_VERSION={}", identity.version);
+    println!("cargo:rustc-env=SPACETERM_COMMIT={}", identity.commit);
+    println!(
+        "cargo:rustc-env=SPACETERM_TARGET={}",
+        env::var("TARGET").expect("Cargo supplies TARGET")
+    );
     println!(
         "cargo:rustc-env=SPACETERM_BUNDLE_VERSION={}",
         identity.bundle_version
