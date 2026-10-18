@@ -196,13 +196,11 @@ fn unsafe_store_and_unverified_extra_retained_resources_are_refused() {
                 VERSION,
             )
             .unwrap();
-            std::fs::write(
-                installed
-                    .directory
-                    .join("share/spaceterm/shell-integration/zsh/extra"),
-                b"unverified code",
-            )
-            .unwrap();
+            let extra = installed
+                .directory
+                .join("share/spaceterm/shell-integration/zsh/extra");
+            std::fs::write(&extra, b"unverified code").unwrap();
+            std::fs::set_permissions(&extra, std::fs::Permissions::from_mode(0o644)).unwrap();
             assert_eq!(
                 verify(&installed.directory, "spaceterm-development"),
                 Err(ServerError::RuntimeUnavailable)
