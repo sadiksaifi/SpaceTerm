@@ -375,6 +375,16 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
                 ServerError::NotRunning => {
                     guidance("The server is set up but not running. Start it to connect.")
                 }
+                ServerError::AuthenticationRefused => (
+                    SharedString::from(format!("{error} Nothing changed.")),
+                    CaptionTone::Error,
+                ),
+                ServerError::IncompatibleState => (
+                    SharedString::from(format!(
+                        "{error} To start over, review and confirm a development state reset, then choose Check Now."
+                    )),
+                    CaptionTone::Error,
+                ),
                 // A deliberate Stop is a state the person chose, not a fault.
                 ServerError::Stopped => guidance(STOPPED_GUIDANCE),
                 ServerError::NotInstalled => {

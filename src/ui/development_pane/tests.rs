@@ -1058,7 +1058,8 @@ fn a_permanent_failure_after_losing_control_explains_itself_without_content(
     assert!(
         notice["aria"]["description"]
             .as_str()
-            .is_some_and(|description| description.contains("could not authenticate")),
+            .is_some_and(|description| description
+                .contains("did not pass the account and server identity checks")),
         "the notice names the failure"
     );
     let screen = tree.node(&format!(

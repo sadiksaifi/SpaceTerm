@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .map_err(|_| "fault setup")?;
         return spaceterm_server::run_local_with_panes(
             "spaceterm-development",
-            spaceterm::runtime::DevelopmentPaneHost::local()?,
+            spaceterm::runtime::SharedWorkspaceHost::local()?,
         )
         .map_err(Into::into);
     }

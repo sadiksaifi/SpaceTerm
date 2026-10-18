@@ -231,6 +231,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn setup_only_recreates_state_after_reset_while_retaining_durable_stop() {
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "st-stopped-{}",
+            u128::from_be_bytes(protocol::random().unwrap()[..16].try_into().unwrap())
+        ));
+        let server = LocalServer {
+            paths: Paths {
+                identity: "spaceterm-development".into(),
+                data: root.join("data"),
+                runtime: root.join("runtime"),
+            },
+            identity: "spaceterm-development".into(),
+            account: "desktop".into(),
+            shared_pane: std::sync::Arc::default(),
+            attachments: std::sync::Arc::default(),
+        };
+        let data = Directory::open(&server.paths.data, true).unwrap();
+        let stopped = serde_json::json!({"installation": "a".repeat(64), "stopped": true, "installed": true, "run": null});
+        data.write_json(c"service.json", &stopped).unwrap();
+        assert_eq!(server.setup_and_start(), Err(ServerError::Stopped));
+        server.setup().unwrap();
+        assert_ne!(data.read().unwrap().server, [0; 32]);
+        assert_eq!(
+            data.read_json::<serde_json::Value>("service.json").unwrap(),
+            Some(stopped)
+        );
+        assert_eq!(server.refresh(), Err(ServerError::Stopped));
+        assert_eq!(server.setup_and_start(), Err(ServerError::Stopped));
+        assert!(!server.paths.runtime.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn relaunch_keeps_each_nonsecret_identity_and_pending_original_bound_to_its_server() {
         let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
             "st-client-{}",

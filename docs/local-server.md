@@ -12,6 +12,8 @@ Run `mise run server:reset --identity spaceterm-development` to preview the exac
 
 The selected server identity, Workspace organization, completed outcomes, client identities, attachments, deferred releases and views leave active use. Their exact bytes remain in a private `reset-*` archive. Settings schema 7, serialized Commands, repository files, signed installations, service registration and Stop intent, SSH trust, credentials and signing keys remain outside the reset. Setup stays explicit. A stopped service stays stopped.
 
+After reset, `mise run server:setup --state-only` recreates Development state without starting anything or reversing Stop. The CLI equivalent is `setup-state IDENTITY` in a client-enabled server build. Only the service's explicit Start can resume a stopped service. Its selected signed runtime must support the new state and protocol; reset never selects an update or weakens artifact verification.
+
 ## Optional obsolete credential cleanup
 
 Old local credentials may remain in native storage after reset. They are unused and can stay there indefinitely. Cleanup is separate from local setup and use; an absent, locked or unavailable store is no reason to delay either.

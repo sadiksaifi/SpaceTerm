@@ -220,7 +220,7 @@ fn a_failure_needing_attention_reads_as_an_error_in_its_bounded_wording() {
             }
             _ => {
                 assert_eq!(presented.tone, CaptionTone::Error, "{error:?}");
-                assert_eq!(presented.explanation.as_ref(), error.to_string());
+                assert!(presented.explanation.starts_with(&error.to_string()));
             }
         }
     }

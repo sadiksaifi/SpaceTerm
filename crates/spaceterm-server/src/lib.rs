@@ -42,12 +42,14 @@ pub enum ServerError {
     #[error("Local server storage is unavailable.")]
     StorageUnavailable,
     #[error(
-        "This unreleased server state is incompatible. Review an explicit local state reset before setting up again."
+        "This server's saved state is from an incompatible SpaceTerm build. SpaceTerm left it unchanged."
     )]
     IncompatibleState,
     #[error("Local server storage has unsafe ownership or permissions.")]
     UnsafeStorage,
-    #[error("The server refused this connection.")]
+    #[error(
+        "The connection did not pass the account and server identity checks, so SpaceTerm did not connect."
+    )]
     AuthenticationRefused,
     #[error("The client and server have no compatible protocol version.")]
     IncompatibleProtocol,

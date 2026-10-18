@@ -407,7 +407,8 @@ run = "cargo run --package spaceterm-server-host --no-default-features --locked 
 
 [tasks."server:setup"]
 description = "Explicitly set up, start, and connect to the local Development server"
-run = "cargo run --package spaceterm-server-host --features client --locked -- setup spaceterm-development"
+usage = 'flag "--state-only" help="Create nonsecret state without starting or changing Stop"'
+run = "cargo run --package spaceterm-server-host --features client --locked -- {% if usage.state_only %}setup-state{% else %}setup{% endif %} spaceterm-development"
 
 [tasks."server:status"]
 description = "Connect to the existing Development server"
