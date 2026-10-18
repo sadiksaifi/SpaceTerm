@@ -78,7 +78,9 @@ pub(crate) use terminal_pane::{
 pub(crate) use workspace_frame::WorkspaceFrame;
 #[cfg(test)]
 pub(crate) use workspace_manager::tests::assert_scroll_shortcuts_from_sidebar_focus;
-pub(crate) use workspace_manager::{LocalServerAdapters, WorkspaceManager, WorkspaceManagerAdapters};
+pub(crate) use workspace_manager::{
+    LocalServerAdapters, WorkspaceManager, WorkspaceManagerAdapters,
+};
 
 /// Finishes every hover transition in progress, since test windows have no frame loop.
 #[cfg(test)]

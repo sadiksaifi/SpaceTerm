@@ -300,11 +300,7 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
 /// The badge, its selector, and whether checking again can tell anything new.
 fn failure(error: ServerError) -> (&'static str, &'static str, bool) {
     match error {
-        ServerError::NotSetUp => (
-            "Not Set Up",
-            "settings-local-server-state-not-set-up",
-            true,
-        ),
+        ServerError::NotSetUp => ("Not Set Up", "settings-local-server-state-not-set-up", true),
         ServerError::NotRunning => (
             "Not Running",
             "settings-local-server-state-not-running",
@@ -335,11 +331,9 @@ fn failure(error: ServerError) -> (&'static str, &'static str, bool) {
             "settings-local-server-state-unsafe-storage",
             true,
         ),
-        ServerError::AuthenticationRefused => (
-            "Refused",
-            "settings-local-server-state-refused",
-            true,
-        ),
+        ServerError::AuthenticationRefused => {
+            ("Refused", "settings-local-server-state-refused", true)
+        }
         ServerError::IncompatibleProtocol => (
             "Incompatible",
             "settings-local-server-state-incompatible",
@@ -357,11 +351,7 @@ fn failure(error: ServerError) -> (&'static str, &'static str, bool) {
         ),
         // Terminal Session refusals reach this row only through a check, which another check
         // answers afresh.
-        ServerError::Controlled => (
-            "In Use",
-            "settings-local-server-state-controlled",
-            true,
-        ),
+        ServerError::Controlled => ("In Use", "settings-local-server-state-controlled", true),
         ServerError::SessionUnavailable | ServerError::StaleControl => (
             "Unavailable",
             "settings-local-server-state-session-unavailable",
@@ -394,11 +384,7 @@ fn failure(error: ServerError) -> (&'static str, &'static str, bool) {
         ),
         // The server is holding shared edit outcomes for clients that have not acknowledged
         // them. Another check reports whether they have since.
-        ServerError::Capacity => (
-            "At Capacity",
-            "settings-local-server-state-capacity",
-            true,
-        ),
+        ServerError::Capacity => ("At Capacity", "settings-local-server-state-capacity", true),
     }
 }
 
