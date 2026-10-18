@@ -190,6 +190,9 @@ pub(crate) struct WorkspaceManagerAdapters {
     pub(crate) directory_selection: Rc<dyn SystemDirectorySelection>,
     pub(crate) window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
     pub(crate) remote_workspace: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
+    /// The account-local server this window launches and presents. Without one, the window
+    /// starts with a desktop-owned local Workspace.
+    pub(crate) local_server: Option<launch::LocalServerAdapters>,
 }
 
 struct PendingRemoteActivation {
@@ -338,6 +341,8 @@ pub(crate) struct WorkspaceManager {
     _shared_poll: Option<Task<()>>,
     /// Where the keyboard rests while the window presents no Workspace.
     empty_focus: FocusHandle,
+    /// Normal launch of the account-local server, while this window presents it.
+    launch: Option<launch::LocalLaunchState>,
 }
 
 impl WorkspaceManager {
@@ -378,6 +383,7 @@ impl WorkspaceManager {
             directory_selection,
             window_drag: operating_system_window_drag_platform,
             remote_workspace: remote_workspace_backend_factory,
+            local_server,
         } = adapters;
         let pane_construction = PaneConstruction::new(
             key_input_adapter_factory,
@@ -390,7 +396,10 @@ impl WorkspaceManager {
         let local_home_identity = default_directory.identity();
         let initial_workspace_identity = default_directory.identity();
         let initial_window_drag_platform = Rc::clone(&operating_system_window_drag_platform);
-        let mut workspaces =
+        let mut workspaces = if local_server.is_some() {
+            // The server owns this window's Workspaces, which arrive once it is ready.
+            WorkspaceCollection::empty()
+        } else {
             WorkspaceCollection::new_local(default_directory, |workspace_id, home_directory| {
                 Self::create_local_tab_manager(
                     WorkspaceTerminalSessionFactory::new_local_with_authority(
@@ -413,7 +422,8 @@ impl WorkspaceManager {
                     window,
                     cx,
                 )
-            });
+            })
+        };
         if let Some((reason, workspace_id)) =
             initial_directory_error.zip(workspaces.active_workspace_id())
         {
@@ -472,7 +482,7 @@ impl WorkspaceManager {
         })
         .detach();
 
-        Self {
+        let mut manager = Self {
             window_appearance,
             window_traffic_lights,
             transient: WorkspaceTransientUi {
@@ -510,7 +520,10 @@ impl WorkspaceManager {
             shared: None,
             _shared_poll: None,
             empty_focus: cx.focus_handle(),
-        }
+            launch: local_server.map(launch::LocalLaunchState::new),
+        };
+        manager.run_local_launch(None, window, cx);
+        manager
     }
 
     fn create_local_tab_manager(
@@ -4006,6 +4019,15 @@ impl WorkspaceManager {
         if let Some(inventory) = poll.inventory {
             self.apply_shared_inventory(&inventory, removal, window, cx);
         }
+        // A new client's first view is the person opening SpaceTerm to work, so it opens the
+        // Active Tab and its Focused Pane's shell. Later launches restore views passively.
+        if let Some(workspace_id) = poll
+            .initial
+            .and_then(|server| self.shared.as_ref()?.local(server))
+            && self.activate_workspace(workspace_id, window, cx)
+        {
+            self.focus(window, cx);
+        }
         // The client that asked for a creation opens it, once, after the server published it.
         if let Some(accepted) = poll.accepted {
             self.open_accepted_shared(&accepted, window, cx);
@@ -5737,6 +5759,10 @@ impl WorkspaceManager {
 }
 
 mod empty;
+mod launch;
+pub(crate) use launch::LocalServerAdapters;
+#[cfg(test)]
+pub(crate) use launch::testing as launch_testing;
 #[path = "workspace_manager/repository.rs"]
 mod repository;
 mod shared_repositories;

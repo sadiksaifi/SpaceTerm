@@ -1207,6 +1207,7 @@ fn workspace_adapters(
         directory_selection: Rc::new(GpuiDirectorySelection),
         window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
         remote_workspace,
+        local_server: None,
     }
 }
 
@@ -14340,13 +14341,19 @@ fn shared_pane_harness(cx: &mut TestAppContext) -> (SharedPaneHarness, &mut Visu
     // The server reaches the Pane and publishes this client's screen, as a fresh connection does.
     harness.panes.pane(SHARED_FOCUS_PANE).reconnect();
     settle_shared_panes(cx);
-    // Opening the Workspace from the sidebar focuses its Focused Pane, as it does for any other.
-    click("workspace-row-2-inactive", cx);
+    // A new client's first view opens the server's Workspace and focuses its Focused Pane.
+    focus_active_workspace(&harness.manager, cx);
     assert!(
         shared_terminal_is_focused(&harness, cx),
         "opening the shared Workspace should leave the keyboard in its Pane"
     );
     (harness, cx)
+}
+
+/// Returns the keyboard to the Active Workspace once its Pane's screen is connected.
+fn focus_active_workspace(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContext) {
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
+    cx.run_until_parked();
 }
 
 /// Lets every shared Pane read its connection and paints the frame that follows.
@@ -14612,7 +14619,7 @@ fn shared_close_harness(cx: &mut TestAppContext) -> (SharedCloseHarness, &mut Vi
     };
     harness.panes.pane(SHARED_CLOSE_ROOT_PANE).reconnect();
     settle_shared_panes(cx);
-    click("workspace-row-2-inactive", cx);
+    focus_active_workspace(&harness.manager, cx);
     (harness, cx)
 }
 
@@ -15667,9 +15674,18 @@ fn attachment_harness(cx: &mut TestAppContext) -> (AttachmentHarness, &mut Visua
     harness.sync(cx);
     assert_eq!(
         harness.presented(cx),
-        vec![1, 2, 3],
-        "a first adoption attaches the Workspaces the server already holds"
+        vec![1, 2],
+        "a new client attaches only the server's first Workspace"
     );
+    // The person attaches the other Workspace, then returns to the one they started in.
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.attach_detached_workspace(ATTACHED_DOCS, window, cx);
+            manager.activate_workspace(WorkspaceId::new(1), window, cx);
+        });
+    });
+    settle_shared_panes(cx);
+    assert_eq!(harness.presented(cx), vec![1, 2, 3]);
     (harness, cx)
 }
 
@@ -16241,6 +16257,8 @@ mod shared_repositories {
                     cx,
                 );
                 manager.sync_shared_workspaces(window, cx);
+                // The person returns to the desktop's own Workspace, so this one is inactive.
+                manager.activate_workspace(WorkspaceId::new(1), window, cx);
             });
         });
         cx.run_until_parked();
@@ -16630,3 +16648,6 @@ mod shared_repositories {
         assert_eq!(harness.edits.submitted(), Vec::new());
     }
 }
+
+#[path = "launch_tests.rs"]
+mod launch_tests;

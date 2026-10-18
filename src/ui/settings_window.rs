@@ -72,7 +72,8 @@ use crate::ui::sidebar_window::form::{
     FormGroup, FormRow, FormRowLayout, Stepper, action_button, reset_button, row_horizontal_inset,
     section_heading,
 };
-use catalog::{SettingsRowId, SettingsSectionId};
+use catalog::SettingsRowId;
+pub(crate) use catalog::SettingsSectionId;
 use editor::{SaveStatus, SettingsEditor};
 use keybindings::ShortcutRows;
 use microphone::MicrophoneAccessRow;

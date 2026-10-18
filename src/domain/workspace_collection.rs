@@ -412,13 +412,21 @@ impl<T> WorkspaceEntry<T> {
 
 pub(crate) struct WorkspaceCollection<T> {
     workspaces: Vec<WorkspaceEntry<T>>,
-    /// The Workspace the window presents. It is `None` only after [`Self::remove_workspace`]
-    /// removed the final Workspace, which leaves a deliberately empty collection.
+    /// The Workspace the window presents. It is `None` only while the collection is empty.
     active_workspace_id: Option<WorkspaceId>,
     next_workspace_id: u64,
 }
 
 impl<T> WorkspaceCollection<T> {
+    /// A collection presenting nothing yet, whose Workspaces another owner supplies.
+    pub(crate) const fn empty() -> Self {
+        Self {
+            workspaces: Vec::new(),
+            active_workspace_id: None,
+            next_workspace_id: 1,
+        }
+    }
+
     pub(crate) fn new_local(
         directory: ValidatedLocalDirectory,
         create_initial_payload: impl FnOnce(WorkspaceId, &Path) -> T,

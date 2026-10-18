@@ -1375,9 +1375,16 @@ mod development {
                 .inventory
                 .filter(|inventory| self.revision != Some(inventory.revision))
             {
-                if let Err(error) = self.attachments.reconcile(&inventory) {
-                    self.attachment_error = Some(error);
-                    return poll;
+                // A new client's first view presents the server's first Workspace. Retained
+                // choices, including a deliberately empty view, always win.
+                let initial = inventory.workspaces.first().map(|workspace| workspace.id);
+                match self.attachments.initialize(&inventory, initial) {
+                    Ok(true) => poll.initial = initial,
+                    Ok(false) => {}
+                    Err(error) => {
+                        self.attachment_error = Some(error);
+                        return poll;
+                    }
                 }
                 if let Some(accepted) = &poll.accepted
                     && matches!(accepted.mutation, Mutation::CreateWorkspace { .. })
@@ -1799,6 +1806,9 @@ mod development {
         /// The server accepted an edit this process asked for, so the window opens what it
         /// created. An accepted edit from another client is absent here.
         pub(crate) accepted: Option<SharedAcceptance>,
+        /// The Workspace this client chose as its first-ever view just now. Opening it is the
+        /// person's first use, so the window opens its Active Tab for them.
+        pub(crate) initial: Option<Id>,
     }
 
     /// One accepted edit this process asked for, and the server identity it created or changed.

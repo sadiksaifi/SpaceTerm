@@ -564,6 +564,7 @@ pub(crate) fn open(
         directory_selection: Rc::new(crate::directory_selection::GpuiDirectorySelection),
         remote_workspace: Arc::clone(&host.adapters.remote_workspace),
         window_drag: host.window_movement.create(),
+        local_server: host.adapters.local_server.clone(),
     };
     let session_factory = Rc::clone(&host.session_factory);
     let home_directory = host.home_directory.clone();
@@ -813,6 +814,8 @@ pub(crate) struct ApplicationCapabilities {
         Option<crate::ui::repository_status_store::RepositoryStatusAdapters>,
     /// Keeps the Background Image copies where Workspace windows can present one.
     pub(crate) background_images: Option<Arc<crate::background_image::BackgroundImageStore>>,
+    /// Launches and presents the account-local SpaceTerm Server in the Workspace Window.
+    pub(crate) local_server: Option<crate::ui::LocalServerAdapters>,
 }
 
 /// The startup-supplied file opener available to explicit local file selections.
@@ -1343,6 +1346,7 @@ mod runtime_tests {
                 remote_workspace: Arc::new(UnavailableRemote),
                 repository_status: None,
                 background_images: None,
+                local_server: None,
             },
             services: Some(services),
             window_movement: movement,
