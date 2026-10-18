@@ -1950,6 +1950,7 @@ impl Element for TerminalGridElement {
                 grid_bounds,
                 self.cell_width,
                 self.line_height,
+                size(self.nominal_cell_width, self.nominal_line_height),
                 self.scale_factor,
             ),
             blink_phase_visible: self.blink_phase_visible,
