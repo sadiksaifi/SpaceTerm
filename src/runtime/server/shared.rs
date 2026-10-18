@@ -386,6 +386,7 @@ impl SharedWorkspaceHost {
                 native_effects: true,
                 reading: true,
                 graphics: true,
+                accessibility: true,
                 directory_recovery: true,
                 worktree_writes: true,
             }),
@@ -524,7 +525,9 @@ impl SharedWorkspaceHost {
             request => {
                 let target = match &request {
                     Request::TakeOver { target, .. } => *target,
-                    Request::ReadingStatus { lease }
+                    Request::Accessibility { lease, .. }
+                    | Request::AccessibilitySelection { lease, .. }
+                    | Request::ReadingStatus { lease }
                     | Request::Read { lease, .. }
                     | Request::GraphicsChunk { lease, .. }
                     | Request::SelectionChunk { lease, .. }

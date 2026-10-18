@@ -45,6 +45,10 @@ impl Reading {
         self.prepared = None;
         self.attempted = None;
     }
+    pub(super) fn fence(&mut self, runtime: &TerminalRuntime) {
+        self.invalidate();
+        self.pending = Some(runtime.reading_barrier());
+    }
     pub(super) fn update(&mut self, runtime: &TerminalRuntime, screen: &ScreenSnapshot) {
         let generation = screen.selection_revision;
         if self
@@ -280,8 +284,7 @@ impl OwnedPane {
                 });
             }
         }
-        self.reading.invalidate();
-        self.reading.pending = Some(self.runtime.reading_barrier());
+        self.reading.fence(&self.runtime);
         Ok(Reply::Reading { accepted: true })
     }
 }

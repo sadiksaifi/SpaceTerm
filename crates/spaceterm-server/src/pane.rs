@@ -1,4 +1,5 @@
 //! Authenticated terminal operations. Native requests never grant local file authority.
+pub mod accessibility;
 pub mod directories;
 pub mod effects;
 pub mod graphics;
@@ -186,6 +187,17 @@ pub enum AttachmentClaim {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
+    Accessibility {
+        lease: Lease,
+        revision: Option<u64>,
+        offset: usize,
+        base: Option<u64>,
+    },
+    AccessibilitySelection {
+        lease: Lease,
+        focus_generation: u64,
+        selection: Option<accessibility::SelectionRefs>,
+    },
     WorktreeRead(crate::worktree::Read),
     DirectoryRead(directories::Request),
     RepairDirectory {
@@ -310,6 +322,10 @@ pub enum Request {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Reply {
+    Accessibility(Result<accessibility::Chunk, accessibility::Error>),
+    AccessibilityRevision {
+        revision: u64,
+    },
     WorktreeRead(Result<crate::worktree::ReadReply, crate::worktree::Error>),
     MutationPending,
     DirectoryRead(Result<directories::Progress, directories::Error>),
@@ -351,6 +367,8 @@ pub enum Reply {
         reading: bool,
         #[serde(default)]
         graphics: bool,
+        #[serde(default)]
+        accessibility: bool,
         #[serde(default)]
         directory_recovery: bool,
         #[serde(default)]
@@ -426,6 +444,8 @@ pub struct Cell {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Screen {
+    #[serde(default)]
+    pub accessibility_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graphics: Option<Result<graphics::Snapshot, graphics::Error>>,
     #[serde(default)]
@@ -487,6 +507,7 @@ struct PaneTransport {
     native_effects: bool,
     reading: bool,
     graphics: bool,
+    accessibility: bool,
     directory_recovery: bool,
     worktree_writes: bool,
 }
@@ -536,10 +557,14 @@ impl PaneConnection {
                 native_effects,
                 reading,
                 graphics,
+                accessibility,
                 directory_recovery,
                 worktree_writes,
             } => {
                 let mut connection = Self::new(stream, pane_takeover);
+                std::sync::Arc::get_mut(&mut connection.transport)
+                    .ok_or(ServerError::Protocol)?
+                    .accessibility = accessibility;
                 std::sync::Arc::get_mut(&mut connection.transport)
                     .ok_or(ServerError::Protocol)?
                     .worktree_writes = worktree_writes;
@@ -573,6 +598,7 @@ impl PaneConnection {
                 native_effects: false,
                 reading: false,
                 graphics: false,
+                accessibility: false,
                 directory_recovery: false,
                 worktree_writes: false,
             }),
@@ -586,6 +612,9 @@ impl PaneConnection {
     }
     pub fn supports_graphics(&self) -> bool {
         self.transport.graphics
+    }
+    pub fn supports_accessibility(&self) -> bool {
+        self.transport.accessibility
     }
     pub fn supports_reading(&self) -> bool {
         self.transport.reading
