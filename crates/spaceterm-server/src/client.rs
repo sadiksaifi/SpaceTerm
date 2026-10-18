@@ -57,11 +57,15 @@ impl LocalServer {
     }
     /// One durable attachment writer shared by the inventory and all Pane subscriptions.
     pub fn attachments(&self) -> Result<crate::attachments::Attachments, ServerError> {
+        if let Some(attachments) = self.attachments.get() {
+            return attachments.clone();
+        }
+        let server = self.server_id()?;
         self.attachments
             .get_or_init(|| {
                 crate::attachments::Attachments::open(
                     self.client_directory()?,
-                    self.server_id()?,
+                    server,
                     self.client_id()?,
                 )
             })
@@ -229,6 +233,40 @@ fn development_account(name: &str) -> Result<String, ServerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attachments_recover_after_initial_setup_on_the_same_client() {
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "st-first-setup-{}",
+            u128::from_be_bytes(protocol::random().unwrap()[..16].try_into().unwrap())
+        ));
+        let server = LocalServer {
+            paths: Paths {
+                identity: "spaceterm-development".into(),
+                data: root.join("data"),
+                runtime: root.join("runtime"),
+            },
+            identity: "spaceterm-development".into(),
+            account: "desktop".into(),
+            shared_pane: std::sync::Arc::default(),
+            attachments: std::sync::Arc::default(),
+        };
+        let subscription = server.clone();
+        assert!(matches!(
+            subscription.attachments(),
+            Err(ServerError::NotSetUp)
+        ));
+        server.setup().unwrap();
+        let opened = server.attachments();
+        assert!(
+            opened.is_ok(),
+            "initial setup must recover without relaunch"
+        );
+        drop(opened);
+        drop(subscription);
+        drop(server);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn setup_only_recreates_state_after_reset_while_retaining_durable_stop() {
