@@ -61,9 +61,7 @@ mod development {
     use crate::terminal::shared_workspace::{SharedWorkspaceClient, SharedWorkspaceSnapshot};
     use crate::terminal::{PreparedWorkspaceTerminalLaunch, WorkspaceTerminalSessionFactory};
     use crate::ui::pane_lifecycle::PaneConstruction;
-    use crate::ui::server_pane::{
-        ServerPaneConnection, ServerPaneView, UnavailableTerminalAccessibility,
-    };
+    use crate::ui::server_pane::{ServerPaneConnection, ServerPaneView};
 
     /// How often the Workspace Window reads the server's inventory and its own edit state.
     /// Reading takes one uncontended lock and clones the inventory.
@@ -658,9 +656,7 @@ mod development {
         ) -> Self {
             Self {
                 opener,
-                // Reading shell content through a server-owned Terminal Session is not available
-                // yet, so a shared Pane publishes its controls and status without its text.
-                panes: panes.with_accessibility(Rc::new(UnavailableTerminalAccessibility)),
+                panes: panes.clone(),
             }
         }
 

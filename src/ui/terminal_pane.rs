@@ -564,6 +564,10 @@ pub(crate) struct TerminalPane {
     pending_accessibility: Option<(u64, Arc<TerminalAccessibilityModel>)>,
     accessibility_element: Box<dyn TerminalAccessibilityAdapter>,
     accessibility_focus_sender: AccessibilityFocusSender,
+    native_focus: NativeFocusAuthority,
+    /// Accessible models at or below this Session epoch's generation predate a cleared server
+    /// presentation, so they never repopulate a Takeover Screen.
+    accessibility_floor: Option<(u64, crate::terminal::PresentationGeneration)>,
     _accessibility_focus_task: Task<()>,
     pending_accessibility_notifications: AccessibilityNotifications,
     accessibility_needs_presentation: bool,
@@ -794,9 +798,13 @@ impl TerminalPane {
         let (accessibility_focus_sender, accessibility_focus_receiver) =
             AccessibilityFocusSender::channel();
         let accessibility_focus_task = cx.spawn_in(window, async move |this, cx| {
-            while accessibility_focus_receiver.recv().await.is_ok() {
+            while let Ok(authority) = accessibility_focus_receiver.recv().await {
                 if this
-                    .update_in(cx, |pane, window, cx| pane.request_focus(window, cx))
+                    .update_in(cx, |pane, window, cx| {
+                        if pane.native_focus_authority() == Some(authority) {
+                            pane.request_focus(window, cx);
+                        }
+                    })
                     .is_err()
                 {
                     break;
@@ -882,6 +890,8 @@ impl TerminalPane {
             pending_accessibility: None,
             accessibility_element,
             accessibility_focus_sender,
+            native_focus: NativeFocusAuthority::default(),
+            accessibility_floor: None,
             _accessibility_focus_task: accessibility_focus_task,
             pending_accessibility_notifications: AccessibilityNotifications::default(),
             accessibility_needs_presentation: false,
@@ -1597,6 +1607,28 @@ impl TerminalPane {
                 .is_some_and(|session| session.interactive_input_available())
     }
 
+    /// The authority a native accessibility focus request must name to move focus here.
+    ///
+    /// A server-backed Pane grants it only while its connection presents authoritative content
+    /// under control. Each new Session epoch, connection epoch, or interruption issues a new
+    /// authority, so a request queued before the change never applies after it.
+    fn native_focus_authority(&mut self) -> Option<u64> {
+        let current = (!self.server_backed()
+            || (!self.terminal_session.remote_input_blocked
+                && self
+                    .terminal_session
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.reading_available())))
+        .then(|| {
+            (
+                self.terminal_session.session_epoch,
+                self.current_input_generation(),
+            )
+        });
+        self.native_focus.current(current)
+    }
+
     fn current_input_generation(&self) -> u64 {
         self.terminal_session
             .session
@@ -1787,6 +1819,7 @@ impl TerminalPane {
         self.last_valid_screen_session_epoch = self.terminal_session.session_epoch;
         self.terminal_session.metadata = None;
         self.accessibility = Arc::new(TerminalAccessibilityModel::from_screen(&cleared));
+        self.accessibility_floor = Some((self.terminal_session.session_epoch, cleared.generation));
         self.pending_accessibility = None;
         self.pending_accessibility_notifications
             .insert(AccessibilityNotification::Value);
@@ -2334,6 +2367,9 @@ impl TerminalPane {
             .session
             .as_ref()
             .and_then(|session| session.accessibility_demand_sender());
+        let focus_sender = self
+            .native_focus_authority()
+            .map(|authority| self.accessibility_focus_sender.with_authority(authority));
         self.pending_accessibility_notifications =
             self.accessibility_element
                 .update(TerminalAccessibilityUpdate {
@@ -2348,7 +2384,7 @@ impl TerminalPane {
                     notifications,
                     selection_sender,
                     demand_sender,
-                    focus_sender: Some(self.accessibility_focus_sender.clone()),
+                    focus_sender,
                 });
         self.accessibility_needs_presentation = false;
     }
@@ -2641,6 +2677,9 @@ impl TerminalPane {
         session_epoch: u64,
         accessibility: Arc<TerminalAccessibilityModel>,
     ) {
+        if self.accessibility_predates_clear(session_epoch, &accessibility) {
+            return;
+        }
         match self.terminal_session.accepted_screen_generation {
             Some(screen_generation) if accessibility.generation() < screen_generation => {}
             Some(screen_generation) if accessibility.generation() == screen_generation => {
@@ -2662,11 +2701,23 @@ impl TerminalPane {
         }
     }
 
+    fn accessibility_predates_clear(
+        &self,
+        session_epoch: u64,
+        accessibility: &TerminalAccessibilityModel,
+    ) -> bool {
+        self.accessibility_floor.is_some_and(|(epoch, floor)| {
+            epoch == session_epoch && accessibility.generation() <= floor
+        })
+    }
+
     fn reconcile_pending_accessibility(&mut self) {
         let Some((session_epoch, accessibility)) = self.pending_accessibility.take() else {
             return;
         };
-        if session_epoch != self.terminal_session.session_epoch {
+        if session_epoch != self.terminal_session.session_epoch
+            || self.accessibility_predates_clear(session_epoch, &accessibility)
+        {
             return;
         }
         match self.terminal_session.accepted_screen_generation {
@@ -5869,6 +5920,23 @@ impl WheelAccumulator {
             *self = Self::default();
         }
         steps
+    }
+}
+
+/// Issues a new opaque authority whenever the facts that grant native focus change.
+#[derive(Default)]
+struct NativeFocusAuthority {
+    facts: Option<(u64, u64)>,
+    serial: u64,
+}
+
+impl NativeFocusAuthority {
+    fn current(&mut self, facts: Option<(u64, u64)>) -> Option<u64> {
+        if facts != self.facts {
+            self.facts = facts;
+            self.serial = self.serial.wrapping_add(1);
+        }
+        facts.map(|_| self.serial)
     }
 }
 

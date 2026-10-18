@@ -1013,6 +1013,7 @@ pub(crate) fn initialize_application(
     cx.set_global(
         crate::ui::development_pane::DevelopmentPaneComposition::new(
             Rc::clone(&host.adapters.key_input),
+            Rc::clone(&host.adapters.accessibility),
             host.adapters.native_services.clone(),
             crate::ui::pane_lifecycle::PaneLifecycleDependencies {
                 permission_setup: host.permission_setup.get().cloned(),

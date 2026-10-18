@@ -32,8 +32,7 @@ mod window {
     use super::super::server_pane::{
         self, Dormant, RESTORED_DETAIL, RESTORED_TITLE, SESSION_ENDED_DETAIL, SESSION_ENDED_TITLE,
         START_SHELL_UNCONFIRMED, STARTING_SHELL, TAKE_OVER_UNCONFIRMED, TAKEOVER_DETAIL,
-        TAKEOVER_FAILED_DETAIL, TAKEOVER_TITLE, TAKING_OVER, UnavailableTerminalAccessibility,
-        with_tab_traversal,
+        TAKEOVER_FAILED_DETAIL, TAKEOVER_TITLE, TAKING_OVER, with_tab_traversal,
     };
     use super::super::sidebar_window::WindowMovement;
     use super::super::terminal_pane::StatusIntent;
@@ -41,6 +40,7 @@ mod window {
     use crate::application_identity::ApplicationIdentity;
     use crate::local_server::{LocalServer, ServerError};
     use crate::platform::local_filesystem::LocalFilesystemAuthority;
+    use crate::platform::terminal_accessibility::TerminalAccessibilityAdapterFactory;
     use crate::platform::window_movement::{
         OperatingSystemWindowDragPlatform, WindowMovementFactory,
     };
@@ -155,10 +155,10 @@ mod window {
     }
 
     impl DevelopmentPaneComposition {
-        /// The Pane takes the application's input and native lifecycle adapters. Its terminal
-        /// text publishes no accessibility content until server-backed accessibility exists.
+        /// The Pane takes the application's input, accessibility, and native lifecycle adapters.
         pub(crate) fn new(
             key_input: Rc<dyn TerminalKeyInputAdapterFactory>,
+            accessibility: Rc<dyn TerminalAccessibilityAdapterFactory>,
             native_services: NativeServiceAdapters,
             lifecycle: PaneLifecycleDependencies,
             home_directory: PathBuf,
@@ -166,12 +166,7 @@ mod window {
             window_movement: Rc<dyn WindowMovementFactory>,
         ) -> Self {
             Self {
-                panes: PaneConstruction::new(
-                    key_input,
-                    Rc::new(UnavailableTerminalAccessibility),
-                    native_services,
-                    lifecycle,
-                ),
+                panes: PaneConstruction::new(key_input, accessibility, native_services, lifecycle),
                 home_directory,
                 local_filesystem,
                 window_movement,
