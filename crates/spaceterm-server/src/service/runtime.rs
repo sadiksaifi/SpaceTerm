@@ -1,10 +1,60 @@
-//! Authenticate retained artifacts before selecting or executing their runtime.
+//! Authenticate and retain independent server artifacts without selecting or starting a runtime.
 use super::*;
 use base64::Engine;
-use std::{collections::BTreeSet, io::Read, os::unix::fs::MetadataExt};
+use std::{
+    collections::BTreeSet,
+    io::Read,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
+};
+
+mod files;
+#[cfg(test)]
+pub(crate) mod test_support;
+#[cfg(test)]
+mod tests;
 
 const MAX_ARCHIVE: u64 = 256 * 1024 * 1024;
 const MAX_EXPANDED: u64 = 512 * 1024 * 1024;
+#[cfg(target_os = "macos")]
+const TARGET: &str = "aarch64-apple-darwin";
+#[cfg(target_os = "linux")]
+const TARGET: &str = "x86_64-unknown-linux-gnu";
+
+impl Service {
+    /// Retain this exact signed independent artifact in the owning account's installation store.
+    ///
+    /// Identity comes from this Service. Target must be the supported native target; commit and
+    /// version must exactly match the signed build document. No executable is selected from PATH
+    /// or beside the desktop. Source builds must supply an approved signed artifact explicitly.
+    ///
+    /// This operation only provisions immutable files. It never writes service policy, server
+    /// identity or organization, starts a service or Terminal Session, clears Stop, or opens a signing credential.
+    /// The caller must reuse existing service policy before requesting first-use provisioning.
+    /// Concurrent requests share the installation directory lock and reuse only a verified match.
+    ///
+    /// # Errors
+    /// Returns RuntimeUnavailable for an invalid signature, layout or exact build; UnsafeStorage
+    /// or StorageUnavailable for unsafe or inaccessible account storage. Existing entries are
+    /// never repaired or replaced. Installation/startup remains a separate Service operation.
+    pub fn provision(
+        &self,
+        archive: &Path,
+        signature: &Path,
+        target: &str,
+        commit: &str,
+        version: &str,
+    ) -> Result<RetainedInstallation, ServerError> {
+        provision(
+            &self.paths.data.join("installations"),
+            &self.identity,
+            archive,
+            signature,
+            target,
+            commit,
+            version,
+        )
+    }
+}
 
 pub(super) fn digest_valid(value: &str) -> bool {
     value.len() == 64
@@ -12,15 +62,17 @@ pub(super) fn digest_valid(value: &str) -> bool {
             .bytes()
             .all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(&v))
 }
-
-pub(super) fn verify(path: &Path, identity: &str) -> Result<(), ServerError> {
-    let directory = owned_directory(path)?;
-    let bytes = read_file(&directory, Path::new("artifact.tar.gz"), MAX_ARCHIVE)?;
-    let signature = read_file(&directory, Path::new("artifact.sig"), 64)?;
-    let hash = ring::digest::digest(&ring::digest::SHA256, &bytes);
-    let digest: String = hash.as_ref().iter().map(|v| format!("{v:02x}")).collect();
-    if path.file_name().and_then(|v| v.to_str()) != Some(&digest) {
-        return Err(ServerError::RuntimeUnavailable);
+fn digest(bytes: &[u8]) -> String {
+    ring::digest::digest(&ring::digest::SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|v| format!("{v:02x}"))
+        .collect()
+}
+fn public_key() -> Result<Vec<u8>, ServerError> {
+    #[cfg(test)]
+    if test_support::active() {
+        return Ok(test_support::key());
     }
     let template = include_str!("../../../../packaging/macos/spaceterm/Info.plist");
     let key = template
@@ -29,13 +81,33 @@ pub(super) fn verify(path: &Path, identity: &str) -> Result<(), ServerError> {
         .and_then(|tail| tail.split_once("</string>"))
         .ok_or(ServerError::RuntimeUnavailable)?
         .0;
-    let key = base64::engine::general_purpose::STANDARD
+    base64::engine::general_purpose::STANDARD
         .decode(key.trim())
-        .map_err(|_| ServerError::RuntimeUnavailable)?;
-    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
-        .verify(&bytes, &signature)
-        .map_err(|_| ServerError::RuntimeUnavailable)?;
-    verify_contents(&directory, &bytes, identity)?;
+        .map_err(|_| ServerError::RuntimeUnavailable)
+}
+fn authenticate(bytes: &[u8], signature: &[u8]) -> Result<(), ServerError> {
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public_key()?)
+        .verify(bytes, signature)
+        .map_err(|_| ServerError::RuntimeUnavailable)
+}
+pub(super) fn verify(path: &Path, identity: &str) -> Result<(), ServerError> {
+    let directory = owned_directory(path)?;
+    let bytes = read_file(&directory, Path::new("artifact.tar.gz"), MAX_ARCHIVE)?;
+    let signature = read_file(&directory, Path::new("artifact.sig"), 64)?;
+    if path.file_name().and_then(|v| v.to_str()) != Some(&digest(&bytes)) {
+        return Err(ServerError::RuntimeUnavailable);
+    }
+    authenticate(&bytes, &signature)?;
+    let info = verify_contents(&directory, &bytes, identity)?;
+    verify_native(path, identity)?;
+    verify_executable(path, &info)?;
+    verify_directory_path(&directory, path)
+}
+fn verify_native(path: &Path, identity: &str) -> Result<(), ServerError> {
+    #[cfg(test)]
+    if test_support::active() {
+        return Ok(());
+    }
     #[cfg(target_os = "macos")]
     {
         let template = include_str!("../../../../packaging/macos/spaceterm/Packager.toml");
@@ -59,42 +131,124 @@ pub(super) fn verify(path: &Path, identity: &str) -> Result<(), ServerError> {
         )
         .map_err(|_| ServerError::RuntimeUnavailable)?;
     }
-    verify_directory_path(&directory, path)
+    #[cfg(not(target_os = "macos"))]
+    let _ = (path, identity);
+    Ok(())
+}
+fn verify_executable(path: &Path, expected: &Build) -> Result<(), ServerError> {
+    #[cfg(test)]
+    let bytes = if test_support::active() {
+        test_support::native_build(&expected.identity)
+    } else {
+        executable_build(path)?
+    };
+    #[cfg(not(test))]
+    let bytes = executable_build(path)?;
+    let reported = Build::parse(&bytes, &expected.identity)?;
+    if reported != *expected {
+        return Err(ServerError::RuntimeUnavailable);
+    }
+    Ok(())
+}
+fn executable_build(path: &Path) -> Result<Vec<u8>, ServerError> {
+    let bytes = execute(
+        Command::new(path.join("bin/spaceterm-server"))
+            .arg("--build-info")
+            .env_clear()
+            .current_dir(path),
+    )
+    .map_err(|_| ServerError::RuntimeUnavailable)?;
+    if bytes.len() > 4096 {
+        return Err(ServerError::RuntimeUnavailable);
+    }
+    Ok(bytes)
 }
 
 pub(super) fn describe(path: &Path, identity: &str) -> Result<(String, String), ServerError> {
     verify(path, identity)?;
     let directory = owned_directory(path)?;
-    let bytes = read_file(&directory, Path::new("build.json"), 4096)?;
-    let info: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|_| ServerError::RuntimeUnavailable)?;
-    let version = info["version"]
-        .as_str()
-        .ok_or(ServerError::RuntimeUnavailable)?;
-    let commit = info["commit"]
-        .as_str()
-        .ok_or(ServerError::RuntimeUnavailable)?;
-    if version.len() > 64 || commit.len() != 40 || !commit.bytes().all(|v| v.is_ascii_hexdigit()) {
-        return Err(ServerError::RuntimeUnavailable);
-    }
-    Ok((version.to_owned(), commit.to_owned()))
+    let info = Build::parse(
+        &read_file(&directory, Path::new("build.json"), 4096)?,
+        identity,
+    )?;
+    Ok((info.version, info.commit))
 }
 
-fn verify_contents(directory: &File, bytes: &[u8], identity: &str) -> Result<(), ServerError> {
+#[derive(Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct Build {
+    schema: u32,
+    identity: String,
+    target: String,
+    commit: String,
+    version: String,
+}
+impl Build {
+    fn parse(bytes: &[u8], identity: &str) -> Result<Self, ServerError> {
+        if bytes.len() > 4096 {
+            return Err(ServerError::RuntimeUnavailable);
+        }
+        let info: Self =
+            serde_json::from_slice(bytes).map_err(|_| ServerError::RuntimeUnavailable)?;
+        if info.commit.len() != 40
+            || !info
+                .commit
+                .bytes()
+                .all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(&v))
+        {
+            return Err(ServerError::RuntimeUnavailable);
+        }
+        let version = info
+            .version
+            .strip_prefix("dev.")
+            .is_some_and(|suffix| suffix == &info.commit[..12] && suffix.len() == 12)
+            || (info.version.split('.').count() == 3
+                && info.version.split('.').all(|part| {
+                    !part.is_empty()
+                        && (part == "0" || !part.starts_with('0'))
+                        && part.bytes().all(|v| v.is_ascii_digit())
+                }));
+        if info.schema != 1
+            || info.identity != identity
+            || info.target != TARGET
+            || info.version.len() > 64
+            || !version
+        {
+            return Err(ServerError::RuntimeUnavailable);
+        }
+        Ok(info)
+    }
+}
+
+/// One parser owns the signed layout for both extraction and retained-content verification.
+fn contents(
+    bytes: &[u8],
+    identity: &str,
+    mut visit: impl FnMut(&Path, bool, u32, &[u8]) -> Result<(), ServerError>,
+) -> Result<Build, ServerError> {
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
     let mut names = BTreeSet::new();
     let mut expanded = 0u64;
-    let mut manifest = false;
+    let mut manifest = None;
     let mut executable = false;
+    let mut files = BTreeSet::new();
+    let mut directories = BTreeSet::new();
     for item in archive
         .entries()
         .map_err(|_| ServerError::RuntimeUnavailable)?
     {
         let item = item.map_err(|_| ServerError::RuntimeUnavailable)?;
+        let raw = item.path_bytes();
         let path = item
             .path()
             .map_err(|_| ServerError::RuntimeUnavailable)?
             .into_owned();
+        let directory = item.header().entry_type().is_dir();
+        let canonical_path: PathBuf = path.components().collect();
+        let canonical = canonical_path.as_os_str().as_bytes();
+        if raw.as_ref() != canonical && !(directory && raw.strip_suffix(b"/") == Some(canonical)) {
+            return Err(ServerError::RuntimeUnavailable);
+        }
         let path = path
             .strip_prefix("server")
             .map_err(|_| ServerError::RuntimeUnavailable)?;
@@ -103,54 +257,146 @@ fn verify_contents(directory: &File, bytes: &[u8], identity: &str) -> Result<(),
             .any(|p| !matches!(p, std::path::Component::Normal(_)))
             || names.len() >= 128
             || !names.insert(path.to_owned())
+            || (!directory && !item.header().entry_type().is_file())
+            || (path.as_os_str().is_empty() && !directory)
         {
             return Err(ServerError::RuntimeUnavailable);
+        }
+        let mode = item
+            .header()
+            .mode()
+            .map_err(|_| ServerError::RuntimeUnavailable)?;
+        let expected_mode = if directory || path == Path::new("bin/spaceterm-server") {
+            0o755
+        } else {
+            0o644
+        };
+        if mode != expected_mode {
+            return Err(ServerError::RuntimeUnavailable);
+        }
+        if directory {
+            directories.insert(path.to_owned());
+        } else {
+            files.insert(path.to_owned());
         }
         let size = item.size();
         expanded = expanded
             .checked_add(size)
             .ok_or(ServerError::RuntimeUnavailable)?;
-        if expanded > MAX_EXPANDED {
+        if expanded > MAX_EXPANDED || (directory && size != 0) {
             return Err(ServerError::RuntimeUnavailable);
         }
-        if item.header().entry_type().is_dir() {
-            continue;
-        }
-        if !item.header().entry_type().is_file() {
-            return Err(ServerError::RuntimeUnavailable);
-        }
-        let retained = read_file(directory, path, size)?;
         let mut signed = Vec::new();
         item.take(size + 1)
             .read_to_end(&mut signed)
             .map_err(|_| ServerError::RuntimeUnavailable)?;
-        if signed != retained {
+        if signed.len() as u64 != size {
             return Err(ServerError::RuntimeUnavailable);
         }
         if path == Path::new("build.json") {
-            let info: serde_json::Value =
-                serde_json::from_slice(&signed).map_err(|_| ServerError::RuntimeUnavailable)?;
-            #[cfg(target_os = "macos")]
-            let target = "aarch64-apple-darwin";
-            #[cfg(target_os = "linux")]
-            let target = "x86_64-unknown-linux-gnu";
-            if info["schema"] != 1 || info["identity"] != identity || info["target"] != target {
-                return Err(ServerError::RuntimeUnavailable);
-            }
-            manifest = true;
+            manifest = Some(Build::parse(&signed, identity)?);
         }
-        if path == Path::new("bin/spaceterm-server") {
+        if path == Path::new("bin/spaceterm-server") && !directory {
             executable = true;
         }
+        visit(path, directory, mode, &signed)?;
     }
-    if !manifest || !executable {
+    let mut required: BTreeSet<PathBuf> = serde_json::from_str::<Vec<PathBuf>>(include_str!(
+        "../../../../packaging/server-resources.json"
+    ))
+    .map_err(|_| ServerError::RuntimeUnavailable)?
+    .into_iter()
+    .collect();
+    required.extend([
+        PathBuf::from("build.json"),
+        PathBuf::from("bin/spaceterm-server"),
+    ]);
+    let terminfo: Vec<_> = files
+        .iter()
+        .filter(|path| {
+            matches!(
+                path.to_str(),
+                Some(
+                    "share/spaceterm/terminfo/x/xterm-spaceterm"
+                        | "share/spaceterm/terminfo/78/xterm-spaceterm"
+                )
+            )
+        })
+        .cloned()
+        .collect();
+    if terminfo.is_empty() {
         return Err(ServerError::RuntimeUnavailable);
     }
-    Ok(())
+    required.extend(terminfo);
+    let required_directories: BTreeSet<_> = files
+        .iter()
+        .flat_map(|path| path.ancestors().skip(1).map(Path::to_owned))
+        .collect();
+    if !executable || files != required || !directories.is_subset(&required_directories) {
+        return Err(ServerError::RuntimeUnavailable);
+    }
+    manifest.ok_or(ServerError::RuntimeUnavailable)
 }
-
+fn verify_contents(directory: &File, bytes: &[u8], identity: &str) -> Result<Build, ServerError> {
+    let mut expected = BTreeSet::from([
+        PathBuf::from("artifact.tar.gz"),
+        PathBuf::from("artifact.sig"),
+    ]);
+    let info = contents(bytes, identity, |path, is_directory, mode, signed| {
+        if !path.as_os_str().is_empty() {
+            let file = open_relative(directory, path, is_directory)?;
+            let metadata = file
+                .metadata()
+                .map_err(|_| ServerError::StorageUnavailable)?;
+            if metadata.is_dir() != is_directory || metadata.mode() & 0o7777 != mode {
+                return Err(ServerError::RuntimeUnavailable);
+            }
+            if !is_directory && read_file(directory, path, signed.len() as u64)? != signed {
+                return Err(ServerError::RuntimeUnavailable);
+            }
+            expected.insert(path.to_owned());
+            expected.extend(
+                path.ancestors()
+                    .skip(1)
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .map(Path::to_owned),
+            );
+        }
+        Ok(())
+    })?;
+    fn scan(
+        directory: &File,
+        prefix: &Path,
+        names: &mut BTreeSet<PathBuf>,
+    ) -> Result<(), ServerError> {
+        for name in files::names(directory)? {
+            let path = prefix.join(&name);
+            if names.len() >= 256 {
+                return Err(ServerError::RuntimeUnavailable);
+            }
+            names.insert(path.clone());
+            let entry = open_relative(directory, Path::new(&name), false)?;
+            if entry
+                .metadata()
+                .map_err(|_| ServerError::StorageUnavailable)?
+                .is_dir()
+            {
+                scan(&entry, &path, names)?;
+            }
+        }
+        Ok(())
+    }
+    let mut actual = BTreeSet::new();
+    scan(directory, Path::new(""), &mut actual)?;
+    if actual != expected {
+        return Err(ServerError::RuntimeUnavailable);
+    }
+    Ok(info)
+}
 fn read_file(directory: &File, path: &Path, maximum: u64) -> Result<Vec<u8>, ServerError> {
-    let file = open_relative(directory, path, false)?;
+    bounded(open_relative(directory, path, false)?, maximum)
+}
+fn bounded(file: File, maximum: u64) -> Result<Vec<u8>, ServerError> {
     let metadata = file
         .metadata()
         .map_err(|_| ServerError::StorageUnavailable)?;
@@ -165,4 +411,81 @@ fn read_file(directory: &File, path: &Path, maximum: u64) -> Result<Vec<u8>, Ser
         return Err(ServerError::RuntimeUnavailable);
     }
     Ok(bytes)
+}
+fn source(path: &Path, maximum: u64) -> Result<Vec<u8>, ServerError> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|_| ServerError::RuntimeUnavailable)?;
+    bounded(file, maximum)
+}
+fn provision(
+    parent: &Path,
+    identity: &str,
+    archive: &Path,
+    signature: &Path,
+    target: &str,
+    commit: &str,
+    version: &str,
+) -> Result<RetainedInstallation, ServerError> {
+    let bytes = source(archive, MAX_ARCHIVE)?;
+    let signature = source(signature, 64)?;
+    authenticate(&bytes, &signature)?;
+    let info = contents(&bytes, identity, |_, _, _, _| Ok(()))?;
+    if info.target != target || info.commit != commit || info.version != version {
+        return Err(ServerError::RuntimeUnavailable);
+    }
+    // The account-private store is the lock used by both the Python installer and service controls.
+    let directory = files::store(parent)?;
+    lock_directory(&directory)?;
+    verify_directory_path(&directory, parent)?;
+    let digest = digest(&bytes);
+    let destination = parent.join(&digest);
+    let name = files::leaf(&destination)?;
+    if files::exists(&directory, &name)? {
+        let (retained_version, retained_commit) = describe(&destination, identity)?;
+        if retained_version != version || retained_commit != commit {
+            return Err(ServerError::RuntimeUnavailable);
+        }
+    } else {
+        let prepared = files::Preparation::new(&directory)?;
+        contents(&bytes, identity, |path, is_directory, mode, data| {
+            if is_directory {
+                files::create_directories(&prepared.directory, path)?;
+            } else {
+                files::create_file(&prepared.directory, path, data, mode)?;
+            }
+            Ok(())
+        })?;
+        files::create_file(
+            &prepared.directory,
+            Path::new("artifact.tar.gz"),
+            &bytes,
+            0o644,
+        )?;
+        files::create_file(
+            &prepared.directory,
+            Path::new("artifact.sig"),
+            &signature,
+            0o644,
+        )?;
+        verify_contents(&prepared.directory, &bytes, identity)?;
+        let prepared_path = prepared.path(parent);
+        verify_directory_path(&prepared.directory, &prepared_path)?;
+        verify_native(&prepared_path, identity)?;
+        verify_executable(&prepared_path, &info)?;
+        verify_directory_path(&directory, parent)?;
+        prepared
+            .directory
+            .sync_all()
+            .map_err(|_| ServerError::StorageUnavailable)?;
+        prepared.publish(&name)?;
+    }
+    verify_directory_path(&directory, parent)?;
+    Ok(RetainedInstallation {
+        directory: destination,
+        version: version.to_owned(),
+        commit: commit.to_owned(),
+    })
 }
