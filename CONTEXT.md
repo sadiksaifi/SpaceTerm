@@ -4,7 +4,7 @@ SpaceTerm organizes terminal work into Workspaces, Tabs, Pane Layouts, and Pane-
 
 ## Hierarchy
 
-**SpaceTerm**: The application that owns all Workspaces.
+**SpaceTerm**: The application for organizing and presenting terminal work.
 
 **Workspace**: A named top-level scope containing Tabs and an optional Pinned Directory.
 
@@ -41,7 +41,7 @@ _Avoid_: Window, Terminal Session
 
 ## Server architecture vocabulary
 
-These terms describe the planned server architecture in [issue #520](https://github.com/sadiksaifi/SpaceTerm/issues/520). The native application retains its current Workspace and Terminal Session ownership until the corresponding implementation changes land.
+The account-local SpaceTerm Server owns local terminal work. Production SSH Workspaces retain native ownership until the remote implementation in [issue #520](https://github.com/sadiksaifi/SpaceTerm/issues/520) replaces it.
 
 **SpaceTerm Server**: The application that owns its Workspaces and their Terminal Sessions independently of the applications presenting them.
 
@@ -287,5 +287,3 @@ _Avoid_: checkout, working copy
 **Surface Material**: The translucency and neutral shading of a background fill.
 
 **Developer Workbench**: The Development window for previewing appearance and interface controls.
-
-**Development Pane**: The window presenting one Terminal Session owned by the local SpaceTerm Server.

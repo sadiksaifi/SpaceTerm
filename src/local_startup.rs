@@ -1,7 +1,6 @@
 //! Account-local startup composition for the desktop host.
 //!
-//! The UI host runs this operation off its event thread and presents the typed outcome. Normal
-//! launch integration remains with the Opus-owned phase of issue #591.
+//! The UI host runs this operation off its event thread and presents the typed outcome.
 use spaceterm_server::{LocalStartup, ServerError, StartupOutcome, service::Service};
 use std::path::{Path, PathBuf};
 
