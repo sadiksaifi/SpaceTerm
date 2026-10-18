@@ -119,8 +119,12 @@ fn run() -> Result<(), Box<dyn Error>> {
         println!("Service-launched shell resolved native tools and the login agent socket.");
     }
     service.stop()?;
-    if !matches!(client.setup_and_start(), Err(ServerError::Stopped)) {
-        return Err("setup reversed Stop".into());
+    if !matches!(
+        spaceterm_server::LocalStartup::for_identity(&identity)?
+            .run(|| Err(ServerError::NotInstalled), || false)?,
+        spaceterm_server::StartupOutcome::Stopped
+    ) {
+        return Err("normal launch reversed Stop".into());
     }
     if !service.status()?.stopped {
         return Err("Stop intent was lost".into());

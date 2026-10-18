@@ -11,7 +11,7 @@ use spaceterm_server::{
     pane::Request,
     repository::{ChangeTotal, DirectoryFacts, RepositoryHead},
 };
-use std::{error::Error, time::Duration};
+use std::error::Error;
 #[path = "support/repository.rs"]
 mod repository;
 use repository::*;
@@ -20,11 +20,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let a = LocalServer::for_development_client("repository-smoke-a", major)?;
     let b = LocalServer::for_development_client("repository-smoke-b", major)?;
     lifecycle::require_idle(&a)?;
-    lifecycle::prepare_companion()?;
-    a.setup_and_start()?;
-    b.setup_and_start()?;
-    connect(&a)?.exchange(&Request::Shutdown)?;
-    std::thread::sleep(Duration::from_millis(200));
+    a.setup()?;
+    b.setup()?;
     let mut server = lifecycle::Server::start()?;
     let repository = Repository::new()?;
     let mut first = connect(&a)?;

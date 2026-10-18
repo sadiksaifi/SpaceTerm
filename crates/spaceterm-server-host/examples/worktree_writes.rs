@@ -91,14 +91,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let b = LocalServer::for_development_client("worktree-writes-b", major)?;
     eprintln!("Worktree smoke: idle guard");
     lifecycle::require_idle(&a)?;
-    lifecycle::prepare_companion()?;
     eprintln!("Worktree smoke: first client setup");
-    a.setup_and_start()?;
+    a.setup()?;
     eprintln!("Worktree smoke: second client setup");
-    b.setup_and_start()?;
-    eprintln!("Worktree smoke: stop setup server");
-    connect(&a)?.exchange(&Request::Shutdown)?;
-    std::thread::sleep(Duration::from_millis(200));
+    b.setup()?;
     let mut server = lifecycle::Server::start()?;
     eprintln!("Worktree smoke: create fixture repository");
     let fixture = Repository::new()?;

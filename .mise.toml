@@ -406,10 +406,9 @@ run = "cargo build --package spaceterm-server-host --no-default-features --locke
 description = "Run the Development server explicitly in the foreground after local setup"
 run = "cargo run --package spaceterm-server-host --no-default-features --locked -- serve spaceterm-development"
 
-[tasks."server:setup"]
-description = "Explicitly set up, start, and connect to the local Development server"
-usage = 'flag "--state-only" help="Create nonsecret state without starting or changing Stop"'
-run = "cargo run --package spaceterm-server-host --features client --locked -- {% if usage.state_only %}setup-state{% else %}setup{% endif %} spaceterm-development"
+[tasks."server:setup-state"]
+description = "Recover nonsecret Development state without starting or changing Stop"
+run = "cargo run --package spaceterm-server-host --features client --locked -- setup-state spaceterm-development"
 
 [tasks."server:status"]
 description = "Connect to the existing Development server"
@@ -424,19 +423,19 @@ description = "Refresh local server dependencies without upgrading unrelated pac
 run = "cargo update --package spaceterm-server --offline"
 
 [tasks."server:pane:test"]
-description = "Verify persistent Development Pane ownership with real headless PTYs"
+description = "Verify persistent server Pane ownership with real headless PTYs"
 run = "cargo test --package spaceterm --no-default-features --locked --lib runtime::server"
 
 [tasks."server:pane:smoke"]
-description = "Launch, disconnect, resume, and close the account-local Development server's one Pane"
+description = "Disconnect, resume, and close a Pane on the approved Development service"
 run = "cargo run --package spaceterm-server-host --features client --example persistent_pane --locked"
 
 [tasks."server:pane:shutdown:smoke"]
-description = "Verify authenticated Development server shutdown terminates its running Pane"
+description = "Verify authenticated approved Development service shutdown terminates its running Pane"
 run = "cargo run --package spaceterm-server-host --features client --example persistent_pane --locked -- --shutdown"
 
 [tasks."server:pane:takeover:smoke"]
-description = "Verify two account-local Development clients transfer control with the initial protocol major"
+description = "Verify two account-local clients transfer control on the approved Development service"
 run = [
   "cargo run --package spaceterm-server-host --features client --example pane_takeover --locked -- 1",
 ]
@@ -527,19 +526,17 @@ run = "cargo build --package spaceterm-server-host --features client --example d
 description = "Exercise directory recovery on an idle Development server without native credential adapters"
 usage = '''
 arg "[major]" default="1" help="Initial protocol major (1)"
-flag "--prepare-desktop" help="Leave the test Workspace unavailable for a real desktop exercise"
 flag "--cleanup-exercise" help="Remove only the retained directory-recovery test Workspace"
 '''
 run = [
   { task = "server:directory:build" },
-  "target/debug/examples/directory_recovery {{usage.major}} {% if usage.prepare_desktop %}--prepare-desktop{% endif %} {% if usage.cleanup_exercise %}--cleanup{% endif %}",
+  "target/debug/examples/directory_recovery {{usage.major}} {% if usage.cleanup_exercise %}--cleanup{% endif %}",
 ]
 
 [tasks."server:directory:run"]
 description = "Run a built directory-recovery check without replacing its code signature"
 usage = '''
 arg "[major]" default="1" help="Initial protocol major (1)"
-flag "--prepare-desktop" help="Leave the test Workspace unavailable for a real desktop exercise"
 flag "--cleanup-exercise" help="Remove only the retained directory-recovery test Workspace"
 '''
-run = "target/debug/examples/directory_recovery {{usage.major}} {% if usage.prepare_desktop %}--prepare-desktop{% endif %} {% if usage.cleanup_exercise %}--cleanup{% endif %}"
+run = "target/debug/examples/directory_recovery {{usage.major}} {% if usage.cleanup_exercise %}--cleanup{% endif %}"

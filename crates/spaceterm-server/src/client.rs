@@ -5,11 +5,6 @@ use crate::{
     storage::Directory,
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    os::unix::process::CommandExt,
-    process::{Command, Stdio},
-    time::{Duration, Instant},
-};
 
 /// A stable presentation identity. Possession grants no connection authority.
 #[derive(Serialize, Deserialize)]
@@ -154,18 +149,6 @@ impl LocalServer {
         self.server_id()?;
         self.authenticate()
     }
-    pub fn setup_and_start(&self) -> Result<AuthenticatedStatus, ServerError> {
-        crate::service::check_start(&self.paths)?;
-        self.setup()?;
-        if crate::service::Service::for_identity(&self.identity)?
-            .status()?
-            .installed
-        {
-            crate::service::Service::for_identity(&self.identity)?.start_if_enabled()?;
-            return self.refresh();
-        }
-        self.start_temporary()
-    }
     /// Explicit first setup retains a nonsecret server identity. It never changes Stop intent.
     pub fn setup(&self) -> Result<(), ServerError> {
         let data = Directory::open(&self.paths.data, true)?;
@@ -173,53 +156,6 @@ impl LocalServer {
         data.read_or_create()?;
         self.client_id()?;
         Ok(())
-    }
-
-    fn start_temporary(&self) -> Result<AuthenticatedStatus, ServerError> {
-        crate::service::check_start(&self.paths)?;
-        match self.authenticate() {
-            Ok(status) => return Ok(status),
-            Err(ServerError::NotRunning) => {}
-            Err(error) => return Err(error),
-        }
-        // Each application stages this binary beside the desktop executable. No PATH
-        // lookup, shell command, retained service, or remote-provided executable is involved.
-        let executable = std::env::current_exe()
-            .map_err(|_| ServerError::StartupFailed)?
-            .parent()
-            .ok_or(ServerError::StartupFailed)?
-            .join("spaceterm-server");
-        let mut command = Command::new(executable);
-        command
-            .args(["serve", &self.identity])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        // SAFETY: setsid is async-signal-safe and this closure performs no allocation or locking.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() < 0 {
-                    Err(std::io::Error::last_os_error())
-                } else {
-                    Ok(())
-                }
-            });
-        }
-        let mut child = command.spawn().map_err(|_| ServerError::StartupFailed)?;
-        std::thread::spawn(move || {
-            let _ = child.wait();
-        });
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            match self.authenticate() {
-                Ok(status) => return Ok(status),
-                Err(ServerError::NotRunning) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(50))
-                }
-                Err(ServerError::NotRunning) => return Err(ServerError::StartupFailed),
-                Err(error) => return Err(error),
-            }
-        }
     }
 }
 
@@ -291,7 +227,7 @@ mod tests {
         let data = Directory::open(&server.paths.data, true).unwrap();
         let stopped = serde_json::json!({"installation": "a".repeat(64), "stopped": true, "installed": true, "run": null});
         data.write_json(c"service.json", &stopped).unwrap();
-        assert_eq!(server.setup_and_start(), Err(ServerError::Stopped));
+        assert_eq!(server.refresh(), Err(ServerError::Stopped));
         server.setup().unwrap();
         assert_ne!(data.read().unwrap().server, [0; 32]);
         assert_eq!(
@@ -299,7 +235,6 @@ mod tests {
             Some(stopped)
         );
         assert_eq!(server.refresh(), Err(ServerError::Stopped));
-        assert_eq!(server.setup_and_start(), Err(ServerError::Stopped));
         assert!(!server.paths.runtime.exists());
         std::fs::remove_dir_all(root).unwrap();
     }

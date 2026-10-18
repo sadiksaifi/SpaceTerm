@@ -161,18 +161,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let a = LocalServer::for_development_client("shared-smoke-a", major)?;
     let b = LocalServer::for_development_client("shared-smoke-b", major)?;
     require_idle(&a)?;
-    let directory = std::env::current_exe()?
-        .parent()
-        .ok_or("example directory")?
-        .to_owned();
-    let companion = directory.join("spaceterm-server");
-    if !companion.try_exists()? {
-        std::os::unix::fs::symlink("../spaceterm-server", &companion)?;
-    }
-    a.setup_and_start()?;
-    b.setup_and_start()?;
-    connect(&a)?.exchange(&Request::Shutdown)?;
-    std::thread::sleep(Duration::from_millis(200));
+    a.setup()?;
+    b.setup()?;
     let mut host = Server::start()?;
     attachment_workflow(&a, &b)?;
     let mut first = connect(&a)?;

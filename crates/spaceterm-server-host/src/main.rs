@@ -11,7 +11,7 @@ fn run() -> Result<(), spaceterm_server::ServerError> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args == ["--help"] {
         println!(
-            "SpaceTerm Server\n\nserve IDENTITY\nsetup IDENTITY\nsetup-state IDENTITY\nstatus IDENTITY\nservice-status IDENTITY\nservice-enable-linger IDENTITY\nservice-install IDENTITY RETAINED_INSTALLATION\nservice-start IDENTITY\nservice-stop IDENTITY\nservice-restart IDENTITY\nservice-uninstall IDENTITY\n\nClient commands require the client build feature. setup-state creates nonsecret local state without starting the server or changing Stop. Service controls use this executable\'s compiled application identity. Stop and uninstall retain identity and Workspace organization."
+            "SpaceTerm Server\n\nserve IDENTITY\nsetup-state IDENTITY\nstatus IDENTITY\nservice-status IDENTITY\nservice-enable-linger IDENTITY\nservice-install IDENTITY RETAINED_INSTALLATION\nservice-start IDENTITY\nservice-stop IDENTITY\nservice-restart IDENTITY\nservice-uninstall IDENTITY\n\nClient commands require the client build feature. setup-state creates nonsecret local state without starting the server or changing Stop. Service controls use this executable\'s compiled application identity. Stop and uninstall retain identity and Workspace organization."
         );
         return Ok(());
     }
@@ -101,9 +101,7 @@ fn run() -> Result<(), spaceterm_server::ServerError> {
             println!("Local server state is set up. Startup and Stop intent are unchanged.");
             return Ok(());
         }
-        let status = if command == "setup" {
-            client.setup_and_start()?
-        } else if command == "status" {
+        let status = if command == "status" {
             client.refresh()?
         } else {
             return Err(spaceterm_server::ServerError::Protocol);

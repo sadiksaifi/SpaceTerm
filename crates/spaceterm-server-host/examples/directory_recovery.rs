@@ -113,17 +113,10 @@ fn cleanup_exercise(connection: &mut PaneConnection) -> Result<(), Box<dyn Error
 }
 fn main() -> Result<(), Box<dyn Error>> {
     let major = std::env::args().nth(1).unwrap_or("1".into()).parse()?;
-    let prepare = std::env::args().any(|arg| arg == "--prepare-desktop");
     let client = LocalServer::for_development_client("directory-recovery", major)?;
     require_idle(&client)?;
-    let companion = std::env::current_exe()?
-        .parent()
-        .ok_or("example directory")?
-        .join("spaceterm-server");
-    if !companion.try_exists()? {
-        std::os::unix::fs::symlink("../spaceterm-server", &companion)?;
-    }
-    client.setup_and_start()?;
+    client.setup()?;
+    let mut host = Server::start()?;
     let mut connection = connect(&client)?;
     if !connection.supports_directory_recovery() {
         return Err(
@@ -134,6 +127,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if std::env::args().any(|arg| arg == "--cleanup") {
         cleanup_exercise(&mut connection)?;
         connection.exchange(&Request::Shutdown)?;
+        host.0.wait()?;
         println!("Removed only the retained directory-recovery exercise.");
         return Ok(());
     }
@@ -142,7 +136,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     connection.exchange(&Request::Shutdown)?;
     drop(connection);
-    std::thread::sleep(Duration::from_millis(250));
+    host.0.wait()?;
     let mut host = Server::start()?;
     let mut connection = connect(&client)?;
     let root = std::env::temp_dir().join(format!(
@@ -230,15 +224,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some(ServerError::DirectoryUnavailable)
     );
     std::fs::remove_file(&original)?;
-    if prepare {
-        println!(
-            "Protocol {major}: prepared Directory recovery Workspace with an unavailable Pane. Replacement directory: {}. Server PID: {}.",
-            replacement.display(),
-            host.0.id()
-        );
-        std::mem::forget(host);
-        return Ok(());
-    }
     // Retry only starts after an explicit request, even once the original returns.
     std::fs::create_dir(&original)?;
     drop(connection);

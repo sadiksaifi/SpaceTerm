@@ -323,16 +323,6 @@ impl Service {
         self.start_locked(&data, &mut state, true)?;
         self.snapshot(&state)
     }
-    #[cfg(feature = "client")]
-    pub(crate) fn start_if_enabled(&self) -> Result<(), ServerError> {
-        let (data, _) = self.read()?.ok_or(ServerError::NotInstalled)?;
-        let _operation = data.lock("service.lock", false)?;
-        let mut state = Self::state(&data)?.ok_or(ServerError::NotInstalled)?;
-        if state.stopped || !state.installed {
-            return Err(ServerError::Stopped);
-        }
-        self.start_locked(&data, &mut state, false)
-    }
     fn start_locked(
         &self,
         data: &Directory,
@@ -521,7 +511,7 @@ impl Service {
     }
 }
 
-// Retained Stop also fences explicit foreground and temporary desktop startup paths.
+// Retained Stop also fences explicit foreground startup.
 pub(crate) fn check_start(paths: &Paths) -> Result<(), ServerError> {
     let data = match Directory::open(&paths.data, false) {
         Ok(data) => data,
@@ -873,24 +863,6 @@ mod tests {
         let reopened = Directory::open(&fixture.paths.data, false).unwrap();
         assert_eq!(reopened.read().unwrap().server, seed);
         assert!(Service::state(&reopened).unwrap().unwrap().stopped);
-    }
-    #[cfg(feature = "client")]
-    #[test]
-    fn connection_setup_cannot_restart_a_durably_stopped_service() {
-        let fixture = Fixture::new();
-        retain_stop(&fixture.paths).unwrap();
-        let service = Service::new(
-            fixture.paths.clone(),
-            "spaceterm-development".into(),
-            std::sync::Arc::new(TestSupervisor::default()),
-        );
-        assert_eq!(service.start_if_enabled(), Err(ServerError::Stopped));
-        assert!(
-            Service::state(&Directory::open(&fixture.paths.data, false).unwrap())
-                .unwrap()
-                .unwrap()
-                .stopped
-        );
     }
     #[test]
     fn service_definition_publication_reuses_exact_bytes_and_preserves_changed_entries() {
