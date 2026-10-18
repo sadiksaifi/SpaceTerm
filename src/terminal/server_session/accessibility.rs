@@ -187,7 +187,7 @@ impl Fetcher {
             let current = base.is_some() && self.server_revision.is_none_or(|r| Some(r) == base);
             let failed =
                 self.failed_revision.is_some() && self.server_revision == self.failed_revision;
-            if current || failed {
+            if self.requested && (current || failed) {
                 return Ok(None);
             }
             self.transfer = Some(Transfer {
@@ -705,6 +705,33 @@ mod tests {
         }
 
         assert_eq!(server.ends(), 1);
+
+        state.accessibility_demand.store(true, Ordering::Release);
+        fetcher
+            .poll(
+                &state,
+                PresentationGeneration::default(),
+                &mut server.exchange(),
+            )
+            .unwrap();
+        assert_eq!(
+            server.bases(),
+            [None, Some(1)],
+            "renewed demand must reach the server"
+        );
+
+        server.snapshot = Some(snapshot(2, &[0], vec![row(0, 2, "changed")]));
+        fetcher.note_revision(2);
+        let changed = fetcher
+            .poll(
+                &state,
+                PresentationGeneration::default().next(),
+                &mut server.exchange(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(rows(&changed), [(0, "changed".into())]);
+        assert_eq!(server.bases(), [None, Some(1), Some(1)]);
     }
 
     #[test]
