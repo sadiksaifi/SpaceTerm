@@ -1,4 +1,4 @@
-//! Explicit disposable-guest evidence with an in-memory fixture client, never a credential fallback.
+//! Explicit disposable-guest evidence with the account-local client without native credential adapters.
 use super::*;
 use crate::{
     hierarchy::{Mutation, Outcome},
@@ -11,19 +11,6 @@ struct Witness {
     server: [u8; 32],
     session: [u8; 32],
     pin: [u8; 32],
-}
-struct Pairing {
-    paths: Paths,
-    public: [u8; 32],
-}
-impl Drop for Pairing {
-    fn drop(&mut self) {
-        let data = Directory::open(&self.paths.data, false).unwrap();
-        let _setup = data.lock("setup.lock", false).unwrap();
-        let mut record = data.read().unwrap();
-        record.paired.retain(|public| public != &self.public);
-        data.write(&record).unwrap();
-    }
 }
 fn command(connection: &mut PaneConnection, lease: Lease, text: &str) {
     for key in [
@@ -105,31 +92,13 @@ fn installed_service_preserves_sessions_and_restores_dormant_organization() {
         return;
     }
     assert!(service.status().unwrap().running);
-    if phase == "prepare" {
-        assert_eq!(
-            native.pair(),
-            Err(ServerError::CredentialUnavailable),
-            "the headless guest must not acquire a fallback credential store"
-        );
-    }
-    let key = crate::protocol::key(&crate::protocol::random().unwrap()).unwrap();
-    let public = crate::protocol::public(&key);
-    let data = Directory::open(&paths.data, false).unwrap();
-    let pin;
-    {
-        let _setup = data.lock("setup.lock", false).unwrap();
-        let mut record = data.read().unwrap();
-        pin = crate::protocol::public(&crate::protocol::key(&record.seed).unwrap());
-        record.paired.push(public);
-        data.write(&record).unwrap();
-    }
-    let _pairing = Pairing {
-        paths: paths.clone(),
-        public,
-    };
-    let mut stream = crate::host::connect(&paths).unwrap();
-    crate::protocol::authenticate_client(&mut stream, &key, &pin, &[2]).unwrap();
-    let mut connection = PaneConnection::negotiate(stream).unwrap();
+    native.setup().unwrap();
+    let pin = Directory::open(&paths.data, false)
+        .unwrap()
+        .read()
+        .unwrap()
+        .server;
+    let mut connection = native.connect_pane().unwrap();
     let witness_path = Path::new("/home/stvm/artifacts/service-witness.json");
     let size = PaneSize {
         columns: 100,

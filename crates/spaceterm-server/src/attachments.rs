@@ -25,8 +25,8 @@ struct Choices {
 #[serde(deny_unknown_fields)]
 struct Record {
     version: u32,
-    pin: Id,
-    device: Id,
+    server: Id,
+    client: Id,
     choices: Choices,
 }
 struct State {
@@ -60,19 +60,19 @@ impl Attachments {
     #[cfg(feature = "client")]
     pub(crate) fn open(
         directory: crate::storage::Directory,
-        pin: Id,
-        device: Id,
+        server: Id,
+        client: Id,
     ) -> Result<Self, ServerError> {
         let lock = directory.lock("attachments.lock", true)?;
         let record = directory
             .read_json::<Record>("attachments.json")?
             .unwrap_or(Record {
                 version: 1,
-                pin,
-                device,
+                server,
+                client,
                 choices: Choices::default(),
             });
-        if record.version != 1 || record.pin != pin || record.device != device {
+        if record.version != 1 || record.server != server || record.client != client {
             return Err(ServerError::AuthenticationRefused);
         }
         let choices = record.choices;
@@ -99,7 +99,7 @@ impl Attachments {
             choices,
             catalog: BTreeMap::new(),
             blocked: false,
-            storage: Some((directory, lock, pin, device)),
+            storage: Some((directory, lock, server, client)),
         }))))
     }
     /// Preserve the existing Development adoption once. Later discoveries remain detached.
@@ -310,14 +310,14 @@ impl State {
             return Err(ServerError::Capacity);
         }
         #[cfg(feature = "client")]
-        if let Some((directory, _, pin, device)) = &self.storage
+        if let Some((directory, _, server, client)) = &self.storage
             && self.choices != next
             && let Err(error) = directory.write_json(
                 c"attachments.json",
                 &Record {
                     version: 1,
-                    pin: *pin,
-                    device: *device,
+                    server: *server,
+                    client: *client,
                     choices: next.clone(),
                 },
             )

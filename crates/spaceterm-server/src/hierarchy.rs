@@ -864,8 +864,8 @@ pub struct ClientOperation {
 #[cfg(feature = "client")]
 #[derive(Default, Serialize, Deserialize)]
 struct JournalRecord {
-    pin: Id,
-    device: Id,
+    server: Id,
+    client: Id,
     pending: Option<ClientOperation>,
     last: Option<RetainedOutcome>,
 }
@@ -891,18 +891,18 @@ impl Drop for ClientJournal {
 impl ClientJournal {
     pub(crate) fn open(
         directory: crate::storage::Directory,
-        pin: Id,
-        device: Id,
+        server: Id,
+        client: Id,
     ) -> Result<Self, ServerError> {
         let lock = directory.lock("operations.lock", true)?;
         let record = directory
             .read_json::<JournalRecord>("operations.json")?
             .unwrap_or(JournalRecord {
-                pin,
-                device,
+                server,
+                client,
                 ..Default::default()
             });
-        if record.pin != pin || record.device != device {
+        if record.server != server || record.client != client {
             return Err(ServerError::AuthenticationRefused);
         }
         Ok(Self {

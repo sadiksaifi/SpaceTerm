@@ -1,4 +1,4 @@
-//! Native service evidence through the desktop's authenticated transport and credential facility.
+//! Native service evidence through the desktop's authenticated transport without credential storage.
 #[expect(
     dead_code,
     reason = "Service evidence uses shared hierarchy instead of legacy Attach."
@@ -36,7 +36,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         );
     }
     let client = LocalServer::for_identity(&identity)?;
-    client.pair()?;
+    client.setup()?;
     let mut first = client.connect_pane()?;
     let Reply::Inventory { next_sequence, .. } = first.exchange(&Request::Inventory)? else {
         return Err("inventory unavailable".into());

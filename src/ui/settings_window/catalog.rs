@@ -22,7 +22,7 @@ pub(crate) enum SettingsSectionId {
     Privacy,
     /// Repository Status and Pull Requests, and the tools that provide them.
     Git,
-    /// The SpaceTerm Server this device pairs with and its authenticated status.
+    /// The account-local SpaceTerm Server and its connection status.
     Servers,
     /// The installed version, the latest check, and how SpaceTerm keeps itself current.
     Updates,
@@ -151,7 +151,7 @@ pub(super) enum SettingsRowId {
     GitHubCli,
     /// The Worktree Path Template, where a new Worktree's directory goes.
     WorktreeLocation,
-    /// This device's pairing with the local server, its authenticated status, and the next step.
+    /// The local server's connection status and the next step.
     LocalServer,
     /// The service that runs the local server while the person is logged in, and its controls.
     ServerService,
@@ -654,19 +654,14 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
             "server",
             "spaceterm server",
             "headless",
-            "pair",
-            "pairing",
-            "paired device",
+            "account",
             "set up",
             "setup",
             "start server",
             "connect",
             "connection",
-            "authenticate",
             "status",
             "protocol",
-            "keychain",
-            "credential",
         ],
         selector: "settings-row-local-server",
     },
@@ -1359,7 +1354,7 @@ mod tests {
 
     #[test]
     fn a_server_query_reaches_the_local_server() {
-        for query in ["server", "pair", "set up", "start server", "protocol"] {
+        for query in ["server", "account", "set up", "start server", "protocol"] {
             assert_eq!(
                 matching_rows(query).first(),
                 Some(&SettingsRowId::LocalServer),

@@ -1,5 +1,9 @@
-# Trust paired clients equally
+# Admit clients through their connection's authority
 
-Every Paired Device has equal authority over its SpaceTerm Server, matching the owner's equally trusted personal devices. Its SpaceTerm Clients can create, take over, and close terminal work; change server settings; pair and unpair devices; update or repair the server; and Start Server or Stop Server. Individual device revocation follows [ADR 0038](0038-unpair-devices-without-blocking-local-connection-removal.md).
+Account-local IPC admits processes running as the server's owning account, with automatic peer-account, private-endpoint and application-build identity checks. This deliberately trusts processes running as the owner. Build identities prevent accidental cross-use; they do not isolate hostile processes in that account. Local connections require no pairing, signing secret or credential-store access.
 
-Management operations remain subject to the host operating system's authorization requirements and the existing confirmation rules, including [confirmation before a server update restarts all Terminal Sessions](0034-confirm-server-update-restarts-and-explain-incompatibility.md). Pairing grants SpaceTerm authority without supplying operating-system administrator credentials.
+SSH connections use OpenSSH host verification and account authentication, followed by an account-local protocol bridge under [ADR 0029](0029-pair-clients-automatically-during-ssh-bootstrap.md). Direct-network connections require verified server trust and deliberate device enrollment. Every authorized client has equal SpaceTerm authority to create, take over and close terminal work, change Server Settings and manage its server. Individual direct-network device revocation follows [ADR 0038](0038-unpair-devices-without-blocking-local-connection-removal.md).
+
+A stable nonsecret Client Identity distinguishes personal views, Workspace Attachments, Pane control and original operations. It grants no connection authority. Connection, Terminal Session, control and attachment generations fence those operations independently of admission.
+
+Management remains subject to operating-system authorization and existing confirmation rules, including [server update confirmation](0034-confirm-server-update-restarts-and-explain-incompatibility.md). Signed-artifact verification, local file authority, durable Stop, proven process ownership and completion or reconciliation of started Git writes remain required.

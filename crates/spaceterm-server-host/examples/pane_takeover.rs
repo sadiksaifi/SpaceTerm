@@ -1,4 +1,4 @@
-//! Real-host two-client check. Pairing remains an explicit owning-account operation.
+//! Real-host two-client check. Admission uses owning-account authority without client credentials.
 mod support;
 use spaceterm_server::{LocalServer, ServerError, pane::*};
 use std::error::Error;
@@ -23,7 +23,7 @@ fn select(connection: &mut PaneConnection, create: bool) -> Result<Reply, Server
 fn main() -> Result<(), Box<dyn Error>> {
     let major = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "2".into())
+        .unwrap_or_else(|| "1".into())
         .parse()?;
     let first = LocalServer::for_development_client("takeover-first", major)?;
     let second = LocalServer::for_development_client("takeover-second", major)?;
@@ -87,7 +87,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Reply::Closed
     ));
     println!(
-        "Protocol {major}: two paired clients transferred the same running Session, refused stale content/resize/close, preserved takeover on reconnect, and acquired released control."
+        "Protocol {major}: two account-local clients transferred the same running Session, refused stale content/resize/close, preserved takeover on reconnect, and acquired released control."
     );
     Ok(())
 }

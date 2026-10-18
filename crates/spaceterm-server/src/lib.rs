@@ -25,8 +25,8 @@ pub struct AuthenticatedStatus {
 /// Bounded classifications. Native errors and peer-supplied values never cross this boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ServerError {
-    #[error("This device has not been paired with the local server.")]
-    NotPaired,
+    #[error("The local server is not set up.")]
+    NotSetUp,
     #[error("The local server service is unavailable. Try again after signing in.")]
     ServiceUnavailable,
     #[error("Install the local server service first.")]
@@ -39,13 +39,17 @@ pub enum ServerError {
     AuthorizationRequired,
     #[error("The local server is not running.")]
     NotRunning,
-    #[error("Native credential storage is locked or unavailable. Unlock it and try again.")]
-    CredentialUnavailable,
     #[error("Local server storage is unavailable.")]
     StorageUnavailable,
+    #[error(
+        "This server's saved state is from an incompatible SpaceTerm build. SpaceTerm left it unchanged."
+    )]
+    IncompatibleState,
     #[error("Local server storage has unsafe ownership or permissions.")]
     UnsafeStorage,
-    #[error("The local server could not authenticate this connection.")]
+    #[error(
+        "The connection did not pass the account and server identity checks, so SpaceTerm did not connect."
+    )]
     AuthenticationRefused,
     #[error("The client and server have no compatible protocol version.")]
     IncompatibleProtocol,
@@ -53,7 +57,7 @@ pub enum ServerError {
     Protocol,
     #[error("The local server could not start. Reinstall SpaceTerm and try again.")]
     StartupFailed,
-    #[error("This Pane is controlled by another device.")]
+    #[error("Another client controls this Pane.")]
     Controlled,
     #[error("This Terminal Session is no longer available.")]
     SessionUnavailable,

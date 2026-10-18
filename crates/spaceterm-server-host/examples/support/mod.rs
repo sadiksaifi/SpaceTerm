@@ -1,4 +1,4 @@
-//! Real-host smoke check, using the same native credentials and authenticated transport as desktop.
+//! Real-host smoke check, using the same account-local authority and authenticated transport as desktop.
 use spaceterm::runtime::PhysicalKey;
 use spaceterm_server::{ServerError, pane::*};
 use std::{

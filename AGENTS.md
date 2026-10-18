@@ -26,5 +26,6 @@ A native desktop terminal multiplexer for macOS and Linux, coming soon for Windo
 ## Work
 
 - Run commands with `mise run` and follow the task conventions in [`.mise.toml`](.mise.toml).
+- For local server setup or incompatible development state, follow [the local workflow](docs/local-server.md).
 - For Linux work, connect with `ssh penguin`.
 - Repositories live at `~/Projects/{SpaceTerm,zed,accesskit}` on both hosts. Clone missing forks from `github.com/sadiksaifi/{zed,accesskit}`.

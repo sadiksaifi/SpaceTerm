@@ -1,4 +1,4 @@
-//! Authenticated real-host directory recovery. Uses native credentials and an idle Development host.
+//! Authenticated real-host directory recovery. Uses account-local authority and an idle Development host.
 #[path = "support/lifecycle.rs"]
 mod lifecycle;
 #[expect(
@@ -112,7 +112,7 @@ fn cleanup_exercise(connection: &mut PaneConnection) -> Result<(), Box<dyn Error
     Ok(())
 }
 fn main() -> Result<(), Box<dyn Error>> {
-    let major = std::env::args().nth(1).unwrap_or("2".into()).parse()?;
+    let major = std::env::args().nth(1).unwrap_or("1".into()).parse()?;
     let prepare = std::env::args().any(|arg| arg == "--prepare-desktop");
     let client = LocalServer::for_development_client("directory-recovery", major)?;
     require_idle(&client)?;
@@ -341,7 +341,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     host.0.wait()?;
     std::fs::remove_dir_all(root)?;
     println!(
-        "Protocol {major}: authenticated restart, unavailable/file-changed directories, concurrent first-use Retry, replacement, nested reports, identity preservation and passive reconnect passed with real native PTYs and credential storage."
+        "Protocol {major}: authenticated restart, unavailable/file-changed directories, concurrent first-use Retry, replacement, nested reports, identity preservation and passive reconnect passed with real native PTYs without credential storage."
     );
     Ok(())
 }

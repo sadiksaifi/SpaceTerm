@@ -7,7 +7,7 @@ use std::{
 };
 
 pub fn require_idle(client: &LocalServer) -> Result<(), Box<dyn Error>> {
-    // Checking the listener first also protects running work when the test has no pairing yet.
+    // Checking the listener first also protects running work before client setup.
     // SAFETY: geteuid has no preconditions.
     let directories = spaceterm_directories::ServerDirectories::for_account(
         std::path::Path::new("/"),
@@ -18,7 +18,7 @@ pub fn require_idle(client: &LocalServer) -> Result<(), Box<dyn Error>> {
         return Err("Stop the Development server before this exercise.".into());
     }
     match client.refresh() {
-        Err(ServerError::NotRunning | ServerError::NotPaired) => Ok(()),
+        Err(ServerError::NotRunning | ServerError::NotSetUp) => Ok(()),
         Ok(_) => Err("Stop the Development server before this exercise.".into()),
         Err(error) => Err(error.into()),
     }
