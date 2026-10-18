@@ -128,6 +128,23 @@ fn launch_harness_choosing(
     >,
     cx: &mut TestAppContext,
 ) -> (LaunchHarness, &mut VisualTestContext) {
+    launch_harness_with(
+        answers,
+        ScriptedEdits::new(Some(inventory())),
+        selections,
+        cx,
+    )
+}
+
+/// A launch harness presenting `edits`, whose System Directory Selection answers `selections`.
+fn launch_harness_with(
+    answers: Vec<Result<LaunchOutcome, ServerError>>,
+    edits: ScriptedEdits,
+    selections: impl IntoIterator<
+        Item = Result<Option<PathBuf>, crate::directory_selection::DirectoryChooserError>,
+    >,
+    cx: &mut TestAppContext,
+) -> (LaunchHarness, &mut VisualTestContext) {
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
     let launch = Arc::new(ScriptedLaunch::default());
@@ -141,7 +158,7 @@ fn launch_harness_choosing(
         crate::terminal::testing::test_local_directory(std::env::temp_dir()),
     );
     let panes = ScriptedPanes::new(session_factory);
-    let edits = Rc::new(ScriptedEdits::new(Some(inventory())));
+    let edits = Rc::new(edits);
     let connector = Rc::new(ScriptedConnector {
         edits: Rc::clone(&edits),
         panes: Rc::clone(&panes),
@@ -252,10 +269,7 @@ fn a_refused_start_explains_itself_and_retries_launch_only_when_asked(cx: &mut T
 
 #[gpui::test]
 fn startup_authorization_runs_only_from_its_explicit_step(cx: &mut TestAppContext) {
-    let (harness, cx) = launch_harness(
-        vec![Ok(LaunchOutcome::AuthorizationRequired), ready()],
-        cx,
-    );
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::AuthorizationRequired), ready()], cx);
     cx.run_until_parked();
     assert_eq!(harness.launch_title(cx), Some(launch::AUTHORIZATION_TITLE));
     assert_eq!(harness.launch.steps(), ["run"]);
@@ -333,7 +347,11 @@ fn new_workspace_asks_the_server_rather_than_creating_desktop_work(cx: &mut Test
         }],
         "the next free default name, as desktop Workspaces were named"
     );
-    assert_eq!(harness.workspace_count(cx), 1, "nothing appears before the server answers");
+    assert_eq!(
+        harness.workspace_count(cx),
+        1,
+        "nothing appears before the server answers"
+    );
 }
 
 #[gpui::test]
@@ -425,4 +443,41 @@ fn a_second_launched_window_brings_the_presenting_one_forward(cx: &mut TestAppCo
         Some(first),
         "the Workspace Window presenting them comes forward"
     );
+}
+
+/// An approved older runtime would drop the directory and start the shell in the home directory,
+/// so SpaceTerm explains which side needs updating and sends nothing.
+#[gpui::test]
+fn an_older_server_is_never_asked_to_open_a_directory(cx: &mut TestAppContext) {
+    let chosen = std::env::temp_dir()
+        .canonicalize()
+        .unwrap()
+        .join(format!("st-launch-older-{}", std::process::id()));
+    std::fs::create_dir_all(&chosen).unwrap();
+    let (harness, cx) = launch_harness_with(
+        vec![ready()],
+        ScriptedEdits::new(Some(inventory())).without_workspace_directories(),
+        [Ok(Some(chosen.clone()))],
+        cx,
+    );
+    cx.run_until_parked();
+    sync(&harness, cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.open_local_directory(String::new(), window, cx);
+            manager.choose_local_pin_directory(
+                PinTarget::NewLocalWorkspace {
+                    name: String::new(),
+                },
+                window,
+                cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+
+    assert!(harness.edits.submitted().is_empty());
+    assert_eq!(harness.workspace_count(cx), 1);
+    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+    std::fs::remove_dir_all(chosen).unwrap();
 }

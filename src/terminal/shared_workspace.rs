@@ -14,6 +14,8 @@ use std::time::Duration;
 #[derive(Clone)]
 pub(crate) struct SharedWorkspaceSnapshot {
     pub worktree_writes: bool,
+    /// Whether the connected server starts a new Workspace in its requested directory.
+    pub workspace_directories: bool,
     pub inventory: Option<Inventory>,
     pub connected: bool,
     pub pending: bool,
@@ -36,6 +38,7 @@ impl SharedWorkspaceClient {
     pub(crate) fn new(server: LocalServer, legacy_location: String) -> Self {
         let snapshot = Arc::new(Mutex::new(SharedWorkspaceSnapshot {
             worktree_writes: false,
+            workspace_directories: false,
             inventory: None,
             connected: false,
             pending: false,
@@ -68,6 +71,12 @@ impl SharedWorkspaceClient {
             .unwrap_or_else(|e| e.into_inner())
             .worktree_writes
     }
+    pub(crate) fn supports_workspace_directories(&self) -> bool {
+        self.snapshot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .workspace_directories
+    }
     pub(crate) fn snapshot(&self) -> SharedWorkspaceSnapshot {
         self.snapshot
             .lock()
@@ -87,6 +96,10 @@ impl SharedWorkspaceClient {
         }
         if !mutation.is_bounded() {
             state.error = Some(ServerError::Unsupported);
+            return false;
+        }
+        // An older server would drop the directory and start the shell somewhere else.
+        if needs_workspace_directories(&mutation) && !state.workspace_directories {
             return false;
         }
         state.pending = true;
@@ -181,6 +194,7 @@ fn run(
             {
                 let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
                 s.worktree_writes = connection.worktree_writes();
+                s.workspace_directories = connection.supports_workspace_directories();
                 s.inventory = Some(initial);
                 s.pending = journal.pending().is_some();
                 s.pending_operation = journal.pending().map(|p| p.mutation.clone());
@@ -217,6 +231,17 @@ fn run(
                     s.error = None;
                 }
                 match commands.recv_timeout(Duration::from_millis(150)) {
+                    // A reconnection may reach a server without the capability the submission
+                    // was checked against. Nothing is sent, and the edit is refused.
+                    Ok(mutation)
+                        if needs_workspace_directories(&mutation)
+                            && !connection.supports_workspace_directories() =>
+                    {
+                        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+                        s.rejected = Some(mutation);
+                        s.pending = false;
+                        s.pending_operation = None;
+                    }
                     Ok(mutation) => {
                         active = Some((sequence, mutation.clone()));
                         journal.submit(sequence, mutation)?;
@@ -255,6 +280,16 @@ fn run(
     }
 }
 
+fn needs_workspace_directories(mutation: &Mutation) -> bool {
+    matches!(
+        mutation,
+        Mutation::CreateWorkspace {
+            directory: Some(_),
+            ..
+        }
+    )
+}
+
 fn reject_queued(state: &Mutex<SharedWorkspaceSnapshot>, commands: &mpsc::Receiver<Mutation>) {
     while let Ok(mutation) = commands.try_recv() {
         let mut snapshot = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -268,10 +303,42 @@ fn reject_queued(state: &Mutex<SharedWorkspaceSnapshot>, commands: &mpsc::Receiv
 mod tests {
     use super::*;
     #[test]
+    fn a_server_without_workspace_directories_is_never_sent_a_directory_creation() {
+        let (commands, receiver) = mpsc::sync_channel(1);
+        let state = Arc::new(Mutex::new(SharedWorkspaceSnapshot {
+            worktree_writes: true,
+            workspace_directories: false,
+            inventory: None,
+            connected: true,
+            pending: false,
+            pending_operation: None,
+            rejected: None,
+            outcome: None,
+            error: None,
+        }));
+        let client = SharedWorkspaceClient {
+            snapshot: state.clone(),
+            commands,
+            alive: Arc::new(AtomicBool::new(true)),
+        };
+        let create = |directory: Option<&str>| Mutation::CreateWorkspace {
+            name: "Site".into(),
+            directory: directory.map(Into::into),
+        };
+        assert!(!client.supports_workspace_directories());
+        assert!(!client.submit(create(Some("/srv/site"))));
+        assert!(receiver.try_recv().is_err(), "nothing reaches the server");
+        assert!(!client.snapshot().pending);
+        assert!(client.submit(create(None)));
+        assert_eq!(receiver.try_recv().unwrap(), create(None));
+    }
+
+    #[test]
     fn disconnect_rejects_an_enqueued_edit_without_carrying_it_across_reconnect() {
         let (commands, receiver) = mpsc::sync_channel(1);
         let state = Arc::new(Mutex::new(SharedWorkspaceSnapshot {
             worktree_writes: true,
+            workspace_directories: true,
             inventory: None,
             connected: true,
             pending: false,

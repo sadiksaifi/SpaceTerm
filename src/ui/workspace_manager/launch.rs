@@ -12,16 +12,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::prelude::*;
 use gpui::{App, Context, SharedString, Task, Window, div};
-use spaceterm_ui::{
-    Button, ButtonSize, ButtonVariant, ProgressRing, ProgressSize, ProgressState,
-};
+use spaceterm_ui::{Button, ButtonSize, ButtonVariant, ProgressRing, ProgressSize, ProgressState};
 
 use super::WorkspaceManager;
-use crate::ui::appearance::gpui_color;
-use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::domain::ValidatedLocalDirectory;
 use crate::local_server::{LocalServer, ServerError};
 use crate::platform::local_filesystem::LocalFilesystemAuthority;
+use crate::ui::appearance::gpui_color;
+use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::pane_lifecycle::PaneConstruction;
 use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
 
@@ -118,8 +116,7 @@ impl LocalLaunch for AccountLaunch {
     fn authorize(&self) -> Result<(), ServerError> {
         // The service asks the operating system for its one fixed authorization, for this
         // account only. No SpaceTerm code runs as root.
-        Self::service()?
-            .enable_linger(crate::local_server::service::LingerAuthorization::Desktop)
+        Self::service()?.enable_linger(crate::local_server::service::LingerAuthorization::Desktop)
     }
 }
 
@@ -225,9 +222,7 @@ const AUTHORIZING_DETAIL: &str = "Enter an administrator password in the system 
 /// The title for a launch that could not finish. The detail names the exact reason.
 const fn failure_title(error: ServerError) -> &'static str {
     match error {
-        ServerError::IncompatibleState | ServerError::IncompatibleProtocol => {
-            "Incompatible Server"
-        }
+        ServerError::IncompatibleState | ServerError::IncompatibleProtocol => "Incompatible Server",
         ServerError::RuntimeUnavailable => "Server Unavailable",
         ServerError::UnsafeStorage => "Unsafe Server Storage",
         ServerError::StorageUnavailable => "Server Storage Unavailable",
@@ -354,7 +349,9 @@ impl WorkspaceManager {
         let work = cx.background_spawn(async move {
             let refused = match step {
                 Some(LaunchStep::Start) => adapter.start().err().map(StepResult::Failed),
-                Some(LaunchStep::Authorize) => adapter.authorize().err().map(|_| StepResult::Declined),
+                Some(LaunchStep::Authorize) => {
+                    adapter.authorize().err().map(|_| StepResult::Declined)
+                }
                 None => None,
             };
             if let Some(refused) = refused {
@@ -406,11 +403,7 @@ impl WorkspaceManager {
     }
 
     /// Presents a ready server's Workspaces in this window.
-    fn connect_local_server(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> LaunchState {
+    fn connect_local_server(&mut self, window: &mut Window, cx: &mut Context<Self>) -> LaunchState {
         if self.shared.is_some() {
             return LaunchState::Ready;
         }

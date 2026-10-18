@@ -376,6 +376,9 @@ pub enum Reply {
         directory_recovery: bool,
         #[serde(default)]
         worktree_writes: bool,
+        /// Whether CreateWorkspace honors its directory. Older servers ignore the field.
+        #[serde(default)]
+        workspace_directories: bool,
     },
     Restored {
         #[serde(default)]
@@ -513,6 +516,7 @@ struct PaneTransport {
     accessibility: bool,
     directory_recovery: bool,
     worktree_writes: bool,
+    workspace_directories: bool,
 }
 /// One transport for a desktop's inventory and Pane workers. It retains no credential.
 #[cfg(feature = "client")]
@@ -563,6 +567,7 @@ impl PaneConnection {
                 accessibility,
                 directory_recovery,
                 worktree_writes,
+                workspace_directories,
             } => {
                 let mut connection = Self::new(stream, pane_takeover);
                 std::sync::Arc::get_mut(&mut connection.transport)
@@ -586,6 +591,9 @@ impl PaneConnection {
                 std::sync::Arc::get_mut(&mut connection.transport)
                     .ok_or(ServerError::Protocol)?
                     .directory_recovery = directory_recovery;
+                std::sync::Arc::get_mut(&mut connection.transport)
+                    .ok_or(ServerError::Protocol)?
+                    .workspace_directories = workspace_directories;
                 Ok(connection)
             }
             Reply::Refused(reason) => Err(reason.into()),
@@ -604,8 +612,13 @@ impl PaneConnection {
                 accessibility: false,
                 directory_recovery: false,
                 worktree_writes: false,
+                workspace_directories: false,
             }),
         }
+    }
+    /// Whether CreateWorkspace starts its first Pane in the requested directory.
+    pub fn supports_workspace_directories(&self) -> bool {
+        self.transport.workspace_directories
     }
     pub fn supports_directory_recovery(&self) -> bool {
         self.transport.directory_recovery
@@ -656,6 +669,35 @@ impl PaneConnection {
 mod transport_tests {
     use super::*;
     use std::os::unix::net::UnixStream;
+
+    /// An approved older runtime predates directory creation and would silently drop the field.
+    #[test]
+    fn a_server_that_never_names_workspace_directories_does_not_support_them() {
+        let negotiated = |reply: serde_json::Value| {
+            let (client, mut server) = UnixStream::pair().unwrap();
+            let peer = std::thread::spawn(move || {
+                let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
+                assert!(matches!(
+                    wire.read::<Request>().unwrap(),
+                    Request::Capabilities
+                ));
+                wire.write(&reply).unwrap();
+            });
+            let connection = PaneConnection::negotiate(client).unwrap();
+            peer.join().unwrap();
+            connection.supports_workspace_directories()
+        };
+        let older = serde_json::json!({ "Capabilities": {
+            "development_pane": true,
+            "pane_takeover": true,
+            "directory_recovery": true,
+            "worktree_writes": true,
+        }});
+        assert!(!negotiated(older.clone()));
+        let mut current = older;
+        current["Capabilities"]["workspace_directories"] = true.into();
+        assert!(negotiated(current));
+    }
 
     #[test]
     fn uncertain_exchange_fences_all_subscribers_before_reconnecting() {

@@ -299,6 +299,7 @@ pub(crate) fn serve_runtime(
                                         accessibility: false,
                                         directory_recovery: true,
                                         worktree_writes: false,
+                                        workspace_directories: false,
                                     }
                                 }
                                 None => {
@@ -619,6 +620,7 @@ mod startup_tests {
                         accessibility: false,
                         directory_recovery: true,
                         worktree_writes: false,
+                        workspace_directories: false,
                     },
                     Request::Inventory => Reply::Inventory {
                         inventory: crate::hierarchy::State::empty().inventory,

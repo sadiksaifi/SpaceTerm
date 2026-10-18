@@ -410,6 +410,7 @@ impl SharedWorkspaceHost {
                 accessibility: true,
                 directory_recovery: true,
                 worktree_writes: true,
+                workspace_directories: true,
             }),
             Request::Inventory => Ok(Reply::Inventory {
                 inventory: self.inventory(),
