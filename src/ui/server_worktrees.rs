@@ -7,7 +7,6 @@ use crate::{
 use gpui::{App, AppContext as _, Global, Task};
 use spaceterm_server::{
     hierarchy::{Mutation, Outcome, RetainedOutcome},
-    pane::{Reply, Request},
     worktree::{Error, Operation, Read, ReadReply},
 };
 use std::{path::PathBuf, rc::Rc};
@@ -95,14 +94,17 @@ fn write(
 }
 
 pub(crate) fn read_server(server: &LocalServer, read: Read) -> Result<ReadReply, Error> {
-    match server
+    let mut connection = server
         .connect_shared_pane()
-        .and_then(|mut c| c.exchange(&Request::WorktreeRead(read)))
-    {
-        Ok(Reply::WorktreeRead(reply)) => reply,
-        _ => Err(Error::Unavailable),
+        .map_err(|_| Error::Unavailable)?;
+    if !connection.worktree_writes() {
+        return Err(Error::Unavailable);
     }
+    connection
+        .read_worktree(read)
+        .map_err(|_| Error::Unavailable)?
 }
+
 pub(crate) fn result(outcome: RetainedOutcome) -> Result<(), WriteError> {
     match outcome.outcome {
         Outcome::Accepted { .. } => Ok(()),

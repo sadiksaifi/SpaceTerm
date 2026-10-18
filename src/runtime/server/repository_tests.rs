@@ -561,16 +561,31 @@ pub(super) fn review_removal(
     root: &std::path::Path,
     path: &std::path::Path,
 ) -> spaceterm_server::worktree::Removal {
-    match host.request(
-        [1; 32],
-        [1; 32],
-        Request::WorktreeRead(spaceterm_server::worktree::Read::CheckRemoval {
+    match read_worktree(
+        host,
+        spaceterm_server::worktree::Read::CheckRemoval {
             root: root.to_owned(),
             path: path.to_owned(),
-        }),
+        },
     ) {
         Reply::WorktreeRead(Ok(spaceterm_server::worktree::ReadReply::Removal(review))) => review,
         other => panic!("unexpected removal review: {other:?}"),
+    }
+}
+pub(super) fn read_worktree(
+    host: &mut SharedWorkspaceHost,
+    mut read: spaceterm_server::worktree::Read,
+) -> Reply {
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        match host.request([1; 32], [1; 32], Request::WorktreeRead(read)) {
+            Reply::WorktreeRead(Ok(spaceterm_server::worktree::ReadReply::Pending { id })) => {
+                assert!(Instant::now() < until, "server Git read did not finish");
+                read = spaceterm_server::worktree::Read::Poll { id };
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            reply => return reply,
+        }
     }
 }
 #[test]
@@ -686,13 +701,12 @@ fn replaced_worktree_and_main_worktree_are_preserved_after_confirmation() {
     let mut host = SharedWorkspaceHost::new(prototype);
     create_shared(&mut host, 1);
     assert!(matches!(
-        host.request(
-            [1; 32],
-            [1; 32],
-            Request::WorktreeRead(Read::CheckRemoval {
+        read_worktree(
+            &mut host,
+            Read::CheckRemoval {
                 root: git.0.clone(),
                 path: git.0.clone()
-            })
+            }
         ),
         Reply::WorktreeRead(Err(Error::Main))
     ));
@@ -806,13 +820,12 @@ fn server_removal_protects_pins_in_unattached_workspaces_and_rechecks_missing_lo
         },
     );
     assert!(matches!(
-        host.request(
-            [1; 32],
-            [1; 32],
-            Request::WorktreeRead(Read::CheckRemoval {
+        read_worktree(
+            &mut host,
+            Read::CheckRemoval {
                 root: git.0.clone(),
                 path: tree.clone()
-            })
+            }
         ),
         Reply::WorktreeRead(Err(Error::Pinned))
     ));

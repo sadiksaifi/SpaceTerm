@@ -134,6 +134,7 @@ impl Default for Settings {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Read {
+    Poll { id: u64 },
     Context { root: PathBuf },
     Settings,
     SeedLocation { template: String },
@@ -142,6 +143,9 @@ pub enum Read {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ReadReply {
+    Pending {
+        id: u64,
+    },
     Context {
         settings: Settings,
         home: PathBuf,
@@ -150,6 +154,30 @@ pub enum ReadReply {
     Settings(Settings),
     Location(PathBuf),
     Removal(Removal),
+}
+
+#[cfg(feature = "client")]
+impl crate::pane::PaneConnection {
+    /// Poll one bounded read on this connection. Uncertain exchanges are never retried.
+    pub fn read_worktree(
+        &mut self,
+        mut read: Read,
+    ) -> Result<Result<ReadReply, Error>, crate::ServerError> {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match self.exchange(&crate::pane::Request::WorktreeRead(read))? {
+                crate::pane::Reply::WorktreeRead(Ok(ReadReply::Pending { id })) => {
+                    if std::time::Instant::now() >= until {
+                        return Ok(Err(Error::Unavailable));
+                    }
+                    read = Read::Poll { id };
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                crate::pane::Reply::WorktreeRead(result) => return Ok(result),
+                _ => return Err(crate::ServerError::Protocol),
+            }
+        }
+    }
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AffectedTab {

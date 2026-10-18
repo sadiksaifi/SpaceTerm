@@ -237,9 +237,9 @@ impl SharedWorkspaceHost {
         self.finish_worktrees(false)?;
         self.synchronize()?;
         match request {
-            Request::WorktreeRead(read) => {
-                Ok(Reply::WorktreeRead(self.worktree_read(device, read)))
-            }
+            Request::WorktreeRead(read) => Ok(Reply::WorktreeRead(
+                self.worktree_read(device, connection, read),
+            )),
             Request::DirectoryRead(request) => Ok(Reply::DirectoryRead(
                 self.prototype.directories.request(connection, request),
             )),
@@ -404,7 +404,7 @@ impl SharedWorkspaceHost {
                     return self.begin_worktree(device, sequence, operation);
                 }
                 if !self.state.pending_worktrees().is_empty() {
-                    return Err(Refusal::Capacity);
+                    return Ok(Reply::MutationPending);
                 }
                 let mut next = self.state.clone();
                 next.inventory = self.inventory();
@@ -597,6 +597,7 @@ impl PaneService for SharedWorkspaceHost {
             .unwrap_or_else(Reply::Refused)
     }
     fn disconnected(&mut self, connection: Id) {
+        self.cancel_worktree_reads(connection);
         self.prototype.directories.cancel_connection(connection);
         self.repositories.disconnected(connection);
         for host in self.panes.values_mut() {
@@ -604,6 +605,7 @@ impl PaneService for SharedWorkspaceHost {
         }
     }
     fn shutdown(&mut self) -> Result<(), ServerError> {
+        self.stop_worktree_reads();
         self.finish_worktrees(true)
             .map_err(|_| ServerError::StorageUnavailable)?;
         self.prototype.directories.stop();

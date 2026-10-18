@@ -68,12 +68,12 @@ fn write(c: &mut PaneConnection, operation: Operation) -> Result<RetainedOutcome
     Ok(outcome)
 }
 fn review(c: &mut PaneConnection, root: &Path, path: &Path) -> Result<Operation, Box<dyn Error>> {
-    let review = match c.exchange(&Request::WorktreeRead(Read::CheckRemoval {
+    let review = match c.read_worktree(Read::CheckRemoval {
         root: root.into(),
         path: path.into(),
-    }))? {
-        Reply::WorktreeRead(Ok(ReadReply::Removal(review))) => review,
-        Reply::WorktreeRead(Err(error)) => {
+    })? {
+        Ok(ReadReply::Removal(review)) => review,
+        Err(error) => {
             return Err(format!("removal review failed: {error:?}").into());
         }
         _ => return Err("removal review response".into()),
