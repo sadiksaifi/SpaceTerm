@@ -190,6 +190,20 @@ impl Directory {
         }
         Ok(file)
     }
+    /// Attempt an exclusive lock, distinguishing contention from unavailable storage.
+    #[cfg(feature = "client")]
+    pub fn try_lock(&self, name: &str) -> Result<Option<File>, ServerError> {
+        let file = self.file(name, true)?;
+        // SAFETY: flock acts only on the supplied live descriptor.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(Some(file));
+        }
+        if std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
+            Ok(None)
+        } else {
+            Err(ServerError::StorageUnavailable)
+        }
+    }
     /// Validate and synchronize retained state before setup or authentication accepts it.
     pub fn read(&self) -> Result<Record, ServerError> {
         let file = self.file("identity.json", false)?;

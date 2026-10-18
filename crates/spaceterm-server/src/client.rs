@@ -88,13 +88,16 @@ impl LocalServer {
         )
     }
     pub fn for_identity(directory_name: &str) -> Result<Self, ServerError> {
+        Self::with_paths(Paths::for_identity(directory_name)?)
+    }
+    pub(crate) fn with_paths(paths: Paths) -> Result<Self, ServerError> {
         let account = match std::env::var_os("SPACETERM_DEVELOPMENT_CLIENT") {
             Some(name) => development_account(name.to_str().ok_or(ServerError::Unsupported)?)?,
             None => "desktop".to_owned(),
         };
         Ok(Self {
-            paths: Paths::for_identity(directory_name)?,
-            identity: directory_name.to_owned(),
+            identity: paths.identity.clone(),
+            paths,
             account,
             shared_pane: std::sync::Arc::default(),
             attachments: std::sync::Arc::default(),

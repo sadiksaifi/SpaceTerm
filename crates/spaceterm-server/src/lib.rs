@@ -10,11 +10,15 @@ pub mod pane;
 mod protocol;
 pub mod repository;
 pub mod service;
+#[cfg(feature = "client")]
+mod startup;
 mod storage;
 pub mod worktree;
 
 #[cfg(feature = "client")]
 pub use client::LocalServer;
+#[cfg(feature = "client")]
+pub use startup::{LocalStartup, StartupOutcome};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AuthenticatedStatus {
