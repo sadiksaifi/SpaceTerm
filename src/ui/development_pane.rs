@@ -531,6 +531,10 @@ mod window {
                     self.focus_content(window, cx);
                 }
             }
+            let terminal_presented = !self.takeover_shown && self.dormant.is_none();
+            self.terminal.update(cx, |terminal, _| {
+                terminal.set_accessibility_hierarchy(terminal_presented);
+            });
             // A disabled action gives up focus, so the window takes it: on the Session Ended
             // screen Tab then reaches Close Window, and on the directory screen it reaches Retry
             // and Choose Directory.
