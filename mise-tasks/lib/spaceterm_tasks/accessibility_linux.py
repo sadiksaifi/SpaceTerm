@@ -491,6 +491,8 @@ class OrcaOutput:
             b"INPUT EVENT MANAGER: Starting key watcher." in line
         )
         for name, marker in (
+            ("insert_events_processed", b"EVENT MANAGER: Processing object:text-changed:insert"),
+            ("insert_events_inactive", b"EVENT MANAGER: Not processing object:text-changed:insert"),
             (
                 "terminal_command_insertions",
                 b"TERMINAL: Insertion is believed to be due to terminal command",
@@ -631,6 +633,7 @@ class OrcaOutput:
         return {
             "atspi_main_loop_started": self.started,
             "terminal_script_selected": self.terminal_script,
+            "active_terminal_script": self.active_terminal_script,
             "terminal_focus_processed": self.counts["terminal_focus_completions"] > 0,
             "fixture_output_spoken": self.marker_spoken,
             "speech_backend": dict(self.speech_backend),

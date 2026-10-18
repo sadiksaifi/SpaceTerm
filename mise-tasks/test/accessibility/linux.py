@@ -3,6 +3,7 @@
 # USAGE flag "--backend <backend>" help="Display backend" default="both" {
 # USAGE   choices "both" "x11" "wayland"
 # USAGE }
+# USAGE flag "--server-backed" help="Exercise an already-running account server through Shared Workspaces"
 # USAGE flag "--binary <binary>" help="Existing source executable; skips building"
 # USAGE flag "--expected-binary-sha256 <sha256>" help="Required SHA256 pin for --binary"
 # USAGE flag "--output-dir <output_dir>" help="Evidence directory; defaults to a fresh temporary directory"
@@ -70,6 +71,12 @@ def parse_args():
         "--binary", type=Path, help="Existing source-built executable; skips building"
     )
     parser.add_argument("--expected-binary-sha256", help="Required SHA256 pin for --binary")
+    parser.add_argument(
+        "--server-backed",
+        action="store_true",
+        help="Use the already-running account server and Shared Workspaces",
+    )
+    parser.add_argument("--server-binary", type=Path, help=argparse.SUPPRESS)
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -164,6 +171,63 @@ class Probe:
                 if child.getRole() == self.atspi.ROLE_FRAME:
                     return child
         return None
+
+    def find_named_control(self, name, root=None):
+        for application in self.atspi.Registry.getDesktop(0):
+            if application.get_process_id() != self.application_pid:
+                continue
+            stack = [root] if root is not None else list(application)
+            visited = 0
+            while stack and visited < 5000:
+                accessible = stack.pop()
+                visited += 1
+                if accessible.name == name:
+                    return accessible
+                stack.extend(accessible)
+        return None
+
+    def activate_control(self, name, root=None):
+        control = self.wait(
+            lambda: self.find_named_control(name, root), "server_workspace_control_missing"
+        )
+        actions = control.queryAction()
+        for index in range(actions.nActions):
+            if actions.getName(index).lower() in ("click", "press", "activate"):
+                require(actions.doAction(index), "server_workspace_control_action_failed")
+                return
+        raise SmokeFailure("server_workspace_control_action_missing")
+
+    def window_is_active(self, window):
+        window.clear_cache()
+        return window.getState().contains(self.atspi.STATE_ACTIVE)
+
+    def open_server_workspace(self, workspace_window, input_driver):
+        # Exercise the same adoption and creation controls as the native client. The fixture's
+        # named client owns its presentation; the already-running account server owns the PTY.
+        self.activate_control("Settings")
+        settings_window = self.wait(
+            lambda: self.find_named_control("Servers"), "server_workspace_control_missing"
+        )
+        while settings_window.getRole() != self.atspi.ROLE_FRAME:
+            settings_window = settings_window.parent
+        input_driver.focus_window(settings_window)
+        self.wait(lambda: self.window_is_active(settings_window), "settings_window_not_active")
+        self.activate_control("Servers")
+        self.activate_control("Use Shared Workspaces")
+        self.activate_control("Close", settings_window)
+        self.wait(lambda: self.find_named_control("Servers") is None, "settings_window_not_closed")
+        input_driver.focus_window(workspace_window)
+        self.wait(lambda: self.window_is_active(workspace_window), "workspace_window_not_active")
+        self.activate_control("New Workspace")
+        previous = self.find_terminal()
+        self.activate_control("Server Workspace")
+
+        def created_terminal():
+            current = self.find_terminal()
+            return current if current is not None and current != previous else None
+
+        self.terminal = self.wait(created_terminal, "server_terminal_object_missing")
+        require(self.terminal.queryComponent().grabFocus(), "server_terminal_focus_rejected")
 
     def event(self, event):
         if self.terminal is not None and event.type.startswith("object:text-changed"):
@@ -292,6 +356,24 @@ class Input:
                 else (self.key_options, keysym, pressed)
             )
             self.remote.NotifyKeyboardKeysym(*arguments)
+
+    def focus_window(self, window):
+        if self.backend == "x11":
+            # Xvfb has no window manager to honor the application's activation request.
+            run(
+                [
+                    "xdotool",
+                    "search",
+                    "--onlyvisible",
+                    "--all",
+                    "--pid",
+                    str(self.probe.application_pid),
+                    "--name",
+                    "^" + re.escape(window.name) + "$",
+                    "windowfocus",
+                    "--sync",
+                ]
+            )
 
     def character(self, pressed):
         if self.backend == "x11":
@@ -462,35 +544,41 @@ def validate_tree(probe, input_driver, output, fixture_speech, readiness):
     text = probe.wait(published_text, "terminal_text_interface_missing")
     probe.wait(lambda: text.characterCount > 0, "terminal_text_missing")
     probe.wait(lambda: text.getText(0, -1).strip(), "terminal_prompt_missing")
-    initial_document = text.getText(0, -1)
-    require(len(initial_document) <= 4096, "initial_document_not_bounded")
-    initial_pane = terminal.queryComponent().getExtents(atspi.WINDOW_COORDS)
-    row_positions = set()
-    end_position_available = False
-    for offset in range(len(initial_document) + 1):
-        try:
-            _, row_y, _, row_height = text.getCharacterExtents(offset, atspi.WINDOW_COORDS)
-        except Exception:
-            if offset == len(initial_document):
-                continue
-            raise
-        if (
-            row_height > 0
-            and initial_pane.y <= row_y
-            and row_y < initial_pane.y + initial_pane.height
-        ):
-            row_positions.add(row_y)
-            end_position_available |= offset == len(initial_document)
-    # An empty final row has no scalar character; include it if the Text API
-    # cannot return the document-end geometry. Physical y positions include wraps.
-    empty_final_row = initial_document.endswith("\n") and not end_position_available
-    probe.viewport_rows = len(row_positions) + int(empty_final_row)
-    require(10 <= probe.viewport_rows <= 200, "initial_viewport_rows_invalid")
-    probe.viewport_geometry = {
-        "physical_row_positions": len(row_positions),
-        "document_end_geometry_available": end_position_available,
-        "empty_final_row_supplemented": empty_final_row,
-    }
+
+    def viewport_ready():
+        initial_document = text.getText(0, -1)
+        require(len(initial_document) <= 4096, "initial_document_not_bounded")
+        initial_pane = terminal.queryComponent().getExtents(atspi.WINDOW_COORDS)
+        row_positions = set()
+        end_position_available = False
+        for offset in range(len(initial_document) + 1):
+            try:
+                _, row_y, _, row_height = text.getCharacterExtents(offset, atspi.WINDOW_COORDS)
+            except Exception:
+                if offset == len(initial_document):
+                    continue
+                raise
+            if (
+                row_height > 0
+                and initial_pane.y <= row_y
+                and row_y < initial_pane.y + initial_pane.height
+            ):
+                row_positions.add(row_y)
+                end_position_available |= offset == len(initial_document)
+        # An empty final row has no scalar character; include it if the Text API
+        # cannot return the document-end geometry. Physical y positions include wraps.
+        empty_final_row = initial_document.endswith("\n") and not end_position_available
+        probe.viewport_rows = len(row_positions) + int(empty_final_row)
+        probe.viewport_geometry = {
+            "physical_row_positions": len(row_positions),
+            "document_line_breaks": initial_document.count("\n"),
+            "pane_height": initial_pane.height,
+            "document_end_geometry_available": end_position_available,
+            "empty_final_row_supplemented": empty_final_row,
+        }
+        return 10 <= probe.viewport_rows <= 200
+
+    probe.wait(viewport_ready, "initial_viewport_rows_invalid")
     probe.begin("shell")
     # Encode the marker so echoed input cannot satisfy the output assertion.
     encoded = "".join(f"\\{ord(char):03o}" for char in MARKER + "\n")
@@ -507,25 +595,37 @@ def validate_tree(probe, input_driver, output, fixture_speech, readiness):
     for event in probe.marker_event_offsets:
         offsets.update((event["start"], event["start"] + event["payload_scalars"] - 1))
     for offset in sorted(offsets):
-        line, line_start, line_end = text.getStringAtOffset(offset, atspi.TEXT_GRANULARITY_LINE)
-        evidence = {
-            "requested_offset": offset,
-            "start": line_start,
-            "end": line_end,
-            "scalars": len(line),
-            "contains_fixture_marker": MARKER in line,
-            "ends_newline": line.endswith("\n"),
-            "matches_document_slice": line == document[line_start:line_end],
-            "returned_range_bounded": 0 <= line_start <= line_end <= len(document),
-            "offset_inside_range": (
-                line_start <= offset < line_end
-                or (
-                    offset == len(document)
-                    and line_end == offset
-                    and (not document.endswith("\n") or line_start == offset)
-                )
-            ),
-        }
+
+        def current_line():
+            line, line_start, line_end = text.getStringAtOffset(offset, atspi.TEXT_GRANULARITY_LINE)
+            current_document = text.getText(0, -1)
+            evidence = {
+                "requested_offset": offset,
+                "start": line_start,
+                "end": line_end,
+                "scalars": len(line),
+                "contains_fixture_marker": MARKER in line,
+                "ends_newline": line.endswith("\n"),
+                "matches_document_slice": line == current_document[line_start:line_end],
+                "returned_range_bounded": 0 <= line_start <= line_end <= len(current_document),
+                "offset_inside_range": (
+                    line_start <= offset < line_end
+                    or (
+                        offset == len(current_document)
+                        and line_end == offset
+                        and (not current_document.endswith("\n") or line_start == offset)
+                    )
+                ),
+            }
+            if (
+                evidence["matches_document_slice"]
+                and evidence["offset_inside_range"]
+                and evidence["returned_range_bounded"]
+            ):
+                return evidence, current_document
+            return None
+
+        evidence, document = probe.wait(current_line, "terminal_line_boundary_invalid")
         line_queries.append(evidence)
         (output / "fixture-line-verification.json").write_text(
             json.dumps(
@@ -538,12 +638,6 @@ def validate_tree(probe, input_driver, output, fixture_speech, readiness):
                 indent=2,
             )
             + "\n"
-        )
-        require(
-            evidence["matches_document_slice"]
-            and evidence["offset_inside_range"]
-            and evidence["returned_range_bounded"],
-            "terminal_line_boundary_invalid",
         )
     readiness.wait(ReadinessStep.FIXTURE_SPEECH, fixture_speech)
     shell = probe.end()
@@ -1595,6 +1689,12 @@ def private_session(args):
                 WAYLAND_DISPLAY_absent="WAYLAND_DISPLAY" not in os.environ,
             )
         require(all(expected_backend.values()), "application_backend_environment_invalid")
+        if args.server_backed:
+            require(args.server_binary is not None, "server_status_executable_missing")
+            # Account-local admission resolves getpwuid, not the private HOME/XDG fixture.
+            # Starting or stopping the owning account's server remains an explicit host action.
+            run([str(args.server_binary), "status", "spaceterm-development"])
+            report["server_backed"] = {"existing_account_server_connected": True}
         application = processes.start([str(args.binary)], stderr=frame_output.writer)
         probe.application_pid = application.pid
         report["application_private_environment"] = readiness.wait(
@@ -1638,6 +1738,13 @@ def private_session(args):
         if args.private_session == "x11":
             run(["xdotool", "search", "--onlyvisible", "--class", "spaceterm", "windowfocus"])
         input_driver = Input(args.private_session, probe)
+        if args.server_backed:
+            probe.open_server_workspace(window, input_driver)
+            window = probe.terminal
+            while window is not None and window.getRole() != probe.atspi.ROLE_FRAME:
+                window = window.parent
+            require(window is not None, "server_terminal_window_missing")
+            report["server_backed"]["workspace_created_through_native_controls"] = True
 
         def orca_terminal_script():
             require(orca_process.poll() is None, "orca_process_exited")
@@ -1831,6 +1938,8 @@ def private_session(args):
                     report["pending_phase"] = probe.phase
                     report["pending_events"] = dict(probe.counts)
                 report["text_event_source_diagnostics"] = dict(probe.source_counts)
+                if hasattr(probe, "viewport_geometry"):
+                    report["initial_viewport_geometry"] = probe.viewport_geometry
             except Exception:
                 report["terminal_diagnostics"] = {"query_available": False}
         if orca_process is not None:
@@ -1974,6 +2083,27 @@ def main():
     # A fresh directory keeps stale workload signals from satisfying a later run.
     run_output = Path(tempfile.mkdtemp(prefix="run-", dir=output))
     binary = None if args.isolation_only else prepare_binary(args, run_output)
+    server_binary = None
+    if args.server_backed and not args.isolation_only:
+        try:
+            source_server = build_executable(
+                "--package",
+                "spaceterm-server-host",
+                "--features",
+                "client",
+                "--locked",
+                binary="spaceterm-server",
+                env={**os.environ, "CARGO_BUILD_JOBS": "2"},
+            )
+        except TaskError:
+            raise SmokeFailure("server_source_build_failed") from None
+        server_binary = binary.parent / "spaceterm-server"
+        shutil.copy2(source_server, server_binary)
+        with server_binary.open("rb") as executable:
+            digest = hashlib.file_digest(executable, "sha256").hexdigest()
+        (run_output / "server-binary-proof.json").write_text(
+            json.dumps({"sha256": digest, "size_bytes": server_binary.stat().st_size}) + "\n"
+        )
     backends = ("x11", "wayland") if args.backend == "both" else (args.backend,)
     status = 0
     for backend in backends:
@@ -2051,6 +2181,9 @@ def main():
             CARGO_BUILD_JOBS="2",
             SPACETERM_ACCESSIBILITY_SMOKE_SESSION=backend,
         )
+        if args.server_backed:
+            client_name = f"a11y-{backend}-{run_output.name}".replace("_", "-")
+            environment["SPACETERM_DEVELOPMENT_CLIENT"] = client_name
         environment.update(
             ALSA_CONFIG_PATH=str(null_audio),
             PULSE_SERVER="unix:" + str(runtime / "private-null-pulse.sock"),
@@ -2071,6 +2204,8 @@ def main():
         ]
         if binary is not None:
             command.extend(("--binary", str(binary)))
+        if server_binary is not None:
+            command.extend(("--server-backed", "--server-binary", str(server_binary)))
         if args.isolation_only:
             command.append("--isolation-only")
         process = None
