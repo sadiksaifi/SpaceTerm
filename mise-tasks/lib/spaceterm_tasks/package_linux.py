@@ -15,7 +15,7 @@ import tempfile
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path, PurePosixPath
 
-from spaceterm_tasks import ROOT, TaskError
+from spaceterm_tasks import ROOT, TaskError, macos_signing
 from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.development_linux import icon_svg
 from spaceterm_tasks.macos_bundle import identity, identity_directory
@@ -113,6 +113,7 @@ def package(release_tag=None):
         require_clean_checkout()
     name = selected_identity(release_tag)
     display_name = identity(name)["CFBundleName"]
+    environment = macos_signing.signing_environment(packaged_environment(release_tag))
     print(f"Building the x86_64 Linux {display_name} executable")
     server = build_executable(
         "--release",
@@ -121,7 +122,7 @@ def package(release_tag=None):
         "spaceterm-server-host",
         "--no-default-features",
         binary="spaceterm-server",
-        env=packaged_environment(release_tag),
+        env=environment,
     )
     executable = build_executable(
         "--release",
@@ -129,7 +130,7 @@ def package(release_tag=None):
         "--no-default-features",
         "--features",
         "desktop",
-        env=packaged_environment(release_tag),
+        env=environment,
     )
     shutil.rmtree(STAGE, ignore_errors=True)
     STAGE.mkdir(parents=True)

@@ -254,7 +254,8 @@ run = "cargo test --package spaceterm --all-targets --features native-tests --lo
 
 [tasks."test:tools"]
 description = "Test the shared task code in mise-tasks/lib"
-run = "python -m unittest discover --start-directory mise-tasks/lib/tests --top-level-directory mise-tasks/lib"
+usage = 'arg "[filter]" help="Run one unittest module or test by its full name"'
+run = "python -m unittest {% if usage.filter %}{{usage.filter | quote}}{% else %}discover --start-directory mise-tasks/lib/tests --top-level-directory mise-tasks/lib{% endif %}"
 
 [tasks.validate]
 description = "Run the full validation gate for the current platform"
