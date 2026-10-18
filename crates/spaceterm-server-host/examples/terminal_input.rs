@@ -309,6 +309,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         sequence: next_sequence,
         mutation: Mutation::CreateWorkspace {
             name: "Interactive input check".into(),
+            directory: None,
         },
     })?
     else {

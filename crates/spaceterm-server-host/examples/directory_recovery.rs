@@ -161,6 +161,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         sequence,
         Mutation::CreateWorkspace {
             name: "Directory recovery".into(),
+            directory: None,
         },
     )?;
     mutate(

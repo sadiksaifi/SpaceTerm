@@ -142,6 +142,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &mut first,
         Mutation::CreateWorkspace {
             name: "Worktree writes smoke".into(),
+            directory: None,
         },
     )?;
     mutate(

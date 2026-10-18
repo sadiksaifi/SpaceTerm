@@ -160,6 +160,8 @@ pub enum Mutation {
     },
     CreateWorkspace {
         name: String,
+        /// Pins the new Workspace here, and its first Pane starts here.
+        directory: Option<PathBuf>,
     },
     CreateTab {
         workspace: Id,
@@ -188,9 +190,10 @@ impl Mutation {
             Self::Close { confirmation, .. } => {
                 !confirmation.panes.is_empty() && confirmation.panes.len() <= MAX_PANES
             }
-            Self::CreateWorkspace { name } | Self::RenameWorkspace { name, .. } => {
-                name.len() <= 256
+            Self::CreateWorkspace { name, directory } => {
+                name.len() <= 256 && directory.as_deref().is_none_or(valid_path)
             }
+            Self::RenameWorkspace { name, .. } => name.len() <= 256,
             Self::PinWorkspace {
                 directory: Some(path),
                 ..
@@ -265,6 +268,7 @@ impl State {
                 device,
                 &Mutation::CreateWorkspace {
                     name: "Development".into(),
+                    directory: None,
                 },
                 directory,
                 |_| true,
@@ -524,8 +528,11 @@ impl State {
                     CloseTarget::Workspace { workspace } => *workspace,
                 }
             }
-            Mutation::CreateWorkspace { name } => {
-                if !valid_name(name) {
+            Mutation::CreateWorkspace {
+                name,
+                directory: pin,
+            } => {
+                if !valid_name(name) || pin.as_deref().is_some_and(|path| !validate_pin(path)) {
                     return Ok(Outcome::Invalid);
                 }
                 if self.inventory.workspaces.len() >= MAX_WORKSPACES
@@ -542,7 +549,7 @@ impl State {
                     name: name.trim().to_owned(),
                     name_version: 0,
                     pin_version: 0,
-                    pinned_directory: None,
+                    pinned_directory: pin.clone(),
                     root_tab: tab,
                     tabs: vec![Tab {
                         worktree: None,
@@ -554,7 +561,7 @@ impl State {
                             id: pane,
                             source: None,
                             axis: Axis::Right,
-                            starting_directory: directory.to_owned(),
+                            starting_directory: pin.clone().unwrap_or_else(|| directory.to_owned()),
                             confirmed_directory: None,
                             creator: Some(device),
                         }],
@@ -973,6 +980,7 @@ mod tests {
                 1,
                 Mutation::CreateWorkspace {
                     name: "Build".into(),
+                    directory: None,
                 },
                 "/tmp".as_ref(),
                 |_| true,
@@ -1032,6 +1040,7 @@ mod tests {
         let mut state = State::empty();
         let create = Mutation::CreateWorkspace {
             name: "Build".into(),
+            directory: None,
         };
         let Outcome::Accepted { target: workspace } = state
             .apply([1; 32], 1, create, "/tmp".as_ref(), |_| true)
@@ -1079,6 +1088,7 @@ mod tests {
         let mut state = State::empty();
         let create = Mutation::CreateWorkspace {
             name: "Build".into(),
+            directory: None,
         };
         let first = state
             .apply([1; 32], 1, create.clone(), "/tmp".as_ref(), |_| true)
@@ -1108,6 +1118,7 @@ mod tests {
                     sequence,
                     Mutation::CreateWorkspace {
                         name: "Build".into(),
+                        directory: None,
                     },
                     "/tmp".as_ref(),
                     |_| true,
@@ -1116,6 +1127,7 @@ mod tests {
         }
         let create = Mutation::CreateWorkspace {
             name: "More".into(),
+            directory: None,
         };
         assert!(matches!(
             state.apply([1; 32], 33, create.clone(), "/tmp".as_ref(), |_| true),
@@ -1130,6 +1142,34 @@ mod tests {
     }
 
     #[test]
+    fn creating_a_workspace_at_a_directory_pins_it_and_roots_its_first_pane_there() {
+        let mut state = State::empty();
+        let create = |directory: &str| Mutation::CreateWorkspace {
+            name: "Site".into(),
+            directory: Some(directory.into()),
+        };
+        assert_eq!(
+            state
+                .apply([1; 32], 1, create("/missing"), "/home".as_ref(), |_| false)
+                .unwrap(),
+            Outcome::Invalid
+        );
+        assert!(state.inventory.workspaces.is_empty());
+        assert!(!create("relative").is_bounded());
+        state
+            .apply([1; 32], 2, create("/srv/site"), "/home".as_ref(), |path| {
+                path == Path::new("/srv/site")
+            })
+            .unwrap();
+        let workspace = &state.inventory.workspaces[0];
+        assert_eq!(workspace.pinned_directory, Some("/srv/site".into()));
+        assert_eq!(
+            workspace.tabs[0].panes[0].starting_directory,
+            Path::new("/srv/site")
+        );
+    }
+
+    #[test]
     fn stale_pin_preserves_the_conflict_even_if_its_draft_directory_became_unavailable() {
         let mut state = State::empty();
         let Outcome::Accepted { target: workspace } = state
@@ -1138,6 +1178,7 @@ mod tests {
                 1,
                 Mutation::CreateWorkspace {
                     name: "Build".into(),
+                    directory: None,
                 },
                 "/tmp".as_ref(),
                 |_| true,
@@ -1187,6 +1228,7 @@ mod tests {
                 1,
                 Mutation::CreateWorkspace {
                     name: "Build".into(),
+                    directory: None,
                 },
                 "/tmp".as_ref(),
                 |_| true,
@@ -1216,6 +1258,7 @@ mod tests {
                 1,
                 Mutation::CreateWorkspace {
                     name: "Build".into(),
+                    directory: None,
                 },
                 "/tmp".as_ref(),
                 |_| true,

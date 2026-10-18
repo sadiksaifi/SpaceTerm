@@ -683,7 +683,8 @@ mod tests {
             journal.submit(
                 1,
                 Mutation::CreateWorkspace {
-                    name: "Draft".into()
+                    name: "Draft".into(),
+                    directory: None,
                 }
             ),
             Err(ServerError::StorageUnavailable)

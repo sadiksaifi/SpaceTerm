@@ -569,6 +569,7 @@ mod tests {
         };
         let other = Mutation::CreateWorkspace {
             name: "Other client".into(),
+            directory: None,
         };
         assert!(matches!(
             host.request(

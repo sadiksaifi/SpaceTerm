@@ -71,6 +71,7 @@ fn attachment_workflow(a: &LocalServer, b: &LocalServer) -> Result<(), Box<dyn E
         &mut first,
         Mutation::CreateWorkspace {
             name: "Attachments smoke".into(),
+            directory: None,
         },
     )?;
     let current = inventory(&mut first)?.0;
@@ -180,6 +181,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &mut first,
         Mutation::CreateWorkspace {
             name: "Shared smoke".into(),
+            directory: None,
         },
     )?;
     let (published, _) = inventory(&mut second)?;
@@ -363,6 +365,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &mut first,
         Mutation::CreateWorkspace {
             name: "Survivor".into(),
+            directory: None,
         },
     )?;
     let current = inventory(&mut first)?.0;

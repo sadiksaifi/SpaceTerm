@@ -45,6 +45,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         sequence: next_sequence,
         mutation: Mutation::CreateWorkspace {
             name: "Service lifecycle check".into(),
+            directory: None,
         },
     })?
     else {

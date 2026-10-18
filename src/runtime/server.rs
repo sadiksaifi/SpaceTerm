@@ -2590,6 +2590,7 @@ mod tests {
                 sequence,
                 mutation: Mutation::CreateWorkspace {
                     name: "Build".into(),
+                    directory: None,
                 },
             },
         ) else {
@@ -2931,7 +2932,7 @@ mod tests {
             Reply::Attached { .. }
         ));
         assert!(
-            matches!(host.request([1; 32], [1; 32], Request::Mutate { sequence: next_sequence, mutation: Mutation::CreateWorkspace { name: "Explicit creation".into() } }), Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. }))
+            matches!(host.request([1; 32], [1; 32], Request::Mutate { sequence: next_sequence, mutation: Mutation::CreateWorkspace { name: "Explicit creation".into(), directory: None } }), Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. }))
         );
         host.shutdown().unwrap();
     }
@@ -2947,6 +2948,7 @@ mod tests {
                 sequence: 1,
                 mutation: Mutation::CreateWorkspace {
                     name: "Build".into(),
+                    directory: None,
                 },
             },
         );
@@ -3432,6 +3434,7 @@ mod tests {
                 sequence: 1,
                 mutation: Mutation::CreateWorkspace {
                     name: "work".into(),
+                    directory: None,
                 },
             },
         );

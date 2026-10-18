@@ -117,6 +117,7 @@ fn installed_service_preserves_sessions_and_restores_dormant_organization() {
                 sequence: next_sequence,
                 mutation: Mutation::CreateWorkspace {
                     name: "Disposable lifecycle fixture".into(),
+                    directory: None,
                 },
             })
             .unwrap()

@@ -33,6 +33,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &mut first,
         Mutation::CreateWorkspace {
             name: "Repository reads smoke".into(),
+            directory: None,
         },
     )?;
     mutate(
@@ -82,6 +83,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &mut second,
         Mutation::CreateWorkspace {
             name: "Other active work".into(),
+            directory: None,
         },
     )?;
     let linked = repository.0.join("linked");

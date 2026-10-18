@@ -1520,7 +1520,10 @@ mod development {
 
         /// Asks the server for another shared Workspace.
         pub(crate) fn create_workspace(&mut self, name: String) -> SharedSubmission {
-            self.ask(Mutation::CreateWorkspace { name })
+            self.ask(Mutation::CreateWorkspace {
+                name,
+                directory: None,
+            })
         }
 
         /// Asks the server to rename a shared Workspace.

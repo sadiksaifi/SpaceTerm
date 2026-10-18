@@ -330,6 +330,7 @@ mod tests {
         assert_ne!(id, second.client_id().unwrap());
         let mutation = crate::hierarchy::Mutation::CreateWorkspace {
             name: "Original".into(),
+            directory: None,
         };
         {
             let mut journal = first.shared_journal().unwrap();
