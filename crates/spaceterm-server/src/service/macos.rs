@@ -45,7 +45,7 @@ impl LaunchAgent {
 <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
 <key>ProcessType</key><string>Interactive</string>
 <key>LimitLoadToSessionType</key><string>Aqua</string>
-<key>ExitTimeOut</key><integer>0</integer>
+<key>ExitTimeOut</key><integer>20</integer>
 <key>Umask</key><integer>63</integer>
 </dict></plist>
 "#, self.label, self.identity).into_bytes())
@@ -191,5 +191,89 @@ impl Supervisor for LaunchAgent {
     }
     fn uninstall(&self, runtime: &Path) -> Result<(), ServerError> {
         self.registration().remove(&self.contents(runtime)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    struct Fixture {
+        root: PathBuf,
+        agent: LaunchAgent,
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = command(
+                "/bin/launchctl",
+                &["bootout".into(), self.agent.target.clone().into()],
+            );
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a GUI login domain; run mise run server:service:test:macos"]
+    fn launchd_unload_allows_in_flight_cleanup_to_finish() {
+        let suffix =
+            u64::from_be_bytes(crate::protocol::random().unwrap()[..8].try_into().unwrap());
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("spaceterm-launchagent-{suffix:x}"));
+        let label = format!("io.github.sadiksaifi.spaceterm.validation-{suffix:x}");
+        // SAFETY: geteuid has no preconditions.
+        let domain = format!("gui/{}", unsafe { libc::geteuid() });
+        let fixture = Fixture {
+            agent: LaunchAgent {
+                directory: root.join("agents"),
+                name: format!("{label}.plist"),
+                target: format!("{domain}/{label}"),
+                label,
+                identity: "spaceterm-development".into(),
+            },
+            root,
+        };
+        let runtime = fixture.root.join("runtime");
+        std::fs::create_dir_all(runtime.join("bin")).unwrap();
+        let executable = runtime.join("bin/spaceterm-server");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\ncd -- \"$(dirname -- \"$0\")/../..\" || exit 1\n\
+             trap '/bin/sleep 1; printf clean > cleaned; exit 0' TERM\n\
+             printf ready > ready\nwhile :; do /bin/sleep 1; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        fixture.agent.install(&runtime).unwrap();
+        command(
+            "/bin/launchctl",
+            &[
+                "bootstrap".into(),
+                domain.into(),
+                fixture.agent.registration().path().into_os_string(),
+            ],
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !fixture.root.join("ready").exists() {
+            assert!(Instant::now() < deadline, "fixture did not become ready");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Logout unloads the job directly, without the explicit Stop action's pre-unload wait.
+        command(
+            "/bin/launchctl",
+            &["bootout".into(), fixture.agent.target.clone().into()],
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !fixture.root.join("cleaned").exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            fixture.root.join("cleaned").exists(),
+            "launchd killed the job before its SIGTERM cleanup finished"
+        );
     }
 }
