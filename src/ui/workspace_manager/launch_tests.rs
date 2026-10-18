@@ -372,3 +372,57 @@ fn open_local_directory_creates_a_server_workspace_rooted_there(cx: &mut TestApp
     assert_eq!(harness.workspace_count(cx), 1);
     std::fs::remove_dir_all(chosen).unwrap();
 }
+
+/// One device presents its server in one Workspace Window. A second window that finishes launch
+/// brings the first one forward instead of presenting the same Workspaces again.
+#[gpui::test]
+fn a_second_launched_window_brings_the_presenting_one_forward(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![ready()], cx);
+    cx.run_until_parked();
+    sync(&harness, cx);
+    let first = cx.update(|window, _| window.window_handle().window_id());
+    let launch = Arc::new(ScriptedLaunch::default());
+    launch.answer(ready());
+    let adapters = LocalServerAdapters {
+        launch: Arc::clone(&launch) as Arc<_>,
+        connector: Rc::new(ScriptedConnector {
+            edits: Rc::clone(&harness.edits),
+            panes: Rc::clone(&harness.panes),
+        }),
+    };
+    let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+        TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+            .with_fallback_title("zsh"),
+    );
+    let second = cx.add_window(|window, cx| {
+        WorkspaceManager::new_with_adapters(
+            session_factory,
+            std::env::temp_dir(),
+            WorkspaceManagerAdapters {
+                local_server: Some(adapters),
+                ..workspace_adapters(test_remote_backend_factory())
+            },
+            SidebarState::Expanded,
+            window,
+            cx,
+        )
+    });
+    second
+        .update(cx, |_, window, _| window.activate_window())
+        .expect("the second window is open");
+    cx.run_until_parked();
+
+    assert_eq!(
+        second
+            .read_with(cx, |manager, _| manager.workspaces.len())
+            .expect("the second window is open"),
+        0,
+        "a second window must not present the same server's Workspaces"
+    );
+    assert_eq!(harness.shared_rows(cx), 1, "the first window keeps them");
+    assert_eq!(
+        cx.update(|_, cx| cx.active_window().map(|active| active.window_id())),
+        Some(first),
+        "the Workspace Window presenting them comes forward"
+    );
+}

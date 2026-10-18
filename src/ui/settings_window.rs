@@ -145,10 +145,10 @@ fn open_settings_window(cx: &App) -> Option<WindowHandle<SettingsWindow>> {
 
 /// Presents a notice over Settings when Settings is the active window, and reports whether it did.
 ///
-/// An action taken in Settings, such as Use Shared Workspaces, answers in the Workspace Window.
-/// Some desktops, such as GNOME on Wayland, refuse to raise that window, which would leave its
-/// alert hidden behind Settings. Attaching the notice to the window the person is using keeps
-/// the outcome visible without raising anything.
+/// A Workspace Window outcome can arrive while Settings is the active window. Some desktops
+/// refuse to raise the Workspace Window, which would leave its alert hidden behind Settings.
+/// Attaching the notice to the window the person is using keeps the outcome visible without
+/// raising anything.
 ///
 /// The notice is presented once the current update finishes, because the request usually comes
 /// from a Settings control while Settings is still being updated.

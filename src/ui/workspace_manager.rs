@@ -3947,64 +3947,6 @@ struct SharedRowFacts {
 /// Shared server Workspaces: adopting them, presenting what the server publishes, submitting the
 /// edits a person asks for, and refusing the operations the server path does not support yet.
 impl WorkspaceManager {
-    /// Presents the local SpaceTerm Server's Workspaces beside this window's own.
-    ///
-    /// Adopting changes nothing a person is working in: the Workspaces this window owns keep their
-    /// Tabs, Panes, and Terminal Sessions, and the Active Workspace stays where it was. Production
-    /// defaults stay desktop-owned, so the server's Workspaces only ever join the sidebar.
-    /// Returns whether a refusal was answered over the active Settings Window.
-    pub(crate) fn adopt_shared_workspaces(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        use super::shared_workspaces::SharedPaneSessions;
-
-        if self.shared.is_some() {
-            return false;
-        }
-        // One device holds one authenticated connection per Pane, and one durable edit journal.
-        // A second presentation of the same server would rebind each Pane's lease and fence the
-        // first into reconnecting, so only one surface presents them at a time.
-        if super::development_pane::is_open(cx) {
-            return Self::show_shared_unavailable(
-                "The Development Pane window is presenting a Pane this server owns. Close it \
-                 first: one device holds one connection per Pane.",
-                window,
-                cx,
-            );
-        }
-        // The client home only completes the launch plan a server-backed Terminal Session ignores.
-        // It is never the directory the server starts a shell in, and it grants this Workspace no
-        // local directory of its own.
-        let Ok(client_home) = self.local_home_directory() else {
-            let answered =
-                super::settings_window::present_over_active_settings(cx, |window, cx| {
-                    let _ = Self::home_directory_alert().present(window, cx, |_, _| {});
-                });
-            if !answered {
-                Self::show_home_directory_unavailable(window, cx);
-            }
-            return answered;
-        };
-        let Some(client) = super::server_worktrees::Client::get(cx) else {
-            return false;
-        };
-        let server = client.server.clone();
-        let edits = client.source;
-        let sessions = SharedPaneSessions::new(
-            server.clone(),
-            client_home,
-            self.local_filesystem.clone(),
-            &self.pane_construction,
-        );
-        self.present_shared_workspaces(edits, sessions, window, cx);
-        if let Some(shared) = self.shared.as_mut() {
-            shared.retain_client_views(server);
-        }
-        false
-    }
-
     /// Presents the Workspaces one shared edit channel publishes.
     ///
     /// The server this reaches is chosen by construction, so the local SpaceTerm Server and a

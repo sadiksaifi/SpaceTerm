@@ -1,9 +1,9 @@
 //! Shared server Workspaces inside the main Workspace Window.
 //!
 //! A SpaceTerm Server owns these Workspaces, their Tabs, their Panes, and the Terminal Sessions
-//! the Panes present. The desktop keeps its own Workspaces exactly as they are: adopting shared
-//! Workspaces adds rows to the existing sidebar, Tabs to the existing Tab strip, and Panes to the
-//! existing split geometry, and it never changes the Active Workspace or ends desktop-owned work.
+//! the Panes present. Normal launch presents the account server's Workspaces this client has
+//! attached beside any Remote Workspaces the window owns. Another client's Workspace joins as
+//! membership and never changes the Active Workspace.
 //!
 //! Every shared change goes to the server as one [`Mutation`]. Nothing here creates, renames, or
 //! pins a Workspace locally and tells the server afterwards, so two clients cannot disagree about
@@ -28,7 +28,7 @@ pub(crate) use development::{
     SharedCloseReview, SharedCloseState, SharedCloseUnavailable, SharedEditSource,
     SharedPaneSessions, SharedPanes, SharedRefusal, SharedRefusalReason, SharedRemoval,
     SharedSubmission, SharedTabs, SharedWorkspaceConflict, SharedWorkspaceFacts,
-    SharedWorkspaceHost, SharedWorkspacePlan, SharedWorkspaces, adopt, adopted,
+    SharedWorkspaceHost, SharedWorkspacePlan, SharedWorkspaces, presenting_window,
     shared_close_changed_title,
 };
 
@@ -71,7 +71,7 @@ mod development {
     ///
     /// One device holds one durable edit journal and one connection per Pane, so a second window
     /// cannot present the same server: it would stay offline behind the journal lock and fence
-    /// every Pane the first window holds. A repeated request activates this window instead.
+    /// every Pane the first window holds. Another window activates this one instead.
     pub(crate) struct SharedWorkspaceHost(
         pub(crate) gpui::WindowHandle<crate::ui::WorkspaceManager>,
     );
@@ -88,42 +88,11 @@ mod development {
             .then_some(handle)
     }
 
-    /// Whether a Workspace Window already presents this device's shared Workspaces.
-    pub(crate) fn adopted(cx: &App) -> bool {
-        host(cx).is_some()
-    }
-
-    /// Presents the server's shared Workspaces in a Workspace Window, or activates the window
-    /// already presenting them.
-    pub(crate) fn adopt(cx: &mut App) {
-        if let Some(existing) = host(cx) {
-            cx.defer(move |cx| {
-                let _ = existing.update(cx, |_, window, _| window.activate_window());
-            });
-            cx.activate(true);
-            return;
-        }
-        let Some(handle) = crate::ui::updates::front_workspace_window(cx) else {
-            eprintln!("shared Workspaces need an open Workspace Window");
-            return;
-        };
-        let answered_over_settings = handle
-            .update(cx, |manager, window, cx| {
-                manager.adopt_shared_workspaces(window, cx)
-            })
-            .unwrap_or(false);
-        // A refusal answered over Settings stays in front; raising the Workspace Window would
-        // cover it.
-        if answered_over_settings {
-            return;
-        }
-        // The request usually comes from Settings. Bring the Workspace Window forward so its
-        // result, or an alert explaining why it could not be shown, is not left behind Settings.
-        // Desktops that refuse the raise keep Settings in front, and the alert follows it there.
-        cx.defer(move |cx| {
-            let _ = handle.update(cx, |_, window, _| window.activate_window());
-        });
-        cx.activate(true);
+    /// The other live Workspace Window already presenting this device's shared Workspaces.
+    pub(crate) fn presenting_window(
+        cx: &App,
+    ) -> Option<gpui::WindowHandle<crate::ui::WorkspaceManager>> {
+        host(cx)
     }
 
     /// The server-side edits one desktop client submits, and the last answer it received.

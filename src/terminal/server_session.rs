@@ -43,7 +43,6 @@ pub(crate) struct DevelopmentPaneState {
     directory_server: Mutex<Option<LocalServer>>,
     directory_busy: AtomicBool,
     directory_note: Mutex<Option<&'static str>>,
-    close: AtomicU64,
     epoch: AtomicU64,
     connected_epoch: AtomicU64,
     paste_unconfirmed: AtomicBool,
@@ -68,7 +67,6 @@ impl DevelopmentPaneState {
             directory_server: Mutex::default(),
             directory_busy: AtomicBool::new(false),
             directory_note: Mutex::default(),
-            close: AtomicU64::new(0),
             epoch: AtomicU64::new(0),
             connected_epoch: AtomicU64::new(0),
             paste_unconfirmed: AtomicBool::new(false),
@@ -183,7 +181,6 @@ impl DevelopmentPaneState {
         if *status == DevelopmentPaneStatus::Connected {
             *status = DevelopmentPaneStatus::Reconnecting;
         }
-        self.close.store(0, Ordering::Release);
         self.paste_unconfirmed.store(false, Ordering::Release);
         self.interaction
             .lock()
@@ -192,11 +189,6 @@ impl DevelopmentPaneState {
         let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
         self.connected_epoch.store(epoch, Ordering::Release);
         epoch
-    }
-    pub(crate) fn close(&self, approved_generation: u64) {
-        // The worker compares this exact approval with its active epoch. A reconnect
-        // between the UI's check and this submission must never retag the request.
-        self.close.store(approved_generation, Ordering::Release);
     }
     fn connection_failed(&self, error: ServerError, has_takeover: bool) -> bool {
         let retryable = matches!(
@@ -285,14 +277,16 @@ impl DevelopmentPaneState {
 pub(crate) struct DevelopmentServerSessionFactory {
     server: LocalServer,
     local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
-    pane_id: Option<spaceterm_server::hierarchy::Id>,
+    pane_id: spaceterm_server::hierarchy::Id,
     attachment: Option<spaceterm_server::attachments::AttachmentPermit>,
     state: Arc<DevelopmentPaneState>,
 }
 impl DevelopmentServerSessionFactory {
-    pub(crate) fn new(
+    /// Presents one server Pane. Construction connects to nothing.
+    pub(crate) fn for_pane(
         server: LocalServer,
         local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
+        pane_id: spaceterm_server::hierarchy::Id,
     ) -> (Self, Arc<DevelopmentPaneState>) {
         let state = Arc::new(DevelopmentPaneState::new());
         *state
@@ -303,7 +297,7 @@ impl DevelopmentServerSessionFactory {
             Self {
                 server,
                 local_files,
-                pane_id: None,
+                pane_id,
                 attachment: None,
                 state: Arc::clone(&state),
             },
@@ -316,15 +310,6 @@ impl DevelopmentServerSessionFactory {
     ) -> Self {
         self.attachment = Some(permit);
         self
-    }
-    pub(crate) fn for_pane(
-        server: LocalServer,
-        local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
-        pane: spaceterm_server::hierarchy::Id,
-    ) -> (Self, Arc<DevelopmentPaneState>) {
-        let (mut factory, state) = Self::new(server, local_files);
-        factory.pane_id = Some(pane);
-        (factory, state)
     }
 }
 
@@ -1030,7 +1015,7 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
         Some(&self.local_files)
     }
     fn fallback_title(&self) -> String {
-        "Development Pane".into()
+        "Terminal".into()
     }
     fn start(
         &self,
@@ -1120,7 +1105,6 @@ fn present(
         attachment,
         state,
     } = factory;
-    let mut create = true;
     let mut expected_session: Option<Lease> = None;
     let mut expected_target: Option<pane::PaneTarget> = None;
     let mut generation = PresentationGeneration::default();
@@ -1132,56 +1116,26 @@ fn present(
         }
         state.retry.store(false, Ordering::Release);
         let connected = (|| {
-            let mut connection = if pane_id.is_some() {
-                server.connect_shared_pane()?
-            } else {
-                server.connect_pane()?
-            };
-            let intent = create;
-            create = false;
+            let mut connection = server.connect_shared_pane()?;
             let mut grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
             let grant_update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let mut grant_appearance = Some(grant_update.generation);
             let style = Some(encode_style(&grant_update));
-            let request = if let Some(pane) = pane_id {
-                Request::SelectPane {
-                    pane,
-                    explicit: state.selected.swap(false, Ordering::AcqRel),
-                    size: grant_size,
-                    style,
-                }
-            } else if connection.supports_takeover() {
-                Request::Select {
-                    create: intent,
-                    size: grant_size,
-                    resume: expected_target,
-                    style,
-                }
-            } else {
-                Request::Attach {
-                    create: intent,
-                    size: grant_size,
-                    resume: expected_session,
-                    style,
-                }
+            let request = Request::SelectPane {
+                pane: pane_id,
+                explicit: state.selected.swap(false, Ordering::AcqRel),
+                size: grant_size,
+                style,
             };
             let mut unavailable = false;
             let mut reply = match exchange(&attachment, &mut connection, &request) {
                 Err(ServerError::DirectoryUnavailable) => {
                     unavailable = true;
-                    let passive = match request {
-                        Request::SelectPane { pane, size, .. } => Request::SelectPane {
-                            pane,
-                            explicit: false,
-                            size,
-                            style: None,
-                        },
-                        _ => Request::Select {
-                            create: false,
-                            size: grant_size,
-                            resume: None,
-                            style: None,
-                        },
+                    let passive = Request::SelectPane {
+                        pane: pane_id,
+                        explicit: false,
+                        size: grant_size,
+                        style: None,
                     };
                     exchange(&attachment, &mut connection, &passive)?
                 }
@@ -1296,20 +1250,11 @@ fn present(
                     reply = exchange(
                         &attachment,
                         &mut connection,
-                        &if let Some(pane) = pane_id {
-                            Request::SelectPane {
-                                pane,
-                                explicit: false,
-                                size,
-                                style: None,
-                            }
-                        } else {
-                            Request::Select {
-                                create: false,
-                                size,
-                                resume: None,
-                                style: None,
-                            }
+                        &Request::SelectPane {
+                            pane: pane_id,
+                            explicit: false,
+                            size,
+                            style: None,
                         },
                     )?;
                 }
@@ -1321,9 +1266,6 @@ fn present(
                 .unwrap_or_else(|e| e.into_inner())
                 .take();
             while let Reply::Takeover { target } = reply {
-                if pane_id.is_none() && expected_target.is_some_and(|old| old != target) {
-                    return Err(ServerError::SessionUnavailable);
-                }
                 expected_target = Some(target);
                 state.paste_unconfirmed.store(false, Ordering::Release);
                 if !takeover {
@@ -1367,20 +1309,11 @@ fn present(
                     reply = exchange(
                         &attachment,
                         &mut connection,
-                        &if let Some(pane) = pane_id {
-                            Request::SelectPane {
-                                pane,
-                                explicit: state.selected.swap(false, Ordering::AcqRel),
-                                size,
-                                style: None,
-                            }
-                        } else {
-                            Request::Select {
-                                create: false,
-                                size,
-                                resume: Some(target),
-                                style: None,
-                            }
+                        &Request::SelectPane {
+                            pane: pane_id,
+                            explicit: state.selected.swap(false, Ordering::AcqRel),
+                            size,
+                            style: None,
                         },
                     )?;
                 }
@@ -1388,9 +1321,6 @@ fn present(
             let Reply::Attached { lease } = reply else {
                 return Err(ServerError::Protocol);
             };
-            if pane_id.is_none() && expected_target.is_some_and(|old| old != lease.into()) {
-                return Err(ServerError::SessionUnavailable);
-            }
             expected_session = Some(lease);
             expected_target = Some(lease.into());
             // Authenticate and receive the authoritative screen before enabling input.
@@ -1531,19 +1461,6 @@ fn present(
                         exchange(&attachment, &mut connection, request)
                     })?;
                 }
-                if state.close.swap(0, Ordering::AcqRel) == epoch {
-                    if !matches!(
-                        exchange(&attachment, &mut connection, &Request::Close { lease })?,
-                        Reply::Closed
-                    ) {
-                        return Err(ServerError::Protocol);
-                    }
-                    state.set(DevelopmentPaneStatus::Ended);
-                    let _ = events.force_send(TerminalSessionEvent::Exited(
-                        TerminalSessionExit::GracefulShutdown,
-                    ));
-                    return Ok(());
-                }
                 for _ in 0..32 {
                     let Ok(submitted) = input.try_recv() else {
                         break;
@@ -1624,7 +1541,7 @@ fn present(
         match connected {
             Ok(()) => return,
             Err(error) => {
-                if pane_id.is_some() && error == ServerError::SessionUnavailable {
+                if error == ServerError::SessionUnavailable {
                     state.set(DevelopmentPaneStatus::Ended);
                     let _ = events
                         .force_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success));
@@ -3493,20 +3410,6 @@ mod tests {
             "wrong fitted-cell y: {:?}",
             coordinates[0]
         );
-    }
-
-    #[test]
-    fn end_session_approval_cannot_transfer_to_a_new_connection() {
-        let state = DevelopmentPaneState::new();
-        let approved = state.invalidate();
-        state.set(DevelopmentPaneStatus::Connected);
-        let reconnected = state.invalidate();
-        state.set(DevelopmentPaneStatus::Connected);
-        state.close(approved);
-        assert_ne!(state.close.swap(0, Ordering::AcqRel), reconnected);
-        assert_eq!(state.status(), DevelopmentPaneStatus::Connected);
-        state.close(reconnected);
-        assert_eq!(state.close.swap(0, Ordering::AcqRel), reconnected);
     }
 
     #[test]

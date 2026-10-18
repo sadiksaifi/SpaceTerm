@@ -3,7 +3,7 @@
 # USAGE flag "--backend <backend>" help="Display backend" default="both" {
 # USAGE   choices "both" "x11" "wayland"
 # USAGE }
-# USAGE flag "--server-backed" help="Exercise an already-running account server through Shared Workspaces"
+# USAGE flag "--server-backed" help="Also create and retire a Workspace on the already-running account server"
 # USAGE flag "--binary <binary>" help="Existing source executable; skips building"
 # USAGE flag "--expected-binary-sha256 <sha256>" help="Required SHA256 pin for --binary"
 # USAGE flag "--output-dir <output_dir>" help="Evidence directory; defaults to a fresh temporary directory"
@@ -74,7 +74,7 @@ def parse_args():
     parser.add_argument(
         "--server-backed",
         action="store_true",
-        help="Use the already-running account server and Shared Workspaces",
+        help="Also create and retire a Workspace on the already-running account server",
     )
     parser.add_argument("--server-binary", type=Path, help=argparse.SUPPRESS)
     parser.add_argument(
@@ -208,10 +208,6 @@ class Probe:
                 return
         raise SmokeFailure("server_workspace_control_action_missing")
 
-    def window_is_active(self, window):
-        window.clear_cache()
-        return window.getState().contains(self.atspi.STATE_ACTIVE)
-
     def workspace_rows(self):
         tree = self.wait(
             lambda: self.find_named_control("Workspaces"), "server_workspace_list_missing"
@@ -284,23 +280,10 @@ class Probe:
             "server_workspace_cleanup_not_confirmed",
         )
 
-    def open_server_workspace(self, workspace_window, input_driver):
-        # Exercise the same adoption and creation controls as the native client. The fixture's
-        # named client owns its presentation; the already-running account server owns the PTY.
-        self.activate_control("Settings")
-        settings_window = self.wait(
-            lambda: self.find_named_control("Servers"), "server_workspace_control_missing"
-        )
-        while settings_window.getRole() != self.atspi.ROLE_FRAME:
-            settings_window = settings_window.parent
-        input_driver.focus_window(settings_window)
-        self.wait(lambda: self.window_is_active(settings_window), "settings_window_not_active")
-        self.activate_control("Servers")
-        self.activate_control("Use Shared Workspaces")
-        self.activate_control("Close", settings_window)
-        self.wait(lambda: self.find_named_control("Servers") is None, "settings_window_not_closed")
-        input_driver.focus_window(workspace_window)
-        self.wait(lambda: self.window_is_active(workspace_window), "workspace_window_not_active")
+    def open_server_workspace(self, input_driver):
+        # Normal launch already presents the account server's Workspaces. Exercise the same
+        # creation controls as the native client. The fixture's named client owns its
+        # presentation; the already-running account server owns the PTY.
         self.activate_control("New Workspace")
         previous = self.find_terminal()
         self.server_workspace_name = os.environ["SPACETERM_DEVELOPMENT_CLIENT"]
@@ -310,7 +293,7 @@ class Probe:
             "server_workspace_fixture_name_in_use",
         )
         self.server_workspace_before = rows
-        self.activate_control("Server Workspace")
+        self.activate_control("Local Workspace")
         self.server_workspace_row = self.wait(
             self.created_workspace_row, "server_workspace_created_row_missing"
         )
@@ -464,24 +447,6 @@ class Input:
                 else (self.key_options, keysym, pressed)
             )
             self.remote.NotifyKeyboardKeysym(*arguments)
-
-    def focus_window(self, window):
-        if self.backend == "x11":
-            # Xvfb has no window manager to honor the application's activation request.
-            run(
-                [
-                    "xdotool",
-                    "search",
-                    "--onlyvisible",
-                    "--all",
-                    "--pid",
-                    str(self.probe.application_pid),
-                    "--name",
-                    "^" + re.escape(window.name) + "$",
-                    "windowfocus",
-                    "--sync",
-                ]
-            )
 
     def escape(self):
         if self.backend == "x11":
@@ -1859,7 +1824,7 @@ def private_session(args):
             run(["xdotool", "search", "--onlyvisible", "--class", "spaceterm", "windowfocus"])
         input_driver = Input(args.private_session, probe)
         if args.server_backed:
-            probe.open_server_workspace(window, input_driver)
+            probe.open_server_workspace(input_driver)
             window = probe.terminal
             while window is not None and window.getRole() != probe.atspi.ROLE_FRAME:
                 window = window.parent

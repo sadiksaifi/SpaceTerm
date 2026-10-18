@@ -1,8 +1,7 @@
 //! Presentation shared by every Pane whose Terminal Session a SpaceTerm Server owns.
 //!
-//! The Development Pane window and the Panes of a shared server Workspace show the same screens,
-//! interruption notices, and action statuses, so their copy and composition live here once. The
-//! surfaces are deliberately plain: a screen replaces the Pane outright, so nothing of a former
+//! Every server-backed Pane shows the same screens, interruption notices, and action statuses, so
+//! their copy and composition live here once. The surfaces are deliberately plain: a screen replaces the Pane outright, so nothing of a former
 //! shell's output paints or reaches assistive technology after another client takes control or the
 //! server restarts.
 
@@ -320,11 +319,11 @@ pub(crate) fn note_status(selector: SharedString, label: SharedString, cx: &App)
     }
 }
 
-/// The Retry and Choose Directory pair the directory screen offers in both presentations.
+/// The Retry and Choose Directory pair the directory screen offers.
 ///
 /// The caller owns the element ids, what it knows about availability, and what each action does.
-/// The copy and the enablement policy belong here, so one screen never explains itself differently
-/// in the Development Pane window and in a shared Workspace.
+/// The copy and the enablement policy belong here, so the screen always explains itself the same
+/// way.
 pub(crate) struct DirectoryActions<Retry, Choose> {
     /// Element id and debug selector for Retry.
     pub(crate) retry: SharedString,
@@ -666,8 +665,7 @@ mod connection {
     /// One Pane's view of its server connection: the last status read, and the screen that
     /// replaces the Pane while no authoritative shell output belongs to this client.
     ///
-    /// The same rules as the Development Pane window apply, minus the window's own lifecycle: an
-    /// unanswered Take Over or Start New Shell is claimed by nobody, and a screen stays through
+    /// An unanswered Take Over or Start New Shell is claimed by nobody, and a screen stays through
     /// interruptions until a fresh screen arrives for this client.
     pub(crate) struct ServerPaneView {
         announcements: ScreenAnnouncements,

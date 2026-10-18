@@ -13,7 +13,6 @@ mod client_view_state;
 mod control_theme;
 #[cfg(feature = "developer-tools")]
 pub(crate) mod developer_workbench;
-pub(crate) mod development_pane;
 pub(crate) mod directory_picker;
 mod drag_and_drop;
 mod native_remote_workspace_flow_backend;

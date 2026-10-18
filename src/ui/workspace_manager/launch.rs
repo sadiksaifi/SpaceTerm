@@ -414,6 +414,13 @@ impl WorkspaceManager {
         if self.shared.is_some() {
             return LaunchState::Ready;
         }
+        // One device presents its server in one Workspace Window, which comes forward instead.
+        if let Some(existing) = crate::ui::shared_workspaces::presenting_window(cx) {
+            cx.defer(move |cx| {
+                let _ = existing.update(cx, |_, window, _| window.activate_window());
+            });
+            return LaunchState::Ready;
+        }
         // The client home only completes the launch plan a server-backed Terminal Session
         // ignores. It is never the directory the server starts a shell in.
         let client_home = match self.local_home_directory() {

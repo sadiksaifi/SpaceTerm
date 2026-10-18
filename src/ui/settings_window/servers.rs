@@ -24,21 +24,15 @@ use crate::ui::sidebar_window::form::{CaptionTone, action_button, badge};
 pub(super) const CONTROL_SELECTOR: &str = "settings-local-server-control";
 pub(super) const PROGRESS_SELECTOR: &str = "settings-local-server-progress";
 pub(super) const CHECK_SELECTOR: &str = "settings-local-server-check";
-pub(super) const SET_UP_SELECTOR: &str = "settings-local-server-set-up";
-pub(super) const START_SELECTOR: &str = "settings-local-server-start";
-pub(super) const OPEN_DEVELOPMENT_PANE_SELECTOR: &str =
-    "settings-local-server-open-development-pane";
-pub(super) const SHARED_WORKSPACES_SELECTOR: &str = "settings-local-server-shared-workspaces";
 
-/// The blocking local server operations the section runs on the background executor.
+/// The blocking local server check the section runs on the background executor. The Workspace
+/// Window sets up and starts the server; this row only reports how it answers.
 pub(super) trait LocalServerControl: Send + Sync {
     fn worktree_server(&self) -> Option<LocalServer> {
         None
     }
     /// Connects using owning-account authority. Never creates an identity or starts a server.
     fn refresh(&self) -> Result<ServerConnection, ServerError>;
-    /// Sets up when needed, starts the server when it is not running, and connects.
-    fn setup_and_start(&self) -> Result<ServerConnection, ServerError>;
 }
 
 impl LocalServerControl for LocalServer {
@@ -48,26 +42,18 @@ impl LocalServerControl for LocalServer {
     fn refresh(&self) -> Result<ServerConnection, ServerError> {
         LocalServer::refresh(self).map(ServerConnection::from)
     }
-
-    fn setup_and_start(&self) -> Result<ServerConnection, ServerError> {
-        LocalServer::setup_and_start(self).map(ServerConnection::from)
-    }
 }
 
 /// What the section presents about an authenticated connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ServerConnection {
     pub(super) protocol_major: u16,
-    /// Whether the server said it runs the Development Pane's Terminal Session. A server that
-    /// predates terminal operations authenticates without saying so.
-    pub(super) development_pane: bool,
 }
 
 impl From<AuthenticatedStatus> for ServerConnection {
     fn from(status: AuthenticatedStatus) -> Self {
         Self {
             protocol_major: status.protocol_major,
-            development_pane: status.development_pane,
         }
     }
 }
@@ -167,43 +153,13 @@ pub(super) fn offered_local_server() -> OfferedLocalServer {
     })
 }
 
-/// The step a person can take from the row.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum LocalServerAction {
-    /// Connects using owning-account authority.
-    Check,
-    /// Sets up the server's identity, then starts the server.
-    SetUp,
-    /// Starts the server.
-    Start,
-}
-
-impl LocalServerAction {
-    /// The button label. Checking reads as the Updates section's check does.
-    pub(super) const fn label(self) -> &'static str {
-        match self {
-            Self::Check => "Check Now",
-            Self::SetUp => "Set Up Server",
-            Self::Start => "Start Server",
-        }
-    }
-
-    const fn selector(self) -> &'static str {
-        match self {
-            Self::Check => CHECK_SELECTOR,
-            Self::SetUp => SET_UP_SELECTOR,
-            Self::Start => START_SELECTOR,
-        }
-    }
-}
-
 /// What SpaceTerm last learned about the local server.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum LocalServerStatus {
     /// Nothing has been asked yet.
     NotChecked,
-    /// One action awaits its result.
-    Working(LocalServerAction),
+    /// A check awaits its result.
+    Checking,
     Connected(ServerConnection),
     Failed(ServerError),
 }
@@ -216,58 +172,10 @@ pub(super) struct LocalServerPresentation {
     pub(super) state_selector: &'static str,
     pub(super) explanation: SharedString,
     pub(super) tone: CaptionTone,
-    /// The step the row offers, if any.
-    pub(super) action: Option<LocalServerAction>,
-    /// Whether an action is running. The row shows progress and withholds its action meanwhile.
+    /// Whether the row offers Check Now.
+    pub(super) check: bool,
+    /// Whether a check is running. The row shows progress and withholds Check Now meanwhile.
     pub(super) working: bool,
-    /// Whether the row offers Open Development Pane, which needs an authenticated server that
-    /// runs it.
-    pub(super) development_pane: bool,
-    /// Whether the row offers Use Shared Workspaces, which presents this server's Workspaces in
-    /// the Workspace Window beside the Workspaces the desktop owns.
-    pub(super) shared_workspaces: bool,
-}
-
-/// Which of the server's two terminal surfaces a device may open now.
-///
-/// One device holds one authenticated connection per Pane. Two surfaces presenting the same Pane
-/// would rebind its lease and fence each other into reconnecting, so only one is offered at a
-/// time. Shared Workspaces are the ordinary route; the Development Pane window stays as a single
-/// Pane for diagnosis.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct ServerSurfaces {
-    pub(super) shared_workspaces: bool,
-    pub(super) development_pane: bool,
-}
-
-impl ServerSurfaces {
-    const SHARED_HOLDS: &'static str = "A Workspace Window is presenting this server's Workspaces. SpaceTerm presents each server Pane in one window at a time.";
-    const DEVELOPMENT_PANE_HOLDS: &'static str = "The Development Pane window is presenting a Pane this server owns. Close it to present \
-         this server's Workspaces instead.";
-
-    /// What each surface offers, given which one is open.
-    pub(super) fn resolve(shared_adopted: bool, development_pane_open: bool) -> Self {
-        Self {
-            shared_workspaces: !development_pane_open,
-            development_pane: !shared_adopted,
-        }
-    }
-
-    pub(super) const fn shared_workspaces_reason(self) -> Option<&'static str> {
-        if self.shared_workspaces {
-            None
-        } else {
-            Some(Self::DEVELOPMENT_PANE_HOLDS)
-        }
-    }
-
-    pub(super) const fn development_pane_reason(self) -> Option<&'static str> {
-        if self.development_pane {
-            None
-        } else {
-            Some(Self::SHARED_HOLDS)
-        }
-    }
 }
 
 /// Owns the offered server, the last status, and the pending operation.
@@ -304,52 +212,29 @@ impl LocalServerRow {
         let mut presentation = present(status);
         // A server that could not be resolved offers no step: checking again resolves nothing.
         if self.control.is_err() {
-            presentation.action = None;
+            presentation.check = false;
         }
-        // Opening never sets up or starts the server, so it waits for a successful check. A
-        // server that does not run the Development Pane is offered no terminal operation.
-        presentation.development_pane = self.control.is_ok()
-            && matches!(
-                status,
-                LocalServerStatus::Connected(ServerConnection {
-                    development_pane: true,
-                    ..
-                })
-            );
-        // Presenting the server's Workspaces reads its inventory, so it waits for the same
-        // successful check. The Workspace Window keeps the Workspaces it already owns.
-        presentation.shared_workspaces = presentation.development_pane;
         presentation
     }
 }
 
 /// The presentation of one status.
 pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
-    use LocalServerAction as Action;
-
     let guidance =
         |explanation: &'static str| (SharedString::new_static(explanation), CaptionTone::Guidance);
-    let (state, state_selector, (explanation, tone), action, working) = match status {
+    let (state, state_selector, (explanation, tone), check, working) = match status {
         LocalServerStatus::NotChecked => (
             "Not Checked",
             "settings-local-server-state-not-checked",
             guidance("SpaceTerm checks the server when you open this section."),
-            Some(Action::Check),
+            true,
             false,
         ),
-        LocalServerStatus::Working(action) => (
-            match action {
-                Action::Check => "Checking",
-                Action::SetUp => "Setting Up",
-                Action::Start => "Starting",
-            },
+        LocalServerStatus::Checking => (
+            "Checking",
             "settings-local-server-state-working",
-            guidance(match action {
-                Action::Check => "Connecting to the server…",
-                Action::SetUp => "Setting up and starting the server…",
-                Action::Start => "Starting the server…",
-            }),
-            Some(action),
+            guidance("Connecting to the server…"),
+            true,
             true,
         ),
         LocalServerStatus::Connected(connection) => (
@@ -362,19 +247,20 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
                 )),
                 CaptionTone::Guidance,
             ),
-            Some(Action::Check),
+            true,
             false,
         ),
         LocalServerStatus::Failed(error) => {
-            let (state, state_selector, action) = failure(error);
+            let (state, state_selector, check) = failure(error);
             let explanation = match error {
                 ServerError::NotSetUp => guidance(
-                    "Set Up creates a server for your account and starts it. Only programs \
-                     running as your account can connect to it.",
+                    "SpaceTerm sets up the server for your account when its window opens. Only \
+                     programs running as your account can connect to it.",
                 ),
-                ServerError::NotRunning => {
-                    guidance("The server is set up but not running. Start it to connect.")
-                }
+                ServerError::NotRunning => guidance(
+                    "The server is set up but not running. Start it below, or open a SpaceTerm \
+                     window, to connect.",
+                ),
                 ServerError::AuthenticationRefused => (
                     SharedString::from(format!("{error} Nothing changed.")),
                     CaptionTone::Error,
@@ -398,7 +284,7 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
                 ),
                 _ => (SharedString::from(error.to_string()), CaptionTone::Error),
             };
-            (state, state_selector, explanation, action, false)
+            (state, state_selector, explanation, check, false)
         }
     };
     LocalServerPresentation {
@@ -406,116 +292,112 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
         state_selector,
         explanation,
         tone,
-        action,
+        check,
         working,
-        development_pane: false,
-        shared_workspaces: false,
     }
 }
 
-/// The badge, its selector, and the step that can recover from one failure.
-fn failure(error: ServerError) -> (&'static str, &'static str, Option<LocalServerAction>) {
-    use LocalServerAction as Action;
-
+/// The badge, its selector, and whether checking again can tell anything new.
+fn failure(error: ServerError) -> (&'static str, &'static str, bool) {
     match error {
         ServerError::NotSetUp => (
             "Not Set Up",
             "settings-local-server-state-not-set-up",
-            Some(Action::SetUp),
+            true,
         ),
         ServerError::NotRunning => (
             "Not Running",
             "settings-local-server-state-not-running",
-            Some(Action::Start),
+            true,
         ),
         ServerError::StartupFailed => (
             "Not Started",
             "settings-local-server-state-startup-failed",
-            Some(Action::Start),
+            true,
         ),
-        // Only the service's explicit Start or Install reverses these, so the connection row offers
-        // no step of its own. Setting up again would leave a stopped server stopped.
-        ServerError::Stopped => ("Stopped", "settings-local-server-state-stopped", None),
+        // Only the service's explicit Start or Install reverses these, so checking again says
+        // nothing new.
+        ServerError::Stopped => ("Stopped", "settings-local-server-state-stopped", false),
         ServerError::NotInstalled => (
             "Not Installed",
             "settings-local-server-state-not-installed",
-            None,
+            false,
         ),
-        // Unreadable or unsafe storage and a refused or incompatible server are never repaired by
-        // setting up again, so the row offers only another check.
+        // Unreadable or unsafe storage and a refused or incompatible server can change outside
+        // SpaceTerm, so the row offers another check.
         ServerError::StorageUnavailable | ServerError::ServiceUnavailable => (
             "Unavailable",
             "settings-local-server-state-unavailable",
-            Some(Action::Check),
+            true,
         ),
         ServerError::UnsafeStorage => (
             "Unsafe Storage",
             "settings-local-server-state-unsafe-storage",
-            Some(Action::Check),
+            true,
         ),
         ServerError::AuthenticationRefused => (
             "Refused",
             "settings-local-server-state-refused",
-            Some(Action::Check),
+            true,
         ),
         ServerError::IncompatibleProtocol => (
             "Incompatible",
             "settings-local-server-state-incompatible",
-            Some(Action::Check),
+            true,
         ),
         ServerError::IncompatibleState => (
             "Incompatible State",
             "settings-local-server-state-incompatible-state",
-            Some(Action::Check),
+            true,
         ),
         ServerError::Protocol => (
             "Protocol Error",
             "settings-local-server-state-protocol-error",
-            Some(Action::Check),
+            true,
         ),
         // Terminal Session refusals reach this row only through a check, which another check
         // answers afresh.
         ServerError::Controlled => (
             "In Use",
             "settings-local-server-state-controlled",
-            Some(Action::Check),
+            true,
         ),
         ServerError::SessionUnavailable | ServerError::StaleControl => (
             "Unavailable",
             "settings-local-server-state-session-unavailable",
-            Some(Action::Check),
+            true,
         ),
         ServerError::DirectoryUnavailable => (
             "Directory Unavailable",
             "settings-local-server-state-directory-unavailable",
-            Some(Action::Check),
+            true,
         ),
         ServerError::Unsupported => (
             "Unsupported",
             "settings-local-server-state-unsupported",
-            Some(Action::Check),
+            true,
         ),
         ServerError::RuntimeUnavailable => (
             "Runtime Unavailable",
             "settings-local-server-state-runtime-unavailable",
-            Some(Action::Check),
+            true,
         ),
         ServerError::AuthorizationRequired => (
             "Authorization Required",
             "settings-local-server-state-authorization-required",
-            None,
+            false,
         ),
         ServerError::CleanupUnresolved => (
             "Cleanup Unresolved",
             "settings-local-server-state-cleanup-unresolved",
-            Some(Action::Check),
+            true,
         ),
         // The server is holding shared edit outcomes for clients that have not acknowledged
         // them. Another check reports whether they have since.
         ServerError::Capacity => (
             "At Capacity",
             "settings-local-server-state-capacity",
-            Some(Action::Check),
+            true,
         ),
     }
 }
@@ -1198,14 +1080,9 @@ impl ServerServiceRow {
 }
 
 impl SettingsWindow {
-    /// Checks the connection as the section comes into view. A running action keeps its place.
+    /// Checks the connection on the background executor. One check runs at a time, and none
+    /// while the service is changing: its result checks the connection afresh.
     pub(super) fn check_local_server(&mut self, cx: &mut Context<Self>) {
-        self.run_local_server(LocalServerAction::Check, cx);
-    }
-
-    /// Runs one action on the background executor. Only one runs at a time, and none while the
-    /// service is changing: its result checks the connection afresh.
-    pub(super) fn run_local_server(&mut self, action: LocalServerAction, cx: &mut Context<Self>) {
         if self
             .server_service
             .as_ref()
@@ -1216,20 +1093,15 @@ impl SettingsWindow {
         let Some(row) = &mut self.local_server else {
             return;
         };
-        if matches!(row.status, LocalServerStatus::Working(_)) {
+        if matches!(row.status, LocalServerStatus::Checking) {
             return;
         }
         let Ok(control) = &row.control else {
             return;
         };
         let control = Arc::clone(control);
-        row.status = LocalServerStatus::Working(action);
-        let result = cx.background_spawn(async move {
-            match action {
-                LocalServerAction::Check => control.refresh(),
-                LocalServerAction::SetUp | LocalServerAction::Start => control.setup_and_start(),
-            }
-        });
+        row.status = LocalServerStatus::Checking;
+        let result = cx.background_spawn(async move { control.refresh() });
         row._operation = Some(cx.spawn(async move |settings, cx| {
             let result = result.await;
             let _ = settings.update(cx, |settings, cx| {
@@ -1238,10 +1110,6 @@ impl SettingsWindow {
                         Ok(connection) => LocalServerStatus::Connected(connection),
                         Err(error) => LocalServerStatus::Failed(error),
                     };
-                }
-                // Setting up or starting can start the server, which the service row then reads.
-                if action != LocalServerAction::Check {
-                    settings.check_server_service(cx);
                 }
                 cx.notify();
             });
@@ -1274,7 +1142,7 @@ impl SettingsWindow {
     fn local_server_working(&self) -> bool {
         self.local_server
             .as_ref()
-            .is_some_and(|row| matches!(row.status, LocalServerStatus::Working(_)))
+            .is_some_and(|row| matches!(row.status, LocalServerStatus::Checking))
     }
 
     /// Reads the service as the section comes into view. A running action keeps its place.
@@ -1733,49 +1601,21 @@ impl SettingsWindow {
                 .child(badge(state_selector, presentation.state, appearance))
                 .into_any_element()
         };
-        // A service change checks the connection when it finishes, so the step waits for it.
+        // A service change checks the connection when it finishes, so the check waits for it.
         let service_changing = self
             .server_service
             .as_ref()
             .is_some_and(ServerServiceRow::changing);
         let owner = cx.weak_entity();
-        let action = presentation.action.map(|action| {
+        let check = presentation.check.then(|| {
             action_button(
-                action.selector(),
-                action.label(),
+                CHECK_SELECTOR,
+                "Check Now",
                 !presentation.working && !service_changing,
                 move |_, cx| {
-                    let _ = owner.update(cx, |settings, cx| settings.run_local_server(action, cx));
+                    let _ = owner.update(cx, |settings, cx| settings.check_local_server(cx));
                 },
             )
-        });
-        let surfaces = ServerSurfaces::resolve(
-            crate::ui::shared_workspaces::adopted(cx),
-            crate::ui::development_pane::is_open(cx),
-        );
-        let development_pane = presentation.development_pane.then(|| {
-            action_button(
-                OPEN_DEVELOPMENT_PANE_SELECTOR,
-                "Open Development Pane",
-                surfaces.development_pane,
-                |_, cx| crate::ui::development_pane::open_or_activate(cx),
-            )
-            .when_some(surfaces.development_pane_reason(), |button, reason| {
-                button.accessibility_description(reason)
-            })
-        });
-        // Presenting the server's Workspaces adds them to the Workspace Window's sidebar. The
-        // Workspaces, Tabs, Panes, and Terminal Sessions the desktop owns are left untouched.
-        let shared_workspaces = presentation.shared_workspaces.then(|| {
-            action_button(
-                SHARED_WORKSPACES_SELECTOR,
-                "Use Shared Workspaces",
-                surfaces.shared_workspaces,
-                |_, cx| crate::ui::shared_workspaces::adopt(cx),
-            )
-            .when_some(surfaces.shared_workspaces_reason(), |button, reason| {
-                button.accessibility_description(reason)
-            })
         });
         div()
             .debug_selector(|| CONTROL_SELECTOR.to_owned())
@@ -1784,9 +1624,7 @@ impl SettingsWindow {
             .items_center()
             .gap(appearance.spacing(8.0))
             .child(state)
-            .children(action)
-            .children(development_pane)
-            .children(shared_workspaces)
+            .children(check)
             .into_any_element()
     }
 }
@@ -1807,9 +1645,7 @@ pub(super) mod testing {
     /// A server whose answers the test sets and whose operations it counts.
     pub(in crate::ui::settings_window) struct ScriptedServer {
         refresh: Mutex<Result<ServerConnection, ServerError>>,
-        setup: Mutex<Result<ServerConnection, ServerError>>,
         refreshes: AtomicUsize,
-        setups: AtomicUsize,
     }
 
     impl ScriptedServer {
@@ -1818,9 +1654,7 @@ pub(super) mod testing {
         ) -> Arc<Self> {
             Arc::new(Self {
                 refresh: Mutex::new(refresh),
-                setup: Mutex::new(Ok(connected(2))),
                 refreshes: AtomicUsize::new(0),
-                setups: AtomicUsize::new(0),
             })
         }
 
@@ -1831,19 +1665,8 @@ pub(super) mod testing {
             *self.refresh.lock().expect("refresh answer") = result;
         }
 
-        pub(in crate::ui::settings_window) fn answer_setup(
-            &self,
-            result: Result<ServerConnection, ServerError>,
-        ) {
-            *self.setup.lock().expect("setup answer") = result;
-        }
-
         pub(in crate::ui::settings_window) fn refreshes(&self) -> usize {
             self.refreshes.load(Ordering::SeqCst)
-        }
-
-        pub(in crate::ui::settings_window) fn setups(&self) -> usize {
-            self.setups.load(Ordering::SeqCst)
         }
     }
 
@@ -1851,11 +1674,6 @@ pub(super) mod testing {
         fn refresh(&self) -> Result<ServerConnection, ServerError> {
             self.refreshes.fetch_add(1, Ordering::SeqCst);
             *self.refresh.lock().expect("refresh answer")
-        }
-
-        fn setup_and_start(&self) -> Result<ServerConnection, ServerError> {
-            self.setups.fetch_add(1, Ordering::SeqCst);
-            *self.setup.lock().expect("setup answer")
         }
     }
 
@@ -2112,20 +1930,7 @@ pub(super) mod testing {
 
     /// A server that runs the Development Pane.
     pub(in crate::ui::settings_window) const fn connected(protocol_major: u16) -> ServerConnection {
-        ServerConnection {
-            protocol_major,
-            development_pane: true,
-        }
-    }
-
-    /// A server from before terminal operations, which authenticates and offers status only.
-    pub(in crate::ui::settings_window) const fn status_only(
-        protocol_major: u16,
-    ) -> ServerConnection {
-        ServerConnection {
-            protocol_major,
-            development_pane: false,
-        }
+        ServerConnection { protocol_major }
     }
 }
 
