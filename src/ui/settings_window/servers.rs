@@ -38,6 +38,9 @@ pub(super) const SHARED_WORKSPACES_SELECTOR: &str = "settings-local-server-share
 
 /// The blocking local server operations the section runs on the background executor.
 pub(super) trait LocalServerControl: Send + Sync {
+    fn worktree_server(&self) -> Option<LocalServer> {
+        None
+    }
     /// Authenticates with the saved pairing. Never creates an identity or starts a server.
     fn refresh(&self) -> Result<ServerConnection, ServerError>;
     /// Sets up and pairs when needed, starts the server when it is not running, and authenticates.
@@ -45,6 +48,9 @@ pub(super) trait LocalServerControl: Send + Sync {
 }
 
 impl LocalServerControl for LocalServer {
+    fn worktree_server(&self) -> Option<LocalServer> {
+        Some(self.clone())
+    }
     fn refresh(&self) -> Result<ServerConnection, ServerError> {
         LocalServer::refresh(self).map(ServerConnection::from)
     }
@@ -281,6 +287,9 @@ pub(super) struct LocalServerRow {
 }
 
 impl LocalServerRow {
+    pub(super) fn worktree_server(&self) -> Option<LocalServer> {
+        self.control.as_ref().ok()?.worktree_server()
+    }
     pub(super) fn new(control: Result<Arc<dyn LocalServerControl>, ServerError>) -> Self {
         Self {
             control,

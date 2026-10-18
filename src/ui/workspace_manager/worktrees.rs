@@ -35,15 +35,18 @@ use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
 
 mod cycle;
 mod removal;
+mod server;
 
 #[derive(Default)]
 pub(super) struct SidebarWorktrees {
     workspaces: BTreeMap<WorkspaceId, WorkspaceWorktrees>,
     form: Option<Entity<WorktreeForm>>,
     created: Option<CreatedWorktree>,
+    created_shared: Option<(WorkspaceId, PathBuf, u64)>,
     /// The removal being checked, confirmed, or run. One runs at a time.
     removal: Option<u64>,
     removal_generation: u64,
+    server_review: Option<server::RemovalReview>,
 }
 
 /// A Worktree git created whose first Tab opens once the listing shows it.
@@ -110,6 +113,19 @@ impl WorkspaceWorktrees {
 }
 
 impl WorkspaceManager {
+    pub(super) fn worktree_creation_failure_presented(
+        &self,
+        path: &std::path::Path,
+        error: spaceterm_server::worktree::Error,
+        cx: &App,
+    ) -> bool {
+        self.sidebar_worktrees.form.as_ref().is_some_and(|form| {
+            let form = form.read(cx);
+            form.is_open()
+                || (error == spaceterm_server::worktree::Error::Interrupted
+                    && form.interrupted_path() == Some(path))
+        })
+    }
     /// Follows each local Workspace's repository and keeps its Tabs in its Worktrees.
     pub(super) fn sync_sidebar_worktrees(&mut self, cx: &mut Context<Self>) {
         let Some(store) = InstalledWorktrees::store(cx) else {
@@ -239,9 +255,9 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        // A shared Workspace's server opens no Tab in a chosen Worktree yet.
+        // A shared Workspace asks its owning server to open the first Tab.
         if self.is_shared_workspace(workspace_id) {
-            return false;
+            return self.open_server_worktree_tab(workspace_id, worktree_id, window, cx);
         }
         let had_tabs = self.worktree_has_tabs(workspace_id, worktree_id, cx);
         if !self.open_worktree(workspace_id, worktree_id, true, window, cx) {
@@ -257,6 +273,10 @@ impl WorkspaceManager {
 
     /// Whether a Workspace reads a local repository, where it can create Worktrees.
     pub(super) fn creates_worktrees(&self, workspace_id: WorkspaceId, cx: &App) -> bool {
+        if self.is_shared_workspace(workspace_id) {
+            return crate::ui::server_worktrees::available(cx)
+                && self.shared_inventory(workspace_id).is_some();
+        }
         self.sidebar_worktrees
             .workspaces
             .get(&workspace_id)
@@ -277,6 +297,9 @@ impl WorkspaceManager {
             .is_some_and(|form| form.read(cx).is_open())
         {
             return false;
+        }
+        if self.is_shared_workspace(workspace_id) {
+            return self.new_shared_worktree(workspace_id, window, cx);
         }
         let Some(worktrees) = self.sidebar_worktrees.workspaces.get(&workspace_id) else {
             return false;
@@ -487,6 +510,7 @@ impl WorkspaceManager {
                 repository,
                 main,
                 has_tabs: counts.contains_key(&id),
+                opens_first_tab: true,
                 active: active == Some(id),
                 locked: record.locked,
                 missing: missing || record.missing,

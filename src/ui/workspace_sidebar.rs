@@ -128,6 +128,8 @@ pub(super) enum WorktreeRemoval {
     Unlisted,
     /// A SpaceTerm Server owns the Worktree, and removing it there is not available yet.
     Server,
+    /// Shared edits wait for a connection or the previous server answer.
+    NeedsServer,
 }
 
 #[derive(Clone, Copy)]
@@ -178,7 +180,7 @@ pub(super) const SERVER_WORKSPACE_BADGE: &str = "Server";
 ///
 /// A shared edit goes to the server, so Rename, the pin commands, and Kill Workspace wait while
 /// this client is offline or an earlier edit is unanswered. Its Repository Status and Worktrees
-/// are what the owning server read; creating and removing Worktrees there is not available yet.
+/// are what the owning server read; Worktree writes use that server too.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct SharedWorkspaceRow {
     /// The name version the server published, which a rename draft keeps from the moment it
@@ -249,6 +251,8 @@ pub(super) struct WorktreeRowViewModel {
     /// The repository's Main Worktree, which is never removed.
     pub(super) main: bool,
     pub(super) has_tabs: bool,
+    /// The owning server is available to create the first Tab, or this is a local Worktree.
+    pub(super) opens_first_tab: bool,
     /// The Worktree holds the Workspace's Active Tab.
     pub(super) active: bool,
     pub(super) locked: bool,
@@ -256,15 +260,14 @@ pub(super) struct WorktreeRowViewModel {
     pub(super) missing: bool,
     pub(super) removal: WorktreeRemoval,
     /// A SpaceTerm Server lists the Worktree and owns its Tabs. The row shows and switches to its
-    /// Tabs, and asks the server for nothing it cannot do yet: a Tab in a chosen Worktree, or
-    /// closing a Worktree's Tabs together.
+    /// Tabs and requests its first Tab through the owning server.
     pub(super) shared: bool,
 }
 
 impl WorktreeRowViewModel {
     /// Whether activating the row shows Tabs: an existing Tab, or a first Tab in its directory.
     pub(super) fn openable(&self) -> bool {
-        self.has_tabs || (!self.missing && !self.shared)
+        self.has_tabs || (!self.missing && self.opens_first_tab)
     }
 
     /// Whether the row offers New Tab: a Tab in this Worktree's directory.

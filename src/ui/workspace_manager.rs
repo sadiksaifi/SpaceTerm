@@ -3854,9 +3854,7 @@ impl WorkspaceManager {
                     available,
                     repository,
                     worktrees,
-                    creates_worktrees: available
-                        && shared.is_none()
-                        && self.creates_worktrees(workspace.id(), cx),
+                    creates_worktrees: available && self.creates_worktrees(workspace.id(), cx),
                     active: Some(workspace.id()) == active_workspace_id,
                     shared: shared.map(|shared| shared.row),
                 }
@@ -3883,7 +3881,7 @@ impl WorkspaceManager {
     /// Tabs, Panes, and Terminal Sessions, and the Active Workspace stays where it was. Production
     /// defaults stay desktop-owned, so the server's Workspaces only ever join the sidebar.
     pub(crate) fn adopt_shared_workspaces(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        use super::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+        use super::shared_workspaces::SharedPaneSessions;
 
         if self.shared.is_some() {
             return;
@@ -3900,16 +3898,6 @@ impl WorkspaceManager {
             );
             return;
         }
-        let Ok(server) = crate::local_server::LocalServer::for_identity(
-            crate::application_identity::ApplicationIdentity::current().directory_name(),
-        ) else {
-            Self::show_shared_unavailable(
-                "SpaceTerm could not resolve the server for this account.",
-                window,
-                cx,
-            );
-            return;
-        };
         // The client home only completes the launch plan a server-backed Terminal Session ignores.
         // It is never the directory the server starts a shell in, and it grants this Workspace no
         // local directory of its own.
@@ -3917,9 +3905,11 @@ impl WorkspaceManager {
             Self::show_home_directory_unavailable(window, cx);
             return;
         };
-        let edits = SharedEditSource::new(std::rc::Rc::new(
-            crate::terminal::shared_workspace::SharedWorkspaceClient::new(server.clone()),
-        ));
+        let Some(client) = super::server_worktrees::Client::get(cx) else {
+            return;
+        };
+        let server = client.server.clone();
+        let edits = client.source;
         let sessions = SharedPaneSessions::new(
             server.clone(),
             client_home,
@@ -4028,6 +4018,23 @@ impl WorkspaceManager {
             self.present_stale_shared_close(server_target, local, window, cx);
         }
         self.revalidate_shared_close(window, cx);
+        self.open_created_server_worktree(window, cx);
+        self.revalidate_server_removal(window, cx);
+        if let Some((operation, error)) =
+            self.shared.as_mut().and_then(|s| s.take_worktree_failure())
+        {
+            use spaceterm_server::worktree::Operation;
+            let presented = match &operation {
+                Operation::Create { path, .. } => {
+                    self.worktree_creation_failure_presented(path, error, cx)
+                }
+                Operation::SetLocation { .. } => true,
+                Operation::Remove { .. } | Operation::OpenTab { .. } => false,
+            };
+            if !presented {
+                self.server_worktree_operation_failure(&operation, error, window, cx);
+            }
+        }
         self.save_shared_arrangements(cx);
         self.report_client_view_error(window, cx);
         // Membership, connection, and Git facts all decide what each view presents, including
@@ -4895,7 +4902,12 @@ impl WorkspaceManager {
                     self.scroll_active_workspace_into_view(cx);
                 }
             }
-            Mutation::CreateTab { workspace } | Mutation::SplitPane { workspace, .. } => {
+            Mutation::CreateTab { workspace }
+            | Mutation::SplitPane { workspace, .. }
+            | Mutation::Worktree(spaceterm_server::worktree::Operation::OpenTab {
+                workspace,
+                ..
+            }) => {
                 let Some(manager) = self
                     .shared
                     .as_ref()
@@ -4913,7 +4925,7 @@ impl WorkspaceManager {
             // A rename or a pin changes no membership, so there is nothing to open.
             Mutation::RenameWorkspace { .. } | Mutation::PinWorkspace { .. } => {}
             // The published removal already moved the keyboard to what remains.
-            Mutation::Close { .. } => {}
+            Mutation::Close { .. } | Mutation::Worktree(_) => {}
         }
     }
 
@@ -4970,7 +4982,13 @@ impl WorkspaceManager {
                 name_version: facts.name_version,
                 edits: editability.available(),
                 edits_reason: editability.explanation(),
-                status: editability.status(),
+                status: shared
+                    .worktree_status(
+                        facts.server,
+                        self.shared_inventory(workspace_id)
+                            .map(|inventory| inventory.main_root.as_path()),
+                    )
+                    .or_else(|| editability.status()),
                 detaches: shared.attachments_changeable(),
             },
             directory: directory.to_owned(),

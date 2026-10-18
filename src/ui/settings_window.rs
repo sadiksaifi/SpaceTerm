@@ -11,6 +11,7 @@ mod import;
 mod keybindings;
 mod microphone;
 mod permission_access;
+mod server_location;
 mod servers;
 mod sidebar;
 mod theme_gallery;
@@ -286,6 +287,7 @@ pub(crate) struct SettingsWindow {
     settings_file: advanced::SettingsFileView,
     /// The Worktree Path Template field, kept so an edit survives re-rendering.
     worktree_location: git::WorktreeLocationField,
+    server_location: server_location::ServerLocation,
     /// The local server this window presents. `None` omits the Servers section.
     local_server: Option<servers::LocalServerRow>,
     /// The service that runs the local server. `None` omits its row.
@@ -343,6 +345,7 @@ fn row_feature(row: SettingsRowId) -> Option<HostFeature> {
 /// How one row returns to its default.
 #[derive(Clone, Debug)]
 enum RowReset {
+    ServerLocation,
     Appearance(ResetTarget),
     Update,
     Clipboard,
@@ -522,6 +525,7 @@ impl SettingsWindow {
             window,
             cx,
         );
+        let server_location = server_location::ServerLocation::new(window, cx);
         let permission_changes =
             PermissionAccessChanges::observe(permissions.system_permissions.as_ref(), cx);
         // A Permission Setup reports its progress and the grant it finds while this window waits
@@ -587,6 +591,7 @@ impl SettingsWindow {
             shortcuts,
             settings_file,
             worktree_location,
+            server_location,
             server_service: local_server
                 .as_ref()
                 .and_then(|offered| offered.service.clone())
@@ -708,6 +713,13 @@ impl SettingsWindow {
             .filter(|row| {
                 self.available_sections.contains(&row.descriptor().section)
                     && !self.omitted_rows.contains(row)
+                    && (*row != SettingsRowId::ServerWorktreeLocation
+                        || self.offers_server_location()
+                            && self
+                                .local_server
+                                .as_ref()
+                                .and_then(|r| r.worktree_server())
+                                .is_some())
             })
             .collect()
     }
@@ -752,6 +764,11 @@ impl SettingsWindow {
 
     /// How this row returns to its default, when it differs from it.
     fn pending_reset(&self, row: SettingsRowId, cx: &App) -> Option<RowReset> {
+        if row == SettingsRowId::ServerWorktreeLocation {
+            return self
+                .server_location_differs()
+                .then_some(RowReset::ServerLocation);
+        }
         if let SettingsRowId::Shortcut(command) = row {
             return self
                 .shortcut_differs(command, cx)
@@ -807,6 +824,7 @@ impl SettingsWindow {
                 move |_, cx| {
                     let reset = reset.clone();
                     let _ = owner.update(cx, |settings, cx| match reset {
+                        RowReset::ServerLocation => settings.reset_server_location(cx),
                         RowReset::Appearance(target) => settings.editor.reset(target, cx),
                         RowReset::Update => settings.reset_update_preference(row, cx),
                         RowReset::Clipboard => settings.reset_clipboard_preference(row, cx),
@@ -1190,9 +1208,12 @@ impl SettingsWindow {
                     .presentation()
                     .explanation,
             );
+        } else if row == SettingsRowId::ServerWorktreeLocation {
+            let (caption, tone) = self.server_location_caption(cx);
+            rendered = rendered.caption_with_example(caption, tone);
         } else if row == SettingsRowId::WorktreeLocation {
             let (caption, tone) = self.worktree_location_caption(cx);
-            rendered = rendered.caption(caption, tone);
+            rendered = rendered.caption_with_example(caption, tone);
         } else if row == SettingsRowId::LocalServer {
             if let Some(presentation) = self.local_server_presentation() {
                 rendered = rendered.caption(presentation.explanation, presentation.tone);
@@ -1251,6 +1272,7 @@ impl SettingsWindow {
             SettingsRowId::GitTool | SettingsRowId::GitHubCli => {
                 self.render_git_tool(row, appearance, cx)
             }
+            SettingsRowId::ServerWorktreeLocation => self.render_server_location(appearance, cx),
             SettingsRowId::WorktreeLocation => self.render_worktree_location(appearance, cx),
             SettingsRowId::LocalServer => self.render_local_server(appearance, cx),
             SettingsRowId::ServerService => self.render_server_service(appearance, cx),
@@ -2086,7 +2108,9 @@ fn row_layout(row: SettingsRowId) -> FormRowLayout {
         SettingsRowId::TerminalTheme
         | SettingsRowId::InstalledThemes
         | SettingsRowId::SettingsFile => FormRowLayout::Full,
-        SettingsRowId::WorktreeLocation => FormRowLayout::Above,
+        SettingsRowId::WorktreeLocation | SettingsRowId::ServerWorktreeLocation => {
+            FormRowLayout::Above
+        }
         _ => FormRowLayout::Beside,
     }
 }

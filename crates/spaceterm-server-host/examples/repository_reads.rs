@@ -6,142 +6,21 @@
 )]
 mod lifecycle;
 use spaceterm_server::{
-    LocalServer, ServerError,
-    hierarchy::{CloseTarget, Id, Inventory, Mutation, Outcome},
-    pane::{PaneConnection, Reply, Request},
+    LocalServer,
+    hierarchy::{CloseTarget, Mutation},
+    pane::Request,
     repository::{ChangeTotal, DirectoryFacts, RepositoryHead},
 };
-use std::{
-    error::Error,
-    path::{Path, PathBuf},
-    process::Command,
-    time::{Duration, Instant},
-};
-
-fn connect(server: &LocalServer) -> Result<PaneConnection, Box<dyn Error>> {
-    let until = Instant::now() + Duration::from_secs(8);
-    loop {
-        match server.connect_shared_pane() {
-            Ok(connection) => return Ok(connection),
-            Err(ServerError::NotRunning) if Instant::now() < until => {
-                std::thread::sleep(Duration::from_millis(50))
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-}
-fn inventory(connection: &mut PaneConnection) -> Result<(Inventory, u64), Box<dyn Error>> {
-    let Reply::Inventory {
-        inventory,
-        next_sequence,
-    } = connection.exchange(&Request::Inventory)?
-    else {
-        return Err("inventory response".into());
-    };
-    Ok((inventory, next_sequence))
-}
-fn mutate(connection: &mut PaneConnection, mutation: Mutation) -> Result<Id, Box<dyn Error>> {
-    let (_, sequence) = inventory(connection)?;
-    let Reply::Outcome(result) = connection.exchange(&Request::Mutate { sequence, mutation })?
-    else {
-        return Err("mutation response".into());
-    };
-    let Outcome::Accepted { target } = result.outcome else {
-        return Err("mutation rejected".into());
-    };
-    connection.exchange(&Request::Acknowledge { sequence })?;
-    Ok(target)
-}
-fn close(connection: &mut PaneConnection, target: CloseTarget) -> Result<(), Box<dyn Error>> {
-    let current = inventory(connection)?.0;
-    let confirmation = current.close_confirmation(target).ok_or("close target")?;
-    mutate(
-        connection,
-        Mutation::Close {
-            target,
-            confirmation,
-        },
-    )?;
-    Ok(())
-}
-fn await_facts(
-    connection: &mut PaneConnection,
-    directory: &Path,
-    predicate: impl Fn(&DirectoryFacts) -> bool,
-) -> Result<Inventory, Box<dyn Error>> {
-    let until = Instant::now() + Duration::from_secs(15);
-    loop {
-        let (current, _) = inventory(connection)?;
-        if current.repositories.as_ref().is_some_and(|s| {
-            s.directories
-                .iter()
-                .any(|f| f.directory == directory && predicate(f))
-        }) {
-            return Ok(current);
-        }
-        if Instant::now() >= until {
-            return Err("server Git facts did not converge".into());
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-struct Repository(PathBuf);
-impl Repository {
-    fn new() -> Result<Self, Box<dyn Error>> {
-        let path = std::env::temp_dir().join(format!("spaceterm-git-smoke-{}", std::process::id()));
-        std::fs::create_dir(&path)?;
-        let fixture = Self(std::fs::canonicalize(path)?);
-        fixture.git(&["init", "-b", "main"])?;
-        fixture.git(&[
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@invalid",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "fixture",
-        ])?;
-        fixture.git(&[
-            "remote",
-            "add",
-            "origin",
-            "https://user:never-publish@github.com/example/repository.git",
-        ])?;
-        Ok(fixture)
-    }
-    fn git(&self, args: &[&str]) -> Result<(), Box<dyn Error>> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.0)
-            .args(args)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .output()?;
-        if !output.status.success() {
-            return Err("fixture Git command failed".into());
-        }
-        Ok(())
-    }
-}
-impl Drop for Repository {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use std::{error::Error, time::Duration};
+#[path = "support/repository.rs"]
+mod repository;
+use repository::*;
 fn main() -> Result<(), Box<dyn Error>> {
     let major = std::env::args().nth(1).unwrap_or("2".into()).parse()?;
     let a = LocalServer::for_development_client("repository-smoke-a", major)?;
     let b = LocalServer::for_development_client("repository-smoke-b", major)?;
     lifecycle::require_idle(&a)?;
-    let examples = std::env::current_exe()?
-        .parent()
-        .ok_or("example directory")?
-        .to_owned();
-    let companion = examples.join("spaceterm-server");
-    if !companion.try_exists()? {
-        std::os::unix::fs::symlink("../spaceterm-server", companion)?;
-    }
+    lifecycle::prepare_companion()?;
     a.setup_and_start()?;
     b.setup_and_start()?;
     connect(&a)?.exchange(&Request::Shutdown)?;

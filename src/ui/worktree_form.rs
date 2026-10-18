@@ -26,11 +26,18 @@ use crate::worktrees::ref_format::{BranchNameError, validate_branch_name};
 const FORM_MODAL_ID: &str = "new-worktree-form";
 const CREATE_ACTION_SELECTOR: &str = "new-worktree-create";
 const CANCEL_ACTION_SELECTOR: &str = "new-worktree-cancel";
-const BRANCHES_FAILED: &str = "SpaceTerm couldn\u{2019}t read this repository\u{2019}s branches.";
+pub(crate) const BRANCHES_FAILED: &str =
+    "SpaceTerm couldn\u{2019}t read this repository\u{2019}s branches.";
 const CREATE_FAILED: &str = "Git couldn\u{2019}t create the Worktree.";
 
 /// Runs the dialog's git work for one repository.
 pub(crate) trait WorktreeFormBackend {
+    fn server(&self) -> bool {
+        false
+    }
+    fn connected(&self) -> bool {
+        true
+    }
     /// The repository's branches, or `None` when git cannot read them.
     fn branches(&self, cx: &mut App) -> Task<Option<BranchList>>;
     fn create(
@@ -61,6 +68,7 @@ pub(crate) struct WorktreeFormContext {
 pub(crate) enum WorktreeFormEvent {
     /// Git created the Worktree at this directory.
     Created(PathBuf),
+    Interrupted(PathBuf),
     Cancelled,
 }
 
@@ -132,13 +140,15 @@ pub(crate) struct WorktreeForm {
     proposed_name: String,
     errors: FormErrors,
     submit_attempted: bool,
-    backend_error: Option<&'static str>,
+    backend_error: Option<SharedString>,
     open: bool,
     pending: bool,
     generation: u64,
     pending_path: Option<PathBuf>,
+    interrupted_path: Option<PathBuf>,
     pending_cancel: Option<DialogPendingCompletion>,
     _branches: Task<()>,
+    _status: Task<()>,
 }
 
 impl EventEmitter<WorktreeFormEvent> for WorktreeForm {}
@@ -189,8 +199,10 @@ impl WorktreeForm {
             pending: false,
             generation: 0,
             pending_path: None,
+            interrupted_path: None,
             pending_cancel: None,
             _branches: Task::ready(()),
+            _status: Task::ready(()),
         };
         form.propose(cx);
         form
@@ -235,10 +247,16 @@ impl WorktreeForm {
             ],
             DialogInitialFocus::Body(self.name.read(cx).focus_handle()),
         )
-        .description(format!(
-            "Check out a branch of {} in its own directory.",
-            self.context.repository_name
-        ))
+        .description(
+            format!(
+                "Check out a branch of {} in its own directory.",
+                self.context.repository_name
+            ) + if self.backend.server() {
+                " The local server runs Git and creates it."
+            } else {
+                ""
+            },
+        )
         .size(DialogSize::Wide)
         .body(cx.entity());
         let completion = dialog.present(
@@ -457,6 +475,11 @@ impl WorktreeForm {
         cx: &mut Context<Self>,
     ) -> DialogCloseDecision {
         match action {
+            FormAction::Cancel
+                if self.pending && self.backend.server() && !self.backend.connected() =>
+            {
+                DialogCloseDecision::Allow
+            }
             FormAction::Cancel if self.pending => {
                 if self.pending_cancel.is_some() {
                     return DialogCloseDecision::Deny {
@@ -518,14 +541,34 @@ impl WorktreeForm {
         cx: &mut Context<Self>,
     ) {
         self.pending = true;
+        if self.backend.server() {
+            self._status = cx.spawn(async move |form, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(150))
+                        .await;
+                    if !form
+                        .update(cx, |f, cx| {
+                            if f.pending {
+                                cx.notify();
+                            }
+                            f.pending && f.open
+                        })
+                        .unwrap_or(false)
+                    {
+                        break;
+                    }
+                }
+            });
+        }
         self.set_editable(false, cx);
         let generation = self.generation;
-        let task = self.backend.create(path, branch, cx);
+        let task = self.backend.create(path.clone(), branch, cx);
         cx.notify();
         cx.spawn(async move |form, cx| {
             let result = task.await;
             let Ok(Some(settlement)) = form.update(cx, |form, cx| {
-                form.settle_create(generation, result, completion, cx)
+                form.settle_create(generation, result, completion, path, cx)
             }) else {
                 return;
             };
@@ -534,15 +577,30 @@ impl WorktreeForm {
         .detach();
     }
 
+    pub(crate) fn interrupted_path(&self) -> Option<&std::path::Path> {
+        self.interrupted_path.as_deref()
+    }
+
     fn settle_create(
         &mut self,
         generation: u64,
         result: Result<PathBuf, WorktreeCreateError>,
         primary: DialogPendingCompletion,
+        attempted_path: PathBuf,
         cx: &mut Context<Self>,
     ) -> Option<Settlement> {
         if !self.open || !self.pending || self.generation != generation {
             return None;
+        }
+        if result
+            == Err(WorktreeCreateError::Server(
+                spaceterm_server::worktree::Error::Interrupted,
+            ))
+        {
+            self.pending_path = None;
+            self.interrupted_path = Some(attempted_path.clone());
+            cx.emit(WorktreeFormEvent::Interrupted(attempted_path));
+            return Some(Settlement::Success { primary });
         }
         if let Ok(path) = result {
             self.pending_path = Some(path);
@@ -552,6 +610,11 @@ impl WorktreeForm {
         self.pending_path = None;
         self.set_editable(true, cx);
         let (field, message): (Option<FormField>, SharedString) = match result {
+            Err(WorktreeCreateError::NotSubmitted(reason)) => (None,format!("SpaceTerm did not create the Worktree on the server. {reason}").into()),
+            Err(WorktreeCreateError::Server(spaceterm_server::worktree::Error::Location)) => (Some(FormField::Location),"SpaceTerm can\u{2019}t use this location on the local server. Choose a new or empty folder.".into()),
+            Err(WorktreeCreateError::Server(spaceterm_server::worktree::Error::Missing)) => (None,"The repository is no longer at its location on the local server, so nothing was created.".into()),
+            Err(WorktreeCreateError::Server(spaceterm_server::worktree::Error::Branch)) => (None,"Git reported an error while creating the Worktree and may have left part of it on disk. The sidebar shows what Git lists now.".into()),
+            Err(WorktreeCreateError::Server(_)) => (None,"The server couldn\u{2019}t confirm whether Git created the Worktree. The sidebar shows what Git lists now.".into()),
             Err(WorktreeCreateError::InvalidName) => (
                 Some(FormField::Name),
                 "Git doesn\u{2019}t accept this name.".into(),
@@ -575,7 +638,7 @@ impl WorktreeForm {
             Some(FormField::Name) => self.errors.name = Some(message),
             Some(FormField::Branch) => self.errors.branch = Some(message),
             Some(FormField::Location) => self.errors.location = Some(message),
-            None => self.backend_error = Some(CREATE_FAILED),
+            None => self.backend_error = Some(message),
         }
         cx.notify();
         Some(Settlement::Failure {
@@ -775,15 +838,19 @@ impl Render for WorktreeForm {
                             .child(note)
                     })),
             )
+            .when(self.pending && self.backend.server(),|body| {
+                let status=if self.backend.connected() {"Creating the Worktree on the local server…"} else {"Lost the connection to the local server. Git may still create the Worktree. Closing this dialog doesn\u{2019}t cancel the request, and SpaceTerm checks its result when it reconnects."};
+                body.child(div().id("new-worktree-status").debug_selector(||"new-worktree-status".to_owned()).role(accesskit::Role::Label).aria_value(status).child(status))
+            })
             .when_some(
-                self.backend_error
-                    .or(self.branches_failed.then_some(BRANCHES_FAILED)),
+                self.backend_error.clone()
+                    .or_else(||self.branches_failed.then(||BRANCHES_FAILED.into())),
                 |body, error| {
                     body.child(
                         div()
                             .id("new-worktree-error")
                             .role(accesskit::Role::Label)
-                            .aria_value(error)
+                            .aria_value(error.clone())
                             .debug_selector(|| "new-worktree-error".to_owned())
                             .text_color(gpui_color(colors.error))
                             .child(error),
@@ -1397,6 +1464,29 @@ mod tests {
         assert!(backend.created.borrow().is_empty());
         assert!(events.borrow().is_empty());
         assert!(form.read_with(cx, |form, _| form.is_open()));
+    }
+
+    #[gpui::test]
+    fn a_create_that_was_not_submitted_shows_its_actual_reason(cx: &mut TestAppContext) {
+        let backend = Rc::new(ScriptedBackend::default());
+        backend
+            .results
+            .borrow_mut()
+            .push(Err(WorktreeCreateError::NotSubmitted(
+                "SpaceTerm is not connected.",
+            )));
+        let (form, events, cx) = form_window(backend, true, cx);
+        type_into(&form, FormField::Name, "fresh", cx);
+        create(cx);
+        assert_eq!(
+            form.read_with(cx, |form, _| form.backend_error.clone())
+                .as_deref(),
+            Some(
+                "SpaceTerm did not create the Worktree on the server. SpaceTerm is not connected."
+            )
+        );
+        assert!(events.borrow().is_empty());
+        assert!(form.read_with(cx, |form, _| form.is_open() && !form.pending));
     }
 
     #[gpui::test]

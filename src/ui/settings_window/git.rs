@@ -37,9 +37,22 @@ impl WorktreeLocationField {
         window: &mut Window,
         cx: &mut Context<SettingsWindow>,
     ) -> Self {
+        Self::with_scope(template, false, window, cx)
+    }
+    pub(super) fn with_scope(
+        template: &str,
+        server: bool,
+        window: &mut Window,
+        cx: &mut Context<SettingsWindow>,
+    ) -> Self {
+        let selector = if server {
+            "settings-server-worktree-location"
+        } else {
+            "settings-worktree-location"
+        };
         let input = cx.new(|cx| {
             TextInput::new(
-                "settings-worktree-location",
+                selector,
                 "New Worktree Location",
                 template.to_owned(),
                 window,
@@ -47,31 +60,37 @@ impl WorktreeLocationField {
             )
             .variant(TextInputVariant::Bare)
             .input_length_limit(Some(1024))
-            .debug_selector("settings-worktree-location")
+            .debug_selector(selector)
         });
         let events = cx.subscribe_in(
             &input,
             window,
-            |settings, input, event: &TextInputEvent, _, cx| match event {
-                TextInputEvent::ValueChanged(_) => {
-                    settings.worktree_location.problem = validate(input.read(cx).value()).err();
-                    cx.notify();
+            move |settings, input, event: &TextInputEvent, _, cx| {
+                if server {
+                    settings.server_location_event(input, event, cx);
+                    return;
                 }
-                TextInputEvent::Submitted | TextInputEvent::FocusLost => {
-                    settings.commit_worktree_location(cx);
+                match event {
+                    TextInputEvent::ValueChanged(_) => {
+                        settings.worktree_location.problem = validate(input.read(cx).value()).err();
+                        cx.notify();
+                    }
+                    TextInputEvent::Submitted | TextInputEvent::FocusLost => {
+                        settings.commit_worktree_location(cx);
+                    }
+                    TextInputEvent::Cancelled => {
+                        let saved = settings
+                            .editor
+                            .document()
+                            .git
+                            .worktree_path_template
+                            .clone();
+                        settings.worktree_location.problem = None;
+                        input.update(cx, |input, cx| input.set_value(saved, cx));
+                        cx.notify();
+                    }
+                    _ => {}
                 }
-                TextInputEvent::Cancelled => {
-                    let saved = settings
-                        .editor
-                        .document()
-                        .git
-                        .worktree_path_template
-                        .clone();
-                    settings.worktree_location.problem = None;
-                    input.update(cx, |input, cx| input.set_value(saved, cx));
-                    cx.notify();
-                }
-                _ => {}
             },
         );
         Self {
@@ -93,7 +112,11 @@ pub(super) fn worktree_location_caption(
                 .map(|path| path.display().to_string())
                 .unwrap_or_default();
             return (
-                format!("Use {{repository}} and {{branch}}. For example: {example}").into(),
+                format!(
+                    "Use {{repository}} and {{branch}}. For example: {}",
+                    example
+                )
+                .into(),
                 CaptionTone::Guidance,
             );
         }
@@ -297,10 +320,19 @@ impl SettingsWindow {
     }
 
     pub(super) fn worktree_location_caption(&self, cx: &App) -> (SharedString, CaptionTone) {
-        worktree_location_caption(
+        let (text, tone) = worktree_location_caption(
             self.worktree_location.input.read(cx).value(),
             self.worktree_location.problem,
-        )
+        );
+        if self.worktree_location.problem.is_none() {
+            (
+                format!("Shared Workspaces use the New Worktree Location in Servers. {text}")
+                    .into(),
+                tone,
+            )
+        } else {
+            (text, tone)
+        }
     }
 
     pub(super) fn render_git_tool(

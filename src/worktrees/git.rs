@@ -30,67 +30,18 @@ const NUL_LIST_VERSION: ToolVersion = ToolVersion {
 /// Discovery prints a few short paths; a listing holds a few hundred bytes per Worktree.
 const OUTPUT_LIMIT: usize = 1024 * 1024;
 
-/// The branches a new Worktree can check out or start from, most recently committed first.
-#[derive(Clone, Default, Eq, PartialEq)]
-pub(crate) struct BranchList {
-    /// Local branch names, such as `feature/login`.
-    pub(crate) local: Vec<String>,
-    /// Remote-tracking branch names already fetched, such as `origin/main`.
-    pub(crate) remote: Vec<String>,
-}
-
-impl std::fmt::Debug for BranchList {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("BranchList")
-            .field("local", &self.local.len())
-            .field("remote", &self.remote.len())
-            .finish()
-    }
-}
-
-/// The branch a new Worktree checks out.
-#[derive(Clone, Eq, PartialEq)]
-pub(crate) enum WorktreeBranch {
-    /// A new branch `name` starting at `base`, a local or remote-tracking branch name. The new
-    /// branch tracks nothing.
-    New { name: String, base: BranchName },
-    /// A local branch no Worktree has checked out.
-    Existing { name: String },
-    /// A new local branch `name` that tracks the remote-tracking branch `remote`.
-    Remote { remote: String, name: String },
-}
-
-impl std::fmt::Debug for WorktreeBranch {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::New { .. } => "New",
-            Self::Existing { .. } => "Existing",
-            Self::Remote { .. } => "Remote",
-        })
-    }
-}
-
-/// A local or remote-tracking branch, by its short name.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum BranchName {
-    Local(String),
-    Remote(String),
-}
-
-impl BranchName {
-    fn full_name(&self) -> String {
-        match self {
-            Self::Local(name) => format!("refs/heads/{name}"),
-            Self::Remote(name) => format!("refs/remotes/{name}"),
-        }
-    }
-}
+pub(crate) use spaceterm_server::worktree::{
+    Branch as WorktreeBranch, BranchName, Branches as BranchList,
+};
 
 /// Why git did not create a Worktree. Checks before the write classify it, because the runner
 /// discards git's messages.
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub(crate) enum WorktreeCreateError {
+    #[error("the operation was not submitted")]
+    NotSubmitted(&'static str),
+    #[error("the server could not complete the Worktree operation")]
+    Server(spaceterm_server::worktree::Error),
     #[error("git refuses the branch name")]
     InvalidName,
     #[error("a branch with the name already exists")]
@@ -406,6 +357,9 @@ impl LocalWorktreeGit {
                     return Err(WorktreeRemoveError::Changed);
                 }
                 Ok(())
+            }
+            RemovalExpectation::Absent(filesystem) if filesystem.has_entry(path) => {
+                Err(WorktreeRemoveError::Replaced)
             }
             RemovalExpectation::Absent(filesystem) => match filesystem.validate_directory(path) {
                 Err(LocalFilesystemError::Missing) => Ok(()),

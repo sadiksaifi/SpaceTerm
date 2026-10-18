@@ -19,8 +19,7 @@
 //! Requests from its own GitHub CLI, and never reads git for a shared Workspace itself.
 //!
 //! Operations the server path does not support yet stay unavailable here rather than falling back
-//! to the desktop: creating and removing Worktrees, opening a Tab in
-//! a chosen Worktree, reading shell content with assistive technology, and paste.
+//! to the desktop: reading shell content with assistive technology and paste.
 
 #[cfg(test)]
 pub(crate) use development::testing;
@@ -159,6 +158,12 @@ mod development {
         edits: Rc<dyn SharedWorkspaceEdits>,
         submitted: Rc<std::cell::RefCell<Option<Mutation>>>,
         awaiting_poll: Rc<std::cell::Cell<bool>>,
+        completion: Rc<std::cell::RefCell<Option<AwaitedEdit>>>,
+    }
+
+    struct AwaitedEdit {
+        mutation: Mutation,
+        reply: async_channel::Sender<Result<RetainedOutcome, SharedRefusalReason>>,
     }
 
     impl SharedEditSource {
@@ -169,6 +174,7 @@ mod development {
                 edits,
                 submitted: Rc::new(std::cell::RefCell::new(None)),
                 awaiting_poll: Rc::new(std::cell::Cell::new(awaiting_poll)),
+                completion: Rc::new(std::cell::RefCell::new(None)),
             }
         }
 
@@ -183,7 +189,7 @@ mod development {
         }
 
         /// Submits one edit and records that this process asked for it.
-        fn submit(&self, mutation: Mutation) -> SharedSubmission {
+        pub(crate) fn submit(&self, mutation: Mutation) -> SharedSubmission {
             let editability = self.editability();
             if !editability.available() {
                 return SharedSubmission::Refused(editability.into());
@@ -198,6 +204,23 @@ mod development {
             SharedSubmission::Submitted
         }
 
+        /// The result belongs to this submission even after another edit replaces the snapshot.
+        pub(crate) fn submit_waiting(
+            &self,
+            mutation: Mutation,
+        ) -> Result<
+            async_channel::Receiver<Result<RetainedOutcome, SharedRefusalReason>>,
+            SharedRefusalReason,
+        > {
+            if let SharedSubmission::Refused(reason) = self.submit(mutation.clone()) {
+                return Err(reason);
+            }
+            let (reply, receiver) = async_channel::bounded(1);
+            self.completion
+                .replace(Some(AwaitedEdit { mutation, reply }));
+            Ok(receiver)
+        }
+
         /// Whether this process asked for the edit an answer settles, which it reports once.
         fn claims(&self, mutation: &Mutation) -> bool {
             let mut submitted = self.submitted.borrow_mut();
@@ -208,10 +231,28 @@ mod development {
             false
         }
 
-        fn snapshot(&self) -> SharedWorkspaceSnapshot {
+        pub(crate) fn snapshot(&self) -> SharedWorkspaceSnapshot {
             let snapshot = self.edits.snapshot();
-            // Every submitting surface shares this gate. A completed reply must reach the
-            // foreground before another request can replace the worker's retained answer.
+            // Deliver the current submission before opening the gate to its successor. Each
+            // receiver retains its own result even if its task has not been polled yet.
+            let mut completion = self.completion.borrow_mut();
+            if let Some(awaited) = completion.as_ref() {
+                let result = if snapshot.rejected.as_ref() == Some(&awaited.mutation) {
+                    Some(Err(SharedRefusalReason::Offline))
+                } else {
+                    snapshot
+                        .outcome
+                        .as_ref()
+                        .filter(|outcome| outcome.mutation == awaited.mutation)
+                        .cloned()
+                        .map(Ok)
+                };
+                if let Some(result) = result
+                    && let Some(awaited) = completion.take()
+                {
+                    let _ = awaited.reply.try_send(result);
+                }
+            }
             if snapshot.connected && !snapshot.pending {
                 self.awaiting_poll.set(false);
             }
@@ -846,11 +887,16 @@ mod development {
         revision: Option<u64>,
         connected: bool,
         pending: bool,
+        pending_operation: Option<Mutation>,
         /// The sequence of the last outcome this client presented, so one answer is read once.
         consumed: Option<u64>,
         /// A refused same-field edit waiting for the local Workspace that presents its target.
         conflict: Option<PendingConflict>,
         refusal: Option<SharedRefusal>,
+        worktree_failure: Option<(
+            spaceterm_server::worktree::Operation,
+            spaceterm_server::worktree::Error,
+        )>,
         /// The inventory the server published last, including the live Session facts a close
         /// confirmation reads. Those facts can change without a new membership revision.
         latest: Option<Inventory>,
@@ -892,9 +938,11 @@ mod development {
                 revision: None,
                 connected: false,
                 pending: false,
+                pending_operation: None,
                 consumed: None,
                 conflict: None,
                 refusal: None,
+                worktree_failure: None,
                 latest: None,
                 repositories: super::SharedRepositories::default(),
                 review: None,
@@ -1089,6 +1137,30 @@ mod development {
             self.retained_views.take();
         }
 
+        pub(crate) fn worktree_status(
+            &self,
+            workspace: Id,
+            repository: Option<&Path>,
+        ) -> Option<&'static str> {
+            if !self.pending || !self.connected {
+                return None;
+            }
+            match self.pending_operation.as_ref() {
+                Some(Mutation::Worktree(spaceterm_server::worktree::Operation::Create {
+                    workspace: target,
+                    ..
+                })) if *target == workspace => Some("Creating Worktree…"),
+                Some(Mutation::Worktree(spaceterm_server::worktree::Operation::Remove {
+                    root,
+                    ..
+                })) if repository == Some(root.as_path()) => Some("Removing Worktree…"),
+                _ => None,
+            }
+        }
+        pub(crate) fn removing_worktree(&self, path: &Path) -> bool {
+            self.pending
+                && matches!(self.pending_operation.as_ref(),Some(Mutation::Worktree(spaceterm_server::worktree::Operation::Remove {path:target,..})) if target==path)
+        }
         pub(crate) const fn sessions(&self) -> &SharedPaneSessions {
             &self.sessions
         }
@@ -1171,6 +1243,14 @@ mod development {
 
         /// A close the server refused as stale, once, with the local target this process asked
         /// to close when it is the one that asked. A recovered answer names no local target.
+        pub(crate) fn take_worktree_failure(
+            &mut self,
+        ) -> Option<(
+            spaceterm_server::worktree::Operation,
+            spaceterm_server::worktree::Error,
+        )> {
+            self.worktree_failure.take()
+        }
         pub(crate) fn take_stale_close(
             &mut self,
         ) -> Option<(ServerCloseTarget, Option<CloseTarget>)> {
@@ -1246,6 +1326,8 @@ mod development {
         pub(crate) fn poll(&mut self) -> SharedPoll {
             let snapshot = self.edits.snapshot();
             let mut poll = SharedPoll::default();
+            self.pending_operation
+                .clone_from(&snapshot.pending_operation);
             if self.connected != snapshot.connected || self.pending != snapshot.pending {
                 self.connected = snapshot.connected;
                 self.pending = snapshot.pending;
@@ -1322,6 +1404,12 @@ mod development {
             poll: &mut SharedPoll,
         ) {
             match outcome.outcome {
+                Outcome::Pending => {}
+                Outcome::WorktreeFailed(error) => {
+                    if let Mutation::Worktree(operation) = &outcome.mutation {
+                        self.worktree_failure = Some((operation.clone(), error));
+                    }
+                }
                 // An accepted change reaches every client through the inventory, which names the
                 // server's own identities rather than a reply this client could have lost. The
                 // client that asked for a creation also opens it, once.
@@ -1386,7 +1474,7 @@ mod development {
                 | Mutation::CreateTab { .. }
                 | Mutation::SplitPane { .. } => None,
                 // A stale close is answered with its own outcome rather than a field conflict.
-                Mutation::Close { .. } => None,
+                Mutation::Close { .. } | Mutation::Worktree(_) => None,
             }
         }
 
@@ -1879,9 +1967,12 @@ mod development {
             pub(crate) fn new(inventory: Option<Inventory>) -> Self {
                 Self {
                     snapshot: Mutex::new(SharedWorkspaceSnapshot {
+                        worktree_writes: false,
                         inventory,
                         connected: true,
                         pending: false,
+                        pending_operation: None,
+                        rejected: None,
                         outcome: None,
                         error: None,
                     }),
@@ -1910,6 +2001,7 @@ mod development {
                 let mut sequence = self.sequence.lock().expect("sequence");
                 let mut snapshot = self.snapshot.lock().expect("snapshot");
                 snapshot.pending = false;
+                snapshot.pending_operation = None;
                 snapshot.outcome = Some(RetainedOutcome {
                     sequence: *sequence,
                     mutation,
@@ -1925,6 +2017,9 @@ mod development {
             /// Records a durable operation an earlier run submitted, which recovery answers after
             /// a relaunch without this process ever asking for it.
             pub(crate) fn submit_for_recovery(&self, mutation: Mutation) {
+                let mut snapshot = self.snapshot.lock().expect("snapshot");
+                snapshot.pending = true;
+                snapshot.pending_operation = Some(mutation.clone());
                 self.submitted.lock().expect("submitted").push(mutation);
             }
         }
@@ -1945,6 +2040,7 @@ mod development {
                     return false;
                 }
                 snapshot.pending = true;
+                snapshot.pending_operation = Some(mutation.clone());
                 snapshot.outcome = None;
                 self.submitted.lock().expect("submitted").push(mutation);
                 true

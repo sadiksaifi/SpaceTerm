@@ -319,7 +319,7 @@ fn unavailable_window_effect_guidance_names_accessibility_for_floating_surfaces(
     assert!(!window_background_rows(&window, cx).adjustable());
 }
 
-fn open_settings(
+pub(super) fn open_settings(
     cx: &mut TestAppContext,
 ) -> (Entity<SettingsWindow>, Harness, &mut VisualTestContext) {
     open_settings_with(
@@ -2688,6 +2688,7 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::ShowPullRequests => "settings-show-pull-requests",
             SettingsRowId::GitTool => "settings-row-git-tool-control",
             SettingsRowId::GitHubCli => "settings-row-github-cli-control",
+            SettingsRowId::ServerWorktreeLocation => "settings-server-worktree-location-frame",
             SettingsRowId::WorktreeLocation => "settings-worktree-location-frame",
             SettingsRowId::LocalServer => "settings-local-server-control",
             SettingsRowId::ServerService => "settings-server-service-control",

@@ -1346,6 +1346,42 @@ mod edits {
     }
 
     #[test]
+    fn a_recovered_worktree_removal_keeps_its_target_and_offline_status() {
+        use spaceterm_server::worktree::Operation;
+        let (mut shared, edits) = shared(Some(root_only()));
+        let path = std::path::PathBuf::from("/fixture/linked");
+        edits.submit_for_recovery(Mutation::Worktree(Operation::Remove {
+            root: "/fixture".into(),
+            path: path.clone(),
+            boot: BOOT,
+            confirmation: [9; 32],
+        }));
+        shared.poll();
+        assert_eq!(
+            shared.worktree_status(WORKSPACE, Some(std::path::Path::new("/fixture"))),
+            Some("Removing Worktree…")
+        );
+        assert_eq!(
+            shared.worktree_status([10; 32], Some(std::path::Path::new("/other-repository"))),
+            None,
+            "an unrelated Workspace must keep its common waiting status"
+        );
+        assert!(shared.removing_worktree(&path));
+        edits.set_connected(false);
+        shared.poll();
+        assert_eq!(
+            shared.worktree_status(WORKSPACE, Some(std::path::Path::new("/fixture"))),
+            None,
+            "the Workspace row must show its offline status"
+        );
+        assert_eq!(shared.editability().status(), Some("Not connected"));
+        assert!(
+            shared.removing_worktree(&path),
+            "the Worktree row still names its unresolved original"
+        );
+    }
+
+    #[test]
     fn an_accepted_creation_this_client_asked_for_should_open_once() {
         let (mut shared, edits) = shared(Some(root_only()));
         bind(&mut shared, &root_only());

@@ -49,6 +49,17 @@ impl RepositoryProgramRunner for UnixRepositoryProgramRunner {
         stdout: &mut dyn FnMut(&[u8]),
         cancellation: &SshCancellationToken,
     ) -> Result<ProgramExit, ProgramError> {
+        self.run_locked(request, stdout, cancellation, None)
+    }
+}
+impl UnixRepositoryProgramRunner {
+    pub(crate) fn run_locked(
+        &self,
+        request: &ProgramRequest,
+        stdout: &mut dyn FnMut(&[u8]),
+        cancellation: &SshCancellationToken,
+        lock: Option<&std::fs::File>,
+    ) -> Result<ProgramExit, ProgramError> {
         if cancellation.is_cancelled() {
             return Err(ProgramError::Cancelled);
         }
@@ -63,7 +74,7 @@ impl RepositoryProgramRunner for UnixRepositoryProgramRunner {
         if !request.directory.is_dir() {
             return Err(ProgramError::Failed);
         }
-        let mut program = ProgramGroup::spawn(request)?;
+        let mut program = ProgramGroup::spawn(request, lock)?;
         let pipe = program.child.stdout.take().ok_or(ProgramError::Failed)?;
         set_nonblocking(&pipe)?;
         let mut reader = StdoutReader {
@@ -114,7 +125,7 @@ struct ProgramGroup {
 }
 
 impl ProgramGroup {
-    fn spawn(request: &ProgramRequest) -> Result<Self, ProgramError> {
+    fn spawn(request: &ProgramRequest, lock: Option<&std::fs::File>) -> Result<Self, ProgramError> {
         let mut command = Command::new(&request.executable);
         command
             .args(&request.arguments)
@@ -134,6 +145,14 @@ impl ProgramGroup {
         // operations before exec. It does not access shared application state.
         unsafe {
             command.pre_exec(reset_child_signals);
+            if let Some(fd) = lock.map(AsRawFd::as_raw_fd) {
+                command.pre_exec(move || {
+                    if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
         }
         let mut child = command.spawn().map_err(|error| match error.kind() {
             io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied => ProgramError::NotFound,
@@ -356,6 +375,66 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn git_lock_survives_owner_exit_until_the_original_child_finishes() {
+        const ENV: &str = "SPACETERM_TEST_GIT_LOCK";
+        if let Some(root) = std::env::var_os(ENV) {
+            let root = PathBuf::from(root);
+            let lock = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(root.join("lock"))
+                .unwrap();
+            // SAFETY: the descriptor belongs to this test process.
+            assert_eq!(
+                unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+                0
+            );
+            let mut request = shell("touch started; while [ ! -e release ]; do sleep 0.02; done");
+            request.directory = root;
+            let program = ProgramGroup::spawn(&request, Some(&lock)).unwrap();
+            // A server killed without unwinding cannot run ProgramGroup::drop.
+            std::mem::forget(program);
+            std::process::exit(0);
+        }
+        let fixture = Fixture::new("git-lock");
+        struct Release(PathBuf);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                let _ = std::fs::write(self.0.join("release"), "");
+            }
+        }
+        let _release = Release(fixture.0.clone());
+        let mut owner=Command::new(std::env::current_exe().unwrap()).args(["--exact","platform::unix_repository_program::tests::git_lock_survives_owner_exit_until_the_original_child_finishes"]).env(ENV,&fixture.0).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        assert!(owner.wait().unwrap().success());
+        let until = Instant::now() + Duration::from_secs(5);
+        while !fixture.0.join("started").exists() {
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(fixture.0.join("lock"))
+            .unwrap();
+        // SAFETY: flock only examines this independently opened descriptor.
+        assert_ne!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        std::fs::write(fixture.0.join("release"), "").unwrap();
+        loop {
+            // SAFETY: this live descriptor remains owned until recovery acquires it.
+            if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                break;
+            }
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 

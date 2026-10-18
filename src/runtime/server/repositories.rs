@@ -58,6 +58,9 @@ impl Drop for ServerRepositories {
     }
 }
 impl ServerRepositories {
+    pub(super) fn refresh(&mut self) {
+        self.stop();
+    }
     pub(super) fn subscribe(&mut self, connection: Id) {
         self.subscribers.insert(connection);
     }
