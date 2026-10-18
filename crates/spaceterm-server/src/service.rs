@@ -290,6 +290,9 @@ impl Service {
             }
             data.read()?;
             if !status.running {
+                if cancelled() {
+                    return Ok(None);
+                }
                 self.start_locked(&data, &mut state, false)?;
             }
             return self.snapshot(&state).map(Some);
@@ -298,6 +301,9 @@ impl Service {
         match data.read() {
             Ok(_) | Err(ServerError::NotSetUp) => {}
             Err(error) => return Err(error),
+        }
+        if cancelled() {
+            return Ok(None);
         }
         let installation = provision()?;
         if cancelled() {
@@ -1008,6 +1014,7 @@ mod tests {
             authorizations: AtomicUsize,
             installs: AtomicUsize,
             starts: AtomicUsize,
+            observed_running: AtomicBool,
         }
         impl AccountSupervisor {
             fn new(paths: Paths) -> Arc<Self> {
@@ -1019,6 +1026,7 @@ mod tests {
                     authorizations: AtomicUsize::new(0),
                     installs: AtomicUsize::new(0),
                     starts: AtomicUsize::new(0),
+                    observed_running: AtomicBool::new(false),
                 })
             }
             fn service(self: &Arc<Self>) -> Service {
@@ -1106,6 +1114,7 @@ mod tests {
                 Ok(())
             }
             fn running(&self) -> Result<bool, ServerError> {
+                self.observed_running.store(true, Ordering::Relaxed);
                 Ok(self
                     .host
                     .lock()
@@ -1469,7 +1478,7 @@ mod tests {
         }
 
         #[test]
-        fn dormant_enabled_service_starts_its_approved_runtime_without_provisioning() {
+        fn dormant_service_respects_cancellation_then_starts_its_approved_runtime() {
             let fixture = Fixture::new();
             fresh(&fixture);
             let supervisor = AccountSupervisor::new(fixture.paths.clone());
@@ -1497,6 +1506,17 @@ mod tests {
                     )
                     .unwrap();
                     *supervisor.registered.lock().unwrap() = Some(selected.clone());
+                    let policy = std::fs::read(fixture.paths.data.join("service.json")).unwrap();
+                    let startup = LocalStartup::with_service(service.clone()).unwrap();
+                    let outcome = startup.run(no_provision, || {
+                        supervisor.observed_running.load(Ordering::Relaxed)
+                    });
+                    assert_eq!(supervisor.starts.load(Ordering::Relaxed), 0);
+                    assert!(matches!(outcome, Ok(StartupOutcome::Cancelled)));
+                    assert_eq!(
+                        std::fs::read(fixture.paths.data.join("service.json")).unwrap(),
+                        policy
+                    );
                     ready(
                         LocalStartup::with_service(service.clone())
                             .unwrap()
