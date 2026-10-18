@@ -29,7 +29,7 @@ def run():
         executable = directory / "executable"
         executable.write_bytes(b"#!/bin/sh\nexit 0\n")
         tree = directory / "tree" / "spaceterm"
-        stage("spaceterm", executable, executable, tree)
+        stage("spaceterm", executable, tree)
         archive = directory / "archive.tar.gz"
         write_archive(tree, archive)
         assets = directory / "assets"

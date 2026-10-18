@@ -438,8 +438,6 @@ def prepare_desktop_artifact(destination, identity, release_tag=None):
 
     An explicit pair uses the same inputs as source builds. A candidate without that pair
     builds the independent signed package using the existing candidate signing workflow.
-    The sibling executable remains for temporary manual workflows and grants no retained
-    runtime authority.
     """
     archive = os.environ.get("SPACETERM_SERVER_ARCHIVE")
     signature = os.environ.get("SPACETERM_SERVER_SIGNATURE")
