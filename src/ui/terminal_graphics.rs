@@ -638,26 +638,28 @@ impl GraphicsPaintPlan {
     ) -> Result<(), GraphicsResourceError> {
         let mut failed = false;
         for paint in self.paints.iter().filter(|paint| paint.layer == layer) {
-            window.with_content_mask(
-                Some(ContentMask {
-                    bounds: paint.destination,
-                }),
-                |window| {
-                    if window
-                        .paint_image(
-                            paint.padded_image,
-                            paint.padded_image,
-                            Default::default(),
-                            Arc::clone(&paint.image),
-                            0,
-                            false,
-                        )
-                        .is_err()
-                    {
-                        failed = true;
-                    }
-                },
-            );
+            // Cover exactly the device pixels the destination cells' backgrounds cover.
+            let Some(bounds) = super::terminal_element::device_pixel_mask(
+                paint.destination,
+                window.scale_factor(),
+            ) else {
+                continue;
+            };
+            window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                if window
+                    .paint_image(
+                        paint.padded_image,
+                        paint.padded_image,
+                        Default::default(),
+                        Arc::clone(&paint.image),
+                        0,
+                        false,
+                    )
+                    .is_err()
+                {
+                    failed = true;
+                }
+            });
         }
         if failed {
             Err(GraphicsResourceError::Paint)
@@ -680,8 +682,8 @@ const fn layer_for_z(z: i32) -> GraphicsLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::px;
     use gpui::AppContext as _;
+    use gpui::px;
     use std::borrow::Cow;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -943,6 +945,43 @@ mod tests {
         assert_eq!(layer_for_z(i32::MIN / 2), GraphicsLayer::BelowText);
         assert_eq!(layer_for_z(-1), GraphicsLayer::BelowText);
         assert_eq!(layer_for_z(0), GraphicsLayer::AboveText);
+    }
+
+    /// Cell backgrounds cover whole device pixels by rounding their edges halves toward zero. An
+    /// image masked to the same cells covers the same device pixels, so cells drawn over it hide it
+    /// exactly, without a device-pixel row of image showing past them.
+    #[gpui::test]
+    fn image_masks_cover_the_device_pixels_of_their_cells(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let prepared = prepared_graphics();
+        let (bounds, cell_width, line_height) = geometry();
+        // The grid starts 0.3 px below a whole logical pixel; at 2x its rows begin 0.6 device px
+        // into a device row, which a cell background leaves to the row above.
+        let bounds = Bounds::new(point(bounds.left(), bounds.top() + px(0.3)), bounds.size);
+        let plan = prepared.paint_plan(
+            bounds,
+            cell_width,
+            line_height,
+            size(cell_width, line_height),
+            cx.update(|window, _| window.scale_factor()),
+        );
+        let scale = cx.update(|window, _| window.scale_factor());
+        assert_eq!(scale, 2.0);
+        cx.draw(point(px(0.), px(0.)), size(px(800.), px(400.)), |_, _| {
+            gpui::canvas(
+                |_, _, _| (),
+                move |_, (), window, _| {
+                    plan.paint_layer(GraphicsLayer::AboveText, window).unwrap();
+                },
+            )
+        });
+        cx.update(|window, _| {
+            let sprites = window.painted_polychrome_sprites();
+            let mask = sprites[0].content_mask.bounds;
+            // Destination 28.3..68.3 logical is device 56.6..136.6; backgrounds cover 57..137.
+            assert!((mask.origin.y.0 - 57.0).abs() < 0.1, "{mask:?}");
+            assert!((mask.bottom().0 - 137.0).abs() < 0.1, "{mask:?}");
+        });
     }
 
     /// The emulator measures images in whole device-pixel cells from the nominal cell, while the
