@@ -294,9 +294,7 @@ fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions
             cells: row
                 .cells
                 .into_iter()
-                .map(|cell| {
-                    AccessibilityCell::at_column(cell.text, cell.column, cell.width_cells)
-                })
+                .map(|cell| AccessibilityCell::at_column(cell.text, cell.column, cell.width_cells))
                 .collect(),
         }],
     };

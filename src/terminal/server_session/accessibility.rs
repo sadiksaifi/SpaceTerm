@@ -455,7 +455,8 @@ mod tests {
                 match request {
                     Request::Accessibility { offset, .. } => {
                         let snapshot = self.snapshot.as_ref().ok_or(ServerError::Protocol)?;
-                        let bytes = serde_json::to_vec(snapshot).map_err(|_| ServerError::Protocol)?;
+                        let bytes =
+                            serde_json::to_vec(snapshot).map_err(|_| ServerError::Protocol)?;
                         let end = (offset + wire::CHUNK_BYTES).min(bytes.len());
                         Ok(Reply::Accessibility(Ok(wire::Chunk {
                             revision: snapshot.revision,
@@ -509,7 +510,11 @@ mod tests {
         let mut fetcher = Fetcher::new(lease());
         let mut server = Server::new(snapshot(1, &[0, 1], vec![row(0, 1, "ab"), row(1, 1, "cd")]));
         let first = fetcher
-            .poll(&state, PresentationGeneration::default(), &mut server.exchange())
+            .poll(
+                &state,
+                PresentationGeneration::default(),
+                &mut server.exchange(),
+            )
             .unwrap()
             .unwrap();
         let first_ids = first.rows().map(|row| row.id).collect::<Vec<_>>();
@@ -521,7 +526,11 @@ mod tests {
             vec![row(1, 2, "cX"), row(2, 1, "ef")],
         ));
         let second = fetcher
-            .poll(&state, PresentationGeneration::default(), &mut server.exchange())
+            .poll(
+                &state,
+                PresentationGeneration::default(),
+                &mut server.exchange(),
+            )
             .unwrap()
             .unwrap();
 
@@ -530,7 +539,10 @@ mod tests {
             rows(&second),
             [(0, "ab".into()), (1, "cX".into()), (2, "ef".into())]
         );
-        assert_eq!(second.rows().next().map(|row| row.id), first_ids.first().copied());
+        assert_eq!(
+            second.rows().next().map(|row| row.id),
+            first_ids.first().copied()
+        );
     }
 
     #[test]
@@ -539,13 +551,21 @@ mod tests {
         let mut fetcher = Fetcher::new(lease());
         let mut server = Server::new(snapshot(4, &[0, 1], vec![row(1, 1, "cd")]));
         let missing = fetcher
-            .poll(&state, PresentationGeneration::default(), &mut server.exchange())
+            .poll(
+                &state,
+                PresentationGeneration::default(),
+                &mut server.exchange(),
+            )
             .unwrap();
         assert!(missing.is_none());
 
         server.snapshot = Some(snapshot(4, &[0, 1], vec![row(0, 1, "ab"), row(1, 1, "cd")]));
         let full = fetcher
-            .poll(&state, PresentationGeneration::default(), &mut server.exchange())
+            .poll(
+                &state,
+                PresentationGeneration::default(),
+                &mut server.exchange(),
+            )
             .unwrap()
             .unwrap();
 
@@ -559,11 +579,19 @@ mod tests {
         let mut fetcher = Fetcher::new(lease());
         let mut server = Server::new(snapshot(1, &[0], vec![row(0, 1, "ab")]));
         fetcher
-            .poll(&state, PresentationGeneration::default(), &mut server.exchange())
+            .poll(
+                &state,
+                PresentationGeneration::default(),
+                &mut server.exchange(),
+            )
             .unwrap();
         fetcher.note_revision(1);
         fetcher
-            .poll(&state, PresentationGeneration::default(), &mut server.exchange())
+            .poll(
+                &state,
+                PresentationGeneration::default(),
+                &mut server.exchange(),
+            )
             .unwrap();
 
         assert_eq!(server.bases().len(), 1);
@@ -575,7 +603,11 @@ mod tests {
         let mut fetcher = Fetcher::new(lease());
         let mut server = Server::new(snapshot(1, &[0, 1], vec![row(0, 1, "ab"), row(1, 1, "cd")]));
         let model = fetcher
-            .poll(&state, PresentationGeneration::default(), &mut server.exchange())
+            .poll(
+                &state,
+                PresentationGeneration::default(),
+                &mut server.exchange(),
+            )
             .unwrap()
             .unwrap();
         let request = model.selection_request(0..2).unwrap();
@@ -623,7 +655,11 @@ mod tests {
 
         assert_eq!(
             fetcher
-                .poll(&state, PresentationGeneration::default(), &mut server.exchange())
+                .poll(
+                    &state,
+                    PresentationGeneration::default(),
+                    &mut server.exchange()
+                )
                 .err(),
             Some(ServerError::Protocol)
         );
@@ -651,12 +687,20 @@ mod tests {
         let mut fetcher = Fetcher::new(lease());
         let mut server = Server::new(snapshot(1, &[0], vec![row(0, 1, "ab")]));
         fetcher
-            .poll(&state, PresentationGeneration::default(), &mut server.exchange())
+            .poll(
+                &state,
+                PresentationGeneration::default(),
+                &mut server.exchange(),
+            )
             .unwrap();
         state.accessibility_demand.store(false, Ordering::Release);
         for _ in 0..2 {
             fetcher
-                .poll(&state, PresentationGeneration::default(), &mut server.exchange())
+                .poll(
+                    &state,
+                    PresentationGeneration::default(),
+                    &mut server.exchange(),
+                )
                 .unwrap();
         }
 
@@ -669,7 +713,11 @@ mod tests {
         let mut fetcher = Fetcher::new(lease());
         let mut server = Server::new(snapshot(1, &[0], vec![row(0, 1, "ab")]));
         let first = fetcher
-            .poll(&state, PresentationGeneration::default(), &mut server.exchange())
+            .poll(
+                &state,
+                PresentationGeneration::default(),
+                &mut server.exchange(),
+            )
             .unwrap()
             .unwrap();
         let next = PresentationGeneration::default().next();
