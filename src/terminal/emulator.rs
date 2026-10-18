@@ -2145,6 +2145,38 @@ impl TerminalEmulator {
         let Some(selection) = self.accessibility.resolve_selection(&request) else {
             return Ok(EmulatorAction::none());
         };
+        self.apply_accessibility_selection(selection)
+            .map(EmulatorAction::screen_changed_if)
+    }
+
+    /// Applies Selection endpoints named by a server client's accessible snapshot.
+    ///
+    /// Returns `false` without mutation when the endpoints disagree on their screen, synchronized
+    /// output is active, or either endpoint no longer names a live row revision.
+    pub(crate) fn set_accessibility_selection_refs(
+        &mut self,
+        selection: Option<AccessibilitySelectionRefs>,
+    ) -> Result<bool, TerminalFailure> {
+        if selection.is_some_and(|selection| {
+            selection.start.row.screen != selection.end.row.screen
+                || selection.start.row.screen_generation != selection.end.row.screen_generation
+        }) {
+            return Ok(false);
+        }
+        if self.terminal.mode(Mode::SYNC_OUTPUT).map_err(|error| {
+            TerminalFailure::emulator_error("query-synchronized-output-mode", error)
+        })? {
+            return Ok(false);
+        }
+        self.apply_accessibility_selection(
+            selection.map(|selection| (selection.start, selection.end)),
+        )
+    }
+
+    fn apply_accessibility_selection(
+        &mut self,
+        selection: Option<(AccessibilityCellRef, AccessibilityCellRef)>,
+    ) -> Result<bool, TerminalFailure> {
         let selection = selection.map(|(start, end)| {
             let convert = |reference: AccessibilityCellRef| ghostty_accessibility::CellRef {
                 row: ghostty_accessibility::RowId {
@@ -2167,14 +2199,13 @@ impl TerminalEmulator {
             .map_err(|error| {
                 TerminalFailure::emulator_error("set-terminal-accessibility-selection", error)
             })?;
-        if !changed {
-            return Ok(EmulatorAction::none());
+        if changed {
+            self.active_pointer = None;
+            self.selection_gesture.reset(&self.terminal);
+            self.selection_drag_position = None;
+            self.pointer_mapping_invalidated = false;
         }
-        self.active_pointer = None;
-        self.selection_gesture.reset(&self.terminal);
-        self.selection_drag_position = None;
-        self.pointer_mapping_invalidated = false;
-        Ok(EmulatorAction::screen_changed())
+        Ok(changed)
     }
 
     fn selection_press(&mut self, position: SurfacePosition) -> Result<(), TerminalFailure> {

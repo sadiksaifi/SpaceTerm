@@ -585,6 +585,8 @@ struct TerminalAccessibilityData {
     selection: Option<Range<usize>>,
     cursor: Range<usize>,
     cursor_cell: Option<(usize, u16)>,
+    cursor_ref: Option<AccessibilityCellRef>,
+    selection_refs: Option<AccessibilitySelectionRefs>,
 }
 
 struct RetainedAccessibilityRequest {
@@ -795,21 +797,23 @@ impl TerminalAccessibilityModel {
         let visible_lines =
             visible_lines.start.min(document.rows)..visible_lines.end.min(document.rows);
         let visible_range = visible_range(&document, visible_lines.clone());
-        let selection = selected.first().zip(selected.last()).and_then(
-            |((start_row, start_col), (end_row, end_col))| {
-                let start = AccessibilityCellRef {
+        let selection_refs = selected.first().zip(selected.last()).map(
+            |((start_row, start_col), (end_row, end_col))| AccessibilitySelectionRefs {
+                start: AccessibilityCellRef {
                     row: *start_row,
                     row_revision: 1,
                     column: *start_col,
-                };
-                let end = AccessibilityCellRef {
+                },
+                end: AccessibilityCellRef {
                     row: *end_row,
                     row_revision: 1,
                     column: *end_col,
-                };
-                range_for_refs(&document, start, end)
+                },
+                rectangle: false,
             },
         );
+        let selection = selection_refs
+            .and_then(|selection| range_for_refs(&document, selection.start, selection.end));
         let cursor_cell = cursor.and_then(|(line, column)| {
             let (row, _) = document.row(line)?;
             let column = row
@@ -818,6 +822,14 @@ impl TerminalAccessibilityModel {
                 .find(|cell| cell.columns.contains(&column))
                 .map_or(column, |cell| cell.columns.start);
             Some((line, column))
+        });
+        let cursor_ref = cursor_cell.and_then(|(line, column)| {
+            let (row, _) = document.row(line)?;
+            Some(AccessibilityCellRef {
+                row: row.id,
+                row_revision: row.revision,
+                column,
+            })
         });
         let cursor = cursor
             .and_then(|(line, column)| {
@@ -837,6 +849,8 @@ impl TerminalAccessibilityModel {
                 selection,
                 cursor: cursor..cursor,
                 cursor_cell,
+                cursor_ref,
+                selection_refs,
             }),
         }
     }
@@ -865,15 +879,17 @@ impl TerminalAccessibilityModel {
                 .map_or(reference.column, |cell| cell.columns.start);
             Some((line, column))
         });
+        let cursor_ref = cursor.filter(|_| cursor_cell.is_some());
         let cursor = cursor
             .and_then(|reference| offset_for_ref(&document, reference, false))
             .unwrap_or(visible_range.start);
-        let selection = selection.and_then(|selection| {
-            // AppKit exposes one contiguous UTF-16 range. A terminal rectangle therefore uses
-            // the smallest contiguous range containing its ordered endpoints.
-            let _rectangle = selection.rectangle;
-            range_for_refs(&document, selection.start, selection.end)
+        // AppKit exposes one contiguous UTF-16 range. A terminal rectangle therefore uses the
+        // smallest contiguous range containing its ordered endpoints; the refs keep the shape.
+        let selection_refs = selection.filter(|selection| {
+            range_for_refs(&document, selection.start, selection.end).is_some()
         });
+        let selection = selection_refs
+            .and_then(|selection| range_for_refs(&document, selection.start, selection.end));
         Self {
             data: Arc::new(TerminalAccessibilityData {
                 generation,
@@ -886,6 +902,8 @@ impl TerminalAccessibilityModel {
                 selection,
                 cursor: cursor..cursor,
                 cursor_cell,
+                cursor_ref,
+                selection_refs,
             }),
         }
     }
@@ -904,6 +922,20 @@ impl TerminalAccessibilityModel {
 
     pub fn active_screen(&self) -> AccessibilityScreen {
         self.data.screen
+    }
+
+    pub(crate) fn screen_generation(&self) -> usize {
+        self.data.screen_generation
+    }
+
+    /// Stable cursor cell identity, present only when it names a retained row revision.
+    pub(crate) fn cursor_ref(&self) -> Option<AccessibilityCellRef> {
+        self.data.cursor_ref
+    }
+
+    /// Stable Selection endpoints, present only when both name retained row revisions.
+    pub(crate) fn selection_refs(&self) -> Option<AccessibilitySelectionRefs> {
+        self.data.selection_refs
     }
 
     #[cfg_attr(
@@ -1278,6 +1310,15 @@ impl TerminalAccessibilityState {
         });
         self.latest = Some(model.clone());
         Some(Arc::new(model))
+    }
+
+    /// Whether a row revision is retained for a delta that omits it.
+    pub(crate) fn retains_row(&self, id: AccessibilityRowId) -> bool {
+        let state = match id.screen {
+            AccessibilityScreen::Primary => &self.primary,
+            AccessibilityScreen::Alternate => &self.alternate,
+        };
+        state.rows.contains_key(&id)
     }
 
     pub(crate) fn resolve_selection(

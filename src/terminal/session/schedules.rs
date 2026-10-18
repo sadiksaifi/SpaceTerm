@@ -327,6 +327,16 @@ impl WorkerSchedules {
         }
     }
 
+    /// Ends native demand without changing visual presentation; a later demand reactivates it.
+    /// A demand requested after `ended_at` survives, so a racing request is never lost.
+    pub(super) fn end_accessibility_demand(&mut self, ended_at: Instant) {
+        if self.input.accessibility_demand.clear_through(ended_at) {
+            return;
+        }
+        self.accessibility_continuation.update(false);
+        self.accessibility_presentation.end_demand();
+    }
+
     pub(super) fn disable_accessibility(&mut self) {
         self.accessibility_continuation.update(false);
         self.accessibility_presentation.disable();
@@ -487,6 +497,11 @@ impl AccessibilityPresentationSchedule {
             self.seed_required = false;
         }
         self.not_before = now + ACCESSIBILITY_PRESENTATION_INTERVAL;
+    }
+
+    fn end_demand(&mut self) {
+        self.pending = self.seed_required && self.pending;
+        self.demand_request = None;
     }
 
     fn disable(&mut self) {
@@ -828,6 +843,20 @@ impl AccessibilityDemandMailbox {
         let mut state = self.lock();
         state.latest_request = None;
         state.notified = false;
+    }
+
+    /// Clears a request made at or before `instant`; returns whether a newer request remains.
+    fn clear_through(&self, instant: Instant) -> bool {
+        let mut state = self.lock();
+        if state
+            .latest_request
+            .is_some_and(|requested_at| requested_at > instant)
+        {
+            return true;
+        }
+        state.latest_request = None;
+        state.notified = false;
+        false
     }
 
     fn set_enabled(&self, enabled: bool) {
@@ -1326,6 +1355,44 @@ mod tests {
         schedules.set_presentable(false, start + Duration::from_millis(50));
         assert!(!schedules.accessibility_presentation_due(start + Duration::from_secs(60)));
         assert!(!input.enqueue_accessibility_demand(start + Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn ending_accessibility_demand_stops_refreshes_until_a_later_demand() {
+        let start = Instant::now();
+        let input = ScheduleInput::default();
+        let mut schedules = WorkerSchedules::new(start, input.clone());
+        schedules.note_screen_published();
+        assert!(schedules.accessibility_presentation_due(start));
+        schedules.mark_accessibility_presented(start, true);
+        assert!(input.enqueue_accessibility_demand(start));
+        schedules.accessibility_demand_received(start);
+        assert!(schedules.accessibility_presentation_due(start));
+        schedules.mark_accessibility_presented(start, true);
+
+        schedules.end_accessibility_demand(start + Duration::from_millis(1));
+        schedules.note_screen_published();
+        assert!(!schedules.accessibility_presentation_due(start + Duration::from_secs(60)));
+
+        let later = start + Duration::from_secs(60);
+        assert!(input.enqueue_accessibility_demand(later));
+        schedules.accessibility_demand_received(later);
+        assert!(schedules.accessibility_presentation_due(later));
+    }
+
+    #[test]
+    fn ending_accessibility_demand_keeps_a_newer_demand() {
+        let start = Instant::now();
+        let input = ScheduleInput::default();
+        let mut schedules = WorkerSchedules::new(start, input.clone());
+        schedules.note_screen_published();
+        schedules.mark_accessibility_presented(start, true);
+
+        let ended_at = start + Duration::from_millis(1);
+        assert!(input.enqueue_accessibility_demand(ended_at + Duration::from_millis(1)));
+        schedules.end_accessibility_demand(ended_at);
+        schedules.accessibility_demand_received(ended_at + Duration::from_millis(2));
+        assert!(schedules.accessibility_presentation_due(ended_at + Duration::from_millis(2)));
     }
 
     #[test]
