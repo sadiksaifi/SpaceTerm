@@ -1,4 +1,5 @@
 //! Desktop presentation and fenced input for an authenticated server Pane.
+mod accessibility;
 mod effects;
 use super::server_graphics as graphics;
 mod reading;
@@ -50,6 +51,8 @@ pub(crate) struct DevelopmentPaneState {
     effect_authority: Arc<ClipboardAuthority>,
     hidden_input: AtomicBool,
     reading: Mutex<reading::ReadingState>,
+    accessibility: Mutex<accessibility::RetainedSemantics>,
+    accessibility_demand: AtomicBool,
     client_effects: Mutex<std::collections::VecDeque<ClientEffectRequest>>,
 }
 impl DevelopmentPaneState {
@@ -72,6 +75,8 @@ impl DevelopmentPaneState {
             interaction: Mutex::new(Interaction::default()),
             hidden_input: AtomicBool::new(false),
             reading: Mutex::default(),
+            accessibility: Mutex::default(),
+            accessibility_demand: AtomicBool::new(false),
             client_effects: Mutex::new(std::collections::VecDeque::new()),
             effect_authority: {
                 let authority = ClipboardAuthority::default();
@@ -165,6 +170,9 @@ impl DevelopmentPaneState {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .disconnect();
+        // A new connection epoch resolves Selection only against semantics it fetched itself.
+        *self.accessibility.lock().unwrap_or_else(|e| e.into_inner()) =
+            accessibility::RetainedSemantics::default();
         self.effect_authority.client_focus(None);
         self.client_effects
             .lock()
@@ -337,6 +345,7 @@ enum Input {
     ),
     Resize(PaneSize),
     Style(pane::PresentationStyle),
+    AccessibilitySelection(super::accessibility::AccessibilitySelectionRequest),
 }
 impl Input {
     fn eligible(&self, target: pane::FocusTarget) -> bool {
@@ -346,9 +355,11 @@ impl Input {
                 target,
                 pane::FocusTarget::Terminal | pane::FocusTarget::FocusedPane
             ),
-            Self::Key(_) | Self::CopyOrForward(_) | Self::Pointer(..) | Self::Wheel(..) => {
-                target == pane::FocusTarget::Terminal
-            }
+            Self::Key(_)
+            | Self::CopyOrForward(_)
+            | Self::Pointer(..)
+            | Self::Wheel(..)
+            | Self::AccessibilitySelection(_) => target == pane::FocusTarget::Terminal,
             Self::Paste(_, reply) => target == pane::FocusTarget::Terminal && !reply.is_closed(),
             Self::ResolvePaste(pending, _, _) => {
                 target == pane::FocusTarget::Terminal
@@ -529,75 +540,80 @@ impl PresentationHandle {
         Some((mapping, x, y))
     }
     fn send(&self, input: Input) {
-        let current_epoch = self.state.epoch.load(Ordering::Acquire);
-        let epoch = match &input {
-            Input::ResolvePaste(pending, ..) => pending.epoch,
-            Input::Pointer(epoch, _) | Input::Wheel(epoch, _) => *epoch,
-            _ => current_epoch,
+        submit_input(&self.state, &self.input, input);
+    }
+}
+
+/// Tags input with the current epoch and focus generation, or discards it now.
+fn submit_input(
+    state: &DevelopmentPaneState,
+    sender: &mpsc::SyncSender<SubmittedInput>,
+    input: Input,
+) {
+    let current_epoch = state.epoch.load(Ordering::Acquire);
+    let epoch = match &input {
+        Input::ResolvePaste(pending, ..) => pending.epoch,
+        Input::Pointer(epoch, _) | Input::Wheel(epoch, _) => *epoch,
+        _ => current_epoch,
+    };
+    let connected = state.status() == DevelopmentPaneStatus::Connected;
+    let mut interaction = state.interaction.lock().unwrap_or_else(|e| e.into_inner());
+    let eligible = input.eligible(interaction.target)
+        && match &input {
+            Input::ResolvePaste(pending, ..) => interaction.resolution_is_current(*pending),
+            _ => true,
         };
-        let connected = self.state.status() == DevelopmentPaneStatus::Connected;
-        let mut interaction = self
-            .state
-            .interaction
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let eligible = input.eligible(interaction.target)
-            && match &input {
-                Input::ResolvePaste(pending, ..) => interaction.resolution_is_current(*pending),
-                _ => true,
-            };
-        let available = connected
-            && epoch == current_epoch
-            && (interaction.interactive
-                || matches!(input, Input::Resize(_) | Input::Style(_))
-                || matches!(input, Input::Read(_)) && interaction.reading)
-            && eligible;
-        if !available {
-            drop(interaction);
-            discard_input(&self.state, epoch, input);
+    let available = connected
+        && epoch == current_epoch
+        && (interaction.interactive
+            || matches!(input, Input::Resize(_) | Input::Style(_))
+            || matches!(input, Input::Read(_)) && interaction.reading)
+        && eligible;
+    if !available {
+        drop(interaction);
+        discard_input(state, epoch, input);
+        return;
+    }
+    if let Input::Paste(_, reply) = &input {
+        if interaction
+            .pending
+            .is_some_and(|pending| std::time::Instant::now() >= pending.deadline)
+        {
+            interaction.pending = None;
+        }
+        if interaction.paste_request.is_some()
+            || interaction.pending.is_some()
+            || interaction.resolving.is_some()
+        {
+            let _ = reply.try_send(Ok(super::PasteRequestOutcome::Rejected(
+                super::paste::PasteRejection::ConfirmationPending,
+            )));
             return;
         }
-        if let Input::Paste(_, reply) = &input {
-            if interaction
-                .pending
-                .is_some_and(|pending| std::time::Instant::now() >= pending.deadline)
-            {
-                interaction.pending = None;
-            }
-            if interaction.paste_request.is_some()
-                || interaction.pending.is_some()
-                || interaction.resolving.is_some()
-            {
-                let _ = reply.try_send(Ok(super::PasteRequestOutcome::Rejected(
-                    super::paste::PasteRejection::ConfirmationPending,
-                )));
-                return;
-            }
-            interaction.paste_request = Some((epoch, interaction.focus_generation));
-        }
-        let focus_generation = match &input {
-            Input::ResolvePaste(pending, ..) => pending.focus_generation,
-            _ => interaction.focus_generation,
-        };
-        let submitted = SubmittedInput {
+        interaction.paste_request = Some((epoch, interaction.focus_generation));
+    }
+    let focus_generation = match &input {
+        Input::ResolvePaste(pending, ..) => pending.focus_generation,
+        _ => interaction.focus_generation,
+    };
+    let submitted = SubmittedInput {
+        epoch,
+        focus_generation,
+        command: input,
+    };
+    let sent = sender.try_send(submitted);
+    drop(interaction);
+    if let Err(error) = sent {
+        discard_input(
+            state,
             epoch,
-            focus_generation,
-            command: input,
-        };
-        let sent = self.input.try_send(submitted);
-        drop(interaction);
-        if let Err(error) = sent {
-            discard_input(
-                &self.state,
-                epoch,
-                match error {
-                    mpsc::TrySendError::Full(input) | mpsc::TrySendError::Disconnected(input) => {
-                        input.command
-                    }
-                },
-            );
-            self.state.invalidate();
-        }
+            match error {
+                mpsc::TrySendError::Full(input) | mpsc::TrySendError::Disconnected(input) => {
+                    input.command
+                }
+            },
+        );
+        state.invalidate();
     }
 }
 fn discard_input(state: &DevelopmentPaneState, epoch: u64, input: Input) {
@@ -742,6 +758,25 @@ impl ActiveInput {
                 },
                 None,
             ),
+            Input::AccessibilitySelection(request) => {
+                // The server revalidates the refs; this client resolves only its own epoch's rows.
+                let Some(selection) = state
+                    .accessibility
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .resolve_selection(&request)
+                else {
+                    return Ok(());
+                };
+                return match exchange(&Request::AccessibilitySelection {
+                    lease: self.lease,
+                    focus_generation: generation,
+                    selection,
+                })? {
+                    Reply::Reading { .. } => Ok(()),
+                    _ => Err(ServerError::Protocol),
+                };
+            }
             Input::Paste(text, reply) => (
                 input_request(pane::InteractiveInput::Paste { text }),
                 Some(PasteReply::Request(reply)),
@@ -1005,7 +1040,7 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
     ) -> Result<StartedTerminalSession, TerminalSessionError> {
         let (input, receiver) = mpsc::sync_channel(512);
         let (events, output) = async_channel::bounded(2);
-        let (_, accessibility) = async_channel::bounded(1);
+        let (accessibility_sender, accessibility) = async_channel::bounded(1);
         let (effects, clipboard) = ClientEffects::new();
         let alive = Arc::new(AtomicBool::new(true));
         let measured_size = Arc::new(Mutex::new(pane_size(geometry)));
@@ -1031,7 +1066,7 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
                     factory,
                     alive,
                     receiver,
-                    events,
+                    (events, accessibility_sender),
                     measured_size,
                     appearance,
                     effects,
@@ -1070,7 +1105,10 @@ fn present(
     factory: DevelopmentServerSessionFactory,
     alive: Arc<AtomicBool>,
     input: mpsc::Receiver<SubmittedInput>,
-    events: async_channel::Sender<TerminalSessionEvent>,
+    (events, semantics): (
+        async_channel::Sender<TerminalSessionEvent>,
+        async_channel::Sender<Arc<super::accessibility::TerminalAccessibilityModel>>,
+    ),
     size: Arc<Mutex<PaneSize>>,
     appearance: Arc<Mutex<TerminalAppearanceUpdate>>,
     mut effects: ClientEffects,
@@ -1367,6 +1405,7 @@ fn present(
             let mut ready = false;
             let mut reader = reading::Reader::default();
             let mut graphics = graphics::Graphics::default();
+            let mut semantic = accessibility::Fetcher::new(lease);
             let mut latest_screen = None;
             loop {
                 if !alive.load(Ordering::Acquire)
@@ -1383,6 +1422,7 @@ fn present(
                 }
                 match reply {
                     Reply::Screen(mut screen) => {
+                        semantic.note_revision(screen.accessibility_revision);
                         let graphics_error = graphics
                             .update(screen.graphics.take(), screen.alternate)
                             .err();
@@ -1467,6 +1507,9 @@ fn present(
                         reader.screen(&state, mapping, screen.selection_present);
                         latest_screen = Some((Arc::clone(&screen), mapping));
                         let _ = events.force_send(TerminalSessionEvent::Screen(screen));
+                        if let Some(model) = semantic.rebind(&state, generation) {
+                            let _ = semantics.force_send(model);
+                        }
                         takeover = false;
                         if paste_unconfirmed {
                             paste_unconfirmed = false;
@@ -1480,6 +1523,7 @@ fn present(
                         return Ok(());
                     }
                     Reply::Unchanged => {}
+                    Reply::AccessibilityRevision { revision } => semantic.note_revision(revision),
                     _ => return Err(ServerError::Protocol),
                 }
                 if ready {
@@ -1558,6 +1602,20 @@ fn present(
                         state.connected(epoch, *mapping, paste_unconfirmed)?;
                         reader.screen(&state, *mapping, next.selection_present);
                         let _ = events.force_send(TerminalSessionEvent::Screen(Arc::clone(screen)));
+                        if let Some(model) = semantic.rebind(&state, generation) {
+                            let _ = semantics.force_send(model);
+                        }
+                    }
+                }
+                if ready && connection.supports_accessibility() {
+                    let model = semantic.poll(&state, generation, &mut |request| {
+                        exchange(&attachment, &mut connection, request)
+                    })?;
+                    if state.epoch.load(Ordering::Acquire) != epoch {
+                        return Err(ServerError::Protocol);
+                    }
+                    if let Some(model) = model {
+                        let _ = semantics.force_send(model);
                     }
                 }
                 std::thread::sleep(Duration::from_millis(30));
@@ -1645,6 +1703,29 @@ fn encode_key(k: KeyInput) -> pane::Key {
     }
 }
 impl TerminalSessionHandle for PresentationHandle {
+    fn accessibility_selection_sender(&self) -> Option<super::AccessibilitySelectionSender> {
+        let state = Arc::clone(&self.state);
+        let input = self.input.clone();
+        Some(super::AccessibilitySelectionSender::server(Arc::new(
+            move |request| submit_input(&state, &input, Input::AccessibilitySelection(request)),
+        )))
+    }
+    fn accessibility_demand_sender(&self) -> Option<super::AccessibilityDemandSender> {
+        let state = Arc::clone(&self.state);
+        Some(super::AccessibilityDemandSender::server(Arc::new(
+            move || {
+                state.accessibility_demand.store(true, Ordering::Release);
+            },
+        )))
+    }
+    fn set_presentable(&self, presentable: bool) {
+        // A hidden Pane ends server semantic work; visual Screens continue.
+        if !presentable {
+            self.state
+                .accessibility_demand
+                .store(false, Ordering::Release);
+        }
+    }
     fn reading_available(&self) -> bool {
         self.state.status() == DevelopmentPaneStatus::Connected
             && self
@@ -3504,6 +3585,7 @@ mod tests {
         let mut overrides = vec![false; 256];
         overrides[1] = true;
         let screen = pane::Screen {
+            accessibility_revision: 0,
             graphics: None,
             cell_pixels: None,
             reading: None,

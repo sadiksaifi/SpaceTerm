@@ -1313,6 +1313,7 @@ impl TerminalAccessibilityState {
     }
 
     /// Whether a row revision is retained for a delta that omits it.
+    #[cfg(feature = "desktop")]
     pub(crate) fn retains_row(&self, id: AccessibilityRowId) -> bool {
         let state = match id.screen {
             AccessibilityScreen::Primary => &self.primary,

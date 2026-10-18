@@ -293,12 +293,16 @@ pub enum SelectionCopyError {
 
 /// Server-backed delivery for native accessibility requests, which the server Pane's
 /// connection fences by its own epoch and focus generation.
-pub(crate) type ServerAccessibilitySelection = Arc<dyn Fn(AccessibilitySelectionRequest) + Send + Sync>;
+#[cfg(feature = "desktop")]
+pub(crate) type ServerAccessibilitySelection =
+    Arc<dyn Fn(AccessibilitySelectionRequest) + Send + Sync>;
+#[cfg(feature = "desktop")]
 pub(crate) type ServerAccessibilityDemand = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Clone)]
 enum AccessibilitySelectionTarget {
     Worker(CommandSender<Command>),
+    #[cfg(feature = "desktop")]
     Server(ServerAccessibilitySelection),
 }
 
@@ -339,6 +343,7 @@ impl AccessibilitySelectionSender {
         )
     }
 
+    #[cfg(feature = "desktop")]
     pub(crate) fn server(deliver: ServerAccessibilitySelection) -> Self {
         Self {
             target: AccessibilitySelectionTarget::Server(deliver),
@@ -357,6 +362,7 @@ impl AccessibilitySelectionSender {
                     );
                 }
             }
+            #[cfg(feature = "desktop")]
             AccessibilitySelectionTarget::Server(deliver) => deliver(request),
         }
     }
@@ -368,6 +374,7 @@ enum AccessibilityDemandTarget {
         commands: CommandSender<Command>,
         schedule_input: ScheduleInput,
     },
+    #[cfg(feature = "desktop")]
     Server(ServerAccessibilityDemand),
 }
 
@@ -397,6 +404,7 @@ impl fmt::Debug for AccessibilityDemandSender {
     )
 )]
 impl AccessibilityDemandSender {
+    #[cfg(feature = "desktop")]
     pub(crate) fn server(demand: ServerAccessibilityDemand) -> Self {
         Self {
             target: AccessibilityDemandTarget::Server(demand),
@@ -421,6 +429,7 @@ impl AccessibilityDemandSender {
                     );
                 }
             }
+            #[cfg(feature = "desktop")]
             AccessibilityDemandTarget::Server(demand) => demand(),
         }
     }
