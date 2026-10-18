@@ -333,3 +333,26 @@ fn accessible_transfers_reuse_unchanged_history_and_finish_during_output() {
             .starts_with("second row appended")
     );
 }
+
+#[test]
+fn takeover_semantics_ignore_models_published_before_the_reading_reset() {
+    let old = ScreenSnapshot::empty(crate::local_path::LocalPathSemantics::Posix);
+    let mut reset = (*old).clone();
+    reset.generation = PresentationGeneration::test(2);
+    let mut state = accessibility::Accessibility::default();
+    state.update(Arc::new(TerminalAccessibilityModel::from_screen(&old)));
+    state.reset();
+    state.bind_reset_screen(reset.generation);
+    state.update(Arc::new(TerminalAccessibilityModel::from_screen(&old)));
+    assert_eq!(state.chunk(None, 0, None).unwrap_err(), Error::Pending);
+    state.update(Arc::new(TerminalAccessibilityModel::from_screen(&reset)));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match state.chunk(None, 0, None) {
+            Ok(_) => break,
+            Err(Error::Pending) => std::thread::yield_now(),
+            other => panic!("{other:?}"),
+        }
+        assert!(Instant::now() < deadline);
+    }
+}

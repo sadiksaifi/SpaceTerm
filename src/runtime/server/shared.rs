@@ -526,6 +526,7 @@ impl SharedWorkspaceHost {
                 let target = match &request {
                     Request::TakeOver { target, .. } => *target,
                     Request::Accessibility { lease, .. }
+                    | Request::EndAccessibilityDemand { lease }
                     | Request::AccessibilitySelection { lease, .. }
                     | Request::ReadingStatus { lease }
                     | Request::Read { lease, .. }

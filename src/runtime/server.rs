@@ -476,6 +476,7 @@ impl DevelopmentPaneHost {
         let pane = self.pane.as_mut().ok_or(Refusal::Missing)?;
         let lease = match &request {
             Request::Accessibility { lease, .. }
+            | Request::EndAccessibilityDemand { lease }
             | Request::AccessibilitySelection { lease, .. }
             | Request::Read { lease, .. }
             | Request::ReadingStatus { lease }
@@ -506,6 +507,10 @@ impl DevelopmentPaneHost {
             return Err(Refusal::DirectoryUnavailable);
         }
         match request {
+            Request::EndAccessibilityDemand { .. } => {
+                pane.runtime.end_server_accessibility_demand();
+                Ok(Reply::Unchanged)
+            }
             Request::Accessibility {
                 revision,
                 offset,
@@ -1033,6 +1038,7 @@ impl OwnedPane {
         };
         if transfer {
             self.attachment_generation = None;
+            self.accessibility.reset();
             self.reading.reset(&self.runtime);
             self.screen = None;
             self.reading.invalidate();
@@ -1106,6 +1112,9 @@ impl OwnedPane {
                 }
                 _ => {}
             }
+        }
+        if let Some(screen) = &self.screen {
+            self.accessibility.bind_reset_screen(screen.generation);
         }
         while let Ok(model) = self.subscription.accessibility.try_recv() {
             self.accessibility.update(model);

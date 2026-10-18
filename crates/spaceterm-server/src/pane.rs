@@ -187,6 +187,9 @@ pub enum AttachmentClaim {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
+    EndAccessibilityDemand {
+        lease: Lease,
+    },
     Accessibility {
         lease: Lease,
         revision: Option<u64>,

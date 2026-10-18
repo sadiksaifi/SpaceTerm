@@ -28,6 +28,8 @@ pub(super) struct Accessibility {
     completed: Option<(u64, Arc<TerminalAccessibilityModel>)>,
     transfer: Option<Transfer>,
     job: Option<Job>,
+    resetting: bool,
+    minimum_generation: Option<PresentationGeneration>,
 }
 impl Accessibility {
     pub(super) fn revision(&self) -> u64 {
@@ -41,6 +43,14 @@ impl Accessibility {
         Some(self.revision)
     }
     pub(super) fn update(&mut self, model: Arc<TerminalAccessibilityModel>) {
+        if self.resetting
+            || self
+                .minimum_generation
+                .is_some_and(|minimum| model.generation() < minimum)
+        {
+            return;
+        }
+        self.minimum_generation = None;
         if self.latest.as_ref().is_none_or(|old| {
             !old.shares_document(&model)
                 || old.visible_lines() != model.visible_lines()
@@ -59,6 +69,17 @@ impl Accessibility {
         // Keep an outstanding job until it finishes, so reconnect cannot start another serializer.
         if let Some(job) = &mut self.job {
             job.obsolete = true;
+        }
+    }
+    pub(super) fn reset(&mut self) {
+        self.disconnect();
+        self.latest = None;
+        self.resetting = true;
+    }
+    pub(super) fn bind_reset_screen(&mut self, generation: PresentationGeneration) {
+        if self.resetting {
+            self.minimum_generation = Some(generation);
+            self.resetting = false;
         }
     }
     fn collect(&mut self) {
