@@ -622,9 +622,22 @@ pub(super) struct GpuiAskPassBridge {
 #[cfg(feature = "desktop")]
 impl GpuiAskPassBridge {
     pub(super) fn new(window: &Window, cx: &mut App) -> Self {
-        let presenter = cx.new(|_| GpuiAskPassPresenter::default());
+        let presenter = Rc::new(RefCell::new(Some(
+            cx.new(|_| GpuiAskPassPresenter::default()),
+        )));
+        let shutdown_presenter = Rc::clone(&presenter);
         let window_handle = window.window_handle();
         let (commands, receiver) = async_channel::bounded(2);
+        let shutdown_commands = commands.downgrade();
+        // Quit may stop foreground task polling before the bridge observes channel closure.
+        cx.on_app_quit(move |_| {
+            if let Some(commands) = shutdown_commands.upgrade() {
+                commands.close();
+            }
+            shutdown_presenter.borrow_mut().take();
+            async {}
+        })
+        .detach();
         cx.spawn(async move |cx| {
             while let Ok(command) = receiver.recv().await {
                 match command {
@@ -636,6 +649,10 @@ impl GpuiAskPassBridge {
                         let response = Rc::new(RefCell::new(Some(job.response)));
                         let completion_response = Rc::clone(&response);
                         let result = window_handle.update(cx, |_, window, cx| {
+                            let presenter = presenter.borrow();
+                            let presenter = presenter.as_ref().ok_or(
+                                prompt::AskPassPresentationError::ApplicationPresentationUnavailable,
+                            )?;
                             presenter.update(cx, |presenter, cx| {
                                 presenter.present(
                                     owner,
@@ -661,13 +678,16 @@ impl GpuiAskPassBridge {
                     }
                     AskPassUiCommand::Cancel { owner } => {
                         let _ = window_handle.update(cx, |_, window, cx| {
-                            presenter.update(cx, |presenter, cx| {
-                                presenter.cancel_owner(owner, window, cx);
-                            });
+                            if let Some(presenter) = presenter.borrow().as_ref() {
+                                presenter.update(cx, |presenter, cx| {
+                                    presenter.cancel_owner(owner, window, cx);
+                                });
+                            }
                         });
                     }
                 }
             }
+            presenter.borrow_mut().take();
         })
         .detach();
         Self {
@@ -1140,6 +1160,28 @@ mod tests {
     use super::*;
     use std::io::{Cursor, Error, ErrorKind, Result as IoResult};
     use std::sync::Mutex;
+
+    #[cfg(feature = "desktop")]
+    #[gpui::test]
+    fn application_shutdown_releases_the_askpass_presenter_with_live_producers(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let window = cx
+            .add_empty_window()
+            .update(|window, _| window.window_handle());
+        let snapshot = cx.update(|cx| cx.leak_detector_snapshot());
+        let bridge = window
+            .update(cx, |_, window, cx| GpuiAskPassBridge::new(window, cx))
+            .unwrap();
+        let producer = bridge.presenter();
+        cx.run_until_parked();
+
+        cx.update(|cx| cx.shutdown());
+
+        cx.update(|cx| cx.assert_no_new_leaks(&snapshot));
+        drop(producer);
+        drop(bridge);
+    }
 
     struct MemoryStream {
         input: Cursor<Vec<u8>>,

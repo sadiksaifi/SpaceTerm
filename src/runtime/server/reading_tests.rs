@@ -3,8 +3,12 @@ use super::*;
 use pane::reading::{Operation, SELECTION_CHUNK_BYTES, Scroll};
 use std::time::Instant;
 
+// Real PTY output and selection formatting share CPU with the parallel portable suite.
+// These waits check completion, not a terminal throughput or response-time guarantee.
+const COMPLETION_TIMEOUT: Duration = Duration::from_secs(60);
+
 fn read(host: &mut DevelopmentPaneHost, lease: Lease, operation: Operation) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + COMPLETION_TIMEOUT;
     loop {
         match host.request(
             [1; 32],
@@ -28,14 +32,24 @@ fn screen(
     lease: Lease,
     matches: impl Fn(&Screen) -> bool,
 ) -> Box<Screen> {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + COMPLETION_TIMEOUT;
+    let mut last_progress = None;
     loop {
         match host.request([1; 32], lease.connection, Request::Poll { lease }) {
             Reply::Screen(screen) if matches(&screen) => return screen,
-            Reply::Screen(_) | Reply::Unchanged => {}
+            Reply::Screen(screen) => {
+                last_progress = Some((
+                    screen.generation,
+                    screen.reading.as_ref().map(|reading| reading.total_rows),
+                ));
+            }
+            Reply::Unchanged => {}
             reply => panic!("screen refused: {reply:?}"),
         }
-        assert!(Instant::now() < deadline, "reading screen missing");
+        assert!(
+            Instant::now() < deadline,
+            "reading screen missing; last generation and retained rows: {last_progress:?}"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -159,7 +173,7 @@ fn old_scrollback_find_and_multichunk_copy_use_the_retained_terminal_content() {
         400.0,
     );
     // Fence the release on the existing worker barrier before preparing the copy.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + COMPLETION_TIMEOUT;
     let mut generation = loop {
         match host.request([1; 32], lease.connection, Request::ReadingStatus { lease }) {
             Reply::ReadingReady {
@@ -181,6 +195,7 @@ fn old_scrollback_find_and_multichunk_copy_use_the_retained_terminal_content() {
     let mut chunks = 0;
     let mut output_started = false;
     let mut output_during_transfer = false;
+    let deadline = Instant::now() + COMPLETION_TIMEOUT;
     loop {
         let update = if !bytes.is_empty() && !output_started {
             // Start real output only after receiving a partial copy, and witness it before
@@ -276,7 +291,7 @@ fn old_scrollback_find_and_multichunk_copy_use_the_retained_terminal_content() {
         ),
         Reply::Refused(Refusal::Stale)
     ));
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + COMPLETION_TIMEOUT;
     loop {
         if let Reply::Screen(screen) =
             host.request([2; 32], other.connection, Request::Poll { lease: other })
