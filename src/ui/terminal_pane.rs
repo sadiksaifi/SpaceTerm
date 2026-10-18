@@ -1078,6 +1078,10 @@ impl TerminalPane {
     }
 
     pub(crate) fn set_accessibility_hierarchy(&mut self, presented: bool) {
+        if self.native_focus.presented != presented {
+            self.native_focus.current(None);
+            self.native_focus.presented = presented;
+        }
         self.accessibility_element.set_hierarchy(presented);
     }
 
@@ -1610,16 +1614,17 @@ impl TerminalPane {
     /// The authority a native accessibility focus request must name to move focus here.
     ///
     /// A server-backed Pane grants it only while its connection presents authoritative content
-    /// under control. Each new Session epoch, connection epoch, or interruption issues a new
-    /// authority, so a request queued before the change never applies after it.
+    /// under control. Each new Session epoch, connection epoch, interruption, or hierarchy change
+    /// issues a new authority, so a request queued before the change never applies after it.
     fn native_focus_authority(&mut self) -> Option<u64> {
-        let current = (!self.server_backed()
-            || (!self.terminal_session.remote_input_blocked
-                && self
-                    .terminal_session
-                    .session
-                    .as_ref()
-                    .is_some_and(|session| session.reading_available())))
+        let current = (self.native_focus.presented
+            && (!self.server_backed()
+                || (!self.terminal_session.remote_input_blocked
+                    && self
+                        .terminal_session
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| session.reading_available()))))
         .then(|| {
             (
                 self.terminal_session.session_epoch,
@@ -1709,7 +1714,7 @@ impl TerminalPane {
         self.visibility_source.take();
         self.context_menu = None;
         self.file_preview.dismiss();
-        self.accessibility_element.set_hierarchy(false);
+        self.set_accessibility_hierarchy(false);
         self.terminal_session.close();
     }
 
@@ -5926,6 +5931,7 @@ impl WheelAccumulator {
 /// Issues a new opaque authority whenever the facts that grant native focus change.
 #[derive(Default)]
 struct NativeFocusAuthority {
+    presented: bool,
     facts: Option<(u64, u64)>,
     serial: u64,
 }

@@ -1736,6 +1736,50 @@ fn accesskit_server_pane_keeps_frozen_text_but_refuses_native_focus_while_interr
     perform(cx, tree.node("Terminal Pane"), Action::Focus);
     cx.run_until_parked();
     assert_eq!(focus_requests.get(), 1);
+
+    let queued = pane.update(cx, |pane, _| {
+        let authority = pane.native_focus_authority().unwrap();
+        pane.accessibility_focus_sender.with_authority(authority)
+    });
+    pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(false));
+    queued.request();
+    cx.run_until_parked();
+    assert_eq!(
+        focus_requests.get(),
+        1,
+        "a hidden Pane must refuse queued focus"
+    );
+
+    pane.update(cx, |pane, cx| {
+        pane.set_accessibility_hierarchy(true);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    queued.request();
+    cx.run_until_parked();
+    assert_eq!(
+        focus_requests.get(),
+        1,
+        "showing a Pane must not restore old authority"
+    );
+
+    // Hiding and showing before the receiver runs must also revoke its old request.
+    let queued = pane.update(cx, |pane, _| {
+        let authority = pane.native_focus_authority().unwrap();
+        pane.accessibility_focus_sender.with_authority(authority)
+    });
+    pane.update(cx, |pane, cx| {
+        pane.set_accessibility_hierarchy(false);
+        pane.set_accessibility_hierarchy(true);
+        cx.notify();
+    });
+    queued.request();
+    cx.run_until_parked();
+    assert_eq!(focus_requests.get(), 1);
+    let tree = A11yTree::read(cx);
+    perform(cx, tree.node("Terminal Pane"), Action::Focus);
+    cx.run_until_parked();
+    assert_eq!(focus_requests.get(), 2);
 }
 
 fn accessibility_model(index: usize) -> Arc<TerminalAccessibilityModel> {
