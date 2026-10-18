@@ -67,9 +67,13 @@ These terms describe the planned server architecture in [issue #520](https://git
 
 **End All Sessions**: The action that ends every live Terminal Session on one SpaceTerm Server while retaining the running server and its Workspace organization.
 
-**Paired Device**: A client device whose identity a SpaceTerm Server has authorized for terminal access and server management.
+**Client Identity**: A stable nonsecret identifier distinguishing one SpaceTerm Client's views, attachments, Pane control and operations.
 
-**Unpair Device**: The action that requests revocation of a Paired Device's access to one SpaceTerm Server and removes the initiating client's saved connection when it unpairs itself.
+**Account-local Connection**: A connection authorized by the operating system as belonging to the SpaceTerm Server's owning account.
+
+**Paired Device**: A client device deliberately enrolled for direct-network access to a SpaceTerm Server.
+
+**Unpair Device**: The action that requests revocation of a Paired Device's direct-network access to one SpaceTerm Server and removes the initiating client's saved connection when it unpairs itself.
 
 **Unpair Pending**: An Unpair Device request whose server-side revocation is awaiting confirmation, independently of completed local connection removal.
 

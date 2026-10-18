@@ -1,4 +1,4 @@
-//! Real paired-client input check. Refuses to interfere with an already running server.
+//! Real account-local client input check. Refuses to interfere with an already running server.
 #[path = "support/lifecycle.rs"]
 mod lifecycle;
 use lifecycle::{Server, connect, require_idle, size};
@@ -276,7 +276,7 @@ fn await_effect(
 fn main() -> Result<(), Box<dyn Error>> {
     let major = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "2".into())
+        .unwrap_or_else(|| "1".into())
         .parse()?;
     let first = LocalServer::for_development_client("input-first", major)?;
     let second = LocalServer::for_development_client("input-second", major)?;
@@ -575,7 +575,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     b.exchange(&Request::Shutdown)?;
     let _ = server.kill();
     println!(
-        "Protocol {major}: paired clients verified PTY keys/IME, focus reports, paste approval/focus/reconnect/takeover fences, pointer/wheel, measured resize, controlling appearance, clipboard replies/refusal, Permission Requests and background attention."
+        "Protocol {major}: account-local clients verified PTY keys/IME, focus reports, paste approval/focus/reconnect/takeover fences, pointer/wheel, measured resize, controlling appearance, clipboard replies/refusal, Permission Requests and background attention."
     );
     Ok(())
 }

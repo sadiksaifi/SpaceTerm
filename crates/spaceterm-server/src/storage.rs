@@ -13,7 +13,6 @@ use std::{
     },
     path::{Component, Path},
 };
-use zeroize::Zeroizing;
 
 // Bound retained hierarchy and edit records independently of live repository snapshots.
 // The authenticated transport also enforces its own 16 MiB frame limit.
@@ -21,18 +20,11 @@ const MAX_RECORD: usize = 12 * 1024 * 1024;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Record {
-    pub seed: [u8; 32],
-    pub paired: Vec<[u8; 32]>,
+    pub format: String,
+    pub server: [u8; 32],
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub organization: Option<crate::organization::Organization>,
 }
-impl Drop for Record {
-    fn drop(&mut self) {
-        use zeroize::Zeroize;
-        self.seed.zeroize();
-    }
-}
-
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) struct SocketIdentity {
     device: libc::dev_t,
@@ -201,7 +193,7 @@ impl Directory {
     /// Validate and synchronize retained state before setup or authentication accepts it.
     pub fn read(&self) -> Result<Record, ServerError> {
         let file = self.file("identity.json", false)?;
-        let mut bytes = Zeroizing::new(Vec::new());
+        let mut bytes = Vec::new();
         (&file)
             .take((MAX_RECORD + 1) as u64)
             .read_to_end(&mut bytes)
@@ -209,9 +201,14 @@ impl Directory {
         if bytes.len() > MAX_RECORD {
             return Err(ServerError::UnsafeStorage);
         }
-        let record: Record =
+        let value: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(|_| ServerError::UnsafeStorage)?;
-        if record.paired.len() > 64 {
+        if value.get("format").and_then(|v| v.as_str()) != Some("account-local-1") {
+            return Err(ServerError::IncompatibleState);
+        }
+        let record: Record =
+            serde_json::from_value(value).map_err(|_| ServerError::UnsafeStorage)?;
+        if record.format != "account-local-1" || record.server == [0; 32] {
             return Err(ServerError::UnsafeStorage);
         }
         if let Some(value) = &record.organization {
@@ -227,10 +224,10 @@ impl Directory {
     pub fn read_or_create(&self) -> Result<Record, ServerError> {
         match self.read() {
             Ok(record) => Ok(record),
-            Err(ServerError::NotPaired) => {
+            Err(ServerError::NotSetUp) => {
                 let record = Record {
-                    seed: protocol::random()?,
-                    paired: Vec::new(),
+                    format: "account-local-1".into(),
+                    server: protocol::random()?,
                     organization: None,
                 };
                 self.write(&record)?;
@@ -244,9 +241,7 @@ impl Directory {
         if let Some(value) = &record.organization {
             value.validate()?;
         }
-        let bytes = Zeroizing::new(
-            serde_json::to_vec(record).map_err(|_| ServerError::StorageUnavailable)?,
-        );
+        let bytes = serde_json::to_vec(record).map_err(|_| ServerError::StorageUnavailable)?;
         self.write_bytes(c"identity.json", &bytes)
     }
     pub(crate) fn read_json<T: serde::de::DeserializeOwned>(
@@ -255,7 +250,7 @@ impl Directory {
     ) -> Result<Option<T>, ServerError> {
         let file = match self.file(name, false) {
             Ok(file) => file,
-            Err(ServerError::NotPaired) => return Ok(None),
+            Err(ServerError::NotSetUp) => return Ok(None),
             Err(error) => return Err(error),
         };
         let mut bytes = Vec::new();
@@ -355,7 +350,7 @@ fn private(file: &File, directory: bool) -> Result<(), ServerError> {
 }
 fn classify_open() -> ServerError {
     match std::io::Error::last_os_error().raw_os_error() {
-        Some(libc::ENOENT) => ServerError::NotPaired,
+        Some(libc::ENOENT) => ServerError::NotSetUp,
         Some(libc::ELOOP | libc::ENOTDIR) => ServerError::UnsafeStorage,
         _ => ServerError::StorageUnavailable,
     }
@@ -429,7 +424,7 @@ mod tests {
             (&view, &ClientView::default())
         );
         drop(client);
-        // Rejected credentials must release the writer slot for the next attempt.
+        // Rejected identities must release the writer slot for the next attempt.
         assert_eq!(
             ClientViewStore::open(Directory::open(&first, false).unwrap(), [7; 32], [9; 32]).err(),
             Some(ServerError::AuthenticationRefused)
@@ -558,19 +553,15 @@ mod tests {
     }
 
     #[test]
-    fn repeated_setup_retains_identity_and_paired_devices_with_private_modes() {
+    fn repeated_setup_retains_nonsecret_identity_with_private_modes() {
         let fixture = Fixture::new();
         let data = fixture.open();
         let _lock = data.lock("setup.lock", false).unwrap();
-        let mut record = data.read_or_create().unwrap();
-        let original = record.seed;
-        record.paired.push([42; 32]);
+        let record = data.read_or_create().unwrap();
+        let original = record.server;
         data.write(&record).unwrap();
         let restored = data.read_or_create().unwrap();
-        assert_eq!(
-            (restored.seed, restored.paired.as_slice()),
-            (original, [[42; 32]].as_slice())
-        );
+        assert_eq!(restored.server, original);
         assert_eq!(fs::metadata(&fixture.0).unwrap().mode() & 0o7777, 0o700);
         assert_eq!(
             fs::metadata(fixture.0.join("identity.json"))
@@ -581,7 +572,7 @@ mod tests {
         );
     }
     #[test]
-    fn organization_is_retained_with_identity_and_pairing() {
+    fn organization_is_retained_with_nonsecret_identity() {
         let fixture = Fixture::new();
         let data = fixture.open();
         let _lock = data.lock("setup.lock", false).unwrap();
@@ -735,7 +726,7 @@ mod tests {
             threads.push(std::thread::spawn(move || {
                 let directory = Directory::open(&path, true).unwrap();
                 let _lock = directory.lock("setup.lock", false).unwrap();
-                directory.read_or_create().unwrap().seed
+                directory.read_or_create().unwrap().server
             }));
         }
         let keys: Vec<_> = threads
@@ -747,19 +738,19 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn uncertain_pairing_stays_unavailable_until_synchronization_recovers() {
+    fn uncertain_identity_stays_unavailable_until_synchronization_recovers() {
         let fixture = Fixture::new();
         let data = fixture.open();
         let _lock = data.lock("setup.lock", false).unwrap();
         let mut record = data.read_or_create().unwrap();
-        record.paired.push([42; 32]);
+        record.server = [42; 32];
 
         let fault = sync_failure::fail_directory(&data.0);
         assert_eq!(data.write(&record), Err(ServerError::StorageUnavailable));
         // The rename succeeded. Recovery must confirm durability, not just parse visible bytes.
         let visible: Record =
             serde_json::from_slice(&fs::read(fixture.0.join("identity.json")).unwrap()).unwrap();
-        assert_eq!(visible.paired, [[42; 32]]);
+        assert_eq!(visible.server, [42; 32]);
         let reopened = fixture.open();
         assert!(matches!(
             reopened.read(),
@@ -772,8 +763,8 @@ mod tests {
 
         drop(fault);
         let recovered = reopened.read_or_create().unwrap();
-        assert_eq!(recovered.seed, record.seed);
-        assert_eq!(recovered.paired, [[42; 32]]);
+        assert_eq!(recovered.server, record.server);
+        assert_eq!(recovered.server, [42; 32]);
     }
 
     #[cfg(target_os = "linux")]
@@ -783,7 +774,7 @@ mod tests {
         let data = fixture.open();
         let _lock = data.lock("setup.lock", false).unwrap();
         let mut record = data.read_or_create().unwrap();
-        record.paired.push([42; 32]);
+        record.server = [42; 32];
         let mut organization = crate::organization::Organization::first(fixture.0.clone()).unwrap();
         organization.name = "Retained work".into();
         organization.pinned_directory = Some(fixture.0.clone());
@@ -806,8 +797,8 @@ mod tests {
         ));
         drop(fault);
         let recovered = reopened.read_or_create().unwrap();
-        assert_eq!(recovered.seed, record.seed);
-        assert_eq!(recovered.paired, [[42; 32]]);
+        assert_eq!(recovered.server, record.server);
+        assert_eq!(recovered.server, [42; 32]);
         assert!(recovered.organization.as_ref() == Some(&organization));
         let mut restored =
             crate::hierarchy::State::from_legacy(recovered.organization.as_ref().unwrap());
@@ -840,7 +831,7 @@ mod tests {
         drop(fault);
         let recovered = fixture.open().read_or_create().unwrap();
         assert!(recovered.organization.as_ref() == Some(&original));
-        assert_eq!(recovered.seed, record.seed);
+        assert_eq!(recovered.server, record.server);
     }
 
     // Interpose only the native syscall in the Linux test executable. Production storage has

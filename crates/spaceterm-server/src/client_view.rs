@@ -245,8 +245,8 @@ impl ClientView {
 #[serde(deny_unknown_fields)]
 struct Record {
     version: u32,
-    pin: Id,
-    device: Id,
+    server: Id,
+    client: Id,
     view: ClientView,
 }
 
@@ -265,19 +265,19 @@ struct ClientViewLock(std::fs::File);
 impl ClientViewStore {
     pub(crate) fn open(
         directory: crate::storage::Directory,
-        pin: Id,
-        device: Id,
+        server: Id,
+        client: Id,
     ) -> Result<Self, ServerError> {
         let lock = ClientViewLock(directory.lock("view.lock", true)?);
         let record = directory
             .read_json::<Record>("view.json")?
             .unwrap_or(Record {
                 version: 1,
-                pin,
-                device,
+                server,
+                client,
                 view: ClientView::default(),
             });
-        if record.version != 1 || record.pin != pin || record.device != device {
+        if record.version != 1 || record.server != server || record.client != client {
             return Err(ServerError::AuthenticationRefused);
         }
         record.view.validate()?;

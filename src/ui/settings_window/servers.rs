@@ -1,11 +1,5 @@
-//! The Servers section: the SpaceTerm Server for this account, this device's pairing with it, its
-//! authenticated status, and the service that runs it. The service supplies its startup policy.
-//! [`crate::local_server`] owns setup, pairing, authentication, and the service.
-//!
-//! Every build offers the section for its own identity's server. Opening Settings asks the server
-//! nothing. Presenting the section checks the saved pairing, reads the service, and lists the
-//! verified server builds it could install. Only the person's explicit Set Up, Install, Start,
-//! Stop, Restart, Uninstall, or startup authorization changes either.
+//! Account-local server connection and service controls. Construction has no effects.
+//! Presenting this section checks the existing server; explicit actions set up or start it.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -41,9 +35,9 @@ pub(super) trait LocalServerControl: Send + Sync {
     fn worktree_server(&self) -> Option<LocalServer> {
         None
     }
-    /// Authenticates with the saved pairing. Never creates an identity or starts a server.
+    /// Connects using owning-account authority. Never creates an identity or starts a server.
     fn refresh(&self) -> Result<ServerConnection, ServerError>;
-    /// Sets up and pairs when needed, starts the server when it is not running, and authenticates.
+    /// Sets up when needed, starts the server when it is not running, and connects.
     fn setup_and_start(&self) -> Result<ServerConnection, ServerError>;
 }
 
@@ -92,7 +86,7 @@ pub(super) trait ServerServiceControl: Send + Sync {
     /// Stops the server, ends its Terminal Sessions, and keeps it stopped until an explicit Start.
     fn stop(&self) -> Result<ServiceStatus, ServerError>;
     fn restart(&self) -> Result<ServiceStatus, ServerError>;
-    /// Stops and removes the service. Workspaces, pairings, and installations are kept.
+    /// Stops and removes the service. Workspaces and installations are kept.
     fn uninstall(&self) -> Result<ServiceStatus, ServerError>;
     /// When the service starts the server.
     fn startup(&self) -> ServiceStartup;
@@ -156,7 +150,7 @@ pub(super) struct OfferedServer {
 pub(super) type OfferedLocalServer = Option<OfferedServer>;
 
 /// Resolves the running build's local server and its service. Resolution reads paths only: it
-/// sets up, installs, starts, and reads credentials for nothing.
+/// sets up, installs, starts, and connects to nothing.
 pub(super) fn offered_local_server() -> OfferedLocalServer {
     let identity = ApplicationIdentity::current().directory_name();
     let service = match Service::for_identity(identity) {
@@ -176,11 +170,11 @@ pub(super) fn offered_local_server() -> OfferedLocalServer {
 /// The step a person can take from the row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LocalServerAction {
-    /// Authenticates with the saved pairing.
+    /// Connects using owning-account authority.
     Check,
-    /// Sets up the server's identity and this device's pairing, then starts the server.
+    /// Sets up the server's identity, then starts the server.
     SetUp,
-    /// Starts the paired server.
+    /// Starts the server.
     Start,
 }
 
@@ -247,8 +241,7 @@ pub(super) struct ServerSurfaces {
 }
 
 impl ServerSurfaces {
-    const SHARED_HOLDS: &'static str = "A Workspace Window is presenting this server's Workspaces. One device holds one \
-         connection per Pane.";
+    const SHARED_HOLDS: &'static str = "A Workspace Window is presenting this server's Workspaces. SpaceTerm presents each server Pane in one window at a time.";
     const DEVELOPMENT_PANE_HOLDS: &'static str = "The Development Pane window is presenting a Pane this server owns. Close it to present \
          this server's Workspaces instead.";
 
@@ -353,10 +346,7 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
             "settings-local-server-state-working",
             guidance(match action {
                 Action::Check => "Connecting to the server…",
-                Action::SetUp => {
-                    "Setting up the server and pairing this device. The system may ask you to \
-                     allow access to its secure storage."
-                }
+                Action::SetUp => "Setting up and starting the server…",
                 Action::Start => "Starting the server…",
             }),
             Some(action),
@@ -367,7 +357,7 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
             "settings-local-server-state-connected",
             (
                 SharedString::from(format!(
-                    "This device is paired and authenticated. Protocol version {}.",
+                    "Connected to the server for your account. Protocol version {}.",
                     connection.protocol_major
                 )),
                 CaptionTone::Guidance,
@@ -378,13 +368,12 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
         LocalServerStatus::Failed(error) => {
             let (state, state_selector, action) = failure(error);
             let explanation = match error {
-                ServerError::NotPaired => guidance(
-                    "Set Up creates a server for your account, pairs this device with it, saves \
-                     the device's credential in the system's secure storage, and starts the \
-                     server.",
+                ServerError::NotSetUp => guidance(
+                    "Set Up creates a server for your account and starts it. Only programs \
+                     running as your account can connect to it.",
                 ),
                 ServerError::NotRunning => {
-                    guidance("This device is paired. Start the server to connect.")
+                    guidance("The server is set up but not running. Start it to connect.")
                 }
                 // A deliberate Stop is a state the person chose, not a fault.
                 ServerError::Stopped => guidance(STOPPED_GUIDANCE),
@@ -419,9 +408,9 @@ fn failure(error: ServerError) -> (&'static str, &'static str, Option<LocalServe
     use LocalServerAction as Action;
 
     match error {
-        ServerError::NotPaired => (
+        ServerError::NotSetUp => (
             "Not Set Up",
-            "settings-local-server-state-not-paired",
+            "settings-local-server-state-not-set-up",
             Some(Action::SetUp),
         ),
         ServerError::NotRunning => (
@@ -444,9 +433,7 @@ fn failure(error: ServerError) -> (&'static str, &'static str, Option<LocalServe
         ),
         // Unreadable or unsafe storage and a refused or incompatible server are never repaired by
         // setting up again, so the row offers only another check.
-        ServerError::CredentialUnavailable
-        | ServerError::StorageUnavailable
-        | ServerError::ServiceUnavailable => (
+        ServerError::StorageUnavailable | ServerError::ServiceUnavailable => (
             "Unavailable",
             "settings-local-server-state-unavailable",
             Some(Action::Check),
@@ -464,6 +451,11 @@ fn failure(error: ServerError) -> (&'static str, &'static str, Option<LocalServe
         ServerError::IncompatibleProtocol => (
             "Incompatible",
             "settings-local-server-state-incompatible",
+            Some(Action::Check),
+        ),
+        ServerError::IncompatibleState => (
+            "Incompatible State",
+            "settings-local-server-state-incompatible-state",
             Some(Action::Check),
         ),
         ServerError::Protocol => (
@@ -748,13 +740,13 @@ impl ServiceConfirmation {
                 },
                 detail: match startup {
                     ServiceStartup::AtLogin => {
-                        "It no longer starts when you log in. Workspaces, paired devices, and \
+                        "It no longer starts when you log in. Workspaces and \
                          verified server installations are kept, so you can install it again."
                     }
                     // Lingering is account policy other services may rely on, so it stays on.
                     ServiceStartup::AtBoot => {
-                        "It no longer starts when the computer starts. Workspaces, paired \
-                         devices, and verified server installations are kept, so you can install \
+                        "It no longer starts when the computer starts. Workspaces and \
+                         verified server installations are kept, so you can install \
                          it again. Lingering stays on for your account, because other services \
                          may rely on it. To turn it off, run loginctl disable-linger."
                     }
@@ -1196,7 +1188,7 @@ impl ServerServiceRow {
 }
 
 impl SettingsWindow {
-    /// Checks the saved pairing as the section comes into view. A running action keeps its place.
+    /// Checks the connection as the section comes into view. A running action keeps its place.
     pub(super) fn check_local_server(&mut self, cx: &mut Context<Self>) {
         self.run_local_server(LocalServerAction::Check, cx);
     }

@@ -1,4 +1,4 @@
-//! Real-host reconnect check using native credentials and authenticated private IPC.
+//! Real-host reconnect check using account-local authority and authenticated private IPC.
 mod support;
 use spaceterm_server::{LocalServer, ServerError, pane::*};
 use std::{error::Error, time::Duration};

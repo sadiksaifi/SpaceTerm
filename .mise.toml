@@ -381,15 +381,15 @@ description = "Preview release notes for changes since the last release"
 run = "git-cliff --config cliff.toml --unreleased --offline --strip all"
 
 [tasks."server:test"]
-description = "Test local server authentication and private storage"
+description = "Test local server account admission and private storage"
 run = "cargo test --package spaceterm-server --package spaceterm-server-host --package spaceterm-directories --all-features --locked"
 
 [tasks."server:test:headless"]
-description = "Test the server without native client credential adapters"
+description = "Test the server without native credential adapters"
 run = "cargo test --package spaceterm-server --no-default-features --locked"
 
 [tasks."server:check"]
-description = "Check the local server and desktop credential adapters"
+description = "Check the local server and desktop account admission"
 run = [
     "cargo clippy --package spaceterm-server --all-targets --all-features --locked -- -D warnings",
     "cargo clippy --package spaceterm-server --all-targets --no-default-features --locked -- -D warnings",
@@ -405,12 +405,12 @@ run = "cargo build --package spaceterm-server-host --no-default-features --locke
 description = "Run the Development server explicitly in the foreground after local setup"
 run = "cargo run --package spaceterm-server-host --no-default-features --locked -- serve spaceterm-development"
 
-[tasks."server:pair"]
-description = "Explicitly set up, pair, start, and authenticate the local Development server"
+[tasks."server:setup"]
+description = "Explicitly set up, start, and connect to the local Development server"
 run = "cargo run --package spaceterm-server-host --features client --locked -- setup spaceterm-development"
 
 [tasks."server:status"]
-description = "Read native device credentials and authenticate the existing Development server"
+description = "Connect to the existing Development server"
 run = "cargo run --package spaceterm-server-host --features client --locked -- status spaceterm-development"
 
 [tasks."server:dependencies"]
@@ -426,7 +426,7 @@ description = "Verify persistent Development Pane ownership with real headless P
 run = "cargo test --package spaceterm --no-default-features --locked --lib runtime::server"
 
 [tasks."server:pane:smoke"]
-description = "Launch, disconnect, resume, and close the paired Development server's one Pane"
+description = "Launch, disconnect, resume, and close the account-local Development server's one Pane"
 run = "cargo run --package spaceterm-server-host --features client --example persistent_pane --locked"
 
 [tasks."server:pane:shutdown:smoke"]
@@ -434,34 +434,30 @@ description = "Verify authenticated Development server shutdown terminates its r
 run = "cargo run --package spaceterm-server-host --features client --example persistent_pane --locked -- --shutdown"
 
 [tasks."server:pane:takeover:smoke"]
-description = "Verify two paired Development clients transfer control through both protocol majors"
+description = "Verify two account-local Development clients transfer control with the initial protocol major"
 run = [
   "cargo run --package spaceterm-server-host --features client --example pane_takeover --locked -- 1",
-  "cargo run --package spaceterm-server-host --features client --example pane_takeover --locked -- 2",
 ]
 
 [tasks."server:input:smoke"]
-description = "Verify paired terminal input and native effects through both protocol majors on an idle server"
+description = "Verify account-local terminal input and native effects with the initial protocol major on an idle server"
 run = [
   "cargo build --package spaceterm-server-host --features client --examples --bins --locked",
   "cargo run --package spaceterm-server-host --features client --example terminal_input --locked -- 1",
-  "cargo run --package spaceterm-server-host --features client --example terminal_input --locked -- 2",
 ]
 
 [tasks."server:workspace:smoke"]
-description = "Exercise retained Development work through server kill and shutdown with both protocol majors"
+description = "Exercise retained Development work through server kill and shutdown with the initial protocol major"
 run = [
   "cargo build --package spaceterm-server-host --features client --examples --bins --locked",
   "cargo run --package spaceterm-server-host --features client --example restored_workspace --locked -- 1",
-  "cargo run --package spaceterm-server-host --features client --example restored_workspace --locked -- 2",
 ]
 
 [tasks."server:shared:smoke"]
-description = "Exercise shared edits, independent Pane control, lost outcomes and restart through both protocol majors"
+description = "Exercise shared edits, independent Pane control, lost outcomes and restart with the initial protocol major"
 run = [
   "cargo build --package spaceterm-server-host --features client --examples --bins --locked",
   "cargo run --package spaceterm-server-host --features client --example shared_workspaces --locked -- 1",
-  "cargo run --package spaceterm-server-host --features client --example shared_workspaces --locked -- 2",
 ]
 
 [tasks."server:shared:desktop:test"]
@@ -469,24 +465,26 @@ description = "Test shared Workspace integration and server Pane presentation in
 run = "cargo test --package spaceterm --lib --all-features --locked -- shared server_pane"
 
 [tasks."server:worktree:smoke"]
-description = "Exercise owning-server Worktree writes and interrupted originals on both protocol majors"
+description = "Exercise owning-server Worktree writes and interrupted originals with the initial protocol major"
 run = [
   "cargo build --package spaceterm-server-host --features client --example worktree_writes --bins --locked",
   "cargo run --package spaceterm-server-host --features client --example worktree_writes --locked -- 1",
-  "cargo run --package spaceterm-server-host --features client --example worktree_writes --locked -- 2",
 ]
 
 [tasks."server:repository:smoke"]
-description = "Read owning-server Git facts and external Worktrees through two clients on both protocol majors"
+description = "Read owning-server Git facts and external Worktrees through two clients with the initial protocol major"
 run = [
   "cargo build --package spaceterm-server-host --features client --example repository_reads --bins --locked",
   "cargo run --package spaceterm-server-host --features client --example repository_reads --locked -- 1",
-  "cargo run --package spaceterm-server-host --features client --example repository_reads --locked -- 2",
 ]
 
 [tasks."server:test:host"]
 description = "Test the headless executable's build isolation"
 run = "cargo test --package spaceterm-server-host --no-default-features --locked"
+
+[tasks."server:admission:host"]
+description = "Observe refusal of a real other-account peer without sending requests"
+run = "cargo test --package spaceterm-server --locked --lib host::tests::refuses_a_real_other_account_peer_without_sending_protocol_bytes -- --ignored --exact"
 
 [tasks."server:service"]
 description = "Explicitly control this build's account server service"
@@ -512,7 +510,7 @@ run = [
 ]
 
 [tasks."server:graphics:transport:test"]
-description = "Test authenticated graphics transfers and slow readers on both protocol majors with fixture identities"
+description = "Test authenticated graphics transfers and slow readers with the initial protocol major with fixture identities"
 run = "cargo test --package spaceterm-server --lib --features client --locked"
 
 [tasks."server:directory:build"]
@@ -520,9 +518,9 @@ description = "Build the server directory-recovery check before native code sign
 run = "cargo build --package spaceterm-server-host --features client --example directory_recovery --bin spaceterm-server --locked"
 
 [tasks."server:directory:smoke"]
-description = "Exercise directory recovery on an idle Development server using native credentials"
+description = "Exercise directory recovery on an idle Development server without native credential adapters"
 usage = '''
-arg "[major]" default="2" help="Protocol major 1 or 2"
+arg "[major]" default="1" help="Initial protocol major (1)"
 flag "--prepare-desktop" help="Leave the test Workspace unavailable for a real desktop exercise"
 flag "--cleanup-exercise" help="Remove only the retained directory-recovery test Workspace"
 '''
@@ -534,7 +532,7 @@ run = [
 [tasks."server:directory:run"]
 description = "Run a built directory-recovery check without replacing its code signature"
 usage = '''
-arg "[major]" default="2" help="Protocol major 1 or 2"
+arg "[major]" default="1" help="Initial protocol major (1)"
 flag "--prepare-desktop" help="Leave the test Workspace unavailable for a real desktop exercise"
 flag "--cleanup-exercise" help="Remove only the retained directory-recovery test Workspace"
 '''

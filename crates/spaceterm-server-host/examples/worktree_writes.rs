@@ -1,4 +1,4 @@
-//! Authenticated Git writes, stale confirmations, original-operation recovery and Stop on both majors.
+//! Authenticated Git writes, stale confirmations, original-operation recovery and Stop on the initial major.
 #[path = "support/lifecycle.rs"]
 #[expect(dead_code, reason = "This exercise uses shared hierarchy connections.")]
 mod lifecycle;
@@ -86,15 +86,15 @@ fn review(c: &mut PaneConnection, root: &Path, path: &Path) -> Result<Operation,
     })
 }
 fn main() -> Result<(), Box<dyn Error>> {
-    let major = std::env::args().nth(1).unwrap_or("2".into()).parse()?;
+    let major = std::env::args().nth(1).unwrap_or("1".into()).parse()?;
     let a = LocalServer::for_development_client("worktree-writes-a", major)?;
     let b = LocalServer::for_development_client("worktree-writes-b", major)?;
     eprintln!("Worktree smoke: idle guard");
     lifecycle::require_idle(&a)?;
     lifecycle::prepare_companion()?;
-    eprintln!("Worktree smoke: first pairing");
+    eprintln!("Worktree smoke: first client setup");
     a.setup_and_start()?;
-    eprintln!("Worktree smoke: second pairing");
+    eprintln!("Worktree smoke: second client setup");
     b.setup_and_start()?;
     eprintln!("Worktree smoke: stop setup server");
     connect(&a)?.exchange(&Request::Shutdown)?;

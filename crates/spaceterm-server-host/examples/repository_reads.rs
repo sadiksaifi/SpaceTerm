@@ -16,7 +16,7 @@ use std::{error::Error, time::Duration};
 mod repository;
 use repository::*;
 fn main() -> Result<(), Box<dyn Error>> {
-    let major = std::env::args().nth(1).unwrap_or("2".into()).parse()?;
+    let major = std::env::args().nth(1).unwrap_or("1".into()).parse()?;
     let a = LocalServer::for_development_client("repository-smoke-a", major)?;
     let b = LocalServer::for_development_client("repository-smoke-b", major)?;
     lifecycle::require_idle(&a)?;

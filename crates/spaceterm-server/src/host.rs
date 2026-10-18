@@ -46,6 +46,7 @@ pub(crate) fn install_shutdown_signals() -> Result<(), ServerError> {
 
 #[derive(Clone)]
 pub(crate) struct Paths {
+    pub identity: String,
     pub data: PathBuf,
     pub runtime: PathBuf,
 }
@@ -80,6 +81,7 @@ impl Paths {
             ServerDirectories::for_account(&home, unsafe { libc::geteuid() }, identity)
                 .map_err(|_| ServerError::StorageUnavailable)?;
         Ok(Self {
+            identity: identity.to_owned(),
             data: directories.data,
             runtime: directories.runtime,
         })
@@ -131,14 +133,22 @@ fn check_account(user: libc::uid_t) -> Result<(), ServerError> {
 }
 
 pub(crate) fn connect(paths: &Paths) -> Result<UnixStream, ServerError> {
-    Directory::open(&paths.runtime, false).map_err(|error| {
-        if error == ServerError::NotPaired {
+    let directory = Directory::open(&paths.runtime, false).map_err(|error| {
+        if error == ServerError::NotSetUp {
             ServerError::NotRunning
         } else {
             error
         }
     })?;
+    directory.verify_path(&paths.runtime)?;
+    let endpoint = directory
+        .socket_identity(c"s")?
+        .ok_or(ServerError::NotRunning)?;
     let stream = connect_socket(&paths.socket()).map_err(|_| ServerError::NotRunning)?;
+    directory.verify_path(&paths.runtime)?;
+    if directory.socket_identity(c"s")? != Some(endpoint) {
+        return Err(ServerError::UnsafeStorage);
+    }
     check_peer(&stream)?;
     Ok(stream)
 }
@@ -246,9 +256,6 @@ pub(crate) fn serve_runtime(
             continue;
         }
         let Ok(record) = data.read() else { continue };
-        let Ok(key) = protocol::key(&record.seed) else {
-            continue;
-        };
         let panes = Arc::clone(&panes);
         let workers = Arc::clone(&workers);
         let stopping = Arc::clone(&stopping);
@@ -259,7 +266,7 @@ pub(crate) fn serve_runtime(
         let handle = std::thread::spawn(move || {
             let _ = (|| -> Result<(), ServerError> {
                 let (_, device) =
-                    protocol::authenticate_server_device(&mut stream, &key, &record.paired)?;
+                    protocol::admit_server(&mut stream, &record.server, &service_paths.identity)?;
                 let connection = protocol::random()?;
                 let result = (|| {
                     loop {
@@ -352,6 +359,16 @@ mod tests {
         check_peer(&client).unwrap();
         check_peer(&server).unwrap();
     }
+    #[test]
+    #[ignore = "explicit real-host root-owned peer observation; sends no request bytes"]
+    fn refuses_a_real_other_account_peer_without_sending_protocol_bytes() {
+        #[cfg(target_os = "macos")]
+        let endpoint = "/var/run/usbmuxd";
+        #[cfg(target_os = "linux")]
+        let endpoint = "/run/dbus/system_bus_socket";
+        let stream = UnixStream::connect(endpoint).expect("root-owned host listener required");
+        assert_eq!(check_peer(&stream), Err(ServerError::AuthenticationRefused));
+    }
 }
 
 #[cfg(test)]
@@ -369,7 +386,7 @@ mod startup_tests {
     struct Fixture {
         root: PathBuf,
         paths: Paths,
-        device: ring::signature::Ed25519KeyPair,
+        device: [u8; 32],
         pin: [u8; 32],
     }
     impl Fixture {
@@ -380,16 +397,15 @@ mod startup_tests {
                 .unwrap()
                 .join(format!("st530-{nonce:x}"));
             let paths = Paths {
+                identity: "spaceterm-development".into(),
                 data: root.join("d"),
                 runtime: root.join("r"),
             };
             let data = Directory::open(&paths.data, true).unwrap();
             let _lock = data.lock("setup.lock", false).unwrap();
-            let device = protocol::key(&protocol::random().unwrap()).unwrap();
-            let mut record = data.read_or_create().unwrap();
-            let pin = protocol::public(&protocol::key(&record.seed).unwrap());
-            record.paired.push(protocol::public(&device));
-            data.write(&record).unwrap();
+            let device = protocol::random().unwrap();
+            let record = data.read_or_create().unwrap();
+            let pin = record.server;
             Directory::open(&paths.runtime, true).unwrap();
             Self {
                 root,
@@ -427,6 +443,22 @@ mod startup_tests {
             self.start_test(CHILD_TEST, false)
         }
     }
+    #[test]
+    fn client_refuses_a_symlink_endpoint_without_contacting_its_listener() {
+        let fixture = Fixture::new();
+        let target = fixture.paths.runtime.join("other");
+        let listener = UnixListener::bind(&target).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        std::os::unix::fs::symlink(&target, fixture.paths.socket()).unwrap();
+        assert!(matches!(
+            connect(&fixture.paths),
+            Err(ServerError::UnsafeStorage)
+        ));
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+        assert!(fixture.paths.socket().is_symlink());
+    }
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
@@ -445,6 +477,7 @@ mod startup_tests {
     fn server_start_child() {
         let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
         let result = serve(&Paths {
+            identity: "spaceterm-development".into(),
             data: root.join("d"),
             runtime: root.join("r"),
         });
@@ -457,6 +490,7 @@ mod startup_tests {
         install_shutdown_signals().unwrap();
         let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
         serve(&Paths {
+            identity: "spaceterm-development".into(),
             data: root.join("d"),
             runtime: root.join("r"),
         })
@@ -477,7 +511,14 @@ mod startup_tests {
                 Err(_) => panic!("server did not start"),
             }
         };
-        protocol::authenticate_client(&mut stream, &fixture.device, &fixture.pin, &[2, 1]).unwrap();
+        protocol::admit_client(
+            &mut stream,
+            &fixture.device,
+            &fixture.pin,
+            "spaceterm-development",
+            &[1],
+        )
+        .unwrap();
         let mut idle = UnixStream::connect(fixture.paths.socket()).unwrap();
         // SAFETY: the guard owns this live child process.
         assert_eq!(
@@ -538,6 +579,7 @@ mod startup_tests {
         let late_requests = Arc::new(AtomicUsize::new(0));
         serve_with_panes(
             &Paths {
+                identity: "spaceterm-development".into(),
                 data: root.join("d"),
                 runtime: root.join("r"),
             },
@@ -615,6 +657,7 @@ mod startup_tests {
         let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("startup fixture root"));
         serve_with_panes(
             &Paths {
+                identity: "spaceterm-development".into(),
                 data: root.join("d"),
                 runtime: root.join("r"),
             },
@@ -627,7 +670,7 @@ mod startup_tests {
     #[test]
     fn a_client_that_stops_reading_resource_chunks_does_not_stall_another_client() {
         use crate::pane::{Lease, PaneConnection, Reply, Request};
-        for (major, graphics) in [(1, false), (2, false), (1, true), (2, true)] {
+        for (major, graphics) in [(1, false), (1, true)] {
             let fixture = Fixture::new();
             let _child = fixture.start_test("host::startup_tests::shared_transport_child", false);
             let deadline = Instant::now() + Duration::from_secs(3);
@@ -647,8 +690,14 @@ mod startup_tests {
                     Err(error) => panic!("test listener unavailable: {error}"),
                 }
             };
-            protocol::authenticate_client(&mut slow, &fixture.device, &fixture.pin, &[major])
-                .unwrap();
+            protocol::admit_client(
+                &mut slow,
+                &fixture.device,
+                &fixture.pin,
+                "spaceterm-development",
+                &[major],
+            )
+            .unwrap();
             let lease = Lease {
                 server: [1; 32],
                 session: [2; 32],
@@ -678,8 +727,14 @@ mod startup_tests {
                     .unwrap();
             }
             let mut stream = UnixStream::connect(fixture.paths.socket()).unwrap();
-            protocol::authenticate_client(&mut stream, &fixture.device, &fixture.pin, &[major])
-                .unwrap();
+            protocol::admit_client(
+                &mut stream,
+                &fixture.device,
+                &fixture.pin,
+                "spaceterm-development",
+                &[major],
+            )
+            .unwrap();
             let mut current = PaneConnection::negotiate(stream).unwrap();
             let started = Instant::now();
             for _ in 0..16 {
@@ -699,18 +754,14 @@ mod startup_tests {
     #[test]
     fn two_desktops_keep_all_supported_panes_without_exhausting_management_admission() {
         use crate::pane::{PaneConnection, PaneSize, Reply, Request, SharedPaneConnection};
-        for major in [1, 2] {
+        for major in [1] {
             let fixture = Fixture::new();
-            let other = protocol::key(&protocol::random().unwrap()).unwrap();
-            let data = Directory::open(&fixture.paths.data, false).unwrap();
-            let mut record = data.read().unwrap();
-            record.paired.push(protocol::public(&other));
-            data.write(&record).unwrap();
+            let other = protocol::random().unwrap();
             let _child = fixture.start_test("host::startup_tests::shared_transport_child", false);
             let deadline = Instant::now() + Duration::from_secs(3);
             let first = SharedPaneConnection::default();
             let second = SharedPaneConnection::default();
-            let open = |device: &ring::signature::Ed25519KeyPair| {
+            let open = |device: &[u8; 32]| {
                 let mut stream = loop {
                     match UnixStream::connect(fixture.paths.socket()) {
                         Ok(stream) => break stream,
@@ -726,7 +777,13 @@ mod startup_tests {
                         Err(error) => panic!("shared transport listener unavailable: {error}"),
                     }
                 };
-                protocol::authenticate_client(&mut stream, device, &fixture.pin, &[major])?;
+                protocol::admit_client(
+                    &mut stream,
+                    device,
+                    &fixture.pin,
+                    "spaceterm-development",
+                    &[major],
+                )?;
                 PaneConnection::negotiate(stream)
             };
             let mut retained = Vec::new();
@@ -791,8 +848,14 @@ mod startup_tests {
                 Err(_) => panic!("server did not start"),
             }
         };
-        protocol::authenticate_client(&mut pending, &fixture.device, &fixture.pin, &[2, 1])
-            .unwrap();
+        protocol::admit_client(
+            &mut pending,
+            &fixture.device,
+            &fixture.pin,
+            "spaceterm-development",
+            &[1],
+        )
+        .unwrap();
         let body = serde_json::to_vec(&Request::Attach {
             create: true,
             size: PaneSize {
@@ -811,8 +874,14 @@ mod startup_tests {
         // The admitted worker waits on the incomplete frame while another connection shuts down.
         std::thread::sleep(Duration::from_millis(50));
         let mut shutdown = UnixStream::connect(fixture.paths.socket()).unwrap();
-        protocol::authenticate_client(&mut shutdown, &fixture.device, &fixture.pin, &[2, 1])
-            .unwrap();
+        protocol::admit_client(
+            &mut shutdown,
+            &fixture.device,
+            &fixture.pin,
+            "spaceterm-development",
+            &[1],
+        )
+        .unwrap();
         let mut wire = protocol::Wire::terminal(&mut shutdown).unwrap();
         wire.write(&Request::Shutdown).unwrap();
         assert!(matches!(wire.read::<Reply>().unwrap(), Reply::Closed));
@@ -887,9 +956,15 @@ mod startup_tests {
             }
         };
         assert_eq!(
-            protocol::authenticate_client(&mut stream, &fixture.device, &fixture.pin, &[2, 1]),
+            protocol::admit_client(
+                &mut stream,
+                &fixture.device,
+                &fixture.pin,
+                "spaceterm-development",
+                &[1]
+            ),
             Ok(crate::AuthenticatedStatus {
-                protocol_major: 2,
+                protocol_major: 1,
                 development_pane: false
             })
         );

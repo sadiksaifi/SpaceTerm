@@ -1,4 +1,4 @@
-//! Real-host server restart exercise. Requires an idle Development server and native credentials.
+//! Real-host server restart exercise. Requires an idle Development server and account-local authority.
 #[path = "support/lifecycle.rs"]
 mod lifecycle;
 mod support;
@@ -19,7 +19,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         )
         .map_err(Into::into);
     }
-    let major = std::env::args().nth(1).unwrap_or("2".into()).parse()?;
+    let major = std::env::args().nth(1).unwrap_or("1".into()).parse()?;
     let name = std::env::var("SPACETERM_DEVELOPMENT_CLIENT").unwrap_or("restore-smoke".into());
     let client = LocalServer::for_development_client(&name, major)?;
     require_idle(&client)?;
@@ -113,7 +113,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         connection
             .exchange(&Request::Poll { lease: original })
             .err(),
-        Some(ServerError::StaleControl)
+        // The shared host routes by server and Session identity. A prior boot's Session
+        // no longer exists, so it refuses the request before reaching Pane control.
+        Some(ServerError::SessionUnavailable)
     );
     connection.exchange(&Request::Shutdown)?;
     host.0.wait()?;
@@ -128,7 +130,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     connection.exchange(&Request::Shutdown)?;
     host.0.wait()?;
     println!(
-        "Protocol {major}: kill/reopen and shutdown/reopen retained Workspace, Tab, Pane and pairing; reconnect stayed dormant; explicit first use started one fresh shell in the confirmed directory with measured dimensions; old leases were refused."
+        "Protocol {major}: kill/reopen and shutdown/reopen retained Workspace, Tab, Pane and client identity; reconnect stayed dormant; explicit first use started one fresh shell in the confirmed directory with measured dimensions; old leases were refused."
     );
     Ok(())
 }

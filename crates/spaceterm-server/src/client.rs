@@ -10,18 +10,13 @@ use std::{
     process::{Command, Stdio},
     time::{Duration, Instant},
 };
-use zeroize::{Zeroize, Zeroizing};
 
+/// A stable presentation identity. Possession grants no connection authority.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Credential {
-    seed: [u8; 32],
-    pin: [u8; 32],
-}
-impl Drop for Credential {
-    fn drop(&mut self) {
-        self.seed.zeroize();
-    }
+struct ClientIdentity {
+    format: String,
+    client: [u8; 32],
 }
 
 /// Resolving this handle never reads or writes storage and never starts a process.
@@ -30,122 +25,96 @@ pub struct LocalServer {
     paths: Paths,
     identity: String,
     account: String,
-    versions: Vec<u16>,
     shared_pane: std::sync::Arc<crate::pane::SharedPaneConnection>,
     attachments:
         std::sync::Arc<std::sync::OnceLock<Result<crate::attachments::Attachments, ServerError>>>,
 }
 impl LocalServer {
+    fn client_directory(&self) -> Result<Directory, ServerError> {
+        Directory::open(&self.paths.data.join("clients").join(&self.account), true)
+    }
+    fn client_id(&self) -> Result<[u8; 32], ServerError> {
+        let directory = self.client_directory()?;
+        let _lock = directory.lock("identity.lock", false)?;
+        if let Some(record) = directory.read_json::<ClientIdentity>("client.json")? {
+            if record.format != "account-local-1" || record.client == [0; 32] {
+                return Err(ServerError::UnsafeStorage);
+            }
+            return Ok(record.client);
+        }
+        let client = protocol::random()?;
+        directory.write_json(
+            c"client.json",
+            &ClientIdentity {
+                format: "account-local-1".into(),
+                client,
+            },
+        )?;
+        Ok(client)
+    }
+    fn server_id(&self) -> Result<[u8; 32], ServerError> {
+        Ok(Directory::open(&self.paths.data, false)?.read()?.server)
+    }
     /// One durable attachment writer shared by the inventory and all Pane subscriptions.
     pub fn attachments(&self) -> Result<crate::attachments::Attachments, ServerError> {
         self.attachments
             .get_or_init(|| {
-                let credential = self.credential()?.ok_or(ServerError::NotPaired)?;
-                let directory =
-                    Directory::open(&self.paths.data.join("clients").join(&self.account), true)?;
                 crate::attachments::Attachments::open(
-                    directory,
-                    credential.pin,
-                    protocol::public(&protocol::key(&credential.seed)?),
+                    self.client_directory()?,
+                    self.server_id()?,
+                    self.client_id()?,
                 )
             })
             .clone()
     }
-
-    /// A single worker owns the journal lock for this exact native device credential and pin.
+    /// One journal writer for this stable client and original server identity.
     pub fn shared_journal(&self) -> Result<crate::hierarchy::ClientJournal, ServerError> {
-        let credential = self.credential()?.ok_or(ServerError::NotPaired)?;
-        let directory =
-            Directory::open(&self.paths.data.join("clients").join(&self.account), true)?;
         crate::hierarchy::ClientJournal::open(
-            directory,
-            credential.pin,
-            protocol::public(&protocol::key(&credential.seed)?),
+            self.client_directory()?,
+            self.server_id()?,
+            self.client_id()?,
         )
     }
-    /// Opens this paired client's private arrangement without contacting or starting the server.
+    /// Opens the private arrangement without contacting or starting the server.
     pub fn client_view_store(&self) -> Result<crate::client_view::ClientViewStore, ServerError> {
-        let credential = self.credential()?.ok_or(ServerError::NotPaired)?;
-        let directory =
-            Directory::open(&self.paths.data.join("clients").join(&self.account), true)?;
         crate::client_view::ClientViewStore::open(
-            directory,
-            credential.pin,
-            protocol::public(&protocol::key(&credential.seed)?),
+            self.client_directory()?,
+            self.server_id()?,
+            self.client_id()?,
         )
     }
     pub fn for_identity(directory_name: &str) -> Result<Self, ServerError> {
-        // Explicit test clients use native credential storage and local pairing in every
-        // application identity, never a fallback secret file.
-        let mut account = "desktop".to_owned();
-        let mut versions = vec![2, 1];
-        if let Some(client) = std::env::var_os("SPACETERM_DEVELOPMENT_CLIENT") {
-            let client = client.to_str().ok_or(ServerError::Unsupported)?;
-            account = development_account(client)?;
-        }
-        if let Some(major) = std::env::var_os("SPACETERM_DEVELOPMENT_PROTOCOL_MAJOR") {
-            versions = match major.to_str() {
-                Some("1") => vec![1],
-                Some("2") => vec![2],
-                _ => return Err(ServerError::IncompatibleProtocol),
-            };
-        }
+        let account = match std::env::var_os("SPACETERM_DEVELOPMENT_CLIENT") {
+            Some(name) => development_account(name.to_str().ok_or(ServerError::Unsupported)?)?,
+            None => "desktop".to_owned(),
+        };
         Ok(Self {
             paths: Paths::for_identity(directory_name)?,
             identity: directory_name.to_owned(),
             account,
-            versions,
             shared_pane: std::sync::Arc::default(),
             attachments: std::sync::Arc::default(),
         })
     }
-    /// Independent Development desktop identity, retained only in native credential storage.
+    /// An independent named desktop with a retained nonsecret identity.
     pub fn for_development_client(name: &str, protocol_major: u16) -> Result<Self, ServerError> {
+        if protocol_major != protocol::MAJOR {
+            return Err(ServerError::IncompatibleProtocol);
+        }
         let mut server = Self::for_identity("spaceterm-development")?;
         server.account = development_account(name)?;
-        server.versions = match protocol_major {
-            1 | 2 => vec![protocol_major],
-            _ => return Err(ServerError::IncompatibleProtocol),
-        };
         Ok(server)
     }
-    fn entry(&self) -> Result<keyring::Entry, ServerError> {
-        // Explicit native builders exclude keyring's mock backend even when target features change.
-        #[cfg(target_os = "macos")]
-        let builder = keyring::macos::default_credential_builder();
-        #[cfg(target_os = "linux")]
-        let builder = keyring::secret_service::default_credential_builder();
-        let credential = builder
-            .build(
-                None,
-                &format!("io.github.sadiksaifi.{}.local-server", self.identity),
-                &self.account,
-            )
-            .map_err(|_| ServerError::CredentialUnavailable)?;
-        Ok(keyring::Entry::new_with_credential(credential))
-    }
-    fn credential(&self) -> Result<Option<Credential>, ServerError> {
-        match self.entry()?.get_secret() {
-            Ok(bytes) => {
-                let bytes = Zeroizing::new(bytes);
-                serde_json::from_slice(&bytes)
-                    .map(Some)
-                    .map_err(|_| ServerError::CredentialUnavailable)
-            }
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(_) => Err(ServerError::CredentialUnavailable),
-        }
-    }
-    fn authenticate(&self, credential: &Credential) -> Result<AuthenticatedStatus, ServerError> {
+    fn authenticate(&self) -> Result<AuthenticatedStatus, ServerError> {
         let mut stream = host::connect(&self.paths)?;
-        let mut status = protocol::authenticate_client(
+        let mut status = protocol::admit_client(
             &mut stream,
-            &protocol::key(&credential.seed)?,
-            &credential.pin,
-            &self.versions,
+            &self.client_id()?,
+            &self.server_id()?,
+            &self.identity,
+            &[protocol::MAJOR],
         )?;
         let mut connection = crate::pane::PaneConnection::new(stream, false);
-        // The status-only server predates optional terminal operations and closes after proof.
         status.development_pane = matches!(
             connection.exchange(&crate::pane::Request::Capabilities),
             Ok(crate::pane::Reply::Capabilities {
@@ -155,33 +124,32 @@ impl LocalServer {
         );
         Ok(status)
     }
-
-    /// Authenticates a terminal transport without setup or implicit Start Server.
+    /// Admits a terminal transport using owning-account authority, without implicit Start.
     pub fn connect_pane(&self) -> Result<crate::pane::PaneConnection, ServerError> {
-        let credential = self.credential()?.ok_or(ServerError::NotPaired)?;
+        crate::service::check_start(&self.paths)?;
         let mut stream = host::connect(&self.paths)?;
-        protocol::authenticate_client(
+        protocol::admit_client(
             &mut stream,
-            &protocol::key(&credential.seed)?,
-            &credential.pin,
-            &self.versions,
+            &self.client_id()?,
+            &self.server_id()?,
+            &self.identity,
+            &[protocol::MAJOR],
         )?;
         crate::pane::PaneConnection::negotiate(stream)
     }
-    /// Multiplexes shared inventory and Pane requests on one authenticated transport.
-    /// Clones of this native client share its connection, but independent desktops do not.
+    /// Clones share a transport. Independent desktops retain distinct identities and views.
     pub fn connect_shared_pane(&self) -> Result<crate::pane::PaneConnection, ServerError> {
         self.shared_pane.connect(|| self.connect_pane())
     }
-    /// Reads the saved native credential and authenticates an existing server. Never starts it.
+    /// Checks an existing server. Never sets up storage or starts it.
     pub fn refresh(&self) -> Result<AuthenticatedStatus, ServerError> {
         crate::service::check_start(&self.paths)?;
-        self.authenticate(&self.credential()?.ok_or(ServerError::NotPaired)?)
+        self.server_id()?;
+        self.authenticate()
     }
-    /// Local owning-account authority is granted only by this explicit setup action.
     pub fn setup_and_start(&self) -> Result<AuthenticatedStatus, ServerError> {
         crate::service::check_start(&self.paths)?;
-        self.pair()?;
+        self.setup()?;
         if crate::service::Service::for_identity(&self.identity)?
             .status()?
             .installed
@@ -191,71 +159,18 @@ impl LocalServer {
         }
         self.start_temporary()
     }
-
-    /// Explicit local pairing, without starting a process or changing retained Stop.
-    pub fn pair(&self) -> Result<(), ServerError> {
-        // Locked or unavailable storage is refused before touching server identity.
-        self.credential()?;
+    /// Explicit first setup retains a nonsecret server identity. It never changes Stop intent.
+    pub fn setup(&self) -> Result<(), ServerError> {
         let data = Directory::open(&self.paths.data, true)?;
         let _setup = data.lock("setup.lock", false)?;
-        let existing = self.credential()?;
-        // A surviving native pin is evidence of an existing identity. Missing server storage
-        // must not silently replace it during repair.
-        let mut record = if existing.is_some() {
-            data.read().map_err(|error| {
-                if error == ServerError::NotPaired {
-                    ServerError::AuthenticationRefused
-                } else {
-                    error
-                }
-            })?
-        } else {
-            data.read_or_create()?
-        };
-        let pin = protocol::public(&protocol::key(&record.seed)?);
-        let credential = match existing {
-            Some(credential) if credential.pin == pin => credential,
-            Some(_) => return Err(ServerError::AuthenticationRefused),
-            None => {
-                let credential = Credential {
-                    seed: protocol::random()?,
-                    pin,
-                };
-                let bytes = Zeroizing::new(
-                    serde_json::to_vec(&credential)
-                        .map_err(|_| ServerError::CredentialUnavailable)?,
-                );
-                self.entry()?
-                    .set_secret(&bytes)
-                    .map_err(|_| ServerError::CredentialUnavailable)?;
-                // Require a successful native read before publishing paired-device authority.
-                let saved = self
-                    .credential()?
-                    .ok_or(ServerError::CredentialUnavailable)?;
-                if saved.seed != credential.seed || saved.pin != credential.pin {
-                    return Err(ServerError::CredentialUnavailable);
-                }
-                credential
-            }
-        };
-        let device = protocol::public(&protocol::key(&credential.seed)?);
-        if !record.paired.contains(&device) {
-            if record.paired.len() >= 64 {
-                return Err(ServerError::StorageUnavailable);
-            }
-            record.paired.push(device);
-            data.write(&record)?;
-        }
-        // Runtime restoration and directory publication use this same retained record.
-        // Release setup serialization before waiting for the server to admit a connection.
-        drop(_setup);
+        data.read_or_create()?;
+        self.client_id()?;
         Ok(())
     }
 
     fn start_temporary(&self) -> Result<AuthenticatedStatus, ServerError> {
         crate::service::check_start(&self.paths)?;
-        let credential = self.credential()?.ok_or(ServerError::NotPaired)?;
-        match self.authenticate(&credential) {
+        match self.authenticate() {
             Ok(status) => return Ok(status),
             Err(ServerError::NotRunning) => {}
             Err(error) => return Err(error),
@@ -289,7 +204,7 @@ impl LocalServer {
         });
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            match self.authenticate(&credential) {
+            match self.authenticate() {
                 Ok(status) => return Ok(status),
                 Err(ServerError::NotRunning) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(50))
@@ -309,4 +224,58 @@ fn development_account(name: &str) -> Result<String, ServerError> {
         return Err(ServerError::Unsupported);
     }
     Ok(format!("desktop-{name}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relaunch_keeps_each_nonsecret_identity_and_pending_original_bound_to_its_server() {
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "st-client-{}",
+            u128::from_be_bytes(protocol::random().unwrap()[..16].try_into().unwrap())
+        ));
+        let make = |name: &str| LocalServer {
+            paths: Paths {
+                identity: "spaceterm-development".into(),
+                data: root.join("data"),
+                runtime: root.join("runtime"),
+            },
+            identity: "spaceterm-development".into(),
+            account: name.into(),
+            shared_pane: std::sync::Arc::default(),
+            attachments: std::sync::Arc::default(),
+        };
+        let first = make("first");
+        let second = make("second");
+        assert!(!root.exists(), "construction cannot provision state");
+        first.setup().unwrap();
+        second.setup().unwrap();
+        let id = first.client_id().unwrap();
+        assert_ne!(id, second.client_id().unwrap());
+        let mutation = crate::hierarchy::Mutation::CreateWorkspace {
+            name: "Original".into(),
+        };
+        {
+            let mut journal = first.shared_journal().unwrap();
+            journal.submit(3, mutation.clone()).unwrap();
+        }
+        drop(first);
+        let relaunched = make("first");
+        assert_eq!(relaunched.client_id().unwrap(), id);
+        let journal = relaunched.shared_journal().unwrap();
+        assert_eq!(journal.pending().unwrap().mutation, mutation);
+        assert!(second.shared_journal().unwrap().pending().is_none());
+        drop(journal);
+        let directory = Directory::open(&root.join("data"), false).unwrap();
+        let mut record = directory.read().unwrap();
+        record.server = protocol::random().unwrap();
+        directory.write(&record).unwrap();
+        assert!(matches!(
+            relaunched.shared_journal(),
+            Err(ServerError::AuthenticationRefused)
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

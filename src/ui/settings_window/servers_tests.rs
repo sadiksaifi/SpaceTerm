@@ -37,15 +37,15 @@ const ROW_SELECTOR: &str = "settings-row-local-server";
 const SERVICE_ROW_SELECTOR: &str = "settings-row-server-service";
 
 const EVERY_ERROR: [ServerError; 19] = [
-    ServerError::NotPaired,
+    ServerError::NotSetUp,
     ServerError::ServiceUnavailable,
     ServerError::NotInstalled,
     ServerError::Stopped,
     ServerError::RuntimeUnavailable,
     ServerError::AuthorizationRequired,
     ServerError::NotRunning,
-    ServerError::CredentialUnavailable,
     ServerError::StorageUnavailable,
+    ServerError::IncompatibleState,
     ServerError::UnsafeStorage,
     ServerError::AuthenticationRefused,
     ServerError::IncompatibleProtocol,
@@ -168,7 +168,7 @@ fn alert_open(selector: &str, cx: &mut VisualTestContext) -> bool {
     cx.debug_bounds(modal_action(selector)).is_some()
 }
 
-/// Opens Settings on the Servers section with a service in `status`, behind a paired server.
+/// Opens Settings on the Servers section with a service in `status`, behind an account-local server.
 fn open_servers_with_service(
     status: Result<super::ServiceStatus, ServerError>,
     cx: &mut TestAppContext,
@@ -190,7 +190,7 @@ fn each_failure_offers_the_one_step_that_can_recover_from_it() {
     for error in EVERY_ERROR {
         let presented = present(LocalServerStatus::Failed(error));
         let expected = match error {
-            ServerError::NotPaired => Some(LocalServerAction::SetUp),
+            ServerError::NotSetUp => Some(LocalServerAction::SetUp),
             ServerError::NotRunning | ServerError::StartupFailed => Some(LocalServerAction::Start),
             // Only the service's explicit Start or Install reverses these, and only the service's
             // Start asks for startup authorization.
@@ -211,7 +211,7 @@ fn a_failure_needing_attention_reads_as_an_error_in_its_bounded_wording() {
         let presented = present(LocalServerStatus::Failed(error));
         match error {
             // These are steps in setup, not faults, so they read as guidance naming the step.
-            ServerError::NotPaired
+            ServerError::NotSetUp
             | ServerError::NotRunning
             | ServerError::Stopped
             | ServerError::NotInstalled
@@ -246,14 +246,14 @@ fn a_connection_names_only_its_protocol_version() {
     assert_eq!(presented.state, "Connected");
     assert_eq!(
         presented.explanation.as_ref(),
-        "This device is paired and authenticated. Protocol version 3."
+        "Connected to the server for your account. Protocol version 3."
     );
     assert_eq!(presented.action, Some(LocalServerAction::Check));
 }
 
 #[gpui::test]
 fn opening_settings_asks_the_local_server_nothing(cx: &mut TestAppContext) {
-    let server = ScriptedServer::new(Err(ServerError::NotPaired));
+    let server = ScriptedServer::new(Err(ServerError::NotSetUp));
     let (window, cx) = open_settings(offered(&server), cx);
 
     assert_eq!(
@@ -272,8 +272,8 @@ fn opening_settings_asks_the_local_server_nothing(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn presenting_servers_checks_the_pairing_without_setting_up(cx: &mut TestAppContext) {
-    let server = ScriptedServer::new(Err(ServerError::NotPaired));
+fn presenting_servers_checks_the_connection_without_setting_up(cx: &mut TestAppContext) {
+    let server = ScriptedServer::new(Err(ServerError::NotSetUp));
     let (window, cx) = open_settings(offered(&server), cx);
 
     click(NAVIGATION_SELECTOR, cx);
@@ -283,7 +283,7 @@ fn presenting_servers_checks_the_pairing_without_setting_up(cx: &mut TestAppCont
         "settings-section-servers",
         ROW_SELECTOR,
         CONTROL_SELECTOR,
-        "settings-local-server-state-not-paired",
+        "settings-local-server-state-not-set-up",
         SET_UP_SELECTOR,
     ] {
         assert!(rendered(selector, cx), "{selector} should render");
@@ -305,7 +305,7 @@ fn presenting_servers_checks_the_pairing_without_setting_up(cx: &mut TestAppCont
 
 #[gpui::test]
 fn set_up_runs_only_from_its_button_and_shows_the_authenticated_status(cx: &mut TestAppContext) {
-    let server = ScriptedServer::new(Err(ServerError::NotPaired));
+    let server = ScriptedServer::new(Err(ServerError::NotSetUp));
     server.answer_setup(Ok(connected(2)));
     let (window, cx) = open_settings(offered(&server), cx);
     click(NAVIGATION_SELECTOR, cx);
@@ -325,7 +325,7 @@ fn set_up_runs_only_from_its_button_and_shows_the_authenticated_status(cx: &mut 
 }
 
 #[gpui::test]
-fn a_paired_server_that_is_not_running_offers_start(cx: &mut TestAppContext) {
+fn a_set_up_server_that_is_not_running_offers_start(cx: &mut TestAppContext) {
     let server = ScriptedServer::new(Err(ServerError::NotRunning));
     server.answer_setup(Err(ServerError::StartupFailed));
     let (window, cx) = open_settings(offered(&server), cx);
@@ -359,7 +359,7 @@ fn a_refused_server_offers_only_another_check(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn one_action_runs_at_a_time(cx: &mut TestAppContext) {
-    let server = ScriptedServer::new(Err(ServerError::NotPaired));
+    let server = ScriptedServer::new(Err(ServerError::NotSetUp));
     let (window, cx) = open_settings(offered(&server), cx);
     click(NAVIGATION_SELECTOR, cx);
 
@@ -381,7 +381,7 @@ fn one_action_runs_at_a_time(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn the_progress_indicator_replaces_the_badge_while_an_action_runs(cx: &mut TestAppContext) {
-    let server = ScriptedServer::new(Err(ServerError::NotPaired));
+    let server = ScriptedServer::new(Err(ServerError::NotSetUp));
     let (window, cx) = open_settings(offered(&server), cx);
     click(NAVIGATION_SELECTOR, cx);
     assert!(!rendered("settings-local-server-progress-track", cx));
@@ -443,7 +443,7 @@ fn a_build_without_a_local_server_omits_the_servers_section(cx: &mut TestAppCont
     let (window, cx) = open_settings(None, cx);
 
     assert!(!rendered(NAVIGATION_SELECTOR, cx));
-    search(&window, "pair", cx);
+    search(&window, "account", cx);
     assert_ne!(
         window.read_with(cx, |settings, _| settings.active_section),
         SettingsSectionId::Servers
@@ -665,7 +665,7 @@ fn only_actions_that_end_sessions_or_remove_the_service_ask_first() {
 
 #[gpui::test]
 fn presenting_servers_reads_the_service_without_changing_it(cx: &mut TestAppContext) {
-    let server = ScriptedServer::new(Err(ServerError::NotPaired));
+    let server = ScriptedServer::new(Err(ServerError::NotSetUp));
     let service = ScriptedService::new(Ok(not_installed()));
     let (window, cx) = open_settings(offered_with_service(&server, &service), cx);
     assert!(service.calls().is_empty(), "opening Settings reads nothing");

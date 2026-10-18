@@ -11,7 +11,7 @@ fn run() -> Result<(), spaceterm_server::ServerError> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args == ["--help"] {
         println!(
-            "SpaceTerm Server\n\nserve IDENTITY\nservice-status IDENTITY\nservice-enable-linger IDENTITY\nservice-install IDENTITY RETAINED_INSTALLATION\nservice-start IDENTITY\nservice-stop IDENTITY\nservice-restart IDENTITY\nservice-uninstall IDENTITY\n\nService controls use this executable\'s compiled application identity. Stop and uninstall retain identity, pairings and Workspace organization."
+            "SpaceTerm Server\n\nserve IDENTITY\nservice-status IDENTITY\nservice-enable-linger IDENTITY\nservice-install IDENTITY RETAINED_INSTALLATION\nservice-start IDENTITY\nservice-stop IDENTITY\nservice-restart IDENTITY\nservice-uninstall IDENTITY\n\nService controls use this executable\'s compiled application identity. Stop and uninstall retain identity and Workspace organization."
         );
         return Ok(());
     }
@@ -104,7 +104,7 @@ fn run() -> Result<(), spaceterm_server::ServerError> {
             return Err(spaceterm_server::ServerError::Protocol);
         };
         println!(
-            "Authenticated local server; protocol {}.",
+            "Connected to the local server; protocol {}.",
             status.protocol_major
         );
         Ok(())

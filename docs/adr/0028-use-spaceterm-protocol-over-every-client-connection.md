@@ -1,11 +1,7 @@
 # Use SpaceTerm Protocol over every client connection
 
-Every SpaceTerm Client connection uses SpaceTerm Protocol. Private local endpoints, secure WebSocket connections, and optional SSH tunnels carry the same protocol, so the chosen route does not change client operations or authoritative server state.
+Every SpaceTerm Client connection uses SpaceTerm Protocol. Account-local IPC, non-PTY SSH account bridges and secure WebSocket connections carry the same operations and authoritative server state. Their admission authority follows [ADR 0027](0027-trust-paired-clients-equally.md).
 
-Every route requires pinned-server and paired-device authentication in both supported protocol major versions. Private local endpoints also check that the peer belongs to the owning account. SSH reachability alone does not authorize SpaceTerm operations. Network listeners stay disabled until explicitly retained remote-access policy enables them.
+Local IPC checks owning-account peers, private endpoints and build identity automatically. SSH uses OpenSSH host/account authority without SpaceTerm device enrollment. Direct-network/WSS access uses pinned-server trust and deliberately paired devices. Network listeners remain disabled until the person explicitly enables remote access.
 
-Users provide network reachability through their home or local network, VPN, tailnet, reachable public server address, or SSH route. SpaceTerm does not provision that network access or operate a relay service. A SpaceTerm-operated connectivity service would require a separate feature decision; it is outside this server architecture.
-
-SSH Bootstrap can detect and reuse a compatible SpaceTerm Server or install and start one when missing. An SSH tunnel can provide a route when a direct SpaceTerm connection is unavailable, including hosts reached through SSH jump hosts. Setup and tunneling also use SSH authentication.
-
-For the planned [server architecture](https://github.com/sadiksaifi/SpaceTerm/issues/520), this revises the complete SSH-removal direction explored in [issue #162](https://github.com/sadiksaifi/SpaceTerm/issues/162): SpaceTerm retains SSH for setup and optional tunneling, and SpaceTerm Servers replace SSH-based Remote Workspaces. [ADR 0003](0003-let-openssh-own-remote-authentication.md) remains relevant to desktop OpenSSH authentication and host verification in those roles.
+Users supply network reachability through their network, VPN, tailnet, reachable server address or SSH route. SpaceTerm operates no relay or connectivity service. SSH Connect and Bootstrap follow [ADR 0029](0029-pair-clients-automatically-during-ssh-bootstrap.md); the owning remote issues implement those routes. Existing desktop SSH behavior remains until that implementation replaces it.

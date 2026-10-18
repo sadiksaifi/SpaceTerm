@@ -145,7 +145,7 @@ impl Service {
         let parent = self.paths.data.join("installations");
         match Directory::open(&parent, false) {
             Ok(_) => {}
-            Err(ServerError::NotPaired) => return Ok(Vec::new()),
+            Err(ServerError::NotSetUp) => return Ok(Vec::new()),
             Err(error) => return Err(error),
         }
         let directory = owned_directory(&parent)?;
@@ -368,7 +368,7 @@ impl Service {
     fn read(&self) -> Result<Option<(Directory, State)>, ServerError> {
         let data = match Directory::open(&self.paths.data, false) {
             Ok(data) => data,
-            Err(ServerError::NotPaired) => return Ok(None),
+            Err(ServerError::NotSetUp) => return Ok(None),
             Err(error) => return Err(error),
         };
         Ok(Self::state(&data)?.map(|state| (data, state)))
@@ -423,7 +423,7 @@ impl Service {
     fn prove_quiescent(&self) -> Result<(), ServerError> {
         let directory = match Directory::open(&self.paths.runtime, false) {
             Ok(directory) => directory,
-            Err(ServerError::NotPaired) => return Ok(()),
+            Err(ServerError::NotSetUp) => return Ok(()),
             Err(error) => return Err(error),
         };
         let _instance = directory
@@ -448,7 +448,7 @@ impl Service {
 pub(crate) fn check_start(paths: &Paths) -> Result<(), ServerError> {
     let data = match Directory::open(&paths.data, false) {
         Ok(data) => data,
-        Err(ServerError::NotPaired) => return Ok(()),
+        Err(ServerError::NotSetUp) => return Ok(()),
         Err(error) => return Err(error),
     };
     if Service::state(&data)?.is_some_and(|v| v.stopped || !v.installed) {
@@ -462,7 +462,7 @@ pub(crate) fn check_runtime(paths: &Paths, supervised: bool) -> Result<(), Serve
     if !supervised {
         let data = match Directory::open(&paths.data, false) {
             Ok(data) => data,
-            Err(ServerError::NotPaired) => return Ok(()),
+            Err(ServerError::NotSetUp) => return Ok(()),
             Err(error) => return Err(error),
         };
         if Service::state(&data)?.is_some_and(|v| v.installed) {
@@ -741,6 +741,7 @@ mod tests {
                 u64::from_be_bytes(crate::protocol::random().unwrap()[..8].try_into().unwrap())
             ));
             let paths = Paths {
+                identity: "spaceterm-development".into(),
                 data: root.join("data"),
                 runtime: root.join("runtime"),
             };
@@ -789,11 +790,11 @@ mod tests {
             .unwrap()
             .read()
             .unwrap()
-            .seed;
+            .server;
         retain_stop(&fixture.paths).unwrap();
         assert_eq!(check_start(&fixture.paths), Err(ServerError::Stopped));
         let reopened = Directory::open(&fixture.paths.data, false).unwrap();
-        assert_eq!(reopened.read().unwrap().seed, seed);
+        assert_eq!(reopened.read().unwrap().server, seed);
         assert!(Service::state(&reopened).unwrap().unwrap().stopped);
     }
     #[cfg(feature = "client")]
