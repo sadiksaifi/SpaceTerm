@@ -519,7 +519,7 @@ mod tests {
         };
         let original = {
             let choices = Attachments::open(fixture.open(), [8; 32], [9; 32]).unwrap();
-            choices.reconcile(&inventory).unwrap();
+            choices.initialize(&inventory, Some([1; 32])).unwrap();
             let permit = choices.permit([3; 32]).unwrap();
             choices.detach([1; 32]).unwrap();
             assert!(!permit.active());

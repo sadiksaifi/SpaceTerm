@@ -103,37 +103,37 @@ impl Attachments {
         }))))
     }
     /// Prepare a new client's exact initial attachment, or its deliberately empty view.
-    /// Retained choices always win. Reconciliation never adds attachments after initialization.
+    /// Retained choices always win. Returns whether this call made the client's initial choice.
     pub fn initialize(
         &self,
         inventory: &Inventory,
         workspace: Option<Id>,
-    ) -> Result<(), ServerError> {
-        self.reconcile_initial(inventory, workspace)
+    ) -> Result<bool, ServerError> {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if state.choices.initialized {
+            drop(state);
+            self.reconcile(inventory)?;
+            return Ok(false);
+        }
+        let mut next = state.choices.clone();
+        if let Some(workspace) = workspace {
+            if !inventory.workspaces.iter().any(|w| w.id == workspace) {
+                return Err(ServerError::SessionUnavailable);
+            }
+            next.attach(workspace)?;
+        }
+        next.initialized = true;
+        state.save(next)?;
+        drop(state);
+        self.reconcile(inventory)?;
+        Ok(true)
     }
-    /// Preserve the existing Development adoption once. Later discoveries remain detached.
+    /// Forget attachments to Workspaces the server no longer has. Never attaches anything.
     pub fn reconcile(&self, inventory: &Inventory) -> Result<(), ServerError> {
-        self.reconcile_initial(inventory, inventory.workspaces.iter().map(|w| w.id))
-    }
-    fn reconcile_initial(
-        &self,
-        inventory: &Inventory,
-        initial: impl IntoIterator<Item = Id>,
-    ) -> Result<(), ServerError> {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let mut next = state.choices.clone();
-        if !next.initialized {
-            for workspace in initial {
-                if !inventory.workspaces.iter().any(|w| w.id == workspace) {
-                    return Err(ServerError::SessionUnavailable);
-                }
-                next.attach(workspace)?;
-            }
-            next.initialized = true;
-        } else {
-            next.attached
-                .retain(|a| inventory.workspaces.iter().any(|w| w.id == a.workspace));
-        }
+        next.attached
+            .retain(|a| inventory.workspaces.iter().any(|w| w.id == a.workspace));
         state.save(next)?;
         state.catalog = inventory
             .workspaces
@@ -306,7 +306,9 @@ impl AttachmentPermit {
     }
 }
 impl Choices {
+    /// An explicit attachment is itself the client's choice, so it completes initialization.
     fn attach(&mut self, workspace: Id) -> Result<(), ServerError> {
+        self.initialized = true;
         if !self.attached.iter().any(|a| a.workspace == workspace) {
             self.next_generation = self
                 .next_generation
@@ -396,6 +398,23 @@ mod tests {
         }
     }
     #[test]
+    fn reconciliation_attaches_nothing_until_one_explicit_initial_choice() {
+        let choices = Attachments::memory();
+        let inventory = inventory();
+        choices.reconcile(&inventory).unwrap();
+        assert!(!choices.is_attached([1; 32]));
+        assert!(choices.permit([3; 32]).is_none());
+        assert!(choices.initialize(&inventory, Some([1; 32])).unwrap());
+        assert!(choices.is_attached([1; 32]));
+        choices.detach([1; 32]).unwrap();
+        assert!(
+            !choices.initialize(&inventory, Some([1; 32])).unwrap(),
+            "a client chooses its initial view once"
+        );
+        assert!(!choices.is_attached([1; 32]));
+    }
+
+    #[test]
     fn initializing_an_empty_view_never_adopts_available_work_on_reconciliation() {
         let choices = Attachments::memory();
         let inventory = inventory();
@@ -483,7 +502,7 @@ mod tests {
     fn offline_detach_invalidates_old_presentations_and_retains_exact_release_after_reattach() {
         let choices = Attachments::memory();
         let inventory = inventory();
-        choices.reconcile(&inventory).unwrap();
+        choices.initialize(&inventory, Some([1; 32])).unwrap();
         let original = choices.permit([3; 32]).unwrap();
         choices.detach([1; 32]).unwrap();
         assert!(!original.active());
