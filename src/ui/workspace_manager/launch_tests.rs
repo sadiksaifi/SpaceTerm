@@ -117,6 +117,17 @@ fn launch_harness(
     answers: Vec<Result<LaunchOutcome, ServerError>>,
     cx: &mut TestAppContext,
 ) -> (LaunchHarness, &mut VisualTestContext) {
+    launch_harness_choosing(answers, [], cx)
+}
+
+/// A launch harness whose System Directory Selection answers `selections` in order.
+fn launch_harness_choosing(
+    answers: Vec<Result<LaunchOutcome, ServerError>>,
+    selections: impl IntoIterator<
+        Item = Result<Option<PathBuf>, crate::directory_selection::DirectoryChooserError>,
+    >,
+    cx: &mut TestAppContext,
+) -> (LaunchHarness, &mut VisualTestContext) {
     cx.update(crate::ui::init)
         .expect("UI initialization should succeed");
     let launch = Arc::new(ScriptedLaunch::default());
@@ -148,6 +159,7 @@ fn launch_harness(
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
                 local_server: Some(adapters),
+                directory_selection: Rc::new(ScriptedDirectorySelection::new(selections)),
                 ..workspace_adapters(test_remote_backend_factory())
             },
             SidebarState::Expanded,
@@ -301,4 +313,62 @@ fn removing_the_final_server_workspace_leaves_the_empty_view(cx: &mut TestAppCon
         "no desktop-owned Workspace replaces the server's"
     );
     assert!(cx.debug_bounds("empty-workspace").is_some());
+}
+
+#[gpui::test]
+fn new_workspace_asks_the_server_rather_than_creating_desktop_work(cx: &mut TestAppContext) {
+    use spaceterm_server::hierarchy::Mutation;
+
+    let (harness, cx) = launch_harness(vec![ready()], cx);
+    cx.run_until_parked();
+    sync(&harness, cx);
+    cx.dispatch_action(NewWorkspace);
+    cx.run_until_parked();
+
+    assert_eq!(
+        harness.edits.submitted(),
+        vec![Mutation::CreateWorkspace {
+            name: "Default (2)".to_owned(),
+            directory: None,
+        }],
+        "the next free default name, as desktop Workspaces were named"
+    );
+    assert_eq!(harness.workspace_count(cx), 1, "nothing appears before the server answers");
+}
+
+#[gpui::test]
+fn open_local_directory_creates_a_server_workspace_rooted_there(cx: &mut TestAppContext) {
+    use spaceterm_server::hierarchy::Mutation;
+
+    let chosen = std::env::temp_dir()
+        .canonicalize()
+        .unwrap()
+        .join(format!("st-launch-open-{}", std::process::id()));
+    std::fs::create_dir_all(&chosen).unwrap();
+    let (harness, cx) = launch_harness_choosing(vec![ready()], [Ok(Some(chosen.clone()))], cx);
+    cx.run_until_parked();
+    sync(&harness, cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.open_local_directory(String::new(), window, cx);
+            manager.choose_local_pin_directory(
+                PinTarget::NewLocalWorkspace {
+                    name: String::new(),
+                },
+                window,
+                cx,
+            );
+        });
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        harness.edits.submitted(),
+        vec![Mutation::CreateWorkspace {
+            name: chosen.file_name().unwrap().to_string_lossy().into_owned(),
+            directory: Some(chosen.clone()),
+        }]
+    );
+    assert_eq!(harness.workspace_count(cx), 1);
+    std::fs::remove_dir_all(chosen).unwrap();
 }

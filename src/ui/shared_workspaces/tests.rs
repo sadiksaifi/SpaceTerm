@@ -1249,7 +1249,7 @@ mod edits {
         edits.answer(Outcome::Conflict);
 
         assert_eq!(
-            shared.create_workspace("Logs".to_owned()),
+            shared.create_workspace("Logs".to_owned(), None),
             SharedSubmission::Refused(SharedRefusalReason::Pending),
             "a second submission must not erase a conflict before the window reads it"
         );
@@ -1259,7 +1259,7 @@ mod edits {
             SharedWorkspaceDraft::Name("Mine".to_owned())
         );
         assert_eq!(
-            shared.create_workspace("Logs".to_owned()),
+            shared.create_workspace("Logs".to_owned(), None),
             SharedSubmission::Submitted
         );
     }
@@ -1385,7 +1385,7 @@ mod edits {
     fn an_accepted_creation_this_client_asked_for_should_open_once() {
         let (mut shared, edits) = shared(Some(root_only()));
         bind(&mut shared, &root_only());
-        shared.create_workspace("Logs".to_owned());
+        shared.create_workspace("Logs".to_owned(), None);
         edits.answer(Outcome::Accepted { target: WORKSPACE });
 
         let accepted = shared.poll().accepted.expect("the creator opens its own");

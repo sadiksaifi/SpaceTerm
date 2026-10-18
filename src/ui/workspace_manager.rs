@@ -1153,6 +1153,9 @@ impl WorkspaceManager {
         let Ok(directory) = self.local_filesystem.revalidate_directory(&directory) else {
             return PinApplication::Failed;
         };
+        if self.launch.is_some() {
+            return self.open_shared_directory_workspace(directory, name, window, cx);
+        }
         let opened = match self
             .workspaces
             .local_workspace_pinned_to(&directory.identity())
@@ -1176,6 +1179,45 @@ impl WorkspaceManager {
             self.transient.end_pin();
         }
         PinApplication::from_applied(opened)
+    }
+
+    /// Opens a chosen directory as a Workspace the account server owns: the presented Workspace
+    /// already pinned there, or a new one whose first Pane starts there.
+    fn open_shared_directory_workspace(
+        &mut self,
+        directory: ValidatedLocalDirectory,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> PinApplication {
+        let existing = self.workspaces.iter().map(WorkspaceEntry::id).find(|id| {
+            self.shared
+                .as_ref()
+                .and_then(|shared| shared.server_workspace(*id))
+                .is_some_and(|workspace| {
+                    workspace.pinned_directory.as_deref() == Some(directory.path())
+                })
+        });
+        let opened = match existing {
+            Some(workspace_id) => self.activate_workspace(workspace_id, window, cx),
+            None => self.create_shared_workspace(
+                name,
+                Some(directory.path().to_owned()),
+                window,
+                cx,
+            ),
+        };
+        if opened {
+            self.pin_operation = self.pin_operation.wrapping_add(1);
+            self.transient.end_pin();
+            return PinApplication::Applied;
+        }
+        // The refusal was presented, so the chooser ends rather than offering a retry.
+        if let Some(picker) = self.pin_picker.take() {
+            picker.update(cx, |picker, cx| picker.cancel(window, cx));
+        }
+        self.transient.end_pin();
+        PinApplication::Reported
     }
 
     /// Pins a validated local directory to `target`, creating the Workspace a new target names.
@@ -3258,6 +3300,10 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         match creation {
+            // The account server owns local work, so a new local Workspace is the server's.
+            WorkspaceCreation::Local if self.launch.is_some() => {
+                self.create_shared_workspace(name, None, window, cx);
+            }
             WorkspaceCreation::Local => self.create_named_local_workspace(Some(name), window, cx),
             WorkspaceCreation::Remote => {
                 self.present_remote_workspace_flow(name, RemoteWorkspaceStart::Home, window, cx)
@@ -3269,7 +3315,9 @@ impl WorkspaceManager {
                 window,
                 cx,
             ),
-            WorkspaceCreation::Server => self.create_shared_workspace(name, window, cx),
+            WorkspaceCreation::Server => {
+                self.create_shared_workspace(name, None, window, cx);
+            }
         }
     }
 
@@ -3516,7 +3564,7 @@ impl WorkspaceManager {
         let combo_lifecycle_window = window.window_handle();
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let remote_unavailable_reason = self.remote_workspace_unavailable_reason.clone();
-        let creation_rows = WorkspaceCreation::rows(self.shared.is_some());
+        let creation_rows = WorkspaceCreation::rows(self.offers_server_creation_row());
         let creation_shortcuts: Vec<_> = creation_rows
             .iter()
             .map(|creation| creation.shortcut(presentation))
@@ -4321,31 +4369,67 @@ impl WorkspaceManager {
     }
 
     /// Asks the server for a Workspace it owns and every connected client presents.
+    /// Returns whether the request reached the server. A refusal is presented here.
     fn create_shared_workspace(
         &mut self,
         name: String,
+        directory: Option<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        use super::shared_workspaces::SharedSubmission;
+    ) -> bool {
+        use super::shared_workspaces::{SharedRefusalReason, SharedSubmission};
 
         let name = match name.trim() {
-            "" => Self::next_shared_workspace_name(),
+            "" => self.next_shared_workspace_name(directory.as_deref()),
             name => name.to_owned(),
         };
         let Some(shared) = self.shared.as_mut() else {
-            return;
+            // The launch screen already says why the server is not ready, and offers its step.
+            if self.workspaces.active_workspace_id().is_none() && self.launch.is_some() {
+                self.focus(window, cx);
+            } else {
+                Self::show_shared_refusal(
+                    "create a Workspace",
+                    SharedRefusalReason::Offline,
+                    window,
+                    cx,
+                );
+            }
+            return false;
         };
-        if let SharedSubmission::Refused(reason) = shared.create_workspace(name) {
+        let submission = shared.create_workspace(name, directory);
+        if let SharedSubmission::Refused(reason) = submission {
             Self::show_shared_refusal("create a Workspace", reason, window, cx);
         }
         cx.notify();
+        submission == SharedSubmission::Submitted
     }
 
-    /// The name a new shared Workspace takes when a person supplied none. The server owns the
-    /// name, so this client suggests one rather than deriving it from local state.
-    fn next_shared_workspace_name() -> String {
-        super::workspace_sidebar::SERVER_WORKSPACE_BADGE.to_owned()
+    /// The name a new shared Workspace takes when a person supplied none: the chosen directory's
+    /// name, or the next default name no presented Workspace uses, as desktop Workspaces were
+    /// named. The server keeps whatever name it receives.
+    fn next_shared_workspace_name(&self, directory: Option<&std::path::Path>) -> String {
+        if let Some(name) = directory
+            .and_then(std::path::Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned())
+        {
+            return name;
+        }
+        let names: BTreeSet<String> = self
+            .shared
+            .as_ref()
+            .and_then(|shared| shared.latest_inventory())
+            .into_iter()
+            .flat_map(|inventory| &inventory.workspaces)
+            .map(|workspace| workspace.name.clone())
+            .collect();
+        (1..)
+            .map(|number| match number {
+                1 => "Default".to_owned(),
+                number => format!("Default ({number})"),
+            })
+            .find(|name| !names.contains(name))
+            .unwrap_or_default()
     }
 
     /// Asks the server to rename a shared Workspace, and reports whether the Workspace was one.
@@ -5055,6 +5139,12 @@ impl WorkspaceManager {
         })
     }
 
+    /// Whether creation offers a separate server row. Launched windows create local Workspaces
+    /// on the account server through the ordinary rows instead.
+    fn offers_server_creation_row(&self) -> bool {
+        self.shared.is_some() && self.launch.is_none()
+    }
+
     /// Whether the server holding this window's shared Workspaces is reachable.
     fn shared_reachable(&self) -> bool {
         self.shared.as_ref().is_none_or(|shared| {
@@ -5394,7 +5484,7 @@ impl WorkspaceManager {
         };
         let rows = self.sidebar_rows(cx);
         let remote_unavailable = self.remote_workspace_unavailable_reason.clone();
-        let creates_server_workspaces = self.shared.is_some();
+        let creates_server_workspaces = self.offers_server_creation_row();
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.set_rows(rows, remote_unavailable, creates_server_workspaces, cx)
         });

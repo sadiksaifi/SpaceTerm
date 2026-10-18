@@ -1519,11 +1519,13 @@ mod development {
         }
 
         /// Asks the server for another shared Workspace.
-        pub(crate) fn create_workspace(&mut self, name: String) -> SharedSubmission {
-            self.ask(Mutation::CreateWorkspace {
-                name,
-                directory: None,
-            })
+        /// Asks the server for a Workspace, pinned at `directory` with its first Pane there.
+        pub(crate) fn create_workspace(
+            &mut self,
+            name: String,
+            directory: Option<PathBuf>,
+        ) -> SharedSubmission {
+            self.ask(Mutation::CreateWorkspace { name, directory })
         }
 
         /// Asks the server to rename a shared Workspace.
