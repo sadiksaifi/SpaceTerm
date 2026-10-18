@@ -344,16 +344,42 @@ pub(crate) enum GraphicsResourceError {
     InjectedAfterStaging,
 }
 
+/// Uploads the image with its edge texels repeated once on every side.
+///
+/// GPUI samples atlas tiles bilinearly and packs them without padding. A magnified image would
+/// otherwise blend its edges with neighbouring tiles, which can hold another Pane's image or
+/// texels left by an image that has since been removed. The repeated border lies outside the
+/// destination mask, so the visible edge samples only the image's own texels.
 fn upload_image(image: Arc<ImageSnapshot>) -> Result<CachedImage, GraphicsResourceError> {
-    let reservation =
-        GpuReservation::acquire(image.rgba.len()).ok_or(GraphicsResourceError::Capacity)?;
     let width = image.width;
     let height = image.height;
-    let mut bgra = image.rgba.to_vec();
-    for pixel in bgra.as_chunks_mut::<4>().0 {
-        pixel.swap(0, 2);
+    let (columns, rows) = (width as usize, height as usize);
+    if columns == 0 || rows == 0 || image.rgba.len() != columns * rows * 4 {
+        return Err(GraphicsResourceError::InvalidImage);
     }
-    let buffer = RgbaImage::from_raw(image.width, image.height, bgra)
+    let padded_width = width
+        .checked_add(2)
+        .ok_or(GraphicsResourceError::InvalidImage)?;
+    let padded_height = height
+        .checked_add(2)
+        .ok_or(GraphicsResourceError::InvalidImage)?;
+    let padded_bytes = (columns + 2)
+        .checked_mul(rows + 2)
+        .and_then(|texels| texels.checked_mul(4))
+        .ok_or(GraphicsResourceError::InvalidImage)?;
+    let reservation =
+        GpuReservation::acquire(padded_bytes).ok_or(GraphicsResourceError::Capacity)?;
+    let source = image.rgba.as_chunks::<4>().0;
+    let mut bgra = Vec::with_capacity(padded_bytes);
+    for row in 0..rows + 2 {
+        let row = row.saturating_sub(1).min(rows - 1);
+        for column in 0..columns + 2 {
+            let [red, green, blue, alpha] =
+                source[row * columns + column.saturating_sub(1).min(columns - 1)];
+            bgra.extend_from_slice(&[blue, green, red, alpha]);
+        }
+    }
+    let buffer = RgbaImage::from_raw(padded_width, padded_height, bgra)
         .ok_or(GraphicsResourceError::InvalidImage)?;
     let render_image = Arc::new(RenderImage::new(smallvec![Frame::new(buffer)]));
     Ok(CachedImage {
@@ -398,7 +424,8 @@ pub(crate) enum GraphicsLayer {
 pub(crate) struct ImagePaint {
     pub(crate) layer: GraphicsLayer,
     pub(crate) destination: Bounds<Pixels>,
-    pub(crate) full_image: Bounds<Pixels>,
+    /// The uploaded image with its repeated edge texels, drawn under the `destination` mask.
+    pub(crate) padded_image: Bounds<Pixels>,
     pub(crate) image: Arc<RenderImage>,
     _resource: Arc<CachedImage>,
 }
@@ -525,20 +552,20 @@ impl PreparedGraphics {
                 );
                 let source_scale_x = destination_width / placement.source_width as f32;
                 let source_scale_y = destination_height / placement.source_height as f32;
-                let full_image = Bounds::new(
+                let padded_image = Bounds::new(
                     point(
-                        destination.left() - source_scale_x * placement.source_x as f32,
-                        destination.top() - source_scale_y * placement.source_y as f32,
+                        destination.left() - source_scale_x * (placement.source_x as f32 + 1.0),
+                        destination.top() - source_scale_y * (placement.source_y as f32 + 1.0),
                     ),
                     size(
-                        source_scale_x * prepared.image.width as f32,
-                        source_scale_y * prepared.image.height as f32,
+                        source_scale_x * (prepared.image.width as f32 + 2.0),
+                        source_scale_y * (prepared.image.height as f32 + 2.0),
                     ),
                 );
                 Some(ImagePaint {
                     layer: layer_for_z(placement.z),
                     destination,
-                    full_image,
+                    padded_image,
                     image: Arc::clone(&prepared.image.render_image),
                     _resource: Arc::clone(&prepared.image),
                 })
@@ -607,8 +634,8 @@ impl GraphicsPaintPlan {
                 |window| {
                     if window
                         .paint_image(
-                            paint.full_image,
-                            paint.full_image,
+                            paint.padded_image,
+                            paint.padded_image,
                             Default::default(),
                             Arc::clone(&paint.image),
                             0,
@@ -883,10 +910,14 @@ mod tests {
         cx.update(|window, _| {
             let sprites = window.painted_polychrome_sprites();
             assert_eq!(sprites.len(), 1);
-            assert_eq!(sprites[0].bounds.origin.x.0, 13.);
-            assert_eq!(sprites[0].bounds.origin.y.0, 27.);
-            assert_eq!(sprites[0].bounds.size.width.0, 26.);
-            assert_eq!(sprites[0].bounds.size.height.0, 27.);
+            let mask = sprites[0].content_mask.bounds;
+            assert_eq!((mask.origin.x.0, mask.origin.y.0), (13., 27.));
+            assert_eq!((mask.size.width.0, mask.size.height.0), (26., 27.));
+            // One repeated edge texel on every side lies outside the measured cells.
+            assert_eq!(sprites[0].bounds.origin.x.0, -13.);
+            assert_eq!(sprites[0].bounds.origin.y.0, 0.);
+            assert_eq!(sprites[0].bounds.size.width.0, 78.);
+            assert_eq!(sprites[0].bounds.size.height.0, 81.);
         });
     }
 
@@ -899,7 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn source_crop_transforms_full_image_under_destination_mask() {
+    fn source_crop_transforms_padded_image_under_destination_mask() {
         let prepared = prepared_graphics();
         let (bounds, cell_width, line_height) = geometry();
 
@@ -907,8 +938,10 @@ mod tests {
         let paint = &plan.paints[0];
         assert_eq!(paint.destination.origin, point(px(27.0), px(28.0)));
         assert_eq!(paint.destination.size, size(px(50.0), px(40.0)));
-        assert_eq!(paint.full_image.origin, point(px(17.0), px(8.0)));
-        assert_eq!(paint.full_image.size, size(px(100.0), px(80.0)));
+        // The 100x80 image fills 100x80 pixels from (17, 8); its repeated edge texels add one
+        // source texel on every side.
+        assert_eq!(paint.padded_image.origin, point(px(16.0), px(7.0)));
+        assert_eq!(paint.padded_image.size, size(px(102.0), px(82.0)));
     }
 
     #[gpui::test]
@@ -1054,11 +1087,11 @@ mod tests {
                         Bounds::new(point(px(5.0), px(27.0)), size(px(40.0), px(20.0))),
                     ]
                 );
-                let full_image = Bounds::new(point(px(5.0), px(7.0)), size(px(40.0), px(40.0)));
+                let padded_image = Bounds::new(point(px(-5.0), px(-3.0)), size(px(60.0), px(60.0)));
                 assert!(
                     plan.paints
                         .iter()
-                        .all(|paint| paint.full_image == full_image)
+                        .all(|paint| paint.padded_image == padded_image)
                 );
                 assert!(
                     plan.paints
@@ -1134,24 +1167,48 @@ mod tests {
     }
 
     #[test]
-    fn upload_converts_rgba_to_gpui_bgra() {
+    fn upload_converts_rgba_to_gpui_bgra_and_repeats_edge_texels() {
         let snapshot = Arc::new(ImageSnapshot {
             key: ImageKey {
                 image_id: 1,
                 generation: 1,
             },
-            width: 1,
+            width: 2,
             height: 1,
-            rgba: Arc::from([10, 20, 30, 40]),
+            rgba: Arc::from([10, 20, 30, 40, 50, 60, 70, 80]),
             reservation: None,
         });
 
         let uploaded = upload_image(snapshot).unwrap();
 
+        let left = [30, 20, 10, 40];
+        let right = [70, 60, 50, 80];
+        let row = [left, left, right, right].concat();
+        assert_eq!(uploaded.render_image.size(0), size(4.into(), 3.into()));
         assert_eq!(
             uploaded.render_image.as_bytes(0).unwrap(),
-            &[30, 20, 10, 40]
+            [row.as_slice(), &row, &row].concat()
         );
+        assert_eq!(uploaded._reservation.0, 4 * 3 * 4);
+    }
+
+    #[test]
+    fn upload_rejects_images_without_texels() {
+        let snapshot = Arc::new(ImageSnapshot {
+            key: ImageKey {
+                image_id: 1,
+                generation: 1,
+            },
+            width: 0,
+            height: 3,
+            rgba: Arc::from([]),
+            reservation: None,
+        });
+
+        assert!(matches!(
+            upload_image(snapshot),
+            Err(GraphicsResourceError::InvalidImage)
+        ));
     }
 
     #[gpui::test]
