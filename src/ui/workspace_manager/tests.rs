@@ -15409,6 +15409,36 @@ fn another_clients_removal_of_where_the_keyboard_rests_should_hand_it_to_what_re
     );
 }
 
+/// Use Shared Workspaces is chosen in the Settings Window. The Workspace Window it presents into
+/// comes forward, so the result, or an alert explaining why it could not be shown, is not left
+/// behind Settings.
+#[gpui::test]
+fn first_adoption_brings_the_workspace_window_in_front_of_settings(cx: &mut TestAppContext) {
+    let (_manager, _records, cx) = workspace_manager(cx);
+    let settings = cx.add_empty_window().window_handle();
+    cx.update(|_, cx| {
+        settings
+            .update(cx, |_, window, _| window.activate_window())
+            .expect("the Settings stand-in is open");
+    });
+    cx.run_until_parked();
+    assert_ne!(
+        cx.update(|_, cx| cx.active_window().map(|active| active.window_id())),
+        Some(cx.update(|window, _| window.window_handle().window_id())),
+    );
+
+    cx.update(|_, cx| crate::ui::shared_workspaces::adopt(cx));
+    cx.run_until_parked();
+
+    assert!(
+        cx.update(|window, cx| {
+            cx.active_window().map(|active| active.window_id())
+                == Some(window.window_handle().window_id())
+        }),
+        "the Workspace Window presenting shared Workspaces comes forward"
+    );
+}
+
 /// One device presents its shared Workspaces in one Workspace Window. Asking a second window to
 /// present them brings the first one forward instead.
 #[gpui::test]

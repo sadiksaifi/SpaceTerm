@@ -112,6 +112,11 @@ mod development {
         let _ = handle.update(cx, |manager, window, cx| {
             manager.adopt_shared_workspaces(window, cx);
         });
+        // The request usually comes from Settings. Bring the Workspace Window forward so its
+        // result, or an alert explaining why it could not be shown, is not left behind Settings.
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+        });
         cx.activate(true);
     }
 
