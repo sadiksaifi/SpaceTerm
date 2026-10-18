@@ -220,11 +220,17 @@ def fork_dependencies(
     old_ref = old_refs[0] if old_refs else None
 
     section = ""
+    tables = {f"{section}.{name}" for section, name in found}
     replaced = 0
     lines = []
     for line in contents.splitlines(keepends=True):
         if line.startswith("["):
-            section = line.strip().strip("[]")
+            section = line.strip().strip("[]").replace("'", "")
+        if section in tables and re.match(r"^\s*(?:tag|rev)\s*=", line):
+            line, count = FIELD_PATTERN.subn(lambda field: "tag" + field[1] + tag + field[3], line)
+            if count != 1:
+                raise BumpError(Failure.DEPENDENCIES_UNEXPECTED)
+            replaced += 1
         match = re.match(r"^([ \t]*)([\w-]+)([ \t]*=[ \t]*\{)([^}\n]*)(\}[^\n]*)", line)
         if (
             match
