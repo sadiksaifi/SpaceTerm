@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use gpui::{App, Bounds, ContentMask, Pixels, RenderImage, Size, Window, point, px, size};
+use gpui::{App, Bounds, ContentMask, Pixels, RenderImage, Size, Window, point, size};
 use image::{Frame, RgbaImage};
 use smallvec::smallvec;
 
@@ -680,6 +680,7 @@ const fn layer_for_z(z: i32) -> GraphicsLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::px;
     use gpui::AppContext as _;
     use std::borrow::Cow;
     use std::sync::atomic::{AtomicUsize, Ordering};
