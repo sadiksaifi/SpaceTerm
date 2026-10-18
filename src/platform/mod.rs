@@ -558,6 +558,9 @@ mod linux_peer_credentials;
 mod linux_pty_host;
 
 #[cfg(target_os = "linux")]
+mod linux_service_pty;
+
+#[cfg(target_os = "linux")]
 pub(crate) mod linux_repository_tools;
 
 #[cfg(target_os = "linux")]
@@ -608,6 +611,14 @@ pub(crate) fn runtime_pty_factory() -> std::sync::Arc<dyn native_pty::NativePtyA
     #[cfg(target_os = "linux")]
     let host = std::sync::Arc::new(linux_pty_host::LinuxPtyHost);
     std::sync::Arc::new(unix_pty::UnixNativePtyAdapterFactory::new(host))
+}
+
+pub(crate) fn service_pty_factory() -> std::sync::Arc<dyn native_pty::NativePtyAdapterFactory> {
+    let factory = runtime_pty_factory();
+    #[cfg(target_os = "linux")]
+    return linux_service_pty::factory(factory);
+    #[cfg(not(target_os = "linux"))]
+    factory
 }
 
 /// Composes local file authority from the existing native identity adapter.

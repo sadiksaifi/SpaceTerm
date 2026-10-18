@@ -202,6 +202,13 @@ impl PreparedShellLaunch {
         self
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn without_environment_value(mut self, name: &str) -> Self {
+        self.environment.retain(|(key, _)| key != name);
+        self.environment_removals.push(name.into());
+        self
+    }
+
     pub fn terminal_name(&self) -> &'static str {
         self.terminal_name
     }

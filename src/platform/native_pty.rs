@@ -150,6 +150,9 @@ pub trait NativePtyAdapterFactory: Send + Sync {
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 /// A closed construction failure classification at the Operating-System Adapter boundary.
 pub enum NativePtyAdapterConstructionFailure {
+    /// The account environment lookup failed before PTY or process construction began.
+    #[error("Account service environment is unavailable")]
+    EnvironmentUnavailable,
     #[error("Native PTY resources could not be created")]
     ResourceCreationFailed,
     #[error("Native PTY resources could not be configured")]
@@ -187,7 +190,7 @@ struct NativePtyCloseState {
 }
 
 impl NativePtyCloseHandle {
-    /// Preparation ended before the adapter factory was called, so no process needs cleanup.
+    /// Preparation or environment lookup ended before any process could need cleanup.
     pub(crate) fn confirm_unstarted(&self) {
         let mut state = self.lock_state();
         debug_assert!(state.supervisor.is_none());
@@ -321,6 +324,11 @@ impl NativePtyOwner {
     ) -> Result<Self, NativePtyStartupFailure> {
         let parts = adapter_factory
             .create(launch, size)
+            .inspect_err(|failure| {
+                if *failure == NativePtyAdapterConstructionFailure::EnvironmentUnavailable {
+                    close_handle.confirm_unstarted();
+                }
+            })
             .map_err(NativePtyStartupFailure::Adapter)?;
         Self::install_adapter_parts(parts, output, close_handle)
     }
