@@ -8,6 +8,9 @@ use spaceterm_server::{
 };
 use std::{sync::Arc, time::Duration};
 
+mod accessibility;
+#[cfg(test)]
+mod accessibility_tests;
 mod directories;
 #[cfg(test)]
 mod directory_tests;
@@ -62,6 +65,7 @@ struct OwnedPane {
     size: PaneSize,
     effects: NativeEffects,
     reading: reading::Reading,
+    accessibility: accessibility::Accessibility,
 }
 fn nonce() -> Result<[u8; 32], ServerError> {
     let mut bytes = [0; 32];
@@ -279,6 +283,7 @@ impl DevelopmentPaneHost {
             size,
             effects: NativeEffects::default(),
             reading: reading::Reading::default(),
+            accessibility: accessibility::Accessibility::default(),
         });
         Ok(lease)
     }
@@ -367,6 +372,7 @@ impl DevelopmentPaneHost {
                 native_effects: true,
                 reading: true,
                 graphics: true,
+                accessibility: true,
                 directory_recovery: true,
                 worktree_writes: false,
             });
@@ -469,7 +475,10 @@ impl DevelopmentPaneHost {
         }
         let pane = self.pane.as_mut().ok_or(Refusal::Missing)?;
         let lease = match &request {
-            Request::Read { lease, .. }
+            Request::Accessibility { lease, .. }
+            | Request::EndAccessibilityDemand { lease }
+            | Request::AccessibilitySelection { lease, .. }
+            | Request::Read { lease, .. }
             | Request::ReadingStatus { lease }
             | Request::GraphicsChunk { lease, .. }
             | Request::SelectionChunk { lease, .. } => lease,
@@ -498,6 +507,48 @@ impl DevelopmentPaneHost {
             return Err(Refusal::DirectoryUnavailable);
         }
         match request {
+            Request::EndAccessibilityDemand { .. } => {
+                pane.runtime.end_server_accessibility_demand();
+                Ok(Reply::Unchanged)
+            }
+            Request::Accessibility {
+                revision,
+                offset,
+                base,
+                ..
+            } => {
+                if pane.ended || pane.failed {
+                    return Err(Refusal::Missing);
+                }
+                pane.runtime.set_presentable(true);
+                if let Some(demand) = pane.runtime.accessibility_demand_sender() {
+                    demand.request();
+                }
+                Ok(Reply::Accessibility(
+                    pane.accessibility.chunk(revision, offset, base),
+                ))
+            }
+            Request::AccessibilitySelection {
+                focus_generation,
+                selection,
+                ..
+            } => {
+                if pane.ended || pane.failed {
+                    return Err(Refusal::Missing);
+                }
+                if focus_generation == 0 || focus_generation != pane.focus_generation {
+                    return Err(Refusal::Stale);
+                }
+                pane.require_terminal_focus()?;
+                let _completion = pane.runtime.set_server_accessibility_selection(
+                    selection
+                        .map(accessibility::decode_selection)
+                        .transpose()
+                        .map_err(|_| Refusal::Unsupported)?,
+                );
+                pane.reading.fence(&pane.runtime);
+                Ok(Reply::Reading { accepted: true })
+            }
             Request::GraphicsChunk { image, offset, .. } => {
                 Ok(Reply::GraphicsChunk(pane.graphics_chunk(image, offset)))
             }
@@ -543,6 +594,10 @@ impl DevelopmentPaneHost {
                     pane.sent = Some(screen.generation);
                     let mut screen = encode_screen(screen);
                     screen.generation = pane.screen_generation;
+                    screen.accessibility_revision = pane
+                        .accessibility
+                        .take_changed_revision()
+                        .unwrap_or(pane.accessibility.revision());
                     return Ok(Reply::Screen(Box::new(screen)));
                 }
                 if pane.failed {
@@ -553,7 +608,11 @@ impl DevelopmentPaneHost {
                     self.pane = None;
                     Ok(Reply::Ended)
                 } else {
-                    Ok(Reply::Unchanged)
+                    if let Some(revision) = pane.accessibility.take_changed_revision() {
+                        Ok(Reply::AccessibilityRevision { revision })
+                    } else {
+                        Ok(Reply::Unchanged)
+                    }
                 }
             }
             Request::Key { key, .. } => {
@@ -698,6 +757,8 @@ impl PaneService for DevelopmentPaneHost {
 impl OwnedPane {
     fn invalidate_input(&mut self) {
         self.graphics_transfer = None;
+        self.accessibility.disconnect();
+        self.runtime.end_server_accessibility_demand();
         self.reading.invalidate();
         self.runtime.client_effect_focus(None);
         self.effects.clear();
@@ -977,6 +1038,7 @@ impl OwnedPane {
         };
         if transfer {
             self.attachment_generation = None;
+            self.accessibility.reset();
             self.reading.reset(&self.runtime);
             self.screen = None;
             self.reading.invalidate();
@@ -1052,6 +1114,12 @@ impl OwnedPane {
             }
         }
         if let Some(screen) = &self.screen {
+            self.accessibility.bind_reset_screen(screen.generation);
+        }
+        while let Ok(model) = self.subscription.accessibility.try_recv() {
+            self.accessibility.update(model);
+        }
+        if let Some(screen) = &self.screen {
             self.reading.update(&self.runtime, screen);
         }
     }
@@ -1121,6 +1189,7 @@ pub(crate) fn encode_screen(screen: &ScreenSnapshot) -> Screen {
     let mut link_indices = std::collections::HashMap::new();
     let mut link_bytes = 0;
     let mut encoded = Screen {
+        accessibility_revision: 0,
         graphics: Some(graphics::encode(&screen.graphics)),
         cell_pixels: Some((screen.cell_pixels.0 as u16, screen.cell_pixels.1 as u16)),
         reading: Some(pane::reading::Snapshot {

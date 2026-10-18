@@ -296,6 +296,7 @@ pub(crate) fn serve_runtime(
                                         native_effects: false,
                                         reading: false,
                                         graphics: false,
+                                        accessibility: false,
                                         directory_recovery: true,
                                         worktree_writes: false,
                                     }
@@ -615,6 +616,7 @@ mod startup_tests {
                         native_effects: true,
                         reading: false,
                         graphics: false,
+                        accessibility: false,
                         directory_recovery: true,
                         worktree_writes: false,
                     },

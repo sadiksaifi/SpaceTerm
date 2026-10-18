@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "accesskit"
 version = "0.24.1"
-source = "git+https://github.com/sadiksaifi/accesskit?tag=spaceterm-2026-10-17#2ab721453595cd3a69d7e9e35e3fd72906175298"
+source = "git+https://github.com/sadiksaifi/accesskit?tag=spaceterm-2026-10-19#015500e9c93470e7ac8dcc49f1b495499caa6703"
 dependencies = [
  "enumn",
  "uuid",
@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "accesskit_atspi_common"
 version = "0.19.1"
-source = "git+https://github.com/sadiksaifi/accesskit?tag=spaceterm-2026-10-17#2ab721453595cd3a69d7e9e35e3fd72906175298"
+source = "git+https://github.com/sadiksaifi/accesskit?tag=spaceterm-2026-10-19#015500e9c93470e7ac8dcc49f1b495499caa6703"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -27,7 +27,7 @@ dependencies = [
 [[package]]
 name = "accesskit_consumer"
 version = "0.38.0"
-source = "git+https://github.com/sadiksaifi/accesskit?tag=spaceterm-2026-10-17#2ab721453595cd3a69d7e9e35e3fd72906175298"
+source = "git+https://github.com/sadiksaifi/accesskit?tag=spaceterm-2026-10-19#015500e9c93470e7ac8dcc49f1b495499caa6703"
 dependencies = [
  "accesskit",
  "hashbrown 0.16.1",
@@ -36,7 +36,7 @@ dependencies = [
 [[package]]
 name = "accesskit_macos"
 version = "0.26.3"
-source = "git+https://github.com/sadiksaifi/accesskit?tag=spaceterm-2026-10-17#2ab721453595cd3a69d7e9e35e3fd72906175298"
+source = "git+https://github.com/sadiksaifi/accesskit?tag=spaceterm-2026-10-19#015500e9c93470e7ac8dcc49f1b495499caa6703"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -49,7 +49,7 @@ dependencies = [
 [[package]]
 name = "accesskit_unix"
 version = "0.22.1"
-source = "git+https://github.com/sadiksaifi/accesskit?tag=spaceterm-2026-10-17#2ab721453595cd3a69d7e9e35e3fd72906175298"
+source = "git+https://github.com/sadiksaifi/accesskit?tag=spaceterm-2026-10-19#015500e9c93470e7ac8dcc49f1b495499caa6703"
 dependencies = [
  "accesskit",
  "accesskit_atspi_common",

@@ -7,7 +7,7 @@
 //! server restarts.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Pixels, SharedString, Stateful, div};
+use gpui::{AnyElement, App, SharedString, Stateful, div};
 use spaceterm_ui::{
     Button, ButtonSize, ButtonVariant, FloatingRole, Icon, ProgressRing, ProgressSize,
     ProgressState,
@@ -22,10 +22,6 @@ use super::appearance_runtime;
 use super::chrome_icons::IconRole;
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use super::terminal_pane::StatusIntent;
-use crate::platform::terminal_accessibility::{
-    TerminalAccessibilityAdapter, TerminalAccessibilityAdapterFactory, TerminalAccessibilityUpdate,
-};
-use crate::terminal::{AccessibilityNotifications, TerminalAccessibilityModel};
 
 pub(crate) const TAKEOVER_TITLE: &str = "Controlled by Another Client";
 pub(crate) const TAKEOVER_DETAIL: &str =
@@ -537,39 +533,6 @@ pub(crate) fn with_tab_traversal(surface: Stateful<gpui::Div>) -> Stateful<gpui:
         window.prevent_default();
         cx.stop_propagation();
     })
-}
-
-/// Publishes a server-backed Pane as one labeled terminal without text, because reading shell
-/// content through a server-owned Terminal Session is not available yet.
-pub(crate) struct UnavailableTerminalAccessibility;
-
-impl TerminalAccessibilityAdapterFactory for UnavailableTerminalAccessibility {
-    fn create(
-        &self,
-        _: &gpui::Window,
-        _: TerminalAccessibilityModel,
-        _: &crate::appearance::ResolvedFontDescriptor,
-        _: Pixels,
-    ) -> Box<dyn TerminalAccessibilityAdapter> {
-        Box::new(Self)
-    }
-}
-
-impl TerminalAccessibilityAdapter for UnavailableTerminalAccessibility {
-    fn set_hierarchy(&mut self, _: bool) {}
-
-    fn update(&mut self, _: TerminalAccessibilityUpdate<'_>) -> AccessibilityNotifications {
-        AccessibilityNotifications::default()
-    }
-
-    fn decorate(&self, pane: Stateful<gpui::Div>) -> Stateful<gpui::Div> {
-        pane.role(gpui::accesskit::Role::Group)
-            .aria_label("Terminal")
-            .aria_description(
-                "Terminal text in a server-owned Terminal Session is not yet available to \
-                 assistive technologies.",
-            )
-    }
 }
 
 pub(crate) use connection::{

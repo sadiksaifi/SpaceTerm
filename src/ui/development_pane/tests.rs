@@ -58,8 +58,7 @@ fn open_pane_with_session_options(
     let records = TestTerminalSessionRecords::default();
     let session_factory = WorkspaceTerminalSessionFactory::new_server(
         Rc::new(
-            configure(TestTerminalSessionFactory::new(records.clone()))
-                .server_backed()
+            configure(TestTerminalSessionFactory::new(records.clone()).server_backed())
                 .with_fallback_title(WINDOW_TITLE),
         ),
         test_local_directory(PathBuf::from("/tmp/spaceterm-development-pane-test")),
@@ -70,7 +69,12 @@ fn open_pane_with_session_options(
         DevelopmentPaneWindow::new(
             session_factory,
             window_connection,
-            &PaneConstruction::testing(),
+            &PaneConstruction::new(
+                Rc::new(crate::terminal::GpuiTerminalKeyInputAdapterFactory::default()),
+                Rc::new(crate::platform::accesskit_terminal_accessibility::AccessKitTerminalAccessibilityAdapterFactory),
+                crate::terminal::native_services::testing::adapters(),
+                crate::ui::pane_lifecycle::PaneLifecycleDependencies::testing(),
+            ),
             Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
             window,
             cx,
@@ -209,6 +213,114 @@ impl OpenPane<'_> {
             .iter()
             .filter(|call| matches!(call.command, RecordedCommand::Key(_)))
             .count()
+    }
+}
+
+#[gpui::test]
+fn native_terminal_accessibility_follows_the_development_pane_presentation(
+    cx: &mut TestAppContext,
+) {
+    use crate::terminal::{
+        CellSnapshot, ScreenSnapshot, TerminalAccessibilityModel, TerminalSessionEvent,
+    };
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    let mut pane =
+        open_pane_with_session_options(DevelopmentPaneStatus::Connected, cx, |sessions| {
+            sessions.with_reading_available(true)
+        });
+    let publish = |pane: &mut OpenPane<'_>, text: &str| {
+        pane.screen_generation += 1;
+        let screen = ScreenSnapshot::from_test_parts_at(
+            Arc::from([text
+                .chars()
+                .map(|character| CellSnapshot {
+                    text: character.to_string(),
+                    foreground_source: Default::default(),
+                    background_source: Default::default(),
+                    inverse: false,
+                    bold: false,
+                    faint: false,
+                    italic: false,
+                    blinking: false,
+                    invisible: false,
+                    underline: Default::default(),
+                    underline_source: Default::default(),
+                    strikethrough: false,
+                    overline: false,
+                    selected: false,
+                    spacer_tail: false,
+                    semantic_content: Default::default(),
+                    hyperlink: None,
+                })
+                .collect::<Vec<_>>()
+                .into()]),
+            Default::default(),
+            WINDOW_TITLE,
+            pane.screen_generation,
+        );
+        pane.records
+            .event_sender(1)
+            .unwrap()
+            .try_send(TerminalSessionEvent::Screen(Arc::clone(&screen)))
+            .unwrap();
+        pane.records
+            .last_accessibility_sender()
+            .unwrap()
+            .force_send(Arc::new(TerminalAccessibilityModel::from_screen(&screen)))
+            .unwrap();
+        pane.cx.run_until_parked();
+    };
+    publish(&mut pane, "initial output");
+    let tree = A11yTree::read(pane.cx);
+    assert_eq!(tree.node("Terminal Pane")["aria"]["role"], "Terminal");
+    assert_eq!(
+        tree.with_role("TextRun")[0]["aria"]["value"],
+        "initial output"
+    );
+    pane.cx.update(|window, cx| window.blur(cx));
+    perform(pane.cx, tree.node("Terminal Pane"), Action::Focus);
+    assert_eq!(pane.focused_role(), "Terminal");
+
+    pane.set(DevelopmentPaneStatus::Reconnecting);
+    pane.cx.update(|window, cx| window.blur(cx));
+    let tree = A11yTree::read(pane.cx);
+    assert_eq!(
+        tree.with_role("TextRun")[0]["aria"]["value"],
+        "initial output"
+    );
+    perform(pane.cx, tree.node("Terminal Pane"), Action::Focus);
+    assert_ne!(
+        pane.focused_role(),
+        "Terminal",
+        "frozen text grants no native focus"
+    );
+    pane.reconnect();
+
+    for status in [
+        DevelopmentPaneStatus::Takeover,
+        DevelopmentPaneStatus::Restored,
+        DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable),
+    ] {
+        pane.set(status);
+        let tree = A11yTree::read(pane.cx);
+        assert!(tree.with_role("Terminal").is_empty(), "{status:?}");
+        assert!(tree.with_role("TextRun").is_empty(), "{status:?}");
+        assert_ne!(pane.focused_role(), "Terminal");
+        pane.set(DevelopmentPaneStatus::Reconnecting);
+        assert!(A11yTree::read(pane.cx).with_role("Terminal").is_empty());
+
+        pane.reconnect();
+        publish(&mut pane, "fresh output");
+        let tree = A11yTree::read(pane.cx);
+        assert_eq!(
+            tree.with_role("TextRun")[0]["aria"]["value"],
+            "fresh output"
+        );
+        pane.cx.update(|window, cx| window.blur(cx));
+        perform(pane.cx, tree.node("Terminal Pane"), Action::Focus);
+        assert_eq!(pane.focused_role(), "Terminal");
     }
 }
 

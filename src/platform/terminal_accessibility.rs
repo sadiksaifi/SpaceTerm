@@ -57,18 +57,36 @@ pub(crate) struct TerminalAccessibilityUpdate<'a> {
 }
 
 /// Asks one Pane to take focus on behalf of an accessibility client. Requests carry no content
-/// and coalesce until the Pane handles them.
+/// and coalesce until the Pane handles them. Each request carries the opaque focus authority the
+/// Pane published with it, so the Pane rejects requests that outlive that authority.
 #[derive(Clone, Debug)]
-pub(crate) struct AccessibilityFocusSender(async_channel::Sender<()>);
+pub(crate) struct AccessibilityFocusSender {
+    sender: async_channel::Sender<u64>,
+    authority: u64,
+}
 
 impl AccessibilityFocusSender {
-    pub(crate) fn channel() -> (Self, async_channel::Receiver<()>) {
+    pub(crate) fn channel() -> (Self, async_channel::Receiver<u64>) {
         let (sender, receiver) = async_channel::bounded(1);
-        (Self(sender), receiver)
+        (
+            Self {
+                sender,
+                authority: 0,
+            },
+            receiver,
+        )
+    }
+
+    /// A sender whose requests name `authority`.
+    pub(crate) fn with_authority(&self, authority: u64) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            authority,
+        }
     }
 
     pub(crate) fn request(&self) {
-        let _ = self.0.try_send(());
+        let _ = self.sender.try_send(self.authority);
     }
 }
 

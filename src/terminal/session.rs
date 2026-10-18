@@ -42,6 +42,7 @@ use crate::platform::native_pty::{
     NativePtyStartupStage, NativePtyWaitFailure,
 };
 use crate::platform::shell_launch::{PreparedShellLaunch, ShellLaunchPlanner};
+use crate::terminal::accessibility::AccessibilitySelectionRefs;
 use crate::terminal::accessibility::AccessibilitySelectionRequest;
 use crate::terminal::accessibility::TerminalAccessibilityModel;
 use crate::terminal::attention::AttentionEvent;
@@ -290,6 +291,21 @@ pub enum SelectionCopyError {
     WorkerStopped,
 }
 
+/// Server-backed delivery for native accessibility requests, which the server Pane's
+/// connection fences by its own epoch and focus generation.
+#[cfg(feature = "desktop")]
+pub(crate) type ServerAccessibilitySelection =
+    Arc<dyn Fn(AccessibilitySelectionRequest) + Send + Sync>;
+#[cfg(feature = "desktop")]
+pub(crate) type ServerAccessibilityDemand = Arc<dyn Fn() + Send + Sync>;
+
+#[derive(Clone)]
+enum AccessibilitySelectionTarget {
+    Worker(CommandSender<Command>),
+    #[cfg(feature = "desktop")]
+    Server(ServerAccessibilitySelection),
+}
+
 #[cfg_attr(
     not(target_os = "macos"),
     allow(
@@ -297,9 +313,15 @@ pub enum SelectionCopyError {
         reason = "only a native accessibility Adapter requests accessibility work"
     )
 )]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AccessibilitySelectionSender {
-    commands: CommandSender<Command>,
+    target: AccessibilitySelectionTarget,
+}
+
+impl fmt::Debug for AccessibilitySelectionSender {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AccessibilitySelectionSender")
+    }
 }
 
 #[cfg_attr(
@@ -314,22 +336,46 @@ impl AccessibilitySelectionSender {
     pub fn recording_channel() -> (Self, RecordingAccessibilitySelectionReceiver) {
         let (commands, receiver) = mpsc::channel();
         (
-            Self { commands },
+            Self {
+                target: AccessibilitySelectionTarget::Worker(commands),
+            },
             RecordingAccessibilitySelectionReceiver(receiver),
         )
     }
 
-    pub fn request(&self, request: AccessibilitySelectionRequest) {
-        if self
-            .commands
-            .send(Command::AccessibilitySelection(request))
-            .is_err()
-        {
-            eprintln!(
-                "terminal accessibility selection was dropped because the worker has stopped"
-            );
+    #[cfg(feature = "desktop")]
+    pub(crate) fn server(deliver: ServerAccessibilitySelection) -> Self {
+        Self {
+            target: AccessibilitySelectionTarget::Server(deliver),
         }
     }
+
+    pub fn request(&self, request: AccessibilitySelectionRequest) {
+        match &self.target {
+            AccessibilitySelectionTarget::Worker(commands) => {
+                if commands
+                    .send(Command::AccessibilitySelection(request))
+                    .is_err()
+                {
+                    eprintln!(
+                        "terminal accessibility selection was dropped because the worker has stopped"
+                    );
+                }
+            }
+            #[cfg(feature = "desktop")]
+            AccessibilitySelectionTarget::Server(deliver) => deliver(request),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum AccessibilityDemandTarget {
+    Worker {
+        commands: CommandSender<Command>,
+        schedule_input: ScheduleInput,
+    },
+    #[cfg(feature = "desktop")]
+    Server(ServerAccessibilityDemand),
 }
 
 #[cfg_attr(
@@ -341,8 +387,7 @@ impl AccessibilitySelectionSender {
 )]
 #[derive(Clone)]
 pub struct AccessibilityDemandSender {
-    commands: CommandSender<Command>,
-    schedule_input: ScheduleInput,
+    target: AccessibilityDemandTarget,
 }
 
 impl fmt::Debug for AccessibilityDemandSender {
@@ -359,17 +404,33 @@ impl fmt::Debug for AccessibilityDemandSender {
     )
 )]
 impl AccessibilityDemandSender {
+    #[cfg(feature = "desktop")]
+    pub(crate) fn server(demand: ServerAccessibilityDemand) -> Self {
+        Self {
+            target: AccessibilityDemandTarget::Server(demand),
+        }
+    }
+
     pub fn request(&self) {
         self.request_at(Instant::now());
     }
 
     fn request_at(&self, requested_at: Instant) {
-        if self
-            .schedule_input
-            .enqueue_accessibility_demand(requested_at)
-            && self.commands.send(Command::AccessibilityDemand).is_err()
-        {
-            eprintln!("terminal accessibility demand was dropped because the worker has stopped");
+        match &self.target {
+            AccessibilityDemandTarget::Worker {
+                commands,
+                schedule_input,
+            } => {
+                if schedule_input.enqueue_accessibility_demand(requested_at)
+                    && commands.send(Command::AccessibilityDemand).is_err()
+                {
+                    eprintln!(
+                        "terminal accessibility demand was dropped because the worker has stopped"
+                    );
+                }
+            }
+            #[cfg(feature = "desktop")]
+            AccessibilityDemandTarget::Server(demand) => demand(),
         }
     }
 }
@@ -636,6 +697,27 @@ impl TerminalRuntime {
             let _ = commands.send(Command::PrepareServerSelection(generation, tx));
         }
         rx
+    }
+    /// Applies a server client's accessible Selection endpoints on the worker.
+    ///
+    /// The receiver yields `true` only when the Selection changed; stale endpoints, mismatched
+    /// screens, synchronized output and a stopped worker yield `false` or disconnect.
+    pub(crate) fn set_server_accessibility_selection(
+        &self,
+        selection: Option<AccessibilitySelectionRefs>,
+    ) -> mpsc::Receiver<bool> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::ServerAccessibilitySelection(selection, tx));
+        }
+        rx
+    }
+    /// Ends server client accessibility demand without changing visual Screen publication.
+    /// A later `AccessibilityDemandSender::request` reactivates semantic publication.
+    pub(crate) fn end_server_accessibility_demand(&self) {
+        if let Some(commands) = &self.commands {
+            let _ = commands.send(Command::EndAccessibilityDemand(Instant::now()));
+        }
     }
     /// Sends application mouse input without starting a server-owned Selection.
     /// Adapter snapshot numbers fence starts; accepted gestures retain their starting snapshot.
@@ -970,7 +1052,7 @@ impl TerminalSessionHandle for TerminalRuntime {
         self.commands
             .as_ref()
             .map(|commands| AccessibilitySelectionSender {
-                commands: commands.clone(),
+                target: AccessibilitySelectionTarget::Worker(commands.clone()),
             })
     }
 
@@ -978,8 +1060,10 @@ impl TerminalSessionHandle for TerminalRuntime {
         self.commands
             .as_ref()
             .map(|commands| AccessibilityDemandSender {
-                commands: commands.clone(),
-                schedule_input: self.schedule_input.clone(),
+                target: AccessibilityDemandTarget::Worker {
+                    commands: commands.clone(),
+                    schedule_input: self.schedule_input.clone(),
+                },
             })
     }
 
@@ -1059,6 +1143,8 @@ enum Command {
     ResetReading,
     ReadingBarrier(mpsc::SyncSender<()>),
     PrepareServerSelection(u64, mpsc::SyncSender<server_reading::PreparedSelection>),
+    ServerAccessibilitySelection(Option<AccessibilitySelectionRefs>, mpsc::SyncSender<bool>),
+    EndAccessibilityDemand(Instant),
     RouteClientEffects,
     Subscribe {
         accessibility: async_channel::Sender<Arc<TerminalAccessibilityModel>>,
@@ -1148,6 +1234,7 @@ impl Command {
                 | Self::ScrollTo(..)
                 | Self::SelectionCopy(Some(_), _)
                 | Self::PrepareServerSelection(..)
+                | Self::ServerAccessibilitySelection(..)
                 | Self::ReadingBarrier(_)
                 | Self::AccessibilitySelection(..)
                 | Self::AccessibilityContinue
@@ -1164,6 +1251,8 @@ impl fmt::Debug for Command {
             Self::ResetReading => "ResetReading",
             Self::ReadingBarrier(_) => "ReadingBarrier",
             Self::PrepareServerSelection(..) => "PrepareServerSelection",
+            Self::ServerAccessibilitySelection(..) => "ServerAccessibilitySelection",
+            Self::EndAccessibilityDemand(..) => "EndAccessibilityDemand",
             Self::RouteClientEffects => "RouteClientEffects",
             Self::Subscribe { .. } => "Subscribe",
             Self::Key(..) => "Key",
@@ -1651,6 +1740,25 @@ impl TerminalWorker {
                         .map_or(Ok(None), |reading| reading.prepared(generation))
                 };
                 let _ = reply.send(selection);
+                true
+            }
+            Command::ServerAccessibilitySelection(selection, reply) => {
+                match self.emulator.set_accessibility_selection_refs(selection) {
+                    Ok(changed) => {
+                        let _ = reply.send(changed);
+                        !changed
+                            || (self.apply_emulator_action(EmulatorAction::screen_changed())
+                                && self.refresh_selection_autoscroll())
+                    }
+                    Err(message) => {
+                        let _ = reply.send(false);
+                        self.send_runtime_failure(message);
+                        false
+                    }
+                }
+            }
+            Command::EndAccessibilityDemand(ended_at) => {
+                self.schedules.end_accessibility_demand(ended_at);
                 true
             }
             Command::RouteClientEffects => {

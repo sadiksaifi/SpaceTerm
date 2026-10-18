@@ -70,20 +70,6 @@ impl PaneConstruction {
         }
     }
 
-    /// The same construction with another accessibility adapter factory.
-    ///
-    /// A server-backed Pane takes one that publishes no shell text, because reading server-owned
-    /// terminal content with assistive technology is not available yet.
-    pub(crate) fn with_accessibility(
-        &self,
-        accessibility: Rc<dyn TerminalAccessibilityAdapterFactory>,
-    ) -> Self {
-        Self {
-            accessibility,
-            ..self.clone()
-        }
-    }
-
     /// The clipboard that application actions such as Copy Path write.
     pub(crate) fn text_clipboard(
         &self,

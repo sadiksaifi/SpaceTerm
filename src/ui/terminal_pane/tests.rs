@@ -1611,6 +1611,12 @@ fn clearing_a_server_presentation_forgets_the_former_screen_and_text(cx: &mut Te
         assert!(pane.last_valid_screen.rows.is_empty());
         assert!(pane.accessibility.text().is_empty());
         assert_eq!(pane.title().as_ref(), "Development Pane");
+        // The connection published this model before the takeover; it arrives afterwards.
+        pane.handle_session_accessibility(
+            epoch,
+            Arc::new(TerminalAccessibilityModel::from_screen(&former)),
+        );
+        assert!(pane.accessibility.text().is_empty());
         assert!(
             !pane.handle_event(
                 TerminalSessionEvent::Screen(text_screen(5, &["secret"])),
@@ -1618,8 +1624,162 @@ fn clearing_a_server_presentation_forgets_the_former_screen_and_text(cx: &mut Te
             ),
             "a Screen from before the takeover stays stale"
         );
-        assert!(pane.handle_event(TerminalSessionEvent::Screen(text_screen(6, &["fresh"])), cx));
+        let fresh = text_screen(6, &["fresh"]);
+        assert!(pane.handle_event(TerminalSessionEvent::Screen(Arc::clone(&fresh)), cx));
+        pane.handle_session_accessibility(
+            epoch,
+            Arc::new(TerminalAccessibilityModel::from_screen(&fresh)),
+        );
+        assert!(pane.accessibility.text().contains("fresh"));
     });
+}
+
+#[gpui::test]
+fn accesskit_server_pane_keeps_frozen_text_but_refuses_native_focus_while_interrupted(
+    cx: &mut TestAppContext,
+) {
+    use gpui::accesskit::Action;
+    use spaceterm_ui::a11y_testing::{A11yTree, perform};
+
+    cx.update(crate::ui::init).unwrap();
+    let records = TestTerminalSessionRecords::default();
+    let session_factory = WorkspaceTerminalSessionFactory::new_server(
+        Rc::new(
+            TestTerminalSessionFactory::new(records.clone())
+                .server_backed()
+                .with_reading_available(true),
+        ),
+        test_local_directory(PathBuf::from("/tmp/spaceterm-terminal-pane-test")),
+    );
+    let (pane, cx) = cx.add_window_view(|window, cx| {
+        TerminalPane::new_with_services(
+            session_factory,
+            None,
+            crate::terminal::testing::test_terminal_key_input_adapter(),
+            &crate::platform::accesskit_terminal_accessibility::AccessKitTerminalAccessibilityAdapterFactory,
+            crate::terminal::native_services::testing::adapters(),
+            PaneLifecycleDependencies::testing(),
+            window,
+            cx,
+        )
+    });
+    cx.update(|window, cx| {
+        window.activate_window();
+        pane.update(cx, |pane, cx| {
+            pane.set_accessibility_hierarchy(true);
+            pane.handle_accessibility(accessibility_model(7));
+            pane.focus(window, cx);
+            cx.notify();
+        });
+    });
+    cx.activate_accessibility();
+    cx.run_until_parked();
+    let focus_requests = Rc::new(Cell::new(0));
+    let observed_requests = focus_requests.clone();
+    pane.update(cx, |_, cx| {
+        cx.subscribe(&pane, move |_, _, event: &TerminalPaneEvent, _| {
+            if matches!(event, TerminalPaneEvent::FocusRequested) {
+                observed_requests.set(observed_requests.get() + 1);
+            }
+        })
+        .detach();
+    });
+    // A request must not outlive its connection or control grant, even before the view polls.
+    let queued = pane.update(cx, |pane, _| {
+        let authority = pane.native_focus_authority().unwrap();
+        pane.accessibility_focus_sender.with_authority(authority)
+    });
+    records.advance_input_generation(records.starts()[0].session_id);
+    queued.request();
+    cx.run_until_parked();
+    assert_eq!(focus_requests.get(), 0);
+
+    // A request queued under the connected authority must not apply after the interruption.
+    let queued = pane.update(cx, |pane, _| {
+        let authority = pane.native_focus_authority().unwrap();
+        pane.accessibility_focus_sender.with_authority(authority)
+    });
+    cx.update(|window, cx| {
+        window.blur(cx);
+        pane.update(cx, |pane, cx| {
+            pane.set_server_connection_interrupted(true, window, cx);
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
+    queued.request();
+    cx.run_until_parked();
+    let tree = A11yTree::read(cx);
+    perform(cx, tree.node("Terminal Pane"), Action::Focus);
+    cx.run_until_parked();
+
+    assert_eq!(focus_requests.get(), 0);
+    let tree = A11yTree::read(cx);
+    assert!(
+        tree.in_order()
+            .iter()
+            .any(|node| node["aria"]["role"] == "TextRun" && node["aria"]["value"] == "update-7x"),
+        "a reconnecting Pane keeps its frozen text readable"
+    );
+
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.set_server_connection_interrupted(false, window, cx);
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
+    queued.request();
+    cx.run_until_parked();
+    assert_eq!(focus_requests.get(), 0);
+    let tree = A11yTree::read(cx);
+    perform(cx, tree.node("Terminal Pane"), Action::Focus);
+    cx.run_until_parked();
+    assert_eq!(focus_requests.get(), 1);
+
+    let queued = pane.update(cx, |pane, _| {
+        let authority = pane.native_focus_authority().unwrap();
+        pane.accessibility_focus_sender.with_authority(authority)
+    });
+    pane.update(cx, |pane, _| pane.set_accessibility_hierarchy(false));
+    queued.request();
+    cx.run_until_parked();
+    assert_eq!(
+        focus_requests.get(),
+        1,
+        "a hidden Pane must refuse queued focus"
+    );
+
+    pane.update(cx, |pane, cx| {
+        pane.set_accessibility_hierarchy(true);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    queued.request();
+    cx.run_until_parked();
+    assert_eq!(
+        focus_requests.get(),
+        1,
+        "showing a Pane must not restore old authority"
+    );
+
+    // Hiding and showing before the receiver runs must also revoke its old request.
+    let queued = pane.update(cx, |pane, _| {
+        let authority = pane.native_focus_authority().unwrap();
+        pane.accessibility_focus_sender.with_authority(authority)
+    });
+    pane.update(cx, |pane, cx| {
+        pane.set_accessibility_hierarchy(false);
+        pane.set_accessibility_hierarchy(true);
+        cx.notify();
+    });
+    queued.request();
+    cx.run_until_parked();
+    assert_eq!(focus_requests.get(), 1);
+    let tree = A11yTree::read(cx);
+    perform(cx, tree.node("Terminal Pane"), Action::Focus);
+    cx.run_until_parked();
+    assert_eq!(focus_requests.get(), 2);
 }
 
 fn accessibility_model(index: usize) -> Arc<TerminalAccessibilityModel> {
