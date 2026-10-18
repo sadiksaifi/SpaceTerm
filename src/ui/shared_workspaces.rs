@@ -109,11 +109,19 @@ mod development {
             eprintln!("shared Workspaces need an open Workspace Window");
             return;
         };
-        let _ = handle.update(cx, |manager, window, cx| {
-            manager.adopt_shared_workspaces(window, cx);
-        });
+        let answered_over_settings = handle
+            .update(cx, |manager, window, cx| {
+                manager.adopt_shared_workspaces(window, cx)
+            })
+            .unwrap_or(false);
+        // A refusal answered over Settings stays in front; raising the Workspace Window would
+        // cover it.
+        if answered_over_settings {
+            return;
+        }
         // The request usually comes from Settings. Bring the Workspace Window forward so its
         // result, or an alert explaining why it could not be shown, is not left behind Settings.
+        // Desktops that refuse the raise keep Settings in front, and the alert follows it there.
         cx.defer(move |cx| {
             let _ = handle.update(cx, |_, window, _| window.activate_window());
         });

@@ -15439,6 +15439,85 @@ fn first_adoption_brings_the_workspace_window_in_front_of_settings(cx: &mut Test
     );
 }
 
+/// Use Shared Workspaces answers over Settings when it cannot present the Workspaces, so the
+/// person sees why without relying on a desktop that may refuse to raise the Workspace Window.
+#[gpui::test]
+fn refused_adoption_from_settings_alerts_over_settings(cx: &mut TestAppContext) {
+    let (manager, _records, cx) = workspace_manager(cx);
+    manager.update(cx, |manager, _| {
+        manager.local_home_directory_path = temporary_directory("shared-adoption-missing-home");
+    });
+    struct StillMovement;
+    impl crate::platform::window_movement::WindowMovementFactory for StillMovement {
+        fn create(
+            &self,
+        ) -> Rc<dyn crate::platform::window_movement::OperatingSystemWindowDragPlatform> {
+            Rc::new(crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform::default())
+        }
+    }
+    let workspace_window = cx.update(|window, _| window.window_handle());
+    cx.update(|_, cx| {
+        if !cx.has_global::<crate::ui::appearance_runtime::AppearanceRuntime>() {
+            crate::ui::appearance_runtime::install(
+                crate::settings::Settings::load(
+                    crate::settings::storage::testing::MemoryStorage::with_document(
+                        &crate::settings::SettingsDocument::default(),
+                    ),
+                ),
+                Rc::new(
+                    crate::platform::appearance::testing::RecordingAppearancePlatform::default(),
+                ),
+                cx,
+            )
+            .expect("appearance runtime should install");
+        }
+        crate::ui::settings_window::configure_window_chrome(
+            Rc::new(StillMovement),
+            Default::default(),
+            None,
+            cx,
+        );
+        crate::ui::settings_window::open_or_activate(None, cx);
+    });
+    cx.run_until_parked();
+    let settings = cx
+        .update(|_, cx| cx.windows())
+        .into_iter()
+        .find_map(|window| window.downcast::<crate::ui::settings_window::SettingsWindow>())
+        .expect("Settings opens");
+    cx.update(|_, cx| {
+        settings
+            .update(cx, |_, window, _| window.activate_window())
+            .expect("Settings is open");
+    });
+    cx.run_until_parked();
+
+    // Use Shared Workspaces runs inside Settings.
+    cx.cx.update(|cx| {
+        settings
+            .update(cx, |_, _, cx| crate::ui::shared_workspaces::adopt(cx))
+            .expect("Settings is open");
+    });
+    cx.run_until_parked();
+
+    assert!(
+        cx.cx.update(|cx| settings
+            .update(cx, |_, window, cx| spaceterm_ui::window_modal_is_open(
+                window, cx
+            ))
+            .expect("Settings is open")),
+        "the refusal is presented over Settings, where the person asked"
+    );
+    assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+    assert_ne!(
+        cx.cx
+            .update(|cx| cx.active_window().map(|active| active.window_id())),
+        Some(workspace_window.window_id()),
+        "a refusal does not raise the Workspace Window over its own alert"
+    );
+    assert!(!cx.update(|_, cx| crate::ui::shared_workspaces::adopted(cx)));
+}
+
 /// One device presents its shared Workspaces in one Workspace Window. Asking a second window to
 /// present them brings the first one forward instead.
 #[gpui::test]
