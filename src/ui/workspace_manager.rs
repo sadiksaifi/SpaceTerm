@@ -2808,6 +2808,14 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The server owns this window's local work, so nothing desktop-owned replaces a final
+        // Workspace: the window presents its empty view instead.
+        if self.launch.is_some() && self.workspaces.len() == 1 {
+            self.remove_workspace_presentation(workspace_id, window, cx);
+            self.remote_workspace_runtimes.remove(&workspace_id);
+            self.debug_assert_remote_runtime_invariants();
+            return;
+        }
         let replacement = if self.workspaces.len() == 1 {
             match self.local_home_directory() {
                 Ok(directory) => directory,
@@ -4983,8 +4991,8 @@ impl WorkspaceManager {
     /// Removes a Workspace the server no longer has.
     ///
     /// The server already removed it, so this needs no confirmation here. It ends nothing on the
-    /// server: closing the local Panes drops their subscriptions. The collection keeps its
-    /// invariants, replacing a final Workspace with a Local one this window owns.
+    /// server: closing the local Panes drops their subscriptions. A final Workspace leaves the
+    /// empty view.
     fn remove_shared_workspace(
         &mut self,
         workspace_id: WorkspaceId,
@@ -5164,15 +5172,15 @@ impl WorkspaceManager {
         }
         // A write SpaceTerm cannot confirm still stops this presentation: the person asked for
         // that, and the Panes' control may already be released.
-        self.remove_detached_workspace(workspace_id, window, cx);
+        self.remove_workspace_presentation(workspace_id, window, cx);
         if let Err(failure) = outcome {
             Self::present_attachment_failure(AttachmentChange::Detach, failure, window, cx);
         }
     }
 
-    /// Removes a detached Workspace's presentation. Closing its local Panes drops their
-    /// subscriptions and ends nothing on the server.
-    fn remove_detached_workspace(
+    /// Removes one Workspace's presentation without replacing it. Closing a shared Workspace's
+    /// local Panes drops their subscriptions and ends nothing on the server.
+    fn remove_workspace_presentation(
         &mut self,
         workspace_id: WorkspaceId,
         window: &mut Window,

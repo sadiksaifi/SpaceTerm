@@ -77,6 +77,7 @@ impl SharedServerConnector for ScriptedConnector {
 struct LaunchHarness {
     manager: Entity<WorkspaceManager>,
     launch: Arc<ScriptedLaunch>,
+    edits: Rc<ScriptedEdits>,
     panes: Rc<ScriptedPanes>,
 }
 
@@ -129,8 +130,9 @@ fn launch_harness(
         crate::terminal::testing::test_local_directory(std::env::temp_dir()),
     );
     let panes = ScriptedPanes::new(session_factory);
+    let edits = Rc::new(ScriptedEdits::new(Some(inventory())));
     let connector = Rc::new(ScriptedConnector {
-        edits: Rc::new(ScriptedEdits::new(Some(inventory()))),
+        edits: Rc::clone(&edits),
         panes: Rc::clone(&panes),
     });
     let adapters = LocalServerAdapters {
@@ -161,6 +163,7 @@ fn launch_harness(
         LaunchHarness {
             manager,
             launch,
+            edits,
             panes,
         },
         cx,
@@ -276,4 +279,26 @@ fn return_runs_the_launch_screens_default_action(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert_eq!(harness.launch.steps(), ["run", "start", "run"]);
+}
+
+#[gpui::test]
+fn removing_the_final_server_workspace_leaves_the_empty_view(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![ready()], cx);
+    cx.run_until_parked();
+    sync(&harness, cx);
+    assert_eq!(harness.shared_rows(cx), 1);
+
+    harness.edits.set_inventory(Inventory {
+        revision: 2,
+        workspaces: Vec::new(),
+        ..inventory()
+    });
+    sync(&harness, cx);
+
+    assert_eq!(
+        harness.workspace_count(cx),
+        0,
+        "no desktop-owned Workspace replaces the server's"
+    );
+    assert!(cx.debug_bounds("empty-workspace").is_some());
 }
