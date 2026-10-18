@@ -134,6 +134,13 @@ def package(release_tag=None):
     shutil.rmtree(STAGE, ignore_errors=True)
     STAGE.mkdir(parents=True)
     stage(name, executable, server, STAGE / DIRECTORIES[name])
+    from spaceterm_tasks.server_package import prepare_desktop_artifact
+
+    prepare_desktop_artifact(
+        STAGE / DIRECTORIES[name] / "share/spaceterm/server-artifact",
+        DIRECTORIES[name],
+        release_tag,
+    )
     DIST.mkdir(exist_ok=True)
     destination = archive_path(name)
     with tempfile.TemporaryDirectory(dir=DIST, prefix=".package.") as temporary:
@@ -194,6 +201,11 @@ def verify_tree(tree, name, release_tag):
         verify_glibc_baseline(server, f"{label} server")
     verify_application_identity(server, "SpaceTerm Server", f"{label} server")
     verify_resources(tree / "share" / "spaceterm", label)
+    from spaceterm_tasks.server_package import verify_desktop_artifact
+
+    verify_desktop_artifact(
+        tree / "share/spaceterm/server-artifact", DIRECTORIES[name], release_tag
+    )
 
     identifier = application_id(name)
     entry = tree / "share" / "applications" / f"{identifier}.desktop"

@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 
 from spaceterm_tasks import ROOT
+from tests.server_artifact_fixture import configure_trust, prepare
 
 FIXTURE = r"""
 #include <stdio.h>
@@ -59,6 +60,7 @@ class PackageTests(unittest.TestCase):
                 ignore=shutil.ignore_patterns("__pycache__"),
             )
         shutil.copyfile(ROOT / "Cargo.toml", self.root / "Cargo.toml")
+        configure_trust(self.root)
         # Release packaging requires a clean Git checkout.
         (self.root / ".gitignore").write_text("/target/\n/dist/\n__pycache__/\n")
         for arguments in (("init", "-q"), ("add", "-A"), ("commit", "-qm", "fixture")):
@@ -143,6 +145,7 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         )
 
     def package(self, release_tag=None):
+        prepare(self.root, self.env, release_tag)
         if release_tag:
             return self.task("release/package/linux.py", release_tag)
         return self.task("preflight/package/linux.py")
@@ -162,6 +165,8 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         for name in (
             "spaceterm-preflight/bin/spaceterm",
             "spaceterm-preflight/bin/spaceterm-server",
+            "spaceterm-preflight/share/spaceterm/server-artifact/artifact.tar.gz",
+            "spaceterm-preflight/share/spaceterm/server-artifact/artifact.sig",
             "spaceterm-preflight/share/spaceterm/THIRD-PARTY-NOTICES.txt",
             "spaceterm-preflight/share/spaceterm/terminfo/x/xterm-spaceterm",
             f"spaceterm-preflight/share/applications/{identifier}.desktop",

@@ -95,6 +95,14 @@ def package_bundle(release_tag=None):
     shutil.copyfile(server, binaries / "spaceterm-server")
     (binaries / "spaceterm-server").chmod(0o755)
     config["binaries"].append({"path": "spaceterm-server", "main": False})
+    from spaceterm_tasks.server_package import prepare_desktop_artifact
+
+    prepare_desktop_artifact(
+        STAGE / "server-artifact",
+        template["CFBundleIdentifier"].removeprefix("io.github.sadiksaifi."),
+        release_tag,
+    )
+    config["resources"].append({"src": str(STAGE / "server-artifact"), "target": "server-artifact"})
     config["version"] = version
     # cargo-packager stamps CFBundleVersion with the build time; the identity's Info.plist
     # entries override its generated ones, so add the tag-derived versions to them.
@@ -236,6 +244,13 @@ def verify_bundle(app, name, release_tag, label):
     ):
         raise TaskError(f"{label} asset catalog has no 1024-pixel {ICON_NAME} icon")
     verify_resources(resources, label)
+    from spaceterm_tasks.server_package import verify_desktop_artifact
+
+    verify_desktop_artifact(
+        resources / "server-artifact",
+        template["CFBundleIdentifier"].removeprefix("io.github.sadiksaifi."),
+        release_tag,
+    )
 
     signature = ["codesign", "--verify", "--strict", *(["--deep"] if release_tag else []), str(app)]
     checked(signature, f"{label} app signature verification failed")

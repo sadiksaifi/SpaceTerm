@@ -30,6 +30,7 @@ from spaceterm_tasks.packaging import (
     TERMINFO,
     checked,
     packaged_environment,
+    release_version,
     require_clean_checkout,
     verify_resources,
 )
@@ -68,7 +69,11 @@ def document(data):
             or value["identity"] not in IDENTITIES
             or value["target"] not in TARGETS.values()
             or not re.fullmatch(r"[0-9a-f]{40}", value["commit"])
-            or not re.fullmatch(r"(?:dev\.[0-9a-f]{12}|[0-9]+\.[0-9]+\.[0-9]+)", value["version"])
+            or len(value["version"]) > 64
+            or not re.fullmatch(
+                r"(?:dev\.[0-9a-f]{12}|(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))",
+                value["version"],
+            )
         ):
             raise ValueError("invalid build")
     except (ValueError, TypeError, UnicodeError):
@@ -166,10 +171,12 @@ def verify_tree(tree, expected):
         for name in files
         if re.fullmatch(r"share/spaceterm/terminfo/(?:78|x)/xterm-spaceterm", name)
     }
-    if not terminfo or files != shell | terminfo | {
+    resources = set(json.loads((ROOT / "packaging/server-resources.json").read_text()))
+    if resources != shell | {"share/spaceterm/THIRD-PARTY-NOTICES.txt"}:
+        raise TaskError("the server resource policy differs from the tracked resources")
+    if not terminfo or files != resources | terminfo | {
         "bin/spaceterm-server",
         "build.json",
-        "share/spaceterm/THIRD-PARTY-NOTICES.txt",
     }:
         raise TaskError("the server resources do not match the supported layout")
     directories = {str(path.relative_to(tree)) for path in tree.rglob("*") if path.is_dir()}
@@ -392,3 +399,68 @@ def package(identity, release_tag=None):
         archive.replace(DIST / name)
         signature.replace(DIST / signature.name)
     print(f"Created signed server candidate {name}; nothing published")
+    return DIST / name, DIST / f"{name}.sig"
+
+
+def desktop_build(identity, release_tag=None):
+    """The exact source revision admitted for a packaged desktop's first server."""
+    commit = checked(
+        ["git", "rev-parse", "HEAD"], "candidate commit unavailable", cwd=ROOT, text=True
+    ).strip()
+    return document(
+        json.dumps(
+            {
+                "schema": 1,
+                "identity": identity,
+                "target": host_target(),
+                "commit": commit,
+                "version": release_version(release_tag) if release_tag else "dev." + commit[:12],
+            }
+        )
+    )
+
+
+def stage_desktop_artifact(archive, signature, destination, expected):
+    """Embed the verified independent archive and raw signature, never a derived executable."""
+    expected = document(json.dumps(expected))
+    # Verification and copying use the same private bytes, even if the input path changes.
+    with tempfile.TemporaryDirectory(prefix="spaceterm-desktop-artifact-") as temporary:
+        _, private, raw = verified_copy(archive, signature, Path(temporary), expected)
+        destination.mkdir(parents=True)
+        shutil.copyfile(private, destination / "artifact.tar.gz")
+        shutil.copyfile(raw, destination / "artifact.sig")
+        for path in destination.iterdir():
+            path.chmod(0o644)
+
+
+def prepare_desktop_artifact(destination, identity, release_tag=None):
+    """Signing happens during candidate preparation; launch only consumes the resulting pair.
+
+    An explicit pair uses the same inputs as source builds. A candidate without that pair
+    builds the independent signed package using the existing candidate signing workflow.
+    The sibling executable remains for temporary manual workflows and grants no retained
+    runtime authority.
+    """
+    archive = os.environ.get("SPACETERM_SERVER_ARCHIVE")
+    signature = os.environ.get("SPACETERM_SERVER_SIGNATURE")
+    if (archive is not None or signature is not None) and (not archive or not signature):
+        raise TaskError("supply both SPACETERM_SERVER_ARCHIVE and SPACETERM_SERVER_SIGNATURE")
+    require_clean_checkout()
+    expected = desktop_build(identity, release_tag)
+    if not archive:
+        archive, signature = package(identity, release_tag)
+    stage_desktop_artifact(archive, signature, destination, expected)
+
+
+def verify_desktop_artifact(destination, identity, release_tag=None):
+    """Verify the pair carried inside the actual app/archive, using the exact candidate build."""
+    try:
+        if {path.name for path in destination.iterdir()} != {"artifact.tar.gz", "artifact.sig"}:
+            raise TaskError("the desktop server artifact layout is invalid")
+        verify(
+            destination / "artifact.tar.gz",
+            destination / "artifact.sig",
+            desktop_build(identity, release_tag),
+        )
+    except OSError:
+        raise TaskError("the desktop server artifact is unavailable") from None

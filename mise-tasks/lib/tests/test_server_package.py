@@ -137,6 +137,26 @@ class ServerArchiveTests(unittest.TestCase):
                         self.archive, self.signature, Path(temporary), self.info
                     )
 
+    def test_desktop_artifact_rejects_wrong_exact_build_before_staging(self):
+        self.archive_with([("server/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)])
+        destination = self.root / "desktop/server-artifact"
+        with self.assertRaises(TaskError):
+            server_package.stage_desktop_artifact(
+                self.archive, self.signature, destination, {**self.info, "commit": "b" * 40}
+            )
+        self.assertFalse(destination.exists())
+
+    def test_desktop_candidate_requires_both_explicit_artifact_inputs(self):
+        with patch.dict(os.environ, {"SPACETERM_SERVER_ARCHIVE": str(self.archive)}, clear=True):
+            with self.assertRaisesRegex(TaskError, "both"):
+                server_package.prepare_desktop_artifact(
+                    self.root / "desktop/server-artifact", "spaceterm-preflight"
+                )
+
+    def test_missing_desktop_artifact_is_classified_without_a_native_error(self):
+        with self.assertRaisesRegex(TaskError, "desktop server artifact is unavailable"):
+            server_package.verify_desktop_artifact(self.root / "missing", "spaceterm-preflight")
+
     def test_signed_malformed_build_document_is_refused(self):
         for payload in [b"null", b"[]", b"{}", b"invalid", b'{"schema":1,"schema":2}']:
             self.archive_with([("server/build.json", payload, tarfile.REGTYPE)])
