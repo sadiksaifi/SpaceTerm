@@ -19,6 +19,13 @@ impl SharedWorkspaceHost {
     pub fn local() -> Result<Self, ServerError> {
         Ok(Self::new(DevelopmentPaneHost::local()?))
     }
+
+    /// Compose an account service whose new terminals follow the current login agent.
+    pub fn account_service() -> Result<Self, ServerError> {
+        Ok(Self::new(DevelopmentPaneHost::local_with_pty_factory(
+            crate::platform::service_pty_factory(),
+        )?))
+    }
     pub(super) fn new(prototype: DevelopmentPaneHost) -> Self {
         let mut state = State::empty();
         state.begin_boot(prototype.boot);

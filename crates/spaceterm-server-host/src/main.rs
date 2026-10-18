@@ -61,7 +61,7 @@ fn run() -> Result<(), spaceterm_server::ServerError> {
         check::resources()?;
         return spaceterm_server::service::run(
             identity,
-            spaceterm::runtime::SharedWorkspaceHost::local()?,
+            spaceterm::runtime::SharedWorkspaceHost::account_service()?,
         );
     } else if let Some(action) = command.to_str().and_then(|v| v.strip_prefix("service-")) {
         let service = spaceterm_server::service::Service::for_identity(identity)?;

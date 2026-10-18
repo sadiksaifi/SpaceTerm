@@ -88,6 +88,12 @@ impl DevelopmentPaneHost {
     }
     /// Native composition for the explicitly launched local Development host.
     pub fn local() -> Result<Self, ServerError> {
+        Self::local_with_pty_factory(native_pty_factory())
+    }
+
+    fn local_with_pty_factory(
+        pty_factory: Arc<dyn NativePtyAdapterFactory>,
+    ) -> Result<Self, ServerError> {
         let filesystem = local_filesystem();
         let directory = crate::platform::app_directories::AppDirectoryEnvironment::capture()
             .home
@@ -95,7 +101,7 @@ impl DevelopmentPaneHost {
             .ok_or(ServerError::StartupFailed)?;
         let shell = crate::platform::launch_host::user_shell();
         let factory = NativeTerminalSessionFactory::new(
-            native_pty_factory(),
+            pty_factory,
             ShellLaunchPlanner::new(
                 shell,
                 crate::platform::launch_host::resource_root(),
@@ -1279,6 +1285,48 @@ pub(crate) fn decode_key(key: Key) -> Option<KeyInput> {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn unavailable_account_environment_allows_pane_close_and_server_shutdown() {
+        struct UnavailableEnvironment;
+        impl NativePtyAdapterFactory for UnavailableEnvironment {
+            fn create(
+                &self,
+                _: crate::platform::shell_launch::PreparedShellLaunch,
+                _: crate::platform::native_pty::NativePtySize,
+            ) -> Result<
+                crate::platform::native_pty::NativePtyAdapterParts,
+                crate::platform::native_pty::NativePtyAdapterConstructionFailure,
+            > {
+                Err(crate::platform::native_pty::NativePtyAdapterConstructionFailure::EnvironmentUnavailable)
+            }
+        }
+        for close_pane in [true, false] {
+            let mut host =
+                DevelopmentPaneHost::local_with_pty_factory(Arc::new(UnavailableEnvironment))
+                    .unwrap();
+            let lease = attach(&mut host, 1, true);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let pane = host.pane.as_mut().unwrap();
+                pane.drain();
+                if pane.failed {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "startup failure was not reported"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if close_pane {
+                let reply = host.request([1; 32], [1; 32], Request::Close { lease });
+                assert!(matches!(reply, Reply::Closed), "{reply:?}");
+            }
+            let reply = host.request([1; 32], [1; 32], Request::Shutdown);
+            assert!(matches!(reply, Reply::Closed), "{reply:?}");
+        }
+    }
 
     #[test]
     fn server_screen_carries_graphics_geometry_without_inline_pixels() {
