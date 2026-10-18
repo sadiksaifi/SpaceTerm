@@ -22,10 +22,9 @@ FORK_URL = "https://github.com/sadiksaifi/zed"
 EXPECTED = {
     ("dependencies", "gpui"),
     ("dependencies", "gpui_platform"),
-    ("dev-dependencies", "gpui"),
     ('target.cfg(target_os = "linux").dependencies', "gpui_platform"),
-    ('target.cfg(target_os = "macos").dev-dependencies', "gpui_macos"),
-    ('target.cfg(target_os = "linux").dev-dependencies', "gpui_wgpu"),
+    ('target.cfg(target_os = "macos").dependencies', "gpui_macos"),
+    ('target.cfg(target_os = "linux").dependencies', "gpui_wgpu"),
 }
 TAG_PATTERN = re.compile(r"spaceterm-[0-9]{4}-[0-9]{2}-[0-9]{2}(?:\.[1-9][0-9]*)?\Z")
 FIELD_PATTERN = re.compile(r'\b(?:tag|rev)(\s*=\s*")([^"]*)(")')
