@@ -2466,10 +2466,8 @@ impl WorkspaceManager {
             .validate_directory(&self.local_home_directory_path)
     }
 
-    fn show_home_directory_unavailable(window: &mut Window, cx: &mut Context<Self>) {
-        let manager = cx.weak_entity();
-        let window_handle = window.window_handle();
-        let _ = Alert::new(
+    fn home_directory_alert() -> Alert<()> {
+        Alert::new(
             ModalId::new("workspace-home-directory-unavailable"),
             "Home directory unavailable",
             "Home Directory Unavailable",
@@ -2477,7 +2475,12 @@ impl WorkspaceManager {
             vec![ModalAction::new((), "OK", ModalActionRole::Cancel, "workspace-home-error-ok")],
         )
         .intent(AlertIntent::Warning)
-        .present(window, cx, move |_, cx| {
+    }
+
+    fn show_home_directory_unavailable(window: &mut Window, cx: &mut Context<Self>) {
+        let manager = cx.weak_entity();
+        let window_handle = window.window_handle();
+        let _ = Self::home_directory_alert().present(window, cx, move |_, cx| {
             let _ = window_handle.update(cx, |_, window, cx| {
                 let _ = manager.update(cx, |manager, cx| {
                     manager.sync_terminal_focus_blocker(window, cx);
@@ -3880,33 +3883,43 @@ impl WorkspaceManager {
     /// Adopting changes nothing a person is working in: the Workspaces this window owns keep their
     /// Tabs, Panes, and Terminal Sessions, and the Active Workspace stays where it was. Production
     /// defaults stay desktop-owned, so the server's Workspaces only ever join the sidebar.
-    pub(crate) fn adopt_shared_workspaces(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Returns whether a refusal was answered over the active Settings Window.
+    pub(crate) fn adopt_shared_workspaces(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         use super::shared_workspaces::SharedPaneSessions;
 
         if self.shared.is_some() {
-            return;
+            return false;
         }
         // One device holds one authenticated connection per Pane, and one durable edit journal.
         // A second presentation of the same server would rebind each Pane's lease and fence the
         // first into reconnecting, so only one surface presents them at a time.
         if super::development_pane::is_open(cx) {
-            Self::show_shared_unavailable(
+            return Self::show_shared_unavailable(
                 "The Development Pane window is presenting a Pane this server owns. Close it \
                  first: one device holds one connection per Pane.",
                 window,
                 cx,
             );
-            return;
         }
         // The client home only completes the launch plan a server-backed Terminal Session ignores.
         // It is never the directory the server starts a shell in, and it grants this Workspace no
         // local directory of its own.
         let Ok(client_home) = self.local_home_directory() else {
-            Self::show_home_directory_unavailable(window, cx);
-            return;
+            let answered =
+                super::settings_window::present_over_active_settings(cx, |window, cx| {
+                    let _ = Self::home_directory_alert().present(window, cx, |_, _| {});
+                });
+            if !answered {
+                Self::show_home_directory_unavailable(window, cx);
+            }
+            return answered;
         };
         let Some(client) = super::server_worktrees::Client::get(cx) else {
-            return;
+            return false;
         };
         let server = client.server.clone();
         let edits = client.source;
@@ -3920,6 +3933,7 @@ impl WorkspaceManager {
         if let Some(shared) = self.shared.as_mut() {
             shared.retain_client_views(server);
         }
+        false
     }
 
     /// Presents the Workspaces one shared edit channel publishes.
@@ -4064,6 +4078,9 @@ impl WorkspaceManager {
             .shared
             .as_mut()
             .and_then(|shared| shared.take_view_error())
+            && !super::settings_window::present_over_active_settings(cx, move |window, cx| {
+                notice.present(window, cx)
+            })
         {
             notice.present(window, cx);
         }
@@ -4851,21 +4868,33 @@ impl WorkspaceManager {
         Self::show_shared_unavailable(&detail, window, cx);
     }
 
-    fn show_shared_unavailable(detail: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let _ = Alert::new(
-            ModalId::new("shared-workspace-unavailable"),
-            "Shared change unavailable",
-            "Shared Change Unavailable",
-            detail.to_owned(),
-            vec![ModalAction::new(
-                (),
-                "OK",
-                ModalActionRole::Cancel,
-                "shared-workspace-unavailable-ok",
-            )],
-        )
-        .intent(AlertIntent::Warning)
-        .present(window, cx, |_, _| {});
+    /// Returns whether the alert was presented over the active Settings Window.
+    fn show_shared_unavailable(detail: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let detail = detail.to_owned();
+        let alert = move || {
+            Alert::new(
+                ModalId::new("shared-workspace-unavailable"),
+                "Shared change unavailable",
+                "Shared Change Unavailable",
+                detail.clone(),
+                vec![ModalAction::new(
+                    (),
+                    "OK",
+                    ModalActionRole::Cancel,
+                    "shared-workspace-unavailable-ok",
+                )],
+            )
+            .intent(AlertIntent::Warning)
+        };
+        let over_settings = alert.clone();
+        let answered =
+            super::settings_window::present_over_active_settings(cx, move |window, cx| {
+                let _ = over_settings().present(window, cx, |_, _| {});
+            });
+        if !answered {
+            let _ = alert().present(window, cx, |_, _| {});
+        }
+        answered
     }
 
     /// Whether a SpaceTerm Server owns the Workspace, which changes what this window may read

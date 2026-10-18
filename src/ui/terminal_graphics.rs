@@ -4,10 +4,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use gpui::{App, Bounds, ContentMask, Pixels, RenderImage, Window, point, px, size};
+use gpui::{App, Bounds, ContentMask, Pixels, RenderImage, Size, Window, point, size};
 use image::{Frame, RgbaImage};
 use smallvec::smallvec;
 
+use crate::terminal::geometry::{BackingScale, LogicalCellSize, backing_cell_size};
 use crate::terminal::{
     ActiveScreenSnapshot, GraphicsSnapshot, ImageKey, ImagePlacementSnapshot, ImageSnapshot,
 };
@@ -344,16 +345,42 @@ pub(crate) enum GraphicsResourceError {
     InjectedAfterStaging,
 }
 
+/// Uploads the image with its edge texels repeated once on every side.
+///
+/// GPUI samples atlas tiles bilinearly and packs them without padding. A magnified image would
+/// otherwise blend its edges with neighbouring tiles, which can hold another Pane's image or
+/// texels left by an image that has since been removed. The repeated border lies outside the
+/// destination mask, so the visible edge samples only the image's own texels.
 fn upload_image(image: Arc<ImageSnapshot>) -> Result<CachedImage, GraphicsResourceError> {
-    let reservation =
-        GpuReservation::acquire(image.rgba.len()).ok_or(GraphicsResourceError::Capacity)?;
     let width = image.width;
     let height = image.height;
-    let mut bgra = image.rgba.to_vec();
-    for pixel in bgra.as_chunks_mut::<4>().0 {
-        pixel.swap(0, 2);
+    let (columns, rows) = (width as usize, height as usize);
+    if columns == 0 || rows == 0 || image.rgba.len() != columns * rows * 4 {
+        return Err(GraphicsResourceError::InvalidImage);
     }
-    let buffer = RgbaImage::from_raw(image.width, image.height, bgra)
+    let padded_width = width
+        .checked_add(2)
+        .ok_or(GraphicsResourceError::InvalidImage)?;
+    let padded_height = height
+        .checked_add(2)
+        .ok_or(GraphicsResourceError::InvalidImage)?;
+    let padded_bytes = (columns + 2)
+        .checked_mul(rows + 2)
+        .and_then(|texels| texels.checked_mul(4))
+        .ok_or(GraphicsResourceError::InvalidImage)?;
+    let reservation =
+        GpuReservation::acquire(padded_bytes).ok_or(GraphicsResourceError::Capacity)?;
+    let source = image.rgba.as_chunks::<4>().0;
+    let mut bgra = Vec::with_capacity(padded_bytes);
+    for row in 0..rows + 2 {
+        let row = row.saturating_sub(1).min(rows - 1);
+        for column in 0..columns + 2 {
+            let [red, green, blue, alpha] =
+                source[row * columns + column.saturating_sub(1).min(columns - 1)];
+            bgra.extend_from_slice(&[blue, green, red, alpha]);
+        }
+    }
+    let buffer = RgbaImage::from_raw(padded_width, padded_height, bgra)
         .ok_or(GraphicsResourceError::InvalidImage)?;
     let render_image = Arc::new(RenderImage::new(smallvec![Frame::new(buffer)]));
     Ok(CachedImage {
@@ -398,7 +425,8 @@ pub(crate) enum GraphicsLayer {
 pub(crate) struct ImagePaint {
     pub(crate) layer: GraphicsLayer,
     pub(crate) destination: Bounds<Pixels>,
-    pub(crate) full_image: Bounds<Pixels>,
+    /// The uploaded image with its repeated edge texels, drawn under the `destination` mask.
+    pub(crate) padded_image: Bounds<Pixels>,
     pub(crate) image: Arc<RenderImage>,
     _resource: Arc<CachedImage>,
 }
@@ -413,7 +441,7 @@ struct GraphicsGeometryKey {
     grid_bounds: Bounds<Pixels>,
     cell_width: Pixels,
     line_height: Pixels,
-    scale_factor_bits: u32,
+    measured_cell: (u32, u32),
 }
 
 struct CachedGraphicsPaintPlan {
@@ -473,23 +501,30 @@ impl PreparedGraphics {
                 || self.inner.placement_snapshot.as_ref() == snapshot.placements.as_ref())
     }
 
+    /// Places images on the drawn grid. `cell_width` and `line_height` are the drawn cell;
+    /// `nominal_cell` is the cell the emulator measured in whole device pixels, which image
+    /// placements are sized in.
     pub(crate) fn paint_plan(
         &self,
         grid_bounds: Bounds<Pixels>,
         cell_width: Pixels,
         line_height: Pixels,
+        nominal_cell: Size<Pixels>,
         scale_factor: f32,
     ) -> GraphicsPaintPlan {
-        let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
-            scale_factor
-        } else {
-            1.0
-        };
+        let scale = BackingScale::new(scale_factor).unwrap_or(BackingScale::ONE);
+        let measured = backing_cell_size(
+            LogicalCellSize::new(
+                f32::from(nominal_cell.width),
+                f32::from(nominal_cell.height),
+            ),
+            scale,
+        );
         let key = GraphicsGeometryKey {
             grid_bounds,
             cell_width,
             line_height,
-            scale_factor_bits: scale.to_bits(),
+            measured_cell: (measured.width, measured.height),
         };
         if let Some(cached) = self.inner.paint_plan.borrow().as_ref()
             && cached.key == key
@@ -510,35 +545,38 @@ impl PreparedGraphics {
                 {
                     return None;
                 }
-                let destination_width = px(placement.destination_width as f32 / scale);
-                let destination_height = px(placement.destination_height as f32 / scale);
+                // One measured device pixel spans this much of the drawn grid.
+                let column_pixel = cell_width / measured.width as f32;
+                let row_pixel = line_height / measured.height as f32;
+                let destination_width = column_pixel * placement.destination_width as f32;
+                let destination_height = row_pixel * placement.destination_height as f32;
                 let destination = Bounds::new(
                     point(
                         grid_bounds.left()
                             + cell_width * placement.viewport_col as f32
-                            + px(placement.cell_offset_x as f32 / scale),
+                            + column_pixel * placement.cell_offset_x as f32,
                         grid_bounds.top()
                             + line_height * placement.viewport_row as f32
-                            + px(placement.cell_offset_y as f32 / scale),
+                            + row_pixel * placement.cell_offset_y as f32,
                     ),
                     size(destination_width, destination_height),
                 );
                 let source_scale_x = destination_width / placement.source_width as f32;
                 let source_scale_y = destination_height / placement.source_height as f32;
-                let full_image = Bounds::new(
+                let padded_image = Bounds::new(
                     point(
-                        destination.left() - source_scale_x * placement.source_x as f32,
-                        destination.top() - source_scale_y * placement.source_y as f32,
+                        destination.left() - source_scale_x * (placement.source_x as f32 + 1.0),
+                        destination.top() - source_scale_y * (placement.source_y as f32 + 1.0),
                     ),
                     size(
-                        source_scale_x * prepared.image.width as f32,
-                        source_scale_y * prepared.image.height as f32,
+                        source_scale_x * (prepared.image.width as f32 + 2.0),
+                        source_scale_y * (prepared.image.height as f32 + 2.0),
                     ),
                 );
                 Some(ImagePaint {
                     layer: layer_for_z(placement.z),
                     destination,
-                    full_image,
+                    padded_image,
                     image: Arc::clone(&prepared.image.render_image),
                     _resource: Arc::clone(&prepared.image),
                 })
@@ -600,26 +638,28 @@ impl GraphicsPaintPlan {
     ) -> Result<(), GraphicsResourceError> {
         let mut failed = false;
         for paint in self.paints.iter().filter(|paint| paint.layer == layer) {
-            window.with_content_mask(
-                Some(ContentMask {
-                    bounds: paint.destination,
-                }),
-                |window| {
-                    if window
-                        .paint_image(
-                            paint.full_image,
-                            paint.full_image,
-                            Default::default(),
-                            Arc::clone(&paint.image),
-                            0,
-                            false,
-                        )
-                        .is_err()
-                    {
-                        failed = true;
-                    }
-                },
-            );
+            // Cover exactly the device pixels the destination cells' backgrounds cover.
+            let Some(bounds) = super::terminal_element::device_pixel_mask(
+                paint.destination,
+                window.scale_factor(),
+            ) else {
+                continue;
+            };
+            window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                if window
+                    .paint_image(
+                        paint.padded_image,
+                        paint.padded_image,
+                        Default::default(),
+                        Arc::clone(&paint.image),
+                        0,
+                        false,
+                    )
+                    .is_err()
+                {
+                    failed = true;
+                }
+            });
         }
         if failed {
             Err(GraphicsResourceError::Paint)
@@ -643,6 +683,7 @@ const fn layer_for_z(z: i32) -> GraphicsLayer {
 mod tests {
     use super::*;
     use gpui::AppContext as _;
+    use gpui::px;
     use std::borrow::Cow;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -869,6 +910,10 @@ mod tests {
                 Bounds::new(point(px(0.), px(0.)), size(px(104.), px(108.))),
                 px(13. / window.scale_factor()),
                 px(27. / window.scale_factor()),
+                size(
+                    px(13. / window.scale_factor()),
+                    px(27. / window.scale_factor()),
+                ),
                 window.scale_factor(),
             )
         });
@@ -883,10 +928,14 @@ mod tests {
         cx.update(|window, _| {
             let sprites = window.painted_polychrome_sprites();
             assert_eq!(sprites.len(), 1);
-            assert_eq!(sprites[0].bounds.origin.x.0, 13.);
-            assert_eq!(sprites[0].bounds.origin.y.0, 27.);
-            assert_eq!(sprites[0].bounds.size.width.0, 26.);
-            assert_eq!(sprites[0].bounds.size.height.0, 27.);
+            let mask = sprites[0].content_mask.bounds;
+            assert_eq!((mask.origin.x.0, mask.origin.y.0), (13., 27.));
+            assert_eq!((mask.size.width.0, mask.size.height.0), (26., 27.));
+            // One repeated edge texel on every side lies outside the measured cells.
+            assert_eq!(sprites[0].bounds.origin.x.0, -13.);
+            assert_eq!(sprites[0].bounds.origin.y.0, 0.);
+            assert_eq!(sprites[0].bounds.size.width.0, 78.);
+            assert_eq!(sprites[0].bounds.size.height.0, 81.);
         });
     }
 
@@ -898,17 +947,118 @@ mod tests {
         assert_eq!(layer_for_z(0), GraphicsLayer::AboveText);
     }
 
+    /// Cell backgrounds cover whole device pixels by rounding their edges halves toward zero. An
+    /// image masked to the same cells covers the same device pixels, so cells drawn over it hide it
+    /// exactly, without a device-pixel row of image showing past them.
+    #[gpui::test]
+    fn image_masks_cover_the_device_pixels_of_their_cells(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let prepared = prepared_graphics();
+        let (bounds, cell_width, line_height) = geometry();
+        // The grid starts 0.3 px below a whole logical pixel; at 2x its rows begin 0.6 device px
+        // into a device row, which a cell background leaves to the row above.
+        let bounds = Bounds::new(point(bounds.left(), bounds.top() + px(0.3)), bounds.size);
+        let plan = prepared.paint_plan(
+            bounds,
+            cell_width,
+            line_height,
+            size(cell_width, line_height),
+            cx.update(|window, _| window.scale_factor()),
+        );
+        let scale = cx.update(|window, _| window.scale_factor());
+        assert_eq!(scale, 2.0);
+        cx.draw(point(px(0.), px(0.)), size(px(800.), px(400.)), |_, _| {
+            gpui::canvas(
+                |_, _, _| (),
+                move |_, (), window, _| {
+                    plan.paint_layer(GraphicsLayer::AboveText, window).unwrap();
+                },
+            )
+        });
+        cx.update(|window, _| {
+            let sprites = window.painted_polychrome_sprites();
+            let mask = sprites[0].content_mask.bounds;
+            // Destination 28.3..68.3 logical is device 56.6..136.6; backgrounds cover 57..137.
+            assert!((mask.origin.y.0 - 57.0).abs() < 0.1, "{mask:?}");
+            assert!((mask.bottom().0 - 137.0).abs() < 0.1, "{mask:?}");
+        });
+    }
+
+    /// The emulator measures images in whole device-pixel cells from the nominal cell, while the
+    /// grid spreads leftover width across its cells. An image placed over twelve cells covers
+    /// exactly those twelve fitted cells.
     #[test]
-    fn source_crop_transforms_full_image_under_destination_mask() {
+    fn cell_sized_images_cover_their_fitted_grid_cells() {
+        let image_snapshot = Arc::new(ImageSnapshot {
+            key: ImageKey {
+                image_id: 1,
+                generation: 1,
+            },
+            width: 24,
+            height: 24,
+            rgba: Arc::from(vec![0; 24 * 24 * 4]),
+            reservation: None,
+        });
+        let image = Arc::new(upload_image(Arc::clone(&image_snapshot)).unwrap());
+        // A 10.8 x 20 nominal cell measures 11 x 20 device pixels at 1x; the grid draws 10.84.
+        let placement = ImagePlacementSnapshot {
+            image: image_snapshot.key,
+            placement_id: 1,
+            z: 0,
+            viewport_col: 35,
+            viewport_row: 3,
+            cell_offset_x: 0,
+            cell_offset_y: 0,
+            source_x: 0,
+            source_y: 0,
+            source_width: 24,
+            source_height: 24,
+            destination_width: 12 * 11,
+            destination_height: 6 * 20,
+            unicode_placeholder: false,
+        };
+        let snapshot = GraphicsSnapshot {
+            failure: None,
+            generation: 1,
+            placement_generation: 1,
+            images: Arc::from([image_snapshot]),
+            placements: Arc::from([placement.clone()]),
+        };
+        let prepared = PreparedGraphics::new(
+            ActiveScreenSnapshot::Primary,
+            &snapshot,
+            Arc::from([PreparedPlacement { placement, image }]),
+        );
+        let grid = Bounds::new(point(px(0.0), px(0.0)), size(px(1670.0), px(960.0)));
+        let cell = px(1670.0 / 154.0);
+
+        let plan = prepared.paint_plan(grid, cell, px(20.0), size(px(10.8), px(20.0)), 1.0);
+
+        let destination = plan.paints[0].destination;
+        assert!((destination.left() - cell * 35.0).abs() < px(0.001));
+        assert!((destination.size.width - cell * 12.0).abs() < px(0.001));
+        assert_eq!(destination.size.height, px(120.0));
+    }
+
+    #[test]
+    fn source_crop_transforms_padded_image_under_destination_mask() {
         let prepared = prepared_graphics();
         let (bounds, cell_width, line_height) = geometry();
 
-        let plan = prepared.paint_plan(bounds, cell_width, line_height, 2.0);
+        let plan = prepared.paint_plan(
+            bounds,
+            cell_width,
+            line_height,
+            size(cell_width, line_height),
+            2.0,
+        );
         let paint = &plan.paints[0];
         assert_eq!(paint.destination.origin, point(px(27.0), px(28.0)));
         assert_eq!(paint.destination.size, size(px(50.0), px(40.0)));
-        assert_eq!(paint.full_image.origin, point(px(17.0), px(8.0)));
-        assert_eq!(paint.full_image.size, size(px(100.0), px(80.0)));
+        // The 100x80 image fills 100x80 pixels from (17, 8); its repeated edge texels add one
+        // source texel on every side.
+        assert_eq!(paint.padded_image.origin, point(px(16.0), px(7.0)));
+        assert_eq!(paint.padded_image.size, size(px(102.0), px(82.0)));
     }
 
     #[gpui::test]
@@ -916,7 +1066,13 @@ mod tests {
         let cx = cx.add_empty_window();
         let prepared = prepared_graphics();
         let (bounds, cell_width, line_height) = geometry();
-        let plan = prepared.paint_plan(bounds, cell_width, line_height, 2.0);
+        let plan = prepared.paint_plan(
+            bounds,
+            cell_width,
+            line_height,
+            size(cell_width, line_height),
+            2.0,
+        );
         let image = Arc::clone(&plan.paints[0].image);
         cx.draw(
             point(px(0.0), px(0.0)),
@@ -951,7 +1107,13 @@ mod tests {
     fn image_atlas_failure_during_preflight_paints_only_retained_surface() {
         let prepared = prepared_graphics();
         let (bounds, cell_width, line_height) = geometry();
-        let first_plan = prepared.paint_plan(bounds, cell_width, line_height, 2.0);
+        let first_plan = prepared.paint_plan(
+            bounds,
+            cell_width,
+            line_height,
+            size(cell_width, line_height),
+            2.0,
+        );
         let first = first_plan.paints[0].clone();
         let mut second = first.clone();
         second.image = Arc::new(RenderImage::new(smallvec![Frame::new(RgbaImage::new(
@@ -1039,9 +1201,13 @@ mod tests {
                     .sync(snapshot.active_screen, &snapshot.graphics, window, cx)
                     .unwrap();
                 let bounds = Bounds::new(point(px(5.0), px(7.0)), size(px(80.0), px(80.0)));
-                let plan = preparation
-                    .graphics
-                    .paint_plan(bounds, px(10.0), px(20.0), 2.0);
+                let plan = preparation.graphics.paint_plan(
+                    bounds,
+                    px(10.0),
+                    px(20.0),
+                    size(px(10.0), px(20.0)),
+                    2.0,
+                );
 
                 assert_eq!(
                     plan.paints
@@ -1054,11 +1220,11 @@ mod tests {
                         Bounds::new(point(px(5.0), px(27.0)), size(px(40.0), px(20.0))),
                     ]
                 );
-                let full_image = Bounds::new(point(px(5.0), px(7.0)), size(px(40.0), px(40.0)));
+                let padded_image = Bounds::new(point(px(-5.0), px(-3.0)), size(px(60.0), px(60.0)));
                 assert!(
                     plan.paints
                         .iter()
-                        .all(|paint| paint.full_image == full_image)
+                        .all(|paint| paint.padded_image == padded_image)
                 );
                 assert!(
                     plan.paints
@@ -1075,8 +1241,20 @@ mod tests {
         let prepared = prepared_graphics();
         let (bounds, cell_width, line_height) = geometry();
 
-        let first = prepared.paint_plan(bounds, cell_width, line_height, 2.0);
-        let second = prepared.paint_plan(bounds, cell_width, line_height, 2.0);
+        let first = prepared.paint_plan(
+            bounds,
+            cell_width,
+            line_height,
+            size(cell_width, line_height),
+            2.0,
+        );
+        let second = prepared.paint_plan(
+            bounds,
+            cell_width,
+            line_height,
+            size(cell_width, line_height),
+            2.0,
+        );
 
         assert!(first.shares_paints_with(&second));
         assert_eq!(prepared.paint_plan_builds(), 1);
@@ -1086,10 +1264,22 @@ mod tests {
     fn invalid_backing_scales_share_the_canonical_one_x_plan() {
         let prepared = prepared_graphics();
         let (bounds, cell_width, line_height) = geometry();
-        let first = prepared.paint_plan(bounds, cell_width, line_height, f32::NAN);
+        let first = prepared.paint_plan(
+            bounds,
+            cell_width,
+            line_height,
+            size(cell_width, line_height),
+            f32::NAN,
+        );
 
         for scale in [f32::INFINITY, f32::NEG_INFINITY, 0.0, -1.0, 1.0] {
-            let next = prepared.paint_plan(bounds, cell_width, line_height, scale);
+            let next = prepared.paint_plan(
+                bounds,
+                cell_width,
+                line_height,
+                size(cell_width, line_height),
+                scale,
+            );
             assert!(first.shares_paints_with(&next));
         }
         assert_eq!(prepared.paint_plan_builds(), 1);
@@ -1099,8 +1289,20 @@ mod tests {
     fn backing_scale_change_rebuilds_geometry_without_replacing_the_image() {
         let prepared = prepared_graphics();
         let (bounds, cell_width, line_height) = geometry();
-        let one_x = prepared.paint_plan(bounds, cell_width, line_height, 1.0);
-        let two_x = prepared.paint_plan(bounds, cell_width, line_height, 2.0);
+        let one_x = prepared.paint_plan(
+            bounds,
+            cell_width,
+            line_height,
+            size(cell_width, line_height),
+            1.0,
+        );
+        let two_x = prepared.paint_plan(
+            bounds,
+            cell_width,
+            line_height,
+            size(cell_width, line_height),
+            2.0,
+        );
 
         assert!(!one_x.shares_paints_with(&two_x));
         assert!(Arc::ptr_eq(&one_x.paints[0].image, &two_x.paints[0].image));
@@ -1111,9 +1313,21 @@ mod tests {
     fn full_grid_bounds_are_geometry_cache_inputs() {
         let prepared = prepared_graphics();
         let (bounds, cell_width, line_height) = geometry();
-        let first = prepared.paint_plan(bounds, cell_width, line_height, 2.0);
+        let first = prepared.paint_plan(
+            bounds,
+            cell_width,
+            line_height,
+            size(cell_width, line_height),
+            2.0,
+        );
         let resized = Bounds::new(bounds.origin, size(px(801.0), bounds.size.height));
-        let second = prepared.paint_plan(resized, cell_width, line_height, 2.0);
+        let second = prepared.paint_plan(
+            resized,
+            cell_width,
+            line_height,
+            size(cell_width, line_height),
+            2.0,
+        );
 
         assert!(!first.shares_paints_with(&second));
         assert_eq!(prepared.paint_plan_builds(), 2);
@@ -1126,32 +1340,68 @@ mod tests {
         let clone = prepared.clone();
         assert!(prepared.shares_identity_with(&clone));
         let (bounds, cell_width, line_height) = geometry();
-        let original_plan = prepared.paint_plan(bounds, cell_width, line_height, 2.0);
-        let clone_plan = clone.paint_plan(bounds, cell_width, line_height, 2.0);
+        let original_plan = prepared.paint_plan(
+            bounds,
+            cell_width,
+            line_height,
+            size(cell_width, line_height),
+            2.0,
+        );
+        let clone_plan = clone.paint_plan(
+            bounds,
+            cell_width,
+            line_height,
+            size(cell_width, line_height),
+            2.0,
+        );
         assert!(original_plan.shares_paints_with(&clone_plan));
         assert_eq!(prepared.paint_plan_builds(), 1);
         assert_eq!(clone.paint_plan_builds(), 1);
     }
 
     #[test]
-    fn upload_converts_rgba_to_gpui_bgra() {
+    fn upload_converts_rgba_to_gpui_bgra_and_repeats_edge_texels() {
         let snapshot = Arc::new(ImageSnapshot {
             key: ImageKey {
                 image_id: 1,
                 generation: 1,
             },
-            width: 1,
+            width: 2,
             height: 1,
-            rgba: Arc::from([10, 20, 30, 40]),
+            rgba: Arc::from([10, 20, 30, 40, 50, 60, 70, 80]),
             reservation: None,
         });
 
         let uploaded = upload_image(snapshot).unwrap();
 
+        let left = [30, 20, 10, 40];
+        let right = [70, 60, 50, 80];
+        let row = [left, left, right, right].concat();
+        assert_eq!(uploaded.render_image.size(0), size(4.into(), 3.into()));
         assert_eq!(
             uploaded.render_image.as_bytes(0).unwrap(),
-            &[30, 20, 10, 40]
+            [row.as_slice(), &row, &row].concat()
         );
+        assert_eq!(uploaded._reservation.0, 4 * 3 * 4);
+    }
+
+    #[test]
+    fn upload_rejects_images_without_texels() {
+        let snapshot = Arc::new(ImageSnapshot {
+            key: ImageKey {
+                image_id: 1,
+                generation: 1,
+            },
+            width: 0,
+            height: 3,
+            rgba: Arc::from([]),
+            reservation: None,
+        });
+
+        assert!(matches!(
+            upload_image(snapshot),
+            Err(GraphicsResourceError::InvalidImage)
+        ));
     }
 
     #[gpui::test]

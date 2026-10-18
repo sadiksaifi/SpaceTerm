@@ -22,13 +22,12 @@ FORK_URL = "https://github.com/sadiksaifi/zed"
 EXPECTED = {
     ("dependencies", "gpui"),
     ("dependencies", "gpui_platform"),
-    ("dev-dependencies", "gpui"),
     ('target.cfg(target_os = "linux").dependencies', "gpui_platform"),
-    ('target.cfg(target_os = "macos").dev-dependencies', "gpui_macos"),
-    ('target.cfg(target_os = "linux").dev-dependencies', "gpui_wgpu"),
+    ('target.cfg(target_os = "macos").dependencies', "gpui_macos"),
+    ('target.cfg(target_os = "linux").dependencies', "gpui_wgpu"),
 }
 TAG_PATTERN = re.compile(r"spaceterm-[0-9]{4}-[0-9]{2}-[0-9]{2}(?:\.[1-9][0-9]*)?\Z")
-FIELD_PATTERN = re.compile(r'(\btag\s*=\s*")([^"]*)(")')
+FIELD_PATTERN = re.compile(r'\b(?:tag|rev)(\s*=\s*")([^"]*)(")')
 CHANNEL_PATTERN = re.compile(r'(?m)^([ \t]*channel[ \t]*=[ \t]*")([^"]*)("[^\n]*)$')
 BASE_FILES = ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml")
 DEPENDENCY_SECTIONS = ("dependencies", "dev-dependencies", "build-dependencies")
@@ -42,7 +41,7 @@ class Failure(Enum):
     OVERRIDE_ACTIVE = "local GPUI override is active; run mise run gpui:pinned"
     CONFIG_INVALID = "local Cargo configuration is invalid"
     DEPENDENCIES_UNEXPECTED = "fork dependency set is unexpected"
-    TAGS_INCONSISTENT = "fork tags in workspace manifests are inconsistent"
+    TAGS_INCONSISTENT = "fork references in workspace manifests are inconsistent"
     LOCK_INVALID = "fork entries in Cargo.lock are missing or inconsistent"
     TOOLCHAIN_INVALID = "Rust toolchain file has no channel"
     REMOTE_FAILED = "could not query the Zed fork remote"
@@ -66,7 +65,7 @@ class BumpCancelled(BaseException):
 
 @dataclass(frozen=True)
 class BumpResult:
-    old_tag: str
+    old_ref: str
     new_tag: str
     old_channel: str
     new_channel: str
@@ -215,24 +214,32 @@ def fork_dependencies(
     }
     if root_manifest and set(found) != EXPECTED:
         raise BumpError(Failure.DEPENDENCIES_UNEXPECTED)
-    old_tags = [dependency.get("tag") for dependency in found.values()]
-    if any(not isinstance(value, str) for value in old_tags) or len(set(old_tags)) > 1:
+    old_refs = [dependency.get("tag", dependency.get("rev")) for dependency in found.values()]
+    if any(not isinstance(value, str) for value in old_refs) or len(set(old_refs)) > 1:
         raise BumpError(Failure.TAGS_INCONSISTENT)
-    old_tag = old_tags[0] if old_tags else None
+    old_ref = old_refs[0] if old_refs else None
 
     section = ""
+    tables = {f"{section}.{name}" for section, name in found}
     replaced = 0
     lines = []
     for line in contents.splitlines(keepends=True):
         if line.startswith("["):
-            section = line.strip().strip("[]")
+            section = line.strip().strip("[]").replace("'", "")
+        if section in tables and re.match(r"^\s*(?:tag|rev)\s*=", line):
+            line, count = FIELD_PATTERN.subn(lambda field: "tag" + field[1] + tag + field[3], line)
+            if count != 1:
+                raise BumpError(Failure.DEPENDENCIES_UNEXPECTED)
+            replaced += 1
         match = re.match(r"^([ \t]*)([\w-]+)([ \t]*=[ \t]*\{)([^}\n]*)(\}[^\n]*)", line)
         if (
             match
             and section.split(".")[-1] in DEPENDENCY_SECTIONS
             and f'git = "{FORK_URL}"' in match[4]
         ):
-            body, count = FIELD_PATTERN.subn(lambda field: field[1] + tag + field[3], match[4])
+            body, count = FIELD_PATTERN.subn(
+                lambda field: "tag" + field[1] + tag + field[3], match[4]
+            )
             if count != 1:
                 raise BumpError(Failure.DEPENDENCIES_UNEXPECTED)
             line = line[: match.start(4)] + body + line[match.end(4) :]
@@ -240,7 +247,7 @@ def fork_dependencies(
         lines.append(line)
     if replaced != len(found):
         raise BumpError(Failure.DEPENDENCIES_UNEXPECTED)
-    return old_tag, "".join(lines)
+    return old_ref, "".join(lines)
 
 
 def channel(contents: str) -> str:
@@ -261,7 +268,7 @@ def set_channel(contents: str, new_channel: str) -> tuple[str, str]:
     return old_channel, updated
 
 
-def fork_packages(contents: str, old_tag: str, new_tag: str) -> tuple[list[str], set[str]]:
+def fork_packages(contents: str, old_ref: str, new_tag: str) -> tuple[list[str], set[str]]:
     try:
         packages = tomllib.loads(contents)["package"]
     except (tomllib.TOMLDecodeError, KeyError, TypeError) as error:
@@ -271,16 +278,17 @@ def fork_packages(contents: str, old_tag: str, new_tag: str) -> tuple[list[str],
     entries = [
         package for package in packages if package.get("source", "").startswith(f"git+{FORK_URL}?")
     ]
-    if not entries or any(
-        not package["source"].startswith(f"git+{FORK_URL}?tag=")
-        or not isinstance(package.get("name"), str)
-        for package in entries
-    ):
+    selectors = [
+        package["source"].split("?", 1)[1].split("#", 1)[0].split("=", 1) for package in entries
+    ]
+    if not entries or any(not isinstance(package.get("name"), str) for package in entries):
         raise BumpError(Failure.LOCK_INVALID)
-    tags = {package["source"].split("?tag=", 1)[1].split("#", 1)[0] for package in entries}
-    if not tags <= {old_tag, new_tag}:
+    if any(len(selector) != 2 or selector[0] not in ("tag", "rev") for selector in selectors):
         raise BumpError(Failure.LOCK_INVALID)
-    return sorted({package["name"] for package in entries}), tags
+    references = {selector[1] for selector in selectors}
+    if not references <= {old_ref, new_tag}:
+        raise BumpError(Failure.LOCK_INVALID)
+    return sorted({package["name"] for package in entries}), references
 
 
 def cargo_update(root: Path, packages: list[str]) -> None:
@@ -332,17 +340,17 @@ def bump(root: Path, tag: str, remote: Remote, update=cargo_update) -> BumpResul
     toolchain_contents = read_file(toolchain_path)
     lock_contents = read_file(lock_path)
     changed_manifests = {}
-    old_tags = set()
+    old_refs = set()
     for path, contents in manifest_contents.items():
-        old_tag, updated = fork_dependencies(contents, tag, path == "Cargo.toml")
-        if old_tag is not None:
-            old_tags.add(old_tag)
+        old_ref, updated = fork_dependencies(contents, tag, path == "Cargo.toml")
+        if old_ref is not None:
+            old_refs.add(old_ref)
             changed_manifests[path] = updated
-    if len(old_tags) != 1:
+    if len(old_refs) != 1:
         raise BumpError(Failure.TAGS_INCONSISTENT)
-    old_tag = old_tags.pop()
+    old_ref = old_refs.pop()
     old_channel = channel(toolchain_contents)
-    packages, lock_tags = fork_packages(lock_contents, old_tag, tag)
+    packages, lock_refs = fork_packages(lock_contents, old_ref, tag)
     if not remote.has_tag(tag):
         raise BumpError(Failure.TAG_MISSING)
     new_channel = channel(remote.toolchain(tag))
@@ -355,11 +363,11 @@ def bump(root: Path, tag: str, remote: Remote, update=cargo_update) -> BumpResul
                     (root / path).write_text(updated)
             if new_toolchain != toolchain_contents:
                 toolchain_path.write_text(new_toolchain)
-            if old_tag != tag or lock_tags != {tag}:
+            if old_ref != tag or lock_refs != {tag}:
                 try:
                     update(root, packages)
-                    _, updated_tags = fork_packages(read_file(lock_path), tag, tag)
-                    if updated_tags != {tag}:
+                    _, updated_refs = fork_packages(read_file(lock_path), tag, tag)
+                    if updated_refs != {tag}:
                         raise BumpError(Failure.UPDATE_FAILED)
                 except Exception as error:
                     raise BumpError(Failure.UPDATE_FAILED) from error
@@ -368,7 +376,7 @@ def bump(root: Path, tag: str, remote: Remote, update=cargo_update) -> BumpResul
             if isinstance(error, (BumpError, KeyboardInterrupt, SystemExit, BumpCancelled)):
                 raise
             raise BumpError(Failure.FILE_WRITE_FAILED) from error
-    return BumpResult(old_tag, tag, old_channel, new_channel)
+    return BumpResult(old_ref, tag, old_channel, new_channel)
 
 
 def main() -> None:
@@ -385,7 +393,7 @@ def main() -> None:
             parser.exit(1, "gpui:bump: failed\n")
         try:
             result = bump(ROOT, args.tag, ForkRemote())
-            print(f"Fork tag: {result.old_tag} -> {result.new_tag}")
+            print(f"Fork reference: {result.old_ref} -> {result.new_tag}")
             print(f"Rust toolchain: {result.old_channel} -> {result.new_channel}")
             print("Next: mise run validate on macOS and Linux")
         except BumpError as error:

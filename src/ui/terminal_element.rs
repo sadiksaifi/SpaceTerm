@@ -356,7 +356,10 @@ impl BottomCorners {
 
 /// The content mask that admits exactly the device pixels GPUI paints a quad with `bounds` into.
 /// GPUI rounds quad edges halves toward zero but expands masks outward to whole device pixels.
-fn device_pixel_mask(bounds: Bounds<Pixels>, scale_factor: f32) -> Option<Bounds<Pixels>> {
+pub(super) fn device_pixel_mask(
+    bounds: Bounds<Pixels>,
+    scale_factor: f32,
+) -> Option<Bounds<Pixels>> {
     const INSIDE: f32 = 1.0 / 64.0;
     let snap = |value: Pixels| {
         let device = f32::from(value) * scale_factor;
@@ -1950,6 +1953,7 @@ impl Element for TerminalGridElement {
                 grid_bounds,
                 self.cell_width,
                 self.line_height,
+                size(self.nominal_cell_width, self.nominal_line_height),
                 self.scale_factor,
             ),
             blink_phase_visible: self.blink_phase_visible,

@@ -30,14 +30,13 @@ other = {{ git = "https://example.com/other", tag = "{OLD_TAG}" }}
 [target.'cfg(target_os = "linux")'.dependencies]
 gpui_platform = {{ git = "{FORK_URL}", tag = "{OLD_TAG}", features = ["wayland", "x11"] }}
 
-[dev-dependencies]
-gpui = {{ git = "{FORK_URL}", tag = "{OLD_TAG}", features = ["test-support"] }}
+[target.'cfg(target_os = "linux")'.dependencies.gpui_wgpu]
+git = "{FORK_URL}"
+tag = "{OLD_TAG}"
 
-[target.'cfg(target_os = "macos")'.dev-dependencies]
-gpui_macos = {{ git = "{FORK_URL}", tag = "{OLD_TAG}" }}
-
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-gpui_wgpu = {{ git = "{FORK_URL}", tag = "{OLD_TAG}" }}
+[target.'cfg(target_os = "macos")'.dependencies.gpui_macos]
+git = "{FORK_URL}"
+tag = "{OLD_TAG}"
 '''
 TOOLCHAIN = '[toolchain]\nchannel = "1.98.1"\nprofile = "minimal"\ncomponents = ["rustfmt"]\n'
 MEMBER = "crates/fixture-ui/Cargo.toml"
@@ -167,7 +166,7 @@ class GpuiBumpTests(unittest.TestCase):
         expected = MANIFEST.replace(
             f'git = "{FORK_URL}", tag = "{OLD_TAG}"',
             f'git = "{FORK_URL}", tag = "{NEW_TAG}"',
-        )
+        ).replace(f'tag = "{OLD_TAG}"\n', f'tag = "{NEW_TAG}"\n')
         self.assertEqual((self.root / "Cargo.toml").read_text(), expected)
         self.assertEqual(
             (self.root / MEMBER).read_text(), MEMBER_MANIFEST.replace(OLD_TAG, NEW_TAG)
@@ -178,6 +177,52 @@ class GpuiBumpTests(unittest.TestCase):
         )
         self.assertEqual(self.updates, [(self.root, list(LOCK_NAMES))])
         self.assertEqual(self.remote.queries, [("tag", NEW_TAG), ("toolchain", NEW_TAG)])
+
+    def test_bump_replaces_a_reviewed_revision_with_the_next_snapshot_tag(self):
+        revision = "a" * 40
+        for name in ("Cargo.toml", MEMBER):
+            path = self.root / name
+            path.write_text(
+                path.read_text()
+                .replace(
+                    f'git = "{FORK_URL}", tag = "{OLD_TAG}"',
+                    f'git = "{FORK_URL}", rev = "{revision}"',
+                )
+                .replace(f'tag = "{OLD_TAG}"\n', f'rev = "{revision}"\n')
+            )
+        (self.root / "Cargo.lock").write_text(lockfile(revision).replace("?tag=", "?rev="))
+        subprocess.run(
+            ["git", "add", "Cargo.toml", MEMBER, "Cargo.lock"], cwd=self.root, check=True
+        )
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-qm",
+                "revision",
+            ],
+            cwd=self.root,
+            check=True,
+        )
+
+        result = self.bump()
+
+        self.assertEqual(result.old_ref, revision)
+        self.assertEqual(
+            (self.root / "Cargo.toml").read_text(),
+            MANIFEST.replace(
+                f'git = "{FORK_URL}", tag = "{OLD_TAG}"',
+                f'git = "{FORK_URL}", tag = "{NEW_TAG}"',
+            ).replace(f'tag = "{OLD_TAG}"\n', f'tag = "{NEW_TAG}"\n'),
+        )
+        self.assertEqual(
+            (self.root / MEMBER).read_text(), MEMBER_MANIFEST.replace(OLD_TAG, NEW_TAG)
+        )
+        self.assertEqual((self.root / "Cargo.lock").read_text(), lockfile(NEW_TAG))
 
     def test_unstaged_change_refuses_bump(self):
         (self.root / "Cargo.toml").write_text(MANIFEST + "\n# local change\n")

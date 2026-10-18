@@ -142,10 +142,7 @@ impl TerminalGeometry {
         logical_cell: LogicalCellSize,
         backing_scale: BackingScale,
     ) -> Self {
-        let backing_cell = backing_size(
-            LogicalSize::new(nominal_cell.width, nominal_cell.height),
-            backing_scale,
-        );
+        let backing_cell = backing_cell_size(nominal_cell, backing_scale);
         let backing_grid = backing_size(
             LogicalSize::new(
                 logical_cell.width * f32::from(grid.cols),
@@ -228,6 +225,14 @@ fn fitted_cell_dimension(available: f32, nominal: f32, cells: u16) -> f32 {
         return nominal;
     }
     (available / f32::from(cells)).max(nominal)
+}
+
+/// The whole device pixels of one nominal cell.
+///
+/// The emulator, the PTY and image placements measure cells in these units, while the drawn grid
+/// may spread leftover width across its cells.
+pub fn backing_cell_size(nominal: LogicalCellSize, scale: BackingScale) -> BackingSize {
+    backing_size(LogicalSize::new(nominal.width, nominal.height), scale)
 }
 
 fn backing_size(logical: LogicalSize, scale: BackingScale) -> BackingSize {

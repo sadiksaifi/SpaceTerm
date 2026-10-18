@@ -142,6 +142,31 @@ fn open_settings_window(cx: &App) -> Option<WindowHandle<SettingsWindow>> {
         .then_some(handle)
 }
 
+/// Presents a notice over Settings when Settings is the active window, and reports whether it did.
+///
+/// An action taken in Settings, such as Use Shared Workspaces, answers in the Workspace Window.
+/// Some desktops, such as GNOME on Wayland, refuse to raise that window, which would leave its
+/// alert hidden behind Settings. Attaching the notice to the window the person is using keeps
+/// the outcome visible without raising anything.
+///
+/// The notice is presented once the current update finishes, because the request usually comes
+/// from a Settings control while Settings is still being updated.
+pub(crate) fn present_over_active_settings(
+    cx: &mut App,
+    present: impl FnOnce(&mut Window, &mut Context<SettingsWindow>) + 'static,
+) -> bool {
+    let Some(settings) = cx
+        .active_window()
+        .and_then(|window| window.downcast::<SettingsWindow>())
+    else {
+        return false;
+    };
+    cx.defer(move |cx| {
+        let _ = settings.update(cx, |_, window, cx| present(window, cx));
+    });
+    true
+}
+
 /// Opens Settings, or activates it when it is already open, showing `section` when one is given.
 pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App) {
     if !cx.has_global::<crate::ui::appearance_runtime::AppearanceRuntime>() {
