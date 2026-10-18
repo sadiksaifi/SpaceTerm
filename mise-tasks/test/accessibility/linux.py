@@ -113,6 +113,10 @@ class Probe:
         self.context = GLib.MainContext.default()
         self.terminal = None
         self.application_pid = None
+        self.server_workspace_before = None
+        self.server_workspace_row = None
+        self.server_workspace_name = None
+        self.server_workspace_named = False
         self.phase = None
         self.counts = Counter()
         self.source_counts = Counter()
@@ -173,13 +177,17 @@ class Probe:
         return None
 
     def find_named_control(self, name, root=None):
-        for application in self.atspi.Registry.getDesktop(0):
+        desktop = self.atspi.Registry.getDesktop(0)
+        desktop.clear_cache()
+        for application in desktop:
+            application.clear_cache()
             if application.get_process_id() != self.application_pid:
                 continue
             stack = [root] if root is not None else list(application)
             visited = 0
             while stack and visited < 5000:
                 accessible = stack.pop()
+                accessible.clear_cache()
                 visited += 1
                 if accessible.name == name:
                     return accessible
@@ -190,6 +198,9 @@ class Probe:
         control = self.wait(
             lambda: self.find_named_control(name, root), "server_workspace_control_missing"
         )
+        self.press_control(control)
+
+    def press_control(self, control):
         actions = control.queryAction()
         for index in range(actions.nActions):
             if actions.getName(index).lower() in ("click", "press", "activate"):
@@ -200,6 +211,78 @@ class Probe:
     def window_is_active(self, window):
         window.clear_cache()
         return window.getState().contains(self.atspi.STATE_ACTIVE)
+
+    def workspace_rows(self):
+        tree = self.wait(
+            lambda: self.find_named_control("Workspaces"), "server_workspace_list_missing"
+        )
+        rows, stack, visited = [], [tree], 0
+        while stack and visited < 5000:
+            node = stack.pop()
+            visited += 1
+            node.clear_cache()
+            if node.getRole() == self.atspi.ROLE_TREE_ITEM:
+                rows.append(node)
+            stack.extend(node)
+        return rows
+
+    def created_workspace_row(self):
+        if self.server_workspace_before is None:
+            return None
+        rows = [
+            row
+            for row in self.workspace_rows()
+            if row not in self.server_workspace_before
+            and row.getState().contains(self.atspi.STATE_SELECTED)
+        ]
+        require(len(rows) <= 1, "server_workspace_creation_ambiguous")
+        return rows[0] if rows else None
+
+    def open_workspace_menu(self, row, input_driver):
+        self.press_control(row)
+        self.wait(
+            lambda: row.getState().contains(self.atspi.STATE_SELECTED),
+            "server_workspace_not_selected",
+        )
+        require(row.queryComponent().grabFocus(), "server_workspace_focus_rejected")
+        self.wait(
+            lambda: row.getState().contains(self.atspi.STATE_FOCUSED),
+            "server_workspace_not_focused",
+        )
+        input_driver.context_menu()
+
+    def retire_server_workspace(self, input_driver):
+        if self.server_workspace_before is None:
+            return
+        # Native objects can be replaced when the performance check reactivates AccessKit.
+        # The unique name was assigned through the exact new row before any workload started.
+        input_driver.escape()
+        self.wait(
+            lambda: self.find_named_control("Workspace name") is None,
+            "server_workspace_rename_not_dismissed",
+        )
+        rows = self.workspace_rows()
+        named = [row for row in rows if row.name == self.server_workspace_name]
+        require(len(named) <= 1, "server_workspace_cleanup_ambiguous")
+        row = named[0] if named else self.server_workspace_row
+        if row not in rows and not self.server_workspace_named:
+            row = self.wait(self.created_workspace_row, "server_workspace_cleanup_identity_missing")
+        require(row in self.workspace_rows(), "server_workspace_cleanup_identity_missing")
+        name = row.name
+        self.open_workspace_menu(row, input_driver)
+        self.activate_control("Kill Workspace")
+        dialog = self.wait(
+            lambda: self.find_named_control(f"Kill Workspace \u201c{name}\u201d?"),
+            "server_workspace_confirmation_missing",
+        )
+        self.activate_control("Kill Workspace", dialog)
+        self.wait(
+            lambda: all(
+                current != row and current.name != self.server_workspace_name
+                for current in self.workspace_rows()
+            ),
+            "server_workspace_cleanup_not_confirmed",
+        )
 
     def open_server_workspace(self, workspace_window, input_driver):
         # Exercise the same adoption and creation controls as the native client. The fixture's
@@ -220,7 +303,32 @@ class Probe:
         self.wait(lambda: self.window_is_active(workspace_window), "workspace_window_not_active")
         self.activate_control("New Workspace")
         previous = self.find_terminal()
+        self.server_workspace_name = os.environ["SPACETERM_DEVELOPMENT_CLIENT"]
+        rows = self.workspace_rows()
+        require(
+            all(row.name != self.server_workspace_name for row in rows),
+            "server_workspace_fixture_name_in_use",
+        )
+        self.server_workspace_before = rows
         self.activate_control("Server Workspace")
+        self.server_workspace_row = self.wait(
+            self.created_workspace_row, "server_workspace_created_row_missing"
+        )
+        self.open_workspace_menu(self.server_workspace_row, input_driver)
+        self.activate_control("Rename Workspace")
+        field = self.wait(
+            lambda: self.find_named_control("Workspace name"), "server_workspace_rename_missing"
+        )
+        self.wait(
+            lambda: field.getState().contains(self.atspi.STATE_FOCUSED),
+            "server_workspace_rename_not_focused",
+        )
+        input_driver.command(self.server_workspace_name)
+        self.wait(
+            lambda: any(row.name == self.server_workspace_name for row in self.workspace_rows()),
+            "server_workspace_rename_not_confirmed",
+        )
+        self.server_workspace_named = True
 
         def created_terminal():
             current = self.find_terminal()
@@ -374,6 +482,18 @@ class Input:
                     "--sync",
                 ]
             )
+
+    def escape(self):
+        if self.backend == "x11":
+            run(["xdotool", "key", "--clearmodifiers", "Escape"])
+        else:
+            self.key(0xFF1B)
+
+    def context_menu(self):
+        if self.backend == "x11":
+            run(["xdotool", "key", "--clearmodifiers", "Menu"])
+        else:
+            self.key(0xFF67)
 
     def character(self, pressed):
         if self.backend == "x11":
@@ -1948,6 +2068,26 @@ def private_session(args):
         if application is not None:
             report["application_running_at_cleanup"] = application.poll() is None
             report["native_windows"] = native_windows(args.private_session)
+        if args.server_backed:
+            cleanup = {"passed": True, "creation_attempted": False}
+            report["server_workspace_cleanup"] = cleanup
+            if "probe" in locals() and probe.server_workspace_before is not None:
+                cleanup.update(
+                    passed=False, creation_attempted=True, name=probe.server_workspace_name
+                )
+                try:
+                    require(
+                        application is not None and application.poll() is None,
+                        "server_workspace_cleanup_application_unavailable",
+                    )
+                    probe.retire_server_workspace(input_driver)
+                    cleanup["passed"] = True
+                except Exception as error:
+                    cleanup["failure"] = (
+                        str(error) if isinstance(error, SmokeFailure) else type(error).__name__
+                    )
+                    report.update(passed=False)
+                    report.setdefault("failure", "server_workspace_cleanup_incomplete")
         if input_driver is not None:
             input_driver.close()
         try:
@@ -2265,6 +2405,21 @@ def main():
             measurement.write_text(json.dumps(report, indent=2) + "\n")
         measurement = backend_output / "measurement.json"
         report = json.loads(measurement.read_text()) if measurement.exists() else {}
+        if (
+            args.server_backed
+            and not args.isolation_only
+            and "server_workspace_cleanup" not in report
+        ):
+            # A killed or timed-out wrapper cannot confirm cleanup through its retired GUI.
+            report.update(passed=False)
+            report.setdefault("failure", "server_workspace_cleanup_incomplete")
+            report["server_workspace_cleanup"] = {
+                "passed": False,
+                "name": environment["SPACETERM_DEVELOPMENT_CLIENT"],
+                "failure": "server_workspace_cleanup_unconfirmed",
+            }
+            measurement.write_text(json.dumps(report, indent=2) + "\n")
+            status = 1
         outcome = "passed" if report.get("passed") else "failed"
         failure = (
             "session_timeout" if report.get("outer_session_timeout") else report.get("failure")
@@ -2273,7 +2428,11 @@ def main():
         print(f"{backend}: {outcome}{scope}" + (f" ({failure})" if failure else ""))
         if not report.get("passed"):
             # These observers retain classifications, counts and timings only.
-            diagnostics = {key: report[key] for key in ("readiness", "orca") if key in report}
+            diagnostics = {
+                key: report[key]
+                for key in ("readiness", "orca", "server_workspace_cleanup")
+                if key in report
+            }
             print(f"{backend}: diagnostics " + json.dumps(diagnostics, sort_keys=True))
     return int(status != 0)
 

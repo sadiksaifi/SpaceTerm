@@ -265,6 +265,70 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
         )
         self.assertIsNone(self.probe.find_terminal())
 
+    def test_cleanup_reacquires_only_the_owned_workspace_after_native_objects_change(self):
+        owned_name = "a11y-x11-run-owned"
+        old_owned = Accessible("tree item", name=owned_name)
+        other = Accessible("tree item", name="Server")
+        survivor = Accessible("tree item", name="Server")
+        owned = Accessible("tree item", name=owned_name)
+        tree = Accessible("tree", name="Workspaces", children=[other, owned, survivor])
+        frame = Accessible("frame", children=[tree])
+        self.desktop([Accessible("application", pid=42, children=[frame])])
+        self.probe.atspi.ROLE_TREE_ITEM = "tree item"
+        self.probe.atspi.STATE_SELECTED = "selected"
+        self.probe.atspi.STATE_FOCUSED = "focused"
+        self.probe.server_workspace_before = [other, survivor]
+        self.probe.server_workspace_row = old_owned
+        self.probe.server_workspace_name = owned_name
+        self.probe.server_workspace_named = True
+
+        def wait(predicate, classification):
+            value = predicate()
+            self.smoke.require(value, classification)
+            return value
+
+        self.probe.wait = wait
+        pressed = []
+        owned.action = lambda: pressed.append("owned row")
+        confirmation = Accessible("button", name="Kill Workspace")
+        dialog = Accessible(
+            "dialog", name=f"Kill Workspace \u201c{owned_name}\u201d?", children=[confirmation]
+        )
+        menu_item = Accessible("menu item", name="Kill Workspace")
+
+        def show_confirmation():
+            frame.remove(menu_item)
+            frame.append(dialog)
+
+        def retire():
+            tree.remove(owned)
+            frame.remove(dialog)
+            pressed.append("confirmed")
+
+        menu_item.action = show_confirmation
+        confirmation.action = retire
+        driver = SimpleNamespace(escape=lambda: None, context_menu=lambda: frame.append(menu_item))
+        self.probe.retire_server_workspace(driver)
+        self.assertEqual(pressed, ["owned row", "confirmed"])
+        self.assertEqual(list(tree), [other, survivor])
+
+    def test_cleanup_refuses_ambiguous_owned_identity_without_deleting_a_workspace(self):
+        rows = [Accessible("tree item", name="a11y-owned") for _ in range(2)]
+        tree = Accessible("tree", name="Workspaces", children=rows)
+        self.desktop(
+            [Accessible("application", pid=42, children=[Accessible("frame", children=[tree])])]
+        )
+        self.probe.atspi.ROLE_TREE_ITEM = "tree item"
+        self.probe.server_workspace_before = []
+        self.probe.server_workspace_row = None
+        self.probe.server_workspace_name = "a11y-owned"
+        self.probe.wait = lambda predicate, classification: (
+            predicate() or self.smoke.require(False, classification)
+        )
+        with self.assertRaisesRegex(SmokeFailure, "server_workspace_cleanup_ambiguous"):
+            self.probe.retire_server_workspace(SimpleNamespace(escape=lambda: None))
+        self.assertEqual(len(tree), 2)
+
     def test_transient_empty_process_environment_waits_for_verified_private_values(self):
         keys = (
             "HOME",
@@ -340,6 +404,32 @@ class Accessible(list):
         self.role = role
         self.name = name
         self.pid = pid
+        self.action = lambda: None
+
+    def __bool__(self):
+        return True
+
+    def __eq__(self, other):
+        return self is other
+
+    def __ne__(self, other):
+        return self is not other
+
+    def clear_cache(self):
+        pass
+
+    def getState(self):
+        return SimpleNamespace(contains=lambda flag: flag in ("selected", "focused"))
+
+    def queryComponent(self):
+        return SimpleNamespace(grabFocus=lambda: True)
+
+    def queryAction(self):
+        def activate(index):
+            self.action()
+            return True
+
+        return SimpleNamespace(nActions=1, getName=lambda index: "click", doAction=activate)
 
     def getRole(self):
         return self.role
