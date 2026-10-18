@@ -55,7 +55,7 @@ impl Accessibility {
             !old.shares_document(&model)
                 || old.visible_lines() != model.visible_lines()
                 || old.cursor_cell() != model.cursor_cell()
-                || old.selection_range() != model.selection_range()
+                || old.selection_refs() != model.selection_refs()
                 || old.active_screen() != model.active_screen()
         }) {
             self.revision = self.revision.saturating_add(1);
@@ -192,6 +192,10 @@ fn cell_ref(reference: AccessibilityCellRef) -> wire::CellRef {
 pub(super) fn decode_selection(
     selection: wire::SelectionRefs,
 ) -> Result<crate::terminal::accessibility::AccessibilitySelectionRefs, ()> {
+    // The native selection setter accepts linear endpoints only.
+    if selection.rectangle {
+        return Err(());
+    }
     let decode = |reference: wire::CellRef| {
         Ok(AccessibilityCellRef {
             row: AccessibilityRowId {

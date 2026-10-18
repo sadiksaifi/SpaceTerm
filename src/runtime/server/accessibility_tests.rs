@@ -219,6 +219,22 @@ fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions
             "native history selection not published"
         );
     }
+    let rectangle = wire::SelectionRefs {
+        rectangle: true,
+        ..selection
+    };
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            lease.connection,
+            Request::AccessibilitySelection {
+                lease,
+                focus_generation: 1,
+                selection: Some(rectangle)
+            }
+        ),
+        Reply::Refused(Refusal::Unsupported)
+    ));
     host.request(
         [1; 32],
         lease.connection,
@@ -254,6 +270,49 @@ fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions
     barrier.recv_timeout(Duration::from_secs(10)).unwrap();
     assert!(snapshot(&mut host, lease, None).selection.is_none());
     host.shutdown().unwrap();
+
+    // Shape-only output changes must advance the wire revision, even with the same UTF-16 range.
+    use crate::terminal::accessibility::{
+        AccessibilityCell, AccessibilityRowUpdate, AccessibilityUpdate, TerminalAccessibilityState,
+    };
+    let refs = accessibility::decode_selection(selection).unwrap();
+    let mut semantics = TerminalAccessibilityState::default();
+    let mut update = AccessibilityUpdate {
+        revision: 1,
+        screen: refs.start.row.screen,
+        screen_generation: refs.start.row.screen_generation,
+        complete: true,
+        more: false,
+        topology: Some(vec![refs.start.row]),
+        visible_lines: 0..1,
+        cursor: None,
+        selection: Some(refs),
+        changed_rows: vec![AccessibilityRowUpdate {
+            id: refs.start.row,
+            revision: row.revision,
+            soft_wrapped: row.soft_wrapped,
+            cells: row
+                .cells
+                .into_iter()
+                .map(|cell| {
+                    AccessibilityCell::at_column(cell.text, cell.column, cell.width_cells)
+                })
+                .collect(),
+        }],
+    };
+    let generation = PresentationGeneration::default();
+    let mut publication = accessibility::Accessibility::default();
+    let linear = semantics.apply(update.clone(), generation).unwrap();
+    let range = linear.selection_range();
+    publication.update(linear);
+    let revision = publication.revision();
+    update.changed_rows.clear();
+    update.topology = None;
+    update.selection.as_mut().unwrap().rectangle = true;
+    let rectangle = semantics.apply(update, generation.next()).unwrap();
+    assert_eq!(rectangle.selection_range(), range);
+    publication.update(rectangle);
+    assert!(publication.revision() > revision);
 }
 
 #[test]
