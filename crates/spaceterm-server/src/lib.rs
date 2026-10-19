@@ -67,7 +67,7 @@ pub enum ServerError {
     SessionUnavailable,
     #[error("This connection no longer controls the Terminal Session.")]
     StaleControl,
-    #[error("This operation is unavailable for this Development Pane.")]
+    #[error("This operation isn't supported here.")]
     Unsupported,
     #[error("Directory unavailable.")]
     DirectoryUnavailable,

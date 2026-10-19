@@ -452,14 +452,14 @@ mod development {
 
         pub(crate) const fn title(self) -> &'static str {
             match self {
-                Self::Read | Self::UnsafeStorage => "Shared Workspaces Unavailable",
+                Self::Read | Self::UnsafeStorage => "Workspaces Unavailable",
                 Self::Write => "Changes Could Not Be Saved",
             }
         }
 
         const fn accessibility_label(self) -> &'static str {
             match self {
-                Self::Read | Self::UnsafeStorage => "Shared Workspaces unavailable",
+                Self::Read | Self::UnsafeStorage => "Workspaces unavailable",
                 Self::Write => "Changes could not be saved",
             }
         }
@@ -467,19 +467,19 @@ mod development {
         pub(crate) const fn detail(self) -> &'static str {
             match self {
                 Self::Read => {
-                    "SpaceTerm could not read which shared Workspaces this device presents, or their Tab order \
-                     and Pane Layouts. Shared Workspaces stay closed, so nothing saved is replaced. Quit and \
+                    "SpaceTerm could not read which Workspaces this device presents, or their Tab order \
+                     and Pane Layouts. Workspaces stay closed, so nothing saved is replaced. Quit and \
                      reopen SpaceTerm to try again."
                 }
                 Self::UnsafeStorage => {
-                    "SpaceTerm could not validate which shared Workspaces this device presents, their Tab order \
-                     and Pane Layouts, or the storage that holds them. Shared Workspaces stay closed, and \
+                    "SpaceTerm could not validate which Workspaces this device presents, their Tab order \
+                     and Pane Layouts, or the storage that holds them. Workspaces stay closed, and \
                      SpaceTerm keeps the saved data."
                 }
                 Self::Write => {
-                    "SpaceTerm could not confirm that it saved which shared Workspaces this device \
+                    "SpaceTerm could not confirm that it saved which Workspaces this device \
                      presents, or their Tab order and Pane Layouts. Until you quit and reopen \
-                     SpaceTerm, some of these changes may not be saved. Shared Workspaces keep \
+                     SpaceTerm, some of these changes may not be saved. Workspaces keep \
                      running on the server."
                 }
             }

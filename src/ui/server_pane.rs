@@ -22,7 +22,9 @@ use super::chrome_icons::IconRole;
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use super::terminal_pane::StatusIntent;
 
-pub(crate) const TAKEOVER_TITLE: &str = "Controlled by Another Client";
+/// What the window knows when the server offers Take Over: this window does not control the
+/// Pane. Another client may, or nobody does after this client released it.
+pub(crate) const TAKEOVER_TITLE: &str = "Not Controlled by This Window";
 pub(crate) const TAKEOVER_DETAIL: &str =
     "Take Over to type and resize here. The shell keeps running.";
 pub(crate) const TAKEOVER_FAILED_DETAIL: &str =
