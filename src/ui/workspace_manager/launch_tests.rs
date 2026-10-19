@@ -238,12 +238,74 @@ fn the_window_says_workspaces_are_on_the_way_until_the_server_answers(cx: &mut T
     // No answer arrives, as while the server is still starting.
     let (harness, cx) = launch_harness(Vec::new(), cx);
     cx.run_until_parked();
+    assert!(
+        cx.debug_bounds(LAUNCH_SELECTOR).is_none(),
+        "a launch still inside its quiet period says nothing yet"
+    );
+    assert!(cx.debug_bounds("empty-workspace").is_none());
 
+    cx.executor().advance_clock(launch::LAUNCH_QUIET_PERIOD);
+    cx.run_until_parked();
     assert_eq!(harness.launch_title(cx), Some(launch::OPENING_TITLE));
     assert!(cx.debug_bounds(LAUNCH_SELECTOR).is_some());
     assert!(
         cx.debug_bounds("empty-workspace").is_none(),
         "never No Workspaces while they are on the way"
+    );
+}
+
+#[gpui::test]
+fn a_launch_that_opens_within_its_quiet_period_never_shows_the_launch_screen(
+    cx: &mut TestAppContext,
+) {
+    // The server is admitted at once, but its first inventory arrives a moment later.
+    let edits = ScriptedEdits::new(None);
+    let (harness, cx) = launch_harness_with(vec![ready()], edits, [], cx);
+    cx.run_until_parked();
+    assert_eq!(harness.launch_title(cx), Some(launch::OPENING_TITLE));
+    assert!(
+        cx.debug_bounds(LAUNCH_SELECTOR).is_none(),
+        "an opening that has not taken long yet draws no spinner or message"
+    );
+    assert!(
+        cx.debug_bounds("empty-workspace").is_none(),
+        "never No Workspaces while they are on the way"
+    );
+
+    cx.executor().advance_clock(launch::LAUNCH_QUIET_PERIOD / 2);
+    harness.edits.set_inventory(inventory());
+    sync(&harness, cx);
+    assert_eq!(harness.launch_title(cx), None);
+    assert_eq!(harness.shared_rows(cx), 1);
+    cx.executor().advance_clock(launch::LAUNCH_QUIET_PERIOD);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(LAUNCH_SELECTOR).is_none());
+}
+
+#[gpui::test]
+fn a_retry_within_the_quiet_period_keeps_saying_what_it_does(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![Err(ServerError::NotInstalled)], cx);
+    cx.run_until_parked();
+    assert_eq!(harness.launch_title(cx), Some("Server Not Installed"));
+
+    // Try Again runs launch, and no answer arrives yet.
+    harness.click(LAUNCH_RETRY_SELECTOR, cx);
+    assert_eq!(harness.launch.steps(), ["run", "run"]);
+    assert_eq!(harness.launch_title(cx), Some(launch::OPENING_TITLE));
+    assert!(
+        cx.debug_bounds(LAUNCH_SELECTOR).is_some(),
+        "a screen the person already sees never goes blank while launch runs again"
+    );
+}
+
+#[gpui::test]
+fn a_launch_that_needs_the_person_explains_itself_at_once(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped)], cx);
+    cx.run_until_parked();
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+    assert!(
+        cx.debug_bounds(LAUNCH_START_SELECTOR).is_some(),
+        "a screen that asks for an action never waits behind the quiet period"
     );
 }
 
