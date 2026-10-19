@@ -749,6 +749,7 @@ impl TerminalRuntime {
     /// Routes native requests through the authenticated controlling client.
     pub(crate) fn route_client_effects(&self) {
         self.clipboard_authority.route();
+        self.schedule_input.set_accessibility_demand_enabled(true);
         if let Some(commands) = &self.commands {
             let _ = commands.send(Command::RouteClientEffects);
         }
@@ -1072,8 +1073,10 @@ impl TerminalSessionHandle for TerminalRuntime {
     }
 
     fn set_presentable(&self, presentable: bool) {
-        self.schedule_input
-            .set_accessibility_demand_enabled(presentable);
+        if !self.clipboard_authority.routed() {
+            self.schedule_input
+                .set_accessibility_demand_enabled(presentable);
+        }
         if let Some(commands) = &self.commands
             && commands.send(Command::SetPresentable(presentable)).is_err()
         {
@@ -1688,6 +1691,15 @@ impl TerminalWorker {
     }
 
     fn order_presentation_barrier(&mut self, command: Command) -> Command {
+        if self.server_reading.is_some()
+            && !self.schedules.is_presentable()
+            && matches!(
+                &command,
+                Command::AccessibilityContinue | Command::PublishAccessibility
+            )
+        {
+            return command;
+        }
         if command.requires_presentation_barrier() && self.schedules.take_presentation_barrier() {
             self.pending_command = Some(if matches!(&command, Command::AccessibilityContinue) {
                 Command::PublishAccessibility
@@ -1778,6 +1790,8 @@ impl TerminalWorker {
                 self.emulator.enable_client_clipboard();
                 self.emulator.enable_server_reading();
                 self.server_reading = Some(server_reading::ServerReading::default());
+                self.schedules
+                    .set_server_presentable(self.schedules.is_presentable(), Instant::now());
                 true
             }
             Command::Subscribe {
@@ -2050,7 +2064,11 @@ impl TerminalWorker {
             }
             Command::SetPresentable(presentable) => {
                 let now = Instant::now();
-                self.schedules.set_presentable(presentable, now);
+                if self.server_reading.is_some() {
+                    self.schedules.set_server_presentable(presentable, now);
+                } else {
+                    self.schedules.set_presentable(presentable, now);
+                }
                 if !presentable && !self.cancel_pointer_drag() {
                     return false;
                 }
@@ -2373,6 +2391,9 @@ impl TerminalWorker {
         }
 
         if received_output {
+            if self.server_reading.is_some() {
+                self.schedules.note_hidden_server_content_changed();
+            }
             let metadata = self.emulator.metadata();
             let metadata_revised = metadata.revision != previous_metadata.revision;
             if metadata_revised {
@@ -2606,6 +2627,9 @@ impl TerminalWorker {
     }
 
     fn publish_visible_screen_change(&mut self) -> bool {
+        if self.server_reading.is_some() {
+            self.schedules.note_hidden_server_content_changed();
+        }
         self.schedules.request_presentation();
         if self.schedules.take_visible_presentation() {
             self.publish_screen()
@@ -2644,7 +2668,11 @@ impl TerminalWorker {
     fn publish_screen(&mut self) -> bool {
         self.metadata_state.publish(self.emulator.metadata());
         if self.events.is_closed() {
-            self.schedules.set_presentable(false, Instant::now());
+            if self.server_reading.is_some() {
+                self.schedules.set_server_presentable(false, Instant::now());
+            } else {
+                self.schedules.set_presentable(false, Instant::now());
+            }
             return true;
         }
 
