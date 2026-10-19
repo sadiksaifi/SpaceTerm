@@ -36,11 +36,26 @@ pub(crate) fn available(cx: &App) -> bool {
         .is_some_and(|status| status.available)
 }
 
+/// Records whether the session shows the item. Losing it while no window is open leaves nothing
+/// that can reach the client, so the client exits through its quit policy, which waits for any
+/// admitted operation.
 pub(crate) fn set_available(cx: &mut App, available: bool) {
-    update(cx, |status| status.available = available);
+    let lost = {
+        let status = cx.default_global::<StatusArea>();
+        let lost = status.available && !available;
+        status.available = available;
+        lost
+    };
+    if lost && cx.windows().is_empty() {
+        cx.dispatch_action(&crate::app::QuitApplication);
+    }
 }
 
-/// Installs the platform's Dock presence switch.
+/// Installs the platform's Dock presence switch. Only a platform with a Dock has one.
+#[cfg_attr(
+    not(any(target_os = "macos", test)),
+    allow(dead_code, reason = "only macOS has a Dock presence to switch")
+)]
 pub(crate) fn set_dock(cx: &mut App, dock: Rc<dyn Fn(bool)>) {
     update(cx, |status| status.dock = Some(dock));
 }

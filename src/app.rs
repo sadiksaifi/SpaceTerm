@@ -1295,6 +1295,33 @@ mod tests {
     }
 
     #[gpui::test]
+    fn losing_the_status_area_exits_only_a_windowless_client(cx: &mut TestAppContext) {
+        let quit = Rc::new(
+            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+        );
+        cx.update(crate::ui::init).unwrap();
+        cx.update(|cx| init(cx, application_menu(), quit.clone()).unwrap());
+        let window = cx.add_window(|_, _| gpui::EmptyView);
+        cx.update(|cx| crate::status_menu::set_available(cx, true));
+        cx.update(|cx| crate::status_menu::set_available(cx, false));
+        cx.run_until_parked();
+        // A window still reaches the client, and a status-area host can return.
+        assert_eq!(quit.requests(), 0);
+
+        cx.update(|cx| crate::status_menu::set_available(cx, true));
+        cx.update(|cx| {
+            window
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        });
+        cx.run_until_parked();
+        assert_eq!(quit.requests(), 0, "the status item reaches a windowless client");
+        cx.update(|cx| crate::status_menu::set_available(cx, false));
+        cx.run_until_parked();
+        assert_eq!(quit.requests(), 1, "nothing reaches the client any more");
+    }
+
+    #[gpui::test]
     fn quitting_waits_for_an_admitted_server_operation(cx: &mut TestAppContext) {
         let quit = Rc::new(
             crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
