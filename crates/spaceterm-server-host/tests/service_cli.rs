@@ -61,6 +61,22 @@ fn malformed_service_invocations_return_bounded_errors() {
         vec!["service-status", identity, "--private-unknown-flag"],
         vec!["service-status", identity, "unexpected", "arguments"],
         vec!["service-private-unknown-command", identity],
+        vec!["service-install", identity],
+        vec!["service-install", identity, "--confirm"],
+        vec![
+            "service-install",
+            identity,
+            "/private/retained-installation",
+            "--confirm",
+        ],
+        vec!["service-serve", identity, "--confirm"],
+        vec!["serve", identity, "--confirm"],
+        vec!["status", identity, "--confirm"],
+        vec!["setup-state", identity, "--confirm"],
+        vec!["--help", identity],
+        vec!["--version", identity],
+        vec!["--build-info", identity],
+        vec!["--check", identity],
     ] {
         let args: Vec<_> = args.into_iter().map(OsString::from).collect();
         assert_protocol_refusal(&args);
