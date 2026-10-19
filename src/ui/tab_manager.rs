@@ -412,8 +412,6 @@ struct SharedStripControls {
 pub(crate) struct TabManager {
     tabs: TabCollection<Entity<TabView>>,
     session_factory: WorkspaceTerminalSessionFactory,
-    /// The root of each Worktree whose Tabs this Workspace holds, as git reports it.
-    worktree_roots: std::collections::HashMap<WorktreeId, std::path::PathBuf>,
     pane_construction: PaneConstruction,
     active: bool,
     sidebar_visible: bool,
@@ -505,7 +503,6 @@ impl TabManager {
         Self {
             tabs,
             session_factory,
-            worktree_roots: std::collections::HashMap::new(),
             pane_construction,
             active: true,
             sidebar_visible: true,
@@ -1259,16 +1256,6 @@ impl TabManager {
     }
 
     #[cfg(test)]
-    pub(crate) fn activate_tab_for_test(
-        &mut self,
-        tab_id: TabId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.activate_tab(tab_id, window, cx);
-    }
-
-    #[cfg(test)]
     pub(crate) fn active_tab_view(&self) -> Entity<TabView> {
         self.tabs.active_tab().clone()
     }
@@ -1309,7 +1296,7 @@ impl TabManager {
         self.tab_selector_pressed = None;
         self.sync_terminal_focus_blocker(cx);
         let scope = self.tabs.active_scope();
-        let session_factory = match self.scoped_factory(scope).for_source_directory(
+        let session_factory = match self.session_factory.for_source_directory(
             self.tabs
                 .active_tab()
                 .read(cx)
@@ -1394,7 +1381,7 @@ impl TabManager {
         cx: &mut Context<Self>,
     ) {
         let previous_tab = self.tabs.active_tab().clone();
-        let session_factory = self.scoped_factory(scope);
+        let session_factory = self.session_factory.clone();
         let pane_construction = self.pane_construction.clone();
         let result = self.tabs.create_tab_in(scope, |tab_id| {
             Self::create_tab_view(
@@ -1427,13 +1414,6 @@ impl TabManager {
         self.scroll_active_tab_into_view();
         cx.emit(TabManagerEvent::PresentationChanged);
         cx.notify();
-    }
-
-    /// The Workspace's launch policy, scoped to one Worktree's root when `scope` names one.
-    fn scoped_factory(&self, scope: Option<WorktreeId>) -> WorkspaceTerminalSessionFactory {
-        let mut factory = self.session_factory.clone();
-        factory.set_worktree_root(scope.and_then(|id| self.worktree_roots.get(&id).cloned()));
-        factory
     }
 
     /// The Active Tab's Worktree.
@@ -1469,25 +1449,6 @@ impl TabManager {
         self.activate_tab_focusing(tab_id, focus, window, cx)
     }
 
-    /// The local Repository Source Directory of the focused Pane in a Worktree's most recently active Tab.
-    pub(crate) fn worktree_directory(
-        &self,
-        id: WorktreeId,
-        cx: &App,
-    ) -> Option<std::path::PathBuf> {
-        let view = self
-            .tabs
-            .tab(self.tabs.most_recent_tab_in(Some(id))?)?
-            .read(cx);
-        match view.pane_repository_source(view.focused_pane_id(), cx)? {
-            (
-                crate::repository_status::RepositoryMachine::Local,
-                crate::repository_status::scheduler::SourceDirectory::Local(directory),
-            ) => Some(directory),
-            _ => None,
-        }
-    }
-
     /// The Worktree a Tab belongs to.
     pub(crate) fn tab_worktree(&self, tab_id: TabId) -> Option<WorktreeId> {
         self.tabs.scope_of(tab_id).ok().flatten()
@@ -1517,113 +1478,6 @@ impl TabManager {
             }
         }
         counts
-    }
-
-    /// Moves every Tab of `from` into `to`, whose Tabs start inside `root`. A Workspace that
-    /// becomes a git Workspace moves its Tabs into the Worktree that contains its directory.
-    pub(crate) fn move_worktree_tabs(
-        &mut self,
-        from: Option<WorktreeId>,
-        to: Option<(WorktreeId, std::path::PathBuf)>,
-        cx: &mut Context<Self>,
-    ) {
-        let tab_ids: Vec<TabId> = self.tabs.tabs_in(from).map(|(tab_id, _)| tab_id).collect();
-        for tab_id in tab_ids {
-            self.set_tab_worktree(tab_id, to.clone(), cx);
-        }
-    }
-
-    /// Moves the Root Tab into another Worktree, as when the Root Pane enters it.
-    pub(crate) fn move_root_tab(
-        &mut self,
-        to: Option<(WorktreeId, std::path::PathBuf)>,
-        cx: &mut Context<Self>,
-    ) {
-        self.set_tab_worktree(self.tabs.root_tab_id(), to, cx);
-    }
-
-    fn set_tab_worktree(
-        &mut self,
-        tab_id: TabId,
-        to: Option<(WorktreeId, std::path::PathBuf)>,
-        cx: &mut Context<Self>,
-    ) {
-        let scope = to.as_ref().map(|(id, _)| *id);
-        if self.tabs.scope_of(tab_id) == Ok(scope) {
-            return;
-        }
-        if let Some((id, root)) = &to {
-            self.worktree_roots.insert(*id, root.clone());
-        }
-        if let Err(error) = self.tabs.set_tab_scope(tab_id, scope) {
-            Self::report_tab_error("move", error);
-            return;
-        }
-        let root = to.map(|(_, root)| root);
-        if let Some(view) = self.tabs.tab(tab_id) {
-            view.update(cx, |view, _| view.set_worktree_root(root));
-        }
-        self.scroll_active_tab_into_view();
-        cx.emit(TabManagerEvent::PresentationChanged);
-        cx.notify();
-    }
-
-    /// Shows a Worktree's Tabs, opening its first Tab in `root` when it has none. Showing an
-    /// existing Tab moves focus to it only when `focus` is set; a new Tab always takes focus.
-    pub(crate) fn open_worktree(
-        &mut self,
-        id: WorktreeId,
-        root: std::path::PathBuf,
-        focus: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.worktree_roots.insert(id, root);
-        if let Some(tab_id) = self.tabs.most_recent_tab_in(Some(id)) {
-            self.activate_tab_focusing(tab_id, focus, window, cx);
-            return;
-        }
-        if self.remote_lifecycle.disconnected_generation().is_some() {
-            cx.emit(RemoteChildLaunchUnavailable::ConnectionUnavailable);
-            return;
-        }
-        let launch = self
-            .scoped_factory(Some(id))
-            .for_source_directory(None)
-            .map_err(|error| error.to_string())
-            .and_then(|factory| {
-                factory
-                    .prepare_child_launch()
-                    .map_err(|error| error.to_string())
-            });
-        match launch {
-            Ok(prepared_launch) => {
-                self.create_tab_with_prepared_launch(prepared_launch, Some(id), window, cx);
-            }
-            Err(error) => {
-                let detail = format!("Cannot open the Worktree because {error}.");
-                let manager = cx.weak_entity();
-                let window_handle = window.window_handle();
-                let _ = Alert::new(
-                    ModalId::new("worktree-directory-unavailable"),
-                    "Worktree unavailable",
-                    "Worktree Unavailable",
-                    detail,
-                    vec![ModalAction::new(
-                        (),
-                        "OK",
-                        ModalActionRole::Cancel,
-                        "worktree-open-error-ok",
-                    )],
-                )
-                .intent(AlertIntent::Warning)
-                .present(window, cx, move |_, cx| {
-                    let _ = window_handle.update(cx, |_, window, cx| {
-                        let _ = manager.update(cx, |manager, cx| manager.focus(window, cx));
-                    });
-                });
-            }
-        }
     }
 
     fn activate_tab(&mut self, tab_id: TabId, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -5515,77 +5369,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn worktrees_should_open_lazily_and_scope_the_tab_strip_and_tab_commands(
-        cx: &mut TestAppContext,
-    ) {
-        let (manager, records, cx) = tab_manager(cx);
-        let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-        let main = fixture.path().join("shell-integration");
-        let linked = main.join("zsh");
-        let (main_id, linked_id) = (WorktreeId::new(1), WorktreeId::new(2));
-        let visible = |cx: &mut VisualTestContext| {
-            manager.read_with(cx, |manager, _| {
-                manager
-                    .visible_tabs()
-                    .map(|(tab_id, _)| tab_id)
-                    .collect::<Vec<_>>()
-            })
-        };
-        let active = |cx: &mut VisualTestContext| {
-            manager.read_with(cx, |manager, _| manager.tabs.active_tab_id())
-        };
-        manager.update(cx, |manager, cx| {
-            manager.move_root_tab(Some((main_id, main.clone())), cx);
-        });
-
-        cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| {
-                manager.open_worktree(linked_id, linked.clone(), true, window, cx);
-            });
-        });
-        cx.run_until_parked();
-        cx.simulate_keystrokes("cmd-t");
-        cx.run_until_parked();
-        let linked_tabs = visible(cx);
-        cx.simulate_keystrokes("cmd-1");
-        cx.run_until_parked();
-        let after_command_one = active(cx);
-        cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| {
-                manager.open_worktree(main_id, main.clone(), true, window, cx);
-            });
-        });
-        let main_tabs = visible(cx);
-        cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| {
-                manager.open_worktree(linked_id, linked.clone(), true, window, cx);
-            });
-        });
-
-        assert_eq!(
-            (linked_tabs, after_command_one, main_tabs, active(cx)),
-            (
-                vec![TabId::new(2), TabId::new(3)],
-                TabId::new(2),
-                vec![TabId::new(1)],
-                TabId::new(2),
-            ),
-            "each Worktree should show only its Tabs and reopen its most recent Tab"
-        );
-        let started: Vec<_> = records
-            .starts()
-            .iter()
-            .skip(1)
-            .map(|start| start.local_working_directory().unwrap().path().to_owned())
-            .collect();
-        assert_eq!(started, [linked.clone(), linked]);
-        assert_eq!(
-            manager.read_with(cx, |manager, _| manager.worktree_tab_counts()),
-            [(main_id, 1), (linked_id, 2)].into_iter().collect()
-        );
-    }
-
-    #[gpui::test]
     fn remote_tab_creation_skips_local_validation_and_preserves_launch_context(
         cx: &mut TestAppContext,
     ) {
@@ -6016,14 +5799,20 @@ mod tests {
         // A single-Pane Tab carries the same mark as the Pane Caption under it.
         cx.simulate_keystrokes("cmd-alt-w");
         cx.run_until_parked();
+        let remaining = manager.read_with(cx, |manager, cx| {
+            manager.tabs.active_tab().read(cx).focused_pane_id()
+        });
         manager.update(cx, |manager, cx| {
             manager.tabs.active_tab().update(cx, |view, cx| {
-                view.set_test_attention(PaneId::new(1), 1, cx);
+                view.set_test_attention(remaining, 1, cx);
             });
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("tab-status-1-attention").is_some());
-        assert!(cx.debug_bounds("pane-status-1-attention").is_some());
+        assert!(
+            cx.debug_bounds(format!("pane-status-{}-attention", remaining.get()).leak())
+                .is_some()
+        );
     }
 
     /// A program's own glyph takes the Terminal Session's slot rather than sitting beside it.

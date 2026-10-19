@@ -1048,8 +1048,8 @@ pub(crate) fn initialize_application(
         }
         if let Some(adapters) = &host.adapters.repository_status {
             crate::ui::repository_status_store::install(&settings, adapters.clone(), cx);
-            crate::ui::worktree_store::install(&settings, adapters.clone(), cx);
         }
+        crate::ui::worktree_path_template::install(&settings, cx);
         if let Some(store) = &host.adapters.background_images {
             crate::ui::background_image_runtime::install(settings.clone(), Arc::clone(store), cx);
         }

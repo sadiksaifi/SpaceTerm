@@ -53,7 +53,7 @@ mod workspace_manager;
 mod workspace_sidebar;
 mod workspace_status;
 mod worktree_form;
-pub(crate) mod worktree_store;
+pub(crate) mod worktree_path_template;
 
 use gpui::{App, actions};
 

@@ -441,7 +441,6 @@ impl SharedWorkspaceHost {
 
 fn removal_error(error: WorktreeRemoveError) -> Error {
     match error {
-        WorktreeRemoveError::HoldsPinnedDirectory => Error::Pinned,
         WorktreeRemoveError::Replaced | WorktreeRemoveError::Changed => Error::Changed,
         _ => Error::Unavailable,
     }

@@ -403,7 +403,6 @@ impl WorkspaceManager {
         .detach();
         cx.on_release(|manager, cx| {
             manager.release_sidebar_repositories(cx);
-            manager.release_sidebar_worktrees(cx);
             manager.save_shared_arrangements(cx);
         })
         .detach();
@@ -438,9 +437,6 @@ impl WorkspaceManager {
                     crate::ui::repository_status_store::InstalledRepositoryStatus::store(cx)
             {
                 store.update(cx, |store, cx| store.window_activated(cx));
-            }
-            if window.is_window_active() {
-                Self::worktrees_window_activated(cx);
             }
             cx.notify();
         })
@@ -5065,7 +5061,6 @@ impl Drop for WorkspaceManager {
 impl Render for WorkspaceManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_sidebar_repositories(cx);
-        self.sync_sidebar_worktrees(cx);
         let activity = super::appearance::window_activity(window);
         activity.mount(activity.with_scope(|| self.render_chrome(window, cx)))
     }

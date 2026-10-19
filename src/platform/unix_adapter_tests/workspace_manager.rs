@@ -54,14 +54,10 @@ fn changing_pin_to_equivalent_directory_should_preserve_selected_spelling(cx: &m
     fs::create_dir_all(&project).unwrap();
     symlink(&project, &equivalent).unwrap();
     let selections = [Ok(Some(project.clone())), Ok(Some(equivalent.clone()))];
-    let (manager, records, cx) = workspace_manager_with_directory_selection(selections, cx);
+    let (manager, _records, cx) = workspace_manager_with_directory_selection(selections, cx);
 
     choose_pin_directory(&manager, cx);
     choose_pin_directory(&manager, cx);
-    cx.simulate_keystrokes("cmd-t");
-    cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-d");
-    cx.run_until_parked();
 
     let state = manager.read_with(cx, |manager, _| {
         let workspace = manager.workspaces.active();
@@ -73,12 +69,6 @@ fn changing_pin_to_equivalent_directory_should_preserve_selected_spelling(cx: &m
     });
     assert_eq!((state.0, state.1), (1, equivalent.clone()));
     assert!(matches!(state.2, WorkspaceLocation::Local));
-    assert_eq!(records.starts().len(), 3);
-    assert!(records.starts()[1..].iter().all(|start| {
-        start
-            .local_working_directory()
-            .is_some_and(|directory| directory.path() == equivalent)
-    }));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -128,143 +118,4 @@ fn replaced_pinned_directory_is_rejected_between_picker_validation_and_activatio
     );
     assert_eq!(records.starts().len(), 1);
     fs::remove_dir_all(root).unwrap();
-}
-
-#[gpui::test]
-fn replaced_pinned_directory_blocks_both_child_actions_without_closing_terminal_sessions(
-    cx: &mut TestAppContext,
-) {
-    let root = temporary_directory("child-replacement");
-    let project = root.join("project");
-    let parked = root.join("parked");
-    fs::create_dir_all(&project).unwrap();
-    let (manager, records, cx) =
-        workspace_manager_with_directory_selection([Ok(Some(project.clone()))], cx);
-    choose_pin_directory(&manager, cx);
-    let original_counts = manager.read_with(cx, |manager, cx| {
-        manager
-            .workspaces
-            .active()
-            .payload()
-            .read(cx)
-            .aggregate_counts(cx)
-    });
-    let original_drops = records.dropped_session_ids();
-    fs::rename(&project, &parked).unwrap();
-    fs::create_dir(&project).unwrap();
-
-    for action in ["cmd-t", "cmd-d"] {
-        cx.simulate_keystrokes(action);
-        cx.run_until_parked();
-        assert_eq!(records.starts().len(), 1);
-        assert_eq!(records.dropped_session_ids(), original_drops);
-        assert_eq!(
-            manager.read_with(cx, |manager, cx| {
-                manager
-                    .workspaces
-                    .active()
-                    .payload()
-                    .read(cx)
-                    .aggregate_counts(cx)
-            }),
-            original_counts
-        );
-        assert!(manager.read_with(cx, |manager, _| {
-            manager.workspaces.active().pinned_directory().is_some()
-        }));
-        let modal_action = if action == "cmd-t" {
-            "modal-action-tab-start-error-ok"
-        } else {
-            "modal-action-pane-start-error-ok"
-        };
-        click(modal_action, cx);
-        cx.run_until_parked();
-    }
-    fs::remove_dir(&project).unwrap();
-    fs::rename(&parked, &project).unwrap();
-    for action in ["cmd-t", "cmd-d"] {
-        cx.simulate_keystrokes(action);
-        cx.run_until_parked();
-    }
-    assert_eq!(records.starts().len(), 3);
-    assert_eq!(records.dropped_session_ids(), original_drops);
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[gpui::test]
-fn removal_should_protect_a_symbolic_link_pin_without_its_worktree_listing(
-    cx: &mut TestAppContext,
-) {
-    use crate::ui::workspace_sidebar::WorktreeRemoval;
-    use spaceterm_ui::a11y_testing::A11yTree;
-
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install_with_removal_git(cx);
-    });
-    let base = temporary_directory("pinned-worktree-link");
-    let linked = base.join("linked");
-    let pinned = base.join("alias").join("sub");
-    fs::create_dir_all(linked.join("sub")).unwrap();
-    symlink(&linked, base.join("alias")).unwrap();
-    let (manager, _records, cx) =
-        workspace_manager_with_directory_selection([Ok(Some(pinned.clone()))], cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    choose_pin_directory(&manager, cx);
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.present_desktop_workspace(window, cx);
-        });
-    });
-    cx.run_until_parked();
-    let other = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    present_worktrees(cx, &[&linked]);
-    let removable = manager.read_with(cx, |manager, cx| {
-        assert!(manager.worktree_section(workspace_id, cx).is_none());
-        let section = manager.worktree_section(other, cx).unwrap();
-        let row = &section.groups[0].rows[1];
-        assert_eq!(row.removal, WorktreeRemoval::Allowed);
-        row.worktree_id
-    });
-
-    for pin_at_confirmation in [false, true] {
-        if pin_at_confirmation {
-            cx.update(|window, cx| {
-                manager.update(cx, |manager, cx| {
-                    manager.apply_directory_pin(workspace_id, None, window, cx);
-                });
-            });
-            cx.run_until_parked();
-        }
-        right_click(worktree_row(other, removable, cx), cx);
-        click("worktree-menu-row-remove", cx);
-        if pin_at_confirmation {
-            cx.update(|window, cx| {
-                manager.update(cx, |manager, cx| {
-                    let directory = manager
-                        .local_filesystem
-                        .validate_directory(&pinned)
-                        .unwrap();
-                    manager.apply_directory_pin(
-                        workspace_id,
-                        Some(PinnedDirectory::Local(directory)),
-                        window,
-                        cx,
-                    );
-                });
-            });
-            cx.run_until_parked();
-            click("modal-action-worktree-removal-confirm", cx);
-        }
-        assert!(
-            A11yTree::read(cx)
-                .find_text("It holds a Pinned Directory, so nothing was removed.")
-                .is_some()
-        );
-        assert!(
-            cx.debug_bounds("modal-action-worktree-removal-confirm")
-                .is_none()
-        );
-        click("modal-action-worktree-removal-failed-ok", cx);
-    }
-    fs::remove_dir_all(base).unwrap();
 }

@@ -799,11 +799,6 @@ impl TabView {
         self.session_factory.set_pinned_directory(directory);
     }
 
-    /// Scopes this Tab's later Panes to a Worktree's root, or to the Workspace with `None`.
-    pub(crate) fn set_worktree_root(&mut self, root: Option<std::path::PathBuf>) {
-        self.session_factory.set_worktree_root(root);
-    }
-
     pub(crate) fn tab_focus(&self) -> &FocusHandle {
         &self.tab_focus
     }
@@ -7982,8 +7977,11 @@ mod tests {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+            TestTerminalSessionFactory::new(records.clone()).with_client_filesystem(
+                crate::platform::local_filesystem::LocalFilesystemAuthority::testing(),
+            ),
+        );
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
             crate::terminal::testing::test_local_directory(test_home_directory()),
@@ -8990,60 +8988,6 @@ mod tests {
                 crate::domain::RemoteDirectory::new("/srv/backend".into()).unwrap()
             ))
         );
-    }
-
-    #[gpui::test]
-    fn local_split_should_inherit_target_apply_pins_and_reject_unavailable_directories(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(crate::ui::init).unwrap();
-        let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-        let authority = crate::platform::local_filesystem::LocalFilesystemAuthority::testing();
-        let home = fixture.path().to_owned();
-        let first = home.join("shell-integration/bash");
-        let second = home.join("shell-integration/zsh");
-        let records = TestTerminalSessionRecords::default();
-        let factory = WorkspaceTerminalSessionFactory::new_local_with_authority(
-            Rc::new(TestTerminalSessionFactory::new(records.clone())),
-            authority.validate_directory(&home).unwrap(),
-            authority.clone(),
-        );
-        let (view, cx) =
-            cx.add_window_view(|window, cx| TabView::new(TabId::new(1), factory, window, cx));
-        cx.run_until_parked();
-        report_current_directory(&records, 1, 1, first.to_str().unwrap(), false);
-        cx.run_until_parked();
-        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
-        report_current_directory(&records, 2, 1, second.to_str().unwrap(), false);
-        cx.run_until_parked();
-        split_test_pane(&view, PaneId::new(1), SplitAxis::Vertical, cx);
-        view.update(cx, |view, _| {
-            view.set_pinned_directory(Some(PinnedDirectory::Local(
-                authority.validate_directory(&second).unwrap(),
-            )))
-        });
-        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
-        view.update(cx, |view, _| view.set_pinned_directory(None));
-        report_current_directory(
-            &records,
-            1,
-            2,
-            home.join("missing").to_str().unwrap(),
-            false,
-        );
-        cx.run_until_parked();
-        let count = view.read_with(cx, |view, _| view.pane_count());
-        split_test_pane(&view, PaneId::new(1), SplitAxis::Vertical, cx);
-        assert_eq!(view.read_with(cx, |view, _| view.pane_count()), count);
-        assert_eq!(
-            records
-                .starts()
-                .iter()
-                .map(|start| start.local_working_directory().unwrap().path().to_owned())
-                .collect::<Vec<_>>(),
-            vec![home, first.clone(), first, second]
-        );
-        assert!(records.dropped_session_ids().is_empty());
     }
 
     #[gpui::test]

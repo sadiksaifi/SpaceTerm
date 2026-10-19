@@ -1,6 +1,13 @@
 //! Desktop dialogs submit Worktree operations to the same server edit journal as shared closes.
+use std::rc::Rc;
+
+use gpui::AppContext as _;
+
 use super::*;
+use crate::repository_status::presentation::{MAXIMUM_NAME_CHARS, sanitize_for_display};
 use crate::ui::server_worktrees::{Client, FormBackend, WriteError};
+use crate::ui::worktree_form::{LocationProbe, WorktreeFormContext, WorktreeFormEvent};
+use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
 use spaceterm_server::worktree::{Operation, Read, ReadReply};
 impl WorkspaceManager {
     pub(in crate::ui::workspace_manager) fn new_shared_worktree(

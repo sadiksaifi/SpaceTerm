@@ -16,14 +16,13 @@ use super::session::{
 use crate::domain::{
     PinnedDirectory, RemoteDirectory, RemoteDirectoryIdentity, ValidatedLocalDirectory,
 };
-use crate::platform::local_filesystem::{
-    LocalFilesystemAuthority, LocalFilesystemError as LocalDirectoryError,
-};
+use crate::platform::local_filesystem::LocalFilesystemError as LocalDirectoryError;
 use crate::ssh::command::PreparedSshTerminalSessionChannelCommand;
 
 #[derive(Clone)]
 enum WorkspaceTerminalLaunchContext {
-    Local(LocalTerminalLaunchPlan),
+    /// The owning SpaceTerm Server selects each shell's starting directory.
+    Server(LocalTerminalLaunchPlan),
     Remote(RemoteWorkspaceTerminalLaunchContext),
 }
 
@@ -159,45 +158,20 @@ impl PreparedWorkspaceTerminalLaunch {
 /// Owns a Workspace's home and pin policy and captures individual Terminal Session launches.
 pub(crate) struct WorkspaceTerminalSessionFactory {
     session_factory: Rc<dyn TerminalSessionFactory>,
-    local_filesystem: Option<LocalFilesystemAuthority>,
     launch_context: WorkspaceTerminalLaunchContext,
     pinned_directory: Option<PinnedDirectory>,
-    /// The local Worktree root a Worktree's Tabs start inside, as git reports it.
-    worktree_root: Option<std::path::PathBuf>,
     expected_remote_identity: Option<RemoteDirectoryIdentity>,
 }
 
 impl WorkspaceTerminalSessionFactory {
+    /// Creates a factory shaped like a server factory over a test session factory, whose
+    /// children all start in `home_directory`.
     #[cfg(test)]
     pub(crate) fn new_local(
         session_factory: Rc<dyn TerminalSessionFactory>,
         home_directory: ValidatedLocalDirectory,
     ) -> Self {
-        Self::new_local_with_authority(
-            session_factory,
-            home_directory,
-            LocalFilesystemAuthority::testing(),
-        )
-    }
-
-    /// Creates a desktop-owned factory whose children start from one validated local home
-    /// directory. Production local work runs on the account server instead.
-    #[cfg(test)]
-    pub(crate) fn new_local_with_authority(
-        session_factory: Rc<dyn TerminalSessionFactory>,
-        home_directory: ValidatedLocalDirectory,
-        local_filesystem: LocalFilesystemAuthority,
-    ) -> Self {
-        Self {
-            session_factory,
-            pinned_directory: None,
-            worktree_root: None,
-            expected_remote_identity: None,
-            local_filesystem: Some(local_filesystem),
-            launch_context: WorkspaceTerminalLaunchContext::Local(LocalTerminalLaunchPlan::new(
-                home_directory,
-            )),
-        }
+        Self::server_shaped(session_factory, home_directory)
     }
 
     /// Creates a factory whose server-backed children start in a SpaceTerm Server.
@@ -210,13 +184,18 @@ impl WorkspaceTerminalSessionFactory {
         home_directory: ValidatedLocalDirectory,
     ) -> Self {
         debug_assert!(session_factory.is_server_backed());
+        Self::server_shaped(session_factory, home_directory)
+    }
+
+    fn server_shaped(
+        session_factory: Rc<dyn TerminalSessionFactory>,
+        home_directory: ValidatedLocalDirectory,
+    ) -> Self {
         Self {
             session_factory,
             pinned_directory: None,
-            worktree_root: None,
             expected_remote_identity: None,
-            local_filesystem: None,
-            launch_context: WorkspaceTerminalLaunchContext::Local(LocalTerminalLaunchPlan::new(
+            launch_context: WorkspaceTerminalLaunchContext::Server(LocalTerminalLaunchPlan::new(
                 home_directory,
             )),
         }
@@ -237,9 +216,7 @@ impl WorkspaceTerminalSessionFactory {
         Self {
             session_factory,
             pinned_directory: None,
-            worktree_root: None,
             expected_remote_identity: Some(initial_directory_identity),
-            local_filesystem: None,
             launch_context: WorkspaceTerminalLaunchContext::Remote(
                 RemoteWorkspaceTerminalLaunchContext {
                     local_home,
@@ -253,13 +230,13 @@ impl WorkspaceTerminalSessionFactory {
 
     /// Reserves one launch before the caller mutates its Tab or Pane hierarchy.
     ///
-    /// Local plans are clonable directory authority. Remote plans consume the provider's one-shot
+    /// Server plans carry no directory authority. Remote plans consume the provider's one-shot
     /// grant and fail if readiness changed after revalidation.
     pub(crate) fn prepare_child_launch(
         &self,
     ) -> Result<PreparedWorkspaceTerminalLaunch, TerminalSessionChannelUnavailable> {
         let launch_plan = match &self.launch_context {
-            WorkspaceTerminalLaunchContext::Local(plan) => TerminalLaunchPlan::Local(plan.clone()),
+            WorkspaceTerminalLaunchContext::Server(plan) => TerminalLaunchPlan::Local(plan.clone()),
             WorkspaceTerminalLaunchContext::Remote(context) => {
                 if !context.channel_provider.is_ready() {
                     return Err(TerminalSessionChannelUnavailable);
@@ -280,14 +257,14 @@ impl WorkspaceTerminalSessionFactory {
 
     /// Revalidates the selected remote directory and grants one subsequent Remote child launch.
     ///
-    /// Local child launches have no remote authority to revalidate, so callers can keep their
+    /// Server child launches have no remote authority to revalidate, so callers can keep their
     /// synchronous path by branching on `None`. Dropping the task or receiving an error authorizes
     /// no hierarchy mutation; the grant must be consumed immediately after successful completion.
     pub(crate) fn revalidate_remote_child_launch(
         &self,
     ) -> Option<Task<Result<(), TerminalSessionChannelRevalidationError>>> {
         match &self.launch_context {
-            WorkspaceTerminalLaunchContext::Local(_) => None,
+            WorkspaceTerminalLaunchContext::Server(_) => None,
             WorkspaceTerminalLaunchContext::Remote(context) => {
                 Some(context.channel_provider.revalidate(
                     context.metadata_context.initial_directory().clone(),
@@ -310,7 +287,7 @@ impl WorkspaceTerminalSessionFactory {
 
     pub(crate) fn fallback_title(&self) -> String {
         match &self.launch_context {
-            WorkspaceTerminalLaunchContext::Local(_) => self.session_factory.fallback_title(),
+            WorkspaceTerminalLaunchContext::Server(_) => self.session_factory.fallback_title(),
             WorkspaceTerminalLaunchContext::Remote(context) => context.fallback_title.clone(),
         }
     }
@@ -318,21 +295,15 @@ impl WorkspaceTerminalSessionFactory {
     /// Server metadata grants no authority. Only explicit same-machine client composition can
     /// enable validated local file links for a server-backed Terminal Session.
     pub(crate) fn local_file_capabilities(&self) -> TerminalLocalFileCapabilities {
-        match &self.launch_context {
-            WorkspaceTerminalLaunchContext::Local(_)
-                if !self.is_server_backed()
-                    || self.session_factory.local_file_authority().is_some() =>
-            {
-                TerminalLocalFileCapabilities::Enabled
-            }
-            WorkspaceTerminalLaunchContext::Local(_)
-            | WorkspaceTerminalLaunchContext::Remote(_) => TerminalLocalFileCapabilities::Disabled,
+        if self.allows_permission_setup() {
+            TerminalLocalFileCapabilities::Enabled
+        } else {
+            TerminalLocalFileCapabilities::Disabled
         }
     }
 
     pub(crate) fn allows_permission_setup(&self) -> bool {
-        !self.is_remote()
-            && (!self.is_server_backed() || self.session_factory.local_file_authority().is_some())
+        !self.is_remote() && self.session_factory.local_file_authority().is_some()
     }
 
     pub(crate) fn file_insertion_capabilities(&self) -> TerminalLocalFileCapabilities {
@@ -356,101 +327,38 @@ impl WorkspaceTerminalSessionFactory {
 
     pub(crate) fn terminal_session_channel_is_ready(&self) -> Option<bool> {
         match &self.launch_context {
-            WorkspaceTerminalLaunchContext::Local(_) => None,
+            WorkspaceTerminalLaunchContext::Server(_) => None,
             WorkspaceTerminalLaunchContext::Remote(context) => {
                 Some(context.channel_provider.is_ready())
             }
         }
     }
 
-    /// Returns local filesystem authority only for a Local launch context.
+    /// The directory a server-shaped child starts in.
     ///
     /// Remote Workspace directories are intentionally unavailable through this API.
     #[cfg(test)]
     pub(crate) fn local_working_directory(&self) -> Option<&std::path::Path> {
         match &self.launch_context {
-            WorkspaceTerminalLaunchContext::Local(plan) => Some(plan.working_directory().path()),
+            WorkspaceTerminalLaunchContext::Server(plan) => Some(plan.working_directory().path()),
             WorkspaceTerminalLaunchContext::Remote(_) => None,
         }
-    }
-
-    /// Revalidates retained local filesystem authority without interpreting Remote values locally.
-    fn validate_starting_directory(&self) -> Result<(), LocalDirectoryError> {
-        let WorkspaceTerminalLaunchContext::Local(plan) = &self.launch_context else {
-            return Ok(());
-        };
-        #[cfg(test)]
-        if plan.working_directory().identity().is_synthetic() {
-            return Ok(());
-        }
-        self.local_filesystem
-            .as_ref()
-            .ok_or(LocalDirectoryError::Other)?
-            .revalidate_directory(plan.working_directory())?;
-        Ok(())
     }
 
     pub(crate) fn set_pinned_directory(&mut self, directory: Option<PinnedDirectory>) {
         self.pinned_directory = directory;
     }
 
-    /// Scopes later launches to one local Worktree, or to the Workspace with `None`.
-    ///
-    /// Inside a Worktree, a launch starts in the Pinned Directory or the source directory only
-    /// when it lies inside the Worktree root, and otherwise in the root itself.
-    pub(crate) fn set_worktree_root(&mut self, root: Option<std::path::PathBuf>) {
-        self.worktree_root = root;
-    }
-
-    /// Captures and validates the starting directory before asynchronous launch work begins.
-    /// The workspace factory retains immutable home; this clone owns only one launch selection.
+    /// Captures a Remote starting directory before asynchronous launch work begins. The workspace
+    /// factory retains its initial directory; this clone owns only one launch selection.
     pub(crate) fn for_source_directory(
         &self,
         source: Option<CurrentDirectory>,
     ) -> Result<Self, LocalDirectoryError> {
         let mut selected = self.clone();
         match &mut selected.launch_context {
-            WorkspaceTerminalLaunchContext::Local(plan) => {
-                let authority = self
-                    .local_filesystem
-                    .as_ref()
-                    .ok_or(LocalDirectoryError::Other)?;
-                if let Some(root) = &self.worktree_root {
-                    if let Some(PinnedDirectory::Local(directory)) = &self.pinned_directory {
-                        authority.revalidate_directory(directory)?;
-                    }
-                    let directory = match (&self.pinned_directory, source) {
-                        (Some(PinnedDirectory::Local(directory)), _)
-                            if authority.physically_contains(root, directory.path()) =>
-                        {
-                            directory.clone()
-                        }
-                        (_, Some(CurrentDirectory::Local(path)))
-                            if authority.physically_contains(root, &path) =>
-                        {
-                            authority.validate_directory(&path)?
-                        }
-                        _ => authority.validate_directory(root)?,
-                    };
-                    *plan = LocalTerminalLaunchPlan::new(directory);
-                    selected.validate_starting_directory()?;
-                    return Ok(selected);
-                }
-                let directory = match (&self.pinned_directory, source) {
-                    (Some(PinnedDirectory::Local(directory)), _) => directory.clone(),
-                    (Some(PinnedDirectory::Remote { .. }), _)
-                    | (None, Some(CurrentDirectory::Remote(_))) => {
-                        return Err(LocalDirectoryError::Other);
-                    }
-                    (None, Some(CurrentDirectory::Local(path)))
-                        if path != plan.working_directory().path() =>
-                    {
-                        authority.validate_directory(&path)?
-                    }
-                    _ => plan.working_directory().clone(),
-                };
-                *plan = LocalTerminalLaunchPlan::new(directory);
-            }
+            // The owning server selects the directory, so a Pane launch only asks it to start.
+            WorkspaceTerminalLaunchContext::Server(_) => {}
             WorkspaceTerminalLaunchContext::Remote(context) => {
                 let directory = match (&self.pinned_directory, source) {
                     (
@@ -476,7 +384,6 @@ impl WorkspaceTerminalSessionFactory {
                 context.metadata_context.set_initial_directory(directory);
             }
         }
-        selected.validate_starting_directory()?;
         Ok(selected)
     }
 }
@@ -595,41 +502,6 @@ mod tests {
     }
 
     #[test]
-    fn local_factory_should_forward_the_validated_launch_plan() {
-        let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records.clone()));
-        let directory = ValidatedLocalDirectory::new(
-            PathBuf::from("/typed-local-workspace"),
-            crate::domain::LocalDirectoryIdentity::for_test(7011),
-        );
-        let factory =
-            WorkspaceTerminalSessionFactory::new_local(session_factory, directory.clone());
-        let geometry = TerminalGeometry::from_grid(
-            CellGridSize::new(80, 24),
-            LogicalCellSize::new(8.0, 20.0),
-            BackingScale::ONE,
-        );
-
-        let launch = factory.prepare_child_launch().unwrap();
-        let _started = factory
-            .start(geometry, launch, test_terminal_appearance_update())
-            .unwrap();
-
-        let starts = records.starts();
-        assert!(matches!(
-            starts[0].launch_plan(),
-            TerminalLaunchPlan::Local(_)
-        ));
-        assert_eq!(
-            starts[0]
-                .local_working_directory()
-                .expect("the local factory must record a local plan"),
-            &directory
-        );
-    }
-
-    #[test]
     fn remote_factory_should_preserve_context_and_prepare_one_terminal_session_channel_per_child() {
         let records = TestTerminalSessionRecords::default();
         let destination = SshDestination::new("tester@remote".to_owned()).unwrap();
@@ -659,7 +531,6 @@ mod tests {
 
         assert_eq!(provider.preparations.load(Ordering::Acquire), 2);
         assert_eq!(factory.local_working_directory(), None);
-        assert!(factory.validate_starting_directory().is_ok());
         assert_eq!(
             factory.local_file_capabilities(),
             TerminalLocalFileCapabilities::Disabled
@@ -795,137 +666,6 @@ mod tests {
             error,
             crate::ssh::command::PreparedSshTerminalSessionChannelError::AlreadyConsumed
         ));
-    }
-    #[test]
-    fn local_launch_policy_should_capture_source_pin_and_home_without_changing_existing_launches() {
-        let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-        let home = fixture.path().to_path_buf();
-        let source = home.join("shell-integration/bash");
-        let pin = home.join("shell-integration/zsh");
-        let authority = LocalFilesystemAuthority::testing();
-        let records = TestTerminalSessionRecords::default();
-        let mut factory = WorkspaceTerminalSessionFactory::new_local_with_authority(
-            Rc::new(TestTerminalSessionFactory::new(records.clone())),
-            authority.validate_directory(&home).unwrap(),
-            authority.clone(),
-        );
-        let captured = factory
-            .for_source_directory(Some(CurrentDirectory::Local(source.clone())))
-            .unwrap();
-        factory.set_pinned_directory(Some(PinnedDirectory::Local(
-            authority.validate_directory(&pin).unwrap(),
-        )));
-        let pinned = factory
-            .for_source_directory(Some(CurrentDirectory::Local(source.clone())))
-            .unwrap();
-        assert_eq!(captured.local_working_directory(), Some(source.as_path()));
-        assert_eq!(pinned.local_working_directory(), Some(pin.as_path()));
-        factory.set_pinned_directory(None);
-        assert_eq!(
-            factory
-                .for_source_directory(None)
-                .unwrap()
-                .local_working_directory(),
-            Some(home.as_path())
-        );
-        assert_eq!(
-            factory
-                .for_source_directory(Some(CurrentDirectory::Local(source.clone())))
-                .unwrap()
-                .local_working_directory(),
-            Some(source.as_path())
-        );
-        assert!(
-            factory
-                .for_source_directory(Some(CurrentDirectory::Local(home.join("missing"))))
-                .is_err()
-        );
-        assert!(
-            factory
-                .for_source_directory(Some(CurrentDirectory::Remote(
-                    RemoteDirectory::new("/tmp".into()).unwrap()
-                )))
-                .is_err()
-        );
-        assert!(
-            records.starts().is_empty(),
-            "directory policy must not mutate sessions"
-        );
-    }
-
-    #[test]
-    fn worktree_launches_should_start_inside_their_worktree() {
-        let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-        let home = fixture.path().to_path_buf();
-        let worktree = home.join("shell-integration");
-        let inside = worktree.join("bash");
-        let outside = home.clone();
-        let authority = LocalFilesystemAuthority::testing();
-        let mut factory = WorkspaceTerminalSessionFactory::new_local_with_authority(
-            Rc::new(TestTerminalSessionFactory::new(
-                TestTerminalSessionRecords::default(),
-            )),
-            authority.validate_directory(&home).unwrap(),
-            authority.clone(),
-        );
-        factory.set_pinned_directory(Some(PinnedDirectory::Local(
-            authority.validate_directory(&home).unwrap(),
-        )));
-        factory.set_worktree_root(Some(worktree.clone()));
-        let selected = |factory: &WorkspaceTerminalSessionFactory,
-                        source: Option<&std::path::PathBuf>| {
-            factory
-                .for_source_directory(source.map(|path| CurrentDirectory::Local(path.clone())))
-                .unwrap()
-                .local_working_directory()
-                .map(std::path::Path::to_path_buf)
-        };
-
-        assert_eq!(
-            (
-                selected(&factory, Some(&inside)),
-                selected(&factory, Some(&outside)),
-                selected(&factory, None),
-            ),
-            (
-                Some(inside.clone()),
-                Some(worktree.clone()),
-                Some(worktree.clone())
-            )
-        );
-        factory.set_pinned_directory(Some(PinnedDirectory::Local(
-            authority.validate_directory(&inside).unwrap(),
-        )));
-        assert_eq!(selected(&factory, Some(&outside)), Some(inside));
-        factory.set_worktree_root(Some(home.join("missing")));
-        assert!(factory.for_source_directory(None).is_err());
-    }
-
-    #[test]
-    fn unavailable_explicit_pin_should_never_fall_back_to_source_or_home() {
-        let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-        let authority = LocalFilesystemAuthority::testing();
-        let pin = fixture.path().join("pinned");
-        std::fs::create_dir(&pin).unwrap();
-        let mut factory = WorkspaceTerminalSessionFactory::new_local_with_authority(
-            Rc::new(TestTerminalSessionFactory::new(
-                TestTerminalSessionRecords::default(),
-            )),
-            authority.validate_directory(fixture.path()).unwrap(),
-            authority.clone(),
-        );
-        factory.set_pinned_directory(Some(PinnedDirectory::Local(
-            authority.validate_directory(&pin).unwrap(),
-        )));
-        std::fs::remove_dir(&pin).unwrap();
-        for root in [None, Some(fixture.path().to_owned())] {
-            factory.set_worktree_root(root);
-            assert!(
-                factory
-                    .for_source_directory(Some(CurrentDirectory::Local(fixture.path().to_owned())))
-                    .is_err()
-            );
-        }
     }
 
     #[test]

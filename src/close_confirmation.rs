@@ -215,17 +215,6 @@ impl CloseHierarchy {
         })
     }
 
-    /// The number of Tabs `target` closes.
-    pub(crate) fn affected_tab_count(&self, target: CloseTarget) -> usize {
-        let mut tabs = Vec::new();
-        for pane in self.matching_panes(target) {
-            if !tabs.contains(&(pane.workspace, pane.tab)) {
-                tabs.push((pane.workspace, pane.tab));
-            }
-        }
-        tabs.len()
-    }
-
     fn matching_panes(&self, target: CloseTarget) -> impl Iterator<Item = &HierarchyPane> {
         self.panes.iter().filter(move |pane| match target {
             CloseTarget::Pane {

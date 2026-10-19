@@ -114,10 +114,6 @@ pub(crate) struct RecordedStart {
 }
 
 impl RecordedStart {
-    pub(crate) const fn launch_plan(&self) -> &TerminalLaunchPlan {
-        &self.launch_plan
-    }
-
     pub(crate) const fn local_launch_plan(
         &self,
     ) -> Option<&crate::terminal::LocalTerminalLaunchPlan> {
@@ -403,6 +399,12 @@ impl TestTerminalSessionFactory {
         filesystem: crate::platform::local_filesystem::LocalFilesystemAuthority,
     ) -> Self {
         self.client_files = Some(filesystem);
+        self
+    }
+
+    /// Sessions a server opens for another machine's client, which grants no file authority.
+    pub(crate) fn without_client_filesystem(mut self) -> Self {
+        self.client_files = None;
         self
     }
 
