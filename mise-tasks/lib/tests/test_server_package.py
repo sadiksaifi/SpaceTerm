@@ -10,11 +10,14 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from spaceterm_tasks import TaskError, release, server_package
+from spaceterm_tasks import ROOT, TaskError, release, server_package
 from spaceterm_tasks.package_linux import write_archive
 from spaceterm_tasks.packaging import NOTICES, SHELL_INTEGRATION, TERMINFO
+
+from tests.server_artifact_fixture import archive_tree
 
 
 class ServerArchiveTests(unittest.TestCase):
@@ -138,12 +141,41 @@ class ServerArchiveTests(unittest.TestCase):
                     )
 
     def test_desktop_artifact_rejects_wrong_exact_build_before_staging(self):
-        self.archive_with([("server/build.json", json.dumps(self.info).encode(), tarfile.REGTYPE)])
-        destination = self.root / "desktop/server-artifact"
-        with self.assertRaises(TaskError):
+        tree = self.root / "server"
+        (tree / "bin").mkdir(parents=True)
+        (tree / "bin/spaceterm-server").write_bytes(b"native executable fixture")
+        (tree / "bin/spaceterm-server").chmod(0o755)
+        archive, signature = archive_tree(ROOT, tree, self.info)
+        run = subprocess.run
+
+        def native_run(arguments, **kwargs):
+            if arguments[0] == "objdump":
+                output = b"elf64-x86-64" if arguments[1] == "-f" else b""
+            elif arguments[1:] == ["--build-info"]:
+                output = json.dumps(self.info).encode()
+            elif arguments[1:] == ["--check"]:
+                output = b"Installed server PTY and shell resources verified.\n"
+            else:
+                return run(arguments, **kwargs)
+            if kwargs.get("text"):
+                output = output.decode()
+            return subprocess.CompletedProcess(arguments, 0, stdout=output, stderr=b"")
+
+        with (
+            patch.object(server_package, "sys", SimpleNamespace(platform="linux")),
+            patch.object(server_package, "host_target", return_value=self.info["target"]),
+            patch.object(subprocess, "run", side_effect=native_run),
+        ):
+            baseline = self.root / "desktop/baseline"
             server_package.stage_desktop_artifact(
-                self.archive, self.signature, destination, {**self.info, "commit": "b" * 40}
+                archive, signature, baseline, self.info
             )
+            self.assertEqual((baseline / "artifact.tar.gz").read_bytes(), archive.read_bytes())
+            self.assertEqual((baseline / "artifact.sig").read_bytes(), signature.read_bytes())
+            destination = self.root / "desktop/wrong-build"
+            expected = {**self.info, "commit": "b" * 40, "version": "dev.bbbbbbbbbbbb"}
+            with self.assertRaisesRegex(TaskError, "artifact differs from the requested exact build"):
+                server_package.stage_desktop_artifact(archive, signature, destination, expected)
         self.assertFalse(destination.exists())
 
     def test_desktop_candidate_requires_both_explicit_artifact_inputs(self):

@@ -86,6 +86,13 @@ int main(int argc, char **argv) {{
                 check=True,
                 capture_output=True,
             )
+    archive, signature = archive_tree(root, tree, expected)
+    environment["SPACETERM_SERVER_ARCHIVE"] = str(archive)
+    environment["SPACETERM_SERVER_SIGNATURE"] = str(signature)
+    return archive, signature
+
+
+def archive_tree(root, tree, expected):
     resources = tree / "share/spaceterm"
     shutil.copytree(root / "assets/shell-integration", resources / "shell-integration")
     shutil.copyfile(root / "assets/THIRD-PARTY-NOTICES.txt", resources / "THIRD-PARTY-NOTICES.txt")
@@ -101,10 +108,8 @@ int main(int argc, char **argv) {{
         capture_output=True,
     )
     (tree / "build.json").write_text(json.dumps(expected))
-    archive = directory / "artifact.tar.gz"
-    signature = directory / "artifact.sig"
+    archive = tree.parent / "artifact.tar.gz"
+    signature = tree.parent / "artifact.sig"
     write_archive(tree, archive)
     release.sign_ed25519(SEED, archive, signature)
-    environment["SPACETERM_SERVER_ARCHIVE"] = str(archive)
-    environment["SPACETERM_SERVER_SIGNATURE"] = str(signature)
     return archive, signature
