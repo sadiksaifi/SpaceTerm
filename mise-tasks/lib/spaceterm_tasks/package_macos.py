@@ -8,7 +8,6 @@ import json
 import os
 import platform
 import plistlib
-import shlex
 import shutil
 import subprocess
 import sys
@@ -17,7 +16,7 @@ import tomllib
 from contextlib import nullcontext
 from pathlib import Path
 
-from spaceterm_tasks import ROOT, TaskError, macos_signing, sparkle, status_area_package
+from spaceterm_tasks import ROOT, TaskError, macos_signing, sparkle
 from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.macos_bundle import ICON_NAME, compile_icon, identity, identity_directory
 from spaceterm_tasks.packaging import (
@@ -80,7 +79,6 @@ def package_bundle(release_tag=None):
     executable = build_executable(
         "--release", "--locked", "--no-default-features", "--features", "desktop", env=environment
     )
-    status_area = status_area_package.build("--release", env=environment)
     binaries = STAGE / "binaries"
     binaries.mkdir()
     shutil.copyfile(executable, binaries / template["CFBundleExecutable"])
@@ -105,20 +103,6 @@ def package_bundle(release_tag=None):
     app_name = template["CFBundleName"]
     with tempfile.TemporaryDirectory(dir=DIST, prefix=".package.") as temporary:
         output = Path(temporary) / "output"
-        # Finalize LoginItems after cargo-packager signs the app, before it creates the DMG.
-        # Its general Mach-O signer otherwise gives every executable the desktop entitlements.
-        config["before-each-package-command"] = shlex.join(
-            [
-                sys.executable,
-                "-m",
-                "spaceterm_tasks.status_area_package",
-                str(output / f"{app_name}.app"),
-                str(status_area),
-                config["macos"]["signing-identity"],
-                str(ROOT / config["macos"]["entitlements"]),
-                *(["--release"] if release_tag else []),
-            ]
-        )
         print(f"Packaging {app_name}.app and {app_name}.dmg with cargo-packager")
         signing = (
             macos_signing.release_keychain(config["macos"]["signing-identity"], os.environ)
@@ -236,9 +220,7 @@ def verify_bundle(app, name, release_tag, label):
         release_tag,
     )
 
-    config = tomllib.loads((identity_directory(name) / "Packager.toml").read_text())
-    status_area_package.verify_macos(app, info, label, config["macos"]["signing-identity"])
-    signature = ["codesign", "--verify", "--strict", "--deep", str(app)]
+    signature = ["codesign", "--verify", "--strict", *(["--deep"] if release_tag else []), str(app)]
     checked(signature, f"{label} app signature verification failed")
     details = subprocess.run(
         ["codesign", "--display", "--verbose=4", str(app)], capture_output=True, text=True

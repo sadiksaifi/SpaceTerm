@@ -122,11 +122,6 @@ class LinuxPrefixTests(unittest.TestCase):
             "a source launch runs beside a running Development instance",
         )
         self.assertTrue((prefix / "share" / "spaceterm" / "shell-integration" / "zsh").is_dir())
-        helper = prefix / "bin/spaceterm-status-area"
-        self.assertEqual(
-            helper.read_bytes(), (self.root / "target/debug/spaceterm-status-area").read_bytes()
-        )
-        self.assertEqual(helper.stat().st_mode & 0o777, 0o755)
         self.assertTrue(
             (prefix / "share" / "spaceterm" / "terminfo" / "x" / "xterm-spaceterm").is_file()
         )

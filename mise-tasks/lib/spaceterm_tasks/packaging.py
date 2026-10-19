@@ -78,10 +78,6 @@ def verify_application_identity(executable, expected, label, version=None):
         raise TaskError(f"{label} executable application identity must be {expected}")
     if version is not None and reported != version.encode():
         raise TaskError(f"{label} executable version must be {version}")
-    try:
-        return reported.decode("ascii")
-    except UnicodeDecodeError:
-        raise TaskError(f"{label} executable version must be ASCII") from None
 
 
 def verify_askpass_helper_mode(executable, label):
