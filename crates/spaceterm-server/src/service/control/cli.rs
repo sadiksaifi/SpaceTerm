@@ -126,7 +126,7 @@ pub fn write_status(
     } else if status.running {
         "Running."
     } else if status.stopped {
-        "Stopped. It stays stopped until you run service-start."
+        "Stopped. It stays stopped until you start it."
     } else {
         "Not running."
     };
@@ -273,7 +273,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             output,
-            b"SpaceTerm Development server: Stopped. It stays stopped until you run service-start.\n\
+            b"SpaceTerm Development server: Stopped. It stays stopped until you start it.\n\
               Installed: true; enabled: false; running: false; stopped: true.\n"
         );
     }
