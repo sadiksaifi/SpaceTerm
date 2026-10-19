@@ -98,6 +98,12 @@
       "sha256": "f0e18c46205e6b1bf9eb20ed97037c128f03cf27c1ff818f442a9cc173f8a002"
     },
     {
+      "name": "libuuid1",
+      "version": "2.37.2-4ubuntu3.6",
+      "path": "pool/main/u/util-linux/libuuid1_2.37.2-4ubuntu3.6_amd64.deb",
+      "sha256": "97eaa1090c2e7ddaad55d58f9d0d7907d64b70f89228405d68a7ce7d56a89d67"
+    },
+    {
       "name": "libxau-dev",
       "version": "1:1.0.9-1build5",
       "path": "pool/main/libx/libxau/libxau-dev_1.0.9-1build5_amd64.deb",
@@ -168,6 +174,12 @@
       "version": "1.4.0-1",
       "path": "pool/main/libx/libxkbcommon/libxkbcommon0_1.4.0-1_amd64.deb",
       "sha256": "a0470edb237d52b71ad41f755c043164abed01423585ed5ea19525b3baaf84f7"
+    },
+    {
+      "name": "uuid-dev",
+      "version": "2.37.2-4ubuntu3.6",
+      "path": "pool/main/u/util-linux/uuid-dev_2.37.2-4ubuntu3.6_amd64.deb",
+      "sha256": "bca1cd5ca6b3be8b5d6498fe80b2cb7e2b63040adda7ff40b9ca26eecb825f58"
     },
     {
       "name": "x11proto-dev",
