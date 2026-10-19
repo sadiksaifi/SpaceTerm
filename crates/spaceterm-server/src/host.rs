@@ -299,7 +299,6 @@ pub(crate) fn serve_runtime(
                                         accessibility: false,
                                         directory_recovery: true,
                                         worktree_writes: false,
-                                        workspace_directories: false,
                                         workspace_policy: false,
                                     }
                                 }
@@ -621,7 +620,6 @@ mod startup_tests {
                         accessibility: false,
                         directory_recovery: true,
                         worktree_writes: false,
-                        workspace_directories: false,
                         workspace_policy: true,
                     },
                     Request::Inventory => Reply::Inventory {

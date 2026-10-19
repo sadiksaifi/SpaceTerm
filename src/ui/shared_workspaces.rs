@@ -110,11 +110,6 @@ mod development {
         /// Submits one edit, or reports that nothing was submitted because this client is offline
         /// or is already waiting for an answer. A refusal is never queued.
         fn submit(&self, mutation: Mutation) -> bool;
-
-        /// Whether the connected server starts a new Workspace in its requested directory.
-        fn supports_workspace_directories(&self) -> bool {
-            self.snapshot().workspace_directories
-        }
     }
 
     impl SharedWorkspaceEdits for SharedWorkspaceClient {
@@ -128,10 +123,6 @@ mod development {
 
         fn submit(&self, mutation: Mutation) -> bool {
             Self::submit(self, mutation)
-        }
-
-        fn supports_workspace_directories(&self) -> bool {
-            Self::supports_workspace_directories(self)
         }
     }
 
@@ -175,10 +166,6 @@ mod development {
                 }
                 (true, _) => SharedEditability::Available,
             }
-        }
-
-        pub(crate) fn supports_workspace_directories(&self) -> bool {
-            self.edits.supports_workspace_directories()
         }
 
         /// Submits one edit and records that this process asked for it.
@@ -1565,11 +1552,6 @@ mod development {
             plan
         }
 
-        /// Asks the server for another shared Workspace.
-        pub(crate) fn supports_workspace_directories(&self) -> bool {
-            self.edits.supports_workspace_directories()
-        }
-
         /// Asks the server for a Workspace, pinned at `directory` with its first Pane there.
         pub(crate) fn create_workspace(
             &mut self,
@@ -2081,7 +2063,6 @@ mod development {
                 Self {
                     snapshot: Mutex::new(SharedWorkspaceSnapshot {
                         worktree_writes: false,
-                        workspace_directories: true,
                         inventory,
                         connected: true,
                         pending: false,
@@ -2093,15 +2074,6 @@ mod development {
                     submitted: Mutex::new(Vec::new()),
                     sequence: Mutex::new(1),
                 }
-            }
-
-            /// The server predates directory creation, as an older approved runtime does.
-            pub(crate) fn without_workspace_directories(self) -> Self {
-                self.snapshot
-                    .lock()
-                    .expect("snapshot")
-                    .workspace_directories = false;
-                self
             }
 
             pub(crate) fn set_inventory(&self, inventory: Inventory) {

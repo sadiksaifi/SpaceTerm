@@ -558,43 +558,6 @@ fn a_second_launched_window_brings_the_presenting_one_forward(cx: &mut TestAppCo
     );
 }
 
-/// An approved older runtime would drop the directory and start the shell in the home directory,
-/// so SpaceTerm explains which side needs updating and sends nothing.
-#[gpui::test]
-fn an_older_server_is_never_asked_to_open_a_directory(cx: &mut TestAppContext) {
-    let chosen = std::env::temp_dir()
-        .canonicalize()
-        .unwrap()
-        .join(format!("st-launch-older-{}", std::process::id()));
-    std::fs::create_dir_all(&chosen).unwrap();
-    let (harness, cx) = launch_harness_with(
-        vec![ready()],
-        ScriptedEdits::new(Some(inventory())).without_workspace_directories(),
-        [Ok(Some(chosen.clone()))],
-        cx,
-    );
-    cx.run_until_parked();
-    sync(&harness, cx);
-    cx.update(|window, cx| {
-        harness.manager.update(cx, |manager, cx| {
-            manager.open_local_directory(String::new(), window, cx);
-            manager.choose_local_pin_directory(
-                PinTarget::NewLocalWorkspace {
-                    name: String::new(),
-                },
-                window,
-                cx,
-            );
-        });
-    });
-    cx.run_until_parked();
-
-    assert!(harness.edits.submitted().is_empty());
-    assert_eq!(harness.workspace_count(cx), 1);
-    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-    std::fs::remove_dir_all(chosen).unwrap();
-}
-
 /// The ready launch harness with its server's Workspace presented and focused.
 fn ready_harness(cx: &mut TestAppContext) -> (LaunchHarness, &mut VisualTestContext) {
     let (harness, cx) = launch_harness(vec![ready()], cx);

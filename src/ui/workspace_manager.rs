@@ -4027,16 +4027,6 @@ impl WorkspaceManager {
             }
             return false;
         };
-        // An older server would drop the directory and start the shell somewhere else.
-        if directory.is_some() && !shared.supports_workspace_directories() {
-            Self::show_shared_unavailable(
-                "This server can\u{2019}t start a new Workspace in a chosen directory, so \
-                 nothing was created. Update the server to open directories.",
-                window,
-                cx,
-            );
-            return false;
-        }
         let submission = shared.create_workspace(name, directory);
         if let SharedSubmission::Refused(reason) = submission {
             Self::show_shared_refusal("create a Workspace", reason, window, cx);

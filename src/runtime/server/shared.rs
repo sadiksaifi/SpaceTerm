@@ -413,7 +413,6 @@ impl SharedWorkspaceHost {
                 accessibility: true,
                 directory_recovery: true,
                 worktree_writes: true,
-                workspace_directories: true,
                 workspace_policy: true,
             }),
             Request::Inventory => Ok(Reply::Inventory {

@@ -375,7 +375,6 @@ impl DevelopmentPaneHost {
                 accessibility: true,
                 directory_recovery: true,
                 worktree_writes: false,
-                workspace_directories: false,
                 workspace_policy: false,
             });
         }
