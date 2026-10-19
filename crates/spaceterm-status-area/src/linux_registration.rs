@@ -94,16 +94,13 @@ fn entry(identity: &str, name: &str, executable: &Path) -> Result<String, Regist
     if executable.chars().any(char::is_control) {
         return Err(RegistrationError::Unbundled);
     }
-    // The Exec value quotes the path, then the entry format escapes each backslash once more.
-    let mut quoted = String::from("\"");
-    for character in executable.chars() {
-        if matches!(character, '"' | '`' | '$' | '\\') {
-            quoted.push('\\');
-        }
-        quoted.push(character);
-    }
-    quoted.push('"');
-    let exec = quoted.replace('\\', "\\\\");
+    // Desktop loaders expand percent field codes and reject an `=` in the program token, so a
+    // source path cannot be that token. Like the Development launcher, the entry names a fixed
+    // program and passes the path as an argument: the shell receives it as `$0` and replaces
+    // itself with it, without evaluating the path.
+    let exec = ["/bin/sh", "-c", "exec \"$0\"", executable]
+        .map(exec_argument)
+        .join(" ");
     Ok(format!(
         "[Desktop Entry]\n\
          Type=Application\n\
@@ -115,6 +112,24 @@ fn entry(identity: &str, name: &str, executable: &Path) -> Result<String, Regist
          NoDisplay=true\n\
          X-GNOME-Autostart-enabled=true\n"
     ))
+}
+
+/// One Exec argument: quoted with its reserved characters escaped, each percent sign doubled so
+/// it is not a field code, then each backslash escaped again for the entry's string value.
+fn exec_argument(argument: &str) -> String {
+    let mut quoted = String::from("\"");
+    for character in argument.chars() {
+        match character {
+            '"' | '`' | '$' | '\\' => {
+                quoted.push('\\');
+                quoted.push(character);
+            }
+            '%' => quoted.push_str("%%"),
+            _ => quoted.push(character),
+        }
+    }
+    quoted.push('"');
+    quoted.replace('\\', "\\\\")
 }
 
 /// Replaces the entry in one rename, so the session never reads a partial file.
@@ -148,4 +163,68 @@ fn spawn(executable: &Path) -> Result<(), RegistrationError> {
         .spawn()
         .map(drop)
         .map_err(|_| RegistrationError::Refused)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Launches the generated entry through GIO, the loader desktop sessions use for autostart,
+    /// and reports the program path the launched process received.
+    #[test]
+    fn autostart_starts_the_exact_executable_from_a_reserved_source_path() {
+        let probe = Command::new("/usr/bin/python3")
+            .args(["-c", "from gi.repository import Gio"])
+            .status();
+        assert!(
+            probe.is_ok_and(|status| status.success()),
+            "GIO desktop parsing needs python3-gi and gir1.2-glib-2.0; run mise doctor project"
+        );
+        let scratch =
+            std::env::temp_dir().join(format!("status-area-entry-{}", std::process::id()));
+        // The same reserved characters the Development launcher supports in a source path.
+        let prefix = scratch.join("source space \"quote\" \\ slash %f =equal $dollar `tick`");
+        std::fs::create_dir_all(prefix.join("bin")).unwrap();
+        let record = scratch.join("launched");
+        let executable = prefix.join("bin/spaceterm-status-area");
+        std::fs::write(
+            &executable,
+            format!("#!/bin/sh\nprintf '%s' \"$0\" > '{}'\n", record.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let entry_path =
+            scratch.join("io.github.sadiksaifi.spaceterm-development.status-area.desktop");
+        std::fs::write(
+            &entry_path,
+            entry(
+                "spaceterm-development",
+                "SpaceTerm Development",
+                &executable,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let launch = Command::new("/usr/bin/python3")
+            .args([
+                "-I",
+                "-c",
+                "import sys\nfrom gi.repository import Gio\n\
+                 info = Gio.DesktopAppInfo.new_from_filename(sys.argv[1])\n\
+                 assert info is not None, 'GIO rejected the entry'\n\
+                 assert info.launch([], None)",
+            ])
+            .arg(&entry_path)
+            .status()
+            .unwrap();
+        assert!(launch.success(), "GIO could not launch the entry");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !record.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let launched = std::fs::read_to_string(&record).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&scratch);
+        assert_eq!(launched, executable.to_str().unwrap());
+    }
 }
