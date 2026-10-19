@@ -220,8 +220,9 @@ impl Directory {
         if value.get("format").and_then(|v| v.as_str()) != Some("account-local-1") {
             return Err(ServerError::IncompatibleState);
         }
+        // Valid JSON in this format can retain a schema this build no longer understands.
         let record: Record =
-            serde_json::from_value(value).map_err(|_| ServerError::UnsafeStorage)?;
+            serde_json::from_value(value).map_err(|_| ServerError::IncompatibleState)?;
         if record.format != "account-local-1" || record.server == [0; 32] {
             return Err(ServerError::UnsafeStorage);
         }
@@ -605,6 +606,38 @@ mod tests {
         let reopened = fixture.open();
         let restored = reopened.read().unwrap();
         assert_eq!(serde_json::to_value(&restored).unwrap(), value);
+    }
+
+    #[test]
+    fn older_shared_organization_is_incompatible_and_left_unchanged() {
+        let fixture = Fixture::new();
+        let data = fixture.open();
+        let _lock = data.lock("setup.lock", false).unwrap();
+        let mut record = data.read_or_create().unwrap();
+        let first = crate::organization::Organization::first(fixture.0.clone()).unwrap();
+        record.organization = Some(
+            crate::hierarchy::State::from_legacy(&first)
+                .envelope(&fixture.0)
+                .unwrap(),
+        );
+        let mut value = serde_json::to_value(&record).unwrap();
+        let shared = value["organization"]["shared"].as_object_mut().unwrap();
+        // Retained organization from before automatic naming has neither field.
+        assert!(shared.remove("names").is_some());
+        assert!(shared.remove("home_directory").is_some());
+        let original = serde_json::to_vec(&value).unwrap();
+        let path = fixture.0.join("identity.json");
+        fs::write(&path, &original).unwrap();
+        assert_eq!(fs::metadata(&fixture.0).unwrap().mode() & 0o7777, 0o700);
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o7777, 0o600);
+
+        let reopened = fixture.open();
+        assert_eq!(reopened.read().err(), Some(ServerError::IncompatibleState));
+        assert_eq!(
+            reopened.read_or_create().err(),
+            Some(ServerError::IncompatibleState)
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
     }
 
     #[cfg(feature = "client")]
