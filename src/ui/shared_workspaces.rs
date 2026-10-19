@@ -110,6 +110,12 @@ mod development {
         /// Submits one edit, or reports that nothing was submitted because this client is offline
         /// or is already waiting for an answer. A refusal is never queued.
         fn submit(&self, mutation: Mutation) -> bool;
+
+        /// A data-free hint after each change the snapshot publishes, or `None` when only
+        /// periodic reading observes changes. The snapshot stays the authority.
+        fn subscribe(&self) -> Option<async_channel::Receiver<()>> {
+            None
+        }
     }
 
     impl SharedWorkspaceEdits for SharedWorkspaceClient {
@@ -123,6 +129,10 @@ mod development {
 
         fn submit(&self, mutation: Mutation) -> bool {
             Self::submit(self, mutation)
+        }
+
+        fn subscribe(&self) -> Option<async_channel::Receiver<()>> {
+            Some(Self::subscribe(self))
         }
     }
 
@@ -1063,6 +1073,20 @@ mod development {
             ));
         }
 
+        /// Completes once the saved arrangement the first inventory waits for has been read,
+        /// or at once when this client retains none.
+        pub(crate) fn client_views_read(&self) -> impl std::future::Future<Output = ()> + 'static {
+            let read = self
+                .retained_views
+                .as_ref()
+                .map(crate::ui::client_view_state::RetainedClientViews::read);
+            async move {
+                if let Some(read) = read {
+                    read.await;
+                }
+            }
+        }
+
         /// Wait for the saved arrangement before applying the first inventory.
         pub(crate) fn prepare_client_views(
             &mut self,
@@ -1358,6 +1382,11 @@ mod development {
 
         pub(crate) const fn connection_error(&self) -> Option<spaceterm_server::ServerError> {
             self.connection_error
+        }
+
+        /// Wakes for each change the server connection publishes, when it can say so.
+        pub(crate) fn subscribe(&self) -> Option<async_channel::Receiver<()>> {
+            self.edits.edits.subscribe()
         }
 
         /// Reads the server's answer and its inventory together, and reports both.

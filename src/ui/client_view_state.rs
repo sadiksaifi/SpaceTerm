@@ -17,12 +17,15 @@ pub(super) struct RetainedClientViews {
     state: Arc<Mutex<State>>,
     wake: std::sync::mpsc::SyncSender<()>,
     worker: Option<std::thread::JoinHandle<()>>,
+    /// Closes once the saved arrangement and attachments are read, or reading failed.
+    read: async_channel::Receiver<()>,
 }
 impl RetainedClientViews {
     pub(super) fn new(server: LocalServer) -> Self {
         let state = Arc::new(Mutex::new(State::default()));
         let shared = Arc::clone(&state);
         let (wake, receiver) = std::sync::mpsc::sync_channel(1);
+        let (read_done, read) = async_channel::bounded::<()>(1);
         let worker = std::thread::Builder::new()
             .name("spaceterm-client-view".into())
             .spawn(move || {
@@ -38,6 +41,8 @@ impl RetainedClientViews {
                             .map_err(|error| *error),
                     );
                 }
+                // The window waits on this before its first inventory, so it hears at once.
+                drop(read_done);
                 let Ok(mut store) = opened else {
                     return;
                 };
@@ -72,6 +77,15 @@ impl RetainedClientViews {
             state,
             wake,
             worker,
+            read,
+        }
+    }
+    /// Completes once the saved arrangement and attachments can be read.
+    pub(super) fn read(&self) -> impl std::future::Future<Output = ()> + 'static {
+        let read = self.read.clone();
+        async move {
+            // Only the worker sends nothing and then closes, so any result means reading ended.
+            let _ = read.recv().await;
         }
     }
     pub(super) fn attachments(

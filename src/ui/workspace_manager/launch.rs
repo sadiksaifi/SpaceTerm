@@ -331,6 +331,9 @@ pub(super) struct LocalLaunchState {
     /// rather than going quiet, even within the first launch's quiet period.
     spoke: std::cell::Cell<bool>,
     _quiet: Option<Task<()>>,
+    /// Presents the server's Workspaces as soon as this client's saved arrangement is read,
+    /// rather than at the next periodic reading.
+    _views_read: Option<Task<()>>,
 }
 
 impl LocalLaunchState {
@@ -345,6 +348,7 @@ impl LocalLaunchState {
             quiet_until: None,
             spoke: std::cell::Cell::new(false),
             _quiet: None,
+            _views_read: None,
         }
     }
 
@@ -558,6 +562,13 @@ impl WorkspaceManager {
         self.present_shared_workspaces(connection.edits, connection.sessions, window, cx);
         if let (Some(shared), Some(server)) = (self.shared.as_mut(), connection.retained) {
             shared.retain_client_views(server);
+            let read = shared.client_views_read();
+            self.launch._views_read = Some(cx.spawn_in(window, async move |manager, cx| {
+                read.await;
+                let _ = manager.update_in(cx, |manager, window, cx| {
+                    manager.sync_shared_workspaces(window, cx);
+                });
+            }));
         }
         LaunchState::Ready
     }
