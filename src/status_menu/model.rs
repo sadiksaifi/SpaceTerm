@@ -24,6 +24,9 @@ pub(crate) struct State {
     pub(crate) status: Option<Result<ServiceStatus, ServerError>>,
     /// The server operation awaiting its result. Menus withhold other server operations meanwhile.
     pub(crate) working: Option<Command>,
+    /// A server control window is asking about or running an operation. Menus withhold the
+    /// server operations and Quit until it closes.
+    pub(crate) asking: bool,
 }
 
 /// One menu row, in the order the menu shows it.
@@ -62,7 +65,8 @@ impl Presentation {
             Some(Command::Restart) => ("Restarting\u{2026}", None),
             _ => phase.describe(name),
         };
-        let offered = |command| state.working.is_none() && phase.offers(command);
+        let idle = state.working.is_none() && !state.asking;
+        let offered = |command| idle && phase.offers(command);
         let control = |command, label: &str| Item {
             command,
             label: label.to_owned(),
@@ -88,7 +92,7 @@ impl Presentation {
             quit: Item {
                 command: Command::Quit,
                 label: format!("Quit {name}"),
-                enabled: state.working.is_none(),
+                enabled: idle,
             },
         }
     }
@@ -184,6 +188,7 @@ mod tests {
                 stopped,
             })),
             working: None,
+            asking: false,
         }
     }
 
@@ -209,12 +214,12 @@ mod tests {
         assert!(offered(State::default()).is_empty());
         let failed = State {
             status: Some(Err(ServerError::StorageUnavailable)),
-            working: None,
+            ..State::default()
         };
         assert!(offered(failed).is_empty());
         let unresolved = State {
             status: Some(Err(ServerError::CleanupUnresolved)),
-            working: None,
+            ..State::default()
         };
         assert_eq!(offered(unresolved), [Stop]);
         let stopping = State {
@@ -228,5 +233,12 @@ mod tests {
                 .quit
                 .enabled
         );
+        // A control window may be about to admit an operation, or already running one.
+        let asking = State {
+            asking: true,
+            ..status(true, true, false)
+        };
+        assert!(offered(asking).is_empty());
+        assert!(!Presentation::of("SpaceTerm Preflight", asking).quit.enabled);
     }
 }

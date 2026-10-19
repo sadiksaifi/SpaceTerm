@@ -48,8 +48,6 @@ enum Message {
 /// What the bus objects publish. The client replaces it after each change.
 struct Published {
     presentation: Presentation,
-    /// Server operations are withheld while a server control window asks or works.
-    controlling: bool,
     revision: u32,
 }
 
@@ -72,7 +70,6 @@ pub(crate) fn install(
     let name = controller.display_name().to_owned();
     let shared = Arc::new(Mutex::new(Published {
         presentation: Presentation::of(&name, State::default()),
-        controlling: false,
         revision: 1,
     }));
     let (sender, messages) = async_channel::unbounded();
@@ -123,7 +120,6 @@ pub(crate) fn install(
         shared,
         window_movement,
         state: std::cell::Cell::new(State::default()),
-        controlling: std::cell::Cell::new(false),
     });
     cx.spawn(async move |cx| {
         while let Ok(message) = messages.recv().await {
@@ -159,48 +155,38 @@ struct LinuxStatusItem {
     shared: Shared,
     window_movement: Rc<dyn crate::platform::window_movement::WindowMovementFactory>,
     state: std::cell::Cell<State>,
-    controlling: std::cell::Cell<bool>,
 }
 
 impl LinuxStatusItem {
     fn handle(self: Rc<Self>, message: Message, cx: &mut App) {
-        let mut state = self.state.get();
         match message {
-            Message::Refresh => {
-                self.worker.send(Request::Refresh);
-                return;
-            }
-            Message::HostStarted => {
-                register_item(&self.connection, self.sender.clone());
-                return;
-            }
-            Message::Hosted(hosted) => {
-                status_menu::set_available(cx, hosted);
-                return;
-            }
-            Message::Worker(Event::Status(status)) => state.status = Some(status),
+            Message::Refresh => self.worker.send(Request::Refresh),
+            Message::HostStarted => register_item(&self.connection, self.sender.clone()),
+            Message::Hosted(hosted) => status_menu::set_available(cx, hosted),
+            Message::Worker(Event::Status(status)) => self.change(|state| {
+                state.status = Some(status);
+            }),
             Message::Worker(Event::Finished(command, result)) => {
-                state.working = None;
+                self.change(|state| {
+                    state.working = None;
+                    if let Ok(status) = result {
+                        state.status = Some(Ok(status));
+                    }
+                });
                 status_menu::end_operation(cx);
+                // Only the server control window explains and requests startup
+                // authorization, and it reports every other refusal as well.
+                let operation = match command {
+                    Command::Stop => Operation::Stop,
+                    Command::Restart => Operation::Restart,
+                    _ => Operation::Start,
+                };
                 match result {
-                    Ok(status) => state.status = Some(Ok(status)),
-                    // Only the server control window explains and requests startup
-                    // authorization, and it reports every other refusal as well.
+                    Ok(_) => {}
                     Err(ServerError::AuthorizationRequired) => {
-                        self.open_control(
-                            Operation::Start,
-                            Step::Authorize { declined: false },
-                            cx,
-                        );
+                        self.open_control(operation, Step::Authorize { declined: false }, cx);
                     }
-                    Err(error) => {
-                        let operation = match command {
-                            Command::Stop => Operation::Stop,
-                            Command::Restart => Operation::Restart,
-                            _ => Operation::Start,
-                        };
-                        self.open_control(operation, Step::Failed(error), cx);
-                    }
+                    Err(error) => self.open_control(operation, Step::Failed(error), cx),
                 }
             }
             Message::Command(command) => {
@@ -210,7 +196,7 @@ impl LinuxStatusItem {
                         .chain(&published.presentation.controls)
                         .chain(std::iter::once(&published.presentation.quit))
                         .find(|item| item.command == command)
-                        .is_some_and(|item| enabled(item, published.controlling))
+                        .is_some_and(|item| item.enabled)
                 };
                 // A host can deliver a click for a row that changed after it drew the menu.
                 if !offered {
@@ -219,7 +205,7 @@ impl LinuxStatusItem {
                 match command {
                     Command::Open => crate::app::activate_default_window(cx, None),
                     Command::Start => {
-                        state.working = Some(Command::Start);
+                        self.change(|state| state.working = Some(Command::Start));
                         status_menu::begin_operation(cx);
                         self.worker.send(Request::Start);
                     }
@@ -230,14 +216,19 @@ impl LinuxStatusItem {
                 }
             }
         }
+    }
+
+    /// Applies one change to the item's state and publishes the result.
+    fn change(&self, change: impl FnOnce(&mut State)) {
+        let mut state = self.state.get();
+        change(&mut state);
         self.state.set(state);
         self.publish();
     }
 
     /// Reads the service off the event thread, then asks in the server control window.
     fn prepare(self: &Rc<Self>, operation: Operation, action: Action, cx: &App) {
-        self.controlling.set(true);
-        self.publish();
+        self.set_asking(true);
         let controller = self.controller.clone();
         let prepared = cx.background_spawn(async move { controller.prepare(action) });
         let item = Rc::clone(self);
@@ -252,8 +243,7 @@ impl LinuxStatusItem {
     }
 
     fn open_control(self: &Rc<Self>, operation: Operation, step: Step, cx: &mut App) {
-        self.controlling.set(true);
-        self.publish();
+        self.set_asking(true);
         let item = Rc::clone(self);
         let opened = server_control_window::open(
             self.controller.clone(),
@@ -261,16 +251,19 @@ impl LinuxStatusItem {
             step,
             Rc::clone(&self.window_movement),
             Box::new(move |_: &mut App| {
-                item.controlling.set(false);
+                item.set_asking(false);
                 item.worker.send(Request::Refresh);
-                item.publish();
             }),
             cx,
         );
         if opened.is_err() {
-            self.controlling.set(false);
-            self.publish();
+            self.set_asking(false);
         }
+    }
+
+    /// A server control window opened or closed.
+    fn set_asking(&self, asking: bool) {
+        self.change(|state| state.asking = asking);
     }
 
     fn publish(&self) {
@@ -278,18 +271,8 @@ impl LinuxStatusItem {
             &self.connection,
             &self.shared,
             Presentation::of(&self.name, self.state.get()),
-            self.controlling.get(),
         );
     }
-}
-
-fn enabled(item: &Item, controlling: bool) -> bool {
-    item.enabled
-        && !(controlling
-            && matches!(
-                item.command,
-                Command::Start | Command::Stop | Command::Restart
-            ))
 }
 
 /// Tells the session's status-area host about the item, off the event thread. The answer says
@@ -340,19 +323,13 @@ fn watch_hosts(connection: &Connection, sender: async_channel::Sender<Message>) 
     });
 }
 
-fn publish(
-    connection: &Connection,
-    shared: &Shared,
-    presentation: Presentation,
-    controlling: bool,
-) {
+fn publish(connection: &Connection, shared: &Shared, presentation: Presentation) {
     let revision = {
         let mut published = lock(shared);
-        if published.presentation == presentation && published.controlling == controlling {
+        if published.presentation == presentation {
             return;
         }
         published.presentation = presentation;
-        published.controlling = controlling;
         published.revision = published.revision.wrapping_add(1);
         published.revision
     };
@@ -516,7 +493,7 @@ impl Menu {
         if let Some(explanation) = &presentation.explanation {
             rows.push((EXPLANATION, label(explanation, false)));
         }
-        let item = |item: &Item| label(&item.label, enabled(item, published.controlling));
+        let item = |item: &Item| label(&item.label, item.enabled);
         let [start, stop, restart] = &presentation.controls;
         rows.extend([
             (SEPARATORS[0], separator()),
