@@ -492,6 +492,16 @@ impl TerminalSessionPermissionRequestState {
     }
 }
 
+/// What a Terminal Session's current connection has answered about interactive terminal input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InteractiveInput {
+    /// The connection has not answered yet, so neither acceptance nor refusal is known.
+    Pending,
+    Accepted,
+    /// The connection answered that it carries no interactive terminal input.
+    Refused,
+}
+
 pub trait TerminalSessionHandle {
     /// Drains bounded native requests independently of replaceable presentation wakeups.
     fn take_client_effects(&self) -> Vec<ClientEffectRequest> {
@@ -522,9 +532,14 @@ pub trait TerminalSessionHandle {
         self.focus(terminal_input);
     }
 
+    /// What the current connection answered about interactive terminal operations.
+    fn interactive_input(&self) -> InteractiveInput {
+        InteractiveInput::Accepted
+    }
+
     /// Whether the current connection can carry interactive terminal operations.
     fn interactive_input_available(&self) -> bool {
-        true
+        self.interactive_input() == InteractiveInput::Accepted
     }
     fn reading_available(&self) -> bool {
         true

@@ -94,6 +94,30 @@ impl DevelopmentPaneState {
     pub(crate) fn status(&self) -> DevelopmentPaneStatus {
         *self.status.lock().unwrap_or_else(|e| e.into_inner())
     }
+    /// What the current connection answered about interactive terminal input.
+    ///
+    /// Only a Connected status carries an answer: attachment records the negotiated capability
+    /// before the status becomes Connected, and a focus barrier the server does not support
+    /// withdraws it while Connected. The status lock is held while the capability is read,
+    /// because an invalidation leaves Connected and clears the capability under that lock, so
+    /// an interrupted connection reads as Pending and never as a refusal.
+    pub(crate) fn interactive_input(&self) -> super::InteractiveInput {
+        let status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        if *status != DevelopmentPaneStatus::Connected {
+            return super::InteractiveInput::Pending;
+        }
+        let interactive = self
+            .interaction
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .interactive;
+        drop(status);
+        if interactive {
+            super::InteractiveInput::Accepted
+        } else {
+            super::InteractiveInput::Refused
+        }
+    }
     pub(crate) fn connection_generation(&self) -> u64 {
         self.connected_epoch.load(Ordering::Acquire)
     }
@@ -1905,14 +1929,8 @@ impl TerminalSessionHandle for PresentationHandle {
         drop(interaction);
         self.state.wake.notify();
     }
-    fn interactive_input_available(&self) -> bool {
-        self.state.status() == DevelopmentPaneStatus::Connected
-            && self
-                .state
-                .interaction
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .interactive
+    fn interactive_input(&self) -> super::InteractiveInput {
+        self.state.interactive_input()
     }
     fn input_generation(&self) -> u64 {
         self.state.epoch.load(Ordering::Acquire)
@@ -3778,6 +3796,32 @@ mod tests {
         assert_eq!(
             state.status(),
             DevelopmentPaneStatus::TakeoverFailed(ServerError::SessionUnavailable)
+        );
+    }
+
+    #[test]
+    fn only_a_connected_answer_reads_as_refused_input() {
+        use crate::terminal::InteractiveInput;
+        let state = DevelopmentPaneState::new();
+        assert_eq!(
+            state.interactive_input(),
+            InteractiveInput::Pending,
+            "a Pane still attaching has no answer"
+        );
+        state.interaction.lock().unwrap().interactive = true;
+        state.set(DevelopmentPaneStatus::Connected);
+        assert_eq!(state.interactive_input(), InteractiveInput::Accepted);
+        state.invalidate();
+        assert_eq!(
+            state.interactive_input(),
+            InteractiveInput::Pending,
+            "an interrupted connection is not a refusal"
+        );
+        state.set(DevelopmentPaneStatus::Connected);
+        assert_eq!(
+            state.interactive_input(),
+            InteractiveInput::Refused,
+            "a connection that negotiated no input refuses it"
         );
     }
 
