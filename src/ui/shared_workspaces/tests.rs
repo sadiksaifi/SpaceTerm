@@ -34,7 +34,7 @@ const SECOND_REPLACEMENT_PANE: Id = [8; 32];
 
 /// The first Workspace a collection owns, which every harness here binds the server Workspace to.
 fn first_workspace_id() -> crate::domain::WorkspaceId {
-    crate::domain::WorkspaceCollection::new_local(
+    crate::domain::workspace_collection::tests::local_collection(
         crate::terminal::testing::test_local_directory(PathBuf::from("/tmp/spaceterm-shared")),
         |_, _| (),
     )
@@ -1953,7 +1953,6 @@ mod draft {
             tooltip: "Server: /server/work".into(),
             pinned: false,
             remote_connection_phase: None,
-            available: true,
             repository: None,
             worktrees: None,
             creates_worktrees: false,
@@ -1996,9 +1995,7 @@ mod draft {
         cx: &mut VisualTestContext,
     ) {
         cx.update(|_, cx| {
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.set_rows(vec![row], None, true, cx)
-            });
+            sidebar.update(cx, |sidebar, cx| sidebar.set_rows(vec![row], None, cx));
         });
         cx.run_until_parked();
     }

@@ -340,9 +340,7 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(launch) = self.launch.as_mut() else {
-            return;
-        };
+        let launch = &mut self.launch;
         launch.state = step.map_or(LaunchState::Launching, LaunchState::Working);
         let adapter = Arc::clone(&launch.adapters.launch);
         let cancelled = Arc::clone(&launch.cancelled);
@@ -391,10 +389,8 @@ impl WorkspaceManager {
             // Only a closing window cancels, so there is nothing left to present.
             StepResult::Outcome(LaunchOutcome::Cancelled) => return,
         };
-        if let Some(launch) = self.launch.as_mut() {
-            launch.state = state;
-            launch._task = None;
-        }
+        self.launch.state = state;
+        self.launch._task = None;
         // The screen's own focus moves to its default action when one appears.
         if self.workspaces.active_workspace_id().is_none() {
             self.focus(window, cx);
@@ -420,13 +416,7 @@ impl WorkspaceManager {
             Ok(client_home) => client_home,
             Err(_) => return LaunchState::Failed(ServerError::StorageUnavailable),
         };
-        let Some(connector) = self
-            .launch
-            .as_ref()
-            .map(|launch| Rc::clone(&launch.adapters.connector))
-        else {
-            return LaunchState::Ready;
-        };
+        let connector = Rc::clone(&self.launch.adapters.connector);
         let Some(connection) = connector.connect(
             client_home,
             self.local_filesystem.clone(),
@@ -447,16 +437,11 @@ impl WorkspaceManager {
     /// It stays until the server's first inventory arrives, so a person never sees "No
     /// Workspaces" while their Workspaces are on the way.
     pub(super) fn launch_presentation(&self) -> Option<LaunchPresentation> {
-        let state = self.launch.as_ref()?.state;
-        if state == LaunchState::Ready
-            && self
-                .shared
-                .as_ref()
-                .is_none_or(|shared| shared.latest_inventory().is_some())
-        {
-            return None;
+        match &self.shared {
+            Some(shared) if shared.latest_inventory().is_some() => None,
+            Some(_) => Some(present(LaunchState::Launching)),
+            None => Some(present(self.launch.state)),
         }
-        Some(present(state))
     }
 
     /// The launch screen's message and actions, centered in the empty stage. Return runs the
@@ -478,10 +463,7 @@ impl WorkspaceManager {
             Some(progress) => format!("{title} {progress}").into(),
             None => format!("{title}. {detail}").into(),
         };
-        let announcement = self
-            .launch
-            .as_ref()
-            .map(|launch| launch.announcement(&message));
+        let announcement = Some(self.launch.announcement(&message));
         let buttons = actions.iter().enumerate().map(|(index, &action)| {
             let owner = cx.weak_entity();
             Button::new(action.selector(), action.label())
@@ -603,10 +585,7 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let ready = self
-            .launch
-            .as_ref()
-            .is_some_and(|launch| launch._task.is_none());
+        let ready = self.launch._task.is_none();
         match action {
             LaunchAction::Settings => crate::ui::settings_window::open_or_activate(
                 Some(crate::ui::settings_window::SettingsSectionId::Servers),
@@ -627,14 +606,104 @@ impl WorkspaceManager {
 #[cfg(test)]
 pub(crate) mod testing {
     use std::collections::VecDeque;
-    use std::sync::Mutex;
+    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
 
-    use super::{LaunchOutcome, LocalLaunch};
+    use super::{LaunchOutcome, LocalLaunch, LocalServerAdapters, SharedServerConnector};
     use crate::local_server::ServerError;
+
+    /// A ready server presenting one Workspace, "Default", whose Panes run in `session_factory`.
+    pub(crate) fn presenting(
+        session_factory: Rc<dyn crate::terminal::TerminalSessionFactory>,
+    ) -> LocalServerAdapters {
+        use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
+        use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+        use spaceterm_server::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
+
+        struct Presenting(Rc<dyn crate::terminal::TerminalSessionFactory>);
+        impl SharedServerConnector for Presenting {
+            fn connect(
+                &self,
+                client_home: crate::domain::ValidatedLocalDirectory,
+                _: crate::platform::local_filesystem::LocalFilesystemAuthority,
+                panes: &crate::ui::pane_lifecycle::PaneConstruction,
+                _: &mut gpui::App,
+            ) -> Option<super::SharedServerConnection> {
+                let inventory = Inventory {
+                    repositories: None,
+                    revision: 1,
+                    close: None,
+                    workspaces: vec![Workspace {
+                        id: [51; 32],
+                        name: "Default".to_owned(),
+                        name_version: 0,
+                        pin_version: 0,
+                        pinned_directory: None,
+                        root_tab: [52; 32],
+                        tabs: vec![Tab {
+                            worktree: None,
+                            worktree_membership_fixed: false,
+                            worktree_repository: None,
+                            id: [52; 32],
+                            root_pane: [53; 32],
+                            panes: vec![Pane {
+                                id: [53; 32],
+                                source: None,
+                                axis: Axis::Right,
+                                starting_directory: client_home.path().to_owned(),
+                                confirmed_directory: None,
+                                creator: None,
+                            }],
+                        }],
+                    }],
+                };
+                let opener = ScriptedPanes::new(
+                    crate::terminal::WorkspaceTerminalSessionFactory::new_local(
+                        Rc::clone(&self.0),
+                        client_home,
+                    ),
+                );
+                Some(super::SharedServerConnection {
+                    edits: SharedEditSource::new(Rc::new(ScriptedEdits::new(Some(inventory)))),
+                    sessions: SharedPaneSessions::with_opener(opener, panes),
+                    retained: None,
+                })
+            }
+        }
+        LocalServerAdapters {
+            launch: Arc::new(ScriptedLaunch {
+                ready: true,
+                ..ScriptedLaunch::default()
+            }),
+            connector: Rc::new(Presenting(session_factory)),
+        }
+    }
+
+    /// A server whose launch never answers, for windows a test does not launch.
+    pub(crate) fn unanswered() -> LocalServerAdapters {
+        struct Unreachable;
+        impl SharedServerConnector for Unreachable {
+            fn connect(
+                &self,
+                _: crate::domain::ValidatedLocalDirectory,
+                _: crate::platform::local_filesystem::LocalFilesystemAuthority,
+                _: &crate::ui::pane_lifecycle::PaneConstruction,
+                _: &mut gpui::App,
+            ) -> Option<super::SharedServerConnection> {
+                None
+            }
+        }
+        LocalServerAdapters {
+            launch: Arc::new(ScriptedLaunch::default()),
+            connector: Rc::new(Unreachable),
+        }
+    }
 
     /// A launch whose answers a test queues and whose explicit steps it records.
     #[derive(Default)]
     pub(crate) struct ScriptedLaunch {
+        /// Answers every run with Ready once the queue is empty, instead of never answering.
+        ready: bool,
         runs: Mutex<VecDeque<Result<LaunchOutcome, ServerError>>>,
         steps: Mutex<Vec<&'static str>>,
         start: Mutex<Option<ServerError>>,
@@ -664,7 +733,11 @@ pub(crate) mod testing {
                 .lock()
                 .unwrap()
                 .pop_front()
-                .unwrap_or(Ok(LaunchOutcome::Cancelled))
+                .unwrap_or(Ok(if self.ready {
+                    LaunchOutcome::Ready
+                } else {
+                    LaunchOutcome::Cancelled
+                }))
         }
         fn start(&self) -> Result<(), ServerError> {
             self.steps.lock().unwrap().push("start");

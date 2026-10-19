@@ -324,11 +324,9 @@ impl WorkspaceChromeStatusHosts {
     }
 }
 
-/// The one status the collapsed Workspace identity presents. An unavailable directory takes
-/// precedence over the Remote connection because no Terminal Session can start until it resolves.
+/// The one status the collapsed Workspace identity presents: a Remote Workspace's connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum WorkspaceChromeStatus {
-    Unavailable,
     Connected,
     Reconnecting,
     Disconnected,
@@ -338,8 +336,7 @@ pub(super) enum WorkspaceChromeStatus {
 
 impl WorkspaceChromeStatus {
     #[cfg(any(test, feature = "developer-tools"))]
-    pub(super) const ALL: [Self; 6] = [
-        Self::Unavailable,
+    pub(super) const ALL: [Self; 5] = [
         Self::Connected,
         Self::Reconnecting,
         Self::Disconnected,
@@ -347,13 +344,7 @@ impl WorkspaceChromeStatus {
         Self::Failed,
     ];
 
-    pub(super) fn resolve(
-        available: bool,
-        remote_connection_phase: Option<RemoteConnectionPhase>,
-    ) -> Option<Self> {
-        if !available {
-            return Some(Self::Unavailable);
-        }
+    pub(super) fn resolve(remote_connection_phase: Option<RemoteConnectionPhase>) -> Option<Self> {
         remote_connection_phase.map(|phase| match phase {
             RemoteConnectionPhase::Connected => Self::Connected,
             RemoteConnectionPhase::Reconnecting => Self::Reconnecting,
@@ -365,7 +356,6 @@ impl WorkspaceChromeStatus {
 
     pub(super) const fn label(self) -> &'static str {
         match self {
-            Self::Unavailable => "Directory unavailable",
             Self::Connected => "Connected remote",
             Self::Reconnecting => "Reconnecting",
             Self::Disconnected => "Disconnected",
@@ -376,7 +366,6 @@ impl WorkspaceChromeStatus {
 
     const fn selector(self) -> &'static str {
         match self {
-            Self::Unavailable => "workspace-switcher-status-unavailable",
             Self::Connected => "workspace-switcher-status-connected",
             Self::Reconnecting => "workspace-switcher-status-reconnecting",
             Self::Disconnected => "workspace-switcher-status-disconnected",
@@ -388,7 +377,6 @@ impl WorkspaceChromeStatus {
     /// The glyph that replaces the dot under Differentiate Without Color.
     const fn glyph(self) -> IconName {
         match self {
-            Self::Unavailable => IconName::TriangleAlert,
             Self::Connected => IconName::Check,
             Self::Reconnecting => IconName::RotateCw,
             Self::Disconnected | Self::Closing => IconName::Minus,
@@ -398,7 +386,6 @@ impl WorkspaceChromeStatus {
 
     fn color(self, colors: &crate::appearance::ChromeColors) -> Color {
         match self {
-            Self::Unavailable => colors.warning,
             Self::Connected => colors.success,
             Self::Reconnecting => colors.info,
             Self::Disconnected | Self::Closing => colors.icon_muted,
@@ -701,13 +688,20 @@ mod tests {
             .or(surface.fill)
             .map_or(title_bar_host, |fill| fill.source_over(title_bar_host));
 
-        let paint = WorkspaceChromeStatus::Unavailable.paint(
-            &appearance,
-            WorkspaceChromeStatusHosts::new(painted_normal, painted_hovered),
-        );
-
-        assert!(paint.normal.contrast_ratio(painted_normal) >= 3.0);
-        assert!(paint.hovered.contrast_ratio(painted_hovered) >= 3.0);
+        for status in WorkspaceChromeStatus::ALL {
+            let paint = status.paint(
+                &appearance,
+                WorkspaceChromeStatusHosts::new(painted_normal, painted_hovered),
+            );
+            assert!(
+                paint.normal.contrast_ratio(painted_normal) >= 3.0,
+                "{status:?}"
+            );
+            assert!(
+                paint.hovered.contrast_ratio(painted_hovered) >= 3.0,
+                "{status:?}"
+            );
+        }
     }
 
     #[test]
@@ -731,12 +725,8 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_identity_should_present_one_status_with_unavailable_first() {
-        assert_eq!(WorkspaceChromeStatus::resolve(true, None), None);
-        assert_eq!(
-            WorkspaceChromeStatus::resolve(false, Some(RemoteConnectionPhase::Connected)),
-            Some(WorkspaceChromeStatus::Unavailable)
-        );
+    fn collapsed_identity_should_present_one_remote_connection_status() {
+        assert_eq!(WorkspaceChromeStatus::resolve(None), None);
         for (phase, status) in [
             (
                 RemoteConnectionPhase::Connected,
@@ -756,10 +746,7 @@ mod tests {
             ),
             (RemoteConnectionPhase::Failed, WorkspaceChromeStatus::Failed),
         ] {
-            assert_eq!(
-                WorkspaceChromeStatus::resolve(true, Some(phase)),
-                Some(status)
-            );
+            assert_eq!(WorkspaceChromeStatus::resolve(Some(phase)), Some(status));
         }
 
         let identity = |status| WorkspaceChromeIdentity {
@@ -773,7 +760,6 @@ mod tests {
             "Switch Workspace, Workspace"
         );
         for (status, label) in [
-            (WorkspaceChromeStatus::Unavailable, "Directory unavailable"),
             (WorkspaceChromeStatus::Connected, "Connected remote"),
             (WorkspaceChromeStatus::Reconnecting, "Reconnecting"),
             (WorkspaceChromeStatus::Disconnected, "Disconnected"),

@@ -180,7 +180,9 @@ impl WorkspaceTerminalSessionFactory {
         )
     }
 
-    /// Creates a factory whose children start from one validated local home directory.
+    /// Creates a desktop-owned factory whose children start from one validated local home
+    /// directory. Production local work runs on the account server instead.
+    #[cfg(test)]
     pub(crate) fn new_local_with_authority(
         session_factory: Rc<dyn TerminalSessionFactory>,
         home_directory: ValidatedLocalDirectory,

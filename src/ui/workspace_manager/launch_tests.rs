@@ -175,7 +175,7 @@ fn launch_harness_with(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
-                local_server: Some(adapters),
+                local_server: adapters,
                 directory_selection: Rc::new(ScriptedDirectorySelection::new(selections)),
                 ..workspace_adapters(test_remote_backend_factory())
             },
@@ -218,13 +218,8 @@ fn launch_presents_the_server_workspace_and_opens_its_pane_without_a_local_one(
     cx: &mut TestAppContext,
 ) {
     let (harness, cx) = launch_harness(vec![ready()], cx);
+    // The window reads the ready server at once, without waiting for a poll interval.
     cx.run_until_parked();
-    assert_eq!(
-        harness.launch_title(cx),
-        Some(launch::OPENING_TITLE),
-        "the window says Workspaces are on the way rather than No Workspaces"
-    );
-    sync(&harness, cx);
 
     assert_eq!(harness.workspace_count(cx), 1, "no desktop-owned Workspace");
     assert_eq!(harness.shared_rows(cx), 1);
@@ -235,6 +230,20 @@ fn launch_presents_the_server_workspace_and_opens_its_pane_without_a_local_one(
         "a new client's first view opens its Focused Pane for the person"
     );
     assert_eq!(harness.launch.steps(), ["run"]);
+}
+
+#[gpui::test]
+fn the_window_says_workspaces_are_on_the_way_until_the_server_answers(cx: &mut TestAppContext) {
+    // No answer arrives, as while the server is still starting.
+    let (harness, cx) = launch_harness(Vec::new(), cx);
+    cx.run_until_parked();
+
+    assert_eq!(harness.launch_title(cx), Some(launch::OPENING_TITLE));
+    assert!(cx.debug_bounds(LAUNCH_SELECTOR).is_some());
+    assert!(
+        cx.debug_bounds("empty-workspace").is_none(),
+        "never No Workspaces while they are on the way"
+    );
 }
 
 #[gpui::test]
@@ -417,7 +426,7 @@ fn a_second_launched_window_brings_the_presenting_one_forward(cx: &mut TestAppCo
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
-                local_server: Some(adapters),
+                local_server: adapters,
                 ..workspace_adapters(test_remote_backend_factory())
             },
             SidebarState::Expanded,
@@ -480,4 +489,333 @@ fn an_older_server_is_never_asked_to_open_a_directory(cx: &mut TestAppContext) {
     assert_eq!(harness.workspace_count(cx), 1);
     assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
     std::fs::remove_dir_all(chosen).unwrap();
+}
+
+/// The ready launch harness with its server's Workspace presented and focused.
+fn ready_harness(cx: &mut TestAppContext) -> (LaunchHarness, &mut VisualTestContext) {
+    let (harness, cx) = launch_harness(vec![ready()], cx);
+    cx.run_until_parked();
+    sync(&harness, cx);
+    (harness, cx)
+}
+
+fn created_names(harness: &LaunchHarness) -> Vec<String> {
+    use spaceterm_server::hierarchy::Mutation;
+    harness
+        .edits
+        .submitted()
+        .into_iter()
+        .filter_map(|mutation| match mutation {
+            Mutation::CreateWorkspace { name, .. } => Some(name),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn the_switcher_creates_a_local_workspace_with_its_query_as_the_name(cx: &mut TestAppContext) {
+    let (harness, cx) = ready_harness(cx);
+    open_workspace_switcher_for_creation(cx);
+    click("workspace-switcher-create-local", cx);
+
+    assert_eq!(created_names(&harness), ["fresh workspace"]);
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+}
+
+#[gpui::test]
+fn the_creation_shortcut_takes_the_switcher_name_instead_of_the_highlight(cx: &mut TestAppContext) {
+    let (harness, cx) = ready_harness(cx);
+    open_workspace_switcher_for_creation(cx);
+    cx.simulate_keystrokes("down cmd-n");
+    cx.run_until_parked();
+
+    assert_eq!(created_names(&harness), ["fresh workspace"]);
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+    assert!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| { manager.remote_workspace_flow.is_none() })
+    );
+}
+
+#[gpui::test]
+fn blank_and_cancelled_creation_names_take_the_next_default_name(cx: &mut TestAppContext) {
+    use spaceterm_server::hierarchy::Outcome;
+
+    let (harness, cx) = ready_harness(cx);
+    open_workspace_switcher_for_creation(cx);
+    cx.simulate_keystrokes("escape cmd-n");
+    cx.run_until_parked();
+    harness.edits.answer(Outcome::Accepted { target: [41; 32] });
+    sync(&harness, cx);
+    open_workspace_switcher(cx);
+    cx.simulate_keystrokes("space space cmd-n");
+    cx.run_until_parked();
+
+    assert_eq!(created_names(&harness), ["Default (2)", "Default (2)"]);
+}
+
+#[gpui::test]
+fn a_named_creation_never_switches_to_an_existing_match(cx: &mut TestAppContext) {
+    let (harness, cx) = ready_harness(cx);
+    open_workspace_switcher(cx);
+    cx.simulate_keystrokes("space D e f a u l t space cmd-n");
+    cx.run_until_parked();
+
+    assert_eq!(created_names(&harness), ["Default"]);
+    assert_eq!(harness.workspace_count(cx), 1);
+}
+
+#[gpui::test]
+fn creation_shortcuts_never_escape_a_modal(cx: &mut TestAppContext) {
+    let (harness, cx) = ready_harness(cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |_, cx| {
+            Alert::new(
+                ModalId::new("creation-shortcut-blocker"),
+                "Shortcut blocker",
+                "Blocking dialog",
+                "Finish this dialog first.",
+                vec![
+                    ModalAction::new(
+                        (),
+                        "OK",
+                        ModalActionRole::Affirmative,
+                        "creation-shortcut-blocker-ok",
+                    )
+                    .default_action(true),
+                ],
+            )
+            .present(window, cx, |_, _| {})
+            .unwrap();
+        });
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-n cmd-shift-n");
+    cx.run_until_parked();
+
+    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+    assert!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| { manager.remote_workspace_flow.is_none() })
+    );
+    assert!(created_names(&harness).is_empty());
+}
+
+#[gpui::test]
+fn creation_shortcuts_never_escape_the_switcher_input_context_menu(cx: &mut TestAppContext) {
+    let (harness, cx) = ready_harness(cx);
+    open_workspace_switcher_for_creation(cx);
+    let input = cx.debug_bounds("combo-box-input").unwrap().center();
+    cx.simulate_mouse_down(input, MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(input, MouseButton::Right, Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
+    cx.simulate_keystrokes("cmd-n cmd-shift-n");
+    cx.run_until_parked();
+    assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
+    assert!(created_names(&harness).is_empty());
+
+    cx.simulate_keystrokes("escape cmd-n");
+    cx.run_until_parked();
+    assert_eq!(created_names(&harness), ["fresh workspace"]);
+}
+
+#[gpui::test]
+fn the_switcher_filter_creates_a_workspace_named_by_it(cx: &mut TestAppContext) {
+    let (harness, cx) = ready_harness(cx);
+    open_workspace_switcher(cx);
+    let icon = cx.debug_bounds("combo-box-input-leading").unwrap();
+    let input = cx.debug_bounds("combo-box-input").unwrap();
+    assert!(icon.right() <= input.left());
+    assert!(input.size.width > px(0.0));
+    cx.simulate_keystrokes("f i l t e r enter");
+    cx.run_until_parked();
+
+    assert_eq!(created_names(&harness), ["filter"]);
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+}
+
+const CREATED: [u8; 32] = [61; 32];
+
+/// The server accepts this client's creation and publishes the new Workspace beside the first.
+fn accept_creation(harness: &LaunchHarness, pinned: Option<PathBuf>, cx: &mut VisualTestContext) {
+    use spaceterm_server::hierarchy::{Mutation, Outcome};
+
+    let Some(Mutation::CreateWorkspace { name, .. }) = harness.edits.submitted().pop() else {
+        panic!("a creation must have been submitted");
+    };
+    let mut published = inventory();
+    let mut created = published.workspaces[0].clone();
+    created.id = CREATED;
+    created.name = name;
+    created.pinned_directory = pinned;
+    created.root_tab = [62; 32];
+    created.tabs[0].id = [62; 32];
+    created.tabs[0].root_pane = [63; 32];
+    created.tabs[0].panes[0].id = [63; 32];
+    published.workspaces.push(created);
+    published.revision = 2;
+    harness.edits.set_inventory(published);
+    harness.edits.answer(Outcome::Accepted { target: CREATED });
+    sync(harness, cx);
+}
+
+fn active_server_workspace(
+    harness: &LaunchHarness,
+    cx: &mut VisualTestContext,
+) -> Option<[u8; 32]> {
+    harness.manager.read_with(cx, |manager, _| {
+        let local = manager.workspaces.active_workspace_id()?;
+        manager
+            .shared
+            .as_ref()?
+            .facts(local)
+            .map(|facts| facts.server)
+    })
+}
+
+#[gpui::test]
+fn the_new_workspace_menu_creates_and_opens_a_server_workspace(cx: &mut TestAppContext) {
+    let (harness, cx) = ready_harness(cx);
+    click_new_workspace_menu("new-workspace-menu-create-local", cx);
+    assert_eq!(created_names(&harness), ["Default (2)"]);
+    assert_eq!(
+        harness.workspace_count(cx),
+        1,
+        "nothing appears before the server answers"
+    );
+
+    accept_creation(&harness, None, cx);
+
+    assert_eq!(harness.workspace_count(cx), 2);
+    assert_eq!(active_server_workspace(&harness, cx), Some(CREATED));
+    assert_eq!(
+        harness.panes.pane([63; 32]).selections(),
+        1,
+        "the person's own creation opens its Pane"
+    );
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+}
+
+#[gpui::test]
+fn switcher_keyboard_acceptance_creates_exactly_one_workspace_without_a_picker(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = ready_harness(cx);
+    open_workspace_switcher_for_creation(cx);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    assert_eq!(created_names(&harness), ["fresh workspace"]);
+    assert!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.pin_picker.is_none())
+    );
+    accept_creation(&harness, None, cx);
+    assert_eq!(harness.workspace_count(cx), 2);
+    assert_eq!(active_server_workspace(&harness, cx), Some(CREATED));
+}
+
+#[gpui::test]
+fn the_collapsed_workspace_name_creates_a_named_workspace_and_stays_collapsed(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = ready_harness(cx);
+    click("toggle-sidebar-button", cx);
+    click("workspace-chip-label", cx);
+    cx.simulate_keystrokes("f r e s h space w o r k s p a c e");
+    cx.run_until_parked();
+    click("workspace-switcher-create-local", cx);
+
+    assert_eq!(created_names(&harness), ["fresh workspace"]);
+    assert!(
+        !harness
+            .manager
+            .read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible)
+    );
+    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
+}
+
+#[gpui::test]
+fn open_local_directory_from_the_sidebar_names_by_directory_or_creates_nothing(
+    cx: &mut TestAppContext,
+) {
+    use spaceterm_server::hierarchy::Mutation;
+
+    let project = temporary_directory("launch-open-local-sidebar");
+    std::fs::create_dir_all(&project).unwrap();
+    let (harness, cx) = ready_harness(cx);
+    click_new_workspace_menu("new-workspace-menu-open-local-directory", cx);
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(harness.edits.submitted().is_empty());
+    assert!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.pin_picker.is_none())
+    );
+
+    click_new_workspace_menu("new-workspace-menu-open-local-directory", cx);
+    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
+
+    assert_eq!(
+        harness.edits.submitted(),
+        vec![Mutation::CreateWorkspace {
+            name: project.file_name().unwrap().to_string_lossy().into_owned(),
+            directory: Some(project.clone()),
+        }]
+    );
+    assert!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.pin_picker.is_none())
+    );
+    std::fs::remove_dir_all(project).unwrap();
+}
+
+#[gpui::test]
+fn open_local_directory_takes_the_switcher_query_as_its_name(cx: &mut TestAppContext) {
+    let project = temporary_directory("launch-open-local-query");
+    std::fs::create_dir_all(&project).unwrap();
+    let (harness, cx) = ready_harness(cx);
+    open_workspace_switcher_for_creation(cx);
+    cx.simulate_keystrokes("cmd-o");
+    cx.run_until_parked();
+    assert!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.pin_picker.is_some())
+    );
+    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
+
+    assert_eq!(created_names(&harness), ["fresh workspace"]);
+    std::fs::remove_dir_all(project).unwrap();
+}
+
+#[gpui::test]
+fn open_local_directory_activates_the_workspace_already_pinned_there(cx: &mut TestAppContext) {
+    let project = temporary_directory("launch-open-local-existing");
+    std::fs::create_dir_all(&project).unwrap();
+    let (harness, cx) = ready_harness(cx);
+    cx.simulate_keystrokes("cmd-o");
+    cx.run_until_parked();
+    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
+    accept_creation(&harness, Some(project.clone()), cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            let first = manager.shared.as_ref().unwrap().local(WORKSPACE).unwrap();
+            assert!(manager.activate_workspace(first, window, cx));
+        })
+    });
+
+    cx.simulate_keystrokes("cmd-o");
+    cx.run_until_parked();
+    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
+
+    assert_eq!(created_names(&harness).len(), 1, "nothing new is created");
+    assert_eq!(active_server_workspace(&harness, cx), Some(CREATED));
+    std::fs::remove_dir_all(project).unwrap();
 }

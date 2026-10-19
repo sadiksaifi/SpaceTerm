@@ -161,7 +161,6 @@ pub(super) struct WorkspaceRowViewModel {
     pub(super) tooltip: SharedString,
     pub(super) pinned: bool,
     pub(super) remote_connection_phase: Option<RemoteConnectionPhase>,
-    pub(super) available: bool,
     /// The branch or Pull Request that ends line 2, after the directory.
     pub(super) repository: Option<crate::repository_status::presentation::SidebarBadge>,
     /// The Worktrees a git Workspace discloses under its row.
@@ -307,9 +306,6 @@ struct DraggedWorkspace {
 pub(super) struct WorkspaceSidebar {
     rows: Vec<WorkspaceRowViewModel>,
     remote_unavailable: Option<String>,
-    /// Whether this Workspace Window presents an adopted server's Workspaces, which offers one
-    /// more creation row.
-    creates_server_workspaces: bool,
     layout: SidebarLayout,
     scroll_handle: ScrollHandle,
     /// Each row's top and bottom within its Workspace group, as last painted. A group is one
@@ -384,7 +380,6 @@ impl WorkspaceSidebar {
         Self {
             rows: Vec::new(),
             remote_unavailable: None,
-            creates_server_workspaces: false,
             layout: SidebarLayout {
                 visible,
                 width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
@@ -756,12 +751,10 @@ impl WorkspaceSidebar {
         &mut self,
         rows: Vec<WorkspaceRowViewModel>,
         remote_unavailable: Option<String>,
-        creates_server_workspaces: bool,
         cx: &mut Context<Self>,
     ) {
         self.rows = rows;
         self.remote_unavailable = remote_unavailable;
-        self.creates_server_workspaces = creates_server_workspaces;
         if self
             .cursor
             .is_some_and(|cursor| !self.visible_keys().iter().any(|(key, _)| *key == cursor))
@@ -779,9 +772,8 @@ impl WorkspaceSidebar {
                 .and_then(|section| section.rows().find(|row| row.active))
                 .map(|row| row.name.to_string()),
             pinned: active.is_some_and(|row| row.pinned),
-            status: active.and_then(|row| {
-                WorkspaceChromeStatus::resolve(row.available, row.remote_connection_phase)
-            }),
+            status: active
+                .and_then(|row| WorkspaceChromeStatus::resolve(row.remote_connection_phase)),
         };
         WorkspaceChromeLayout::collapsed_width(&identity, window, cx)
     }

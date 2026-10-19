@@ -8,8 +8,8 @@ use gpui::{App, Context, Entity, Subscription};
 
 use super::WorkspaceManager;
 use crate::domain::{
-    DirectoryAvailability, PinnedDirectory, RemoteConnectionPhase, RemoteConnectionState,
-    WorkspaceEntry, WorkspaceId, WorkspaceLocation, WorktreeId,
+    PinnedDirectory, RemoteConnectionPhase, RemoteConnectionState, WorkspaceEntry, WorkspaceId,
+    WorkspaceLocation, WorktreeId,
 };
 use crate::repository_status::presentation::{SidebarBadge, chip_tooltip_line};
 use crate::repository_status::scheduler::{Interest, InterestId, SourceDirectory};
@@ -248,8 +248,7 @@ impl WorkspaceManager {
         Some(RowFacts {
             machine,
             directory,
-            available: connected
-                && matches!(workspace.availability(), DirectoryAvailability::Available),
+            available: connected,
             visible: true,
         })
     }

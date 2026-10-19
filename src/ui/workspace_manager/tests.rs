@@ -5,8 +5,11 @@ use crate::terminal::GpuiTerminalKeyInputAdapterFactory;
 use crate::ui::drag_and_drop::finish_slides;
 use crate::ui::workspace_frame::WorkspaceFrame;
 use crate::ui::workspace_sidebar::SIDEBAR_ROW_SELECTION_INSET_Y;
-use crate::ui::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
+use crate::ui::{
+    TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH,
+};
 use gpui::MouseButton;
+use gpui::px;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fs;
@@ -81,7 +84,7 @@ fn sidebar_should_follow_the_local_root_in_background_and_promote_on_close(
         "api"
     );
 
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     records.report_directory(
         1,
@@ -375,7 +378,7 @@ fn sidebar_rows_end_with_the_branch_and_let_a_pull_request_open_in_the_browser(
 #[gpui::test]
 fn sidebar_rows_contain_semantic_text_in_both_densities(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
-    click_new_workspace_menu("new-workspace-menu-create-local", cx);
+    new_desktop_workspace(cx);
 
     for density in [
         crate::appearance::ChromeDensity::Compact,
@@ -1086,7 +1089,7 @@ fn remote_completion_with_active_alias_pin_failure(
 }
 
 #[gpui::test]
-fn native_service_factory_reaches_initial_new_and_replacement_hierarchy(cx: &mut TestAppContext) {
+fn native_service_factory_reaches_initial_and_new_hierarchy(cx: &mut TestAppContext) {
     use crate::terminal::native_services::file_preview::{FilePreviewFactory, FilePreviewPanel};
 
     struct CountingFilePreviewFactory {
@@ -1112,7 +1115,7 @@ fn native_service_factory_reaches_initial_new_and_replacement_hierarchy(cx: &mut
         TestTerminalSessionRecords::default(),
     ));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
@@ -1127,11 +1130,13 @@ fn native_service_factory_reaches_initial_new_and_replacement_hierarchy(cx: &mut
     cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
     cx.run_until_parked();
     assert_eq!(created.get(), 1);
-    for (shortcut, expected) in [("cmd-d", 2), ("cmd-t", 3), ("cmd-n", 4)] {
+    for (shortcut, expected) in [("cmd-d", 2), ("cmd-t", 3)] {
         cx.simulate_keystrokes(shortcut);
         cx.run_until_parked();
         assert_eq!(created.get(), expected, "{shortcut}");
     }
+    new_desktop_workspace(cx);
+    assert_eq!(created.get(), 4, "new Workspace");
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             let workspace_id = manager.workspaces.active_id();
@@ -1141,7 +1146,7 @@ fn native_service_factory_reaches_initial_new_and_replacement_hierarchy(cx: &mut
         });
     });
     cx.run_until_parked();
-    assert_eq!(created.get(), 5, "replacement Workspace");
+    assert_eq!(created.get(), 4, "nothing replaces the final Workspace");
 }
 
 #[gpui::test]
@@ -1156,7 +1161,7 @@ fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes
         TestTerminalSessionRecords::default(),
     ));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
@@ -1171,11 +1176,13 @@ fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes
     cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
     cx.run_until_parked();
     assert_eq!(factory.records.borrow().len(), 1);
-    for (shortcut, expected) in [("cmd-d", 2), ("cmd-t", 3), ("cmd-n", 4)] {
+    for (shortcut, expected) in [("cmd-d", 2), ("cmd-t", 3)] {
         cx.simulate_keystrokes(shortcut);
         cx.run_until_parked();
         assert_eq!(factory.records.borrow().len(), expected, "{shortcut}");
     }
+    new_desktop_workspace(cx);
+    assert_eq!(factory.records.borrow().len(), 4, "new Workspace");
     let records = factory.records.borrow();
     assert!(
         records[0]
@@ -1207,7 +1214,100 @@ fn workspace_adapters(
         directory_selection: Rc::new(GpuiDirectorySelection),
         window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
         remote_workspace,
-        local_server: None,
+        local_server: crate::ui::launch_testing::unanswered(),
+    }
+}
+
+/// Adds and activates one more desktop-owned Workspace in the window under test, as a person
+/// opening another Workspace does.
+fn new_desktop_workspace(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| {
+        let manager = window
+            .root::<WorkspaceManager>()
+            .flatten()
+            .expect("the window presents a Workspace manager");
+        manager.update(cx, |manager, cx| {
+            manager.present_desktop_workspace(window, cx);
+        });
+    });
+    cx.run_until_parked();
+}
+
+/// A Workspace Window presenting one desktop-owned Workspace at `home_directory`.
+///
+/// Production desktop-owned Workspaces are Remote Workspaces; these tests exercise the window's
+/// own behavior around any desktop-owned Workspace without opening an SSH connection.
+fn new_desktop_manager(
+    session_factory: Rc<dyn TerminalSessionFactory>,
+    home_directory: PathBuf,
+    adapters: WorkspaceManagerAdapters,
+    sidebar: SidebarState,
+    window: &mut Window,
+    cx: &mut Context<WorkspaceManager>,
+) -> WorkspaceManager {
+    let mut manager = WorkspaceManager::new_with_adapters(
+        session_factory,
+        home_directory,
+        adapters,
+        sidebar,
+        window,
+        cx,
+    );
+    manager.present_desktop_workspace(window, cx);
+    manager
+}
+
+impl WorkspaceManager {
+    /// Presents and activates one desktop-owned Workspace at this window's home directory.
+    pub(crate) fn present_desktop_workspace(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> WorkspaceId {
+        let directory = ValidatedLocalDirectory::new(
+            self.local_home_directory_path.clone(),
+            self.local_home_identity.clone(),
+        );
+        let session_factory = WorkspaceTerminalSessionFactory::new_local_with_authority(
+            Rc::clone(&self.session_factory),
+            directory.clone(),
+            self.local_filesystem.clone(),
+        );
+        let prepared_launch = session_factory
+            .prepare_child_launch()
+            .expect("a local launch reserves no channel");
+        let sidebar_visible = self.sidebar.read(cx).layout().visible;
+        let sidebar_width = self.sidebar.read(cx).layout().width;
+        let window_drag = Rc::clone(&self.operating_system_window_drag_platform);
+        let pane_construction = self.pane_construction.clone();
+        let previous = self.workspaces.active_workspace_id();
+        let workspace_id = self
+            .workspaces
+            .create_local_workspace(directory, |workspace_id, _| {
+                Self::create_tab_manager_with_prepared_launch(
+                    session_factory,
+                    prepared_launch,
+                    TabManagerCreation {
+                        workspace_id,
+                        sidebar_visible,
+                        sidebar_width,
+                        operating_system_window_drag_platform: window_drag,
+                        pane_construction,
+                    },
+                    window,
+                    cx,
+                )
+            })
+            .expect("the test Workspace is created");
+        // Creation activates the Workspace in the collection; the window then opens it as a
+        // person's activation does, from the Workspace that was active.
+        if let Some(previous) = previous {
+            self.workspaces
+                .activate_workspace(previous)
+                .expect("the previous Workspace remains");
+        }
+        self.activate_workspace(workspace_id, window, cx);
+        workspace_id
     }
 }
 
@@ -1224,7 +1324,7 @@ fn workspace_manager(
     let session_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             workspace_adapters(test_remote_backend_factory()),
@@ -1273,7 +1373,7 @@ fn workspace_manager_with_application_actions(
     let session_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             workspace_adapters(test_remote_backend_factory()),
@@ -1306,7 +1406,7 @@ fn workspace_manager_with_remote_backend(
     let factory: Arc<dyn RemoteWorkspaceFlowBackendFactory> =
         Arc::new(TestRemoteWorkspaceFlowBackendFactory { backend });
     let (manager, cx) = cx.add_window_view(move |window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             workspace_adapters(factory),
@@ -1417,7 +1517,7 @@ fn workspace_manager_with_operating_system_window_drag_platform(
     let platform = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
     let injected_platform = Rc::clone(&platform);
     let (manager, cx) = cx.add_window_view(move |window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
@@ -1454,7 +1554,7 @@ fn workspace_manager_with_directory_selection(
     let directory_selection: Rc<dyn SystemDirectorySelection> =
         Rc::new(ScriptedDirectorySelection::new(selections));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
@@ -1634,7 +1734,7 @@ fn application_rtl_locale_installation_should_mirror_production_modal_footer(
     let session_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(records).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             workspace_adapters(test_remote_backend_factory()),
@@ -1878,7 +1978,7 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
     let second_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(second_records.clone()).with_fallback_title("zsh"));
     let first = cx.add_window(|window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             first_factory,
             PathBuf::from("/Users/first"),
             workspace_adapters(test_remote_backend_factory()),
@@ -1888,7 +1988,7 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
         )
     });
     let second = cx.add_window(|window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             second_factory,
             PathBuf::from("/Users/second"),
             workspace_adapters(test_remote_backend_factory()),
@@ -2155,62 +2255,6 @@ fn hiding_the_sidebar_should_keep_the_top_combo_box_and_its_focus_blocker(cx: &m
 }
 
 #[gpui::test]
-fn top_combo_box_local_choice_should_create_without_a_directory_picker(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    open_workspace_switcher_for_creation(cx);
-    click("workspace-switcher-create-local", cx);
-    assert_eq!(
-        cx.update(|window, cx| {
-            let manager = manager.read(cx);
-            (
-                window_combo_box_is_open(window, cx),
-                manager.terminal_focus_blocker(window, cx),
-                manager
-                    .workspaces
-                    .active()
-                    .payload()
-                    .read(cx)
-                    .focused_terminal_is_focused(window, cx),
-                manager.workspaces.len(),
-                records.starts().len(),
-            )
-        }),
-        (false, None, true, 2, 2)
-    );
-    assert!(manager.read_with(cx, |manager, _| manager.pin_picker.is_none()));
-}
-
-#[gpui::test]
-fn top_combo_box_keyboard_acceptance_should_create_exactly_one_local_workspace(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    open_workspace_switcher_for_creation(cx);
-
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
-
-    assert_eq!(
-        cx.update(|window, cx| {
-            let manager = manager.read(cx);
-            (
-                manager.workspaces.len(),
-                records.starts().len(),
-                window_combo_box_is_open(window, cx),
-                manager.terminal_focus_blocker(window, cx),
-                manager
-                    .workspaces
-                    .active()
-                    .payload()
-                    .read(cx)
-                    .focused_terminal_is_focused(window, cx),
-            )
-        }),
-        (2, 2, false, None, true)
-    );
-}
-
-#[gpui::test]
 fn top_combo_box_available_remote_should_open_one_flow_and_keep_terminal_input_blocked(
     cx: &mut TestAppContext,
 ) {
@@ -2291,7 +2335,7 @@ fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_i
             create_calls: Arc::clone(&create_calls),
         });
     let (manager, cx) = cx.add_window_view(move |window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             workspace_adapters(factory),
@@ -2593,7 +2637,7 @@ fn backend_construction_failure_should_disable_remote_instead_of_leaving_an_iner
             create_calls: Arc::clone(&create_calls),
         });
     let (manager, cx) = cx.add_window_view(move |window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             workspace_adapters(factory),
@@ -4309,251 +4353,6 @@ fn confirm_directory_picker_path(path: &str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-fn active_local_pin(
-    manager: &Entity<WorkspaceManager>,
-    cx: &mut VisualTestContext,
-) -> Option<PathBuf> {
-    manager.read_with(cx, |manager, _| {
-        match manager.workspaces.active().pinned_directory() {
-            Some(PinnedDirectory::Local(directory)) => Some(directory.path().to_owned()),
-            _ => None,
-        }
-    })
-}
-
-#[gpui::test]
-fn open_local_directory_should_create_a_pinned_workspace_named_by_the_switcher_query(
-    cx: &mut TestAppContext,
-) {
-    let project = temporary_directory("open-local");
-    fs::create_dir_all(&project).unwrap();
-    let (manager, records, cx) = workspace_manager_with_directory_selection([], cx);
-    open_workspace_switcher_for_creation(cx);
-    cx.simulate_keystrokes("cmd-o");
-    cx.run_until_parked();
-    assert!(manager.read_with(cx, |manager, _| manager.pin_picker.is_some()));
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.len()),
-        1
-    );
-
-    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
-
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 2);
-        assert_eq!(manager.workspaces.active_id(), WorkspaceId::new(2));
-        assert_eq!(manager.workspaces.active().name(), "fresh workspace");
-        assert!(manager.pin_picker.is_none());
-    });
-    assert_eq!(active_local_pin(&manager, cx), Some(project.clone()));
-    let starts = records.starts();
-    assert_eq!(starts.len(), 2);
-    assert_eq!(
-        starts
-            .last()
-            .unwrap()
-            .local_working_directory()
-            .unwrap()
-            .path(),
-        project.as_path()
-    );
-    fs::remove_dir_all(project).unwrap();
-}
-
-#[gpui::test]
-fn open_local_directory_should_activate_the_workspace_already_pinned_to_the_directory(
-    cx: &mut TestAppContext,
-) {
-    let project = temporary_directory("open-local-existing");
-    fs::create_dir_all(&project).unwrap();
-    let (manager, records, cx) = workspace_manager_with_directory_selection([], cx);
-    let path = format!("{}/", project.to_str().unwrap());
-    cx.simulate_keystrokes("cmd-o");
-    cx.run_until_parked();
-    confirm_directory_picker_path(&path, cx);
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            assert!(manager.activate_workspace(WorkspaceId::new(1), window, cx));
-        })
-    });
-
-    cx.simulate_keystrokes("cmd-o");
-    cx.run_until_parked();
-    confirm_directory_picker_path(&path, cx);
-
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 2);
-        assert_eq!(manager.workspaces.active_id(), WorkspaceId::new(2));
-    });
-    assert_eq!(records.starts().len(), 2);
-    fs::remove_dir_all(project).unwrap();
-}
-
-#[gpui::test]
-fn open_local_directory_should_keep_the_picker_usable_after_a_failed_creation(
-    cx: &mut TestAppContext,
-) {
-    let project = temporary_directory("open-local-retry");
-    fs::create_dir_all(&project).unwrap();
-    let (manager, _, cx) = workspace_manager_with_directory_selection([], cx);
-    manager.update(cx, |manager, _| {
-        crate::domain::set_next_workspace_id(&mut manager.workspaces, u64::MAX);
-    });
-    cx.simulate_keystrokes("cmd-o");
-    cx.run_until_parked();
-    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 1);
-        assert!(manager.pin_picker.is_some());
-    });
-
-    manager.update(cx, |manager, _| {
-        crate::domain::set_next_workspace_id(&mut manager.workspaces, 2);
-    });
-    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
-
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 2);
-        assert!(manager.pin_picker.is_none());
-    });
-    assert_eq!(active_local_pin(&manager, cx), Some(project.clone()));
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active()
-            .payload()
-            .read(cx)
-            .focused_terminal_is_focused(window, cx)
-    }));
-    fs::remove_dir_all(project).unwrap();
-}
-
-#[gpui::test]
-fn open_local_directory_should_activate_the_pinned_workspace_when_home_is_unavailable(
-    cx: &mut TestAppContext,
-) {
-    let project = temporary_directory("open-local-reuse-missing-home");
-    fs::create_dir_all(&project).unwrap();
-    let (manager, records, cx) = workspace_manager_with_directory_selection([], cx);
-    cx.simulate_keystrokes("cmd-o");
-    cx.run_until_parked();
-    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
-    let pinned = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    manager.update(cx, |manager, _| {
-        manager.local_home_directory_path =
-            temporary_directory("open-local-reuse-missing-home-directory");
-    });
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            assert!(manager.activate_workspace(WorkspaceId::new(1), window, cx));
-        })
-    });
-
-    cx.simulate_keystrokes("cmd-o");
-    cx.run_until_parked();
-    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
-
-    assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 2);
-        assert_eq!(manager.workspaces.active_id(), pinned);
-        assert!(manager.pin_picker.is_none());
-    });
-    assert_eq!(records.starts().len(), 2);
-    fs::remove_dir_all(project).unwrap();
-}
-
-#[gpui::test]
-fn open_local_directory_should_alert_once_when_system_selection_meets_an_unavailable_home(
-    cx: &mut TestAppContext,
-) {
-    let project = temporary_directory("open-local-system-missing-home");
-    fs::create_dir_all(&project).unwrap();
-    let (manager, _, cx) =
-        workspace_manager_with_directory_selection([Ok(Some(project.clone()))], cx);
-    manager.update(cx, |manager, _| {
-        manager.local_home_directory_path =
-            temporary_directory("open-local-system-missing-home-directory");
-    });
-    cx.simulate_keystrokes("cmd-o");
-    cx.run_until_parked();
-    click("directory-picker-confirm-menu", cx);
-    click(
-        "command-palette-primary-menu-directory-picker-system-selection",
-        cx,
-    );
-
-    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-    click("modal-action-workspace-home-error-ok", cx);
-
-    assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-    manager.read_with(cx, |manager, _| assert_eq!(manager.workspaces.len(), 1));
-    fs::remove_dir_all(project).unwrap();
-}
-
-#[gpui::test]
-fn open_local_directory_should_close_the_picker_and_alert_when_home_is_unavailable(
-    cx: &mut TestAppContext,
-) {
-    let project = temporary_directory("open-local-missing-home-project");
-    fs::create_dir_all(&project).unwrap();
-    let (manager, records, cx) = workspace_manager_with_directory_selection([], cx);
-    manager.update(cx, |manager, _| {
-        manager.local_home_directory_path = temporary_directory("open-local-missing-home");
-    });
-    cx.simulate_keystrokes("cmd-o");
-    cx.run_until_parked();
-    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
-
-    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 1);
-        assert!(manager.pin_picker.is_none());
-    });
-    click("modal-action-workspace-home-error-ok", cx);
-    assert_eq!(records.starts().len(), 1);
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active()
-            .payload()
-            .read(cx)
-            .focused_terminal_is_focused(window, cx)
-    }));
-    fs::remove_dir_all(project).unwrap();
-}
-
-#[gpui::test]
-fn sidebar_open_local_directory_should_name_the_workspace_automatically_or_create_nothing(
-    cx: &mut TestAppContext,
-) {
-    let project = temporary_directory("open-local-sidebar");
-    fs::create_dir_all(&project).unwrap();
-    let (manager, records, cx) = workspace_manager_with_directory_selection([], cx);
-    click_new_workspace_menu("new-workspace-menu-open-local-directory", cx);
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.len()),
-        1
-    );
-    assert!(manager.read_with(cx, |manager, _| manager.pin_picker.is_none()));
-
-    click_new_workspace_menu("new-workspace-menu-open-local-directory", cx);
-    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
-
-    let expected_name = project.file_name().unwrap().to_str().unwrap().to_owned();
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 2);
-        assert_eq!(manager.workspaces.active().name(), expected_name);
-    });
-    assert_eq!(active_local_pin(&manager, cx), Some(project.clone()));
-    assert_eq!(records.starts().len(), 2);
-    fs::remove_dir_all(project).unwrap();
-}
-
 #[gpui::test]
 fn open_remote_directory_should_start_the_remote_flow_at_a_chosen_directory(
     cx: &mut TestAppContext,
@@ -4754,12 +4553,6 @@ fn unavailable_pinned_directory_should_block_children_and_recover_when_restored(
     cx.simulate_keystrokes("cmd-t");
     cx.run_until_parked();
     assert_eq!(records.starts().len(), 2);
-    assert!(manager.read_with(cx, |manager, _| {
-        matches!(
-            manager.workspaces.active().availability(),
-            crate::domain::DirectoryAvailability::Available
-        )
-    }));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -4918,7 +4711,7 @@ fn open_workspace_switcher_should_remove_a_workspace_after_its_final_terminal_se
     let inactive_sender = records
         .event_sender(1)
         .expect("the initial Workspace Terminal Session must have started");
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     manager.update(cx, |manager, cx| {
         manager
@@ -4937,8 +4730,6 @@ fn open_workspace_switcher_should_remove_a_workspace_after_its_final_terminal_se
         .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
         .expect("the inactive shell exit must be delivered");
     cx.run_until_parked();
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
 
     let state = manager.read_with(cx, |manager, _| {
         (
@@ -4946,21 +4737,17 @@ fn open_workspace_switcher_should_remove_a_workspace_after_its_final_terminal_se
             manager.workspaces.active_id(),
         )
     });
-    assert_eq!(state, (true, WorkspaceId::new(3)));
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .active()
-            .name()
-            .to_owned()),
-        "alpha"
+    assert_eq!(state, (true, WorkspaceId::new(2)));
+    assert!(
+        cx.update(|window, cx| window_combo_box_is_open(window, cx)),
+        "the open switcher stays open without the removed Workspace"
     );
 }
 
 #[gpui::test]
 fn workspace_switcher_selection_should_activate_the_matching_workspace(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     manager.update(cx, |manager, cx| {
         manager
@@ -5348,9 +5135,10 @@ fn command_w_should_confirm_kill_workspace_even_when_its_panes_are_idle(cx: &mut
     click("modal-action-close-confirmation-confirm", cx);
     redraw(cx);
     assert_eq!(records.dropped_session_ids(), vec![1]);
-    assert_ne!(
-        manager.read_with(cx, |manager, _| manager.workspaces.active_id()),
-        workspace_id
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.len()),
+        0,
+        "nothing replaces the final Workspace"
     );
 }
 
@@ -5512,14 +5300,13 @@ fn direct_multi_tab_workspace_close_should_use_one_aggregate_confirmation(cx: &m
     click("modal-action-close-confirmation-confirm", cx);
 
     assert_eq!(
-        manager.read_with(cx, |manager, _| (
-            manager.workspaces.len(),
-            manager.workspaces.active_id(),
-        )),
-        (1, WorkspaceId::new(2))
+        manager.read_with(cx, |manager, _| manager.workspaces.len()),
+        0
     );
     assert_eq!(records.dropped_session_ids(), vec![1, 2]);
-    assert_eq!(records.session_count(), 3);
+    assert_eq!(records.session_count(), 2);
+    // The empty stage remains, with nothing desktop-owned in it.
+    assert!(cx.debug_bounds("empty-workspace-stage").is_some());
 }
 
 #[gpui::test]
@@ -6232,7 +6019,7 @@ fn workspace_popup_name_should_fit_at_fractional_scales(cx: &mut TestAppContext)
         RecordingRenderedText::context_with_measurement(cx, name, px(266.9));
     let (manager, _records, cx) = workspace_manager(&mut text_context);
     for _ in 0..9 {
-        cx.simulate_keystrokes("cmd-n");
+        new_desktop_workspace(cx);
     }
     manager.update(cx, |manager, cx| {
         manager
@@ -7176,7 +6963,8 @@ fn collapsed_sidebar_resize_should_not_leak_held_pointer_events_to_terminal_sess
 #[gpui::test]
 fn selected_workspace_should_use_an_inset_chip_without_row_separators(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n cmd-n");
+    new_desktop_workspace(cx);
+    new_desktop_workspace(cx);
     cx.run_until_parked();
 
     let first_row = cx
@@ -7350,27 +7138,6 @@ fn sidebar_new_workspace_menu_should_mirror_switcher_creation_rows(cx: &mut Test
         open_remote.top() - open_local.bottom(),
         remote.top() - local.bottom()
     );
-}
-
-#[gpui::test]
-fn sidebar_new_workspace_button_should_create_local_immediately(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    click_new_workspace_menu("new-workspace-menu-create-local", cx);
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.len()),
-        2
-    );
-    assert_eq!(records.starts().len(), 2);
-    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active()
-            .payload()
-            .read(cx)
-            .focused_terminal_is_focused(window, cx)
-    }));
 }
 
 #[gpui::test]
@@ -7571,7 +7338,7 @@ fn the_workspace_chip_should_follow_the_active_workspace(cx: &mut TestAppContext
     let (manager, _, cx) = workspace_manager(cx);
 
     click("toggle-sidebar-button", cx);
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     manager.update(cx, |manager, cx| {
         manager
             .workspaces
@@ -7665,28 +7432,6 @@ fn collapsed_top_chrome_should_ignore_a_larger_resized_sidebar_width(cx: &mut Te
             root.origin.x + collapsed_width,
             root.origin.x + collapsed_width,
         )
-    );
-}
-
-#[gpui::test]
-fn collapsed_identity_should_keep_an_unavailable_local_workspace_visible(cx: &mut TestAppContext) {
-    let (manager, _, cx) = workspace_manager(cx);
-    manager.update(cx, |manager, cx| {
-        let workspace_id = manager.workspaces.active_id();
-        manager
-            .workspaces
-            .set_directory_unavailable(workspace_id, "Directory unavailable".to_owned())
-            .expect("the Active Workspace should remain present");
-        cx.notify();
-    });
-
-    click("toggle-sidebar-button", cx);
-
-    assert!(cx.debug_bounds("workspace-chip-label").is_some());
-    assert!(
-        cx.debug_bounds("workspace-switcher-status-unavailable")
-            .is_some(),
-        "the collapsed identity must keep the Active Workspace's unavailable state visible"
     );
 }
 
@@ -7983,43 +7728,13 @@ fn collapsed_chrome_geometry_survives_combo_box_theme_replacement(cx: &mut TestA
 }
 
 #[gpui::test]
-fn collapsed_workspace_name_should_open_filter_and_create_a_named_workspace(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    click("toggle-sidebar-button", cx);
-    click("workspace-chip-label", cx);
-    cx.simulate_keystrokes("f r e s h space w o r k s p a c e");
-    cx.run_until_parked();
-    click("workspace-switcher-create-local", cx);
-    assert_eq!(
-        manager.read_with(cx, |manager, _| {
-            manager.workspaces.active().name().to_owned()
-        }),
-        "fresh workspace"
-    );
-    assert_eq!(records.starts().len(), 2);
-    assert!(!manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible));
-    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active()
-            .payload()
-            .read(cx)
-            .focused_terminal_is_focused(window, cx)
-    }));
-}
-
-#[gpui::test]
 fn workspace_created_while_collapsed_should_share_the_active_top_chrome_width(
     cx: &mut TestAppContext,
 ) {
     let (_, _, cx) = workspace_manager(cx);
     click("toggle-sidebar-button", cx);
 
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
 
     let chrome = cx
@@ -8079,7 +7794,7 @@ fn collapsed_top_chrome_should_preserve_name_after_inactive_shell_exit(cx: &mut 
     let inactive_sender = records
         .event_sender(1)
         .expect("the initial Workspace Terminal Session must have started");
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     manager.update(cx, |manager, cx| {
         manager
             .workspaces
@@ -8120,7 +7835,7 @@ fn collapsed_top_chrome_should_preserve_name_after_inactive_shell_exit(cx: &mut 
 fn cmd_n_should_create_a_local_workspace_without_the_panel(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
 
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
 
     assert_eq!(
@@ -8140,7 +7855,7 @@ fn cmd_n_should_create_a_local_workspace_without_the_panel(cx: &mut TestAppConte
 fn workspace_list_should_scroll_vertically_with_the_mouse_wheel(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-n");
+        new_desktop_workspace(cx);
     }
 
     manager.read_with(cx, |manager, cx| {
@@ -8176,7 +7891,7 @@ fn workspace_list_should_scroll_vertically_with_the_mouse_wheel(cx: &mut TestApp
 fn workspace_scrollbar_should_reveal_when_the_list_scrolls(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-n");
+        new_desktop_workspace(cx);
     }
     manager.read_with(cx, |manager, cx| {
         manager
@@ -8216,7 +7931,7 @@ fn workspace_list_publishes_a_named_scroll_bar_before_it_is_revealed(cx: &mut Te
 
     let (_manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-n");
+        new_desktop_workspace(cx);
     }
     let tree = A11yTree::read(cx);
     assert_eq!(tree.node("Workspace list")["aria"]["role"], "ScrollBar");
@@ -8236,8 +7951,8 @@ fn workspace_order(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContex
 #[gpui::test]
 fn a_workspace_row_drag_released_on_its_first_move_should_land(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
     let release =
@@ -8256,8 +7971,8 @@ fn a_workspace_row_drag_released_on_its_first_move_should_land(cx: &mut TestAppC
 #[gpui::test]
 fn a_workspace_row_released_just_below_the_list_should_land_at_its_end(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
     let list = cx.debug_bounds("workspace-list").unwrap();
@@ -8285,8 +8000,8 @@ fn a_workspace_row_released_just_below_the_list_should_land_at_its_end(cx: &mut 
 #[gpui::test]
 fn dragging_a_workspace_row_should_open_a_gap_and_settle_there_on_release(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
     let second = cx.debug_bounds("workspace-row-2-inactive").unwrap();
@@ -8379,7 +8094,7 @@ fn dragging_a_workspace_row_should_open_a_gap_and_settle_there_on_release(cx: &m
 #[gpui::test]
 fn a_closed_workspace_row_should_leave_a_gap_that_closes(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
@@ -8406,7 +8121,7 @@ fn a_closed_workspace_row_should_leave_a_gap_that_closes(cx: &mut TestAppContext
 #[gpui::test]
 fn selecting_another_workspace_should_move_the_selection_from_the_old_row(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     finish_slides(cx);
     cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
@@ -8435,7 +8150,8 @@ fn switching_to_a_workspace_with_fewer_tabs_should_start_its_tab_strip_from_the_
     cx: &mut TestAppContext,
 ) {
     let (_manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-t cmd-t cmd-n");
+    cx.simulate_keystrokes("cmd-t cmd-t");
+    new_desktop_workspace(cx);
     finish_slides(cx);
     click("workspace-row-1-inactive", cx);
     finish_slides(cx);
@@ -8477,7 +8193,7 @@ fn switching_to_a_workspace_with_an_overflowing_tab_strip_should_keep_its_tabs_i
     for _ in 0..13 {
         cx.simulate_keystrokes("cmd-t");
     }
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     finish_slides(cx);
     click("workspace-row-1-inactive", cx);
     finish_slides(cx);
@@ -8521,7 +8237,7 @@ fn a_new_workspace_should_start_its_tab_strip_from_a_scrolled_old_one(cx: &mut T
     let selection = cx.debug_bounds("tab-item-14-chip").unwrap().origin;
     let create = cx.debug_bounds("create-tab-button").unwrap().origin;
 
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     let leaving = (
         cx.debug_bounds("tab-item-1-chip")
@@ -8562,7 +8278,7 @@ fn switching_workspaces_while_a_dropped_tab_settles_should_move_the_selection_fr
     cx.run_until_parked();
     let drawn = cx.debug_bounds("tab-item-3-chip").unwrap().origin;
 
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     let leaving = cx
         .debug_bounds("tab-item-1-chip")
@@ -8590,7 +8306,7 @@ fn a_new_workspace_should_start_its_tab_strip_from_the_old_one(cx: &mut TestAppC
             .origin
     };
 
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     let leaving = chip(cx);
     finish_slides(cx);
@@ -8608,7 +8324,8 @@ fn switching_to_a_workspace_with_more_tabs_should_grow_the_tabs_the_old_strip_la
     cx: &mut TestAppContext,
 ) {
     let (_manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-t cmd-t cmd-n");
+    cx.simulate_keystrokes("cmd-t cmd-t");
+    new_desktop_workspace(cx);
     finish_slides(cx);
     cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
     let selection = cx.debug_bounds("tab-item-1-chip").unwrap().origin;
@@ -8637,7 +8354,8 @@ fn switching_back_and_forth_quickly_should_start_each_tab_strip_from_the_old_end
     cx: &mut TestAppContext,
 ) {
     let (_manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-t cmd-t cmd-n");
+    cx.simulate_keystrokes("cmd-t cmd-t");
+    new_desktop_workspace(cx);
     finish_slides(cx);
     cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
     let end = |cx: &mut VisualTestContext| cx.debug_bounds("create-tab-button").unwrap().origin.x;
@@ -8667,8 +8385,8 @@ fn escape_should_cancel_a_workspace_row_drag_and_return_every_row_to_its_place(
     cx: &mut TestAppContext,
 ) {
     let (manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
     let third = cx.debug_bounds("workspace-row-3-active").unwrap();
@@ -8708,8 +8426,8 @@ fn escape_should_cancel_a_workspace_row_drag_and_return_every_row_to_its_place(
 #[gpui::test]
 fn a_single_motion_should_move_a_workspace_row_on_release(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
     let third = cx.debug_bounds("workspace-row-3-active").unwrap();
@@ -8728,7 +8446,7 @@ fn a_single_motion_should_move_a_workspace_row_on_release(cx: &mut TestAppContex
 fn escape_should_cancel_only_the_drag_in_progress(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-t");
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.simulate_keystrokes("cmd-t");
     cx.simulate_keystrokes("ctrl-1");
     cx.run_until_parked();
@@ -8784,7 +8502,7 @@ fn escape_should_cancel_only_the_drag_in_progress(cx: &mut TestAppContext) {
 fn workspace_scrollbar_thumb_should_drag_the_list(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-n");
+        new_desktop_workspace(cx);
     }
     manager.update(cx, |manager, cx| {
         manager
@@ -8835,7 +8553,7 @@ fn closing_an_inactive_workspace_should_keep_the_sidebar_where_it_was_scrolled(
 ) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-n");
+        new_desktop_workspace(cx);
     }
     finish_slides(cx);
     manager.update(cx, |manager, cx| {
@@ -8875,7 +8593,7 @@ fn closing_an_inactive_workspace_should_keep_the_sidebar_where_it_was_scrolled(
 fn creating_workspaces_should_scroll_the_active_workspace_into_view(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-n");
+        new_desktop_workspace(cx);
     }
 
     let state = manager.read_with(cx, |manager, cx| {
@@ -8902,7 +8620,7 @@ fn creating_workspaces_should_scroll_the_active_workspace_into_view(cx: &mut Tes
 fn overflowing_workspace_list_should_not_cover_the_creation_footer(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-n");
+        new_desktop_workspace(cx);
     }
 
     let sidebar = cx
@@ -9064,7 +8782,7 @@ fn a_secondary_click_should_leave_focus_in_the_pane(cx: &mut TestAppContext) {
 fn command_n_creates_and_activates_a_home_workspace(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
 
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
 
     let state = manager.read_with(cx, |manager, _| {
@@ -9106,7 +8824,8 @@ fn command_n_creates_and_activates_a_home_workspace(cx: &mut TestAppContext) {
 #[gpui::test]
 fn control_number_should_activate_workspaces_by_position(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n cmd-n");
+    new_desktop_workspace(cx);
+    new_desktop_workspace(cx);
     cx.run_until_parked();
 
     cx.simulate_keystrokes("ctrl-1");
@@ -9152,7 +8871,8 @@ fn control_number_should_activate_workspaces_by_position(cx: &mut TestAppContext
 #[gpui::test]
 fn clicking_an_inactive_workspace_should_restore_its_focused_pane(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-d cmd-n");
+    cx.simulate_keystrokes("cmd-d");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
 
     click("workspace-row-1-inactive", cx);
@@ -9203,7 +8923,7 @@ fn right_clicking_an_inactive_workspace_should_open_its_menu_without_activating_
 ) {
     let (manager, _records, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
 
     right_click("workspace-row-1-inactive", cx);
@@ -9298,7 +9018,7 @@ fn tab_shortcuts_should_create_and_activate_tabs_while_sidebar_is_focused(cx: &m
 }
 
 #[gpui::test]
-fn close_pane_shortcut_from_sidebar_should_close_the_globally_final_operating_system_window(
+fn close_pane_shortcut_from_sidebar_should_leave_the_empty_view_after_the_final_pane(
     cx: &mut TestAppContext,
 ) {
     let (manager, records, cx) = workspace_manager(cx);
@@ -9312,19 +9032,18 @@ fn close_pane_shortcut_from_sidebar_should_close_the_globally_final_operating_sy
     let state = manager.read_with(cx, |manager, _| {
         (
             manager.workspaces.len(),
-            manager.workspaces.active_id(),
             records.dropped_session_ids(),
             records.session_count(),
         )
     });
-    assert_eq!(state, (1, WorkspaceId::new(1), vec![1], 1));
-    assert!(cx.windows().is_empty());
+    assert_eq!(state, (0, vec![1], 1));
+    assert_eq!(cx.windows().len(), 1, "the window stays open");
+    // The empty stage remains, with nothing desktop-owned in it.
+    assert!(cx.debug_bounds("empty-workspace-stage").is_some());
 }
 
 #[gpui::test]
-fn duplicate_final_tab_close_requests_should_schedule_one_operating_system_window_close(
-    cx: &mut TestAppContext,
-) {
+fn duplicate_final_tab_close_requests_should_close_the_workspace_once(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
     let tab_manager = manager.read_with(cx, |manager, _| {
         manager.workspaces.active().payload().clone()
@@ -9341,7 +9060,11 @@ fn duplicate_final_tab_close_requests_should_schedule_one_operating_system_windo
     cx.run_until_parked();
 
     assert_eq!(records.dropped_session_ids(), vec![1]);
-    assert!(cx.windows().is_empty());
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.len()),
+        0
+    );
+    assert_eq!(cx.windows().len(), 1);
 }
 
 #[gpui::test]
@@ -9746,7 +9469,7 @@ fn blurring_inline_rename_should_commit_the_edited_name(cx: &mut TestAppContext)
 #[gpui::test]
 fn activating_another_workspace_should_cancel_the_previous_inline_rename(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     click("workspace-row-1-inactive", cx);
     right_click("workspace-row-1-active", cx);
@@ -9791,9 +9514,7 @@ fn activating_another_workspace_should_cancel_the_previous_inline_rename(cx: &mu
 }
 
 #[gpui::test]
-fn explicitly_closing_the_final_workspace_should_replace_it_and_keep_the_window_open(
-    cx: &mut TestAppContext,
-) {
+fn explicitly_closing_the_final_workspace_should_leave_the_empty_view(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
 
     right_click("workspace-row-1-active", cx);
@@ -9803,13 +9524,18 @@ fn explicitly_closing_the_final_workspace_should_replace_it_and_keep_the_window_
     let state = manager.read_with(cx, |manager, _| {
         (
             manager.workspaces.len(),
-            manager.workspaces.active_id(),
             records.dropped_session_ids(),
             records.session_count(),
         )
     });
-    assert_eq!(state, (1, WorkspaceId::new(2), vec![1], 2));
+    assert_eq!(
+        state,
+        (0, vec![1], 1),
+        "nothing replaces the final Workspace"
+    );
     assert_eq!(cx.windows().len(), 1);
+    // The empty stage remains, with nothing desktop-owned in it.
+    assert!(cx.debug_bounds("empty-workspace-stage").is_some());
 }
 
 #[gpui::test]
@@ -9821,7 +9547,7 @@ fn inactive_shell_exit_should_close_its_workspace_without_stealing_activation(
     let inactive_sender = records
         .event_sender(1)
         .expect("the initial Workspace Terminal Session must have started");
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
 
     assert!(active_terminal_has_input_focus(&manager, cx));
@@ -9834,7 +9560,7 @@ fn inactive_shell_exit_should_close_its_workspace_without_stealing_activation(
         WorkspaceId::new(2)
     );
     assert!(active_terminal_has_input_focus(&manager, cx));
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
 
     let state = manager.read_with(cx, |manager, _| {
@@ -10071,52 +9797,9 @@ fn directory_picker_should_pin_its_target_and_keep_the_connection(cx: &mut TestA
 }
 
 #[gpui::test]
-fn unavailable_home_should_reject_new_workspace_before_mutating_hierarchy(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    let missing_home = temporary_directory("missing-home");
-    manager.update(cx, |manager, _| {
-        manager.local_home_directory_path = missing_home
-    });
-
-    cx.simulate_keystrokes("cmd-n");
-    cx.run_until_parked();
-
-    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 1);
-        assert_eq!(manager.workspaces.active_id(), WorkspaceId::new(1));
-    });
-    assert_eq!(records.session_count(), 1);
-    assert!(records.dropped_session_ids().is_empty());
-}
-
-#[gpui::test]
-fn unavailable_home_should_reject_final_workspace_replacement_before_closing(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    let missing_home = temporary_directory("missing-home");
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.local_home_directory_path = missing_home;
-            manager.close_workspace(WorkspaceId::new(1), window, cx);
-        });
-    });
-    cx.run_until_parked();
-
-    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 1);
-        assert_eq!(manager.workspaces.active_id(), WorkspaceId::new(1));
-    });
-    assert_eq!(records.session_count(), 1);
-    assert!(records.dropped_session_ids().is_empty());
-}
-
-#[gpui::test]
 fn unavailable_home_should_allow_closing_a_workspace_without_replacement(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     let missing_home = temporary_directory("missing-home");
     cx.update(|window, cx| {
@@ -10190,7 +9873,7 @@ fn workspace_switcher_should_not_expose_the_workspace_path_as_a_description(
 #[gpui::test]
 fn workspace_switcher_should_not_match_workspace_paths(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     manager.update(cx, |manager, _| {
         manager
@@ -10223,7 +9906,7 @@ fn workspace_switcher_should_not_match_workspace_paths(cx: &mut TestAppContext) 
 #[gpui::test]
 fn workspace_switcher_should_preserve_empty_order_and_show_fuzzy_ranking(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     manager.update(cx, |manager, _| {
         manager
@@ -10319,56 +10002,6 @@ fn sidebar_remote_creation_should_open_host_selection_and_restore_focus_on_cance
 }
 
 #[gpui::test]
-fn switcher_should_preserve_explicit_local_names_without_switching_to_the_match(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    for expected in ["fresh workspace"; 3] {
-        open_workspace_switcher_for_creation(cx);
-        click("workspace-switcher-create-local", cx);
-        assert_eq!(
-            manager.read_with(cx, |manager, _| manager
-                .workspaces
-                .active()
-                .name()
-                .to_owned()),
-            expected
-        );
-    }
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.len()),
-        4
-    );
-    assert_eq!(records.starts().len(), 4);
-}
-
-#[gpui::test]
-fn creation_shortcut_should_accept_local_switcher_name_instead_of_highlight(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    open_workspace_switcher_for_creation(cx);
-    cx.simulate_keystrokes("down cmd-n");
-    cx.run_until_parked();
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.active().name(), "fresh workspace");
-        assert_eq!(manager.workspaces.len(), 2);
-        assert!(manager.remote_workspace_flow.is_none());
-    });
-    assert_eq!(records.starts().len(), 2);
-    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active()
-            .payload()
-            .read(cx)
-            .focused_terminal_is_focused(window, cx)
-    }));
-}
-
-#[gpui::test]
 fn creation_shortcut_should_accept_remote_switcher_name_instead_of_highlight(
     cx: &mut TestAppContext,
 ) {
@@ -10401,8 +10034,15 @@ fn creation_shortcut_should_accept_remote_switcher_name_instead_of_highlight(
 #[gpui::test]
 fn switcher_should_preserve_explicit_remote_names_across_destinations(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
-    open_workspace_switcher_for_creation(cx);
-    click("workspace-switcher-create-local", cx);
+    new_desktop_workspace(cx);
+    manager.update(cx, |manager, cx| {
+        let workspace_id = manager.workspaces.active_id();
+        manager
+            .workspaces
+            .rename_workspace(workspace_id, "fresh workspace".to_owned())
+            .unwrap();
+        cx.notify();
+    });
     for (destination, expected) in [
         ("work", "fresh workspace"),
         ("work", "fresh workspace"),
@@ -10473,47 +10113,6 @@ fn creation_shortcut_should_open_remote_setup_without_reusing_cancelled_query(
 }
 
 #[gpui::test]
-fn creation_shortcut_should_use_automatic_local_name_for_blank_and_cancelled_input(
-    cx: &mut TestAppContext,
-) {
-    let (manager, _, cx) = workspace_manager(cx);
-    open_workspace_switcher_for_creation(cx);
-    cx.simulate_keystrokes("escape cmd-n");
-    cx.run_until_parked();
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .active()
-            .name()
-            .to_owned()),
-        "Default (2)"
-    );
-    open_workspace_switcher(cx);
-    cx.simulate_keystrokes("space space cmd-n");
-    cx.run_until_parked();
-    let id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    manager.update(cx, |manager, _| {
-        manager
-            .workspaces
-            .update_automatic_directory(
-                id,
-                crate::terminal::metadata::CurrentDirectory::Local(PathBuf::from(
-                    "/project/automatic",
-                )),
-            )
-            .unwrap();
-    });
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .active()
-            .name()
-            .to_owned()),
-        "automatic"
-    );
-}
-
-#[gpui::test]
 fn creation_shortcut_should_use_automatic_remote_name_for_blank_input(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
     open_workspace_switcher(cx);
@@ -10535,106 +10134,12 @@ fn creation_shortcut_should_use_automatic_remote_name_for_blank_input(cx: &mut T
 }
 
 #[gpui::test]
-fn creation_shortcut_should_create_named_local_even_with_existing_match(cx: &mut TestAppContext) {
-    let (manager, _, cx) = workspace_manager(cx);
-    manager.update(cx, |manager, _| {
-        manager
-            .workspaces
-            .rename_workspace(WorkspaceId::new(1), "Alpha".into())
-            .unwrap()
-    });
-    open_workspace_switcher(cx);
-    cx.simulate_keystrokes("space A l p h a space cmd-n");
-    cx.run_until_parked();
-    let id = manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 2);
-        manager.workspaces.active_id()
-    });
-    manager.update(cx, |manager, _| {
-        manager
-            .workspaces
-            .update_automatic_directory(
-                id,
-                crate::terminal::metadata::CurrentDirectory::Local(PathBuf::from(
-                    "/project/changed",
-                )),
-            )
-            .unwrap();
-    });
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .active()
-            .name()
-            .to_owned()),
-        "Alpha"
-    );
-}
-
-#[gpui::test]
-fn creation_shortcuts_should_not_escape_a_modal(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    cx.update(|window, cx| {
-        manager.update(cx, |_, cx| {
-            Alert::new(
-                ModalId::new("creation-shortcut-blocker"),
-                "Shortcut blocker",
-                "Blocking dialog",
-                "Finish this dialog first.",
-                vec![
-                    ModalAction::new(
-                        (),
-                        "OK",
-                        ModalActionRole::Affirmative,
-                        "creation-shortcut-blocker-ok",
-                    )
-                    .default_action(true),
-                ],
-            )
-            .present(window, cx, |_, _| {})
-            .unwrap();
-        });
-    });
-    cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-n cmd-shift-n");
-    cx.run_until_parked();
-    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-    assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
-    assert_eq!(records.starts().len(), 1);
-}
-
-#[gpui::test]
-fn creation_shortcuts_should_not_escape_switcher_input_context_menu(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    open_workspace_switcher_for_creation(cx);
-    let input = cx.debug_bounds("combo-box-input").unwrap().center();
-    cx.simulate_mouse_down(input, MouseButton::Right, Modifiers::none());
-    cx.simulate_mouse_up(input, MouseButton::Right, Modifiers::none());
-    cx.run_until_parked();
-    assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
-    cx.simulate_keystrokes("cmd-n cmd-shift-n");
-    cx.run_until_parked();
-    assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
-    assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
-    assert_eq!(records.starts().len(), 1);
-    cx.simulate_keystrokes("escape cmd-n");
-    cx.run_until_parked();
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .active()
-            .name()
-            .to_owned()),
-        "fresh workspace"
-    );
-}
-
-#[gpui::test]
 fn workspace_switcher_check_should_follow_active_workspace_not_keyboard_highlight(
     cx: &mut TestAppContext,
 ) {
     let (manager, _, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n ctrl-1");
+    new_desktop_workspace(cx);
+    cx.simulate_keystrokes("ctrl-1");
     cx.run_until_parked();
     open_workspace_switcher(cx);
     cx.simulate_keystrokes("down");
@@ -10683,33 +10188,10 @@ fn workspace_switcher_creation_rows_should_start_in_the_checkmark_column(cx: &mu
 }
 
 #[gpui::test]
-fn workspace_filter_icon_should_precede_editable_input_without_affecting_creation(
-    cx: &mut TestAppContext,
-) {
-    let (manager, _, cx) = workspace_manager(cx);
-    open_workspace_switcher(cx);
-    let icon = cx.debug_bounds("combo-box-input-leading").unwrap();
-    let input = cx.debug_bounds("combo-box-input").unwrap();
-    assert!(icon.right() <= input.left());
-    assert!(input.size.width > px(0.0));
-    cx.simulate_keystrokes("f i l t e r enter");
-    cx.run_until_parked();
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .active()
-            .name()
-            .to_owned()),
-        "filter"
-    );
-    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
-}
-
-#[gpui::test]
 fn workspace_activation_hints_should_follow_sidebar_order_after_closing(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
     for _ in 0..9 {
-        cx.simulate_keystrokes("cmd-n");
+        new_desktop_workspace(cx);
     }
     cx.run_until_parked();
     let hints = cx.update(|_, cx| {
@@ -10865,7 +10347,7 @@ fn sidebar_resize_cancel_should_respect_the_current_window_width(cx: &mut TestAp
 fn sidebar_keyboard_should_navigate_reveal_and_stop_at_both_ends(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-n");
+        new_desktop_workspace(cx);
     }
     cx.simulate_keystrokes("cmd-shift-e home up");
     cx.run_until_parked();
@@ -12091,7 +11573,9 @@ fn a_worktree_should_hold_a_pinned_directory_chosen_through_a_symbolic_link_for_
     });
     // Another Workspace lists the same repository from its Main Worktree.
     cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| manager.create_local_workspace(window, cx));
+        manager.update(cx, |manager, cx| {
+            manager.present_desktop_workspace(window, cx);
+        });
     });
     cx.run_until_parked();
     let other = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
@@ -12246,7 +11730,9 @@ fn closing_a_worktrees_tabs_should_keep_them_when_no_other_tab_can_open(cx: &mut
     let (manager, _records, cx) = workspace_manager(cx);
     // A second Workspace keeps the window open, so closing the first would show in the count.
     cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| manager.create_local_workspace(window, cx));
+        manager.update(cx, |manager, cx| {
+            manager.present_desktop_workspace(window, cx);
+        });
     });
     cx.run_until_parked();
     let fixture = crate::terminal::testing::ShellResourcesFixture::new();
@@ -12692,7 +12178,9 @@ fn workspace_rows_publish_a_tree_that_selects_on_press(cx: &mut TestAppContext) 
 
     let (manager, _records, cx) = workspace_manager(cx);
     cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| manager.create_local_workspace(window, cx));
+        manager.update(cx, |manager, cx| {
+            manager.present_desktop_workspace(window, cx);
+        });
     });
     cx.run_until_parked();
 
@@ -13045,7 +12533,7 @@ fn workspace_manager_with_terminal_nodes(
     let session_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
@@ -13767,7 +13255,9 @@ fn removing_a_worktree_should_close_its_tabs_in_every_workspace(cx: &mut TestApp
     let (manager, _records, cx) = workspace_manager(cx);
     let first = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| manager.create_local_workspace(window, cx));
+        manager.update(cx, |manager, cx| {
+            manager.present_desktop_workspace(window, cx);
+        });
     });
     cx.run_until_parked();
     let second = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
@@ -13977,7 +13467,7 @@ fn an_inactive_workspace_menu_should_open_its_tab_there_and_rename_it_in_place(
 ) {
     let (manager, _records, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
 
     right_click("workspace-row-1-inactive", cx);
@@ -14100,8 +13590,8 @@ fn an_expanded_workspace_group_released_below_the_list_should_land_at_its_end(
         .collect();
     let linked: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
     present_worktrees(cx, &linked);
-    cx.simulate_keystrokes("cmd-n");
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
+    new_desktop_workspace(cx);
     redraw(cx);
     click("workspace-disclosure-2-expanded", cx);
     click("workspace-disclosure-3-expanded", cx);
@@ -15733,7 +15223,7 @@ fn the_empty_view_action_should_open_the_switcher_with_the_detached_workspaces(
     let switcher_open = cx.update(|window, cx| window_combo_box_is_open(window, cx));
     // The switcher's creation commands share its option role, and how many of them render
     // depends on the platform's viewport, so only the remaining options are Workspaces.
-    let creations = WorkspaceCreation::rows(true)
+    let creations = WorkspaceCreation::ALL
         .into_iter()
         .map(WorkspaceCreation::label)
         .collect::<Vec<_>>();

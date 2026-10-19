@@ -815,7 +815,7 @@ pub(crate) struct ApplicationCapabilities {
     /// Keeps the Background Image copies where Workspace windows can present one.
     pub(crate) background_images: Option<Arc<crate::background_image::BackgroundImageStore>>,
     /// Launches and presents the account-local SpaceTerm Server in the Workspace Window.
-    pub(crate) local_server: Option<crate::ui::LocalServerAdapters>,
+    pub(crate) local_server: crate::ui::LocalServerAdapters,
 }
 
 /// The startup-supplied file opener available to explicit local file selections.
@@ -1305,10 +1305,13 @@ mod runtime_tests {
         services: Rc<RecordingServices>,
         movement: Rc<RecordingMovement>,
     ) -> HostCompositionParts {
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+            crate::terminal::testing::TestTerminalSessionFactory::new(Default::default()),
+        );
         HostCompositionParts {
             profile: crate::desktop_profile::testing_profile(spaceterm_ui::TextDirection::LeftToRight),
             home_directory: std::env::temp_dir(),
-            session_factory: Rc::new(crate::terminal::testing::TestTerminalSessionFactory::new(Default::default())),
+            session_factory: Rc::clone(&session_factory),
             adapters: ApplicationCapabilities {
                 updates: Rc::new(crate::updates::testing::RecordingAdapter::default()),
                 selected_files: None,
@@ -1332,7 +1335,7 @@ mod runtime_tests {
                 remote_workspace: Arc::new(UnavailableRemote),
                 repository_status: None,
                 background_images: None,
-                local_server: None,
+                local_server: crate::ui::launch_testing::presenting(session_factory),
             },
             services: Some(services),
             window_movement: movement,
@@ -1449,6 +1452,8 @@ mod runtime_tests {
         let services = Rc::new(RecordingServices::default());
         let mut wiring = parts(Rc::clone(&services), Rc::default());
         wiring.session_factory = Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        wiring.adapters.local_server =
+            crate::ui::launch_testing::presenting(Rc::clone(&wiring.session_factory));
         let host = Rc::new(HostComposition::new(wiring).unwrap());
         let original = cx.update(|cx| {
             let original = start_application(cx, &host).unwrap();
@@ -1492,6 +1497,8 @@ mod runtime_tests {
         let services = Rc::new(RecordingServices::default());
         let mut wiring = parts(Rc::clone(&services), Rc::default());
         wiring.session_factory = Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        wiring.adapters.local_server =
+            crate::ui::launch_testing::presenting(Rc::clone(&wiring.session_factory));
         let host = HostComposition::new(wiring).unwrap();
         cx.update(|cx| {
             start_application(cx, &host).unwrap();
@@ -1507,6 +1514,22 @@ mod runtime_tests {
             ),
             (1, 1, vec!["register", "install"])
         );
+    }
+
+    /// Presents one desktop-owned Workspace, whose running work quitting would end, as an SSH
+    /// Workspace's is.
+    fn present_desktop_work(
+        workspace: gpui::WindowHandle<WorkspaceManager>,
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            workspace
+                .update(cx, |manager, window, cx| {
+                    manager.present_desktop_workspace(window, cx);
+                })
+                .unwrap();
+        });
+        cx.run_until_parked();
     }
 
     fn host_with_settings() -> Rc<HostComposition> {
@@ -2101,8 +2124,10 @@ mod runtime_tests {
         );
         let mut host = host_with_settings();
         Rc::get_mut(&mut host).unwrap().adapters.application_quit = quit.clone();
+        Rc::get_mut(&mut host).unwrap().adapters.local_server =
+            crate::ui::launch_testing::unanswered();
         let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
-        cx.run_until_parked();
+        present_desktop_work(workspace, cx);
         assert!(cx.update(|cx| application_quit_snapshot(cx).facts.requires_confirmation()));
 
         cx.update(|cx| {
@@ -2131,8 +2156,10 @@ mod runtime_tests {
         );
         let mut host = host_with_settings();
         Rc::get_mut(&mut host).unwrap().adapters.application_quit = quit.clone();
+        Rc::get_mut(&mut host).unwrap().adapters.local_server =
+            crate::ui::launch_testing::unanswered();
         let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
-        cx.run_until_parked();
+        present_desktop_work(workspace, cx);
         cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
         cx.run_until_parked();
         cx.update(|cx| cx.dispatch_action(&QuitApplication));
@@ -2169,9 +2196,10 @@ mod runtime_tests {
         let adapter = Rc::new(crate::updates::testing::RecordingAdapter::available());
         let mut host = host_with_settings();
         Rc::get_mut(&mut host).unwrap().adapters.updates = adapter.clone();
-        cx.update(|cx| {
-            start_application(cx, &host).unwrap();
-        });
+        Rc::get_mut(&mut host).unwrap().adapters.local_server =
+            crate::ui::launch_testing::unanswered();
+        let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
+        present_desktop_work(workspace, cx);
         let service = cx.update(|cx| cx.global::<crate::updates::UpdateService>().0.clone());
         service.update(cx, |updates, cx| updates.check(false, cx));
         adapter.emit(crate::updates::UpdateEvent::Available("0.1.1".into()));
@@ -2263,17 +2291,25 @@ mod runtime_tests {
         let records = TestTerminalSessionRecords::default();
         let mut wiring = parts(Rc::default(), Rc::default());
         wiring.session_factory = Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        wiring.adapters.local_server =
+            crate::ui::launch_testing::presenting(Rc::clone(&wiring.session_factory));
         let application_quit = Rc::new(
             crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
         );
         wiring.adapters.application_quit = application_quit.clone();
+        // Desktop-owned work alone decides whether quitting ends anything.
+        wiring.adapters.local_server = crate::ui::launch_testing::unanswered();
         let host = HostComposition::new(wiring).unwrap();
         let (running, idle) = cx.update(|cx| {
             let running = start_application(cx, &host).unwrap();
             let idle = open(cx, &host).unwrap();
+            (running, idle)
+        });
+        present_desktop_work(running, cx);
+        present_desktop_work(idle, cx);
+        cx.update(|cx| {
             idle.update(cx, |_, window, _| window.activate_window())
                 .unwrap();
-            (running, idle)
         });
         cx.run_until_parked();
         let now = std::time::Instant::now();
@@ -2341,12 +2377,13 @@ mod runtime_tests {
         );
         let mut wiring = parts(Rc::default(), Rc::default());
         wiring.adapters.application_quit = application_quit.clone();
+        wiring.adapters.local_server = crate::ui::launch_testing::unanswered();
         let host = HostComposition::new(wiring).unwrap().with_appearance(
             storage.clone(),
             Rc::new(crate::platform::appearance::testing::RecordingAppearancePlatform::default()),
         );
         let workspace = cx.update(|cx| start_application(cx, &host).unwrap());
-        cx.run_until_parked();
+        present_desktop_work(workspace, cx);
         cx.update(|cx| cx.dispatch_action(&crate::ui::settings_window::OpenSettings));
         cx.run_until_parked();
         let settings_window = cx.update(|cx| {
@@ -2372,7 +2409,12 @@ mod runtime_tests {
         assert!(settings_cx.has_pending_prompt());
         settings_cx.simulate_prompt_answer("Quit SpaceTerm");
         settings_cx.cx.update(|cx| {
-            open(cx, &host).unwrap();
+            open(cx, &host)
+                .unwrap()
+                .update(cx, |manager, window, cx| {
+                    manager.present_desktop_workspace(window, cx);
+                })
+                .unwrap();
             workspace
                 .update(cx, |_, window, _| window.remove_window())
                 .unwrap();

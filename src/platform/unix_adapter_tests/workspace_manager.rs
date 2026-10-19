@@ -18,7 +18,7 @@ fn workspace_manager_with_directory_selection(
     let directory_selection: Rc<dyn SystemDirectorySelection> =
         Rc::new(ScriptedDirectorySelection::new(selections));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_adapters(
+        let mut manager = WorkspaceManager::new_with_adapters(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
@@ -30,12 +30,14 @@ fn workspace_manager_with_directory_selection(
                 directory_selection,
                 window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
                 remote_workspace: test_remote_backend_factory(),
-                local_server: None,
+                local_server: crate::ui::launch_testing::unanswered(),
             },
             SidebarState::Expanded,
             window,
             cx,
-        )
+        );
+        manager.present_desktop_workspace(window, cx);
+        manager
     });
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| manager.focus(window, cx));
@@ -209,7 +211,9 @@ fn removal_should_protect_a_symbolic_link_pin_without_its_worktree_listing(
     let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
     choose_pin_directory(&manager, cx);
     cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| manager.create_local_workspace(window, cx));
+        manager.update(cx, |manager, cx| {
+            manager.present_desktop_workspace(window, cx);
+        });
     });
     cx.run_until_parked();
     let other = manager.read_with(cx, |manager, _| manager.workspaces.active_id());

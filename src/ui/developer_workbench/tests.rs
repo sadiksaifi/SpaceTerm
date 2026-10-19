@@ -468,7 +468,7 @@ fn differentiate_without_color_renders_two_status_cues_and_the_failed_glyph(
     assert_eq!(shapes(cx), (true, true));
     // Every Workspace mark shares the glyph selector; the last one rendered is Failed's.
     let glyph = cx.debug_bounds("workspace-switcher-status-glyph").unwrap();
-    let mark = cx.debug_bounds("workbench-status-workspace-5").unwrap();
+    let mark = cx.debug_bounds("workbench-status-workspace-4").unwrap();
     assert!(
         mark.contains(&glyph.center()),
         "{glyph:?} must sit in {mark:?}"
