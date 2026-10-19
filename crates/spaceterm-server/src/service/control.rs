@@ -17,11 +17,51 @@ pub struct Confirmation {
     service: Service,
     action: Action,
     running: bool,
+    wording: Wording,
 }
 
 impl Confirmation {
     pub fn action(&self) -> Action {
         self.action
+    }
+
+    pub fn wording(&self) -> &Wording {
+        &self.wording
+    }
+
+    pub fn title(&self) -> &'static str {
+        self.wording.title()
+    }
+
+    pub fn confirm_label(&self) -> &'static str {
+        self.wording.confirm_label()
+    }
+
+    pub fn message(&self) -> String {
+        self.wording.message()
+    }
+
+    pub fn detail(&self) -> String {
+        self.wording.detail()
+    }
+}
+
+/// Shared destructive-action copy, without service access or an authority grant.
+pub struct Wording {
+    server: String,
+    action: Action,
+    running: bool,
+    startup: ServiceStartup,
+}
+
+impl Wording {
+    pub fn new(identity: &str, action: Action, running: bool, startup: ServiceStartup) -> Self {
+        Self {
+            server: display_name(identity).into(),
+            action,
+            running,
+            startup,
+        }
     }
 
     pub fn title(&self) -> &'static str {
@@ -40,7 +80,7 @@ impl Confirmation {
     }
 
     pub fn message(&self) -> String {
-        let server = display_name(&self.service.identity);
+        let server = &self.server;
         match self.action {
             Action::Stop => {
                 format!("Stop the {server} server and end all of its Terminal Sessions?")
@@ -56,7 +96,7 @@ impl Confirmation {
     }
 
     pub fn detail(&self) -> String {
-        let startup = self.service.startup();
+        let startup = self.startup;
         match self.action {
             Action::Stop => match startup {
                 ServiceStartup::AtLogin => "Terminal Sessions end for every client using this server, and programs running in them stop. Workspaces are kept. The server stays stopped, even after you log in again, until you choose Start Server.",
@@ -147,6 +187,7 @@ impl Controller {
             service: self.service.clone(),
             action,
             running,
+            wording: Wording::new(&self.service.identity, action, running, self.startup()),
         })
     }
 
