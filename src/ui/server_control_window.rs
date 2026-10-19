@@ -18,8 +18,7 @@ use spaceterm_server::{
     },
 };
 use spaceterm_ui::{
-    Button, ButtonSize, ButtonVariant, ClientWindowControls, ProgressRing, ProgressState,
-    WindowControlSide,
+    Button, ButtonSize, ButtonVariant, ProgressRing, ProgressState,
 };
 
 use crate::platform::window_movement::WindowMovementFactory;
@@ -30,6 +29,9 @@ use crate::ui::settings_window::{AuthorizationPrompt, AuthorizedRequest, Service
 use crate::ui::sidebar_window::WindowMovement;
 
 actions!(spaceterm, [DismissServerControl]);
+
+#[cfg(test)]
+mod tests;
 
 const KEY_CONTEXT: &str = "ServerControl";
 const WINDOW_WIDTH: f32 = 420.0;
@@ -487,45 +489,11 @@ impl ServerControlWindow {
                     .mt(appearance.spacing(BODY_TO_BUTTONS))
                     .child(controls),
             );
-        let working = matches!(step, Step::Working(_));
-        let closing = cx.weak_entity();
-        let close: spaceterm_ui::WindowCloseHandler = Rc::new(move |window, cx| {
-            let _ = closing.update(cx, |this, cx| this.respond(Response::Cancel, window, cx));
-        });
-        let edge_margin = px(spaceterm_ui::DesktopWindowStyle::current(cx)
-            .control_metrics()
-            .edge_margin);
-        let control_surface = gpui_color(appearance.colors.title_bar_background);
-        let window_controls = div()
-            .absolute()
-            .top_0()
-            .left_0()
-            .w_full()
-            .flex()
-            .flex_row()
-            .justify_between()
-            .pt(edge_margin)
-            .px(edge_margin)
-            .when(!working, |controls| {
-                controls
-                    .child(
-                        ClientWindowControls::new(Rc::clone(&close))
-                            .side(WindowControlSide::Left)
-                            .surface_color(control_surface),
-                    )
-                    .child(
-                        ClientWindowControls::new(close)
-                            .side(WindowControlSide::Right)
-                            .surface_color(control_surface),
-                    )
-            });
         let movement = self.window_movement.region(
             "server-control-drag-region".to_owned(),
-            div()
-                .relative()
-                .size_full()
-                .child(body)
-                .child(window_controls),
+            // Like an alert dialog, the window has no close control: Cancel, Escape, and the
+            // window manager's close request close it, and none can overlap the heading.
+            div().relative().size_full().child(body),
             Edges::default(),
             window,
         );
@@ -537,6 +505,7 @@ impl ServerControlWindow {
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::dismiss))
+            .on_key_down(traverse)
             .size_full()
             .bg(gpui_color(
                 surface.surface(SettingsSurfaceRole::Canvas).paint,
@@ -545,6 +514,26 @@ impl ServerControlWindow {
             .child(movement);
         super::window_shell::render(root, window, cx)
     }
+}
+
+/// Tab and Shift-Tab move focus between the buttons, so the keyboard reaches every choice.
+fn traverse(event: &gpui::KeyDownEvent, window: &mut Window, cx: &mut App) {
+    let modifiers = event.keystroke.modifiers;
+    if event.keystroke.key != "tab"
+        || modifiers.control
+        || modifiers.alt
+        || modifiers.platform
+        || modifiers.function
+    {
+        return;
+    }
+    if modifiers.shift {
+        window.focus_prev(cx);
+    } else {
+        window.focus_next(cx);
+    }
+    window.prevent_default();
+    cx.stop_propagation();
 }
 
 impl Render for ServerControlWindow {

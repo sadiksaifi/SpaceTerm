@@ -79,7 +79,7 @@ use keybindings::ShortcutRows;
 use microphone::MicrophoneAccessRow;
 use permission_access::{PermissionAccessChanges, PermissionAccessRows};
 /// The server control window shares the service row's progress and authorization wording.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 pub(crate) use servers::{AuthorizationPrompt, AuthorizedRequest, ServiceAction};
 use theme_gallery::ThemeGallery;
 use theme_store::ThemeStore;
