@@ -13,6 +13,10 @@ fn main() {
         println!("cargo:rerun-if-changed={}", path.display());
     }
     println!("cargo:rerun-if-changed=../../build/identity.rs");
+    // The desktop's build script also watches its sources, which can make the checkout dirty
+    // without touching Git. Watching the same inputs keeps the two versions identical, as the
+    // bundled helper's exact version check requires.
+    println!("cargo:rerun-if-changed=../../src");
     let release = std::env::var("SPACETERM_RELEASE_TAG").ok();
     let packaged = std::env::var("SPACETERM_PACKAGED").as_deref() == Ok("1");
     assert!(release.is_none() || packaged, "releases must be packaged");
