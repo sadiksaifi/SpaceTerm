@@ -35,14 +35,7 @@ impl WorkspaceManager {
             .workspaces
             .workspace(workspace_id)
             .and_then(|w| w.payload().read(cx).active_worktree())
-            .and_then(|id| {
-                self.sidebar_worktrees
-                    .workspaces
-                    .get(&workspace_id)?
-                    .registry
-                    .key(id)
-            })
-            .map(|key| key.root().to_owned());
+            .and_then(|id| self.shared_worktree_root(workspace_id, id));
         let context = client.read(Read::Context { root: root.clone() }, cx);
         let handle = window.window_handle().downcast::<WorkspaceManager>();
         cx.spawn(async move |_, cx| {
