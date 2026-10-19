@@ -543,7 +543,6 @@ impl DevelopmentPaneHost {
                 if pane.ended || pane.failed {
                     return Err(Refusal::Missing);
                 }
-                pane.runtime.set_presentable(true);
                 if let Some(demand) = pane.runtime.accessibility_demand_sender() {
                     demand.request();
                 }
