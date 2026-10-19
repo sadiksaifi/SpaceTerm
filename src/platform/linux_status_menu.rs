@@ -11,7 +11,7 @@ use crate::status_menu::{
     worker::{Event, Request, Worker},
 };
 use crate::ui::server_control_window::{self, Operation, Step};
-use gpui::App;
+use gpui::{App, AppContext as _};
 use spaceterm_server::{
     ServerError,
     service::{
