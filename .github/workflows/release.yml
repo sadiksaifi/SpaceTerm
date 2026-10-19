@@ -128,37 +128,17 @@ jobs:
     name: Package and sign x86_64 Linux
     needs: tag
     runs-on: ubuntu-26.04
-    # The release links against Ubuntu 22.04's glibc 2.35 so it runs on every supported host.
-    container: ubuntu:22.04
+    # mise pins Zig's glibc target and the Ubuntu 22.04 native-library sysroot.
     timeout-minutes: 75
     steps:
-      - name: Install checkout, compiler, and signing tools
-        timeout-minutes: 10
-        # mise compiles its Cargo tools, so the compiler and linker come before mise.
-        run: |
-          apt-get update
-          apt-get install --yes --no-install-recommends \
-            build-essential ca-certificates curl git openssl pkg-config xz-utils
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           submodules: recursive
-      - name: Trust the checkout
-        # The container user differs from the owner of the mounted workspace.
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - name: Install rustup
-        # The container has no Rust. The default is the toolchain rust-toolchain.toml pins, so
-        # mise builds its Cargo tools with it outside the checkout too.
-        timeout-minutes: 5
-        run: |
-          toolchain="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --no-modify-path --profile minimal --default-toolchain "$toolchain"
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: jdx/mise-action@v5
       - name: Install Linux build packages
         timeout-minutes: 10
-        run: mise bootstrap packages apply --yes
+        run: mise bootstrap packages apply --yes --update
       - name: Fetch locked Rust dependencies
         timeout-minutes: 10
         run: mise run setup:deps
