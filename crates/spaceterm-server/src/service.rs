@@ -1138,6 +1138,7 @@ mod tests {
                         directory_recovery: false,
                         worktree_writes: false,
                         workspace_policy: true,
+                        presentation_changes: false,
                     },
                     _ => pane::Reply::Refused(pane::Refusal::Unsupported),
                 }

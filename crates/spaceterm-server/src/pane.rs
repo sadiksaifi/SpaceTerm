@@ -389,6 +389,8 @@ pub enum Reply {
         worktree_writes: bool,
         #[serde(default)]
         workspace_policy: bool,
+        #[serde(default)]
+        presentation_changes: bool,
     },
     Restored {
         #[serde(default)]
@@ -527,6 +529,7 @@ pub struct ExchangeTiming {
 #[cfg(feature = "client")]
 struct PaneTransport {
     admission: transport::Admission,
+    presentation_changes: bool,
     stream: std::sync::Mutex<Option<std::os::unix::net::UnixStream>>,
     takeover: bool,
     interactive_input: bool,
@@ -590,6 +593,7 @@ impl PaneConnection {
                 directory_recovery,
                 worktree_writes,
                 workspace_policy: true,
+                presentation_changes,
             } => {
                 let mut connection = Self::new(stream, pane_takeover);
                 std::sync::Arc::get_mut(&mut connection.transport)
@@ -613,6 +617,9 @@ impl PaneConnection {
                 std::sync::Arc::get_mut(&mut connection.transport)
                     .ok_or(ServerError::Protocol)?
                     .directory_recovery = directory_recovery;
+                std::sync::Arc::get_mut(&mut connection.transport)
+                    .ok_or(ServerError::Protocol)?
+                    .presentation_changes = presentation_changes;
                 Ok(connection)
             }
             Reply::Capabilities {
@@ -628,6 +635,7 @@ impl PaneConnection {
         Self {
             transport: std::sync::Arc::new(PaneTransport {
                 admission: transport::Admission::default(),
+                presentation_changes: false,
                 stream: std::sync::Mutex::new(Some(stream)),
                 takeover,
                 interactive_input: false,
@@ -643,6 +651,9 @@ impl PaneConnection {
     }
     pub fn supports_directory_recovery(&self) -> bool {
         self.transport.directory_recovery
+    }
+    pub fn supports_presentation_changes(&self) -> bool {
+        self.transport.presentation_changes
     }
     pub fn supports_native_effects(&self) -> bool {
         self.transport.native_effects

@@ -384,6 +384,7 @@ impl DevelopmentPaneHost {
                 directory_recovery: true,
                 worktree_writes: false,
                 workspace_policy: false,
+                presentation_changes: true,
             });
         }
         self.recover()?;
@@ -788,6 +789,9 @@ impl PaneService for DevelopmentPaneHost {
 }
 impl OwnedPane {
     fn invalidate_input(&mut self) {
+        self.presentable = false;
+        self.runtime.set_presentable(false);
+        self.screen_encoder = pane::presentation::ScreenEncoder::default();
         self.graphics_transfer = None;
         self.accessibility.disconnect();
         self.runtime.end_server_accessibility_demand();
