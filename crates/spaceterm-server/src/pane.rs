@@ -379,6 +379,8 @@ pub enum Reply {
         /// Whether CreateWorkspace honors its directory. Older servers ignore the field.
         #[serde(default)]
         workspace_directories: bool,
+        #[serde(default)]
+        workspace_policy: bool,
     },
     Restored {
         #[serde(default)]
@@ -568,6 +570,7 @@ impl PaneConnection {
                 directory_recovery,
                 worktree_writes,
                 workspace_directories,
+                workspace_policy: true,
             } => {
                 let mut connection = Self::new(stream, pane_takeover);
                 std::sync::Arc::get_mut(&mut connection.transport)
@@ -670,6 +673,25 @@ mod transport_tests {
     use super::*;
     use std::os::unix::net::UnixStream;
 
+    #[test]
+    fn a_retained_runtime_without_workspace_policy_is_refused_before_operations() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let peer = std::thread::spawn(move || {
+            let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
+            assert!(matches!(
+                wire.read::<Request>().unwrap(),
+                Request::Capabilities
+            ));
+            wire.write(&serde_json::json!({ "Capabilities": { "development_pane": true } }))
+                .unwrap();
+        });
+        assert!(matches!(
+            PaneConnection::negotiate(client),
+            Err(ServerError::Unsupported)
+        ));
+        peer.join().unwrap();
+    }
+
     /// An approved older runtime predates directory creation and would silently drop the field.
     #[test]
     fn a_server_that_never_names_workspace_directories_does_not_support_them() {
@@ -689,6 +711,7 @@ mod transport_tests {
         };
         let older = serde_json::json!({ "Capabilities": {
             "development_pane": true,
+            "workspace_policy": true,
             "pane_takeover": true,
             "directory_recovery": true,
             "worktree_writes": true,

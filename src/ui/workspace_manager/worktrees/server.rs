@@ -236,6 +236,7 @@ impl WorkspaceManager {
         let task = client.write(
             Operation::OpenTab {
                 workspace,
+                source: None,
                 root,
                 path,
             },

@@ -82,6 +82,7 @@ pub enum Operation {
     },
     OpenTab {
         workspace: Id,
+        source: Option<Id>,
         root: PathBuf,
         path: PathBuf,
     },

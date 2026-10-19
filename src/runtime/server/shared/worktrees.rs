@@ -313,10 +313,45 @@ impl SharedWorkspaceHost {
         match prepared {
             preparing::Prepared::Open {
                 workspace,
+                source,
                 root,
                 path,
             } => {
-                let outcome = match next.add_worktree_tab(device, workspace, root, path) {
+                let selected = (|| {
+                    let w = next
+                        .inventory
+                        .workspaces
+                        .iter()
+                        .find(|w| w.id == workspace)
+                        .ok_or(Refusal::Missing)?;
+                    let source = source
+                        .map(|id| {
+                            w.tabs
+                                .iter()
+                                .flat_map(|t| &t.panes)
+                                .find(|p| p.id == id)
+                                .ok_or(Refusal::Missing)
+                        })
+                        .transpose()?;
+                    let filesystem = local_filesystem();
+                    let start = w
+                        .pinned_directory
+                        .as_deref()
+                        .filter(|pin| filesystem.physically_contains(&path, pin))
+                        .or_else(|| {
+                            source
+                                .map(crate::runtime::server::repositories::pane_directory)
+                                .filter(|cwd| filesystem.physically_contains(&path, cwd))
+                        })
+                        .unwrap_or(&path);
+                    let start = filesystem
+                        .validate_directory(start)
+                        .map_err(|_| Refusal::DirectoryUnavailable)?
+                        .path()
+                        .to_owned();
+                    next.add_worktree_tab(device, workspace, root, path, start)
+                })();
+                let outcome = match selected {
                     Ok(target) => Outcome::Accepted { target },
                     Err(_) => Outcome::WorktreeFailed(Error::Unavailable),
                 };
@@ -341,7 +376,13 @@ impl SharedWorkspaceHost {
                     {
                         // Reserve capacity before Git starts, without publishing a speculative Tab.
                         next.clone()
-                            .add_worktree_tab(device, *workspace, root.clone(), path.clone())
+                            .add_worktree_tab(
+                                device,
+                                *workspace,
+                                root.clone(),
+                                path.clone(),
+                                path.clone(),
+                            )
                             .map_err(|_| Error::Unavailable)?;
                     }
                     Ok(())
@@ -420,9 +461,10 @@ impl SharedWorkspaceHost {
                     workspace, root, ..
                 }) = operation
                 {
-                    match path
-                        .and_then(|path| next.add_worktree_tab(device, workspace, root, path).ok())
-                    {
+                    match path.and_then(|path| {
+                        next.add_worktree_tab(device, workspace, root, path.clone(), path)
+                            .ok()
+                    }) {
                         Some(target) => Outcome::Accepted { target },
                         None => Outcome::WorktreeFailed(Error::Interrupted),
                     }
@@ -453,6 +495,56 @@ mod tests {
         repository_tests::{GitFixture, finish_write, git_facts, review_removal},
         tests::{create_shared, host, shared_inventory, size},
     };
+
+    #[test]
+    fn worktree_tabs_use_the_source_directory_and_contained_pin_before_the_root() {
+        let git = GitFixture::new();
+        let tree = git.0.join("linked");
+        git.git(&["worktree", "add", "-b", "feature", tree.to_str().unwrap()]);
+        let cwd = tree.join("src");
+        let pin = tree.join("pinned");
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::create_dir(&pin).unwrap();
+        let mut prototype = host();
+        prototype.directory = git.0.clone();
+        let mut host = SharedWorkspaceHost::new(prototype);
+        let workspace = create_shared(&mut host, 1);
+        let source = host.state.inventory.workspaces[0].tabs[0].root_pane;
+        host.state.confirm_directory(source, cwd.clone());
+        for (index, (pinned, expected)) in [
+            (None, cwd.clone()),
+            (Some(pin.clone()), pin),
+            (Some(git.0.clone()), cwd),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let pin_sequence = 2 + index as u64 * 2;
+            assert!(matches!(host.request([1; 32], [1; 32], Request::Mutate {
+                sequence: pin_sequence,
+                mutation: Mutation::PinWorkspace { workspace, version: index as u64, directory: pinned },
+            }), Reply::Outcome(record) if matches!(record.outcome, Outcome::Accepted { .. })));
+            let Outcome::Accepted { target } = finish_write(
+                &mut host,
+                pin_sequence + 1,
+                Operation::OpenTab {
+                    workspace,
+                    root: git.0.clone(),
+                    path: tree.clone(),
+                    source: Some(source),
+                },
+            ) else {
+                panic!("open Worktree Tab");
+            };
+            let workspace = &host.state.inventory.workspaces[0];
+            let tab = workspace.tabs.iter().find(|tab| tab.id == target).unwrap();
+            assert_eq!(
+                (tab.worktree.as_ref(), &tab.panes[0].starting_directory),
+                (Some(&tree), &expected)
+            );
+        }
+        host.shutdown().unwrap();
+    }
 
     struct FilterGate(PathBuf);
     impl Drop for FilterGate {

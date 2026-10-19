@@ -3168,7 +3168,11 @@ impl TabManager {
             return;
         };
         self.tab_selector_pressed = None;
-        if let SharedSubmission::Refused(reason) = shared.create_tab() {
+        let active = self.tabs.active_tab().read(cx);
+        let Some(source) = active.shared_server_pane(active.focused_pane_id()) else {
+            return;
+        };
+        if let SharedSubmission::Refused(reason) = shared.create_tab(source) {
             let detail = format!(
                 "SpaceTerm did not create a Tab in this shared Workspace. {}",
                 reason.explanation()

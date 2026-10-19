@@ -376,6 +376,7 @@ impl DevelopmentPaneHost {
                 directory_recovery: true,
                 worktree_writes: false,
                 workspace_directories: false,
+                workspace_policy: false,
             });
         }
         self.recover()?;
@@ -2727,7 +2728,10 @@ mod tests {
             [1; 32],
             Request::Mutate {
                 sequence: 2,
-                mutation: Mutation::CreateTab { workspace },
+                mutation: Mutation::CreateTab {
+                    workspace,
+                    source: None,
+                },
             },
         );
         assert!(
@@ -2760,7 +2764,10 @@ mod tests {
                     axis: Axis::Down,
                 }
             } else {
-                Mutation::CreateTab { workspace }
+                Mutation::CreateTab {
+                    workspace,
+                    source: None,
+                }
             };
             let Reply::Outcome(result) = host.request(
                 [1; 32],
@@ -3013,7 +3020,10 @@ mod tests {
             [4; 32],
             Request::Mutate {
                 sequence: 2,
-                mutation: Mutation::CreateTab { workspace: w.id },
+                mutation: Mutation::CreateTab {
+                    workspace: w.id,
+                    source: None,
+                },
             },
         ) else {
             panic!()

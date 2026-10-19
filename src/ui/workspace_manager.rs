@@ -4683,7 +4683,7 @@ impl WorkspaceManager {
                     self.scroll_active_workspace_into_view(cx);
                 }
             }
-            Mutation::CreateTab { workspace }
+            Mutation::CreateTab { workspace, .. }
             | Mutation::SplitPane { workspace, .. }
             | Mutation::Worktree(spaceterm_server::worktree::Operation::OpenTab {
                 workspace,

@@ -262,7 +262,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
     )?;
     let (_, sequence) = inventory(&mut first)?;
-    let creation = Mutation::CreateTab { workspace };
+    let creation = Mutation::CreateTab {
+        workspace,
+        source: None,
+    };
     // Discard the result at the application boundary and reconnect with its original identity.
     first.exchange(&Request::Mutate {
         sequence,
@@ -441,7 +444,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     let (_, sequence) = inventory(&mut first)?;
     assert!(
-        matches!(first.exchange(&Request::Mutate { sequence, mutation: Mutation::CreateTab { workspace } })?, Reply::Outcome(o) if o.outcome == Outcome::Missing)
+        matches!(first.exchange(&Request::Mutate { sequence, mutation: Mutation::CreateTab { workspace, source: None } })?, Reply::Outcome(o) if o.outcome == Outcome::Missing)
     );
     first.exchange(&Request::Acknowledge { sequence })?;
     assert!(matches!(

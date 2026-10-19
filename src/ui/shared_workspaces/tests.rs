@@ -229,7 +229,8 @@ fn new_tab_in_a_shared_workspace_should_ask_the_server_and_create_nothing_locall
     assert_eq!(
         harness.edits.submitted(),
         vec![Mutation::CreateTab {
-            workspace: WORKSPACE
+            workspace: WORKSPACE,
+            source: Some(ROOT_PANE),
         }],
         "New Tab should ask the server"
     );
@@ -1334,6 +1335,7 @@ mod edits {
         bind(&mut shared, &root_only());
         edits.submit_for_recovery(Mutation::CreateTab {
             workspace: WORKSPACE,
+            source: None,
         });
         edits.answer(Outcome::Accepted { target: SECOND_TAB });
 

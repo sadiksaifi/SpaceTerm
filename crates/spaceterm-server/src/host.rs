@@ -300,6 +300,7 @@ pub(crate) fn serve_runtime(
                                         directory_recovery: true,
                                         worktree_writes: false,
                                         workspace_directories: false,
+                                        workspace_policy: false,
                                     }
                                 }
                                 None => {
@@ -621,6 +622,7 @@ mod startup_tests {
                         directory_recovery: true,
                         worktree_writes: false,
                         workspace_directories: false,
+                        workspace_policy: false,
                     },
                     Request::Inventory => Reply::Inventory {
                         inventory: crate::hierarchy::State::empty().inventory,

@@ -41,7 +41,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             directory: Some(repository.0.clone()),
         },
     )?;
-    let tab = mutate(&mut first, Mutation::CreateTab { workspace })?;
+    let tab = mutate(
+        &mut first,
+        Mutation::CreateTab {
+            workspace,
+            source: None,
+        },
+    )?;
     let initial = await_facts(&mut second, &repository.0, |f| {
         f.repository
             .as_ref()
@@ -116,7 +122,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             directory: Some(linked.clone()),
         },
     )?;
-    let tab = mutate(&mut first, Mutation::CreateTab { workspace })?;
+    let tab = mutate(
+        &mut first,
+        Mutation::CreateTab {
+            workspace,
+            source: None,
+        },
+    )?;
     let current = inventory(&mut first)?.0;
     for other in &current
         .workspaces

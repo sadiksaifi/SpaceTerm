@@ -165,6 +165,7 @@ pub enum Mutation {
     },
     CreateTab {
         workspace: Id,
+        source: Option<Id>,
     },
     SplitPane {
         workspace: Id,
@@ -397,6 +398,7 @@ impl State {
         workspace: Id,
         root: PathBuf,
         path: PathBuf,
+        starting_directory: PathBuf,
     ) -> Result<Id, Refusal> {
         if self.tab_count() >= MAX_TABS || self.pane_count() >= MAX_PANES {
             return Err(Refusal::Capacity);
@@ -419,7 +421,7 @@ impl State {
                 id: pane,
                 source: None,
                 axis: Axis::Right,
-                starting_directory: path,
+                starting_directory,
                 confirmed_directory: None,
                 creator: Some(device),
             }],
@@ -569,7 +571,7 @@ impl State {
                 });
                 id
             }
-            Mutation::CreateTab { workspace } => {
+            Mutation::CreateTab { workspace, source } => {
                 if self.tab_count() >= MAX_TABS || self.pane_count() >= MAX_PANES {
                     return Ok(Outcome::Limit);
                 }
@@ -581,20 +583,23 @@ impl State {
                 else {
                     return Ok(Outcome::Missing);
                 };
-                let start = w.pinned_directory.clone().unwrap_or_else(|| {
-                    w.tabs
+                let source = match source {
+                    Some(id) => w.tabs.iter().flat_map(|t| &t.panes).find(|p| p.id == *id),
+                    None => w
+                        .tabs
                         .iter()
                         .find(|t| t.id == w.root_tab)
-                        .and_then(|t| t.panes.iter().find(|p| p.id == t.root_pane))
-                        .map_or_else(
-                            || directory.to_owned(),
-                            |p| {
-                                p.confirmed_directory
-                                    .as_ref()
-                                    .unwrap_or(&p.starting_directory)
-                                    .clone()
-                            },
-                        )
+                        .and_then(|t| t.panes.iter().find(|p| p.id == t.root_pane)),
+                };
+                let Some(source) = source else {
+                    return Ok(Outcome::Missing);
+                };
+                let start = w.pinned_directory.clone().unwrap_or_else(|| {
+                    source
+                        .confirmed_directory
+                        .as_ref()
+                        .unwrap_or(&source.starting_directory)
+                        .clone()
                 });
                 let id = new_id()?;
                 let pane = new_id()?;
@@ -972,6 +977,90 @@ mod tests {
     use super::*;
 
     #[test]
+    fn new_tabs_follow_the_source_pane_unless_the_workspace_is_pinned() {
+        let mut state = State::empty();
+        state
+            .apply(
+                [1; 32],
+                1,
+                Mutation::CreateWorkspace {
+                    name: "Build".into(),
+                    directory: None,
+                },
+                "/home/test".as_ref(),
+                |_| true,
+            )
+            .unwrap();
+        let workspace = state.inventory.workspaces[0].id;
+        let tab = state.inventory.workspaces[0].root_tab;
+        let root = state.inventory.workspaces[0].tabs[0].root_pane;
+        let Outcome::Accepted { target: source } = state
+            .apply(
+                [1; 32],
+                2,
+                Mutation::SplitPane {
+                    workspace,
+                    tab,
+                    source: root,
+                    axis: Axis::Right,
+                },
+                "/home/test".as_ref(),
+                |_| true,
+            )
+            .unwrap()
+        else {
+            panic!("split");
+        };
+        state.confirm_directory(root, "/repo/main".into());
+        state.confirm_directory(source, "/repo/feature".into());
+        state
+            .apply(
+                [1; 32],
+                3,
+                Mutation::CreateTab {
+                    workspace,
+                    source: Some(source),
+                },
+                "/home/test".as_ref(),
+                |_| true,
+            )
+            .unwrap();
+        assert_eq!(
+            state.inventory.workspaces[0].tabs[1].panes[0].starting_directory,
+            Path::new("/repo/feature")
+        );
+        state
+            .apply(
+                [1; 32],
+                4,
+                Mutation::PinWorkspace {
+                    workspace,
+                    version: 0,
+                    directory: Some("/repo/pin".into()),
+                },
+                "/home/test".as_ref(),
+                |_| true,
+            )
+            .unwrap();
+        state
+            .apply(
+                [1; 32],
+                5,
+                Mutation::CreateTab {
+                    workspace,
+                    source: Some(source),
+                },
+                "/home/test".as_ref(),
+                |_| true,
+            )
+            .unwrap();
+        assert_eq!(
+            state.inventory.workspaces[0].tabs[2].panes[0].starting_directory,
+            Path::new("/repo/pin")
+        );
+    }
+
+    #[test]
     fn confirmed_close_promotes_roots_and_replay_cannot_remove_later_work() {
         let mut state = State::empty();
         state
@@ -992,7 +1081,10 @@ mod tests {
             .apply(
                 [1; 32],
                 2,
-                Mutation::CreateTab { workspace },
+                Mutation::CreateTab {
+                    workspace,
+                    source: None,
+                },
                 "/tmp".as_ref(),
                 |_| true,
             )
@@ -1057,7 +1149,10 @@ mod tests {
             .apply(
                 [1; 32],
                 2,
-                Mutation::CreateTab { workspace },
+                Mutation::CreateTab {
+                    workspace,
+                    source: None,
+                },
                 "/tmp".as_ref(),
                 |_| true,
             )
@@ -1303,7 +1398,10 @@ mod tests {
                 .apply(
                     [1; 32],
                     3,
-                    Mutation::CreateTab { workspace },
+                    Mutation::CreateTab {
+                        workspace,
+                        source: None
+                    },
                     "/tmp".as_ref(),
                     |_| true
                 )

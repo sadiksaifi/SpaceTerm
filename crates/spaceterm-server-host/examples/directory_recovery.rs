@@ -171,7 +171,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tab = mutate(
         &mut connection,
         sequence + 2,
-        Mutation::CreateTab { workspace },
+        Mutation::CreateTab {
+            workspace,
+            source: None,
+        },
     )?;
     let before = inventory(&mut connection)?.0;
     let pane = before.workspaces[0]

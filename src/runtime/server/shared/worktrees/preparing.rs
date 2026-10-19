@@ -4,6 +4,7 @@ use super::*;
 pub(super) enum Prepared {
     Open {
         workspace: Id,
+        source: Option<Id>,
         root: PathBuf,
         path: PathBuf,
     },
@@ -82,6 +83,7 @@ impl RemovalPlan {
                     workspace.id,
                     self.review.root.clone(),
                     self.fallback.clone(),
+                    self.fallback.clone(),
                 )
                 .map_err(|_| Error::Unavailable)?;
             }
@@ -104,6 +106,7 @@ pub(super) fn prepare(
     match operation {
         Operation::OpenTab {
             workspace,
+            source,
             root,
             path,
         } => {
@@ -120,6 +123,7 @@ pub(super) fn prepare(
                 .map_err(|_| Error::Location)?;
             Ok(Prepared::Open {
                 workspace,
+                source,
                 root,
                 path,
             })

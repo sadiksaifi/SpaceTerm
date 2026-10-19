@@ -848,10 +848,33 @@ mod development {
         }
 
         /// Asks the server for another Tab in this Workspace.
-        pub(crate) fn create_tab(&self) -> SharedSubmission {
-            self.edits.submit(Mutation::CreateTab {
-                workspace: self.workspace,
-            })
+        pub(crate) fn create_tab(&self, source: Id) -> SharedSubmission {
+            let snapshot = self.edits.edits.snapshot();
+            let tab = snapshot
+                .inventory
+                .as_ref()
+                .and_then(|i| i.workspaces.iter().find(|w| w.id == self.workspace))
+                .and_then(|w| {
+                    w.tabs
+                        .iter()
+                        .find(|t| t.panes.iter().any(|p| p.id == source))
+                });
+            let mutation =
+                match tab.and_then(|t| t.worktree_repository.as_ref().zip(t.worktree.as_ref())) {
+                    Some((root, path)) => {
+                        Mutation::Worktree(spaceterm_server::worktree::Operation::OpenTab {
+                            workspace: self.workspace,
+                            root: root.clone(),
+                            path: path.clone(),
+                            source: Some(source),
+                        })
+                    }
+                    None => Mutation::CreateTab {
+                        workspace: self.workspace,
+                        source: Some(source),
+                    },
+                };
+            self.edits.submit(mutation)
         }
     }
 

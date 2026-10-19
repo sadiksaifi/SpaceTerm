@@ -797,6 +797,7 @@ mod tests {
         let mut shared = crate::hierarchy::State::from_legacy(&organization);
         let creation = crate::hierarchy::Mutation::CreateTab {
             workspace: organization.workspace,
+            source: None,
         };
         let accepted = shared
             .apply([42; 32], 1, creation.clone(), &fixture.0, |_| true)
