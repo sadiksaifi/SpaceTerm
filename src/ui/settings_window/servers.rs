@@ -419,7 +419,7 @@ pub(super) const AUTHORIZE_CANCEL_SELECTOR: &str = "settings-server-authorize-ca
 
 /// The step a person can take from the service row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ServiceAction {
+pub(crate) enum ServiceAction {
     /// Reads the service again.
     Check,
     /// Installs and starts the service from a verified server build the person names. With several
@@ -438,7 +438,7 @@ pub(super) enum ServiceAction {
 
 impl ServiceAction {
     /// The button label. Start and Stop use the names the person knows the actions by.
-    pub(super) const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Check => "Check Now",
             Self::Install => "Install",
@@ -506,7 +506,7 @@ impl ServiceAction {
 
     /// The progress badge and caption. Installing keeps a Stop the person chose, so it starts the
     /// server only when `stopped` is false.
-    const fn progress(self, stopped: bool) -> (&'static str, &'static str) {
+    pub(crate) const fn progress(self, stopped: bool) -> (&'static str, &'static str) {
         match self {
             Self::Check => ("Checking", "Reading the service\u{2026}"),
             Self::Install if stopped => (
@@ -535,7 +535,7 @@ impl ServiceAction {
 /// The Install or Start the service refused until the person authorizes startup at boot. The
 /// authorization step retries only this request, and only after the person confirms it.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum AuthorizedRequest {
+pub(crate) enum AuthorizedRequest {
     /// Installs and starts the named verified build.
     Install(PathBuf),
     /// Starts the installed server. A Restart refused after stopping retries as Start.
@@ -649,16 +649,16 @@ impl ServiceConfirmation {
 /// administrator password. Cancel takes initial focus, and cancelling here or in the operating
 /// system's prompt changes nothing.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct AuthorizationPrompt {
-    pub(super) title: &'static str,
-    pub(super) message: &'static str,
-    pub(super) detail: SharedString,
-    pub(super) confirm: &'static str,
+pub(crate) struct AuthorizationPrompt {
+    pub(crate) title: &'static str,
+    pub(crate) message: &'static str,
+    pub(crate) detail: SharedString,
+    pub(crate) confirm: &'static str,
 }
 
 impl AuthorizationPrompt {
     /// The prompt for one waiting request. `build` names the build Install installs.
-    pub(super) fn for_request(request: &AuthorizedRequest, build: Option<&str>) -> Self {
+    pub(crate) fn for_request(request: &AuthorizedRequest, build: Option<&str>) -> Self {
         let (then, confirm) = match (request, build) {
             (AuthorizedRequest::Install(_), Some(build)) => (
                 format!("SpaceTerm then installs {build} and starts the server."),

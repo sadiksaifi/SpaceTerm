@@ -290,6 +290,9 @@ pub(crate) use macos_composition::main;
 #[cfg(target_os = "linux")]
 #[cfg(feature = "desktop")]
 mod linux_composition;
+#[cfg(target_os = "linux")]
+#[cfg(feature = "desktop")]
+pub(crate) mod linux_server_control;
 #[cfg(all(target_os = "linux", not(test)))]
 #[cfg(feature = "desktop")]
 mod linux_fonts;
