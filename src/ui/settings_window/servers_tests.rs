@@ -543,6 +543,22 @@ fn a_refused_operation_explains_itself_beside_the_status_read_after_it() {
 }
 
 #[test]
+fn a_stop_whose_cleanup_was_not_confirmed_offers_only_another_stop() {
+    let presentation = present_service(ServiceState {
+        status: None,
+        failure: Some(ServerError::CleanupUnresolved),
+        ..ServiceState::default()
+    });
+
+    assert_eq!(presentation.state, "Cleanup Unresolved");
+    // Retrying Stop never restarts the server, so Start and Restart stay unavailable.
+    assert_eq!(
+        presentation.actions,
+        vec![ServiceAction::Stop, ServiceAction::Check]
+    );
+}
+
+#[test]
 fn an_unreadable_service_offers_only_another_check() {
     let presentation = present_service(ServiceState {
         status: None,

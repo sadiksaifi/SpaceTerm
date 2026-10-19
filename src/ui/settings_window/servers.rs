@@ -836,6 +836,19 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
             "settings-server-service-state-not-checked",
             guidance("SpaceTerm reads the service when you open this section."),
         ),
+        // A Stop that published its intent but could not confirm its cleanup. Only another
+        // explicit Stop retries it; nothing offered here starts the server again.
+        (None, Some(ServerError::CleanupUnresolved), _) => (
+            "Cleanup Unresolved",
+            "settings-server-service-state-cleanup-unresolved",
+            (
+                SharedString::new_static(
+                    "SpaceTerm couldn't confirm that the server's Terminal Sessions ended. \
+                     Choose Stop Server to try again.",
+                ),
+                CaptionTone::Warning,
+            ),
+        ),
         (None, Some(error), _) => (
             "Unknown",
             "settings-server-service-state-unknown",
@@ -947,10 +960,13 @@ pub(super) fn present_service(state: ServiceState) -> ServicePresentation {
             (badge, selector, caption)
         }
     };
-    let actions = phase.map_or_else(
-        || vec![ServiceAction::Check],
-        |phase| phase.actions().to_vec(),
-    );
+    let actions = match (phase, state.failure) {
+        (Some(phase), _) => phase.actions().to_vec(),
+        (None, Some(ServerError::CleanupUnresolved)) => {
+            vec![ServiceAction::Stop, ServiceAction::Check]
+        }
+        (None, _) => vec![ServiceAction::Check],
+    };
     // The authorization step takes the place of the Install or Start it retries.
     let actions = match &authorization {
         Some(pending) => {
