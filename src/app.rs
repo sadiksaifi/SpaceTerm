@@ -152,6 +152,7 @@ actions!(
         ShowAboutApplication,
         OpenApplicationHelp,
         QuitApplication,
+        CloseAllWindows,
         HideApplication,
         HideOtherApplications,
         ShowAllApplications,
@@ -169,30 +170,40 @@ pub(crate) fn init(
 ) -> Result<(), crate::platform::application_quit::ApplicationQuitError> {
     install_application_menu_actions(cx, Rc::clone(&application_menu));
     install_application_quit(cx, Rc::clone(&application_quit))?;
-    if application_quit.last_window_policy()
-        == crate::platform::application_quit::LastWindowPolicy::Quit
-    {
-        let adapter = application_quit.clone();
-        let pending = Rc::new(std::cell::Cell::new(false));
-        cx.on_window_closed(move |cx, _| {
-            if cx.windows().is_empty() && !pending.replace(true) {
-                let adapter = adapter.clone();
-                let pending = pending.clone();
-                cx.defer(move |cx| {
-                    pending.set(false);
-                    if cx.windows().is_empty() {
-                        adapter.request_quit(cx);
-                    }
-                });
-            }
-        })
-        .detach();
-    }
+    let quits = application_quit.last_window_policy()
+        == crate::platform::application_quit::LastWindowPolicy::Quit;
+    let adapter = application_quit.clone();
+    let pending = Rc::new(std::cell::Cell::new(false));
+    cx.on_window_closed(move |cx, _| {
+        if cx.windows().is_empty() && !pending.replace(true) {
+            let adapter = adapter.clone();
+            let pending = pending.clone();
+            cx.defer(move |cx| {
+                pending.set(false);
+                if !cx.windows().is_empty() {
+                    return;
+                }
+                if take_dismissal(cx) {
+                    crate::status_menu::show_in_dock(cx, false);
+                }
+                // A status item keeps a windowless client reachable. Without one, the client
+                // exits rather than run where nothing can reach it.
+                if quits && !crate::status_menu::available(cx) {
+                    adapter.request_quit(cx);
+                }
+            });
+        }
+    })
+    .detach();
     crate::ui::settings_window::init(cx);
     #[cfg(feature = "developer-tools")]
     crate::ui::developer_workbench::init(cx);
     crate::ui::updates::init(cx);
     cx.on_action(switch_workspace_from_global_action);
+    cx.on_action(|_: &CloseAllWindows, cx| {
+        // Window action dispatch temporarily owns its Window, so close after it returns.
+        cx.defer(close_all_windows);
+    });
     cx.on_action(move |_: &QuitApplication, cx| {
         let application_quit = Rc::clone(&application_quit);
         // Window action dispatch temporarily owns its Window. Read all Workspace
@@ -439,9 +450,13 @@ impl ApplicationQuitCoordinator {
                 *self.state.borrow_mut() = ApplicationQuitCoordinatorState::WaitingForUpdater;
                 return;
             }
-            if let Some(adapter) = self.adapter.upgrade() {
-                adapter.confirm_quit(cx);
-            }
+            // An admitted Stop or Restart finishes before the client exits.
+            let adapter = self.adapter.clone();
+            crate::status_menu::after_operations(cx, move |cx| {
+                if let Some(adapter) = adapter.upgrade() {
+                    adapter.confirm_quit(cx);
+                }
+            });
         } else {
             self.present_confirmation(current, cx);
         }
@@ -654,6 +669,46 @@ fn workspace_windows(cx: &App) -> Vec<gpui::WindowHandle<WorkspaceManager>> {
         .collect()
 }
 
+/// Close All Windows was chosen and its windows are still closing. Once none remains, the
+/// client leaves the Dock and stays in the menu bar.
+#[derive(Default)]
+struct Dismissal(bool);
+impl gpui::Global for Dismissal {}
+
+fn take_dismissal(cx: &mut App) -> bool {
+    std::mem::take(&mut cx.default_global::<Dismissal>().0)
+}
+
+/// A window refused to close, so the client stays windowed.
+pub(crate) fn dismissal_cancelled(cx: &mut App) {
+    cx.default_global::<Dismissal>().0 = false;
+}
+
+/// Closes every window the way its own close button does, so a window that asks first still
+/// asks. The client keeps running with its status item; it neither quits nor stops the server.
+fn close_all_windows(cx: &mut App) {
+    cx.default_global::<Dismissal>().0 = true;
+    for window in cx.windows() {
+        if let Some(workspace) = window.downcast::<WorkspaceManager>() {
+            let _ = workspace.update(cx, |manager, window, cx| {
+                manager.request_window_close(window, cx);
+            });
+        } else if !crate::ui::settings_window::request_window_close(window, cx) {
+            let _ = window.update(cx, |_, window, _| window.remove_window());
+        }
+    }
+    // With nothing to close, the client is menu-only at once.
+    if cx.windows().is_empty() && take_dismissal(cx) {
+        crate::status_menu::show_in_dock(cx, false);
+    }
+}
+
+/// Returns a menu-only client to the Dock before it presents a window again.
+fn leave_menu_only(cx: &mut App) {
+    dismissal_cancelled(cx);
+    crate::status_menu::show_in_dock(cx, true);
+}
+
 fn restore_default_window(cx: &mut App, host: &HostComposition) {
     if !workspace_windows(cx).is_empty() {
         return;
@@ -672,6 +727,7 @@ impl gpui::Global for DefaultWorkspaceWindowHost {}
     reason = "external activation sources are selected by host composition"
 )]
 pub(crate) fn activate_default_window(cx: &mut App, token: Option<&str>) {
+    leave_menu_only(cx);
     if let Some(host) = cx
         .try_global::<DefaultWorkspaceWindowHost>()
         .map(|host| host.0.clone())
@@ -837,6 +893,11 @@ pub(crate) struct HostCompositionParts {
     pub(crate) window_frame: crate::platform::window_frame::WindowFrameGeometry,
     pub(crate) window_chrome: crate::platform::window_chrome::WindowChrome,
 }
+/// Installs the host's native status item once the application runs. Window movement serves any
+/// window the status item opens.
+pub(crate) type StatusMenuInstaller =
+    fn(&mut App, Rc<dyn crate::platform::window_movement::WindowMovementFactory>);
+
 pub(crate) struct HostComposition {
     modal_prompts: bool,
     profile: crate::desktop_profile::DesktopProfile,
@@ -851,12 +912,18 @@ pub(crate) struct HostComposition {
         Arc<dyn crate::settings::storage::SettingsStorage>,
         Rc<dyn crate::platform::appearance::AppearancePlatform>,
     )>,
+    /// Shows the native status item beside the client's windows, where the host has one.
+    status_menu: Option<StatusMenuInstaller>,
     /// The application's one Permission Setup, created once the application runs when the host
     /// composes permission access and a Setup Guide.
     permission_setup:
         std::cell::OnceCell<gpui::Entity<crate::ui::permission_setup::PermissionSetup>>,
 }
 impl HostComposition {
+    pub(crate) fn with_status_menu(mut self, install: StatusMenuInstaller) -> Self {
+        self.status_menu = Some(install);
+        self
+    }
     pub(crate) fn with_modal_prompts(mut self, enabled: bool) -> Self {
         self.modal_prompts = enabled;
         self
@@ -897,6 +964,7 @@ impl HostComposition {
             window_frame: parts.window_frame,
             window_chrome: parts.window_chrome,
             appearance: None,
+            status_menu: None,
             permission_setup: std::cell::OnceCell::new(),
         })
     }
@@ -945,13 +1013,19 @@ pub(crate) fn run(host: HostComposition) -> Result<(), RuntimeError> {
     let host = Rc::new(host);
     let reopened_host = Rc::clone(&host);
     let application = gpui_platform::application().with_assets(spaceterm_ui::EmbeddedAssets);
-    application.on_reopen(move |cx| restore_default_window(cx, &reopened_host));
+    application.on_reopen(move |cx| {
+        leave_menu_only(cx);
+        restore_default_window(cx, &reopened_host);
+    });
     application.run(move |cx| {
         if let Err(error) = initialize_application(cx, &host) {
             reported_failure.set(Some(error));
             cx.quit();
         } else {
             install_headless_window_actions(cx, Rc::clone(&host));
+            if let Some(install) = host.status_menu {
+                install(cx, Rc::clone(&host.window_movement));
+            }
             let service = cx.global::<crate::updates::UpdateService>().0.clone();
             service.update(cx, |updates, cx| {
                 updates.begin_launch(
@@ -1138,12 +1212,111 @@ mod tests {
         assert_eq!(quit.0.get(), 1);
     }
 
+    /// Counts quit requests under one last-window policy.
+    struct CountingQuit {
+        policy: crate::platform::application_quit::LastWindowPolicy,
+        requests: std::cell::Cell<usize>,
+    }
+
+    impl ApplicationQuitAdapter for CountingQuit {
+        fn last_window_policy(&self) -> crate::platform::application_quit::LastWindowPolicy {
+            self.policy
+        }
+        fn install(
+            &self,
+            _: ApplicationQuitHandler,
+        ) -> Result<(), crate::platform::application_quit::ApplicationQuitError> {
+            Ok(())
+        }
+        fn request_quit(&self, _: &mut App) {
+            self.requests.set(self.requests.get() + 1);
+        }
+        fn confirm_quit(&self, _: &mut App) {}
+    }
+
+    fn close_all_windows_with(
+        policy: crate::platform::application_quit::LastWindowPolicy,
+        status_area: bool,
+        cx: &mut TestAppContext,
+    ) -> (Rc<CountingQuit>, Rc<RefCell<Vec<bool>>>) {
+        let quit = Rc::new(CountingQuit {
+            policy,
+            requests: std::cell::Cell::new(0),
+        });
+        let dock = Rc::new(RefCell::new(Vec::new()));
+        cx.update(crate::ui::init).unwrap();
+        cx.update(|cx| {
+            init(cx, application_menu(), quit.clone()).unwrap();
+            let recorded = Rc::clone(&dock);
+            crate::status_menu::set_dock(cx, Rc::new(move |visible| recorded.borrow_mut().push(visible)));
+            crate::status_menu::set_available(cx, status_area);
+        });
+        cx.add_window(|_, _| gpui::EmptyView);
+        cx.add_window(|_, _| gpui::EmptyView);
+        cx.update(|cx| cx.dispatch_action(&CloseAllWindows));
+        cx.run_until_parked();
+        assert!(cx.update(|cx| cx.windows().is_empty()));
+        (quit, dock)
+    }
+
+    #[gpui::test]
+    fn close_all_windows_leaves_the_dock_and_keeps_the_client_running(cx: &mut TestAppContext) {
+        let (quit, dock) = close_all_windows_with(
+            crate::platform::application_quit::LastWindowPolicy::KeepRunning,
+            true,
+            cx,
+        );
+        assert_eq!(quit.requests.get(), 0);
+        assert_eq!(*dock.borrow(), [false]);
+
+        // Opening SpaceTerm again returns the same client to the Dock.
+        cx.update(|cx| activate_default_window(cx, None));
+        assert_eq!(*dock.borrow(), [false, true]);
+    }
+
+    #[gpui::test]
+    fn close_all_windows_keeps_a_client_its_status_item_can_reach(cx: &mut TestAppContext) {
+        let (quit, _) = close_all_windows_with(
+            crate::platform::application_quit::LastWindowPolicy::Quit,
+            true,
+            cx,
+        );
+        assert_eq!(quit.requests.get(), 0);
+    }
+
+    #[gpui::test]
+    fn close_all_windows_exits_a_client_no_status_item_can_reach(cx: &mut TestAppContext) {
+        let (quit, _) = close_all_windows_with(
+            crate::platform::application_quit::LastWindowPolicy::Quit,
+            false,
+            cx,
+        );
+        assert_eq!(quit.requests.get(), 1);
+    }
+
+    #[gpui::test]
+    fn quitting_waits_for_an_admitted_server_operation(cx: &mut TestAppContext) {
+        let quit = Rc::new(
+            crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+        );
+        cx.update(crate::ui::init).unwrap();
+        cx.update(|cx| init(cx, application_menu(), quit.clone()).unwrap());
+        cx.update(crate::status_menu::begin_operation);
+        cx.update(|cx| cx.dispatch_action(&QuitApplication));
+        cx.run_until_parked();
+        assert_eq!(quit.confirmations(), 0, "a running Stop is never cut off");
+
+        cx.update(crate::status_menu::end_operation);
+        cx.run_until_parked();
+        assert_eq!(quit.confirmations(), 1);
+    }
+
     #[gpui::test]
     fn configured_shortcuts_should_bind_global_application_actions(cx: &mut TestAppContext) {
         cx.update(crate::ui::init).expect("UI initialization");
         cx.update(|cx| init(cx, application_menu(), application_quit()).unwrap());
         let expected = [
-            ("cmd-q", QuitApplication.name()),
+            ("cmd-q", CloseAllWindows.name()),
             ("cmd-h", HideApplication.name()),
             ("alt-cmd-h", HideOtherApplications.name()),
             ("cmd-m", MinimizeWindow.name()),
@@ -1839,7 +2012,7 @@ mod runtime_tests {
                 assert!(
                     cx.all_bindings_for_input(&[shortcut])
                         .iter()
-                        .any(|binding| { binding.action().name() == QuitApplication.name() })
+                        .any(|binding| { binding.action().name() == CloseAllWindows.name() })
                 );
                 assert!(cx.is_action_available(&crate::ui::settings_window::OpenSettings));
                 self.0.store(true, Ordering::SeqCst);

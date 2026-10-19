@@ -5188,7 +5188,8 @@ fn native_application_quit_should_not_compete_with_an_in_app_close_confirmation(
         Some(CloseTarget::Window)
     );
     assert!(!cx.has_pending_prompt());
-    assert_eq!(application_quit.requests(), 1);
+    // Command-Q closes windows; it asks the application to quit only from the status menu.
+    assert_eq!(application_quit.requests(), 0);
     click("modal-action-close-confirmation-cancel", cx);
 }
 
@@ -5387,10 +5388,33 @@ fn client_window_controls_remain_operable_during_close_confirmation(cx: &mut Tes
 }
 
 #[gpui::test]
-fn command_q_and_quit_action_should_cancel_safely_and_confirm_once(cx: &mut TestAppContext) {
+fn command_q_closes_the_window_through_its_own_confirmation_without_quitting(
+    cx: &mut TestAppContext,
+) {
     let (manager, records, application_quit, cx) = workspace_manager_with_application_actions(cx);
     redraw(cx);
     cx.simulate_keystrokes("cmd-q");
+    cx.run_until_parked();
+
+    // The window's running work asks first, exactly as its close button does.
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .close_confirmation
+            .pending()
+            .map(|pending| pending.target)),
+        Some(CloseTarget::Window)
+    );
+    assert_eq!(application_quit.requests(), 0);
+    click("modal-action-close-confirmation-cancel", cx);
+    assert!(records.dropped_session_ids().is_empty());
+    assert_eq!(application_quit.requests(), 0);
+}
+
+#[gpui::test]
+fn quit_action_should_cancel_safely_and_confirm_once(cx: &mut TestAppContext) {
+    let (manager, records, application_quit, cx) = workspace_manager_with_application_actions(cx);
+    redraw(cx);
+    cx.dispatch_action(crate::app::QuitApplication);
     cx.run_until_parked();
     assert!(cx.has_pending_prompt());
     assert_eq!(application_quit.requests(), 1);

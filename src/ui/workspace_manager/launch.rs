@@ -101,15 +101,7 @@ impl AccountLaunch {
 impl LocalLaunch for AccountLaunch {
     fn run(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<LaunchOutcome, ServerError> {
         use spaceterm_server::StartupOutcome;
-        let outcome = crate::local_startup::run(cancelled)?;
-        // The service is installed, so its status item can control it once this window closes.
-        if matches!(
-            outcome,
-            StartupOutcome::Ready { .. } | StartupOutcome::Stopped
-        ) {
-            crate::platform::status_area::register();
-        }
-        Ok(match outcome {
+        Ok(match crate::local_startup::run(cancelled)? {
             StartupOutcome::Ready { .. } => LaunchOutcome::Ready,
             StartupOutcome::Stopped => LaunchOutcome::Stopped,
             StartupOutcome::AuthorizationRequired => LaunchOutcome::AuthorizationRequired,

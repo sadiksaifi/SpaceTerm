@@ -85,8 +85,6 @@ pub(crate) mod selected_file;
 pub(crate) mod settings_file;
 #[cfg(feature = "desktop")]
 pub(crate) mod setup_guide_host;
-#[cfg(feature = "desktop")]
-pub(crate) mod status_area;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[cfg(feature = "desktop")]
 mod unix_selected_file;
@@ -258,6 +256,10 @@ pub(crate) mod macos_window_backdrop;
 #[cfg(feature = "desktop")]
 mod macos_window_frame;
 
+#[cfg(target_os = "macos")]
+#[cfg(feature = "desktop")]
+mod macos_status_menu;
+
 pub(crate) mod shell_integration;
 pub(crate) mod shell_launch;
 
@@ -290,15 +292,15 @@ pub(crate) use macos_composition::main;
 #[cfg(target_os = "linux")]
 #[cfg(feature = "desktop")]
 mod linux_composition;
+#[cfg(target_os = "linux")]
+#[cfg(feature = "desktop")]
+mod linux_status_menu;
 #[cfg(all(target_os = "linux", not(test)))]
 #[cfg(feature = "desktop")]
 mod linux_fonts;
 #[cfg(all(target_os = "linux", test))]
 #[cfg(feature = "desktop")]
 pub(crate) mod linux_fonts;
-#[cfg(target_os = "linux")]
-#[cfg(feature = "desktop")]
-pub(crate) mod linux_server_control;
 #[cfg(target_os = "linux")]
 #[cfg(feature = "desktop")]
 pub(crate) use linux_composition::main;

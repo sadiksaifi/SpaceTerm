@@ -1,5 +1,5 @@
 //! Runs every service read and operation away from the UI thread, one at a time.
-use crate::{StatusError, menu::Command};
+use super::model::Command;
 #[cfg(target_os = "macos")]
 use spaceterm_server::service::control::{Action, Confirmation};
 use spaceterm_server::{
@@ -15,10 +15,10 @@ use std::{
 /// menu opens.
 const REFRESH: Duration = Duration::from_secs(10);
 
-pub enum Request {
+pub(crate) enum Request {
     Refresh,
     Start,
-    /// On Linux the desktop's control-only window prepares and confirms instead.
+    /// On Linux the server control window prepares and confirms instead.
     #[cfg(target_os = "macos")]
     Prepare(Action),
     /// Performs the confirmed operation the menu's command prepared.
@@ -26,7 +26,7 @@ pub enum Request {
     Confirm(Command, Confirmation),
 }
 
-pub enum Event {
+pub(crate) enum Event {
     Status(Result<ServiceStatus, ServerError>),
     /// A confirmation to present, or why the operation is no longer available.
     #[cfg(target_os = "macos")]
@@ -34,16 +34,16 @@ pub enum Event {
     Finished(Command, Result<ServiceStatus, ServerError>),
 }
 
-pub struct Worker {
+pub(crate) struct Worker {
     requests: mpsc::Sender<Request>,
 }
 
 impl Worker {
     /// `deliver` runs on the worker thread and hands each event to the UI thread.
-    pub fn spawn(
+    pub(crate) fn spawn(
         controller: Controller,
         deliver: impl Fn(Event) + Send + 'static,
-    ) -> Result<Self, StatusError> {
+    ) -> std::io::Result<Self> {
         let (requests, received) = mpsc::channel();
         std::thread::Builder::new()
             .name("server-status".into())
@@ -70,12 +70,11 @@ impl Worker {
                         }
                     }
                 }
-            })
-            .map_err(|_| StatusError::Unavailable)?;
+            })?;
         Ok(Self { requests })
     }
 
-    pub fn send(&self, request: Request) {
+    pub(crate) fn send(&self, request: Request) {
         let _ = self.requests.send(request);
     }
 }

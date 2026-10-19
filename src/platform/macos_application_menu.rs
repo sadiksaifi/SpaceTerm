@@ -384,7 +384,7 @@ fn application_menu_item_icons(application_name: &str) -> [(String, &'static str
         (format!("Hide {application_name}"), "eye.slash"),
         ("Hide Others".to_owned(), "eye.slash.fill"),
         ("Show All".to_owned(), "eye"),
-        (format!("Quit {application_name}"), "power"),
+        ("Close All Windows".to_owned(), "xmark.rectangle"),
     ]
 }
 
@@ -826,7 +826,7 @@ mod tests {
                 "Hide Others",
                 "Show All",
                 "|",
-                "Quit SpaceTerm",
+                "Close All Windows",
             ]
         );
         assert_eq!(
@@ -844,7 +844,7 @@ mod tests {
                 "Hide Others",
                 "Show All",
                 "|",
-                "Quit SpaceTerm Development",
+                "Close All Windows",
             ]
         );
     }

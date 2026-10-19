@@ -5689,6 +5689,7 @@ dependencies = [
  "async-channel",
  "base64 0.22.1",
  "block2 0.6.2",
+ "dispatch2",
  "flate2",
  "getrandom 0.4.3",
  "gpui",
@@ -5764,21 +5765,6 @@ dependencies = [
  "spaceterm",
  "spaceterm-directories",
  "spaceterm-server",
-]
-
-[[package]]
-name = "spaceterm-status-area"
-version = "0.0.0"
-dependencies = [
- "block2 0.6.2",
- "dispatch2",
- "libc",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "spaceterm-server",
- "thiserror 2.0.19",
- "zbus",
 ]
 
 [[package]]

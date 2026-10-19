@@ -278,7 +278,7 @@ fn fixed_bindings() -> Vec<KeyBinding> {
             Some(TERMINAL_KEY_CONTEXT),
         ),
         KeyBinding::new("ctrl-,", crate::ui::settings_window::OpenSettings, None),
-        KeyBinding::new("ctrl-shift-q", QuitApplication, None),
+        KeyBinding::new("ctrl-shift-q", CloseAllWindows, None),
         KeyBinding::new("ctrl-shift-m", MinimizeWindow, None),
         KeyBinding::new("f11", ToggleFullScreen, None),
     ];

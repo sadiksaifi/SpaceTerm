@@ -3,58 +3,58 @@ use spaceterm_server::{ServerError, service::ServiceStatus};
 
 /// One person-chosen operation the status menu offers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Command {
-    /// Launches the desktop. It never starts, installs, or stops the server itself.
+pub(crate) enum Command {
+    /// Restores this client's windows. It never starts, installs, or stops the server itself.
     Open,
     Start,
     /// Asks first, since it ends every client's Terminal Sessions.
     Stop,
     /// Asks first, since it ends every client's Terminal Sessions.
     Restart,
-    /// Removes the status item until the next login. The server keeps running. Unavailable while
-    /// a server operation runs, so exiting never abandons an admitted operation's cleanup.
-    Hide,
+    /// Exits the whole client, status item included. The server and its Terminal Sessions keep
+    /// running. Unavailable while a server operation runs, so exiting never abandons an admitted
+    /// operation's cleanup.
+    Quit,
 }
 
 /// What the status item last learned and what it is doing.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct State {
+pub(crate) struct State {
     /// The last status read, or `None` before the first read finishes.
-    pub status: Option<Result<ServiceStatus, ServerError>>,
+    pub(crate) status: Option<Result<ServiceStatus, ServerError>>,
     /// The server operation awaiting its result. Menus withhold other server operations meanwhile.
-    pub working: Option<Command>,
+    pub(crate) working: Option<Command>,
 }
 
 /// One menu row, in the order the menu shows it.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Item {
-    pub command: Command,
-    pub label: String,
-    pub enabled: bool,
+pub(crate) struct Item {
+    pub(crate) command: Command,
+    pub(crate) label: String,
+    pub(crate) enabled: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Presentation {
+pub(crate) struct Presentation {
     /// The section heading naming the server, such as "SpaceTerm Preflight Server".
-    pub server: String,
+    pub(crate) server: String,
     /// The short state, such as "Running".
-    pub state: &'static str,
+    pub(crate) state: &'static str,
     /// A sentence explaining the state, when it needs one.
-    pub explanation: Option<String>,
+    pub(crate) explanation: Option<String>,
     /// The icon's accessibility label and tooltip, which name the server and its state.
-    pub summary: String,
+    pub(crate) summary: String,
     /// Whether the server is running. Other states dim the icon.
-    pub running: bool,
-    /// Open, then the server operations, then Hide. Hosts separate these three groups.
-    pub open: Item,
-    pub controls: [Item; 3],
-    pub hide: Item,
+    pub(crate) running: bool,
+    /// Open, then the server operations, then Quit. Hosts separate these three groups.
+    pub(crate) open: Item,
+    pub(crate) controls: [Item; 3],
+    pub(crate) quit: Item,
 }
 
 impl Presentation {
-    /// `name` is the build's display name, such as "SpaceTerm Preflight". `open` is whether this
-    /// installation can launch its desktop.
-    pub fn of(name: &str, state: State, open: bool) -> Self {
+    /// `name` is the build's display name, such as "SpaceTerm Preflight".
+    pub(crate) fn of(name: &str, state: State) -> Self {
         let phase = Phase::of(state.status);
         let (label, explanation) = match state.working {
             Some(Command::Start) => ("Starting\u{2026}", None),
@@ -78,16 +78,16 @@ impl Presentation {
             open: Item {
                 command: Command::Open,
                 label: format!("Open {name}"),
-                enabled: open,
+                enabled: true,
             },
             controls: [
                 control(Command::Start, "Start Server"),
                 control(Command::Stop, "Stop Server\u{2026}"),
                 control(Command::Restart, "Restart Server\u{2026}"),
             ],
-            hide: Item {
-                command: Command::Hide,
-                label: "Hide Status Icon".to_owned(),
+            quit: Item {
+                command: Command::Quit,
+                label: format!("Quit {name}"),
                 enabled: state.working.is_none(),
             },
         }
@@ -188,7 +188,7 @@ mod tests {
     }
 
     fn offered(state: State) -> Vec<Command> {
-        Presentation::of("SpaceTerm Preflight", state, true)
+        Presentation::of("SpaceTerm Preflight", state)
             .controls
             .into_iter()
             .filter(|item| item.enabled)
@@ -224,8 +224,8 @@ mod tests {
         assert!(offered(stopping).is_empty());
         // Exiting would abandon the admitted Stop before the service manager confirms it.
         assert!(
-            !Presentation::of("SpaceTerm Preflight", stopping, true)
-                .hide
+            !Presentation::of("SpaceTerm Preflight", stopping)
+                .quit
                 .enabled
         );
     }

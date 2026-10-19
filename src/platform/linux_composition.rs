@@ -313,10 +313,9 @@ fn compose(
         window_chrome: super::window_chrome::WindowChrome::client().with_controls(controls),
     })
     .map(|host| {
-        host.with_modal_prompts(true).with_appearance(
-            settings_storage,
-            appearance,
-        )
+        host.with_modal_prompts(true)
+            .with_appearance(settings_storage, appearance)
+            .with_status_menu(super::linux_status_menu::install)
     })
 }
 

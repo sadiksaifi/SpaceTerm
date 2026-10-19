@@ -1,19 +1,28 @@
-//! The status-area item over D-Bus: a StatusNotifierItem with its com.canonical.dbusmenu menu.
-//! Confirmations and startup authorization open the desktop's control-only window, so they look
-//! and read like every other SpaceTerm alert without opening a Workspace Window.
-use crate::{
-    IDENTITY, StatusError,
-    linux_registration::hide,
-    menu::{Command, Item, Presentation, State},
+//! The client's status-area item over D-Bus: a StatusNotifierItem with its com.canonical.dbusmenu
+//! menu, served by the client process beside its windows. Stop, Restart, and startup
+//! authorization open the server control window in this process, without a Workspace Window.
+//!
+//! Without a status-area host the item stays on the bus and appears once a host starts. Meanwhile
+//! the client reports the item unavailable, so closing its last window exits it rather than
+//! leaving it unreachable.
+use crate::status_menu::{
+    self,
+    model::{Command, Item, Presentation, State},
     worker::{Event, Request, Worker},
 };
-use spaceterm_server::{ServerError, service::control::Controller};
+use crate::ui::server_control_window::{self, Operation, Step};
+use gpui::App;
+use spaceterm_server::{
+    ServerError,
+    service::{
+        Service,
+        control::{Action, Controller},
+    },
+};
 use std::{
     collections::HashMap,
-    os::unix::process::CommandExt,
-    path::Path,
-    process::Stdio,
-    sync::{Arc, Mutex, PoisonError, mpsc},
+    rc::Rc,
+    sync::{Arc, Mutex, PoisonError},
 };
 use zbus::{
     blocking::{Connection, connection::Builder},
@@ -28,17 +37,18 @@ const WATCHER: &str = "org.kde.StatusNotifierWatcher";
 enum Message {
     Worker(Event),
     Command(Command),
-    /// A status-area host appeared.
-    WatcherAppeared,
+    /// Whether the session's status-area host now shows the item.
+    Hosted(bool),
+    /// A status-area host started, so the item registers with it.
+    HostStarted,
     /// The person opened the menu.
     Refresh,
-    ControlClosed,
 }
 
-/// What the bus objects publish. The main loop replaces it after each change.
+/// What the bus objects publish. The client replaces it after each change.
 struct Published {
     presentation: Presentation,
-    /// Server operations are withheld while a control window asks or works.
+    /// Server operations are withheld while a server control window asks or works.
     controlling: bool,
     revision: u32,
 }
@@ -49,46 +59,31 @@ fn lock(shared: &Shared) -> std::sync::MutexGuard<'_, Published> {
     shared.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Runs until the person hides the item or the session ends. Without a status-area host the item
-/// stays on the bus, shows nothing, and appears once a host starts.
-pub fn run(controller: Controller) -> Result<(), StatusError> {
+/// Serves this build's status item for as long as the client runs.
+pub(crate) fn install(
+    cx: &mut App,
+    window_movement: Rc<dyn crate::platform::window_movement::WindowMovementFactory>,
+) {
+    let identity = crate::application_identity::ApplicationIdentity::current();
+    let Ok(service) = Service::for_identity(identity.directory_name()) else {
+        return;
+    };
+    let controller = Controller::new(service);
     let name = controller.display_name().to_owned();
-    let directory = std::env::current_exe()
-        .ok()
-        .and_then(|executable| executable.parent().map(Path::to_owned));
-    let desktop = directory
-        .as_ref()
-        .map(|directory| directory.join("spaceterm"))
-        .filter(|desktop| desktop.is_file());
-    // Hosts load an absolute IconName as a file. A theme name needs an icon theme index, which
-    // an installation directory does not have.
-    let icon = directory
-        .as_ref()
-        .and_then(|directory| directory.parent())
-        .map(|prefix| {
-            prefix.join(format!(
-                "share/icons/hicolor/scalable/apps/io.github.sadiksaifi.{IDENTITY}.svg"
-            ))
-        })
-        .filter(|icon| icon.is_file())
-        .and_then(|icon| icon.to_str().map(str::to_owned))
-        .unwrap_or_else(|| format!("io.github.sadiksaifi.{IDENTITY}"));
-    let mut state = State::default();
     let shared = Arc::new(Mutex::new(Published {
-        presentation: Presentation::of(&name, state, desktop.is_some()),
+        presentation: Presentation::of(&name, State::default()),
         controlling: false,
         revision: 1,
     }));
-    let (sender, messages) = mpsc::channel();
-    let bus_name = format!("io.github.sadiksaifi.{IDENTITY}.StatusArea");
+    let (sender, messages) = async_channel::unbounded();
     let connection = match Builder::session()
-        .and_then(|builder| builder.name(bus_name.as_str()))
         .and_then(|builder| {
             builder.serve_at(
                 ITEM_PATH,
                 StatusItem {
                     shared: shared.clone(),
-                    icon,
+                    identity: identity.directory_name(),
+                    icon: icon(identity.directory_name()),
                 },
             )
         })
@@ -97,95 +92,195 @@ pub fn run(controller: Controller) -> Result<(), StatusError> {
                 MENU_PATH,
                 Menu {
                     shared: shared.clone(),
-                    sender: Mutex::new(sender.clone()),
+                    sender: sender.clone(),
                 },
             )
         })
         .and_then(Builder::build)
     {
         Ok(connection) => connection,
-        // Another status item for this build already runs in the session.
-        Err(zbus::Error::NameTaken) => return Ok(()),
-        Err(_) => return Err(StatusError::SessionUnavailable),
+        // Without a session bus there is no status area; closing the last window exits.
+        Err(_) => return,
     };
-    watch_hosts(&connection, sender.clone());
     let worker = {
         let sender = sender.clone();
-        Worker::spawn(controller, move |event| {
-            let _ = sender.send(Message::Worker(event));
-        })?
+        match Worker::spawn(controller.clone(), move |event| {
+            let _ = sender.send_blocking(Message::Worker(event));
+        }) {
+            Ok(worker) => worker,
+            Err(_) => return,
+        }
     };
-    register_item(&connection);
+    watch_hosts(&connection, sender.clone());
+    register_item(&connection, sender.clone());
     worker.send(Request::Refresh);
-    let mut controlling = false;
-    for message in messages {
+    let item = Rc::new(LinuxStatusItem {
+        name,
+        sender,
+        controller,
+        worker,
+        connection,
+        shared,
+        window_movement,
+        state: std::cell::Cell::new(State::default()),
+        controlling: std::cell::Cell::new(false),
+    });
+    cx.spawn(async move |cx| {
+        while let Ok(message) = messages.recv().await {
+            let item = Rc::clone(&item);
+            cx.update(|cx| item.handle(message, cx));
+        }
+    })
+    .detach();
+}
+
+/// The installed icon's absolute path, which hosts load as a file, or the application id as a
+/// theme icon name. An installation directory has no icon theme index for a theme name.
+fn icon(identity: &str) -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|executable| executable.parent()?.parent().map(ToOwned::to_owned))
+        .map(|prefix| {
+            prefix.join(format!(
+                "share/icons/hicolor/scalable/apps/io.github.sadiksaifi.{identity}.svg"
+            ))
+        })
+        .filter(|icon| icon.is_file())
+        .and_then(|icon| icon.to_str().map(str::to_owned))
+        .unwrap_or_else(|| format!("io.github.sadiksaifi.{identity}"))
+}
+
+struct LinuxStatusItem {
+    name: String,
+    sender: async_channel::Sender<Message>,
+    controller: Controller,
+    worker: Worker,
+    connection: Connection,
+    shared: Shared,
+    window_movement: Rc<dyn crate::platform::window_movement::WindowMovementFactory>,
+    state: std::cell::Cell<State>,
+    controlling: std::cell::Cell<bool>,
+}
+
+impl LinuxStatusItem {
+    fn handle(self: Rc<Self>, message: Message, cx: &mut App) {
+        let mut state = self.state.get();
         match message {
+            Message::Refresh => {
+                self.worker.send(Request::Refresh);
+                return;
+            }
+            Message::HostStarted => {
+                register_item(&self.connection, self.sender.clone());
+                return;
+            }
+            Message::Hosted(hosted) => {
+                status_menu::set_available(cx, hosted);
+                return;
+            }
             Message::Worker(Event::Status(status)) => state.status = Some(status),
             Message::Worker(Event::Finished(command, result)) => {
                 state.working = None;
+                status_menu::end_operation(cx);
                 match result {
                     Ok(status) => state.status = Some(Ok(status)),
-                    // Only the control window explains and requests startup authorization.
-                    Err(ServerError::AuthorizationRequired) if desktop.is_some() => {
-                        controlling = open_control(desktop.as_deref(), "start", &sender);
+                    // Only the server control window explains and requests startup
+                    // authorization, and it reports every other refusal as well.
+                    Err(ServerError::AuthorizationRequired) => {
+                        self.open_control(
+                            Operation::Start,
+                            Step::Authorize { declined: false },
+                            cx,
+                        );
                     }
-                    Err(error) => notify(&connection, &name, command, error),
+                    Err(error) => {
+                        let operation = match command {
+                            Command::Stop => Operation::Stop,
+                            Command::Restart => Operation::Restart,
+                            _ => Operation::Start,
+                        };
+                        self.open_control(operation, Step::Failed(error), cx);
+                    }
                 }
             }
             Message::Command(command) => {
-                let published = lock(&shared);
-                let item = std::iter::once(&published.presentation.open)
-                    .chain(&published.presentation.controls)
-                    .chain(std::iter::once(&published.presentation.hide))
-                    .find(|item| item.command == command);
+                let offered = {
+                    let published = lock(&self.shared);
+                    std::iter::once(&published.presentation.open)
+                        .chain(&published.presentation.controls)
+                        .chain(std::iter::once(&published.presentation.quit))
+                        .find(|item| item.command == command)
+                        .is_some_and(|item| enabled(item, published.controlling))
+                };
                 // A host can deliver a click for a row that changed after it drew the menu.
-                if !item.is_some_and(|item| enabled(item, published.controlling)) {
-                    continue;
+                if !offered {
+                    return;
                 }
-                drop(published);
                 match command {
-                    Command::Open => {
-                        if let Some(desktop) = &desktop {
-                            launch(std::process::Command::new(desktop), || {});
-                        }
-                    }
+                    Command::Open => crate::app::activate_default_window(cx, None),
                     Command::Start => {
                         state.working = Some(Command::Start);
-                        worker.send(Request::Start);
+                        status_menu::begin_operation(cx);
+                        self.worker.send(Request::Start);
                     }
-                    Command::Stop => {
-                        controlling = open_control(desktop.as_deref(), "stop", &sender);
-                    }
-                    Command::Restart => {
-                        controlling = open_control(desktop.as_deref(), "restart", &sender);
-                    }
-                    Command::Hide => {
-                        hide(IDENTITY);
-                        return Ok(());
-                    }
+                    Command::Stop => self.prepare(Operation::Stop, Action::Stop, cx),
+                    Command::Restart => self.prepare(Operation::Restart, Action::Restart, cx),
+                    // The client's own quit policy decides, including its confirmation.
+                    Command::Quit => cx.dispatch_action(&crate::app::QuitApplication),
                 }
             }
-            Message::WatcherAppeared => {
-                register_item(&connection);
-                continue;
-            }
-            Message::Refresh => {
-                worker.send(Request::Refresh);
-                continue;
-            }
-            Message::ControlClosed => {
-                controlling = false;
-                worker.send(Request::Refresh);
-            }
         }
+        self.state.set(state);
+        self.publish();
+    }
+
+    /// Reads the service off the event thread, then asks in the server control window.
+    fn prepare(self: &Rc<Self>, operation: Operation, action: Action, cx: &App) {
+        self.controlling.set(true);
+        self.publish();
+        let controller = self.controller.clone();
+        let prepared = cx.background_spawn(async move { controller.prepare(action) });
+        let item = Rc::clone(self);
+        cx.spawn(async move |cx| {
+            let step = match prepared.await {
+                Ok(confirmation) => Step::Ask(confirmation),
+                Err(error) => Step::Failed(error),
+            };
+            cx.update(|cx| item.open_control(operation, step, cx));
+        })
+        .detach();
+    }
+
+    fn open_control(self: &Rc<Self>, operation: Operation, step: Step, cx: &mut App) {
+        self.controlling.set(true);
+        self.publish();
+        let item = Rc::clone(self);
+        let opened = server_control_window::open(
+            self.controller.clone(),
+            operation,
+            step,
+            Rc::clone(&self.window_movement),
+            Box::new(move |_: &mut App| {
+                item.controlling.set(false);
+                item.worker.send(Request::Refresh);
+                item.publish();
+            }),
+            cx,
+        );
+        if opened.is_err() {
+            self.controlling.set(false);
+            self.publish();
+        }
+    }
+
+    fn publish(&self) {
         publish(
-            &connection,
-            &shared,
-            Presentation::of(&name, state, desktop.is_some()),
-            controlling,
+            &self.connection,
+            &self.shared,
+            Presentation::of(&self.name, self.state.get()),
+            self.controlling.get(),
         );
     }
-    Ok(())
 }
 
 fn enabled(item: &Item, controlling: bool) -> bool {
@@ -197,68 +292,33 @@ fn enabled(item: &Item, controlling: bool) -> bool {
             ))
 }
 
-/// Opens the desktop's control-only window for one operation and reports when it closes. The
-/// window asks, authorizes, and runs the operation itself, so hiding this item cannot abandon it.
-fn open_control(desktop: Option<&Path>, action: &str, sender: &mpsc::Sender<Message>) -> bool {
-    let Some(desktop) = desktop else {
-        return false;
-    };
-    let mut command = std::process::Command::new(desktop);
-    command.args(["--server-control", action]);
-    let sender = sender.clone();
-    launch(command, move || {
-        let _ = sender.send(Message::ControlClosed);
-    })
-    .is_some()
-}
-
-/// Starts a process in its own session, so it outlives this item, and reaps it when it exits so
-/// a long-lived item collects no zombies. `exited` runs after the process ended. Returns the
-/// process id, or `None` when it could not start.
-fn launch(
-    mut command: std::process::Command,
-    exited: impl FnOnce() + Send + 'static,
-) -> Option<u32> {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    // SAFETY: setsid is async-signal-safe and touches no memory shared with the parent.
-    unsafe {
-        command.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    let mut child = command.spawn().ok()?;
-    let id = child.id();
-    std::thread::spawn(move || {
-        let _ = child.wait();
-        exited();
-    });
-    Some(id)
-}
-
-/// Tells the session's status-area host about the item. Without a host this does nothing.
+/// Tells the session's status-area host about the item, off the event thread. The answer says
+/// whether the host shows it.
 ///
-/// The item registers by this connection's unique name, not the build's well-known name. A
-/// previous instance registered that well-known name too, and a host that processes its exit
-/// after this registration would otherwise remove the new item along with the old one.
-fn register_item(connection: &Connection) {
-    let Some(unique) = connection.unique_name() else {
-        return;
-    };
-    let _ = connection.call_method(
-        Some(WATCHER),
-        "/StatusNotifierWatcher",
-        Some(WATCHER),
-        "RegisterStatusNotifierItem",
-        &(unique.as_str(),),
-    );
+/// The item registers by this connection's unique name. A previous client registered its own,
+/// so a host that processes that client's exit after this registration removes only its item.
+fn register_item(connection: &Connection, sender: async_channel::Sender<Message>) {
+    let connection = connection.clone();
+    std::thread::spawn(move || {
+        let Some(unique) = connection.unique_name().map(|name| name.to_string()) else {
+            return;
+        };
+        let hosted = connection
+            .call_method(
+                Some(WATCHER),
+                "/StatusNotifierWatcher",
+                Some(WATCHER),
+                "RegisterStatusNotifierItem",
+                &(unique.as_str(),),
+            )
+            .is_ok();
+        let _ = sender.send_blocking(Message::Hosted(hosted));
+    });
 }
 
-/// Registers again whenever a status-area host starts, such as after the shell restarts.
-fn watch_hosts(connection: &Connection, sender: mpsc::Sender<Message>) {
+/// Follows the status-area host: registers again when one starts, such as after the shell
+/// restarts, and reports the item unavailable when it exits.
+fn watch_hosts(connection: &Connection, sender: async_channel::Sender<Message>) {
     let Ok(proxy) = zbus::blocking::fdo::DBusProxy::new(connection) else {
         return;
     };
@@ -267,9 +327,13 @@ fn watch_hosts(connection: &Connection, sender: mpsc::Sender<Message>) {
     };
     std::thread::spawn(move || {
         for change in changes {
-            if change.args().is_ok_and(|args| args.new_owner().is_some())
-                && sender.send(Message::WatcherAppeared).is_err()
-            {
+            let started = change.args().is_ok_and(|args| args.new_owner().is_some());
+            let message = if started {
+                Message::HostStarted
+            } else {
+                Message::Hosted(false)
+            };
+            if sender.send_blocking(message).is_err() {
                 return;
             }
         }
@@ -304,38 +368,12 @@ fn publish(
     }
 }
 
-/// Reports a refused Start where the person will see it. Notifications carry only bounded text.
-fn notify(connection: &Connection, name: &str, command: Command, error: ServerError) {
-    let operation = match command {
-        Command::Start => "start",
-        Command::Stop => "stop",
-        _ => "restart",
-    };
-    let summary = format!("The {name} server couldn't {operation}.");
-    let hints: HashMap<&str, Value<'_>> = HashMap::new();
-    let _ = connection.call_method(
-        Some("org.freedesktop.Notifications"),
-        "/org/freedesktop/Notifications",
-        Some("org.freedesktop.Notifications"),
-        "Notify",
-        &(
-            format!("{name} Server Status"),
-            0u32,
-            format!("io.github.sadiksaifi.{IDENTITY}"),
-            summary,
-            error.to_string(),
-            Vec::<&str>::new(),
-            hints,
-            -1i32,
-        ),
-    );
-}
-
 /// StatusNotifierItem pixmaps: width, height, and ARGB32 bytes. The item draws none.
 type Pixmaps = Vec<(i32, i32, Vec<u8>)>;
 
 struct StatusItem {
     shared: Shared,
+    identity: &'static str,
     /// The installed icon's absolute path, or the application id as a theme icon name.
     icon: String,
 }
@@ -349,7 +387,7 @@ impl StatusItem {
 
     #[zbus(property)]
     fn id(&self) -> String {
-        format!("{IDENTITY}-server-status")
+        format!("{}-server-status", self.identity)
     }
 
     #[zbus(property)]
@@ -444,7 +482,7 @@ const OPEN: i32 = 5;
 const START: i32 = 7;
 const STOP: i32 = 8;
 const RESTART: i32 = 9;
-const HIDE: i32 = 11;
+const QUIT: i32 = 11;
 const SEPARATORS: [i32; 3] = [4, 6, 10];
 
 fn command(id: i32) -> Option<Command> {
@@ -453,23 +491,19 @@ fn command(id: i32) -> Option<Command> {
         START => Command::Start,
         STOP => Command::Stop,
         RESTART => Command::Restart,
-        HIDE => Command::Hide,
+        QUIT => Command::Quit,
         _ => return None,
     })
 }
 
 struct Menu {
     shared: Shared,
-    sender: Mutex<mpsc::Sender<Message>>,
+    sender: async_channel::Sender<Message>,
 }
 
 impl Menu {
     fn send(&self, message: Message) {
-        let _ = self
-            .sender
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .send(message);
+        let _ = self.sender.try_send(message);
     }
 
     fn rows(&self) -> Vec<(i32, HashMap<String, OwnedValue>)> {
@@ -492,7 +526,7 @@ impl Menu {
             (STOP, item(stop)),
             (RESTART, item(restart)),
             (SEPARATORS[2], separator()),
-            (HIDE, item(&presentation.hide)),
+            (QUIT, item(&presentation.quit)),
         ]);
         rows
     }
@@ -621,23 +655,4 @@ impl Menu {
         revision: u32,
         parent: i32,
     ) -> zbus::Result<()>;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_launched_process_is_reaped_after_it_exits() {
-        let (reaped, exited) = mpsc::channel();
-        let id = launch(std::process::Command::new("/bin/true"), move || {
-            let _ = reaped.send(());
-        })
-        .expect("the process starts");
-        exited
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("the process exits");
-        // A process that exited but was never waited for stays in /proc as a zombie.
-        assert!(!Path::new(&format!("/proc/{id}")).exists());
-    }
 }

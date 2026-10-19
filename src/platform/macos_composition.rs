@@ -221,10 +221,12 @@ fn compose(
         })),
     })
     .map(|host| {
-        host.with_modal_prompts(false).with_appearance(
-            settings_storage,
-            Rc::new(super::macos_appearance::MacosAppearancePlatform),
-        )
+        host.with_modal_prompts(false)
+            .with_appearance(
+                settings_storage,
+                Rc::new(super::macos_appearance::MacosAppearancePlatform),
+            )
+            .with_status_menu(super::macos_status_menu::install)
     })
 }
 

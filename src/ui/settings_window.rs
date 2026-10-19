@@ -79,7 +79,6 @@ use keybindings::ShortcutRows;
 use microphone::MicrophoneAccessRow;
 use permission_access::{PermissionAccessChanges, PermissionAccessRows};
 /// The server control window shares the service row's progress and authorization wording.
-#[cfg(any(target_os = "linux", test))]
 pub(crate) use servers::{AuthorizationPrompt, AuthorizedRequest, ServiceAction};
 use theme_gallery::ThemeGallery;
 use theme_store::ThemeStore;
@@ -239,6 +238,18 @@ pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App)
 }
 
 /// Retains Settings until its latest edit is saved, then completes an authorized application quit.
+/// Closes the Settings window the way its own close button does: it saves first and stays open
+/// when saving fails. Reports whether `window` is the Settings window.
+pub(crate) fn request_window_close(window: AnyWindowHandle, cx: &mut App) -> bool {
+    let Some(settings) = window.downcast::<SettingsWindow>() else {
+        return false;
+    };
+    let _ = settings.update(cx, |settings, _, cx| {
+        settings.request_close(CloseIntent::Window(window), cx);
+    });
+    true
+}
+
 pub(crate) fn quit_when_saved(cx: &mut App, completion: crate::app::ApplicationQuitAfterSave) {
     if let Some(settings) = cx
         .windows()

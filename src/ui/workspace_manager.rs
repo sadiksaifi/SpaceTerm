@@ -2526,6 +2526,10 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Keeping the window also keeps the client windowed after Close All Windows.
+        if !confirmed && target == CloseTarget::Window {
+            crate::app::dismissal_cancelled(cx);
+        }
         let hierarchy = self.close_hierarchy(cx);
         if let Some(target) = self
             .close_confirmation
@@ -2588,7 +2592,7 @@ impl WorkspaceManager {
         }
     }
 
-    fn request_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn request_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.should_close_window(window, cx) {
             window.remove_window();
         }

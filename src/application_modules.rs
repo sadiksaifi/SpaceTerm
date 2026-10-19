@@ -74,6 +74,8 @@ mod settings;
     )
 )]
 mod ssh;
+#[cfg(feature = "desktop")]
+mod status_menu;
 mod terminal;
 #[cfg(feature = "desktop")]
 mod theme_registry;

@@ -42,12 +42,5 @@ pub fn run_desktop() {
         }
         _ => {}
     }
-    // The Linux status item's control-only window for one server operation.
-    #[cfg(target_os = "linux")]
-    if let [flag, operation] = std::env::args_os().skip(1).collect::<Vec<_>>().as_slice()
-        && flag == platform::linux_server_control::ARGUMENT
-    {
-        std::process::exit(platform::linux_server_control::main(operation));
-    }
     platform::main();
 }

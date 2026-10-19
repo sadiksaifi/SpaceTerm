@@ -1,0 +1,87 @@
+//! The client's native status item: this build's server state and controls in the menu bar or
+//! status area, owned by the same process as the client's windows. The independently supervised
+//! server keeps running whether the client is windowed, menu-only, exited, or crashed.
+pub(crate) mod model;
+pub(crate) mod worker;
+
+use gpui::{App, Global};
+use std::rc::Rc;
+
+/// Work deferred until no admitted server operation is running.
+type AfterOperations = Box<dyn FnOnce(&mut App)>;
+
+/// What the client's window lifecycle needs from its status item.
+#[derive(Default)]
+pub(crate) struct StatusArea {
+    /// Whether the session shows the item. Without it, a client with no windows would be
+    /// unreachable, so closing every window exits the client instead.
+    available: bool,
+    /// Server operations admitted from the status item and not yet finished.
+    operations: usize,
+    /// Work waiting for every admitted operation to finish, such as exiting the client.
+    after_operations: Vec<AfterOperations>,
+    /// Shows or removes the client's Dock presence, where the platform has one.
+    dock: Option<Rc<dyn Fn(bool)>>,
+}
+
+impl Global for StatusArea {}
+
+fn update(cx: &mut App, change: impl FnOnce(&mut StatusArea)) {
+    change(cx.default_global::<StatusArea>());
+}
+
+/// Whether the session currently shows the client's status item.
+pub(crate) fn available(cx: &App) -> bool {
+    cx.try_global::<StatusArea>()
+        .is_some_and(|status| status.available)
+}
+
+pub(crate) fn set_available(cx: &mut App, available: bool) {
+    update(cx, |status| status.available = available);
+}
+
+/// Installs the platform's Dock presence switch.
+pub(crate) fn set_dock(cx: &mut App, dock: Rc<dyn Fn(bool)>) {
+    update(cx, |status| status.dock = Some(dock));
+}
+
+/// Shows or removes the client's Dock presence. The client and its status item keep running.
+pub(crate) fn show_in_dock(cx: &mut App, visible: bool) {
+    if let Some(dock) = cx
+        .try_global::<StatusArea>()
+        .and_then(|status| status.dock.clone())
+    {
+        dock(visible);
+    }
+}
+
+/// Records a server operation the person admitted. Exiting waits until it finishes.
+pub(crate) fn begin_operation(cx: &mut App) {
+    update(cx, |status| status.operations += 1);
+}
+
+pub(crate) fn end_operation(cx: &mut App) {
+    let waiting = {
+        let status = cx.default_global::<StatusArea>();
+        status.operations = status.operations.saturating_sub(1);
+        if status.operations > 0 {
+            return;
+        }
+        std::mem::take(&mut status.after_operations)
+    };
+    for work in waiting {
+        work(cx);
+    }
+}
+
+/// Runs `work` once no admitted server operation is running, so exiting never abandons one.
+pub(crate) fn after_operations(cx: &mut App, work: impl FnOnce(&mut App) + 'static) {
+    let running = cx
+        .try_global::<StatusArea>()
+        .is_some_and(|status| status.operations > 0);
+    if running {
+        update(cx, |status| status.after_operations.push(Box::new(work)));
+    } else {
+        work(cx);
+    }
+}

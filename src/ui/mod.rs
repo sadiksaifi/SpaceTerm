@@ -24,10 +24,9 @@ pub(crate) mod remote_workspace_flow;
 mod render_lifecycle;
 pub(crate) mod repository_status_store;
 mod selection_chip;
-#[cfg(any(target_os = "linux", test))]
-#[cfg_attr(
-    not(target_os = "linux"),
-    allow(dead_code, reason = "only the Linux status item opens this window")
+#[allow(
+    dead_code,
+    reason = "only a status item without native alerts opens this window"
 )]
 pub(crate) mod server_control_window;
 pub(crate) mod server_pane;

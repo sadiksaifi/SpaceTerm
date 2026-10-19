@@ -4,7 +4,7 @@ use spaceterm_ui::{EditCopy, EditCut, EditPaste, EditRedo, EditSelectAll, EditUn
 
 use crate::app::{
     BringAllWindowsToFront, HideApplication, HideOtherApplications, MinimizeWindow,
-    OpenApplicationHelp, QuitApplication, ShowAboutApplication, ShowAllApplications,
+    CloseAllWindows, OpenApplicationHelp, ShowAboutApplication, ShowAllApplications,
     ZoomActiveWindow,
 };
 use crate::ui::updates::{
@@ -54,7 +54,9 @@ pub(crate) fn application_menu(application_name: &str) -> Menu {
             MenuItem::action("Hide Others", HideOtherApplications),
             MenuItem::action("Show All", ShowAllApplications),
             MenuItem::separator(),
-            MenuItem::action(format!("Quit {application_name}"), QuitApplication),
+            // Command-Q dismisses the windows and keeps the client in the menu bar. The status
+            // menu's Quit exits the client.
+            MenuItem::action("Close All Windows", CloseAllWindows),
         ],
     }
 }

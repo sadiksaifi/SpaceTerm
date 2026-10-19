@@ -1,4 +1,4 @@
-//! The control-only window the Linux status item opens for one server operation. It asks before
+//! The server control window a status item opens for one server operation. It asks before
 //! an operation that ends Terminal Sessions, explains startup authorization, shows progress, and
 //! reports a refusal, without opening a Workspace Window.
 
@@ -14,7 +14,7 @@ use spaceterm_server::{
     ServerError,
     service::{
         LingerAuthorization,
-        control::{Action, Confirmation, Controller},
+        control::{Confirmation, Controller},
     },
 };
 use spaceterm_ui::{Button, ButtonSize, ButtonVariant, ProgressRing, ProgressState};
@@ -49,15 +49,6 @@ pub(crate) enum Operation {
 }
 
 impl Operation {
-    pub(crate) fn parse(argument: &str) -> Option<Self> {
-        Some(match argument {
-            "start" => Self::Start,
-            "stop" => Self::Stop,
-            "restart" => Self::Restart,
-            _ => return None,
-        })
-    }
-
     const fn service_action(self) -> ServiceAction {
         match self {
             Self::Start => ServiceAction::Start,
@@ -87,40 +78,28 @@ pub(crate) enum Step {
     Failed(ServerError),
 }
 
-/// Prepares the first step without opening any window, so the status item's choice is checked
-/// against the service's current state. `None` means Start finished and nothing needs showing.
-pub(crate) fn first_step(controller: &Controller, operation: Operation) -> Option<Step> {
-    let action = match operation {
-        Operation::Start => {
-            return match controller.start() {
-                Ok(_) => None,
-                Err(ServerError::AuthorizationRequired) => {
-                    Some(Step::Authorize { declined: false })
-                }
-                Err(error) => Some(Step::Failed(error)),
-            };
-        }
-        Operation::Stop => Action::Stop,
-        Operation::Restart => Action::Restart,
-    };
-    Some(match controller.prepare(action) {
-        Ok(confirmation) => Step::Ask(confirmation),
-        Err(error) => Step::Failed(error),
-    })
-}
+/// The key bindings the window installs once.
+struct Bindings;
+impl gpui::Global for Bindings {}
 
+/// Opens one window for one operation. `closed` runs when the window goes away, whatever the
+/// person chose.
 pub(crate) fn open(
     controller: Controller,
     operation: Operation,
     step: Step,
     window_movement: Rc<dyn WindowMovementFactory>,
+    closed: Box<dyn FnOnce(&mut App)>,
     cx: &mut App,
 ) -> gpui::Result<()> {
-    cx.bind_keys([
-        KeyBinding::new("escape", DismissServerControl, Some(KEY_CONTEXT)),
-        // Return chooses Cancel, so it never ends Terminal Sessions by accident.
-        KeyBinding::new("enter", DismissServerControl, Some(KEY_CONTEXT)),
-    ]);
+    if !cx.has_global::<Bindings>() {
+        cx.bind_keys([
+            KeyBinding::new("escape", DismissServerControl, Some(KEY_CONTEXT)),
+            // Return chooses Cancel, so it never ends Terminal Sessions by accident.
+            KeyBinding::new("enter", DismissServerControl, Some(KEY_CONTEXT)),
+        ]);
+        cx.set_global(Bindings);
+    }
     let name = controller.display_name().to_owned();
     let content = Content::of(&name, operation, &step);
     let window_size = window_size(&content, cx);
@@ -152,7 +131,10 @@ pub(crate) fn open(
         );
     let drag = window_movement.create();
     cx.open_window(options, |window, cx| {
-        cx.new(|cx| ServerControlWindow::new(controller, name, operation, step, drag, window, cx))
+        cx.new(|cx| {
+            cx.on_release(move |_, cx| closed(cx)).detach();
+            ServerControlWindow::new(controller, name, operation, step, drag, window, cx)
+        })
     })?;
     cx.activate(true);
     Ok(())
@@ -389,8 +371,11 @@ impl ServerControlWindow {
         cx: &mut Context<Self>,
     ) {
         self.show(Step::Working(self.operation), window, cx);
+        // Exiting the client waits for the admitted operation.
+        crate::status_menu::begin_operation(cx);
         self._operation = Some(cx.spawn_in(window, async move |this, cx| {
             let result = work.await;
+            let _ = cx.update(|_, cx| crate::status_menu::end_operation(cx));
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(()) => window.remove_window(),
                 // The operating system's prompt was cancelled or refused. Nothing changed.

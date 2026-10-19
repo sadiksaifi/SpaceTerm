@@ -204,6 +204,6 @@ ctrl-insert	Some(Identifier("TerminalPane"))	terminal::CopySelection
 ctrl-shift-v	Some(Identifier("TerminalPane"))	spaceterm_text_input::Paste
 shift-insert	Some(Identifier("TerminalPane"))	terminal::PasteSelection
 ctrl-,	None	spaceterm::OpenSettings
-ctrl-shift-q	None	spaceterm::QuitApplication
+ctrl-shift-q	None	spaceterm::CloseAllWindows
 ctrl-shift-m	None	spaceterm::MinimizeWindow
 f11	None	spaceterm::ToggleFullScreen

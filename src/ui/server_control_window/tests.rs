@@ -37,6 +37,7 @@ fn open_window(step: Step, cx: &mut TestAppContext) -> gpui::AnyWindowHandle {
             Operation::Start,
             step,
             Rc::new(RecordingMovement),
+            Box::new(|_| {}),
             cx,
         )
         .expect("the control window should open");
