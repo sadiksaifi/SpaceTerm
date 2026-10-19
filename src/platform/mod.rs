@@ -85,6 +85,8 @@ pub(crate) mod selected_file;
 pub(crate) mod settings_file;
 #[cfg(feature = "desktop")]
 pub(crate) mod setup_guide_host;
+#[cfg(feature = "desktop")]
+pub(crate) mod status_area;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[cfg(feature = "desktop")]
 mod unix_selected_file;
