@@ -685,8 +685,21 @@ impl TabView {
         }
     }
 
+    /// Moves the keyboard to the Focused Pane. A server Pane presenting a screen in place of its
+    /// shell takes it on that screen, so Tab reaches the screen's action and typing meant for a
+    /// shell reaches nothing. Focusing selects nothing.
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
-        let Some(terminal) = self.tab.pane(self.tab.focused_pane_id()) else {
+        let pane_id = self.tab.focused_pane_id();
+        if let Some(focus) = self.shared.as_ref().and_then(|shared| {
+            shared
+                .view(pane_id)
+                .and_then(crate::ui::server_pane::ServerPaneView::screen)
+                .and_then(|_| shared.screen_focus(pane_id))
+        }) {
+            focus.focus(window, cx);
+            return;
+        }
+        let Some(terminal) = self.tab.pane(pane_id) else {
             return;
         };
         terminal.update(cx, |terminal, cx| terminal.focus(window, cx));

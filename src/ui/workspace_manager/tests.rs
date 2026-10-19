@@ -13098,6 +13098,38 @@ fn killing_the_active_workspace_should_open_its_neighbor_without_selecting_its_p
     );
 }
 
+/// A neighbor whose Pane waits for first use takes the keyboard on the screen in the Pane's
+/// place, so Tab reaches Start New Shell and nothing starts until the person presses it.
+#[gpui::test]
+fn a_dormant_neighbor_should_take_the_keyboard_on_its_screen(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (harness, cx) = attachment_harness(cx);
+    for pane in [ATTACHED_BUILD_PANE, ATTACHED_DOCS_PANE] {
+        harness
+            .panes
+            .pane(pane)
+            .set(crate::terminal::server_session::DevelopmentPaneStatus::Restored);
+    }
+    settle_shared_panes(cx);
+    let selections = harness.panes.pane(ATTACHED_BUILD_PANE).selections();
+
+    harness.close_desktop_workspace(cx);
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    let focused = A11yTree::read(cx)
+        .focused()
+        .map(|node| node["aria"]["label"].clone());
+
+    assert_eq!(harness.active(cx), Some(WorkspaceId::new(2)));
+    assert_eq!(focused, Some(serde_json::json!("Start New Shell")));
+    assert_eq!(
+        harness.panes.pane(ATTACHED_BUILD_PANE).selections(),
+        selections
+    );
+    assert_eq!(harness.panes.pane(ATTACHED_BUILD_PANE).restored_starts(), 0);
+}
+
 /// Detaching the Active Workspace opens its neighbor the same way: with the keyboard, without
 /// selecting the neighbor's Focused Pane.
 #[gpui::test]
