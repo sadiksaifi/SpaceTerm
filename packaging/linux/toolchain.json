@@ -38,6 +38,12 @@
       "sha256": "5ed152003cdb6e840985d41a5fbc72a72dfe2e92e187d57b66052de3ea8ee2cd"
     },
     {
+      "name": "libfontconfig-dev",
+      "version": "2.13.1-4.2ubuntu5",
+      "path": "pool/main/f/fontconfig/libfontconfig-dev_2.13.1-4.2ubuntu5_amd64.deb",
+      "sha256": "2dfd75329c954d7453bf95a6057151aba638159172b7700cfa95b4901d0cbde7"
+    },
+    {
       "name": "libfontconfig1",
       "version": "2.13.1-4.2ubuntu5",
       "path": "pool/main/f/fontconfig/libfontconfig1_2.13.1-4.2ubuntu5_amd64.deb",
