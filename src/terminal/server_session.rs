@@ -1078,12 +1078,14 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
             geometry: Mutex::new(geometry),
         };
         let factory = self.clone();
+        // Ownership follows creation order, however late each worker first runs.
+        let reservation = self.control.reserve();
         std::thread::Builder::new()
             .name("spaceterm-pane-connection".into())
             .spawn(move || {
                 present(
                     factory,
-                    alive,
+                    (reservation, alive),
                     receiver,
                     (events, accessibility_sender),
                     measured_size,
@@ -1139,7 +1141,7 @@ fn expect_unchanged(reply: Reply) -> Result<(), ServerError> {
 
 fn present(
     factory: DevelopmentServerSessionFactory,
-    alive: Arc<AtomicBool>,
+    (reservation, alive): (control::Reservation, Arc<AtomicBool>),
     input: mpsc::Receiver<SubmittedInput>,
     (events, semantics): (
         async_channel::Sender<TerminalSessionEvent>,
@@ -1154,10 +1156,10 @@ fn present(
         local_files,
         pane_id,
         attachment,
-        control,
+        control: _,
         state,
     } = factory;
-    let presenter = control.present();
+    let presenter = reservation.activate(&alive);
     let mut expected_session: Option<Lease> = None;
     let mut expected_target: Option<pane::PaneTarget> = None;
     let mut generation = PresentationGeneration::default();
@@ -2778,6 +2780,10 @@ mod tests {
         }
     }
 
+    fn presenter_for(control: &Arc<control::PaneControl>) -> control::Presenter {
+        control.reserve().activate(&AtomicBool::new(true))
+    }
+
     /// The server's focus rule for one Pane on one connection, stated independently.
     #[derive(Default)]
     struct FocusServer {
@@ -2829,7 +2835,7 @@ mod tests {
         let controls = PaneControls::default();
         let mut server = FocusServer::default();
         for changes in [0, 1, 15, 100] {
-            let presenter = controls.pane([7; 32]).present();
+            let presenter = presenter_for(&controls.pane([7; 32]));
             let mut old = Adapter::attached(&presenter).unwrap();
             for change in 0..changes {
                 old.handle.interactive_focus(change % 2 == 1, true);
@@ -2844,7 +2850,7 @@ mod tests {
             // Closing every window leaves the Pane unfocused and without visual demand.
             assert_eq!(server.target, Some(pane::FocusTarget::Unfocused));
             assert_eq!(server.visible, Some(false));
-            let successor = controls.pane([7; 32]).present();
+            let successor = presenter_for(&controls.pane([7; 32]));
             let mut new = Adapter::attached(&successor).unwrap();
             new.handle.key(KeyInput::text_input("x"));
             new.drain(|request| successor.send(request, |request| server.handle(request)))
@@ -2860,10 +2866,10 @@ mod tests {
     fn a_dismissed_presentations_paused_input_cannot_follow_its_successors_focus() {
         let controls = PaneControls::default();
         let mut server = FocusServer::default();
-        let presenter = controls.pane([7; 32]).present();
+        let presenter = presenter_for(&controls.pane([7; 32]));
         let mut old = Adapter::attached(&presenter).unwrap();
         old.handle.key(KeyInput::text_input("old"));
-        let successor = controls.pane([7; 32]).present();
+        let successor = presenter_for(&controls.pane([7; 32]));
         let mut new = Adapter::attached(&successor).unwrap();
         new.drain(|request| successor.send(request, |request| server.handle(request)))
             .unwrap();
@@ -2886,9 +2892,53 @@ mod tests {
     }
 
     #[test]
+    fn a_dismissed_window_whose_worker_starts_late_cannot_revoke_its_reopened_successor() {
+        let controls = PaneControls::default();
+        let (old, _) = DevelopmentServerSessionFactory::for_pane(
+            LocalServer::for_identity("spaceterm-development").unwrap(),
+            &controls,
+            crate::platform::runtime_local_filesystem(),
+            [7; 32],
+        );
+        // The old window was created first and closed before its worker ran.
+        let reservation = old.control.reserve();
+        let successor = presenter_for(&controls.pane([7; 32]));
+        let focus = Request::Focus {
+            lease: Adapter::new().active.lease,
+            generation: 10,
+            target: pane::FocusTarget::Terminal,
+        };
+        successor.send(&focus, |_| Ok(Reply::Unchanged)).unwrap();
+        let (_, input) = mpsc::sync_channel(1);
+        let (events, _output) = async_channel::bounded(2);
+        let (semantics, _semantics) = async_channel::bounded(1);
+        let (effects, _clipboard) = ClientEffects::new();
+        // The dismissed worker's production entry point. Its view is gone, so it connects to
+        // nothing.
+        present(
+            old,
+            (reservation, Arc::new(AtomicBool::new(false))),
+            input,
+            (events, semantics),
+            Arc::new(Mutex::new(PaneSize {
+                columns: 20,
+                rows: 6,
+                cell_width: 10,
+                cell_height: 20,
+            })),
+            Arc::new(Mutex::new(TerminalAppearanceUpdate::builtin().unwrap())),
+            effects,
+        );
+        assert!(
+            successor.send(&focus, |_| Ok(Reply::Unchanged)).is_ok(),
+            "the reopened window keeps its Pane"
+        );
+    }
+
+    #[test]
     fn an_exhausted_focus_sequence_fails_closed_instead_of_reusing_a_generation() {
         let controls = PaneControls::default();
-        let presenter = controls.pane([7; 32]).present();
+        let presenter = presenter_for(&controls.pane([7; 32]));
         presenter
             .send(
                 &Request::Focus {
@@ -2899,7 +2949,7 @@ mod tests {
                 |_| Ok(Reply::Unchanged),
             )
             .unwrap();
-        let successor = controls.pane([7; 32]).present();
+        let successor = presenter_for(&controls.pane([7; 32]));
         assert!(matches!(
             Adapter::attached(&successor),
             Err(ServerError::Unsupported)
