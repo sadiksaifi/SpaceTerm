@@ -1,18 +1,21 @@
 //! FIFO exchange admission keeps a chunk producer behind already waiting callers.
 use crate::ServerError;
-use std::sync::{Condvar, Mutex};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Condvar, Mutex},
+};
 
 const MAX_PENDING: u64 = 2 * crate::hierarchy::MAX_PANES as u64;
 
 #[derive(Default)]
 pub(super) struct Admission {
     state: Mutex<State>,
-    ready: Condvar,
 }
 #[derive(Default)]
 struct State {
     next: u64,
     serving: u64,
+    waiters: VecDeque<Arc<Condvar>>,
 }
 pub(super) struct Turn<'a>(&'a Admission);
 impl Admission {
@@ -23,8 +26,15 @@ impl Admission {
         }
         let ticket = state.next;
         state.next = state.next.checked_add(1).ok_or(ServerError::Capacity)?;
-        while state.serving != ticket {
-            state = self.ready.wait(state).unwrap_or_else(|e| e.into_inner());
+        let ready = (state.serving != ticket).then(|| {
+            let ready = Arc::new(Condvar::new());
+            state.waiters.push_back(Arc::clone(&ready));
+            ready
+        });
+        if let Some(ready) = ready {
+            while state.serving != ticket {
+                state = ready.wait(state).unwrap_or_else(|e| e.into_inner());
+            }
         }
         Ok(Turn(self))
     }
@@ -33,7 +43,9 @@ impl Drop for Turn<'_> {
     fn drop(&mut self) {
         let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         state.serving += 1;
-        self.0.ready.notify_all();
+        if let Some(ready) = state.waiters.pop_front() {
+            ready.notify_one();
+        }
     }
 }
 
