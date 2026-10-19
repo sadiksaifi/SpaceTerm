@@ -574,6 +574,13 @@ mod development {
     /// because only an explicit selection of that Pane asks the server for one.
     pub(crate) trait SharedPaneOpener {
         fn open(&self, pane: Id) -> Option<SharedPaneSubscription>;
+
+        /// Only an account-local route can interpret server directory text on this client.
+        fn local_filesystem(
+            &self,
+        ) -> Option<&crate::platform::local_filesystem::LocalFilesystemAuthority> {
+            None
+        }
     }
 
     /// The local server's own Panes.
@@ -586,6 +593,12 @@ mod development {
     }
 
     impl SharedPaneOpener for LocalServerPanes {
+        fn local_filesystem(
+            &self,
+        ) -> Option<&crate::platform::local_filesystem::LocalFilesystemAuthority> {
+            Some(&self.local_files)
+        }
+
         fn open(&self, pane: Id) -> Option<SharedPaneSubscription> {
             let (factory, state) = DevelopmentServerSessionFactory::for_pane(
                 self.server.clone(),
@@ -640,6 +653,12 @@ mod development {
                 opener,
                 panes: panes.clone(),
             }
+        }
+
+        pub(crate) fn local_filesystem(
+            &self,
+        ) -> Option<&crate::platform::local_filesystem::LocalFilesystemAuthority> {
+            self.opener.local_filesystem()
         }
 
         pub(crate) const fn panes(&self) -> &PaneConstruction {
@@ -1993,6 +2012,7 @@ mod development {
         /// Scripted Pane subscriptions over one local Terminal Session factory, so a test drives
         /// the real binding and reconciliation without a server.
         pub(crate) struct ScriptedPanes {
+            local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
             session_factory: crate::terminal::WorkspaceTerminalSessionFactory,
             panes: Mutex<std::collections::BTreeMap<super::Id, std::sync::Arc<ScriptedPane>>>,
         }
@@ -2002,6 +2022,7 @@ mod development {
                 session_factory: crate::terminal::WorkspaceTerminalSessionFactory,
             ) -> std::rc::Rc<Self> {
                 std::rc::Rc::new(Self {
+                    local_files: crate::runtime::local_filesystem(),
                     session_factory,
                     panes: Mutex::new(std::collections::BTreeMap::new()),
                 })
@@ -2020,6 +2041,12 @@ mod development {
         }
 
         impl super::SharedPaneOpener for ScriptedPanes {
+            fn local_filesystem(
+                &self,
+            ) -> Option<&crate::platform::local_filesystem::LocalFilesystemAuthority> {
+                Some(&self.local_files)
+            }
+
             fn open(&self, pane: super::Id) -> Option<super::SharedPaneSubscription> {
                 let connection = ScriptedPane::new();
                 self.panes

@@ -176,6 +176,7 @@ fn launch_harness_with(
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
                 local_server: adapters,
+                local_filesystem: crate::runtime::local_filesystem(),
                 directory_selection: Rc::new(ScriptedDirectorySelection::new(selections)),
                 ..workspace_adapters(test_remote_backend_factory())
             },
@@ -800,14 +801,18 @@ fn open_local_directory_takes_the_switcher_query_as_its_name(cx: &mut TestAppCon
 }
 
 #[gpui::test]
-fn open_local_directory_activates_the_workspace_already_pinned_there(cx: &mut TestAppContext) {
+fn open_local_directory_alias_activates_the_workspace_and_keeps_its_spelling(
+    cx: &mut TestAppContext,
+) {
     let project = temporary_directory("launch-open-local-existing");
     std::fs::create_dir_all(&project).unwrap();
+    let alias = project.with_extension("alias");
+    std::os::unix::fs::symlink(&project, &alias).unwrap();
     let (harness, cx) = ready_harness(cx);
     cx.simulate_keystrokes("cmd-o");
     cx.run_until_parked();
-    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
-    accept_creation(&harness, Some(project.clone()), cx);
+    confirm_directory_picker_path(&format!("{}/", alias.to_str().unwrap()), cx);
+    accept_creation(&harness, Some(alias.clone()), cx);
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
             let first = manager.shared.as_ref().unwrap().local(WORKSPACE).unwrap();
@@ -821,6 +826,22 @@ fn open_local_directory_activates_the_workspace_already_pinned_there(cx: &mut Te
 
     assert_eq!(created_names(&harness).len(), 1, "nothing new is created");
     assert_eq!(active_server_workspace(&harness, cx), Some(CREATED));
+    assert_eq!(
+        harness.manager.read_with(cx, |manager, _| manager
+            .shared
+            .as_ref()
+            .unwrap()
+            .latest_inventory()
+            .unwrap()
+            .workspaces
+            .iter()
+            .find(|w| w.id == CREATED)
+            .unwrap()
+            .pinned_directory
+            .clone()),
+        Some(alias.clone())
+    );
+    std::fs::remove_file(alias).unwrap();
     std::fs::remove_dir_all(project).unwrap();
 }
 

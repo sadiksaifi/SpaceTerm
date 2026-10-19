@@ -985,13 +985,19 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> PinApplication {
-        let existing = self.workspaces.iter().map(WorkspaceEntry::id).find(|id| {
-            self.shared
-                .as_ref()
-                .and_then(|shared| shared.server_workspace(*id))
-                .is_some_and(|workspace| {
-                    workspace.pinned_directory.as_deref() == Some(directory.path())
-                })
+        let existing = self.shared.as_ref().and_then(|shared| {
+            let filesystem = shared.sessions().local_filesystem()?;
+            self.workspaces.iter().find_map(|entry| {
+                let pin = shared
+                    .server_workspace(entry.id())?
+                    .pinned_directory
+                    .as_deref()?;
+                filesystem
+                    .validate_directory(pin)
+                    .ok()
+                    .filter(|pinned| pinned.identity() == directory.identity())
+                    .map(|_| entry.id())
+            })
         });
         let opened = match existing {
             Some(workspace_id) => self.activate_workspace(workspace_id, window, cx),
