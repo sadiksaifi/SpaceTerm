@@ -372,3 +372,94 @@ fn copy_shortcuts_use_the_authoritative_keyboard_mode_and_focus_fence() {
         host.shutdown().unwrap();
     }
 }
+
+#[test]
+fn reading_completion_refuses_orphan_motion_resize_and_retired_leases() {
+    fn complete(host: &mut DevelopmentPaneHost, lease: Lease) -> Result<(), Refusal> {
+        let deadline = Instant::now() + COMPLETION_TIMEOUT;
+        loop {
+            match host.request([1; 32], lease.connection, Request::ReadingStatus { lease }) {
+                Reply::ReadingReady { .. } => return Ok(()),
+                Reply::Refused(refusal) => return Err(refusal),
+                Reply::SelectionPending => {}
+                other => panic!("unexpected completion: {other:?}"),
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    let mut host = host();
+    let lease = attach(&mut host, 1, true);
+    let observed = screen(&mut host, lease, |_| true);
+    let operation = |phase| {
+        Operation::Pointer(pane::Pointer {
+            screen_generation: observed.generation,
+            phase,
+            button: Some(pane::PointerButton::Left),
+            x: 1.0,
+            y: 1.0,
+            modifiers: 0,
+            shift_selection: false,
+        })
+    };
+    read(&mut host, lease, operation(pane::PointerPhase::Motion));
+    assert!(matches!(complete(&mut host, lease), Err(Refusal::Stale)));
+    let mut size = super::tests::size();
+    size.columns += 1;
+    assert!(matches!(
+        host.request([1; 32], lease.connection, Request::Resize { lease, size }),
+        Reply::Unchanged
+    ));
+    screen(&mut host, lease, |screen| screen.columns == size.columns);
+    read(&mut host, lease, operation(pane::PointerPhase::Press));
+    assert!(matches!(complete(&mut host, lease), Err(Refusal::Stale)));
+    host.disconnected(lease.connection);
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            lease.connection,
+            Request::Read {
+                lease,
+                operation: operation(pane::PointerPhase::Press)
+            }
+        ),
+        Reply::Refused(Refusal::Stale)
+    ));
+    let resumed = attach(&mut host, 3, false);
+    screen(&mut host, resumed, |_| true);
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            lease.connection,
+            Request::Read {
+                lease,
+                operation: operation(pane::PointerPhase::Press)
+            }
+        ),
+        Reply::Refused(Refusal::Stale)
+    ));
+    assert!(matches!(
+        host.request(
+            [2; 32],
+            [2; 32],
+            Request::TakeOver {
+                target: resumed.into(),
+                size,
+                style: None
+            }
+        ),
+        Reply::Attached { .. }
+    ));
+    assert!(matches!(
+        host.request(
+            [1; 32],
+            resumed.connection,
+            Request::Read {
+                lease: resumed,
+                operation: operation(pane::PointerPhase::Press)
+            }
+        ),
+        Reply::Refused(Refusal::Stale)
+    ));
+    host.shutdown().unwrap();
+}

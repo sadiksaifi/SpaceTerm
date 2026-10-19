@@ -4688,7 +4688,7 @@ fn prepared_server_copy_survives_unrelated_output_and_rejects_changed_selected_t
             modifiers: Default::default(),
             shift_selection: Default::default(),
         };
-        assert!(worker.process_command(Command::ReadingPointer(input)));
+        assert!(worker.process_command(Command::ReadingPointer(input, mpsc::sync_channel(1).0)));
     }
     assert!(worker.publish_screen_snapshot());
     let selected = latest();
@@ -5016,4 +5016,88 @@ fn paste_confirmation_focus_cannot_claim_a_different_or_cancelled_payload() {
         assert!(records.snapshot().written.is_empty());
         session.shutdown();
     }
+}
+
+#[test]
+fn metadata_only_screen_changes_do_not_schedule_another_semantic_document() {
+    let (mut worker, _records, _requests, _reader, _commands) = clipboard_worker();
+    let (accessibility, _receiver) = async_channel::bounded(1);
+    worker.accessibility = accessibility;
+    let now = Instant::now();
+    let input = ScheduleInput::default();
+    worker.schedules = WorkerSchedules::new(now, input.clone());
+    input.enqueue_accessibility_demand(now);
+    worker.schedules.accessibility_demand_received(now);
+    worker.emulator.feed(b"unchanged text");
+    assert!(worker.publish_screen_snapshot());
+    assert!(worker.publish_accessibility(true));
+    worker.emulator.mark_metadata_stale();
+    assert!(worker.publish_screen_snapshot());
+    assert!(
+        !worker
+            .schedules
+            .accessibility_presentation_due(now + Duration::from_secs(1))
+    );
+    worker.finish();
+}
+
+#[test]
+fn queued_server_reading_reports_application_after_output_and_refuses_changed_rows() {
+    for (output, applied) in [
+        (b"\x1b[4;1Hunrelated".as_slice(), true),
+        (b"\x1b[1;1Hreplacement".as_slice(), false),
+    ] {
+        let (mut worker, _records, _requests, _reader, _commands) = clipboard_worker();
+        assert!(worker.process_command(Command::RouteClientEffects));
+        worker.emulator.feed(b"select this text");
+        assert!(worker.publish_screen_snapshot());
+        let mut input = PointerInput {
+            generation: worker.emulator.presentation_generation(),
+            phase: PointerPhase::Press,
+            button: Some(PointerButton::Left),
+            position: SurfacePosition { x: 1.0, y: 1.0 },
+            modifiers: Default::default(),
+            shift_selection: Default::default(),
+        };
+        let (reply, completion) = mpsc::sync_channel(1);
+        let queued = Command::ReadingPointer(input, reply);
+        worker.emulator.feed(output);
+        assert!(worker.publish_screen_snapshot());
+        assert!(worker.process_command(queued));
+        assert_eq!(completion.recv().unwrap(), applied);
+        if !applied {
+            input.phase = PointerPhase::Motion;
+            input.position.x = 60.0;
+            let (reply, completion) = mpsc::sync_channel(1);
+            assert!(worker.process_command(Command::ReadingPointer(input, reply)));
+            assert!(!completion.recv().unwrap());
+            assert!(worker.emulator.selection_text().unwrap().is_none());
+        }
+        worker.finish();
+    }
+}
+
+#[test]
+fn server_wheel_completion_accepts_unchanged_viewports_and_zero_delta_edges() {
+    let (mut worker, _records, _requests, _reader, _commands) = clipboard_worker();
+    assert!(worker.process_command(Command::RouteClientEffects));
+    worker.emulator.feed(b"no scrollback");
+    assert!(worker.publish_screen_snapshot());
+    for (horizontal_steps, vertical_steps) in [(0, 0), (1, 0), (0, 1)] {
+        let (reply, completion) = mpsc::sync_channel(1);
+        assert!(worker.process_command(Command::ReadingWheel(
+            WheelInput {
+                generation: worker.emulator.presentation_generation(),
+                horizontal_steps,
+                vertical_steps,
+                phase: WheelPhase::GestureEnded,
+                position: SurfacePosition { x: 1.0, y: 1.0 },
+                modifiers: Default::default(),
+                shift_selection: Default::default(),
+            },
+            reply
+        )));
+        assert!(completion.recv().unwrap());
+    }
+    worker.finish();
 }

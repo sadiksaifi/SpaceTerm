@@ -6,9 +6,12 @@ type Prepared = Receiver<Result<Option<Arc<[u8]>>, crate::terminal::SelectionCop
 
 #[derive(Default)]
 pub(super) struct Reading {
-    gesture: Option<(u64, PaneSize)>,
+    gesture: Option<(u64, PaneSize, PresentationGeneration)>,
     resetting: bool,
     pending: Option<Receiver<()>>,
+    applying: Option<Receiver<bool>>,
+    refused: bool,
+    baselines: std::collections::VecDeque<(u64, PresentationGeneration)>,
     preparing: Option<(u64, Prepared)>,
     prepared: Option<(u64, Arc<[u8]>)>,
     attempted: Option<u64>,
@@ -17,6 +20,9 @@ pub(super) struct Reading {
 impl Reading {
     pub(super) fn reset(&mut self, runtime: &TerminalRuntime) {
         self.gesture = None;
+        self.baselines.clear();
+        self.applying = None;
+        self.refused = false;
         self.invalidate();
         runtime.reset_reading();
         self.pending = Some(runtime.reading_barrier());
@@ -38,7 +44,38 @@ impl Reading {
             return true;
         }
         self.pending = None;
+        if let Some(completion) = &self.applying {
+            match completion.try_recv() {
+                Err(TryRecvError::Empty) => return true,
+                Ok(true) => {}
+                Ok(false) | Err(TryRecvError::Disconnected) => {
+                    self.refused = true;
+                    self.gesture = None;
+                }
+            }
+        }
+        self.applying = None;
         false
+    }
+    pub(super) fn observe(&mut self, wire: u64, screen: &Arc<ScreenSnapshot>) {
+        if self
+            .baselines
+            .back()
+            .is_some_and(|(saved, _)| *saved == wire)
+        {
+            return;
+        }
+        self.baselines.push_back((wire, screen.generation));
+        while self.baselines.len() > 32 {
+            self.baselines.pop_front();
+        }
+    }
+    fn take_refused(&mut self) -> Result<(), Refusal> {
+        if std::mem::take(&mut self.refused) {
+            Err(Refusal::Stale)
+        } else {
+            Ok(())
+        }
     }
     pub(super) fn invalidate(&mut self) {
         self.preparing = None;
@@ -46,7 +83,6 @@ impl Reading {
         self.attempted = None;
     }
     pub(super) fn fence(&mut self, runtime: &TerminalRuntime) {
-        self.invalidate();
         self.pending = Some(runtime.reading_barrier());
     }
     pub(super) fn update(&mut self, runtime: &TerminalRuntime, screen: &ScreenSnapshot) {
@@ -97,10 +133,34 @@ impl Reading {
 }
 
 impl OwnedPane {
+    fn reading_generation(&self, wire: u64) -> Result<PresentationGeneration, Refusal> {
+        if wire == 0 {
+            return Err(Refusal::Stale);
+        }
+        self.reading
+            .baselines
+            .iter()
+            .find(|(saved, _)| *saved == wire)
+            .map(|(_, generation)| *generation)
+            .or_else(|| {
+                self.reading
+                    .gesture
+                    .filter(|(saved, _, _)| *saved == wire)
+                    .map(|(_, _, generation)| generation)
+            })
+            .or_else(|| {
+                (wire == self.screen_generation)
+                    .then(|| self.screen.as_ref().map(|screen| screen.generation))
+                    .flatten()
+            })
+            .ok_or(Refusal::Stale)
+    }
+
     pub(super) fn reading_status(&mut self) -> Result<Reply, Refusal> {
         if self.reading.busy() {
             return Ok(Reply::SelectionPending);
         }
+        self.reading.take_refused()?;
         // A worker completion follows its presentation barrier. Drain again after observing
         // completion so this fence includes a newly published screen as well as a quiet release.
         self.drain();
@@ -120,6 +180,7 @@ impl OwnedPane {
         if self.reading.busy() {
             return Ok(Reply::Reading { accepted: false });
         }
+        self.reading.take_refused()?;
         match operation {
             Operation::Scroll(movement) => self.runtime.scroll_scrollback(match movement {
                 Scroll::PageUp => ScrollbackMovement::PageUp,
@@ -164,7 +225,7 @@ impl OwnedPane {
                     && self.screen.as_ref().is_some_and(|s| s.mouse_tracking)
                     && !input.shift_selection
                 {
-                    return Err(Refusal::Unsupported);
+                    return Err(Refusal::Stale);
                 }
                 if !matches!(input.phase, pane::PointerPhase::Motion) && input.button.is_none() {
                     return Err(Refusal::Unsupported);
@@ -180,31 +241,30 @@ impl OwnedPane {
                 {
                     return Err(Refusal::Unsupported);
                 }
-                let wire = if continuation {
-                    let (start, size) = self.reading.gesture.ok_or(Refusal::Stale)?;
+                if continuation {
+                    let (start, size, _) = self.reading.gesture.ok_or(Refusal::Stale)?;
                     if input.screen_generation < start
                         || input.screen_generation > self.screen_generation
                         || size != self.size
                     {
                         return Err(Refusal::Stale);
                     }
-                    self.screen_generation
-                } else {
-                    input.screen_generation
-                };
-                let generation = self.pointer_generation(
-                    wire,
+                }
+                let wire = input.screen_generation;
+                self.pointer_generation(
+                    self.screen_generation,
                     input.x.clamp(0.0, width - 1.0),
                     input.y.clamp(0.0, height - 1.0),
                     input.modifiers,
                 )?;
+                let generation = self.reading_generation(wire)?;
                 if matches!(input.phase, pane::PointerPhase::Press) {
-                    self.reading.gesture = Some((wire, self.size));
+                    self.reading.gesture = Some((wire, self.size, generation));
                 }
                 if matches!(input.phase, pane::PointerPhase::Release) {
                     self.reading.gesture = None;
                 }
-                self.runtime.reading_pointer(PointerInput {
+                self.reading.applying = Some(self.runtime.reading_pointer(PointerInput {
                     generation,
                     phase: match input.phase {
                         pane::PointerPhase::Press => crate::runtime::PointerPhase::Press,
@@ -224,7 +284,7 @@ impl OwnedPane {
                     shift_selection: ShiftSelectionPolicy::from_selection_override(
                         input.shift_selection,
                     ),
-                });
+                }));
             }
             Operation::Wheel(input) => {
                 if self.screen.as_ref().is_some_and(|s| {
@@ -232,20 +292,16 @@ impl OwnedPane {
                         || s.active_screen == ActiveScreenSnapshot::Alternate && s.alternate_scroll
                 }) && !input.shift_selection
                 {
-                    return Err(Refusal::Unsupported);
+                    return Err(Refusal::Stale);
                 }
-                let generation = self.pointer_generation(
-                    input.screen_generation,
-                    input.x,
-                    input.y,
-                    input.modifiers,
-                )?;
+                self.pointer_generation(self.screen_generation, input.x, input.y, input.modifiers)?;
+                let generation = self.reading_generation(input.screen_generation)?;
                 if input.horizontal_steps.unsigned_abs() > 100
                     || input.vertical_steps.unsigned_abs() > 100
                 {
                     return Err(Refusal::Unsupported);
                 }
-                self.runtime.reading_wheel(WheelInput {
+                self.reading.applying = Some(self.runtime.reading_wheel(WheelInput {
                     generation,
                     horizontal_steps: input.horizontal_steps,
                     vertical_steps: input.vertical_steps,
@@ -281,7 +337,7 @@ impl OwnedPane {
                     shift_selection: ShiftSelectionPolicy::from_selection_override(
                         input.shift_selection,
                     ),
-                });
+                }));
             }
         }
         self.reading.fence(&self.runtime);

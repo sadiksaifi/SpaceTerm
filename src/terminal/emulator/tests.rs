@@ -882,14 +882,14 @@ fn reading_requests_never_write_application_input_after_a_mode_change() {
     );
     emulator.feed(b"\x1b[?1000h\x1b[?1006h");
     // A delayed reading request keeps reading authority even if its observed mode is obsolete.
-    assert!(emulator.reading_pointer(delayed).unwrap().bytes.is_empty());
+    assert!(emulator.reading_pointer(delayed).unwrap().is_none());
     _ = emulator.snapshot().unwrap();
     let input = current_wheel(&emulator, wheel(1, false));
-    assert!(emulator.reading_wheel(input).unwrap().bytes.is_empty());
+    assert!(emulator.reading_wheel(input).unwrap().is_none());
     emulator.feed(b"\x1b[?1000l\x1b[?1049h\x1b[?1007h");
     _ = emulator.snapshot().unwrap();
     let input = current_wheel(&emulator, wheel(1, true));
-    assert!(emulator.reading_wheel(input).unwrap().bytes.is_empty());
+    assert!(emulator.reading_wheel(input).unwrap().is_none());
 }
 
 fn key(physical_key: PhysicalKey, modifiers: InputModifiers) -> KeyInput {
@@ -5389,4 +5389,256 @@ fn accessibility_selection_rejects_a_model_from_before_the_latest_screen() {
             .unwrap()
             .is_none()
     );
+}
+
+#[test]
+fn server_selection_uses_the_observed_row_across_unrelated_output() {
+    let mut emulator = emulator(20, 4);
+    emulator.enable_server_reading();
+    emulator.feed(b"select this text\x1b[4;1Hcounter 0");
+    let observed = emulator.snapshot().unwrap().unwrap();
+    emulator.feed(b"\x1b[4;1Hcounter 1");
+    _ = emulator.snapshot().unwrap();
+    let mut input = pointer(
+        PointerPhase::Press,
+        Some(PointerButton::Left),
+        1.0,
+        1.0,
+        false,
+    );
+    input.generation = observed.generation;
+    assert!(
+        emulator
+            .reading_pointer(input)
+            .unwrap()
+            .unwrap()
+            .screen_changed
+    );
+    emulator.feed(b"\x1b[4;1Hcounter 2");
+    _ = emulator.snapshot().unwrap();
+    input.phase = PointerPhase::Motion;
+    input.position.x = 63.0;
+    assert!(
+        emulator
+            .reading_pointer(input)
+            .unwrap()
+            .unwrap()
+            .screen_changed
+    );
+    input.phase = PointerPhase::Release;
+    assert!(
+        emulator
+            .reading_pointer(input)
+            .unwrap()
+            .unwrap()
+            .selection_completed
+    );
+    assert_eq!(
+        emulator.selection_text().unwrap().as_deref(),
+        Some("select")
+    );
+}
+
+#[test]
+fn server_relative_wheels_keep_their_displacement_across_published_viewports() {
+    let mut emulator = emulator(20, 3);
+    emulator.enable_server_reading();
+    emulator.feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+    let observed = emulator.snapshot().unwrap().unwrap();
+    let mut input = wheel(1, false);
+    input.generation = observed.generation;
+    assert!(
+        emulator
+            .reading_wheel(input)
+            .unwrap()
+            .unwrap()
+            .screen_changed
+    );
+    _ = emulator.snapshot().unwrap();
+    assert!(
+        emulator
+            .reading_wheel(input)
+            .unwrap()
+            .unwrap()
+            .screen_changed
+    );
+    let moved = emulator.snapshot().unwrap().unwrap();
+    assert_eq!(
+        moved.scrollbar.offset_rows + 2,
+        observed.scrollbar.offset_rows
+    );
+}
+
+#[test]
+fn selection_copy_reuses_prepared_text_while_only_the_viewport_changes() {
+    let mut emulator = emulator(8, 3);
+    emulator.feed("界abcdefghi\r\nline 2\r\nline 3\r\nline 4".as_bytes());
+    _ = emulator.snapshot().unwrap();
+    for (phase, x) in [
+        (PointerPhase::Press, 1.0),
+        (PointerPhase::Motion, 45.0),
+        (PointerPhase::Release, 45.0),
+    ] {
+        let input = current_pointer(
+            &emulator,
+            pointer(phase, Some(PointerButton::Left), x, 1.0, false),
+        );
+        emulator.pointer(input).unwrap();
+    }
+    let options = SelectionCopyOptions::default();
+    let first = emulator.selection_copy(options).unwrap().unwrap();
+    emulator.scroll_scrollback(ScrollbackMovement::Top);
+    _ = emulator.snapshot().unwrap();
+    let second = emulator.selection_copy(options).unwrap().unwrap();
+    assert!(Arc::ptr_eq(&first.plain_text, &second.plain_text));
+    assert!(Arc::ptr_eq(
+        first.html.as_ref().unwrap(),
+        second.html.as_ref().unwrap()
+    ));
+    emulator.feed(b"\x1b[1;1Hchanged");
+    let changed = emulator.selection_copy(options).unwrap().unwrap();
+    assert_ne!(first.plain_text, changed.plain_text);
+}
+
+#[test]
+fn server_reading_refuses_changed_rows_remapping_resize_modes_sync_and_reset() {
+    let mutations: [fn(&mut TerminalEmulator); 7] = [
+        |emulator| emulator.feed(b"\x1b[1;1Hreplaced"),
+        |emulator| {
+            emulator.scroll_scrollback(ScrollbackMovement::Top);
+        },
+        |emulator| emulator.resize(geometry(24, 4, 10.0, 20.0)).unwrap(),
+        |emulator| emulator.feed(b"\x1b[?1000h\x1b[?1006h"),
+        |emulator| emulator.feed(b"\x1b[?1049h"),
+        |emulator| emulator.feed(b"\x1b[?2026h"),
+        |emulator| {
+            emulator.reset_reading().unwrap();
+        },
+    ];
+    for mutate in mutations {
+        let mut emulator = emulator(20, 4);
+        emulator.enable_server_reading();
+        emulator.feed(b"a\r\nb\r\nc\r\nd\r\ne\r\nf\x1b[1;1Horiginal");
+        let observed = emulator.snapshot().unwrap().unwrap();
+        let mut input = pointer(
+            PointerPhase::Press,
+            Some(PointerButton::Left),
+            1.0,
+            1.0,
+            false,
+        );
+        input.generation = observed.generation;
+        mutate(&mut emulator);
+        _ = emulator.snapshot().unwrap();
+        assert!(emulator.reading_pointer(input).unwrap().is_none());
+        input.phase = PointerPhase::Motion;
+        input.position.x = 65.0;
+        assert!(emulator.reading_pointer(input).unwrap().is_none());
+        assert!(emulator.selection_text().unwrap().is_none());
+    }
+}
+
+#[test]
+fn server_selection_keeps_its_anchor_when_unrelated_output_evicts_the_display_baseline() {
+    let mut emulator = emulator(20, 4);
+    emulator.enable_server_reading();
+    emulator.feed(b"select this text\x1b[4;1Hcounter 0");
+    let observed = emulator.snapshot().unwrap().unwrap();
+    let mut input = pointer(
+        PointerPhase::Press,
+        Some(PointerButton::Left),
+        1.0,
+        1.0,
+        false,
+    );
+    input.generation = observed.generation;
+    assert!(emulator.reading_pointer(input).unwrap().is_some());
+    for counter in 1..40 {
+        emulator.feed(format!("\x1b[4;1Hcounter {counter}").as_bytes());
+        _ = emulator.snapshot().unwrap();
+    }
+    input.phase = PointerPhase::Motion;
+    input.position.x = 63.0;
+    assert!(emulator.reading_pointer(input).unwrap().is_some());
+    input.phase = PointerPhase::Release;
+    assert!(emulator.reading_pointer(input).unwrap().is_some());
+    assert_eq!(
+        emulator.selection_text().unwrap().as_deref(),
+        Some("select")
+    );
+    input.phase = PointerPhase::Press;
+    assert!(emulator.reading_pointer(input).unwrap().is_none());
+}
+
+#[test]
+fn cached_selection_copy_preserves_wide_cells_and_soft_wrap_options() {
+    let mut emulator = emulator(4, 3);
+    emulator.feed("界abce".as_bytes());
+    _ = emulator.snapshot().unwrap();
+    for (phase, x, y) in [
+        (PointerPhase::Press, 1.0, 1.0),
+        (PointerPhase::Motion, 35.0, 21.0),
+        (PointerPhase::Release, 35.0, 21.0),
+    ] {
+        let input = current_pointer(
+            &emulator,
+            pointer(phase, Some(PointerButton::Left), x, y, false),
+        );
+        emulator.pointer(input).unwrap();
+    }
+    let unwrapped = emulator
+        .selection_copy(SelectionCopyOptions::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(unwrapped.plain_text.as_ref(), "界abce");
+    let wrapped = emulator
+        .selection_copy(SelectionCopyOptions {
+            unwrap_soft_wraps: false,
+            ..Default::default()
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(wrapped.plain_text.as_ref(), "界ab\nce");
+    assert!(wrapped.html.as_ref().unwrap().contains("&#30028;"));
+}
+
+#[test]
+fn server_selection_clamps_normal_out_of_pane_drag_positions() {
+    for (x, y) in [(-100.0, 20.0), (300.0, 20.0), (50.0, -20.0), (50.0, 120.0)] {
+        let mut emulator = emulator(20, 4);
+        emulator.enable_server_reading();
+        emulator.feed(b"line one\r\nline two\r\nline three\r\nline four");
+        let observed = emulator.snapshot().unwrap().unwrap();
+        let mut input = pointer(
+            PointerPhase::Press,
+            Some(PointerButton::Left),
+            1.0,
+            1.0,
+            false,
+        );
+        input.generation = observed.generation;
+        assert!(emulator.reading_pointer(input).unwrap().is_some());
+        input.phase = PointerPhase::Motion;
+        input.position = SurfacePosition { x, y };
+        assert!(emulator.reading_pointer(input).unwrap().is_some());
+        input.phase = PointerPhase::Release;
+        assert!(emulator.reading_pointer(input).unwrap().is_some());
+    }
+}
+
+#[test]
+fn large_server_reading_baselines_expire_within_the_retained_byte_budget() {
+    let mut emulator = emulator(240, 100);
+    emulator.enable_server_reading();
+    emulator.feed(b"stable content");
+    let observed = emulator.snapshot().unwrap().unwrap();
+    for counter in 1..21 {
+        emulator.feed(format!("\x1b[100;1Hcounter {counter}").as_bytes());
+        _ = emulator.snapshot().unwrap();
+    }
+    let mut input = wheel(0, false);
+    input.generation = observed.generation;
+    assert!(emulator.reading_wheel(input).unwrap().is_none());
+    input.generation = emulator.presentation_generation();
+    assert!(emulator.reading_wheel(input).unwrap().is_some());
 }

@@ -666,15 +666,19 @@ impl TerminalRuntime {
             let _ = commands.send(Command::CopyOrForward(modifiers, reply));
         }
     }
-    pub(crate) fn reading_pointer(&self, input: PointerInput) {
+    pub(crate) fn reading_pointer(&self, input: PointerInput) -> mpsc::Receiver<bool> {
+        let (reply, completion) = mpsc::sync_channel(1);
         if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::ReadingPointer(input));
+            let _ = commands.send(Command::ReadingPointer(input, reply));
         }
+        completion
     }
-    pub(crate) fn reading_wheel(&self, input: WheelInput) {
+    pub(crate) fn reading_wheel(&self, input: WheelInput) -> mpsc::Receiver<bool> {
+        let (reply, completion) = mpsc::sync_channel(1);
         if let Some(commands) = &self.commands {
-            let _ = commands.send(Command::ReadingWheel(input));
+            let _ = commands.send(Command::ReadingWheel(input, reply));
         }
+        completion
     }
     pub(crate) fn reading_barrier(&self) -> mpsc::Receiver<()> {
         let (tx, rx) = mpsc::sync_channel(1);
@@ -1138,8 +1142,8 @@ struct ReaderEventBatch {
 }
 
 enum Command {
-    ReadingPointer(PointerInput),
-    ReadingWheel(WheelInput),
+    ReadingPointer(PointerInput, mpsc::SyncSender<bool>),
+    ReadingWheel(WheelInput, mpsc::SyncSender<bool>),
     ResetReading,
     ReadingBarrier(mpsc::SyncSender<()>),
     PrepareServerSelection(u64, mpsc::SyncSender<server_reading::PreparedSelection>),
@@ -1246,8 +1250,8 @@ impl Command {
 impl fmt::Debug for Command {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
-            Self::ReadingPointer(_) => "ReadingPointer",
-            Self::ReadingWheel(_) => "ReadingWheel",
+            Self::ReadingPointer(..) => "ReadingPointer",
+            Self::ReadingWheel(..) => "ReadingWheel",
             Self::ResetReading => "ResetReading",
             Self::ReadingBarrier(_) => "ReadingBarrier",
             Self::PrepareServerSelection(..) => "PrepareServerSelection",
@@ -1704,17 +1708,26 @@ impl TerminalWorker {
 
     fn process_command(&mut self, command: Command) -> bool {
         match command {
-            Command::ReadingPointer(input) => match self.emulator.reading_pointer(input) {
+            Command::ReadingPointer(input, reply) => match self.emulator.reading_pointer(input) {
                 Ok(action) => {
-                    self.apply_emulator_action(action) && self.refresh_selection_autoscroll()
+                    let applied = action.is_some();
+                    let success = action.is_none_or(|action| self.apply_emulator_action(action))
+                        && self.refresh_selection_autoscroll();
+                    let _ = reply.send(applied && success);
+                    success
                 }
                 Err(error) => {
                     self.send_runtime_failure(error);
                     false
                 }
             },
-            Command::ReadingWheel(input) => match self.emulator.reading_wheel(input) {
-                Ok(action) => self.apply_emulator_action(action),
+            Command::ReadingWheel(input, reply) => match self.emulator.reading_wheel(input) {
+                Ok(action) => {
+                    let applied = action.is_some();
+                    let success = action.is_none_or(|action| self.apply_emulator_action(action));
+                    let _ = reply.send(applied && success);
+                    success
+                }
                 Err(error) => {
                     self.send_runtime_failure(error);
                     false
@@ -1763,6 +1776,7 @@ impl TerminalWorker {
             }
             Command::RouteClientEffects => {
                 self.emulator.enable_client_clipboard();
+                self.emulator.enable_server_reading();
                 self.server_reading = Some(server_reading::ServerReading::default());
                 true
             }
@@ -2642,11 +2656,26 @@ impl TerminalWorker {
         if let Some(reading) = &mut self.server_reading {
             reading.update(&mut self.emulator);
         }
+        let semantic_content_changed = self.emulator.accessibility_content_changed();
         let snapshot = self.emulator.snapshot();
         self.schedules
             .update_graphics_animation(self.emulator.graphics_animation_deadline());
         match snapshot {
             Ok(Some(snapshot)) => {
+                let semantics_changed = semantic_content_changed
+                    || !matches!(
+                        snapshot.damage.content,
+                        super::emulator::ContentDamageSnapshot::Clean
+                    )
+                    || !matches!(
+                        snapshot.damage.cursor,
+                        super::emulator::ContentDamageSnapshot::Clean
+                    )
+                    || snapshot.damage.selection_presence
+                    || snapshot.damage.viewport
+                    || snapshot.damage.scrollbar
+                    || snapshot.damage.active_screen
+                    || snapshot.damage.resize;
                 let result = self
                     .events
                     .force_send(TerminalSessionEvent::Screen(snapshot))
@@ -2656,16 +2685,21 @@ impl TerminalWorker {
                     let now = Instant::now();
                     self.schedules.metadata_presented();
                     self.schedules.mark_presented(now);
-                    self.schedules.update_accessibility(false);
-                    if !self.accessibility.is_closed() {
-                        self.schedules.note_screen_published();
-                    } else {
+                    if self.accessibility.is_closed() {
                         self.schedules.disable_accessibility();
+                    } else if semantics_changed {
+                        self.schedules.update_accessibility(false);
+                        self.schedules.note_screen_published();
                     }
                 }
                 result
             }
-            Ok(None) => true,
+            Ok(None) => {
+                if semantic_content_changed && !self.accessibility.is_closed() {
+                    self.schedules.note_screen_published();
+                }
+                true
+            }
             Err(error) => {
                 self.send_runtime_failure(TerminalFailure::emulator_error(
                     "produce-terminal-screen-snapshot",
