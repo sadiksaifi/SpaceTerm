@@ -4,6 +4,20 @@ The desktop and local server use your operating-system account's authority. They
 
 Normal desktop launch connects to the account-local server and presents its retained Workspaces in the main Workspace Window. Quitting the desktop leaves server-owned terminal programs running. A deliberately stopped server stays stopped until the person chooses Start. Settings > Servers retains service management. The `server:*` mise tasks exercise the Development identity; status never starts a server.
 
+## Controls without the desktop
+
+The desktop installation includes a CLI fallback for use without a status area or graphical login. For a standard installation, open its command help with:
+
+```sh
+# macOS
+"/Applications/SpaceTerm.app/Contents/Library/LoginItems/SpaceTerm Server Status.app/Contents/MacOS/spaceterm-status-area" --help
+
+# Linux
+"$HOME/.local/lib/spaceterm/bin/spaceterm-status-area" --help
+```
+
+For Preflight, use "SpaceTerm Preflight" in both macOS app names or `spaceterm-preflight` in the Linux directory. For a custom installation, use the helper inside that app or installation directory. The help names the compiled application identity and lists the service commands and confirmation flag. Headless installations expose the same commands through `bin/spaceterm-server` in their installation directory. Source builds use `mise run server:service --help` for the Development identity.
+
 ## Server artifacts for desktop startup
 
 The desktop startup adapter in [src/local_startup.rs](../src/local_startup.rs) prepares or reuses the account service on a worker. Existing service policy selects the approved installation. Launch does not select a newer artifact or reverse Stop.
