@@ -3,7 +3,6 @@
 # USAGE flag "--backend <backend>" help="Display backend" default="both" {
 # USAGE   choices "both" "x11" "wayland"
 # USAGE }
-# USAGE flag "--server-backed" help="Also create and retire a Workspace on the already-running account server"
 # USAGE flag "--binary <binary>" help="Existing source executable; skips building"
 # USAGE flag "--expected-binary-sha256 <sha256>" help="Required SHA256 pin for --binary"
 # USAGE flag "--output-dir <output_dir>" help="Evidence directory; defaults to a fresh temporary directory"
@@ -71,11 +70,6 @@ def parse_args():
         "--binary", type=Path, help="Existing source-built executable; skips building"
     )
     parser.add_argument("--expected-binary-sha256", help="Required SHA256 pin for --binary")
-    parser.add_argument(
-        "--server-backed",
-        action="store_true",
-        help="Also create and retire a Workspace on the already-running account server",
-    )
     parser.add_argument("--server-binary", type=Path, help=argparse.SUPPRESS)
     parser.add_argument(
         "--output-dir",
@@ -151,11 +145,23 @@ class Probe:
             time.sleep(0.01)
 
     def find_terminal(self):
+        # A process-owned terminal can still belong to retained account work.
+        # Only the exact newly created and named Workspace is a workload target.
+        if not self.server_workspace_named:
+            return None
+        selected = [
+            row
+            for row in self.workspace_rows()
+            if row.getState().contains(self.atspi.STATE_SELECTED)
+        ]
+        if len(selected) != 1 or selected[0].name != self.server_workspace_name:
+            return None
         window = self.find_window(self.application_pid)
         if window is None:
             return None
         stack = [window]
         visited = 0
+        terminals = []
         while stack and visited < 5000:
             accessible = stack.pop()
             visited += 1
@@ -163,9 +169,10 @@ class Probe:
                 accessible.getRole() == self.atspi.ROLE_TERMINAL
                 and accessible.name == "Terminal Pane"
             ):
-                return accessible
+                terminals.append(accessible)
             stack.extend(accessible)
-        return None
+        require(len(terminals) <= 1, "server_workspace_terminal_ambiguous")
+        return terminals[0] if terminals else None
 
     def find_window(self, pid):
         for application in self.atspi.Registry.getDesktop(0):
@@ -285,7 +292,6 @@ class Probe:
         # creation controls as the native client. The fixture's named client owns its
         # presentation; the already-running account server owns the PTY.
         self.activate_control("New Workspace")
-        previous = self.find_terminal()
         self.server_workspace_name = os.environ["SPACETERM_DEVELOPMENT_CLIENT"]
         rows = self.workspace_rows()
         require(
@@ -306,18 +312,14 @@ class Probe:
             lambda: field.getState().contains(self.atspi.STATE_FOCUSED),
             "server_workspace_rename_not_focused",
         )
-        input_driver.command(self.server_workspace_name)
+        input_driver.workspace_name(self.server_workspace_name, field)
         self.wait(
             lambda: any(row.name == self.server_workspace_name for row in self.workspace_rows()),
             "server_workspace_rename_not_confirmed",
         )
         self.server_workspace_named = True
 
-        def created_terminal():
-            current = self.find_terminal()
-            return current if current is not None and current != previous else None
-
-        self.terminal = self.wait(created_terminal, "server_terminal_object_missing")
+        self.terminal = self.wait(self.find_terminal, "server_terminal_object_missing")
         require(self.terminal.queryComponent().grabFocus(), "server_terminal_focus_rejected")
 
     def event(self, event):
@@ -461,6 +463,7 @@ class Input:
             self.key(0xFF67)
 
     def character(self, pressed):
+        self.require_fixture()
         if self.backend == "x11":
             run(["xdotool", "keydown" if pressed else "keyup", "--clearmodifiers", "q"])
         else:
@@ -472,18 +475,37 @@ class Input:
             self.remote.NotifyKeyboardKeysym(*arguments)
 
     def backspace(self):
+        self.require_fixture()
         if self.backend == "x11":
             run(["xdotool", "key", "--clearmodifiers", "BackSpace"])
         else:
             self.key(0xFF08)
 
     def keyboard_barrier(self):
+        self.require_fixture()
         if self.backend == "x11":
             run(["xdotool", "key", "--clearmodifiers", "Shift_R"])
         else:
             self.key(0xFFE2)
 
     def command(self, command, *, wait_for_echo=False):
+        self.require_fixture()
+        self._submit_text(command, wait_for_echo=wait_for_echo)
+
+    def require_fixture(self):
+        require(
+            self.probe.server_workspace_named and self.probe.terminal is not None,
+            "fixture_terminal_not_selected",
+        )
+
+    def workspace_name(self, name, field):
+        require(
+            field.getState().contains(self.probe.atspi.STATE_FOCUSED),
+            "server_workspace_rename_not_focused",
+        )
+        self._submit_text(name)
+
+    def _submit_text(self, command, *, wait_for_echo=False):
         if self.backend == "x11":
             run(["xdotool", "type", "--clearmodifiers", "--delay", "2", "--", command])
         else:
@@ -616,6 +638,9 @@ print("\\033[?1049l", end="", flush=True)
 
 def validate_tree(probe, input_driver, output, fixture_speech, readiness):
     terminal = probe.terminal
+    require(
+        terminal is not None and probe.find_terminal() == terminal, "fixture_terminal_not_selected"
+    )
     atspi = probe.atspi
     probe.wait(lambda: terminal.getState().contains(atspi.STATE_FOCUSED), "terminal_not_focused")
     state = terminal.getState()
@@ -1222,11 +1247,10 @@ def reacquire_terminal(probe, application, expected_marker=None):
         desktop.clear_cache()
         for child in desktop:
             child.clear_cache()
-        window = probe.find_window(application.pid)
-        if window is None:
+        node = probe.find_terminal()
+        if node is None:
             return None
-        window.clear_cache()
-        stack = list(window)
+        stack = [node]
         visited = 0
         while stack and visited < 5000:
             node = stack.pop()
@@ -1774,12 +1798,16 @@ def private_session(args):
                 WAYLAND_DISPLAY_absent="WAYLAND_DISPLAY" not in os.environ,
             )
         require(all(expected_backend.values()), "application_backend_environment_invalid")
-        if args.server_backed:
-            require(args.server_binary is not None, "server_status_executable_missing")
-            # Account-local admission resolves getpwuid, not the private HOME/XDG fixture.
-            # Starting or stopping the owning account's server remains an explicit host action.
-            run([str(args.server_binary), "status", "spaceterm-development"])
-            report["server_backed"] = {"existing_account_server_connected": True}
+        require(args.server_binary is not None, "server_status_executable_missing")
+        require(
+            os.environ.get("SPACETERM_DEVELOPMENT_CLIENT")
+            == f"a11y-{args.private_session}-{output.parent.name}".replace("_", "-"),
+            "server_fixture_client_identity_missing",
+        )
+        # Account-local admission resolves getpwuid, not the private HOME/XDG fixture.
+        # Starting or stopping the owning account's server remains an explicit host action.
+        run([str(args.server_binary), "status", "spaceterm-development"])
+        report["server_backed"] = {"existing_account_server_connected": True}
         application = processes.start([str(args.binary)], stderr=frame_output.writer)
         probe.application_pid = application.pid
         report["application_private_environment"] = readiness.wait(
@@ -1787,7 +1815,11 @@ def private_session(args):
         )
         app_entries = Path(f"/proc/{application.pid}/environ").read_bytes().split(bytes([0]))
         app_environment = dict(entry.split(b"=", 1) for entry in app_entries if b"=" in entry)
-        actual_backend = {"headless_override_absent": b"ZED_HEADLESS" not in app_environment}
+        actual_backend = {
+            "headless_override_absent": b"ZED_HEADLESS" not in app_environment,
+            "named_server_client": app_environment.get(b"SPACETERM_DEVELOPMENT_CLIENT")
+            == os.environ["SPACETERM_DEVELOPMENT_CLIENT"].encode(),
+        }
         if args.private_session == "wayland":
             actual_backend.update(
                 DISPLAY_absent=b"DISPLAY" not in app_environment,
@@ -1816,20 +1848,17 @@ def private_session(args):
 
         window = readiness.wait(ReadinessStep.APPLICATION_WINDOW, application_window, timeout=60)
         report["window_accessibility_published"] = True
-        probe.terminal = readiness.wait(
-            ReadinessStep.TERMINAL_OBJECT, probe.find_terminal, timeout=60
-        )
-        report["terminal_accessibility_published"] = True
         if args.private_session == "x11":
             run(["xdotool", "search", "--onlyvisible", "--class", "spaceterm", "windowfocus"])
         input_driver = Input(args.private_session, probe)
-        if args.server_backed:
-            probe.open_server_workspace(input_driver)
-            window = probe.terminal
-            while window is not None and window.getRole() != probe.atspi.ROLE_FRAME:
-                window = window.parent
-            require(window is not None, "server_terminal_window_missing")
-            report["server_backed"]["workspace_created_through_native_controls"] = True
+        probe.open_server_workspace(input_driver)
+        readiness.wait(ReadinessStep.TERMINAL_OBJECT, probe.find_terminal, timeout=60)
+        report["terminal_accessibility_published"] = True
+        window = probe.terminal
+        while window is not None and window.getRole() != probe.atspi.ROLE_FRAME:
+            window = window.parent
+        require(window is not None, "server_terminal_window_missing")
+        report["server_backed"]["workspace_created_through_native_controls"] = True
 
         def orca_terminal_script():
             require(orca_process.poll() is None, "orca_process_exited")
@@ -2033,26 +2062,23 @@ def private_session(args):
         if application is not None:
             report["application_running_at_cleanup"] = application.poll() is None
             report["native_windows"] = native_windows(args.private_session)
-        if args.server_backed:
-            cleanup = {"passed": True, "creation_attempted": False}
-            report["server_workspace_cleanup"] = cleanup
-            if "probe" in locals() and probe.server_workspace_before is not None:
-                cleanup.update(
-                    passed=False, creation_attempted=True, name=probe.server_workspace_name
+        cleanup = {"passed": True, "creation_attempted": False}
+        report["server_workspace_cleanup"] = cleanup
+        if "probe" in locals() and probe.server_workspace_before is not None:
+            cleanup.update(passed=False, creation_attempted=True, name=probe.server_workspace_name)
+            try:
+                require(
+                    application is not None and application.poll() is None,
+                    "server_workspace_cleanup_application_unavailable",
                 )
-                try:
-                    require(
-                        application is not None and application.poll() is None,
-                        "server_workspace_cleanup_application_unavailable",
-                    )
-                    probe.retire_server_workspace(input_driver)
-                    cleanup["passed"] = True
-                except Exception as error:
-                    cleanup["failure"] = (
-                        str(error) if isinstance(error, SmokeFailure) else type(error).__name__
-                    )
-                    report.update(passed=False)
-                    report.setdefault("failure", "server_workspace_cleanup_incomplete")
+                probe.retire_server_workspace(input_driver)
+                cleanup["passed"] = True
+            except Exception as error:
+                cleanup["failure"] = (
+                    str(error) if isinstance(error, SmokeFailure) else type(error).__name__
+                )
+                report.update(passed=False)
+                report.setdefault("failure", "server_workspace_cleanup_incomplete")
         if input_driver is not None:
             input_driver.close()
         try:
@@ -2189,7 +2215,7 @@ def main():
     run_output = Path(tempfile.mkdtemp(prefix="run-", dir=output))
     binary = None if args.isolation_only else prepare_binary(args, run_output)
     server_binary = None
-    if args.server_backed and not args.isolation_only:
+    if not args.isolation_only:
         try:
             source_server = build_executable(
                 "--package",
@@ -2286,7 +2312,7 @@ def main():
             CARGO_BUILD_JOBS="2",
             SPACETERM_ACCESSIBILITY_SMOKE_SESSION=backend,
         )
-        if args.server_backed:
+        if not args.isolation_only:
             client_name = f"a11y-{backend}-{run_output.name}".replace("_", "-")
             environment["SPACETERM_DEVELOPMENT_CLIENT"] = client_name
         environment.update(
@@ -2310,7 +2336,7 @@ def main():
         if binary is not None:
             command.extend(("--binary", str(binary)))
         if server_binary is not None:
-            command.extend(("--server-backed", "--server-binary", str(server_binary)))
+            command.extend(("--server-binary", str(server_binary)))
         if args.isolation_only:
             command.append("--isolation-only")
         process = None
@@ -2370,11 +2396,7 @@ def main():
             measurement.write_text(json.dumps(report, indent=2) + "\n")
         measurement = backend_output / "measurement.json"
         report = json.loads(measurement.read_text()) if measurement.exists() else {}
-        if (
-            args.server_backed
-            and not args.isolation_only
-            and "server_workspace_cleanup" not in report
-        ):
+        if not args.isolation_only and "server_workspace_cleanup" not in report:
             # A killed or timed-out wrapper cannot confirm cleanup through its retired GUI.
             report.update(passed=False)
             report.setdefault("failure", "server_workspace_cleanup_incomplete")
