@@ -72,7 +72,10 @@ pub(crate) enum Step {
     Ask(Confirmation),
     /// Explains startup authorization before the operating system asks for a password.
     Authorize {
+        /// The operating system's prompt was cancelled or refused, so nothing changed.
         declined: bool,
+        /// A Restart already stopped the server, and only starting it remains.
+        stopped: bool,
     },
     Working(Operation),
     Failed(ServerError),
@@ -203,13 +206,15 @@ impl Content {
                     },
                 ],
             },
-            Step::Authorize { declined } => {
+            Step::Authorize { declined, stopped } => {
                 let prompt = AuthorizationPrompt::for_request(&AuthorizedRequest::Start, None);
                 let body = if *declined {
                     format!(
                         "The password prompt was cancelled or refused, so nothing changed. {}",
                         prompt.detail
                     )
+                } else if *stopped {
+                    format!("The server is stopped. {}", prompt.detail)
                 } else {
                     prompt.detail.to_string()
                 };
@@ -402,7 +407,27 @@ impl ServerControlWindow {
                 Ok(_) => window.remove_window(),
                 // The operating system's prompt was cancelled or refused. Nothing changed.
                 Err(ServerError::AuthorizationRequired) if this.operation == Operation::Start => {
-                    this.show(Step::Authorize { declined: true }, window, cx);
+                    this.show(
+                        Step::Authorize {
+                            declined: true,
+                            stopped: false,
+                        },
+                        window,
+                        cx,
+                    );
+                }
+                // The Restart stopped the server, then starting it needed authorization. Only
+                // the start remains, so the window continues as Start and never restarts again.
+                Err(ServerError::AuthorizationRequired) if this.operation == Operation::Restart => {
+                    this.operation = Operation::Start;
+                    this.show(
+                        Step::Authorize {
+                            declined: false,
+                            stopped: true,
+                        },
+                        window,
+                        cx,
+                    );
                 }
                 Err(error) => this.show(Step::Failed(error), window, cx),
             });

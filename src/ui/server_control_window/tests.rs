@@ -19,6 +19,14 @@ impl WindowMovementFactory for RecordingMovement {
 }
 
 fn open_window(step: Step, cx: &mut TestAppContext) -> gpui::AnyWindowHandle {
+    open_window_for(Operation::Start, step, cx)
+}
+
+fn open_window_for(
+    operation: Operation,
+    step: Step,
+    cx: &mut TestAppContext,
+) -> gpui::AnyWindowHandle {
     let settings = crate::settings::Settings::load(MemoryStorage::with_document(
         &crate::settings::SettingsDocument::default(),
     ));
@@ -44,7 +52,7 @@ fn open_window(step: Step, cx: &mut TestAppContext) -> gpui::AnyWindowHandle {
         .expect("application actions should install");
         open(
             controller,
-            Operation::Start,
+            operation,
             step,
             Rc::new(RecordingMovement),
             Box::new(|_| {}),
@@ -74,7 +82,13 @@ fn press_space(window: &mut VisualTestContext) {
 
 #[gpui::test]
 fn tab_reaches_cancel_first_and_space_chooses_it(cx: &mut TestAppContext) {
-    let window = open_window(Step::Authorize { declined: false }, cx);
+    let window = open_window(
+        Step::Authorize {
+            declined: false,
+            stopped: false,
+        },
+        cx,
+    );
     let window = &mut VisualTestContext::from_window(window, cx);
 
     // Cancel comes before the step that asks the operating system for a password.
@@ -121,9 +135,51 @@ fn close_all_windows_keeps_a_window_whose_operation_is_running(cx: &mut TestAppC
 
 #[gpui::test]
 fn close_all_windows_cancels_a_window_that_is_only_asking(cx: &mut TestAppContext) {
-    open_window(Step::Authorize { declined: false }, cx);
+    open_window(
+        Step::Authorize {
+            declined: false,
+            stopped: false,
+        },
+        cx,
+    );
     cx.update(|cx| cx.dispatch_action(&crate::app::CloseAllWindows));
     cx.run_until_parked();
 
     assert!(cx.windows().is_empty());
+}
+
+/// Restart stops the server before it starts it again. When starting then needs authorization,
+/// the window asks for it and continues as Start, so the person never confirms a second Restart.
+#[gpui::test]
+fn a_restart_that_needs_authorization_continues_as_start(cx: &mut TestAppContext) {
+    let window = open_window_for(Operation::Restart, Step::Working(Operation::Restart), cx);
+    let control = window.downcast::<ServerControlWindow>().unwrap();
+    control
+        .update(cx, |this, window, cx| {
+            this.run(
+                Task::ready(Err(ServerError::AuthorizationRequired)),
+                window,
+                cx,
+            );
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    let (operation, authorizing) = control
+        .read_with(cx, |this, _| {
+            (
+                this.operation,
+                matches!(
+                    this.step,
+                    Some(Step::Authorize {
+                        declined: false,
+                        stopped: true,
+                    })
+                ),
+            )
+        })
+        .unwrap();
+    assert!(authorizing, "the window explains startup authorization");
+    assert_eq!(operation, Operation::Start);
+    assert!(!cx.update(|cx| crate::status_menu::operations_running(cx)));
 }
