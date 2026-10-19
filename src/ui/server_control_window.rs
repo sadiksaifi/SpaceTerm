@@ -17,9 +17,7 @@ use spaceterm_server::{
         control::{Action, Confirmation, Controller},
     },
 };
-use spaceterm_ui::{
-    Button, ButtonSize, ButtonVariant, ProgressRing, ProgressState,
-};
+use spaceterm_ui::{Button, ButtonSize, ButtonVariant, ProgressRing, ProgressState};
 
 use crate::platform::window_movement::WindowMovementFactory;
 use crate::ui::appearance::gpui_color;

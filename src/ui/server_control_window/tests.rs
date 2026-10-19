@@ -92,5 +92,8 @@ fn shift_tab_reaches_the_last_choice(cx: &mut TestAppContext) {
     window.run_until_parked();
     press_space(window);
 
-    assert!(window.windows().is_empty(), "Space on the focused OK closes the window");
+    assert!(
+        window.windows().is_empty(),
+        "Space on the focused OK closes the window"
+    );
 }
