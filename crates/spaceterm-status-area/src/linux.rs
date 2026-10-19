@@ -60,11 +60,19 @@ pub fn run(controller: Controller) -> Result<(), StatusError> {
         .as_ref()
         .map(|directory| directory.join("spaceterm"))
         .filter(|desktop| desktop.is_file());
-    let icons = directory
+    // Hosts load an absolute IconName as a file. A theme name needs an icon theme index, which
+    // an installation directory does not have.
+    let icon = directory
         .as_ref()
         .and_then(|directory| directory.parent())
-        .map(|prefix| prefix.join("share/icons"))
-        .filter(|icons| icons.is_dir());
+        .map(|prefix| {
+            prefix.join(format!(
+                "share/icons/hicolor/scalable/apps/io.github.sadiksaifi.{IDENTITY}.svg"
+            ))
+        })
+        .filter(|icon| icon.is_file())
+        .and_then(|icon| icon.to_str().map(str::to_owned))
+        .unwrap_or_else(|| format!("io.github.sadiksaifi.{IDENTITY}"));
     let mut state = State::default();
     let shared = Arc::new(Mutex::new(Published {
         presentation: Presentation::of(&name, state, desktop.is_some()),
@@ -80,10 +88,7 @@ pub fn run(controller: Controller) -> Result<(), StatusError> {
                 ITEM_PATH,
                 StatusItem {
                     shared: shared.clone(),
-                    icon_theme: icons
-                        .and_then(|icons| icons.to_str().map(str::to_owned))
-                        .into_iter()
-                        .collect(),
+                    icon,
                 },
             )
         })
@@ -317,7 +322,8 @@ type Pixmaps = Vec<(i32, i32, Vec<u8>)>;
 
 struct StatusItem {
     shared: Shared,
-    icon_theme: Vec<String>,
+    /// The installed icon's absolute path, or the application id as a theme icon name.
+    icon: String,
 }
 
 #[zbus::interface(name = "org.kde.StatusNotifierItem")]
@@ -351,12 +357,7 @@ impl StatusItem {
 
     #[zbus(property)]
     fn icon_name(&self) -> String {
-        format!("io.github.sadiksaifi.{IDENTITY}")
-    }
-
-    #[zbus(property)]
-    fn icon_theme_path(&self) -> String {
-        self.icon_theme.first().cloned().unwrap_or_default()
+        self.icon.clone()
     }
 
     #[zbus(property)]
