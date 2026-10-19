@@ -765,6 +765,7 @@ mod tests {
     struct TestSupervisor {
         stop_data: Option<PathBuf>,
         running: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        allow_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
     impl Supervisor for TestSupervisor {
         fn startup(&self) -> ServiceStartup {
@@ -792,11 +793,15 @@ mod tests {
                 false,
             )?;
             let state = Service::state(&data)?.ok_or(ServerError::NotInstalled)?;
-            Err(if state.stopped {
-                ServerError::ServiceUnavailable
-            } else {
-                ServerError::StartupFailed
-            })
+            if !state.stopped {
+                return Err(ServerError::StartupFailed);
+            }
+            if !self.allow_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(ServerError::ServiceUnavailable);
+            }
+            self.running
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
         }
         fn uninstall(&self, _: &Path) -> Result<(), ServerError> {
             panic!("unexpected OS call")
@@ -993,6 +998,7 @@ mod tests {
             Arc::new(TestSupervisor {
                 stop_data: Some(fixture.paths.data.clone()),
                 running: running.clone(),
+                ..Default::default()
             }),
         ));
         let confirmation = control.prepare(Action::Uninstall).unwrap();
@@ -1001,6 +1007,35 @@ mod tests {
         let data = Directory::open(&fixture.paths.data, false).unwrap();
         let state = Service::state(&data).unwrap().unwrap();
         assert!(state.installed && !state.stopped);
+    }
+    #[test]
+    fn a_refused_native_stop_can_be_confirmed_again_without_reversing_stop() {
+        use control::{Action, Controller};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let fixture = Fixture::new();
+        let allow_stop = Arc::new(AtomicBool::new(false));
+        let control = Controller::new(Service::new(
+            fixture.paths.clone(),
+            "spaceterm-development".into(),
+            Arc::new(TestSupervisor {
+                stop_data: Some(fixture.paths.data.clone()),
+                running: Arc::new(AtomicBool::new(true)),
+                allow_stop: allow_stop.clone(),
+            }),
+        ));
+        let confirmation = control.prepare(Action::Stop).unwrap();
+        assert_eq!(
+            control.confirm(confirmation),
+            Err(ServerError::ServiceUnavailable)
+        );
+        assert_eq!(control.status(), Err(ServerError::CleanupUnresolved));
+        allow_stop.store(true, Ordering::Relaxed);
+        let retry = control.prepare(Action::Stop).unwrap();
+        let status = control.confirm(retry).unwrap();
+        assert!(status.stopped && !status.running && !status.enabled);
     }
     #[test]
     fn foreground_start_cannot_bypass_the_approved_service_runtime() {

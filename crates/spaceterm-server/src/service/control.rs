@@ -121,17 +121,32 @@ impl Controller {
 
     /// Observe the selected service and describe an action without changing it.
     pub fn prepare(&self, action: Action) -> Result<Confirmation, ServerError> {
-        let status = self.status()?;
-        if !status.installed {
-            return Err(ServerError::NotInstalled);
-        }
-        if matches!(action, Action::Stop | Action::Restart) && status.stopped {
-            return Err(ServerError::Stopped);
-        }
+        let running = match self.status() {
+            Ok(status) => {
+                if !status.installed {
+                    return Err(ServerError::NotInstalled);
+                }
+                if matches!(action, Action::Stop | Action::Restart) && status.stopped {
+                    return Err(ServerError::Stopped);
+                }
+                status.running
+            }
+            Err(ServerError::CleanupUnresolved) if action == Action::Stop => {
+                let (_, state) = self.service.read()?.ok_or(ServerError::NotInstalled)?;
+                if !state.installed {
+                    return Err(ServerError::NotInstalled);
+                }
+                // A refused native Stop can leave a process running after durable Stop was
+                // published. Warn about every Session and let explicit Stop retry the same
+                // native checks; Start and Restart remain unavailable.
+                true
+            }
+            Err(error) => return Err(error),
+        };
         Ok(Confirmation {
             service: self.service.clone(),
             action,
-            running: status.running,
+            running,
         })
     }
 
