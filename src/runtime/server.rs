@@ -1131,6 +1131,7 @@ impl OwnedPane {
                     {
                         self.screen_generation = self.screen_generation.saturating_add(1);
                     }
+                    self.reading.observe(self.screen_generation, &screen);
                     self.screen = Some(screen);
                 }
                 TerminalSessionEvent::ClientEffect(_) => {}
