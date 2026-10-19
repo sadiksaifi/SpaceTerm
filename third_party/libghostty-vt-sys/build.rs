@@ -104,6 +104,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=GHOSTTY_ZIG_SYSTEM_DIR");
     println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=HOST");
+    println!("cargo:rerun-if-env-changed=CARGO_ZIGBUILD_TARGET");
     println!("cargo:rerun-if-env-changed=DEBUG");
     println!("cargo:rerun-if-env-changed=OPT_LEVEL");
     for build_script in BUILD_SCRIPT_FILES {
@@ -217,9 +218,11 @@ fn build_vendored(link_mode: LinkMode) {
             .arg(&zig_global_cache_dir);
     }
 
-    // Only pass -Dtarget when cross-compiling. For native builds, let zig
-    // auto-detect the host (matches how ghostty's own CMakeLists.txt works).
-    if target != host {
+    // Use the linker's resolved target, including its glibc baseline, even on
+    // native hosts. Autodetection would compile against the build host's glibc.
+    if let Ok(zig_target) = env::var("CARGO_ZIGBUILD_TARGET") {
+        build.arg(format!("-Dtarget={zig_target}"));
+    } else if target != host {
         let zig_target = zig_target(&target);
         build.arg(format!("-Dtarget={zig_target}"));
     }

@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # MISE description="Build and verify SpaceTerm Preflight, the optimized x86_64 Linux archive"
+# MISE depends=["setup:linux-toolchain"]
 """Build and verify SpaceTerm Preflight, the optimized x86_64 Linux archive."""
 
 import argparse

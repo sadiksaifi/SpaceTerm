@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # MISE description="Build and sign an independent headless server candidate without publishing"
+# MISE depends=["setup:linux-toolchain"]
 """Build and sign an independent headless server candidate without publishing."""
 
 import argparse

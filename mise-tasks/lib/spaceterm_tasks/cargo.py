@@ -10,11 +10,17 @@ from spaceterm_tasks import ROOT, TaskError
 from spaceterm_tasks.processes import OWN_GROUP, stop_group, terminating_signals_raise
 
 
-def build_executable(*cargo_args, binary="spaceterm", env=None):
+def build_executable(*cargo_args, binary="spaceterm", env=None, portable_linux=False):
     """Build `binary` and return Cargo's artifact path, never a stale guess under target/."""
+    build = ["build"]
+    if portable_linux:
+        from spaceterm_tasks.linux_toolchain import build_environment
+
+        target, env = build_environment(env if env is not None else os.environ)
+        build = ["zigbuild", "--target", target]
     command = [
         "cargo",
-        "build",
+        *build,
         "--bin",
         binary,
         "--message-format=json-render-diagnostics",

@@ -22,6 +22,9 @@ FIXTURE = r"""
 #ifdef NEWER_GLIBC
 extern int pidfd_getpid(int);
 #endif
+#ifdef WEAK_NEWER_GLIBC
+extern int pidfd_getpid(int) __attribute__((weak));
+#endif
 int main(int argc, char **argv) {
     if (getenv("SPACETERM_SSH_ASKPASS_MODE")) return 2;
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
@@ -30,6 +33,9 @@ int main(int argc, char **argv) {
     }
 #ifdef NEWER_GLIBC
     return pidfd_getpid(-1);
+#endif
+#ifdef WEAK_NEWER_GLIBC
+    if (pidfd_getpid) return pidfd_getpid(-1);
 #endif
     return 1;
 }
@@ -89,7 +95,7 @@ import json
 import os
 from pathlib import Path
 import sys
-if sys.argv[1] != "build" or "--locked" not in sys.argv:
+if sys.argv[1] != "zigbuild" or "--locked" not in sys.argv:
     os.execv({cargo!r}, [{cargo!r}, *sys.argv[1:]])
 Path(os.environ["BUILD_RECORD"]).write_text(json.dumps({{
     "arguments": sys.argv[2:],
@@ -228,10 +234,12 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         self.assertFalse((self.root / "dist/spaceterm-linux-x86_64.tar.gz").exists())
 
     @unittest.skipUnless(host_glibc() >= (2, 39), "the host glibc predates pidfd_getpid")
-    def test_preflight_runs_on_its_build_host_whatever_its_glibc(self):
-        self.compile_executable("SpaceTerm Preflight 0.0.0", "NEWER_GLIBC")
+    def test_preflight_rejects_even_a_weak_import_from_a_newer_glibc(self):
+        self.compile_executable("SpaceTerm Preflight 0.0.0", "WEAK_NEWER_GLIBC")
         result = self.package()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("newer than 2.35", result.stderr)
+        self.assertFalse((self.root / "dist/spaceterm-preflight-linux-x86_64.tar.gz").exists())
 
 
 if __name__ == "__main__":
