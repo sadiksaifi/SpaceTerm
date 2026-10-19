@@ -115,7 +115,7 @@ pub fn run(controller: Controller) -> Result<(), StatusError> {
             let _ = sender.send(Message::Worker(event));
         })?
     };
-    register_item(&connection, &bus_name);
+    register_item(&connection);
     worker.send(Request::Refresh);
     let mut controlling = false;
     for message in messages {
@@ -166,7 +166,7 @@ pub fn run(controller: Controller) -> Result<(), StatusError> {
                 }
             }
             Message::WatcherAppeared => {
-                register_item(&connection, &bus_name);
+                register_item(&connection);
                 continue;
             }
             Message::Refresh => {
@@ -233,13 +233,20 @@ fn detached(mut command: std::process::Command) -> std::process::Command {
 }
 
 /// Tells the session's status-area host about the item. Without a host this does nothing.
-fn register_item(connection: &Connection, bus_name: &str) {
+///
+/// The item registers by this connection's unique name, not the build's well-known name. A
+/// previous instance registered that well-known name too, and a host that processes its exit
+/// after this registration would otherwise remove the new item along with the old one.
+fn register_item(connection: &Connection) {
+    let Some(unique) = connection.unique_name() else {
+        return;
+    };
     let _ = connection.call_method(
         Some(WATCHER),
         "/StatusNotifierWatcher",
         Some(WATCHER),
         "RegisterStatusNotifierItem",
-        &(bus_name,),
+        &(unique.as_str(),),
     );
 }
 
