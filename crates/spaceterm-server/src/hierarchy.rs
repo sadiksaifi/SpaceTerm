@@ -665,6 +665,9 @@ impl State {
                         .unwrap_or(&source.starting_directory)
                         .clone()
                 });
+                if !validate_pin(&start) {
+                    return Ok(Outcome::Invalid);
+                }
                 let id = new_id()?;
                 let pane = new_id()?;
                 w.tabs.push(Tab {
@@ -1470,6 +1473,68 @@ mod tests {
                 .map(|w| w.name.as_str())
                 .collect::<Vec<_>>(),
             ["Default", "Default (3)", "Default (2)"]
+        );
+    }
+
+    #[test]
+    fn new_tabs_refuse_an_unavailable_pin_and_keep_the_refusal_after_repair() {
+        let mut state = State::empty();
+        let pin = Path::new("/repo/pin");
+        let home = Path::new("/home/test");
+        let Outcome::Accepted { target: workspace } = state
+            .apply(
+                [1; 32],
+                1,
+                Mutation::CreateWorkspace {
+                    name: "Build".into(),
+                    directory: Some(pin.into()),
+                },
+                home,
+                |_| true,
+            )
+            .unwrap()
+        else {
+            panic!("create the pinned Workspace");
+        };
+        let inventory = state.inventory.clone();
+        let create = Mutation::CreateTab {
+            workspace,
+            source: None,
+        };
+        assert_eq!(
+            state
+                .apply([1; 32], 2, create.clone(), home, |path| {
+                    assert_eq!(path, pin);
+                    false
+                })
+                .unwrap(),
+            Outcome::Invalid
+        );
+        assert_eq!(state.inventory, inventory);
+        let retained = serde_json::to_vec(&state).unwrap();
+        let mut state: State = serde_json::from_slice(&retained).unwrap();
+        assert_eq!(
+            state
+                .apply([1; 32], 2, create.clone(), home, |path| path == pin)
+                .unwrap(),
+            Outcome::Invalid,
+            "repair does not retry a completed operation"
+        );
+        assert_eq!(serde_json::to_vec(&state).unwrap(), retained);
+        let accepted = state
+            .apply([1; 32], 3, create.clone(), home, |path| path == pin)
+            .unwrap();
+        assert!(matches!(accepted, Outcome::Accepted { .. }));
+        assert_eq!(
+            state
+                .apply([1; 32], 3, create, home, |path| path == pin)
+                .unwrap(),
+            accepted
+        );
+        assert_eq!(state.inventory.workspaces[0].tabs.len(), 2);
+        assert_eq!(
+            state.inventory.workspaces[0].tabs[1].panes[0].starting_directory,
+            pin
         );
     }
 
