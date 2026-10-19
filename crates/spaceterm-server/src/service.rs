@@ -1,4 +1,5 @@
 //! Explicit account service installation and lifecycle. Discovery never starts a service.
+mod command;
 pub mod control;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -20,10 +21,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
 use std::{
     ffi::OsString,
     io::{Read, Write},
-    process::{Command, Stdio},
+    process::Command,
 };
 
 /// The OS authorization surface selected by an explicit local action.
@@ -96,6 +99,10 @@ trait Supervisor: Send + Sync {
     fn disable(&self) -> Result<(), ServerError>;
     fn uninstall(&self, runtime: &Path) -> Result<(), ServerError>;
     fn running(&self) -> Result<bool, ServerError>;
+    fn observe(&self, runtime: &Path, removing: bool) -> Result<bool, ServerError> {
+        self.check(runtime, removing)?;
+        self.running()
+    }
     fn enable_linger(&self, _authorization: LingerAuthorization) -> Result<(), ServerError> {
         Err(ServerError::Unsupported)
     }
@@ -295,8 +302,9 @@ impl Service {
                     return Ok(None);
                 }
                 self.start_locked(&data, &mut state, false)?;
+                return self.snapshot(&state).map(Some);
             }
-            return self.snapshot(&state).map(Some);
+            return Ok(Some(status));
         }
         // Existing but incompatible identity is never first setup. Leave its exact bytes intact.
         match data.read() {
@@ -458,11 +466,12 @@ impl Service {
         if state.removing {
             return Err(ServerError::CleanupUnresolved);
         }
-        if state.installed {
+        let running = if state.installed {
             self.supervisor
-                .check(&self.runtime(state), state.removing)?;
-        }
-        let running = self.supervisor.running()?;
+                .observe(&self.runtime(state), state.removing)?
+        } else {
+            self.supervisor.running()?
+        };
         if running && (!state.installed || state.stopped) {
             return Err(ServerError::CleanupUnresolved);
         }
@@ -734,40 +743,7 @@ fn command(program: &str, args: &[OsString]) -> Result<Vec<u8>, ServerError> {
     execute(&mut prepared)
 }
 fn execute(prepared: &mut Command) -> Result<Vec<u8>, ServerError> {
-    let mut child = prepared
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| ServerError::ServiceUnavailable)?;
-    let mut output = child.stdout.take().ok_or(ServerError::ServiceUnavailable)?;
-    let reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = output.by_ref().take(65536).read_to_end(&mut bytes);
-        let _ = std::io::copy(&mut output, &mut std::io::sink());
-        bytes
-    });
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let result = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                break if status.success() {
-                    Ok(())
-                } else {
-                    Err(ServerError::ServiceUnavailable)
-                };
-            }
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break Err(ServerError::ServiceUnavailable);
-            }
-        }
-    };
-    let bytes = reader.join().map_err(|_| ServerError::ServiceUnavailable)?;
-    result?;
-    Ok(bytes)
+    command::execute(prepared, Duration::from_secs(20))
 }
 
 // An authenticated explicit protocol Shutdown carries Stop intent too. Service-manager signals
@@ -790,12 +766,16 @@ mod tests {
         stop_data: Option<PathBuf>,
         running: std::sync::Arc<std::sync::atomic::AtomicBool>,
         allow_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        checks: std::sync::atomic::AtomicUsize,
+        running_checks: std::sync::atomic::AtomicUsize,
     }
     impl Supervisor for TestSupervisor {
         fn startup(&self) -> ServiceStartup {
             ServiceStartup::AtLogin
         }
         fn check(&self, _: &Path, _: bool) -> Result<(), ServerError> {
+            self.checks
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if self.stop_data.is_some() {
                 Ok(())
             } else {
@@ -831,6 +811,8 @@ mod tests {
             panic!("unexpected OS call")
         }
         fn running(&self) -> Result<bool, ServerError> {
+            self.running_checks
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if self.stop_data.is_some() {
                 Ok(self.running.load(std::sync::atomic::Ordering::Relaxed))
             } else {
@@ -873,6 +855,35 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+    #[cfg(feature = "client")]
+    #[test]
+    fn warm_launch_reuses_its_validated_service_observation() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let fixture = Fixture::new();
+        let supervisor = Arc::new(TestSupervisor {
+            stop_data: Some(fixture.paths.data.clone()),
+            running: Arc::new(AtomicBool::new(true)),
+            ..Default::default()
+        });
+        let service = Service::new(
+            fixture.paths.clone(),
+            fixture.paths.identity.clone(),
+            supervisor.clone(),
+        );
+        let status = service
+            .launch(
+                || panic!("warm launch must preserve the approved runtime"),
+                || false,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(status.running && status.installed && !status.stopped);
+        assert_eq!(supervisor.checks.load(Ordering::Relaxed), 1);
+        assert_eq!(supervisor.running_checks.load(Ordering::Relaxed), 1);
     }
     #[test]
     fn reinstall_discovery_does_not_offer_an_unapproved_staged_build() {
@@ -1048,6 +1059,7 @@ mod tests {
                 stop_data: Some(fixture.paths.data.clone()),
                 running: Arc::new(AtomicBool::new(true)),
                 allow_stop: allow_stop.clone(),
+                ..Default::default()
             }),
         ));
         let confirmation = control.prepare(Action::Stop).unwrap();
