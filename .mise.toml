@@ -492,8 +492,9 @@ description = "Explicitly control this build's account server service"
 usage = '''
 arg "<action>" help="status, install, start, stop, restart, uninstall, or enable-linger"
 arg "[installation]" help="Verified retained installation directory for install"
+flag "--confirm" help="Confirm Stop, Restart, or Uninstall after reviewing its effects"
 '''
-run = "cargo run --package spaceterm-server-host --no-default-features --locked -- service-{{usage.action}} spaceterm-development {% if usage.installation %}{{usage.installation | quote}}{% endif %}"
+run = "cargo run --package spaceterm-server-host --no-default-features --locked -- service-{{usage.action}} spaceterm-development {% if usage.installation %}{{usage.installation | quote}}{% endif %}{% if usage.confirm %} --confirm{% endif %}"
 
 [tasks."server:service:session:macos"]
 description = "Verify authenticated Session survival and durable Stop on an installed macOS server"
