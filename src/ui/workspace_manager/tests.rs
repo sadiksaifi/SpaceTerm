@@ -13075,6 +13075,52 @@ fn choosing_a_detached_workspace_should_attach_and_activate_it_without_taking_ov
     assert_eq!(harness.edits.submitted(), Vec::new());
 }
 
+/// The Workspace that takes the place of one the person closed gets the keyboard, but nobody chose
+/// it, so its Focused Pane is not selected and a restored Pane starts no shell.
+#[gpui::test]
+fn killing_the_active_workspace_should_open_its_neighbor_without_selecting_its_pane(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = attachment_harness(cx);
+    let selections = || {
+        [ATTACHED_BUILD_PANE, ATTACHED_DOCS_PANE].map(|pane| harness.panes.pane(pane).selections())
+    };
+    let before = selections();
+
+    harness.close_desktop_workspace(cx);
+
+    assert_eq!(harness.presented(cx), vec![2, 3]);
+    assert_eq!(harness.active(cx), Some(WorkspaceId::new(2)));
+    assert_eq!(selections(), before);
+    assert!(
+        active_terminal_has_input_focus(&harness.manager, cx),
+        "the keyboard moves into the Workspace that took the closed one's place"
+    );
+}
+
+/// Detaching the Active Workspace opens its neighbor the same way: with the keyboard, without
+/// selecting the neighbor's Focused Pane.
+#[gpui::test]
+fn detaching_the_active_workspace_should_open_its_neighbor_without_selecting_its_pane(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = attachment_harness(cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.activate_workspace(WorkspaceId::new(3), window, cx);
+        });
+    });
+    settle_shared_panes(cx);
+    let before = harness.panes.pane(ATTACHED_BUILD_PANE).selections();
+
+    harness.detach(3, cx);
+
+    assert_eq!(harness.presented(cx), vec![1, 2]);
+    assert_eq!(harness.active(cx), Some(WorkspaceId::new(2)));
+    assert_eq!(harness.panes.pane(ATTACHED_BUILD_PANE).selections(), before);
+    assert!(active_terminal_has_input_focus(&harness.manager, cx));
+}
+
 #[gpui::test]
 fn detaching_the_final_workspace_should_leave_an_empty_view_without_a_replacement(
     cx: &mut TestAppContext,

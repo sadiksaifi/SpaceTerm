@@ -643,6 +643,14 @@ impl TabManager {
             .update(cx, |view, cx| view.open_focused_pane(window, cx));
     }
 
+    /// Opens this Workspace in place of one that went away. The keyboard moves into its Active
+    /// Tab, but nobody chose the Workspace, so no Pane is selected and a restored Pane waits for
+    /// its first use.
+    pub(crate) fn activate_in_place(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.activate_without_focus(cx);
+        self.focus(window, cx);
+    }
+
     pub(crate) fn activate_without_focus(&mut self, cx: &mut Context<Self>) {
         self.active = true;
         self.tabs

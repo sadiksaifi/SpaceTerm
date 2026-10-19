@@ -2632,10 +2632,10 @@ impl WorkspaceManager {
         self.close_workspace_activating(workspace_id, true, window, cx);
     }
 
-    /// Closes a Workspace. `activate_next` opens the Workspace that takes its place for the
-    /// person, which selects that Workspace's Focused Pane; a close the server published passes
-    /// `false`, because nobody asked for a Pane there. Nothing replaces a final Workspace: the
-    /// window presents its empty view instead.
+    /// Closes a Workspace. `activate_next` moves the keyboard into the Workspace that takes its
+    /// place; nobody chose that Workspace, so its Focused Pane is not selected either way. A close
+    /// the server published passes `false`. Nothing replaces a final Workspace: the window
+    /// presents its empty view instead.
     fn close_workspace_activating(
         &mut self,
         workspace_id: WorkspaceId,
@@ -2673,7 +2673,8 @@ impl WorkspaceManager {
                     {
                         active_manager.update(cx, |manager, cx| manager.activate_without_focus(cx));
                     } else {
-                        active_manager.update(cx, |manager, cx| manager.activate(window, cx));
+                        active_manager
+                            .update(cx, |manager, cx| manager.activate_in_place(window, cx));
                     }
                 }
             }
@@ -4940,7 +4941,8 @@ impl WorkspaceManager {
                     {
                         active_manager.update(cx, |manager, cx| manager.activate_without_focus(cx));
                     } else {
-                        active_manager.update(cx, |manager, cx| manager.activate(window, cx));
+                        active_manager
+                            .update(cx, |manager, cx| manager.activate_in_place(window, cx));
                     }
                 }
                 self.scroll_active_workspace_into_view(cx);
