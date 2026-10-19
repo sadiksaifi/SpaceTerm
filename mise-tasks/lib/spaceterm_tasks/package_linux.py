@@ -15,7 +15,7 @@ import tempfile
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path, PurePosixPath
 
-from spaceterm_tasks import ROOT, TaskError, macos_signing
+from spaceterm_tasks import ROOT, TaskError, macos_signing, status_area_package
 from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.development_linux import icon_svg
 from spaceterm_tasks.macos_bundle import identity, identity_directory
@@ -65,11 +65,12 @@ def icon_document(name):
     return identity_directory(name) / f"{identity(name)['CFBundleName']}.icon"
 
 
-def stage(name, executable, tree):
+def stage(name, executable, status_area, tree):
     """Lay out one identity's installed directory at `tree`."""
     (tree / "bin").mkdir(parents=True)
     shutil.copyfile(executable, tree / "bin" / "spaceterm")
     (tree / "bin" / "spaceterm").chmod(0o755)
+    status_area_package.stage_executable(status_area, tree / "bin")
     resources = tree / "share" / "spaceterm"
     shutil.copytree(SHELL_INTEGRATION, resources / "shell-integration")
     shutil.copyfile(NOTICES, resources / NOTICES.name)
@@ -121,9 +122,10 @@ def package(release_tag=None):
         "desktop",
         env=environment,
     )
+    status_area = status_area_package.build("--release", env=environment)
     shutil.rmtree(STAGE, ignore_errors=True)
     STAGE.mkdir(parents=True)
-    stage(name, executable, STAGE / DIRECTORIES[name])
+    stage(name, executable, status_area, STAGE / DIRECTORIES[name])
     from spaceterm_tasks.server_package import prepare_desktop_artifact
 
     prepare_desktop_artifact(
@@ -179,7 +181,20 @@ def verify_tree(tree, name, release_tag):
     if release_tag:
         verify_glibc_baseline(executable, label)
     version = release_version(release_tag) if release_tag else None
-    verify_application_identity(executable, identity(name)["CFBundleName"], label, version)
+    outer_version = verify_application_identity(
+        executable, identity(name)["CFBundleName"], label, version
+    )
+    helper = tree / "bin" / status_area_package.BINARY
+    helper_label = f"{label} status-area"
+    status_area_package.verify_executable(helper, helper_label)
+    header = checked(["objdump", "-f", str(helper)], f"{helper_label} executable is unreadable")
+    if b"elf64-x86-64" not in header:
+        raise TaskError(f"{helper_label} executable must contain only x86_64 code")
+    if release_tag:
+        verify_glibc_baseline(helper, helper_label)
+    verify_application_identity(
+        helper, identity(name)["CFBundleName"] + " Server Status", helper_label, outer_version
+    )
     verify_askpass_helper_mode(executable, label)
     verify_resources(tree / "share" / "spaceterm", label)
     from spaceterm_tasks.server_package import verify_desktop_artifact

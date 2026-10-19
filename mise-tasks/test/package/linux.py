@@ -91,30 +91,36 @@ from pathlib import Path
 import sys
 if sys.argv[1] != "build" or "--locked" not in sys.argv:
     os.execv({cargo!r}, [{cargo!r}, *sys.argv[1:]])
-Path(os.environ["BUILD_RECORD"]).write_text(json.dumps({{
+binary = sys.argv[sys.argv.index("--bin") + 1]
+assert binary in ("spaceterm", "spaceterm-status-area"), "no sibling server build"
+record = "BUILD_RECORD" if binary == "spaceterm" else "BUILD_STATUS_AREA_RECORD"
+Path(os.environ[record]).write_text(json.dumps({{
     "arguments": sys.argv[2:],
     "packaged": os.environ.get("SPACETERM_PACKAGED"),
     "release_tag": os.environ.get("SPACETERM_RELEASE_TAG"),
 }}))
-binary = sys.argv[sys.argv.index("--bin") + 1]
-assert binary == "spaceterm", "the desktop builds no sibling server executable"
+artifact = "BUILD_EXECUTABLE" if binary == "spaceterm" else "BUILD_STATUS_AREA_EXECUTABLE"
 print(json.dumps({{"reason": "compiler-artifact", "target": {{"name": binary}},
-                  "executable": os.environ["BUILD_EXECUTABLE"]}}))
+                  "executable": os.environ[artifact]}}))
 sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
 """)
         (self.bin / "cargo").chmod(0o755)
         self.record = Path(self.directory.name) / "build.json"
         self.artifact = self.root / "target/release/spaceterm"
+        self.status_area = self.artifact.with_name("spaceterm-status-area")
         self.env = {
             **os.environ,
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
             "PYTHONPATH": str(self.root / "mise-tasks/lib"),
             "BUILD_RECORD": str(self.record),
             "BUILD_EXECUTABLE": str(self.artifact),
+            "BUILD_STATUS_AREA_RECORD": str(self.record.with_name("status-area-build.json")),
+            "BUILD_STATUS_AREA_EXECUTABLE": str(self.status_area),
         }
 
-    def compile_executable(self, identity, *definitions):
-        self.artifact.parent.mkdir(parents=True, exist_ok=True)
+    def compile_executable(self, identity, *definitions, output=None):
+        output = output or self.artifact
+        output.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(
             [
                 "cc",
@@ -124,7 +130,7 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
                 *(f"-D{definition}" for definition in definitions),
                 "-",
                 "-o",
-                str(self.artifact),
+                str(output),
             ],
             input=FIXTURE,
             text=True,
@@ -143,6 +149,13 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         )
 
     def package(self, release_tag=None):
+        if not self.status_area.exists():
+            self.compile_executable(
+                "SpaceTerm Server Status " + release_tag.removeprefix("v")
+                if release_tag
+                else "SpaceTerm Preflight Server Status dev.0123456789ab.dirty",
+                output=self.status_area,
+            )
         prepare(self.root, self.env, release_tag)
         if release_tag:
             return self.task("release/package/linux.py", release_tag)
@@ -153,7 +166,7 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
             return {member.name: member for member in source.getmembers()}
 
     def test_preflight_archive_holds_the_reported_artifact_in_the_installed_layout(self):
-        self.compile_executable("SpaceTerm Preflight 0.0.0")
+        self.compile_executable("SpaceTerm Preflight dev.0123456789ab.dirty")
         result = self.package()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         archive = self.root / "dist/spaceterm-preflight-linux-x86_64.tar.gz"
@@ -162,6 +175,7 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         identifier = "io.github.sadiksaifi.spaceterm-preflight"
         for name in (
             "spaceterm-preflight/bin/spaceterm",
+            "spaceterm-preflight/bin/spaceterm-status-area",
             "spaceterm-preflight/share/spaceterm/server-artifact/artifact.tar.gz",
             "spaceterm-preflight/share/spaceterm/server-artifact/artifact.sig",
             "spaceterm-preflight/share/spaceterm/THIRD-PARTY-NOTICES.txt",
@@ -180,6 +194,14 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         record = json.loads(self.record.read_text())
         self.assertIn("--no-default-features", record["arguments"])
         self.assertEqual((record["packaged"], record["release_tag"]), ("1", None))
+        helper = members["spaceterm-preflight/bin/spaceterm-status-area"]
+        self.assertEqual(helper.mode, 0o755)
+        with tarfile.open(archive, "r:gz") as source:
+            packaged = source.extractfile(helper)
+            assert packaged is not None
+            self.assertEqual(packaged.read(), self.status_area.read_bytes())
+        helper_record = json.loads(Path(self.env["BUILD_STATUS_AREA_RECORD"]).read_text())
+        self.assertEqual((helper_record["packaged"], helper_record["release_tag"]), ("1", None))
 
     def test_packaging_rejects_development_identity_in_a_preflight_archive(self):
         self.compile_executable("SpaceTerm Development 0.0.0")
@@ -188,8 +210,30 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         self.assertIn("application identity", result.stderr)
         self.assertFalse((self.root / "dist/spaceterm-preflight-linux-x86_64.tar.gz").exists())
 
+    def test_packaging_rejects_another_status_area_identity(self):
+        self.compile_executable("SpaceTerm Preflight dev.0123456789ab.dirty")
+        self.compile_executable(
+            "SpaceTerm Development Server Status 0.0.0", output=self.status_area
+        )
+        result = self.package()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("status-area executable application identity", result.stderr)
+        self.assertFalse((self.root / "dist/spaceterm-preflight-linux-x86_64.tar.gz").exists())
+
+    def test_packaging_rejects_a_status_area_helper_from_another_build(self):
+        self.compile_executable("SpaceTerm Preflight dev.0123456789ab.dirty")
+        self.compile_executable(
+            "SpaceTerm Preflight Server Status dev.ffffffffffff", output=self.status_area
+        )
+        result = self.package()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "status-area executable version must be dev.0123456789ab.dirty", result.stderr
+        )
+        self.assertFalse((self.root / "dist/spaceterm-preflight-linux-x86_64.tar.gz").exists())
+
     def test_failed_build_does_not_package_a_stale_executable(self):
-        self.compile_executable("SpaceTerm Preflight 0.0.0")
+        self.compile_executable("SpaceTerm Preflight dev.0123456789ab.dirty")
         self.env["BUILD_EXIT"] = "1"
         result = self.package()
         self.assertNotEqual(result.returncode, 0)
@@ -228,8 +272,19 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         self.assertFalse((self.root / "dist/spaceterm-linux-x86_64.tar.gz").exists())
 
     @unittest.skipUnless(host_glibc() >= (2, 39), "the host glibc predates pidfd_getpid")
+    def test_release_packaging_rejects_a_status_area_helper_with_a_newer_glibc(self):
+        self.compile_executable("SpaceTerm 0.0.1")
+        self.compile_executable(
+            "SpaceTerm Server Status 0.0.1", "NEWER_GLIBC", output=self.status_area
+        )
+        result = self.package("v0.0.1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("status-area executable needs glibc", result.stderr)
+        self.assertFalse((self.root / "dist/spaceterm-linux-x86_64.tar.gz").exists())
+
+    @unittest.skipUnless(host_glibc() >= (2, 39), "the host glibc predates pidfd_getpid")
     def test_preflight_runs_on_its_build_host_whatever_its_glibc(self):
-        self.compile_executable("SpaceTerm Preflight 0.0.0", "NEWER_GLIBC")
+        self.compile_executable("SpaceTerm Preflight dev.0123456789ab.dirty", "NEWER_GLIBC")
         result = self.package()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 

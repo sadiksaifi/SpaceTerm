@@ -94,7 +94,7 @@ shutil.copyfile(source, arguments[arguments.index("--output") + 1])
     def release_archive(self, name, version):
         directory = "spaceterm" if name == "spaceterm" else "spaceterm-preflight"
         tree = self.root / f"tree-{name}-{version}" / directory
-        stage(name, self.executable, tree)
+        stage(name, self.executable, self.executable, tree)
         (tree / "share/spaceterm/version").write_text(version)
         archive = self.root / f"{directory}-{version}.tar.gz"
         write_archive(tree, archive)

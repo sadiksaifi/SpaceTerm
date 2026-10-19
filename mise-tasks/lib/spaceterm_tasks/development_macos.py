@@ -4,11 +4,10 @@ import hashlib
 import os
 import plistlib
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 
-from spaceterm_tasks import TaskError, developer_environment
+from spaceterm_tasks import TaskError, developer_environment, status_area_package
 from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.macos_bundle import ICON_NAME, compile_icon, identity, identity_directory
 from spaceterm_tasks.packaging import (
@@ -44,7 +43,7 @@ def cached_icon(parent, name):
     return cache
 
 
-def stage_bundle(executable):
+def stage_bundle(executable, status_area):
     template = identity(IDENTITY)
     name = template["CFBundleName"]
     if name != template["CFBundleExecutable"]:
@@ -75,12 +74,8 @@ def stage_bundle(executable):
             "Development terminfo compilation failed",
         )
         verify_resources(resources, "Development bundle")
-        signed = subprocess.run(
-            ["codesign", "--force", "--sign", "-", "--timestamp=none", str(contents.parent)],
-            stdout=subprocess.DEVNULL,
-        )
-        if signed.returncode:
-            raise TaskError("codesign could not sign the Development bundle")
+        status_area_package.finalize_macos(contents.parent, status_area, "-", None)
+        status_area_package.verify_macos(contents.parent, info, "Development bundle")
         bundle = parent / f"{name}.app"
         shutil.rmtree(bundle, ignore_errors=True)
         contents.parent.rename(bundle)
@@ -90,7 +85,10 @@ def stage_bundle(executable):
 
 
 def launch():
-    bundle = stage_bundle(build_executable("--locked"))
+    bundle = stage_bundle(
+        build_executable("--locked"),
+        status_area_package.build(env={**os.environ, "MACOSX_DEPLOYMENT_TARGET": "26.0"}),
+    )
     scenario = os.environ.get("SPACETERM_UPDATE_PREVIEW")
     if scenario:
         print(f"Update preview: {scenario}. Choose SpaceTerm Development > Check for Updates…")

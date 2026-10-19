@@ -4,6 +4,7 @@
 
 import json
 import os
+import plistlib
 import re
 import shutil
 import subprocess
@@ -76,7 +77,10 @@ import subprocess
 import sys
 if sys.argv[1] != "build" or "--locked" not in sys.argv:
     os.execv({cargo!r}, [{cargo!r}, *sys.argv[1:]])
-Path(os.environ["BUILD_RECORD"]).write_text(json.dumps({{
+binary = sys.argv[sys.argv.index("--bin") + 1]
+assert binary in ("spaceterm", "spaceterm-status-area"), "no sibling server build"
+record = "BUILD_RECORD" if binary == "spaceterm" else "BUILD_STATUS_AREA_RECORD"
+Path(os.environ[record]).write_text(json.dumps({{
     "arguments": sys.argv[2:],
     "packaged": os.environ.get("SPACETERM_PACKAGED"),
     "release_tag": os.environ.get("SPACETERM_RELEASE_TAG"),
@@ -89,10 +93,9 @@ Path(os.environ["BUILD_RECORD"]).write_text(json.dumps({{
         capture_output=True, text=True, check=True,
     ).stdout,
 }}))
-binary = sys.argv[sys.argv.index("--bin") + 1]
-assert binary == "spaceterm", "the desktop builds no sibling server executable"
+artifact = "BUILD_EXECUTABLE" if binary == "spaceterm" else "BUILD_STATUS_AREA_EXECUTABLE"
 print(json.dumps({{"reason": "compiler-artifact", "target": {{"name": binary}},
-                  "executable": os.environ["BUILD_EXECUTABLE"]}}))
+                  "executable": os.environ[artifact]}}))
 sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
 """)
         (self.bin / "cargo").chmod(0o755)
@@ -103,10 +106,13 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
             "PYTHONPATH": str(self.root / "mise-tasks/lib"),
             "BUILD_RECORD": str(self.record),
+            "BUILD_STATUS_AREA_RECORD": str(self.record.with_name("status-area-build.json")),
             "BUILD_SIGNING_FINGERPRINT": self.fingerprint,
         }
         self.artifact = self.root / "target/aarch64-apple-darwin/release/spaceterm"
         self.env["BUILD_EXECUTABLE"] = str(self.artifact)
+        self.status_area = self.artifact.with_name("spaceterm-status-area")
+        self.env["BUILD_STATUS_AREA_EXECUTABLE"] = str(self.status_area)
         self.stale = self.root / "target/release/spaceterm"
         self.compile_executable(self.stale, "SpaceTerm Development")
 
@@ -115,7 +121,8 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
             args, cwd=self.root, capture_output=True, text=True, check=True, **kwargs
         )
 
-    def compile_executable(self, output, identity):
+    def compile_executable(self, output, identity, version=None):
+        version = version or ("0.0.1" if identity == "SpaceTerm" else "dev.0123456789ab.dirty")
         output.parent.mkdir(parents=True, exist_ok=True)
         self.run_command(
             "xcrun",
@@ -135,7 +142,7 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
 int main(int argc, char **argv) {{
     if (getenv("SPACETERM_SSH_ASKPASS_MODE")) return 2;
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {{
-        puts("{identity} 0.0.1");
+        puts("{identity} {version}");
         return 0;
     }}
     return 1;
@@ -154,6 +161,12 @@ int main(int argc, char **argv) {{
         )
 
     def package(self, release_tag=None):
+        if not self.status_area.exists():
+            self.compile_executable(
+                self.status_area,
+                "SpaceTerm Server Status" if release_tag else "SpaceTerm Preflight Server Status",
+                release_tag.removeprefix("v") if release_tag else "dev.0123456789ab.dirty",
+            )
         prepare(self.root, self.env, release_tag, self.fingerprint, self.credentials)
         if release_tag:
             return self.task("release/package/macos.py", release_tag)
@@ -173,6 +186,16 @@ int main(int argc, char **argv) {{
         bundled = self.root / "dist/SpaceTerm Preflight.app/Contents/MacOS/SpaceTerm Preflight"
         self.assertEqual(self.executable_uuid(bundled), self.executable_uuid(self.artifact))
         self.assertNotEqual(self.executable_uuid(bundled), self.executable_uuid(self.stale))
+        helper = (
+            bundled.parent.parent
+            / "Library/LoginItems/SpaceTerm Preflight Server Status.app/Contents/MacOS/spaceterm-status-area"
+        )
+        self.assertTrue(helper.is_file())
+        self.assertEqual(self.executable_uuid(helper), self.executable_uuid(self.status_area))
+        helper_record = json.loads(Path(self.env["BUILD_STATUS_AREA_RECORD"]).read_text())
+        self.assertEqual(helper_record["packaged"], "1")
+        self.assertEqual(helper_record["private_inputs"], [])
+        self.assertFalse(helper_record["signing_available"])
         server = bundled.with_name("spaceterm-server")
         self.assertFalse(server.exists())
         artifact = bundled.parent.parent / "Resources/server-artifact"
@@ -193,6 +216,43 @@ int main(int argc, char **argv) {{
         result = self.package()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("application identity", result.stderr)
+        self.assertFalse((self.root / "dist/SpaceTerm Preflight.app").exists())
+
+    def test_packaging_rejects_another_status_area_identity(self):
+        self.compile_executable(self.artifact, "SpaceTerm Preflight")
+        self.compile_executable(self.status_area, "SpaceTerm Development Server Status", "0.0.0")
+        result = self.package()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("status-area executable application identity", result.stderr)
+        self.assertFalse((self.root / "dist/SpaceTerm Preflight.app").exists())
+
+    def test_verification_rejects_a_sealed_status_area_bundle_with_the_wrong_presentation(self):
+        self.compile_executable(self.artifact, "SpaceTerm Preflight")
+        result = self.package()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        app = self.root / "dist/SpaceTerm Preflight.app"
+        helper = app / "Contents/Library/LoginItems/SpaceTerm Preflight Server Status.app"
+        plist = helper / "Contents/Info.plist"
+        info = plistlib.loads(plist.read_bytes())
+        info["LSUIElement"] = False
+        plist.write_bytes(plistlib.dumps(info))
+        for bundle in (helper, app):
+            self.run_command("codesign", "--force", "--sign", "-", "--timestamp=none", str(bundle))
+        self.run_command("codesign", "--verify", "--strict", "--deep", str(app))
+        result = self.task("preflight/verify/macos.py", "--app", str(app))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("status-area Info.plist differs from its outer application", result.stderr)
+
+    def test_packaging_rejects_a_status_area_helper_from_another_build(self):
+        self.compile_executable(self.artifact, "SpaceTerm Preflight")
+        self.compile_executable(
+            self.status_area, "SpaceTerm Preflight Server Status", "dev.ffffffffffff"
+        )
+        result = self.package()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "status-area executable version must be dev.0123456789ab.dirty", result.stderr
+        )
         self.assertFalse((self.root / "dist/SpaceTerm Preflight.app").exists())
 
     def test_failed_build_does_not_package_a_stale_executable(self):
