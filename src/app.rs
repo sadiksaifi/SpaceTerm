@@ -170,6 +170,9 @@ pub(crate) fn init(
 ) -> Result<(), crate::platform::application_quit::ApplicationQuitError> {
     install_application_menu_actions(cx, Rc::clone(&application_menu));
     install_application_quit(cx, Rc::clone(&application_quit))?;
+    // GPUI otherwise exits on its own when the last window closes outside macOS, before the
+    // client can stay in its status area. Only the client's quit policy below ends it.
+    cx.set_quit_mode(gpui::QuitMode::Explicit);
     let quits = application_quit.last_window_policy()
         == crate::platform::application_quit::LastWindowPolicy::Quit;
     let adapter = application_quit.clone();
