@@ -13885,6 +13885,220 @@ mod shared_repositories {
         assert_eq!(harness.edits.submitted(), Vec::new());
     }
 
+    /// The shared Workspace, active, with its two Worktree rows disclosed.
+    fn active_harness(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+        let (harness, cx) = harness(cx, published(1, "main", true));
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                manager.activate_workspace(harness.shared, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        (harness, cx)
+    }
+
+    fn worktree_ids(
+        harness: &Harness,
+        cx: &mut VisualTestContext,
+    ) -> (crate::domain::WorktreeId, crate::domain::WorktreeId) {
+        let section = harness.row(cx).worktrees.expect("the Worktree rows");
+        let rows: Vec<_> = section.rows().map(|row| row.worktree_id).collect();
+        (rows[0], rows[1])
+    }
+
+    #[gpui::test]
+    fn a_disclosure_chevron_should_trail_the_workspace_name(cx: &mut TestAppContext) {
+        let (harness, cx) = active_harness(cx);
+        redraw(cx);
+        let id = harness.shared.get();
+        let name = cx
+            .debug_bounds(format!("workspace-row-name-{id}").leak())
+            .expect("the Workspace name");
+        let disclosure = cx
+            .debug_bounds(format!("workspace-disclosure-{id}-expanded").leak())
+            .expect("the disclosure chevron");
+        let group = cx
+            .debug_bounds(format!("workspace-group-{id}").leak())
+            .expect("the Workspace group");
+
+        click(format!("workspace-disclosure-{id}-expanded").leak(), cx);
+        let collapsed_name = cx
+            .debug_bounds(format!("workspace-row-name-{id}").leak())
+            .expect("the Workspace name");
+        let collapsed = cx
+            .debug_bounds(format!("workspace-disclosure-{id}-collapsed").leak())
+            .expect("the collapsed disclosure chevron");
+        let branch = cx
+            .debug_bounds(format!("workspace-row-branch-{id}").leak())
+            .expect("line 2's branch");
+
+        assert!(
+            disclosure.left() >= name.right() && disclosure.right() > group.right() - px(40.0),
+            "the chevron trails the Workspace name at the row's end"
+        );
+        assert_eq!(
+            (collapsed.center().y, branch.right()),
+            (collapsed_name.center().y, collapsed.right()),
+            "a collapsed row's chevron trails line 1, so line 2 runs to the row's end"
+        );
+    }
+
+    #[gpui::test]
+    fn a_focused_git_workspace_row_should_collapse_and_expand_from_the_keyboard(
+        cx: &mut TestAppContext,
+    ) {
+        let (harness, cx) = active_harness(cx);
+        let expanded = |cx: &mut VisualTestContext| {
+            harness.manager.read_with(cx, |manager, cx| {
+                manager
+                    .worktree_section(harness.shared, cx)
+                    .unwrap()
+                    .expanded
+            })
+        };
+        cx.update(|window, cx| {
+            harness
+                .manager
+                .update(cx, |manager, cx| manager.toggle_sidebar_focus(window, cx));
+        });
+        cx.simulate_keystrokes("up");
+        cx.run_until_parked();
+        let mut states = vec![expanded(cx)];
+
+        for key in ["enter", "space", "left", "left", "right", "right"] {
+            cx.simulate_keystrokes(key);
+            cx.run_until_parked();
+            states.push(expanded(cx));
+        }
+
+        assert_eq!(states, [true, false, true, false, false, true, true]);
+        assert!(
+            cx.update(|window, cx| harness.manager.read(cx).sidebar.read(cx).is_focused(window)),
+            "toggling keeps the keyboard in the sidebar"
+        );
+    }
+
+    #[gpui::test]
+    fn worktree_rows_should_match_a_two_line_workspace_row_height(cx: &mut TestAppContext) {
+        let (harness, cx) = active_harness(cx);
+        let (_, feature) = worktree_ids(&harness, cx);
+        redraw(cx);
+        let row = worktree_row(harness.shared, feature, cx);
+        let worktree = cx.debug_bounds(row).expect("the feature Worktree row");
+
+        harness.manager.update(cx, |manager, cx| {
+            manager.set_worktrees_expanded(harness.shared, false);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        redraw(cx);
+        let workspace = cx
+            .debug_bounds(format!("workspace-row-{}-active", harness.shared.get()).leak())
+            .expect("the collapsed Workspace row");
+
+        assert_eq!(worktree.size.height, workspace.size.height);
+    }
+
+    /// Arrows show the Tabs of each Worktree row they stand on, Left and Right collapse and
+    /// expand the group without changing the Active Worktree, and Return moves typing to it.
+    #[gpui::test]
+    fn the_keyboard_should_walk_worktrees_and_return_to_the_pane(cx: &mut TestAppContext) {
+        let (harness, cx) = active_harness(cx);
+        let (main, feature) = worktree_ids(&harness, cx);
+        let sidebar_focus = harness
+            .manager
+            .read_with(cx, |manager, cx| manager.sidebar.read(cx).focus_handle());
+        let active_worktree = |cx: &mut VisualTestContext| {
+            harness.manager.read_with(cx, |manager, cx| {
+                manager
+                    .workspaces
+                    .workspace(harness.shared)
+                    .and_then(|workspace| workspace.payload().read(cx).active_worktree())
+            })
+        };
+        let initial = active_worktree(cx);
+        cx.update(|window, cx| sidebar_focus.focus(window, cx));
+        cx.run_until_parked();
+
+        let mut steps = Vec::new();
+        for keys in ["down", "left", "left", "right", "down down", "enter"] {
+            cx.simulate_keystrokes(keys);
+            cx.run_until_parked();
+            steps.push((selected_tree_item_labels(cx), active_worktree(cx)));
+        }
+
+        let step = |selected: &str, worktree| (vec![selected.to_owned()], Some(worktree));
+        assert_eq!(initial, Some(main));
+        assert_eq!(
+            steps,
+            [
+                step("app-feature", feature),
+                step("Build", feature),
+                step("Build", feature),
+                step("Build", feature),
+                step("app-feature", feature),
+                step("app-feature", feature),
+            ]
+        );
+        assert!(
+            cx.update(|window, _| !sidebar_focus.is_focused(window)),
+            "Return moves typing to the Worktree's Tab"
+        );
+        assert_eq!(harness.edits.submitted(), Vec::new());
+    }
+
+    /// A secondary click on another Worktree row opens its menu and keeps the selection, and
+    /// Escape returns typing to the Pane.
+    #[gpui::test]
+    fn a_worktree_menu_should_keep_the_selection_and_return_typing_to_the_pane(
+        cx: &mut TestAppContext,
+    ) {
+        let (harness, cx) = active_harness(cx);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let (_, feature) = worktree_ids(&harness, cx);
+        redraw(cx);
+        let selected = selected_tree_item_labels(cx);
+
+        right_click(worktree_row(harness.shared, feature, cx), cx);
+        let selected_with_menu = selected_tree_item_labels(cx);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert_eq!(selected_with_menu, selected);
+        assert!(
+            active_terminal_has_input_focus(&harness.manager, cx),
+            "Escape returns typing to the Pane"
+        );
+    }
+
+    fn selected_tree_item_labels(cx: &mut VisualTestContext) -> Vec<String> {
+        spaceterm_ui::a11y_testing::A11yTree::read(cx)
+            .with_role("TreeItem")
+            .iter()
+            .filter(|item| item["aria"]["selected"] == true)
+            .map(|item| {
+                item["aria"]["label"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    fn worktree_row(
+        workspace_id: WorkspaceId,
+        worktree_id: crate::domain::WorktreeId,
+        cx: &mut VisualTestContext,
+    ) -> &'static str {
+        ["selected", "unselected"]
+            .into_iter()
+            .map(|state| -> &'static str {
+                format!("worktree-row-{}-{worktree_id}-{state}", workspace_id.get()).leak()
+            })
+            .find(|selector| cx.debug_bounds(selector).is_some())
+            .unwrap_or_else(|| panic!("worktree row {worktree_id} was not rendered"))
+    }
 }
 
 #[path = "launch_tests.rs"]
