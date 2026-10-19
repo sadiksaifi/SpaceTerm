@@ -1914,7 +1914,7 @@ pub(super) mod testing {
         }
     }
 
-    /// A server that runs the Development Pane.
+    /// An authenticated server speaking `protocol_major`.
     pub(in crate::ui::settings_window) const fn connected(protocol_major: u16) -> ServerConnection {
         ServerConnection { protocol_major }
     }

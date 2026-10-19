@@ -1587,7 +1587,7 @@ fn clearing_a_server_presentation_forgets_the_former_screen_and_text(cx: &mut Te
         Rc::new(
             TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
                 .server_backed()
-                .with_fallback_title("Development Pane"),
+                .with_fallback_title("Terminal"),
         ),
         test_local_directory(PathBuf::from("/tmp/spaceterm-terminal-pane-test")),
     );
@@ -1610,7 +1610,7 @@ fn clearing_a_server_presentation_forgets_the_former_screen_and_text(cx: &mut Te
         assert!(pane.screen.rows.is_empty());
         assert!(pane.last_valid_screen.rows.is_empty());
         assert!(pane.accessibility.text().is_empty());
-        assert_eq!(pane.title().as_ref(), "Development Pane");
+        assert_eq!(pane.title().as_ref(), "Terminal");
         // The connection published this model before the takeover; it arrives afterwards.
         pane.handle_session_accessibility(
             epoch,
