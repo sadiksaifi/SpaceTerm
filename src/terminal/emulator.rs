@@ -1781,7 +1781,15 @@ impl TerminalEmulator {
             .active_pointer
             .as_ref()
             .is_some_and(|p| matches!(p.route, PointerRoute::Selection));
-        if !self.reading_row_is_current(input)?
+        // Press validates its observed row. An accepted gesture's continuation keeps the
+        // anchor Press validated; it needs only its observed geometry, screen and modes, so
+        // native autoscroll may move the viewport before the client sees the result.
+        let current = if input.phase == PointerPhase::Press {
+            self.reading_row_is_current(input)?
+        } else {
+            self.reading_baseline(input.generation)?.is_some()
+        };
+        if !current
             || (input.phase == PointerPhase::Press
                 && (self.active_pointer.is_some() || input.button != Some(PointerButton::Left)))
             || (input.phase != PointerPhase::Press && !selection_gesture)

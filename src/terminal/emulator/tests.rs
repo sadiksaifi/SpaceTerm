@@ -5642,3 +5642,41 @@ fn large_server_reading_baselines_expire_within_the_retained_byte_budget() {
     input.generation = emulator.presentation_generation();
     assert!(emulator.reading_wheel(input).unwrap().is_some());
 }
+
+#[test]
+fn server_selection_release_completes_after_autoscroll_before_the_client_sees_it() {
+    let mut emulator = emulator(8, 2);
+    emulator.enable_server_reading();
+    emulator.feed(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+    let observed = emulator.snapshot().unwrap().unwrap();
+    let mut input = pointer(
+        PointerPhase::Press,
+        Some(PointerButton::Left),
+        1.0,
+        21.0,
+        false,
+    );
+    input.generation = observed.generation;
+    assert!(emulator.reading_pointer(input).unwrap().is_some());
+    // An out-of-Pane drag starts native autoscroll.
+    input.phase = PointerPhase::Motion;
+    input.position.y = -41.0;
+    assert!(emulator.reading_pointer(input).unwrap().is_some());
+    let dragged = emulator.snapshot().unwrap().unwrap();
+    input.generation = dragged.generation;
+    assert!(emulator.selection_autoscroll_tick().unwrap().screen_changed);
+    let scrolled = emulator.snapshot().unwrap().unwrap();
+    assert_ne!(
+        dragged.scrollbar.offset_rows,
+        scrolled.scrollbar.offset_rows
+    );
+    // The client still displays the screen before that autoscroll step.
+    input.phase = PointerPhase::Release;
+    assert!(
+        emulator
+            .reading_pointer(input)
+            .unwrap()
+            .is_some_and(|action| action.selection_completed),
+        "the accepted selection completes its Release"
+    );
+}
