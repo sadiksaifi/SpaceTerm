@@ -819,3 +819,27 @@ fn open_local_directory_activates_the_workspace_already_pinned_there(cx: &mut Te
     assert_eq!(active_server_workspace(&harness, cx), Some(CREATED));
     std::fs::remove_dir_all(project).unwrap();
 }
+
+/// Starting the server from Settings opens the Workspaces of a window waiting on it, and leaves
+/// a window that already presents them alone.
+#[gpui::test]
+fn a_service_start_elsewhere_resumes_only_a_waiting_launch(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped), ready()], cx);
+    cx.run_until_parked();
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+
+    cx.cx
+        .update(crate::ui::workspace_manager::resume_waiting_launches);
+    cx.run_until_parked();
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "run"],
+        "no Start of its own"
+    );
+    assert_eq!(harness.shared_rows(cx), 1);
+
+    cx.cx
+        .update(crate::ui::workspace_manager::resume_waiting_launches);
+    cx.run_until_parked();
+    assert_eq!(harness.launch.steps(), ["run", "run"]);
+}

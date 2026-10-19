@@ -5481,9 +5481,9 @@ impl WorkspaceManager {
 
 mod empty;
 mod launch;
-pub(crate) use launch::LocalServerAdapters;
 #[cfg(test)]
 pub(crate) use launch::testing as launch_testing;
+pub(crate) use launch::{LocalServerAdapters, resume_waiting_launches};
 #[path = "workspace_manager/repository.rs"]
 mod repository;
 mod shared_repositories;

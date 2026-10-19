@@ -1323,6 +1323,17 @@ impl SettingsWindow {
                 if action.changes_service() {
                     settings.check_local_server(cx);
                 }
+                // A Workspace Window waiting on a stopped or missing server opens its Workspaces
+                // once the person starts it here.
+                if action.changes_service()
+                    && settings
+                        .server_service
+                        .as_ref()
+                        .and_then(|row| row.state.status)
+                        .is_some_and(|status| status.running && !status.stopped)
+                {
+                    crate::ui::workspace_manager::resume_waiting_launches(cx);
+                }
                 cx.notify();
             });
         }));

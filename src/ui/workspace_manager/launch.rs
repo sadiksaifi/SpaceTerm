@@ -332,6 +332,28 @@ enum StepResult {
     Declined,
 }
 
+/// Runs launch again in every Workspace Window still waiting on the server, after the person
+/// started or installed it from Settings. A window already presenting its Workspaces, or still
+/// launching, is left alone, and nothing here starts the server itself.
+pub(crate) fn resume_waiting_launches(cx: &mut App) {
+    for window in cx.windows() {
+        let Some(window) = window.downcast::<WorkspaceManager>() else {
+            continue;
+        };
+        let _ = window.update(cx, |manager, window, cx| {
+            if matches!(
+                manager.launch.state,
+                LaunchState::Stopped
+                    | LaunchState::AuthorizationRequired { .. }
+                    | LaunchState::Failed(_)
+            ) && manager.launch._task.is_none()
+            {
+                manager.run_local_launch(None, window, cx);
+            }
+        });
+    }
+}
+
 impl WorkspaceManager {
     /// Runs launch, after the person's explicit step when there is one.
     pub(super) fn run_local_launch(
