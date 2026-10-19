@@ -41,15 +41,17 @@ impl ReadingState {
     /// Drops the refused gesture's queued continuation. Nothing is replayed, and a later
     /// Motion never starts a gesture of its own.
     pub(super) fn abandon_gesture(&mut self) {
-        self.abandoned_gesture = true;
+        let press = |op: &Operation| matches!(op, Operation::Pointer(p) if matches!(p.phase, pane::PointerPhase::Press));
         while let Some(index) = self
             .queue
             .iter()
-            .take_while(|op| !matches!(op, Operation::Pointer(p) if matches!(p.phase, pane::PointerPhase::Press)))
+            .take_while(|op| !press(op))
             .position(continues_gesture)
         {
             self.queue.remove(index);
         }
+        // Once a later Press is queued, new continuation belongs to that gesture.
+        self.abandoned_gesture = !self.queue.iter().any(press);
     }
     pub(super) fn enqueue(&mut self, operation: Operation) -> bool {
         if let Operation::Pointer(pointer) = &operation {
@@ -844,6 +846,46 @@ mod tests {
             );
             assert_eq!(state.epoch.load(Ordering::Acquire), adapter.active.epoch);
         }
+    }
+
+    #[test]
+    fn a_late_refusal_keeps_the_continuation_of_a_gesture_queued_after_it() {
+        use pane::PointerPhase::{Motion, Press, Release};
+        let adapter = Adapter::new();
+        let state = &adapter.handle.state;
+        let mut reader = Reader::default();
+        reader.screen(state, mapping(&adapter), false);
+        state.reading.lock().unwrap().enqueue(pointer(Press, 1.0));
+        reader
+            .poll(state, adapter.active.lease, &mut |_| {
+                Ok(Reply::Reading { accepted: true })
+            })
+            .unwrap();
+        // The next gesture starts while the worker still applies the first Press.
+        for operation in [pointer(Release, 1.0), pointer(Press, 9.0)] {
+            state.reading.lock().unwrap().enqueue(operation);
+        }
+        reader
+            .poll(state, adapter.active.lease, &mut |_| {
+                Err(ServerError::StaleControl)
+            })
+            .unwrap();
+        for operation in [pointer(Motion, 10.0), pointer(Release, 10.0)] {
+            state.reading.lock().unwrap().enqueue(operation);
+        }
+        let queued: Vec<_> = state
+            .reading
+            .lock()
+            .unwrap()
+            .queue
+            .iter()
+            .cloned()
+            .collect();
+        assert_eq!(
+            phases(&queued),
+            vec![("press", 9.0), ("motion", 10.0), ("release", 10.0)],
+            "only the refused gesture's continuation is dropped"
+        );
     }
 
     fn wheel(phase: pane::WheelPhase, vertical_steps: i32) -> pane::Wheel {
