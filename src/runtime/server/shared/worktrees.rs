@@ -18,6 +18,44 @@ use std::{
 mod preparing;
 mod reads;
 
+/// The old local factory's scoped launch rule, validated on the owning server.
+pub(super) fn starting_directory(
+    workspace: &spaceterm_server::hierarchy::Workspace,
+    source: Option<Id>,
+    root: &Path,
+) -> Result<PathBuf, Refusal> {
+    let source = source
+        .map(|id| {
+            workspace
+                .tabs
+                .iter()
+                .flat_map(|t| &t.panes)
+                .find(|p| p.id == id)
+                .ok_or(Refusal::Missing)
+        })
+        .transpose()?;
+    let filesystem = local_filesystem();
+    if let Some(pin) = &workspace.pinned_directory {
+        filesystem
+            .validate_directory(pin)
+            .map_err(|_| Refusal::DirectoryUnavailable)?;
+    }
+    let start = workspace
+        .pinned_directory
+        .as_deref()
+        .filter(|pin| filesystem.physically_contains(root, pin))
+        .or_else(|| {
+            source
+                .map(crate::runtime::server::repositories::pane_directory)
+                .filter(|cwd| filesystem.physically_contains(root, cwd))
+        })
+        .unwrap_or(root);
+    filesystem
+        .validate_directory(start)
+        .map(|directory| directory.path().to_owned())
+        .map_err(|_| Refusal::DirectoryUnavailable)
+}
+
 enum JobResult {
     Prepared(Result<preparing::Prepared, Error>),
     Finished(Result<Option<PathBuf>, Error>),
@@ -317,40 +355,14 @@ impl SharedWorkspaceHost {
                 root,
                 path,
             } => {
-                let selected = (|| {
-                    let w = next
-                        .inventory
-                        .workspaces
-                        .iter()
-                        .find(|w| w.id == workspace)
-                        .ok_or(Refusal::Missing)?;
-                    let source = source
-                        .map(|id| {
-                            w.tabs
-                                .iter()
-                                .flat_map(|t| &t.panes)
-                                .find(|p| p.id == id)
-                                .ok_or(Refusal::Missing)
-                        })
-                        .transpose()?;
-                    let filesystem = local_filesystem();
-                    let start = w
-                        .pinned_directory
-                        .as_deref()
-                        .filter(|pin| filesystem.physically_contains(&path, pin))
-                        .or_else(|| {
-                            source
-                                .map(crate::runtime::server::repositories::pane_directory)
-                                .filter(|cwd| filesystem.physically_contains(&path, cwd))
-                        })
-                        .unwrap_or(&path);
-                    let start = filesystem
-                        .validate_directory(start)
-                        .map_err(|_| Refusal::DirectoryUnavailable)?
-                        .path()
-                        .to_owned();
-                    next.add_worktree_tab(device, workspace, root, path, start)
-                })();
+                let selected = next
+                    .inventory
+                    .workspaces
+                    .iter()
+                    .find(|w| w.id == workspace)
+                    .ok_or(Refusal::Missing)
+                    .and_then(|w| starting_directory(w, source, &path))
+                    .and_then(|start| next.add_worktree_tab(device, workspace, root, path, start));
                 let outcome = match selected {
                     Ok(target) => Outcome::Accepted { target },
                     Err(_) => Outcome::WorktreeFailed(Error::Unavailable),
@@ -497,6 +509,91 @@ mod tests {
     };
 
     #[test]
+    fn splitting_a_worktree_pane_keeps_its_scope_when_the_pin_or_cwd_is_outside() {
+        use spaceterm_server::hierarchy::Axis;
+        let git = GitFixture::new();
+        let tree = git.0.join("linked");
+        git.git(&["worktree", "add", "-b", "feature", tree.to_str().unwrap()]);
+        let mut prototype = host();
+        prototype.directory = git.0.clone();
+        let mut host = SharedWorkspaceHost::new(prototype);
+        let workspace = create_shared(&mut host, 1);
+        assert!(
+            matches!(host.request([1; 32], [1; 32], Request::Mutate { sequence: 2, mutation: Mutation::PinWorkspace { workspace, version: 0, directory: Some(git.0.clone()) } }), Reply::Outcome(record) if matches!(record.outcome, Outcome::Accepted { .. }))
+        );
+        let Outcome::Accepted { target: tab } = finish_write(
+            &mut host,
+            3,
+            Operation::OpenTab {
+                workspace,
+                root: git.0.clone(),
+                path: tree.clone(),
+                source: None,
+            },
+        ) else {
+            panic!("Worktree Tab");
+        };
+        let source = host.state.inventory.workspaces[0]
+            .tabs
+            .iter()
+            .find(|t| t.id == tab)
+            .unwrap()
+            .root_pane;
+        host.state.confirm_directory(source, git.0.clone());
+        let Reply::Outcome(record) = host.request(
+            [1; 32],
+            [1; 32],
+            Request::Mutate {
+                sequence: 4,
+                mutation: Mutation::SplitPane {
+                    workspace,
+                    tab,
+                    source,
+                    axis: Axis::Right,
+                },
+            },
+        ) else {
+            panic!("split");
+        };
+        let Outcome::Accepted { target: pane } = record.outcome else {
+            panic!("accepted split");
+        };
+        assert_eq!(host.state.pane(pane).unwrap().2.starting_directory, tree);
+        assert!(
+            host.panes.is_empty(),
+            "membership creates no implicit shell"
+        );
+        let Reply::Attached { lease } = host.request(
+            [1; 32],
+            [2; 32],
+            Request::SelectPane {
+                pane,
+                explicit: true,
+                size: PaneSize {
+                    columns: 240,
+                    ..size()
+                },
+                style: None,
+            },
+        ) else {
+            panic!("explicit split shell");
+        };
+        crate::runtime::server::tests::command(
+            &mut host,
+            2,
+            lease,
+            "printf 'SPLIT-CWD:%s\\n' \"$PWD\"\n",
+        );
+        crate::runtime::server::tests::await_text(
+            &mut host,
+            2,
+            lease,
+            &format!("SPLIT-CWD:{}", tree.display()),
+        );
+        host.shutdown().unwrap();
+    }
+
+    #[test]
     fn confirmed_worktree_close_ends_its_shell_and_preserves_git_and_the_outside_tab() {
         use crate::runtime::server::tests::{await_text, command};
         use spaceterm_server::hierarchy::CloseTarget;
@@ -623,6 +720,37 @@ mod tests {
                 (tab.worktree.as_ref(), &tab.panes[0].starting_directory),
                 (Some(&tree), &expected)
             );
+            if index == 0 {
+                let pane = tab.root_pane;
+                assert!(host.panes.is_empty(), "New Tab starts no implicit shell");
+                let Reply::Attached { lease } = host.request(
+                    [1; 32],
+                    [2; 32],
+                    Request::SelectPane {
+                        pane,
+                        explicit: true,
+                        size: PaneSize {
+                            columns: 240,
+                            ..size()
+                        },
+                        style: None,
+                    },
+                ) else {
+                    panic!("explicit new Tab shell");
+                };
+                crate::runtime::server::tests::command(
+                    &mut host,
+                    2,
+                    lease,
+                    "printf 'TAB-CWD:%s\\n' \"$PWD\"\n",
+                );
+                crate::runtime::server::tests::await_text(
+                    &mut host,
+                    2,
+                    lease,
+                    &format!("TAB-CWD:{}", expected.display()),
+                );
+            }
         }
         host.shutdown().unwrap();
     }

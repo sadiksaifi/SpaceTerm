@@ -707,12 +707,17 @@ impl State {
                 let Some(p) = t.panes.iter().find(|p| p.id == *source) else {
                     return Ok(Outcome::Missing);
                 };
-                let start = w.pinned_directory.clone().unwrap_or_else(|| {
-                    p.confirmed_directory
-                        .as_ref()
-                        .unwrap_or(&p.starting_directory)
-                        .clone()
-                });
+                // Scoped launches have been physically selected and validated by the server.
+                let start = if t.worktree.is_some() {
+                    directory.to_owned()
+                } else {
+                    w.pinned_directory.clone().unwrap_or_else(|| {
+                        p.confirmed_directory
+                            .as_ref()
+                            .unwrap_or(&p.starting_directory)
+                            .clone()
+                    })
+                };
                 let id = new_id()?;
                 t.panes.push(Pane {
                     id,

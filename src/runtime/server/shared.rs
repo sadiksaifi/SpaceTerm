@@ -442,13 +442,29 @@ impl SharedWorkspaceHost {
                 }
                 let mut next = self.state.clone();
                 next.inventory = self.inventory();
-                next.apply(
-                    device,
-                    sequence,
-                    mutation,
-                    &self.prototype.directory,
-                    |path| local_filesystem().validate_directory(path).is_ok(),
-                )?;
+                let mut directory = self.prototype.directory.clone();
+                if let spaceterm_server::hierarchy::Mutation::SplitPane {
+                    workspace,
+                    tab,
+                    source,
+                    ..
+                } = &mutation
+                    && let Some(workspace) = next
+                        .inventory
+                        .workspaces
+                        .iter()
+                        .find(|w| w.id == *workspace)
+                    && let Some(root) = workspace
+                        .tabs
+                        .iter()
+                        .find(|t| t.id == *tab)
+                        .and_then(|t| t.worktree.as_deref())
+                {
+                    directory = worktrees::starting_directory(workspace, Some(*source), root)?;
+                }
+                next.apply(device, sequence, mutation, &directory, |path| {
+                    local_filesystem().validate_directory(path).is_ok()
+                })?;
                 let outcome = next
                     .outcome(device, sequence)
                     .ok_or(Refusal::Failed)?
