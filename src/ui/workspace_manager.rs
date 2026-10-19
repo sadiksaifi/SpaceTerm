@@ -3893,6 +3893,10 @@ impl WorkspaceManager {
             return;
         };
         let active_workspace_id = self.workspaces.active_workspace_id();
+        // The empty view or launch screen held the keyboard, which moves to the Workspace that
+        // takes its place, without asking the server for its Pane.
+        let empty_held_keyboard =
+            active_workspace_id.is_none() && self.empty_focus.is_focused(window);
         let active_manager = self.active_tab_manager();
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar.read(cx).layout().visible;
@@ -3961,6 +3965,9 @@ impl WorkspaceManager {
             .as_ref()
             .unwrap_or(&manager)
             .update(cx, |manager, cx| manager.activate_without_focus(cx));
+        if empty_held_keyboard {
+            manager.update(cx, |manager, cx| manager.focus(window, cx));
+        }
         if let Some(shared) = self.shared.as_mut() {
             shared.register(workspace_id, facts.clone());
         }
