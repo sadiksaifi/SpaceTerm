@@ -899,6 +899,48 @@ fn a_service_start_elsewhere_resumes_only_a_waiting_launch(cx: &mut TestAppConte
     assert_eq!(harness.launch.steps(), ["run", "run"]);
 }
 
+/// A Start from the status menu reaches a window that launched while the server was stopped, and
+/// a Stop from there leaves it waiting.
+#[gpui::test]
+fn a_status_menu_start_resumes_a_window_waiting_on_a_stopped_server(cx: &mut TestAppContext) {
+    use spaceterm_server::service::ServiceStatus;
+
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped), ready()], cx);
+    cx.run_until_parked();
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+
+    let stopped = ServiceStatus {
+        installed: true,
+        enabled: false,
+        running: false,
+        stopped: true,
+    };
+    cx.cx
+        .update(|cx| crate::status_menu::operation_succeeded(cx, stopped));
+    cx.run_until_parked();
+    assert_eq!(
+        harness.launch.steps(),
+        ["run"],
+        "a stopped server stays stopped"
+    );
+
+    let running = ServiceStatus {
+        enabled: true,
+        running: true,
+        stopped: false,
+        ..stopped
+    };
+    cx.cx
+        .update(|cx| crate::status_menu::operation_succeeded(cx, running));
+    cx.run_until_parked();
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "run"],
+        "no Start of its own"
+    );
+    assert_eq!(harness.shared_rows(cx), 1);
+}
+
 /// Stopping the server from Settings while its Workspaces are open leaves each Pane saying so,
 /// with Start Server where retrying could never connect.
 fn stopped_in_session(cx: &mut TestAppContext) -> (LaunchHarness, &mut VisualTestContext) {

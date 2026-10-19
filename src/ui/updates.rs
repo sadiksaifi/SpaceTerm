@@ -3,7 +3,7 @@
 
 mod launch;
 
-pub(crate) use launch::show_launch;
+pub(crate) use launch::{request_window_close as request_launch_window_close, show_launch};
 
 use gpui::prelude::*;
 use gpui::{

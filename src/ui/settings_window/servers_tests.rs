@@ -543,6 +543,22 @@ fn a_refused_operation_explains_itself_beside_the_status_read_after_it() {
 }
 
 #[test]
+fn a_stop_whose_cleanup_was_not_confirmed_offers_only_another_stop() {
+    let presentation = present_service(ServiceState {
+        status: None,
+        failure: Some(ServerError::CleanupUnresolved),
+        ..ServiceState::default()
+    });
+
+    assert_eq!(presentation.state, "Cleanup Unresolved");
+    // Retrying Stop never restarts the server, so Start and Restart stay unavailable.
+    assert_eq!(
+        presentation.actions,
+        vec![ServiceAction::Stop, ServiceAction::Check]
+    );
+}
+
+#[test]
 fn an_unreadable_service_offers_only_another_check() {
     let presentation = present_service(ServiceState {
         status: None,
@@ -571,7 +587,12 @@ fn only_actions_that_end_sessions_or_remove_the_service_ask_first() {
     for action in [ServiceAction::Stop, ServiceAction::Restart] {
         let confirmation =
             ServiceConfirmation::for_action(action, true, login).expect("confirmation");
-        assert!(confirmation.message.contains("end its Terminal Sessions"));
+        assert!(
+            confirmation
+                .message
+                .contains("server and end all of its Terminal Sessions")
+        );
+        assert!(confirmation.detail.contains("for every client"));
         assert_eq!(confirmation.confirm, action.label());
     }
     // Uninstalling a server that is not running ends no Terminal Session.
@@ -580,7 +601,7 @@ fn only_actions_that_end_sessions_or_remove_the_service_ask_first() {
     let live =
         ServiceConfirmation::for_action(ServiceAction::Uninstall, true, login).expect("live");
     assert!(!idle.message.contains("Terminal Sessions"));
-    assert!(live.message.contains("end its Terminal Sessions"));
+    assert!(live.message.contains("end all of its Terminal Sessions"));
 }
 
 #[gpui::test]

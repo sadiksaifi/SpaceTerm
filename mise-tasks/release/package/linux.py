@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # MISE description="Package an annotated release tag at HEAD as SpaceTerm for x86_64 Linux"
+# MISE depends=["setup:linux-toolchain"]
 # USAGE arg "<tag>" help="Annotated stable release tag at HEAD, for example v1.2.3"
 """Package an annotated release tag at HEAD as SpaceTerm for x86_64 Linux."""
 

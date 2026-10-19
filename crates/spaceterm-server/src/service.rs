@@ -1,4 +1,5 @@
 //! Explicit account service installation and lifecycle. Discovery never starts a service.
+pub mod control;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -359,14 +360,7 @@ impl Service {
         self.wait_running(true)
     }
     pub fn stop(&self) -> Result<ServiceStatus, ServerError> {
-        let (data, _) = self.read()?.ok_or(ServerError::NotInstalled)?;
-        let _operation = data.lock("service.lock", false)?;
-        let mut state = Self::state(&data)?.ok_or(ServerError::NotInstalled)?;
-        if !state.installed {
-            return Err(ServerError::NotInstalled);
-        }
-        self.stop_locked(&data, &mut state)?;
-        self.snapshot(&state)
+        self.apply_control(control::Action::Stop, None)
     }
     fn stop_locked(&self, data: &Directory, state: &mut State) -> Result<(), ServerError> {
         // Publication precedes all service-manager operations, so partial failure fails closed.
@@ -393,34 +387,47 @@ impl Service {
         }
     }
     pub fn restart(&self) -> Result<ServiceStatus, ServerError> {
-        let (data, _) = self.read()?.ok_or(ServerError::NotInstalled)?;
-        let _operation = data.lock("service.lock", false)?;
-        let mut state = Self::state(&data)?.ok_or(ServerError::NotInstalled)?;
-        if !state.installed {
-            return Err(ServerError::NotInstalled);
-        }
-        if state.stopped {
-            return Err(ServerError::Stopped);
-        }
-        self.stop_locked(&data, &mut state)?;
-        self.start_locked(&data, &mut state, true)?;
-        self.snapshot(&state)
+        self.apply_control(control::Action::Restart, None)
     }
     /// Remove only the service registration. Retain identity, organization, artifacts and Stop.
     pub fn uninstall(&self) -> Result<ServiceStatus, ServerError> {
+        self.apply_control(control::Action::Uninstall, None)
+    }
+    fn apply_control(
+        &self,
+        action: control::Action,
+        observed_running: Option<bool>,
+    ) -> Result<ServiceStatus, ServerError> {
         let (data, _) = self.read()?.ok_or(ServerError::NotInstalled)?;
         let _operation = data.lock("service.lock", false)?;
         let mut state = Self::state(&data)?.ok_or(ServerError::NotInstalled)?;
-        if !state.installed && !state.removing {
+        if action == control::Action::Uninstall && !state.installed && !state.removing {
             return self.snapshot(&state);
         }
+        if !state.installed {
+            return Err(ServerError::NotInstalled);
+        }
+        // Serialize this check with explicit Start and other controls. A quiescent-server
+        // confirmation cannot silently become approval to end newly running work.
+        if observed_running == Some(false) && self.supervisor.running()? {
+            return Err(ServerError::Changed);
+        }
+        if action == control::Action::Restart && state.stopped {
+            return Err(ServerError::Stopped);
+        }
         self.stop_locked(&data, &mut state)?;
-        state.removing = true;
-        data.write_json(c"service.json", &state)?;
-        self.supervisor.uninstall(&self.runtime(&state))?;
-        state.removing = false;
-        state.installed = false;
-        data.write_json(c"service.json", &state)?;
+        match action {
+            control::Action::Stop => {}
+            control::Action::Restart => self.start_locked(&data, &mut state, true)?,
+            control::Action::Uninstall => {
+                state.removing = true;
+                data.write_json(c"service.json", &state)?;
+                self.supervisor.uninstall(&self.runtime(&state))?;
+                state.removing = false;
+                state.installed = false;
+                data.write_json(c"service.json", &state)?;
+            }
+        }
         self.snapshot(&state)
     }
     fn runtime(&self, state: &State) -> PathBuf {
@@ -757,6 +764,8 @@ mod tests {
     #[derive(Default)]
     struct TestSupervisor {
         stop_data: Option<PathBuf>,
+        running: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        allow_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
     impl Supervisor for TestSupervisor {
         fn startup(&self) -> ServiceStartup {
@@ -784,17 +793,25 @@ mod tests {
                 false,
             )?;
             let state = Service::state(&data)?.ok_or(ServerError::NotInstalled)?;
-            Err(if state.stopped {
-                ServerError::ServiceUnavailable
-            } else {
-                ServerError::StartupFailed
-            })
+            if !state.stopped {
+                return Err(ServerError::StartupFailed);
+            }
+            if !self.allow_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(ServerError::ServiceUnavailable);
+            }
+            self.running
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
         }
         fn uninstall(&self, _: &Path) -> Result<(), ServerError> {
             panic!("unexpected OS call")
         }
         fn running(&self) -> Result<bool, ServerError> {
-            panic!("unexpected OS call")
+            if self.stop_data.is_some() {
+                Ok(self.running.load(std::sync::atomic::Ordering::Relaxed))
+            } else {
+                panic!("unexpected OS call")
+            }
         }
     }
     struct Fixture {
@@ -893,6 +910,7 @@ mod tests {
         let fixture = Fixture::new();
         let supervisor = TestSupervisor {
             stop_data: Some(fixture.paths.data.clone()),
+            ..Default::default()
         };
         let service = Service::new(
             fixture.paths.clone(),
@@ -900,6 +918,124 @@ mod tests {
             std::sync::Arc::new(supervisor),
         );
         assert_eq!(service.stop(), Err(ServerError::ServiceUnavailable));
+    }
+    #[test]
+    fn cancelled_control_preserves_work_and_confirmed_native_refusal_retains_stop() {
+        use control::{Action, Controller};
+        let fixture = Fixture::new();
+        let service = Service::new(
+            fixture.paths.clone(),
+            "spaceterm-development".into(),
+            std::sync::Arc::new(TestSupervisor {
+                stop_data: Some(fixture.paths.data.clone()),
+                ..Default::default()
+            }),
+        );
+        let control = Controller::new(service);
+        drop(control.prepare(Action::Stop).unwrap());
+        let data = Directory::open(&fixture.paths.data, false).unwrap();
+        assert!(!Service::state(&data).unwrap().unwrap().stopped);
+        let confirmation = control.prepare(Action::Stop).unwrap();
+        assert_eq!(
+            control.confirm(confirmation),
+            Err(ServerError::ServiceUnavailable)
+        );
+        assert!(Service::state(&data).unwrap().unwrap().stopped);
+    }
+    #[test]
+    fn control_confirmation_cannot_target_another_account_service() {
+        use control::{Action, Controller};
+        let first = Fixture::new();
+        let second = Fixture::new();
+        let controller = |fixture: &Fixture| {
+            Controller::new(Service::new(
+                fixture.paths.clone(),
+                "spaceterm-development".into(),
+                std::sync::Arc::new(TestSupervisor {
+                    stop_data: Some(fixture.paths.data.clone()),
+                    ..Default::default()
+                }),
+            ))
+        };
+        let confirmation = controller(&first).prepare(Action::Stop).unwrap();
+        assert_eq!(
+            controller(&second).confirm(confirmation),
+            Err(ServerError::AuthenticationRefused)
+        );
+        for fixture in [&first, &second] {
+            let data = Directory::open(&fixture.paths.data, false).unwrap();
+            assert!(!Service::state(&data).unwrap().unwrap().stopped);
+        }
+    }
+    #[test]
+    fn pending_restart_confirmation_cannot_reverse_a_later_deliberate_stop() {
+        use control::{Action, Controller};
+        let fixture = Fixture::new();
+        let control = Controller::new(Service::new(
+            fixture.paths.clone(),
+            "spaceterm-development".into(),
+            std::sync::Arc::new(TestSupervisor {
+                stop_data: Some(fixture.paths.data.clone()),
+                ..Default::default()
+            }),
+        ));
+        let confirmation = control.prepare(Action::Restart).unwrap();
+        retain_stop(&fixture.paths).unwrap();
+        assert_eq!(control.confirm(confirmation), Err(ServerError::Stopped));
+    }
+    #[test]
+    fn confirmation_for_a_quiescent_service_cannot_end_newly_running_work() {
+        use control::{Action, Controller};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let fixture = Fixture::new();
+        let running = Arc::new(AtomicBool::new(false));
+        let control = Controller::new(Service::new(
+            fixture.paths.clone(),
+            "spaceterm-development".into(),
+            Arc::new(TestSupervisor {
+                stop_data: Some(fixture.paths.data.clone()),
+                running: running.clone(),
+                ..Default::default()
+            }),
+        ));
+        let confirmation = control.prepare(Action::Uninstall).unwrap();
+        running.store(true, Ordering::Relaxed);
+        assert_eq!(control.confirm(confirmation), Err(ServerError::Changed));
+        let data = Directory::open(&fixture.paths.data, false).unwrap();
+        let state = Service::state(&data).unwrap().unwrap();
+        assert!(state.installed && !state.stopped);
+    }
+    #[test]
+    fn a_refused_native_stop_can_be_confirmed_again_without_reversing_stop() {
+        use control::{Action, Controller};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let fixture = Fixture::new();
+        let allow_stop = Arc::new(AtomicBool::new(false));
+        let control = Controller::new(Service::new(
+            fixture.paths.clone(),
+            "spaceterm-development".into(),
+            Arc::new(TestSupervisor {
+                stop_data: Some(fixture.paths.data.clone()),
+                running: Arc::new(AtomicBool::new(true)),
+                allow_stop: allow_stop.clone(),
+            }),
+        ));
+        let confirmation = control.prepare(Action::Stop).unwrap();
+        assert_eq!(
+            control.confirm(confirmation),
+            Err(ServerError::ServiceUnavailable)
+        );
+        assert_eq!(control.status(), Err(ServerError::CleanupUnresolved));
+        allow_stop.store(true, Ordering::Relaxed);
+        let retry = control.prepare(Action::Stop).unwrap();
+        let status = control.confirm(retry).unwrap();
+        assert!(status.stopped && !status.running && !status.enabled);
     }
     #[test]
     fn foreground_start_cannot_bypass_the_approved_service_runtime() {

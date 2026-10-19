@@ -342,6 +342,7 @@ def package(identity, release_tag=None):
         "--no-default-features",
         binary="spaceterm-server",
         env=environment,
+        portable_linux=sys.platform == "linux",
     )
     expected = build_info(executable)
     commit = checked(

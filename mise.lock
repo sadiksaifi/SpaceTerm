@@ -12,6 +12,11 @@ version = "0.8.0"
 backend = "cargo:cargo-sweep"
 specifiers = ["0.8.0"]
 
+[[tools."cargo:cargo-zigbuild"]]
+version = "0.23.4"
+backend = "cargo:cargo-zigbuild"
+specifiers = ["0.23.4"]
+
 [[tools.cocogitto]]
 version = "7.0.0"
 backend = "aqua:cocogitto/cocogitto"

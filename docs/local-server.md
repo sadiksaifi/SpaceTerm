@@ -2,7 +2,21 @@
 
 The desktop and local server use your operating-system account's authority. They do not pair or open a credential store. Independent clients retain nonsecret identities so their views, attachments and Pane control survive relaunch. [ADR 0027](adr/0027-trust-paired-clients-equally.md) owns the trust decision.
 
-Normal desktop launch connects to the account-local server and presents its retained Workspaces in the main Workspace Window. Quitting the desktop leaves server-owned terminal programs running. A deliberately stopped server stays stopped until the person chooses Start. Settings > Servers retains service management. The `server:*` mise tasks exercise the Development identity; status never starts a server.
+Normal desktop launch connects to the account-local server and presents its retained Workspaces in the main Workspace Window. Closing client windows and quitting the client leave server-owned terminal programs running; [ADR 0049](adr/0049-own-status-controls-in-the-desktop-client.md) defines the client and status-menu lifetime. A deliberately stopped server stays stopped until the person chooses Start. Settings > Servers retains service management. The `server:*` mise tasks exercise the Development identity; status never starts a server.
+
+## Controls without the desktop
+
+The desktop installation includes a CLI fallback for use without a status area or graphical login. For a standard installation, open its command help with:
+
+```sh
+# macOS
+"/Applications/SpaceTerm.app/Contents/MacOS/SpaceTerm" --help
+
+# Linux
+"$HOME/.local/lib/spaceterm/bin/spaceterm" --help
+```
+
+For Preflight, use "SpaceTerm Preflight" for both the macOS app and executable names, or `spaceterm-preflight` in the Linux directory. For a custom installation, use the desktop executable inside that app or installation directory. The help names the compiled application identity and lists the service commands and confirmation flag. These service commands run without opening the client or initializing its graphical interface. Headless installations expose the same commands through `bin/spaceterm-server` in their installation directory. Source builds use `mise run server:service --help` for the Development identity.
 
 ## Server artifacts for desktop startup
 

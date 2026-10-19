@@ -36,7 +36,7 @@ from spaceterm_tasks.packaging import (
 
 STAGE = ROOT / "target" / "package-linux"
 PLATFORM = "linux-x86_64"
-# Ubuntu 22.04. The release builds there, and every symbol the executable needs must exist there.
+# Ubuntu 22.04. Every symbol imported by a package must exist on this baseline.
 GLIBC_BASELINE = (2, 35)
 GLIBC_SYMBOL = re.compile(rb"\bGLIBC_([0-9]+)\.([0-9]+)(?:\.[0-9]+)?\b")
 DIRECTORIES = {"spaceterm": "spaceterm", "preflight": "spaceterm-preflight"}
@@ -120,6 +120,7 @@ def package(release_tag=None):
         "--features",
         "desktop",
         env=environment,
+        portable_linux=True,
     )
     shutil.rmtree(STAGE, ignore_errors=True)
     STAGE.mkdir(parents=True)
@@ -175,9 +176,7 @@ def verify_tree(tree, name, release_tag):
     header = checked(["objdump", "-f", str(executable)], f"{label} executable is unreadable")
     if b"elf64-x86-64" not in header:
         raise TaskError(f"{label} executable must contain only x86_64 code")
-    # Preflight runs only where it was built. Releases must run on every supported host.
-    if release_tag:
-        verify_glibc_baseline(executable, label)
+    verify_glibc_baseline(executable, label)
     version = release_version(release_tag) if release_tag else None
     verify_application_identity(executable, identity(name)["CFBundleName"], label, version)
     verify_askpass_helper_mode(executable, label)

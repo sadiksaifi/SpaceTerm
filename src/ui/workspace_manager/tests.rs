@@ -5188,7 +5188,8 @@ fn native_application_quit_should_not_compete_with_an_in_app_close_confirmation(
         Some(CloseTarget::Window)
     );
     assert!(!cx.has_pending_prompt());
-    assert_eq!(application_quit.requests(), 1);
+    // Command-Q closes windows; it asks the application to quit only from the status menu.
+    assert_eq!(application_quit.requests(), 0);
     click("modal-action-close-confirmation-cancel", cx);
 }
 
@@ -5387,10 +5388,67 @@ fn client_window_controls_remain_operable_during_close_confirmation(cx: &mut Tes
 }
 
 #[gpui::test]
-fn command_q_and_quit_action_should_cancel_safely_and_confirm_once(cx: &mut TestAppContext) {
+fn command_q_closes_the_window_through_its_own_confirmation_without_quitting(
+    cx: &mut TestAppContext,
+) {
     let (manager, records, application_quit, cx) = workspace_manager_with_application_actions(cx);
     redraw(cx);
     cx.simulate_keystrokes("cmd-q");
+    cx.run_until_parked();
+
+    // The window's running work asks first, exactly as its close button does.
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager
+            .close_confirmation
+            .pending()
+            .map(|pending| pending.target)),
+        Some(CloseTarget::Window)
+    );
+    assert_eq!(application_quit.requests(), 0);
+    click("modal-action-close-confirmation-cancel", cx);
+    assert!(records.dropped_session_ids().is_empty());
+    assert_eq!(application_quit.requests(), 0);
+}
+
+/// A Quit confirmed while a status-menu Stop or Restart runs waits for it, then checks the
+/// client's work again: a Pane opened during the wait was never covered by that confirmation.
+#[gpui::test]
+fn quit_waiting_for_a_server_operation_asks_again_about_new_work(cx: &mut TestAppContext) {
+    let (_, records, application_quit, cx) = workspace_manager_with_application_actions(cx);
+    redraw(cx);
+    cx.cx.update(crate::status_menu::begin_operation);
+    cx.dispatch_action(crate::app::QuitApplication);
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Quit SpaceTerm");
+    cx.run_until_parked();
+    assert_eq!(
+        application_quit.confirmations(),
+        0,
+        "the Stop is still running"
+    );
+
+    cx.simulate_keystrokes("cmd-d");
+    redraw(cx);
+    // The operation ends from the application's event loop, outside any window.
+    cx.cx.update(crate::status_menu::end_operation);
+    cx.run_until_parked();
+
+    assert!(
+        cx.has_pending_prompt(),
+        "the new Pane needs its own confirmation"
+    );
+    assert_eq!(application_quit.confirmations(), 0);
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert!(records.dropped_session_ids().is_empty());
+    assert_eq!(application_quit.confirmations(), 0);
+}
+
+#[gpui::test]
+fn quit_action_should_cancel_safely_and_confirm_once(cx: &mut TestAppContext) {
+    let (manager, records, application_quit, cx) = workspace_manager_with_application_actions(cx);
+    redraw(cx);
+    cx.dispatch_action(crate::app::QuitApplication);
     cx.run_until_parked();
     assert!(cx.has_pending_prompt());
     assert_eq!(application_quit.requests(), 1);

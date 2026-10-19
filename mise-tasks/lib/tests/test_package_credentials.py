@@ -14,13 +14,15 @@ class PackageCredentialsTests(unittest.TestCase):
             "UPDATE_SIGNING_KEY": "fixture-update-key",
             "MACOS_SIGNING_CERTIFICATE_P12": "fixture-certificate",
             "MACOS_SIGNING_CERTIFICATE_PASSWORD": "fixture-password",
+            "SPACETERM_LINUX_PACKAGE_TARGET": "x86_64-unknown-linux-gnu.2.35",
+            "SPACETERM_LINUX_PACKAGE_SYSROOT": "/fixture-sysroot",
         }
 
         def compiler(arguments, **kwargs):
-            self.assertTrue(arguments[:2] == ["cargo", "build"])
+            self.assertTrue(arguments[:2] == ["cargo", "zigbuild"])
             self.assertEqual(
                 set(kwargs["env"]) & set(environment),
-                {"PATH"},
+                {"PATH", "SPACETERM_LINUX_PACKAGE_TARGET", "SPACETERM_LINUX_PACKAGE_SYSROOT"},
                 "signing inputs must stay in the packaging process",
             )
             raise TaskError("compiler boundary reached")

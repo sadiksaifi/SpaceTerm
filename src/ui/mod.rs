@@ -24,6 +24,11 @@ pub(crate) mod remote_workspace_flow;
 mod render_lifecycle;
 pub(crate) mod repository_status_store;
 mod selection_chip;
+#[allow(
+    dead_code,
+    reason = "only a status item without native alerts opens this window"
+)]
+pub(crate) mod server_control_window;
 pub(crate) mod server_pane;
 pub(crate) mod server_worktrees;
 pub(crate) mod settings_file;
@@ -81,7 +86,7 @@ pub(crate) use workspace_manager::launch_testing;
 #[cfg(test)]
 pub(crate) use workspace_manager::tests::assert_scroll_shortcuts_from_sidebar_focus;
 pub(crate) use workspace_manager::{
-    LocalServerAdapters, WorkspaceManager, WorkspaceManagerAdapters,
+    LocalServerAdapters, WorkspaceManager, WorkspaceManagerAdapters, resume_waiting_launches,
 };
 
 /// Finishes every hover transition in progress, since test windows have no frame loop.

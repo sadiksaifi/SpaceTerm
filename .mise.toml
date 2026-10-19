@@ -7,6 +7,8 @@ lockfile = true
 [env]
 # Shared task code; see mise-tasks/lib.
 PYTHONPATH = "{{config_root}}/mise-tasks/lib"
+SPACETERM_LINUX_PACKAGE_TARGET = "x86_64-unknown-linux-gnu.2.35"
+SPACETERM_LINUX_PACKAGE_SYSROOT = "{{config_root}}/target/linux-sysroots"
 
 [tools]
 python = "3.13.15"
@@ -20,6 +22,7 @@ node = "24.21.0"
 zig = "0.16.0"
 "cargo:cargo-packager" = { version = "0.11.8", os = ["macos"] }
 "cargo:cargo-sweep" = "0.8.0"
+"cargo:cargo-zigbuild" = { version = "0.23.4", os = ["linux"] }
 "npm:skills" = "1.7.0"
 "npm:tagsmith" = "1.2.0"
 # The signed updater framework and its signing tools.
@@ -145,6 +148,10 @@ run = ["skills experimental_install", "python -m spaceterm_tasks.agent_skills"]
 [tasks."setup:metal:macos"]
 description = "Install the Xcode Metal toolchain for native GPUI builds"
 run = "xcodebuild -downloadComponent MetalToolchain"
+
+[tasks."setup:linux-toolchain"]
+description = "Prepare the pinned Ubuntu 22.04 native libraries without installing host packages"
+run = "python -m spaceterm_tasks.linux_toolchain"
 
 [tasks.development]
 description = "Run SpaceTerm Development from source"
@@ -492,8 +499,9 @@ description = "Explicitly control this build's account server service"
 usage = '''
 arg "<action>" help="status, install, start, stop, restart, uninstall, or enable-linger"
 arg "[installation]" help="Verified retained installation directory for install"
+flag "--confirm" help="Confirm Stop, Restart, or Uninstall after reviewing its effects"
 '''
-run = "cargo run --package spaceterm-server-host --no-default-features --locked -- service-{{usage.action}} spaceterm-development {% if usage.installation %}{{usage.installation | quote}}{% endif %}"
+run = "cargo run --package spaceterm-server-host --no-default-features --locked -- service-{{usage.action}} spaceterm-development {% if usage.installation %}{{usage.installation | quote}}{% endif %}{% if usage.confirm %} --confirm{% endif %}"
 
 [tasks."server:service:session:macos"]
 description = "Verify authenticated Session survival and durable Stop on an installed macOS server"

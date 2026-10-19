@@ -5689,6 +5689,7 @@ dependencies = [
  "async-channel",
  "base64 0.22.1",
  "block2 0.6.2",
+ "dispatch2",
  "flate2",
  "getrandom 0.4.3",
  "gpui",
