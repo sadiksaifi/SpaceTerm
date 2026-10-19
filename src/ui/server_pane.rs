@@ -99,7 +99,8 @@ pub(crate) struct ScreenStatus {
 }
 
 /// A centered screen replacing a Pane: a title, its detail, one action, and a status slot under
-/// the action.
+/// the action. The screen is one Group named by its title, which a caller can give the Pane's
+/// focus so the keyboard lands on something assistive technology announces.
 pub(crate) fn render_screen(
     selector: SharedString,
     copy: ScreenCopy,
@@ -108,7 +109,7 @@ pub(crate) fn render_screen(
     status: Option<ScreenStatus>,
     announcements: &ScreenAnnouncements,
     cx: &App,
-) -> AnyElement {
+) -> Stateful<gpui::Div> {
     render_screen_content(
         selector,
         copy,
@@ -128,7 +129,7 @@ pub(crate) fn render_directory_screen(
     missing_worktree: bool,
     announcements: &ScreenAnnouncements,
     cx: &App,
-) -> AnyElement {
+) -> Stateful<gpui::Div> {
     let detail = if missing_worktree {
         "This Tab's Worktree is missing, and SpaceTerm doesn't recreate Worktrees. Retry after restoring it with git, or choose another directory for this Pane."
     } else {
@@ -170,7 +171,7 @@ fn render_screen_content(
     status: Option<ScreenStatus>,
     announcements: &ScreenAnnouncements,
     cx: &App,
-) -> AnyElement {
+) -> Stateful<gpui::Div> {
     let ScreenCopy {
         title,
         detail,
@@ -269,7 +270,6 @@ fn render_screen_content(
                 .items_center()
                 .children(status.map(|status| status.content)),
         )
-        .into_any_element()
 }
 
 /// Progress is available for exploration, without interrupting the action's outcome speech.

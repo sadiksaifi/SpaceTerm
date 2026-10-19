@@ -3069,20 +3069,14 @@ impl TabView {
                 )
             }
         });
-        // The screen rests on its own focus, so plain Tab the terminal never took reaches its
-        // action while terminal input is paused.
-        let screen = screen.map(|screen| {
-            let surface = div()
-                .id(selector("screen"))
-                .absolute()
-                .inset_0()
-                .child(screen);
-            match &screen_focus {
-                Some(focus) => {
-                    server_pane::with_tab_traversal(surface.track_focus(focus)).into_any_element()
-                }
-                None => surface.into_any_element(),
+        // The screen's labeled Group rests on its own focus, so assistive technology announces
+        // where the keyboard landed, and plain Tab the terminal never took reaches its action
+        // while terminal input is paused.
+        let screen = screen.map(|screen| match &screen_focus {
+            Some(focus) => {
+                server_pane::with_tab_traversal(screen.track_focus(focus)).into_any_element()
             }
+            None => screen.into_any_element(),
         });
         let notice = pane.notice().map(|(title, detail, intent)| {
             let retry = if pane.server_stopped() {
