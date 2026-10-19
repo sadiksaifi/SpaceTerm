@@ -54,6 +54,8 @@ struct OwnedPane {
     screen: Option<Arc<ScreenSnapshot>>,
     graphics_transfer: Option<(ActiveScreenSnapshot, Arc<crate::terminal::ImageSnapshot>)>,
     sent: Option<PresentationGeneration>,
+    screen_encoder: pane::presentation::ScreenEncoder,
+    presentable: bool,
     ended: bool,
     failed: bool,
     directory_failed: bool,
@@ -272,6 +274,8 @@ impl DevelopmentPaneHost {
             screen: None,
             graphics_transfer: None,
             sent: None,
+            screen_encoder: pane::presentation::ScreenEncoder::default(),
+            presentable: true,
             ended: false,
             failed: false,
             directory_failed: false,
@@ -364,6 +368,10 @@ impl DevelopmentPaneHost {
         connection: [u8; 32],
         request: Request,
     ) -> Result<Reply, Refusal> {
+        let (request, changes) = match request {
+            Request::PollChanges { lease, base } => (Request::Poll { lease }, Some(base)),
+            request => (request, None),
+        };
         if matches!(request, Request::Capabilities) {
             return Ok(Reply::Capabilities {
                 development_pane: true,
@@ -484,6 +492,7 @@ impl DevelopmentPaneHost {
             | Request::GraphicsChunk { lease, .. }
             | Request::SelectionChunk { lease, .. } => lease,
             Request::Poll { lease }
+            | Request::PresentationDemand { lease, .. }
             | Request::NativeEffects { lease, .. }
             | Request::CompleteClipboard { lease, .. }
             | Request::Focus { lease, .. }
@@ -508,6 +517,18 @@ impl DevelopmentPaneHost {
             return Err(Refusal::DirectoryUnavailable);
         }
         match request {
+            Request::PresentationDemand { visible, .. } => {
+                if pane.presentable != visible {
+                    pane.presentable = visible;
+                    pane.runtime.set_presentable(visible);
+                    pane.screen_encoder = pane::presentation::ScreenEncoder::default();
+                    pane.sent = None;
+                    if !visible {
+                        pane.runtime.end_server_accessibility_demand();
+                    }
+                }
+                Ok(Reply::Unchanged)
+            }
             Request::EndAccessibilityDemand { .. } => {
                 pane.runtime.end_server_accessibility_demand();
                 Ok(Reply::Unchanged)
@@ -590,7 +611,14 @@ impl DevelopmentPaneHost {
             }
             Request::Poll { .. } => {
                 if let Some(screen) = &pane.screen
-                    && pane.sent != Some(screen.generation)
+                    && pane.presentable
+                    && match changes {
+                        Some(base) => {
+                            base != Some(pane.screen_generation)
+                                || base != pane.screen_encoder.baseline()
+                        }
+                        None => pane.sent != Some(screen.generation),
+                    }
                 {
                     pane.sent = Some(screen.generation);
                     let mut screen = encode_screen(screen);
@@ -599,7 +627,10 @@ impl DevelopmentPaneHost {
                         .accessibility
                         .take_changed_revision()
                         .unwrap_or(pane.accessibility.revision());
-                    return Ok(Reply::Screen(Box::new(screen)));
+                    return Ok(match changes {
+                        Some(base) => pane.screen_encoder.encode(screen, base),
+                        None => Reply::Screen(Box::new(screen)),
+                    });
                 }
                 if pane.failed {
                     return Err(Refusal::Failed);
@@ -1052,7 +1083,10 @@ impl OwnedPane {
         self.lease.control = control;
         self.lease.connection = connection;
         self.connected = true;
+        self.presentable = true;
+        self.runtime.set_presentable(true);
         self.sent = None;
+        self.screen_encoder = pane::presentation::ScreenEncoder::default();
         self.runtime.resize(geometry(size));
         self.size = size;
         if let Some(appearance) = appearance {
@@ -1507,6 +1541,150 @@ mod tests {
             input(host, lease, generation, InteractiveInput::Key(enter)),
             Reply::Unchanged
         ));
+    }
+
+    #[test]
+    fn row_changes_follow_the_exact_baseline_and_connection_lease() {
+        let mut host = host();
+        let lease = attach(&mut host, 1, true);
+        command(
+            &mut host,
+            1,
+            lease,
+            "stty -echo; printf '\\033[2J\\033[HBASELINE-READY\\r\\n'",
+        );
+        await_text(&mut host, 1, lease, "BASELINE-READY");
+        let mut decoder = pane::presentation::ScreenDecoder::default();
+        let reset = host.request(
+            [1; 32],
+            lease.connection,
+            Request::PollChanges { lease, base: None },
+        );
+        assert!(matches!(&reset, Reply::Screen(_)));
+        decoder.apply(reset).unwrap();
+        command(
+            &mut host,
+            1,
+            lease,
+            "printf '\\033[H\\033[2KCHANGED-ROW\\r\\n'",
+        );
+        await_text(&mut host, 1, lease, "CHANGED-ROW");
+        let reply = host.request(
+            [1; 32],
+            lease.connection,
+            Request::PollChanges {
+                lease,
+                base: decoder.baseline(),
+            },
+        );
+        assert!(
+            matches!(&reply, Reply::ScreenChanges(changes) if !changes.indices.is_empty() && changes.indices.len() < 24)
+        );
+        decoder.apply(reply).unwrap();
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                lease.connection,
+                Request::PollChanges { lease, base: None }
+            ),
+            Reply::Screen(_)
+        ));
+        let Reply::Attached { lease: replacement } = host.request(
+            [1; 32],
+            [2; 32],
+            Request::Attach {
+                create: false,
+                size: size(),
+                resume: Some(lease),
+                style: None,
+            },
+        ) else {
+            panic!("reattachment failed")
+        };
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                lease.connection,
+                Request::PollChanges {
+                    lease,
+                    base: decoder.baseline()
+                }
+            ),
+            Reply::Refused(Refusal::Stale)
+        ));
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                replacement.connection,
+                Request::PollChanges {
+                    lease: replacement,
+                    base: None
+                }
+            ),
+            Reply::Screen(_)
+        ));
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn hidden_presentation_suppresses_rows_and_reveal_resets_the_baseline() {
+        let mut host = host();
+        let lease = attach(&mut host, 1, true);
+        command(
+            &mut host,
+            1,
+            lease,
+            "stty -echo; printf '\\033[2J\\033[HHIDDEN-READY\\r\\n'",
+        );
+        await_text(&mut host, 1, lease, "HIDDEN-READY");
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                lease.connection,
+                Request::PresentationDemand {
+                    lease,
+                    visible: false
+                }
+            ),
+            Reply::Unchanged
+        ));
+        for _ in 0..10 {
+            assert!(!matches!(
+                host.request(
+                    [1; 32],
+                    lease.connection,
+                    Request::PollChanges { lease, base: None }
+                ),
+                Reply::Screen(_) | Reply::ScreenChanges(_)
+            ));
+        }
+        command(
+            &mut host,
+            1,
+            lease,
+            "printf '\\033[H\\033[2KHIDDEN-OUTPUT\\r\\n'",
+        );
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                lease.connection,
+                Request::PresentationDemand {
+                    lease,
+                    visible: true
+                }
+            ),
+            Reply::Unchanged
+        ));
+        assert!(matches!(
+            host.request(
+                [1; 32],
+                lease.connection,
+                Request::PollChanges { lease, base: None }
+            ),
+            Reply::Screen(_)
+        ));
+        await_text(&mut host, 1, lease, "HIDDEN-OUTPUT");
+        host.shutdown().unwrap();
     }
 
     #[test]

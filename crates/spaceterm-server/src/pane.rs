@@ -3,7 +3,10 @@ pub mod accessibility;
 pub mod directories;
 pub mod effects;
 pub mod graphics;
+pub mod presentation;
 pub mod reading;
+#[cfg(feature = "client")]
+mod transport;
 use crate::ServerError;
 use serde::{Deserialize, Serialize};
 
@@ -305,6 +308,14 @@ pub enum Request {
     Poll {
         lease: Lease,
     },
+    PollChanges {
+        lease: Lease,
+        base: Option<u64>,
+    },
+    PresentationDemand {
+        lease: Lease,
+        visible: bool,
+    },
     Key {
         lease: Lease,
         key: Key,
@@ -396,6 +407,7 @@ pub enum Reply {
         lease: Lease,
     },
     Screen(Box<Screen>),
+    ScreenChanges(Box<presentation::RowChanges>),
     Unchanged,
     Ended,
     Closed,
@@ -430,13 +442,13 @@ impl From<Refusal> for ServerError {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Color {
     Default,
     Palette(u8),
     Rgb([u8; 3]),
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cell {
     #[serde(default)]
     pub hyperlink: Option<u16>,
@@ -503,9 +515,18 @@ pub trait PaneService: Send {
 #[cfg(feature = "client")]
 pub struct PaneConnection {
     transport: std::sync::Arc<PaneTransport>,
+    last_exchange: Option<ExchangeTiming>,
+}
+/// Local bounded numeric evidence; no terminal data or operation contents are retained.
+#[cfg(feature = "client")]
+#[derive(Clone, Copy, Debug)]
+pub struct ExchangeTiming {
+    pub queue_wait: std::time::Duration,
+    pub exchange: std::time::Duration,
 }
 #[cfg(feature = "client")]
 struct PaneTransport {
+    admission: transport::Admission,
     stream: std::sync::Mutex<Option<std::os::unix::net::UnixStream>>,
     takeover: bool,
     interactive_input: bool,
@@ -534,7 +555,10 @@ impl SharedPaneConnection {
                 .unwrap_or_else(|e| e.into_inner())
                 .is_some()
         {
-            return Ok(PaneConnection { transport });
+            return Ok(PaneConnection {
+                transport,
+                last_exchange: None,
+            });
         }
         // Serialize authentication as well as publication, so simultaneous Pane
         // workers never briefly allocate a separate host connection each.
@@ -603,6 +627,7 @@ impl PaneConnection {
     pub(crate) fn new(stream: std::os::unix::net::UnixStream, takeover: bool) -> Self {
         Self {
             transport: std::sync::Arc::new(PaneTransport {
+                admission: transport::Admission::default(),
                 stream: std::sync::Mutex::new(Some(stream)),
                 takeover,
                 interactive_input: false,
@@ -613,6 +638,7 @@ impl PaneConnection {
                 directory_recovery: false,
                 worktree_writes: false,
             }),
+            last_exchange: None,
         }
     }
     pub fn supports_directory_recovery(&self) -> bool {
@@ -637,6 +663,9 @@ impl PaneConnection {
         self.transport.interactive_input
     }
     pub fn exchange(&mut self, request: &Request) -> Result<Reply, ServerError> {
+        let queued = std::time::Instant::now();
+        let _turn = self.transport.admission.enter()?;
+        let admitted = std::time::Instant::now();
         let mut stream = self
             .transport
             .stream
@@ -653,10 +682,17 @@ impl PaneConnection {
         if result.is_err() {
             *stream = None;
         }
+        self.last_exchange = Some(ExchangeTiming {
+            queue_wait: admitted.duration_since(queued),
+            exchange: admitted.elapsed(),
+        });
         match result? {
             Reply::Refused(reason) => Err(reason.into()),
             reply => Ok(reply),
         }
+    }
+    pub fn last_exchange_timing(&self) -> Option<ExchangeTiming> {
+        self.last_exchange
     }
 }
 

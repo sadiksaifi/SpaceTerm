@@ -579,6 +579,8 @@ impl SharedWorkspaceHost {
                     | Request::GraphicsChunk { lease, .. }
                     | Request::SelectionChunk { lease, .. }
                     | Request::Poll { lease }
+                    | Request::PollChanges { lease, .. }
+                    | Request::PresentationDemand { lease, .. }
                     | Request::NativeEffects { lease, .. }
                     | Request::CompleteClipboard { lease, .. }
                     | Request::Focus { lease, .. }
@@ -590,7 +592,7 @@ impl SharedWorkspaceHost {
                     | Request::Close { lease } => (*lease).into(),
                     _ => return Err(Refusal::Unsupported),
                 };
-                if matches!(request, Request::Poll { .. })
+                if matches!(request, Request::Poll { .. } | Request::PollChanges { .. })
                     && self
                         .panes
                         .values()
