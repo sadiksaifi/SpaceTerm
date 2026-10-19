@@ -718,6 +718,9 @@ impl State {
                             .clone()
                     })
                 };
+                if !validate_pin(&start) {
+                    return Ok(Outcome::Invalid);
+                }
                 let id = new_id()?;
                 t.panes.push(Pane {
                     id,

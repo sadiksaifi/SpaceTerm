@@ -590,6 +590,30 @@ mod tests {
             lease,
             &format!("SPLIT-CWD:{}", tree.display()),
         );
+        let pin = git.0.join("lost-pin");
+        std::fs::create_dir(&pin).unwrap();
+        assert!(matches!(host.request([1; 32], [1; 32], Request::Mutate {
+            sequence: 5, mutation: Mutation::PinWorkspace { workspace, version: 1, directory: Some(pin.clone()) },
+        }), Reply::Outcome(record) if matches!(record.outcome, Outcome::Accepted { .. })));
+        std::fs::remove_dir(&pin).unwrap();
+        let mutation = Mutation::SplitPane {
+            workspace,
+            tab,
+            source,
+            axis: Axis::Down,
+        };
+        assert!(
+            matches!(host.request([1; 32], [1; 32], Request::Mutate { sequence: 6, mutation: mutation.clone() }), Reply::Outcome(record) if record.outcome == Outcome::Invalid)
+        );
+        std::fs::create_dir(&pin).unwrap();
+        assert!(
+            matches!(host.request([1; 32], [1; 32], Request::Mutate { sequence: 6, mutation: mutation.clone() }), Reply::Outcome(record) if record.outcome == Outcome::Invalid),
+            "repair cannot change the original outcome"
+        );
+        assert!(
+            matches!(host.request([1; 32], [1; 32], Request::Mutate { sequence: 7, mutation }), Reply::Outcome(record) if matches!(record.outcome, Outcome::Accepted { .. })),
+            "a fresh edit can proceed"
+        );
         host.shutdown().unwrap();
     }
 

@@ -442,7 +442,7 @@ impl SharedWorkspaceHost {
                 }
                 let mut next = self.state.clone();
                 next.inventory = self.inventory();
-                let mut directory = self.prototype.directory.clone();
+                let mut directory = Ok(self.prototype.directory.clone());
                 if let spaceterm_server::hierarchy::Mutation::SplitPane {
                     workspace,
                     tab,
@@ -460,11 +460,16 @@ impl SharedWorkspaceHost {
                         .find(|t| t.id == *tab)
                         .and_then(|t| t.worktree.as_deref())
                 {
-                    directory = worktrees::starting_directory(workspace, Some(*source), root)?;
+                    directory = worktrees::starting_directory(workspace, Some(*source), root);
                 }
-                next.apply(device, sequence, mutation, &directory, |path| {
-                    local_filesystem().validate_directory(path).is_ok()
-                })?;
+                // A directory refusal finishes this journaled edit, so retry cannot admit it later.
+                next.apply(
+                    device,
+                    sequence,
+                    mutation,
+                    directory.as_deref().unwrap_or(&self.prototype.directory),
+                    |path| directory.is_ok() && local_filesystem().validate_directory(path).is_ok(),
+                )?;
                 let outcome = next
                     .outcome(device, sequence)
                     .ok_or(Refusal::Failed)?
