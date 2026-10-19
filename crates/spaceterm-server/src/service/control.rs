@@ -73,7 +73,8 @@ impl Confirmation {
     }
 }
 
-fn display_name(identity: &str) -> &str {
+/// The application display name for a compiled service identity.
+pub fn display_name(identity: &str) -> &str {
     match identity {
         "spaceterm" => "SpaceTerm",
         "spaceterm-preflight" => "SpaceTerm Preflight",
