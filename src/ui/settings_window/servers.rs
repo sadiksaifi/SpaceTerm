@@ -385,6 +385,9 @@ fn failure(error: ServerError) -> (&'static str, &'static str, bool) {
         // The server is holding shared edit outcomes for clients that have not acknowledged
         // them. Another check reports whether they have since.
         ServerError::Capacity => ("At Capacity", "settings-local-server-state-capacity", true),
+        // Another surface changed the service after a confirmation was prepared. A check reads
+        // its current state before the person asks again.
+        ServerError::Changed => ("Changed", "settings-local-server-state-changed", true),
     }
 }
 
