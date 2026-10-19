@@ -13988,6 +13988,63 @@ mod shared_repositories {
     }
 
     #[gpui::test]
+    fn worktree_menu_new_tab_uses_its_recent_tabs_focused_pane(cx: &mut TestAppContext) {
+        use spaceterm_server::hierarchy::Mutation;
+        use spaceterm_server::worktree::Operation;
+
+        let mut initial = published(1, "main", true);
+        let mut recent = initial.workspaces[0].tabs[1].clone();
+        recent.id = [70; 32];
+        recent.root_pane = [71; 32];
+        recent.panes[0].id = recent.root_pane;
+        let mut child = pane([72; 32], "/srv/app-feature/src");
+        child.source = Some(recent.root_pane);
+        recent.panes.push(child);
+        initial.workspaces[0].tabs.push(recent);
+        let (harness, cx) = harness(cx, initial);
+        cx.update(|window, cx| {
+            window.activate_window();
+            harness.manager.update(cx, |manager, cx| {
+                manager.activate_workspace(harness.shared, window, cx);
+                manager
+                    .workspaces
+                    .workspace(harness.shared)
+                    .unwrap()
+                    .payload()
+                    .update(cx, |tabs, cx| {
+                        tabs.open_accepted_shared([70; 32], window, cx);
+                    });
+            });
+        });
+        redraw(cx);
+        cx.dispatch_action(crate::ui::FocusPaneRight);
+        cx.run_until_parked();
+        let (main, feature) = worktree_ids(&harness, cx);
+        click(worktree_row(harness.shared, main, cx), cx);
+        cx.update(|_, cx| {
+            let sidebar = harness.manager.read(cx).sidebar.clone();
+            sidebar.update(cx, |_, cx| {
+                cx.emit(SidebarEvent::WorktreeCommand {
+                    workspace_id: harness.shared,
+                    worktree_id: feature,
+                    command: WorktreeMenuCommand::NewTab,
+                });
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            harness.edits.submitted(),
+            [Mutation::Worktree(Operation::OpenTab {
+                workspace: WORKSPACE,
+                source: Some([72; 32]),
+                root: MAIN_ROOT.into(),
+                path: FEATURE_ROOT.into(),
+            })]
+        );
+    }
+
+    #[gpui::test]
     fn worktree_rows_copy_the_path_and_confirm_their_server_tabs(cx: &mut TestAppContext) {
         use spaceterm_server::hierarchy::{
             CloseInventory, CloseTarget as ServerCloseTarget, ConfirmedPane, Mutation, Outcome,
