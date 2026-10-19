@@ -344,12 +344,7 @@ pub(crate) fn serve_runtime(
     }
     stopping.store(true, Ordering::Release);
     drop(listener);
-    for (_, stream) in &connections {
-        let _ = stream.shutdown(std::net::Shutdown::Both);
-    }
-    for (worker, _) in connections {
-        let _ = worker.join();
-    }
+    finish_connections(connections);
     if let Some(panes) = panes.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         panes.shutdown()?;
     }
@@ -358,9 +353,52 @@ pub(crate) fn serve_runtime(
     Ok(())
 }
 
+fn finish_connections(connections: Vec<(std::thread::JoinHandle<()>, UnixStream)>) {
+    for (_, stream) in &connections {
+        // Wake idle readers without cancelling an admitted reply, including Closed. Writes
+        // retain the protocol's absolute frame deadline while workers finish before cleanup.
+        let _ = stream.shutdown(std::net::Shutdown::Read);
+    }
+    for (worker, _) in connections {
+        let _ = worker.join();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shutdown_unblocks_idle_readers_and_finishes_pending_replies() {
+        use std::io::Read;
+
+        let (idle_client, mut idle_server) = UnixStream::pair().unwrap();
+        let idle_cancellation = idle_server.try_clone().unwrap();
+        let idle = std::thread::spawn(move || {
+            let mut byte = [0];
+            assert_eq!(idle_server.read(&mut byte).unwrap(), 0);
+        });
+        let (mut reply_client, mut reply_server) = UnixStream::pair().unwrap();
+        let reply_cancellation = reply_server.try_clone().unwrap();
+        let reply = std::thread::spawn(move || {
+            // The socket read orders the pending reply after cancellation without a timer.
+            let mut byte = [0];
+            assert_eq!(reply_server.read(&mut byte).unwrap(), 0);
+            protocol::Wire::terminal(&mut reply_server)
+                .unwrap()
+                .write(&crate::pane::Reply::Closed)
+                .unwrap();
+        });
+
+        finish_connections(vec![(idle, idle_cancellation), (reply, reply_cancellation)]);
+
+        let received: crate::pane::Reply = protocol::Wire::terminal(&mut reply_client)
+            .unwrap()
+            .read()
+            .unwrap();
+        assert!(matches!(received, crate::pane::Reply::Closed));
+        drop(idle_client);
+    }
+
     #[test]
     fn refuses_another_account_before_protocol_processing() {
         // SAFETY: geteuid has no preconditions.
