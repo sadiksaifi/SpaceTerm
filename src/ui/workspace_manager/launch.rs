@@ -232,6 +232,19 @@ const fn failure_title(error: ServerError) -> &'static str {
     }
 }
 
+/// Whether a connection failure before the first inventory needs the person, because
+/// reconnecting alone cannot open the Workspaces.
+const fn ends_opening(error: ServerError) -> bool {
+    matches!(
+        error,
+        ServerError::IncompatibleProtocol
+            | ServerError::IncompatibleState
+            | ServerError::StorageUnavailable
+            | ServerError::UnsafeStorage
+            | ServerError::AuthenticationRefused
+    )
+}
+
 pub(super) fn present(state: LaunchState) -> LaunchPresentation {
     use LaunchAction::{Authorize, Retry, Settings, Start};
     let fixed = SharedString::new_static;
@@ -521,10 +534,19 @@ impl WorkspaceManager {
     pub(super) fn launch_presentation(&self) -> Option<LaunchPresentation> {
         match &self.shared {
             Some(shared) if shared.latest_inventory().is_some() => None,
+            // A step the person chose, or its refusal, says so until launch runs again.
+            Some(_)
+                if !matches!(
+                    self.launch.state,
+                    LaunchState::Launching | LaunchState::Ready
+                ) =>
+            {
+                Some(present(self.launch.state))
+            }
             Some(shared) => Some(present(match shared.connection_error() {
-                Some(
-                    error @ (ServerError::IncompatibleProtocol | ServerError::IncompatibleState),
-                ) => LaunchState::Failed(error),
+                Some(ServerError::Stopped) => LaunchState::Stopped,
+                Some(error) if ends_opening(error) => LaunchState::Failed(error),
+                // The connection retries an interruption by itself, so opening goes on.
                 _ => LaunchState::Launching,
             })),
             None => Some(present(self.launch.state)),

@@ -364,31 +364,60 @@ fn return_runs_the_launch_screens_default_action(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn an_incompatible_server_before_inventory_explains_the_failure_and_offers_recovery(
-    cx: &mut TestAppContext,
-) {
+fn a_failure_before_inventory_explains_itself_and_offers_recovery(cx: &mut TestAppContext) {
     let edits = ScriptedEdits::new(None);
     edits.set_connected(false);
     let (harness, cx) = launch_harness_with(vec![ready()], edits, [], cx);
     cx.run_until_parked();
     sync(&harness, cx);
     assert_eq!(harness.launch_title(cx), Some(launch::OPENING_TITLE));
-    for error in [
-        ServerError::IncompatibleProtocol,
-        ServerError::IncompatibleState,
+    for (error, title) in [
+        (ServerError::IncompatibleProtocol, "Incompatible Server"),
+        (ServerError::IncompatibleState, "Incompatible Server"),
+        (
+            ServerError::StorageUnavailable,
+            "Server Storage Unavailable",
+        ),
+        (ServerError::UnsafeStorage, "Unsafe Server Storage"),
     ] {
         harness.edits.set_error(error);
         sync(&harness, cx);
-        assert_eq!(harness.launch_title(cx), Some("Incompatible Server"));
+        assert_eq!(harness.launch_title(cx), Some(title));
         assert!(cx.debug_bounds(LAUNCH_RETRY_SELECTOR).is_some());
         assert!(cx.debug_bounds(launch::LAUNCH_SETTINGS_SELECTOR).is_some());
     }
+    // The connection retries an interruption by itself, so the window keeps opening.
+    harness.edits.set_error(ServerError::NotRunning);
+    sync(&harness, cx);
+    assert_eq!(harness.launch_title(cx), Some(launch::OPENING_TITLE));
     assert_eq!(
         harness.launch.steps(),
         ["run"],
         "no implicit Start or runtime activation"
     );
     assert!(harness.edits.submitted().is_empty());
+}
+
+/// A Stop between admission and the first inventory offers Start Server, which opens the
+/// Workspaces once the server answers.
+#[gpui::test]
+fn a_stop_before_inventory_offers_start_server(cx: &mut TestAppContext) {
+    let edits = ScriptedEdits::new(None);
+    edits.set_connected(false);
+    let (harness, cx) = launch_harness_with(vec![ready(), ready()], edits, [], cx);
+    cx.run_until_parked();
+    harness.edits.set_error(ServerError::Stopped);
+    sync(&harness, cx);
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+
+    harness.click(LAUNCH_START_SELECTOR, cx);
+    harness.edits.set_inventory(inventory());
+    harness.edits.set_connected(true);
+    sync(&harness, cx);
+
+    assert_eq!(harness.launch.steps(), ["run", "start", "run"]);
+    assert_eq!(harness.launch_title(cx), None);
+    assert_eq!(harness.shared_rows(cx), 1);
 }
 
 #[gpui::test]
