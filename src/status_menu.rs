@@ -90,12 +90,15 @@ pub(crate) fn end_operation(cx: &mut App) {
     }
 }
 
+/// Whether a server operation the person admitted is still running.
+pub(crate) fn operations_running(cx: &App) -> bool {
+    cx.try_global::<StatusArea>()
+        .is_some_and(|status| status.operations > 0)
+}
+
 /// Runs `work` once no admitted server operation is running, so exiting never abandons one.
 pub(crate) fn after_operations(cx: &mut App, work: impl FnOnce(&mut App) + 'static) {
-    let running = cx
-        .try_global::<StatusArea>()
-        .is_some_and(|status| status.operations > 0);
-    if running {
+    if operations_running(cx) {
         update(cx, |status| status.after_operations.push(Box::new(work)));
     } else {
         work(cx);

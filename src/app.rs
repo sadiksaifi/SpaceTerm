@@ -363,6 +363,8 @@ enum ApplicationQuitCoordinatorState {
     Prompting,
     WaitingForSettings,
     WaitingForUpdater,
+    /// Waiting for a Stop or Restart the status item admitted.
+    WaitingForOperations,
 }
 
 struct ApplicationQuitCoordinator {
@@ -438,6 +440,7 @@ impl ApplicationQuitCoordinator {
         );
         if authorized {
             let coordinator = Rc::clone(self);
+            let updater_authorization = current.clone();
             if crate::updates::prepare_before_quit(
                 cx,
                 Rc::new(move |cx| {
@@ -447,19 +450,31 @@ impl ApplicationQuitCoordinator {
                         return;
                     }
                     *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
-                    coordinator.wait_for_settings(Some(current.clone()), cx);
+                    coordinator.wait_for_settings(Some(updater_authorization.clone()), cx);
                 }),
             ) {
                 *self.state.borrow_mut() = ApplicationQuitCoordinatorState::WaitingForUpdater;
                 return;
             }
-            // An admitted Stop or Restart finishes before the client exits.
-            let adapter = self.adapter.clone();
-            crate::status_menu::after_operations(cx, move |cx| {
-                if let Some(adapter) = adapter.upgrade() {
-                    adapter.confirm_quit(cx);
-                }
-            });
+            // An admitted Stop or Restart finishes before the client exits. The client stays
+            // usable meanwhile, so the wait ends with the same checks and save as this one.
+            if crate::status_menu::operations_running(cx) {
+                *self.state.borrow_mut() = ApplicationQuitCoordinatorState::WaitingForOperations;
+                let coordinator = Rc::clone(self);
+                crate::status_menu::after_operations(cx, move |cx| {
+                    if *coordinator.state.borrow()
+                        != ApplicationQuitCoordinatorState::WaitingForOperations
+                    {
+                        return;
+                    }
+                    *coordinator.state.borrow_mut() = ApplicationQuitCoordinatorState::Idle;
+                    coordinator.wait_for_settings(Some(current), cx);
+                });
+                return;
+            }
+            if let Some(adapter) = self.adapter.upgrade() {
+                adapter.confirm_quit(cx);
+            }
         } else {
             self.present_confirmation(current, cx);
         }
