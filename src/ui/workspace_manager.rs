@@ -4007,10 +4007,6 @@ impl WorkspaceManager {
     ) -> bool {
         use super::shared_workspaces::{SharedRefusalReason, SharedSubmission};
 
-        let name = match name.trim() {
-            "" => self.next_shared_workspace_name(directory.as_deref()),
-            name => name.to_owned(),
-        };
         let Some(shared) = self.shared.as_mut() else {
             // The launch screen already says why the server is not ready, and offers its step.
             if self.workspaces.active_workspace_id().is_none() {
@@ -4041,33 +4037,6 @@ impl WorkspaceManager {
         }
         cx.notify();
         submission == SharedSubmission::Submitted
-    }
-
-    /// The name a new shared Workspace takes when a person supplied none: the chosen directory's
-    /// name, or the next default name no presented Workspace uses, as desktop Workspaces were
-    /// named. The server keeps whatever name it receives.
-    fn next_shared_workspace_name(&self, directory: Option<&std::path::Path>) -> String {
-        if let Some(name) = directory
-            .and_then(std::path::Path::file_name)
-            .map(|name| name.to_string_lossy().into_owned())
-        {
-            return name;
-        }
-        let names: BTreeSet<String> = self
-            .shared
-            .as_ref()
-            .and_then(|shared| shared.latest_inventory())
-            .into_iter()
-            .flat_map(|inventory| &inventory.workspaces)
-            .map(|workspace| workspace.name.clone())
-            .collect();
-        (1..)
-            .map(|number| match number {
-                1 => "Default".to_owned(),
-                number => format!("Default ({number})"),
-            })
-            .find(|name| !names.contains(name))
-            .unwrap_or_default()
     }
 
     /// Asks the server to rename a shared Workspace, and reports whether the Workspace was one.

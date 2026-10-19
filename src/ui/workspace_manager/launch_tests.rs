@@ -351,10 +351,10 @@ fn new_workspace_asks_the_server_rather_than_creating_desktop_work(cx: &mut Test
     assert_eq!(
         harness.edits.submitted(),
         vec![Mutation::CreateWorkspace {
-            name: "Default (2)".to_owned(),
+            name: String::new(),
             directory: None,
         }],
-        "the next free default name, as desktop Workspaces were named"
+        "the server allocates the automatic name"
     );
     assert_eq!(
         harness.workspace_count(cx),
@@ -392,7 +392,7 @@ fn open_local_directory_creates_a_server_workspace_rooted_there(cx: &mut TestApp
     assert_eq!(
         harness.edits.submitted(),
         vec![Mutation::CreateWorkspace {
-            name: chosen.file_name().unwrap().to_string_lossy().into_owned(),
+            name: String::new(),
             directory: Some(chosen.clone()),
         }]
     );
@@ -539,7 +539,7 @@ fn the_creation_shortcut_takes_the_switcher_name_instead_of_the_highlight(cx: &m
 }
 
 #[gpui::test]
-fn blank_and_cancelled_creation_names_take_the_next_default_name(cx: &mut TestAppContext) {
+fn blank_and_cancelled_creation_names_stay_automatic_on_the_server(cx: &mut TestAppContext) {
     use spaceterm_server::hierarchy::Outcome;
 
     let (harness, cx) = ready_harness(cx);
@@ -552,7 +552,7 @@ fn blank_and_cancelled_creation_names_take_the_next_default_name(cx: &mut TestAp
     cx.simulate_keystrokes("space space cmd-n");
     cx.run_until_parked();
 
-    assert_eq!(created_names(&harness), ["Default (2)", "Default (2)"]);
+    assert_eq!(created_names(&harness), ["", ""]);
 }
 
 #[gpui::test]
@@ -649,7 +649,11 @@ fn accept_creation(harness: &LaunchHarness, pinned: Option<PathBuf>, cx: &mut Vi
     let mut published = inventory();
     let mut created = published.workspaces[0].clone();
     created.id = CREATED;
-    created.name = name;
+    created.name = if name.is_empty() {
+        "Default (2)".into()
+    } else {
+        name
+    };
     created.pinned_directory = pinned;
     created.root_tab = [62; 32];
     created.tabs[0].id = [62; 32];
@@ -680,7 +684,7 @@ fn active_server_workspace(
 fn the_new_workspace_menu_creates_and_opens_a_server_workspace(cx: &mut TestAppContext) {
     let (harness, cx) = ready_harness(cx);
     click_new_workspace_menu("new-workspace-menu-create-local", cx);
-    assert_eq!(created_names(&harness), ["Default (2)"]);
+    assert_eq!(created_names(&harness), [""]);
     assert_eq!(
         harness.workspace_count(cx),
         1,
@@ -764,7 +768,7 @@ fn open_local_directory_from_the_sidebar_names_by_directory_or_creates_nothing(
     assert_eq!(
         harness.edits.submitted(),
         vec![Mutation::CreateWorkspace {
-            name: project.file_name().unwrap().to_string_lossy().into_owned(),
+            name: String::new(),
             directory: Some(project.clone()),
         }]
     );

@@ -622,7 +622,7 @@ mod startup_tests {
                         directory_recovery: true,
                         worktree_writes: false,
                         workspace_directories: false,
-                        workspace_policy: false,
+                        workspace_policy: true,
                     },
                     Request::Inventory => Reply::Inventory {
                         inventory: crate::hierarchy::State::empty().inventory,

@@ -54,7 +54,10 @@ impl SharedWorkspaceHost {
         if next.inventory.workspaces.is_empty() {
             let organization = Organization::first(self.prototype.directory.clone())
                 .map_err(|_| Refusal::Failed)?;
-            next.inventory = State::from_legacy(&organization).inventory;
+            let settings = next.worktree_settings.take();
+            next = State::from_legacy(&organization);
+            next.worktree_settings = settings;
+            next.begin_boot(self.prototype.boot);
         }
         self.commit(next)
     }
