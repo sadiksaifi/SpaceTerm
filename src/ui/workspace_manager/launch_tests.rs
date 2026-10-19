@@ -843,3 +843,47 @@ fn a_service_start_elsewhere_resumes_only_a_waiting_launch(cx: &mut TestAppConte
     cx.run_until_parked();
     assert_eq!(harness.launch.steps(), ["run", "run"]);
 }
+
+/// Stopping the server from Settings while its Workspaces are open leaves each Pane saying so,
+/// with Start Server where retrying could never connect.
+fn stopped_in_session(cx: &mut TestAppContext) -> (LaunchHarness, &mut VisualTestContext) {
+    let (harness, cx) = ready_harness(cx);
+    harness.launch.answer(ready());
+    harness
+        .panes
+        .pane(PANE)
+        .set(crate::terminal::server_session::DevelopmentPaneStatus::Failed(ServerError::Stopped));
+    cx.executor()
+        .advance_clock(crate::ui::shared_workspaces::POLL_INTERVAL * 3);
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    (harness, cx)
+}
+
+#[gpui::test]
+fn a_pane_stopped_in_session_offers_start_server_instead_of_retry(cx: &mut TestAppContext) {
+    let (harness, cx) = stopped_in_session(cx);
+    assert!(cx.debug_bounds("shared-pane-start-server-1").is_some());
+    assert!(cx.debug_bounds("shared-pane-retry-1").is_none());
+
+    harness.click("shared-pane-start-server-1", cx);
+
+    assert_eq!(harness.launch.steps(), ["run", "start", "run"]);
+    assert_eq!(
+        harness.panes.pane(PANE).retries(),
+        0,
+        "a retry could never connect"
+    );
+}
+
+#[gpui::test]
+fn a_refused_start_while_presenting_explains_itself(cx: &mut TestAppContext) {
+    let (harness, cx) = stopped_in_session(cx);
+    harness.launch.refuse_start(ServerError::NotInstalled);
+
+    harness.click("shared-pane-start-server-1", cx);
+
+    assert_eq!(harness.launch.steps(), ["run", "start"]);
+    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+}

@@ -332,6 +332,18 @@ enum StepResult {
     Declined,
 }
 
+/// The person's explicit Start Server from a Pane whose server they stopped. The window runs its
+/// Start step, then launch, and its Panes reconnect once the server answers.
+pub(crate) fn start_local_server(window: &mut Window, cx: &mut App) {
+    window.defer(cx, |window, cx| {
+        if let Some(Some(manager)) = window.root::<WorkspaceManager>() {
+            manager.update(cx, |manager, cx| {
+                manager.run_launch_action(LaunchAction::Start, window, cx);
+            });
+        }
+    });
+}
+
 /// Runs launch again in every Workspace Window still waiting on the server, after the person
 /// started or installed it from Settings. A window already presenting its Workspaces, or still
 /// launching, is left alone, and nothing here starts the server itself.
@@ -413,6 +425,13 @@ impl WorkspaceManager {
         };
         self.launch.state = state;
         self.launch._task = None;
+        // While Workspaces are presented the launch screen is hidden, so a step that could not
+        // finish explains itself in an alert instead.
+        if self.launch_presentation().is_none()
+            && let Some(presentation) = (state != LaunchState::Ready).then(|| present(state))
+        {
+            Self::present_launch_alert(presentation, window, cx);
+        }
         // The screen's own focus moves to its default action when one appears.
         if self.workspaces.active_workspace_id().is_none() {
             self.focus(window, cx);
@@ -452,6 +471,28 @@ impl WorkspaceManager {
             shared.retain_client_views(server);
         }
         LaunchState::Ready
+    }
+
+    fn present_launch_alert(
+        presentation: LaunchPresentation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use spaceterm_ui::{Alert, AlertIntent, ModalAction, ModalActionRole, ModalId};
+        let _ = Alert::new(
+            ModalId::new("server-launch-alert"),
+            presentation.title,
+            presentation.title,
+            presentation.detail.to_string(),
+            vec![ModalAction::new(
+                (),
+                "OK",
+                ModalActionRole::Cancel,
+                "server-launch-alert-ok",
+            )],
+        )
+        .intent(AlertIntent::Warning)
+        .present(window, cx, |_, _| {});
     }
 
     /// The launch screen this window presents in place of the empty view, if any.

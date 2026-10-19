@@ -32,6 +32,10 @@ pub(crate) const SESSION_ENDED_DETAIL: &str =
     "This Terminal Session is no longer available on the server.";
 pub(crate) const TAKING_OVER: &str = "Taking Over…";
 pub(crate) const TAKE_OVER_UNCONFIRMED: &str = "Take Over was not confirmed.";
+/// A Pane this client released, or one nobody controls, offered for Take Over.
+pub(crate) const UNCLAIMED_TITLE: &str = "Available to Take Over";
+pub(crate) const UNCLAIMED_DETAIL: &str = "No other client controls this Pane. Take Over to type and resize here. The shell keeps \
+     running.";
 pub(crate) const RESTORED_TITLE: &str = "Server Restarted";
 pub(crate) const RESTORED_DETAIL: &str = "Programs that were running in this Pane ended when the \
                                           server stopped. Start a new shell to keep working here.";
@@ -497,6 +501,21 @@ pub(crate) fn render_notice(
         .into_any_element()
 }
 
+/// The Start Server action of a Pane whose server the person stopped. Retrying could never
+/// connect, and only an explicit Start reverses Stop.
+pub(crate) fn start_server_button(
+    selector: SharedString,
+    on_activate: impl Fn(&mut gpui::Window, &mut App) + 'static,
+) -> Button {
+    let debug_selector = selector.clone();
+    Button::new(selector, "Start Server")
+        .variant(ButtonVariant::Link)
+        .size(ButtonSize::Compact)
+        .tab_stop(true)
+        .debug_selector(debug_selector)
+        .on_activate(move |_, window, cx| on_activate(window, cx))
+}
+
 /// The standard Retry action of an interruption notice.
 pub(crate) fn retry_button(
     selector: SharedString,
@@ -906,6 +925,15 @@ mod connection {
                 {
                     None
                 }
+                DevelopmentPaneStatus::Failed(ServerError::Stopped)
+                | DevelopmentPaneStatus::TakeoverFailed(ServerError::Stopped) => Some((
+                    SharedString::new_static("Server Stopped"),
+                    SharedString::new_static(
+                        "You stopped the server, so the programs in this Pane ended. Start it \
+                         to keep working here.",
+                    ),
+                    super::StatusIntent::Warning,
+                )),
                 DevelopmentPaneStatus::Failed(error)
                 | DevelopmentPaneStatus::TakeoverFailed(error) => Some((
                     SharedString::new_static("Not Connected"),
@@ -916,9 +944,20 @@ mod connection {
             }
         }
 
-        /// Whether a person can ask for a connection attempt now.
+        /// Whether the person stopped the server behind this Pane, which only Start reverses.
+        pub(crate) fn server_stopped(&self) -> bool {
+            matches!(
+                self.status,
+                DevelopmentPaneStatus::Failed(ServerError::Stopped)
+                    | DevelopmentPaneStatus::TakeoverFailed(ServerError::Stopped)
+            )
+        }
+
+        /// Whether a person can ask for a connection attempt now. A stopped server offers
+        /// Start Server instead, because a retry could never connect.
         pub(crate) fn can_retry(&self) -> bool {
             !self.session_ended()
+                && !self.server_stopped()
                 && self.status != DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
                 && matches!(
                     self.status,

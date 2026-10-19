@@ -3077,12 +3077,19 @@ impl TabView {
             }
         });
         let notice = pane.notice().map(|(title, detail, intent)| {
-            let retry = pane.can_retry().then(|| {
-                let owner = view.clone();
-                server_pane::retry_button(selector("retry"), move |_, cx| {
-                    let _ = owner.update(cx, |view, cx| view.retry_shared_pane(pane_id, cx));
+            let retry = if pane.server_stopped() {
+                Some(server_pane::start_server_button(
+                    selector("start-server"),
+                    crate::ui::workspace_manager::start_local_server,
+                ))
+            } else {
+                pane.can_retry().then(|| {
+                    let owner = view.clone();
+                    server_pane::retry_button(selector("retry"), move |_, cx| {
+                        let _ = owner.update(cx, |view, cx| view.retry_shared_pane(pane_id, cx));
+                    })
                 })
-            });
+            };
             server_pane::render_notice(selector("notice"), title, detail, intent, retry, true, cx)
         });
         SharedPaneSurface { screen, notice }
