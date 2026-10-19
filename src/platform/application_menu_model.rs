@@ -3,8 +3,8 @@ use gpui::{Menu, MenuItem, SystemMenuType};
 use spaceterm_ui::{EditCopy, EditCut, EditPaste, EditRedo, EditSelectAll, EditUndo};
 
 use crate::app::{
-    BringAllWindowsToFront, HideApplication, HideOtherApplications, MinimizeWindow,
-    CloseAllWindows, OpenApplicationHelp, ShowAboutApplication, ShowAllApplications,
+    BringAllWindowsToFront, CloseAllWindows, HideApplication, HideOtherApplications,
+    MinimizeWindow, OpenApplicationHelp, ShowAboutApplication, ShowAllApplications,
     ZoomActiveWindow,
 };
 use crate::ui::updates::{

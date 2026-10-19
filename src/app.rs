@@ -1250,7 +1250,10 @@ mod tests {
         cx.update(|cx| {
             init(cx, application_menu(), quit.clone()).unwrap();
             let recorded = Rc::clone(&dock);
-            crate::status_menu::set_dock(cx, Rc::new(move |visible| recorded.borrow_mut().push(visible)));
+            crate::status_menu::set_dock(
+                cx,
+                Rc::new(move |visible| recorded.borrow_mut().push(visible)),
+            );
             crate::status_menu::set_available(cx, status_area);
         });
         cx.add_window(|_, _| gpui::EmptyView);
@@ -1317,7 +1320,11 @@ mod tests {
                 .unwrap();
         });
         cx.run_until_parked();
-        assert_eq!(quit.requests(), 0, "the status item reaches a windowless client");
+        assert_eq!(
+            quit.requests(),
+            0,
+            "the status item reaches a windowless client"
+        );
         cx.update(|cx| crate::status_menu::set_available(cx, false));
         cx.run_until_parked();
         assert_eq!(quit.requests(), 1, "nothing reaches the client any more");
