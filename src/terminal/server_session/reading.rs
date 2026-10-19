@@ -3,12 +3,22 @@ use super::*;
 use pane::reading::{MAX_SELECTION_BYTES, Operation, SELECTION_CHUNK_BYTES};
 use std::collections::VecDeque;
 
+/// One queued reading operation and the identity its answer settles.
+struct Queued {
+    id: u64,
+    operation: Operation,
+}
+
 #[derive(Default)]
 pub(super) struct ReadingState {
     revision: u64,
     pub(super) selection_present: bool,
     pub(super) pending_copy: Option<(u64, u64, InputModifiers)>,
-    queue: VecDeque<Operation>,
+    queue: VecDeque<Queued>,
+    next_id: u64,
+    /// The queued operation the worker is sending. Nothing changes it in place while it is
+    /// sent; removing it is allowed, and its answer then removes nothing else.
+    sending: Option<u64>,
     prepared: Option<(u64, ScreenMapping, super::super::SelectionCopy)>,
     pointer_copy: Option<u64>,
     notify: bool,
@@ -41,12 +51,12 @@ impl ReadingState {
     /// Drops the refused gesture's queued continuation. Nothing is replayed, and a later
     /// Motion never starts a gesture of its own.
     pub(super) fn abandon_gesture(&mut self) {
-        let press = |op: &Operation| matches!(op, Operation::Pointer(p) if matches!(p.phase, pane::PointerPhase::Press));
+        let press = |queued: &Queued| matches!(&queued.operation, Operation::Pointer(p) if matches!(p.phase, pane::PointerPhase::Press));
         while let Some(index) = self
             .queue
             .iter()
-            .take_while(|op| !press(op))
-            .position(continues_gesture)
+            .take_while(|queued| !press(queued))
+            .position(|queued| continues_gesture(&queued.operation))
         {
             self.queue.remove(index);
         }
@@ -61,26 +71,34 @@ impl ReadingState {
                 return false;
             }
         }
-        if let Operation::Wheel(wheel) = &operation
-            && let Some(Operation::Wheel(queued)) = self.queue.back_mut()
-            && let Some(merged) = merge_wheels(queued, wheel)
-        {
-            *queued = merged;
-            return true;
-        }
-        if matches!(&operation, Operation::Pointer(p) if matches!(p.phase, pane::PointerPhase::Motion))
-            && matches!(self.queue.back(), Some(Operation::Pointer(p)) if matches!(p.phase, pane::PointerPhase::Motion))
-        {
-            self.queue.pop_back();
+        // Only an operation that is not being sent can absorb or be replaced by a newer one.
+        let sending = self.sending;
+        let unsent_back = self
+            .queue
+            .back_mut()
+            .filter(|queued| Some(queued.id) != sending);
+        if let Some(back) = unsent_back {
+            if let Operation::Wheel(wheel) = &operation
+                && let Operation::Wheel(queued) = &mut back.operation
+                && let Some(merged) = merge_wheels(queued, wheel)
+            {
+                *queued = merged;
+                return true;
+            }
+            if matches!(&operation, Operation::Pointer(p) if matches!(p.phase, pane::PointerPhase::Motion))
+                && matches!(&back.operation, Operation::Pointer(p) if matches!(p.phase, pane::PointerPhase::Motion))
+            {
+                self.queue.pop_back();
+            }
         }
         // The newest query and scrollbar target supersede queued targets of the same kind.
         if matches!(
             operation,
             Operation::Query { .. } | Operation::EndFind { .. }
         ) {
-            self.queue.retain(|op| {
+            self.queue.retain(|queued| {
                 !matches!(
-                    op,
+                    queued.operation,
                     Operation::Query { .. }
                         | Operation::Navigate { .. }
                         | Operation::EndFind { .. }
@@ -88,15 +106,31 @@ impl ReadingState {
             });
         } else if matches!(operation, Operation::ScrollTo { .. }) {
             self.queue
-                .retain(|op| !matches!(op, Operation::ScrollTo { .. }));
+                .retain(|queued| !matches!(queued.operation, Operation::ScrollTo { .. }));
         }
         let release = matches!(&operation, Operation::Pointer(p) if matches!(p.phase, pane::PointerPhase::Release));
         // Preserve the final edge of an accepted gesture even when local reading is saturated.
         if self.queue.len() < 128 || release && self.queue.len() == 128 {
-            self.queue.push_back(operation);
+            let id = self.next_id;
+            self.next_id = self.next_id.wrapping_add(1);
+            self.queue.push_back(Queued { id, operation });
             true
         } else {
             false
+        }
+    }
+    /// The first queued operation, which is being sent until `settle` answers it.
+    fn send_front(&mut self) -> Option<(u64, Operation)> {
+        let front = self.queue.front()?;
+        self.sending = Some(front.id);
+        Some((front.id, front.operation.clone()))
+    }
+    /// Ends sending `id`. An answered operation leaves the queue; one a hide, a newer query, or
+    /// a disconnect removed meanwhile leaves no other operation behind in its place.
+    fn settle(&mut self, id: u64, answered: bool) {
+        self.sending = None;
+        if answered && let Some(index) = self.queue.iter().position(|queued| queued.id == id) {
+            self.queue.remove(index);
         }
     }
 }
@@ -309,22 +343,29 @@ impl Reader {
             .reading
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .queue
-            .front()
-            .cloned();
-        if let Some(operation) = operation {
+            .send_front();
+        if let Some((id, operation)) = operation {
             let gesture = matches!(&operation, Operation::Pointer(p) if matches!(p.phase, pane::PointerPhase::Press))
                 || continues_gesture(&operation);
-            match exchange(&Request::Read { lease, operation }) {
+            let reply = exchange(&Request::Read { lease, operation });
+            // The answer settles only the operation it answers. Another thread may have removed
+            // that operation during the exchange; then no other queued operation is removed.
+            let answered = matches!(
+                reply,
+                Ok(Reply::Reading { accepted: true }) | Err(ServerError::StaleControl)
+            );
+            {
+                let mut reading = state.reading.lock().unwrap_or_else(|e| e.into_inner());
+                reading.settle(id, answered);
+                // A refused gesture's queued continuation goes with it, in the same step.
+                if gesture && matches!(reply, Err(ServerError::StaleControl)) {
+                    reading.abandon_gesture();
+                }
+            }
+            match reply {
                 // The server's single reading slot is busy; this operation stays first.
                 Ok(Reply::Reading { accepted: false }) => return Ok(next.max(Next::Recheck)),
                 Ok(Reply::Reading { accepted: true }) => {
-                    state
-                        .reading
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .queue
-                        .pop_front();
                     self.target = None;
                     self.bytes.clear();
                     self.total = None;
@@ -333,12 +374,6 @@ impl Reader {
                     return Ok(next.max(Next::Continue));
                 }
                 Err(ServerError::StaleControl) => {
-                    let mut reading = state.reading.lock().unwrap_or_else(|e| e.into_inner());
-                    reading.queue.pop_front();
-                    if gesture {
-                        reading.abandon_gesture();
-                    }
-                    drop(reading);
                     self.target = None;
                     self.bytes.clear();
                     self.total = None;
@@ -879,7 +914,7 @@ mod tests {
             .unwrap()
             .queue
             .iter()
-            .cloned()
+            .map(|queued| queued.operation.clone())
             .collect();
         assert_eq!(
             phases(&queued),
@@ -929,7 +964,7 @@ mod tests {
             .unwrap()
             .queue
             .iter()
-            .map(|operation| match operation {
+            .map(|queued| match &queued.operation {
                 Operation::Wheel(w) => (format!("{:?}", w.phase), w.vertical_steps),
                 _ => panic!("expected wheel"),
             })
@@ -1106,5 +1141,110 @@ mod tests {
             128,
             "each applied operation's screen is fetched at once"
         );
+    }
+
+    /// Polls `reader` until its queue is empty and nothing is awaited, answering each Read with
+    /// `answer` and each status with a ready screen.
+    fn drain(
+        reader: &mut Reader,
+        adapter: &Adapter,
+        mut answer: impl FnMut(&Operation) -> Result<Reply, ServerError>,
+    ) -> Vec<Operation> {
+        let state = &adapter.handle.state;
+        let mut delivered = vec![];
+        for _ in 0..16 {
+            if state.reading.lock().unwrap().queue.is_empty() && !reader.awaiting_read {
+                return delivered;
+            }
+            reader
+                .poll(state, adapter.active.lease, &mut |request| match request {
+                    Request::Read { operation, .. } => {
+                        delivered.push(operation.clone());
+                        answer(operation)
+                    }
+                    Request::ReadingStatus { .. } => Ok(Reply::ReadingReady {
+                        generation: 17,
+                        selection_revision: 17,
+                        selection_present: false,
+                    }),
+                    _ => panic!("unexpected reading request"),
+                })
+                .unwrap();
+        }
+        panic!("reading must settle");
+    }
+
+    #[test]
+    fn hiding_a_pane_while_its_release_is_sent_keeps_the_scroll_queued_after_it() {
+        use crate::terminal::TerminalSessionHandle;
+        use pane::PointerPhase::{Press, Release};
+        // The server accepts the Release, or refuses it after the hide.
+        for refused in [false, true] {
+            let adapter = Adapter::new();
+            let state = &adapter.handle.state;
+            let mut reader = Reader::default();
+            reader.screen(state, mapping(&adapter), false);
+            for operation in [
+                pointer(Press, 1.0),
+                pointer(Release, 1.0),
+                Operation::Scroll(pane::reading::Scroll::PageUp),
+            ] {
+                state.reading.lock().unwrap().enqueue(operation);
+            }
+            let delivered = drain(&mut reader, &adapter, |operation| {
+                if matches!(operation, Operation::Pointer(p) if matches!(p.phase, Release)) {
+                    // The person switches Tabs while the worker sends the Release.
+                    adapter.handle.set_presentable(false);
+                    if refused {
+                        return Err(ServerError::StaleControl);
+                    }
+                }
+                Ok(Reply::Reading { accepted: true })
+            });
+            assert!(
+                matches!(
+                    delivered.last(),
+                    Some(Operation::Scroll(pane::reading::Scroll::PageUp))
+                ),
+                "refused: {refused}; delivered: {delivered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn work_queued_while_an_operation_is_sent_never_changes_or_replaces_it() {
+        use pane::PointerPhase::Motion;
+        use pane::WheelPhase::GestureChanged;
+        let query = |generation, text: &str| Operation::Query {
+            generation,
+            text: text.to_owned(),
+        };
+        // Compatible scrolling merges, a newer Motion replaces, and a newer query supersedes.
+        for (sent, later) in [
+            (
+                Operation::Wheel(wheel(GestureChanged, 3)),
+                Operation::Wheel(wheel(GestureChanged, 4)),
+            ),
+            (pointer(Motion, 2.0), pointer(Motion, 3.0)),
+            (query(1, "a"), query(2, "ab")),
+        ] {
+            let adapter = Adapter::new();
+            let state = &adapter.handle.state;
+            let mut reader = Reader::default();
+            reader.screen(state, mapping(&adapter), false);
+            state.reading.lock().unwrap().enqueue(sent.clone());
+            let mut arriving = Some(later.clone());
+            let delivered = drain(&mut reader, &adapter, |_| {
+                if let Some(operation) = arriving.take() {
+                    state.reading.lock().unwrap().enqueue(operation);
+                }
+                Ok(Reply::Reading { accepted: true })
+            });
+            assert_eq!(
+                format!("{delivered:?}"),
+                format!("{:?}", [sent, later]),
+                "each operation is sent once, as queued"
+            );
+        }
     }
 }
