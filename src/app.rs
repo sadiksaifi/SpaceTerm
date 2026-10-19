@@ -693,7 +693,9 @@ fn close_all_windows(cx: &mut App) {
             let _ = workspace.update(cx, |manager, window, cx| {
                 manager.request_window_close(window, cx);
             });
-        } else if !crate::ui::settings_window::request_window_close(window, cx) {
+        } else if !crate::ui::settings_window::request_window_close(window, cx)
+            && !crate::ui::server_control_window::request_window_close(window, cx)
+        {
             let _ = window.update(cx, |_, window, _| window.remove_window());
         }
     }

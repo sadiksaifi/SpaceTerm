@@ -32,6 +32,16 @@ fn open_window(step: Step, cx: &mut TestAppContext) -> gpui::AnyWindowHandle {
         )
         .expect("appearance runtime should install");
         crate::ui::init(cx).expect("UI initialization should succeed");
+        crate::app::init(
+            cx,
+            Rc::new(
+                crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
+            ),
+            Rc::new(
+                crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+            ),
+        )
+        .expect("application actions should install");
         open(
             controller,
             Operation::Start,
@@ -97,4 +107,23 @@ fn shift_tab_reaches_the_last_choice(cx: &mut TestAppContext) {
         window.windows().is_empty(),
         "Space on the focused OK closes the window"
     );
+}
+
+#[gpui::test]
+fn close_all_windows_keeps_a_window_whose_operation_is_running(cx: &mut TestAppContext) {
+    open_window(Step::Working(Operation::Stop), cx);
+    cx.update(|cx| cx.dispatch_action(&crate::app::CloseAllWindows));
+    cx.run_until_parked();
+
+    // Closing would abandon the admitted Stop's result and the wait that exiting relies on.
+    assert_eq!(cx.windows().len(), 1);
+}
+
+#[gpui::test]
+fn close_all_windows_cancels_a_window_that_is_only_asking(cx: &mut TestAppContext) {
+    open_window(Step::Authorize { declined: false }, cx);
+    cx.update(|cx| cx.dispatch_action(&crate::app::CloseAllWindows));
+    cx.run_until_parked();
+
+    assert!(cx.windows().is_empty());
 }

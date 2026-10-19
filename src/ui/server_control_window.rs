@@ -140,6 +140,19 @@ pub(crate) fn open(
     Ok(())
 }
 
+/// Closes a server control window the way its own close request does: a window that is only
+/// asking cancels, and one whose operation runs stays until the operation finishes. Reports
+/// whether `window` is a server control window.
+pub(crate) fn request_window_close(window: gpui::AnyWindowHandle, cx: &mut App) -> bool {
+    let Some(control) = window.downcast::<ServerControlWindow>() else {
+        return false;
+    };
+    let _ = control.update(cx, |this, window, cx| {
+        this.respond(Response::Cancel, window, cx);
+    });
+    true
+}
+
 /// The text and buttons of one step.
 struct Content {
     title: SharedString,
@@ -284,7 +297,6 @@ pub(crate) struct ServerControlWindow {
     focus_handle: FocusHandle,
     window_movement: WindowMovement,
     window_appearance: super::appearance_runtime::WindowAppearanceOwner,
-    _operation: Option<Task<()>>,
 }
 
 impl ServerControlWindow {
@@ -327,7 +339,6 @@ impl ServerControlWindow {
             focus_handle,
             window_movement,
             window_appearance,
-            _operation: None,
         }
     }
 
@@ -371,12 +382,17 @@ impl ServerControlWindow {
         cx: &mut Context<Self>,
     ) {
         self.show(Step::Working(self.operation), window, cx);
-        // Exiting the client waits for the admitted operation.
+        // Exiting the client waits for the admitted operation. Its result is collected by the
+        // application rather than this window, so the wait always ends.
         crate::status_menu::begin_operation(cx);
-        self._operation = Some(cx.spawn_in(window, async move |this, cx| {
+        let control = window.window_handle().downcast::<Self>();
+        App::spawn(cx, async move |cx| {
             let result = work.await;
-            let _ = cx.update(|_, cx| crate::status_menu::end_operation(cx));
-            let _ = this.update_in(cx, |this, window, cx| match result {
+            cx.update(crate::status_menu::end_operation);
+            let Some(control) = control else {
+                return;
+            };
+            let _ = control.update(cx, |this, window, cx| match result {
                 Ok(()) => window.remove_window(),
                 // The operating system's prompt was cancelled or refused. Nothing changed.
                 Err(ServerError::AuthorizationRequired) if this.operation == Operation::Start => {
@@ -384,7 +400,8 @@ impl ServerControlWindow {
                 }
                 Err(error) => this.show(Step::Failed(error), window, cx),
             });
-        }));
+        })
+        .detach();
     }
 
     fn show(&mut self, step: Step, window: &mut Window, cx: &mut Context<Self>) {
