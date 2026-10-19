@@ -318,6 +318,34 @@ fn return_runs_the_launch_screens_default_action(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn an_incompatible_server_before_inventory_explains_the_failure_and_offers_recovery(
+    cx: &mut TestAppContext,
+) {
+    let edits = ScriptedEdits::new(None);
+    edits.set_connected(false);
+    let (harness, cx) = launch_harness_with(vec![ready()], edits, [], cx);
+    cx.run_until_parked();
+    sync(&harness, cx);
+    assert_eq!(harness.launch_title(cx), Some(launch::OPENING_TITLE));
+    for error in [
+        ServerError::IncompatibleProtocol,
+        ServerError::IncompatibleState,
+    ] {
+        harness.edits.set_error(error);
+        sync(&harness, cx);
+        assert_eq!(harness.launch_title(cx), Some("Incompatible Server"));
+        assert!(cx.debug_bounds(LAUNCH_RETRY_SELECTOR).is_some());
+        assert!(cx.debug_bounds(launch::LAUNCH_SETTINGS_SELECTOR).is_some());
+    }
+    assert_eq!(
+        harness.launch.steps(),
+        ["run"],
+        "no implicit Start or runtime activation"
+    );
+    assert!(harness.edits.submitted().is_empty());
+}
+
+#[gpui::test]
 fn removing_the_final_server_workspace_leaves_the_empty_view(cx: &mut TestAppContext) {
     let (harness, cx) = launch_harness(vec![ready()], cx);
     cx.run_until_parked();

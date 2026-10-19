@@ -599,6 +599,11 @@ impl PaneConnection {
                     .workspace_directories = workspace_directories;
                 Ok(connection)
             }
+            Reply::Capabilities {
+                development_pane: true,
+                workspace_policy: false,
+                ..
+            } => Err(ServerError::IncompatibleProtocol),
             Reply::Refused(reason) => Err(reason.into()),
             _ => Err(ServerError::Unsupported),
         }
@@ -675,21 +680,26 @@ mod transport_tests {
 
     #[test]
     fn a_retained_runtime_without_workspace_policy_is_refused_before_operations() {
-        let (client, mut server) = UnixStream::pair().unwrap();
-        let peer = std::thread::spawn(move || {
-            let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
+        for capability in [None, Some(false)] {
+            let (client, mut server) = UnixStream::pair().unwrap();
+            let peer = std::thread::spawn(move || {
+                let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
+                assert!(matches!(
+                    wire.read::<Request>().unwrap(),
+                    Request::Capabilities
+                ));
+                let mut reply = serde_json::json!({ "Capabilities": { "development_pane": true } });
+                if let Some(capability) = capability {
+                    reply["Capabilities"]["workspace_policy"] = capability.into();
+                }
+                wire.write(&reply).unwrap();
+            });
             assert!(matches!(
-                wire.read::<Request>().unwrap(),
-                Request::Capabilities
+                PaneConnection::negotiate(client),
+                Err(ServerError::IncompatibleProtocol)
             ));
-            wire.write(&serde_json::json!({ "Capabilities": { "development_pane": true } }))
-                .unwrap();
-        });
-        assert!(matches!(
-            PaneConnection::negotiate(client),
-            Err(ServerError::Unsupported)
-        ));
-        peer.join().unwrap();
+            peer.join().unwrap();
+        }
     }
 
     /// An approved older runtime predates directory creation and would silently drop the field.

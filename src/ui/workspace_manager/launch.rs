@@ -518,7 +518,12 @@ impl WorkspaceManager {
     pub(super) fn launch_presentation(&self) -> Option<LaunchPresentation> {
         match &self.shared {
             Some(shared) if shared.latest_inventory().is_some() => None,
-            Some(_) => Some(present(LaunchState::Launching)),
+            Some(shared) => Some(present(match shared.connection_error() {
+                Some(
+                    error @ (ServerError::IncompatibleProtocol | ServerError::IncompatibleState),
+                ) => LaunchState::Failed(error),
+                _ => LaunchState::Launching,
+            })),
             None => Some(present(self.launch.state)),
         }
     }

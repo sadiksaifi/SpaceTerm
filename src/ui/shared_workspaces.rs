@@ -919,6 +919,7 @@ mod development {
         /// The inventory revision this client has applied.
         revision: Option<u64>,
         connected: bool,
+        connection_error: Option<spaceterm_server::ServerError>,
         pending: bool,
         pending_operation: Option<Mutation>,
         /// The sequence of the last outcome this client presented, so one answer is read once.
@@ -970,6 +971,7 @@ mod development {
                 workspaces: BTreeMap::new(),
                 revision: None,
                 connected: false,
+                connection_error: None,
                 pending: false,
                 pending_operation: None,
                 consumed: None,
@@ -1363,6 +1365,10 @@ mod development {
             self.refusal.take()
         }
 
+        pub(crate) const fn connection_error(&self) -> Option<spaceterm_server::ServerError> {
+            self.connection_error
+        }
+
         /// Reads the server's answer and its inventory together, and reports both.
         ///
         /// One answer is read once. An answer recovered after a relaunch still reports the draft
@@ -1374,6 +1380,10 @@ mod development {
             let mut poll = SharedPoll::default();
             self.pending_operation
                 .clone_from(&snapshot.pending_operation);
+            if self.connection_error != snapshot.error {
+                self.connection_error = snapshot.error;
+                poll.changed = true;
+            }
             if self.connected != snapshot.connected || self.pending != snapshot.pending {
                 self.connected = snapshot.connected;
                 self.pending = snapshot.pending;
@@ -2100,6 +2110,10 @@ mod development {
 
             pub(crate) fn set_connected(&self, connected: bool) {
                 self.snapshot.lock().expect("snapshot").connected = connected;
+            }
+
+            pub(crate) fn set_error(&self, error: spaceterm_server::ServerError) {
+                self.snapshot.lock().expect("snapshot").error = Some(error);
             }
 
             /// Answers the last submitted edit with `outcome`.
