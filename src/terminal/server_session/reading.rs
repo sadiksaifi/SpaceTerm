@@ -12,6 +12,8 @@ pub(super) struct ReadingState {
     prepared: Option<(u64, ScreenMapping, super::super::SelectionCopy)>,
     pointer_copy: Option<u64>,
     notify: bool,
+    /// The server refused this gesture's Press; its continuation is dropped until the next one.
+    abandoned_gesture: bool,
 }
 impl ReadingState {
     pub(super) fn publish_ready(&mut self, events: &async_channel::Sender<TerminalSessionEvent>) {
@@ -32,10 +34,38 @@ impl ReadingState {
     pub(super) fn disconnect(&mut self) {
         self.invalidate();
         self.queue.clear();
+        self.abandoned_gesture = false;
         self.selection_present = false;
         self.pending_copy = None;
     }
+    /// Drops the refused gesture's queued continuation. Nothing is replayed, and a later
+    /// Motion never starts a gesture of its own.
+    pub(super) fn abandon_gesture(&mut self) {
+        self.abandoned_gesture = true;
+        while let Some(index) = self
+            .queue
+            .iter()
+            .take_while(|op| !matches!(op, Operation::Pointer(p) if matches!(p.phase, pane::PointerPhase::Press)))
+            .position(continues_gesture)
+        {
+            self.queue.remove(index);
+        }
+    }
     pub(super) fn enqueue(&mut self, operation: Operation) -> bool {
+        if let Operation::Pointer(pointer) = &operation {
+            if matches!(pointer.phase, pane::PointerPhase::Press) {
+                self.abandoned_gesture = false;
+            } else if self.abandoned_gesture && continues_gesture(&operation) {
+                return false;
+            }
+        }
+        if let Operation::Wheel(wheel) = &operation
+            && let Some(Operation::Wheel(queued)) = self.queue.back_mut()
+            && let Some(merged) = merge_wheels(queued, wheel)
+        {
+            *queued = merged;
+            return true;
+        }
         if matches!(&operation, Operation::Pointer(p) if matches!(p.phase, pane::PointerPhase::Motion))
             && matches!(self.queue.back(), Some(Operation::Pointer(p)) if matches!(p.phase, pane::PointerPhase::Motion))
         {
@@ -69,10 +99,114 @@ impl ReadingState {
     }
 }
 
+fn continues_gesture(operation: &Operation) -> bool {
+    matches!(operation, Operation::Pointer(p)
+        if matches!(p.phase, pane::PointerPhase::Release)
+            || matches!(p.phase, pane::PointerPhase::Motion) && p.button.is_some())
+}
+
+/// The server accepts at most this many steps per axis in one wheel operation.
+pub(super) const MAX_WHEEL_STEPS: i32 = 100;
+
+/// Sums an unsent continuation of the same native scroll into its predecessor. Gesture and
+/// momentum edges, modifier changes and over-limit sums stay separate operations.
+fn merge_wheels(queued: &pane::Wheel, next: &pane::Wheel) -> Option<pane::Wheel> {
+    use pane::WheelPhase::{GestureChanged, MomentumChanged};
+    let same_phase = matches!(
+        (queued.phase, next.phase),
+        (GestureChanged, GestureChanged) | (MomentumChanged, MomentumChanged)
+    );
+    // A direction change is an edge: at a viewport limit, +1 then -1 still moves by one.
+    let compatible = |a: i32, b: i32| a == 0 || b == 0 || a.signum() == b.signum();
+    if !compatible(queued.horizontal_steps, next.horizontal_steps)
+        || !compatible(queued.vertical_steps, next.vertical_steps)
+    {
+        return None;
+    }
+    let horizontal = queued.horizontal_steps.checked_add(next.horizontal_steps)?;
+    let vertical = queued.vertical_steps.checked_add(next.vertical_steps)?;
+    // Only scrolling of one displayed screen merges; a later screen may differ in geometry
+    // or mode, and its relative movement must not be applied to an earlier view.
+    (same_phase
+        && queued.screen_generation == next.screen_generation
+        && queued.modifiers == next.modifiers
+        && queued.shift_selection == next.shift_selection
+        && horizontal.unsigned_abs() <= MAX_WHEEL_STEPS.unsigned_abs()
+        && vertical.unsigned_abs() <= MAX_WHEEL_STEPS.unsigned_abs())
+    .then_some(pane::Wheel {
+        horizontal_steps: horizontal,
+        vertical_steps: vertical,
+        ..*next
+    })
+}
+
+/// One native event moves at most this many server operations' worth of steps. A larger delta
+/// is not a plausible device event; it is bounded rather than queued as a long tail.
+const MAX_WHEEL_PARTS: i32 = 16;
+
+/// Divides one native wheel event into operations the server accepts, in order, keeping its
+/// start edge on the first part and its end edge on the last.
+pub(super) fn split_wheel(mut wheel: pane::Wheel) -> Vec<pane::Wheel> {
+    use pane::WheelPhase::*;
+    let bound = MAX_WHEEL_STEPS * MAX_WHEEL_PARTS;
+    wheel.horizontal_steps = wheel.horizontal_steps.clamp(-bound, bound);
+    wheel.vertical_steps = wheel.vertical_steps.clamp(-bound, bound);
+    let parts = [wheel.horizontal_steps, wheel.vertical_steps]
+        .iter()
+        .map(|steps| steps.unsigned_abs().div_ceil(MAX_WHEEL_STEPS as u32))
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let changed = match wheel.phase {
+        GestureStarted | GestureChanged | GestureEnded | GestureCancelled => GestureChanged,
+        MomentumStarted | MomentumChanged | MomentumEnded | MomentumCancelled => MomentumChanged,
+    };
+    let mut remaining = (wheel.horizontal_steps, wheel.vertical_steps);
+    (0..parts)
+        .map(|part| {
+            let take = |left: &mut i32| {
+                let step = (*left).clamp(-MAX_WHEEL_STEPS, MAX_WHEEL_STEPS);
+                *left -= step;
+                step
+            };
+            let first = part == 0;
+            let last = part + 1 == parts;
+            pane::Wheel {
+                horizontal_steps: take(&mut remaining.0),
+                vertical_steps: take(&mut remaining.1),
+                phase: match wheel.phase {
+                    GestureStarted | MomentumStarted if first => wheel.phase,
+                    GestureEnded | GestureCancelled | MomentumEnded | MomentumCancelled if last => {
+                        wheel.phase
+                    }
+                    _ if parts == 1 => wheel.phase,
+                    _ => changed,
+                },
+                ..wheel
+            }
+        })
+        .collect()
+}
+
+/// When a worker's reading continues. Later variants are more urgent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Next {
+    /// Nothing until the next output check.
+    Idle,
+    /// The server is still applying reading work; recheck before the next output check.
+    Recheck,
+    /// More ready work follows at once.
+    Continue,
+    /// Reading completed against a newer screen; check output now.
+    Refresh,
+}
+
 #[derive(Default)]
 pub(super) struct Reader {
     latest: Option<ScreenMapping>,
     awaiting_read: bool,
+    /// The awaited operation began or continued a pointer gesture.
+    awaiting_gesture: bool,
     target: Option<(ScreenMapping, u64)>,
     bytes: Vec<u8>,
     total: Option<usize>,
@@ -112,37 +246,61 @@ impl Reader {
         self.total = None;
     }
 
+    /// Advances reading by at most one exchange of each kind and says when to continue.
     pub(super) fn poll(
         &mut self,
         state: &DevelopmentPaneState,
         lease: Lease,
         exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
-    ) -> Result<(), ServerError> {
+    ) -> Result<Next, ServerError> {
+        let mut next = Next::Idle;
         if self.awaiting_read {
-            match exchange(&Request::ReadingStatus { lease })? {
-                Reply::SelectionPending => return Ok(()),
-                Reply::ReadingReady {
-                    generation: _,
-                    selection_revision,
-                    selection_present,
-                } => {
-                    let Some(mapping) = self
-                        .latest
-                        .filter(|mapping| mapping.selection == selection_revision)
-                    else {
-                        return Ok(());
-                    };
+            match exchange(&Request::ReadingStatus { lease }) {
+                Ok(Reply::SelectionPending) => return Ok(Next::Recheck),
+                // The worker refused the admitted operation. It is not retried.
+                Err(ServerError::StaleControl) => {
                     self.awaiting_read = false;
-                    let revision = {
-                        let mut reading = state.reading.lock().unwrap_or_else(|e| e.into_inner());
-                        reading.selection_present = selection_present;
-                        reading.revision
-                    };
-                    self.target = selection_present.then_some((mapping, revision));
-                    self.bytes.clear();
-                    self.total = None;
+                    if std::mem::take(&mut self.awaiting_gesture) {
+                        state
+                            .reading
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .abandon_gesture();
+                    }
+                    return Ok(Next::Continue);
                 }
-                _ => return Err(ServerError::Protocol),
+                Err(error) => return Err(error),
+                Ok(reply) => match reply {
+                    Reply::ReadingReady {
+                        generation,
+                        selection_revision,
+                        selection_present,
+                    } => {
+                        let Some(mapping) = self
+                            .latest
+                            .filter(|mapping| mapping.selection == selection_revision)
+                        else {
+                            // Its barrier names a screen this worker has not received yet.
+                            return Ok(Next::Refresh);
+                        };
+                        self.awaiting_read = false;
+                        self.awaiting_gesture = false;
+                        let revision = {
+                            let mut reading =
+                                state.reading.lock().unwrap_or_else(|e| e.into_inner());
+                            reading.selection_present = selection_present;
+                            reading.revision
+                        };
+                        self.target = selection_present.then_some((mapping, revision));
+                        self.bytes.clear();
+                        self.total = None;
+                        // The completed operation's screen follows without awaiting an output check.
+                        if generation != mapping.wire {
+                            next = Next::Refresh;
+                        }
+                    }
+                    _ => return Err(ServerError::Protocol),
+                },
             }
         }
         let operation = state
@@ -153,8 +311,11 @@ impl Reader {
             .front()
             .cloned();
         if let Some(operation) = operation {
+            let gesture = matches!(&operation, Operation::Pointer(p) if matches!(p.phase, pane::PointerPhase::Press))
+                || continues_gesture(&operation);
             match exchange(&Request::Read { lease, operation }) {
-                Ok(Reply::Reading { accepted: false }) => return Ok(()),
+                // The server's single reading slot is busy; this operation stays first.
+                Ok(Reply::Reading { accepted: false }) => return Ok(next.max(Next::Recheck)),
                 Ok(Reply::Reading { accepted: true }) => {
                     state
                         .reading
@@ -166,19 +327,20 @@ impl Reader {
                     self.bytes.clear();
                     self.total = None;
                     self.awaiting_read = true;
-                    return Ok(());
+                    self.awaiting_gesture = gesture;
+                    return Ok(next.max(Next::Continue));
                 }
                 Err(ServerError::StaleControl) => {
-                    state
-                        .reading
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .queue
-                        .pop_front();
+                    let mut reading = state.reading.lock().unwrap_or_else(|e| e.into_inner());
+                    reading.queue.pop_front();
+                    if gesture {
+                        reading.abandon_gesture();
+                    }
+                    drop(reading);
                     self.target = None;
                     self.bytes.clear();
                     self.total = None;
-                    return Ok(());
+                    return Ok(next.max(Next::Continue));
                 }
                 Err(error) => return Err(error),
                 _ => return Err(ServerError::Protocol),
@@ -214,7 +376,7 @@ impl Reader {
             }
         }
         let Some((mapping, revision)) = self.target else {
-            return Ok(());
+            return Ok(next);
         };
         if state
             .reading
@@ -225,7 +387,7 @@ impl Reader {
         {
             self.target = None;
             self.bytes.clear();
-            return Ok(());
+            return Ok(next);
         }
         let reply = exchange(&Request::SelectionChunk {
             lease,
@@ -233,10 +395,11 @@ impl Reader {
             offset: self.bytes.len(),
         });
         match reply {
-            Ok(Reply::SelectionPending) => {}
+            Ok(Reply::SelectionPending) => return Ok(next.max(Next::Recheck)),
             Err(ServerError::StaleControl) => {
                 self.target = None;
                 self.bytes.clear();
+                return Ok(next);
             }
             Err(error) => return Err(error),
             Ok(Reply::SelectionChunk {
@@ -277,11 +440,13 @@ impl Reader {
                     }
                     self.target = None;
                     self.bytes.clear();
+                    return Ok(next);
                 }
             }
             _ => return Err(ServerError::Protocol),
         }
-        Ok(())
+        // A prepared selection continues with its next chunk without awaiting an output check.
+        Ok(next.max(Next::Continue))
     }
 }
 
@@ -590,6 +755,314 @@ mod tests {
         assert!(
             adapter.handle.take_prepared_pointer_copy().is_some(),
             "a release with no new screen must still complete Copy"
+        );
+    }
+
+    fn pointer(phase: pane::PointerPhase, x: f32) -> Operation {
+        Operation::Pointer(pane::Pointer {
+            screen_generation: 17,
+            phase,
+            button: Some(pane::PointerButton::Left),
+            x,
+            y: 1.0,
+            modifiers: 0,
+            shift_selection: false,
+        })
+    }
+    fn phases(delivered: &[Operation]) -> Vec<(&'static str, f32)> {
+        delivered
+            .iter()
+            .map(|operation| match operation {
+                Operation::Pointer(p) => (
+                    match p.phase {
+                        pane::PointerPhase::Press => "press",
+                        pane::PointerPhase::Motion => "motion",
+                        pane::PointerPhase::Release => "release",
+                    },
+                    p.x,
+                ),
+                _ => panic!("expected pointer"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_refused_press_never_turns_its_later_motion_into_a_new_gesture() {
+        use pane::PointerPhase::{Motion, Press, Release};
+        // Refused at admission, then refused by the terminal worker after admission.
+        for refused_after_admission in [false, true] {
+            let adapter = Adapter::new();
+            let state = &adapter.handle.state;
+            for operation in [pointer(Press, 1.0), pointer(Motion, 2.0)] {
+                state.reading.lock().unwrap().enqueue(operation);
+            }
+            let mut reader = Reader::default();
+            reader.screen(state, mapping(&adapter), false);
+            let mut delivered = vec![];
+            let poll = |reader: &mut Reader, delivered: &mut Vec<Operation>| {
+                reader
+                    .poll(state, adapter.active.lease, &mut |request| match request {
+                        Request::Read { operation, .. } => {
+                            delivered.push(operation.clone());
+                            let press = matches!(operation, Operation::Pointer(p) if matches!(p.phase, Press));
+                            if press && !refused_after_admission && delivered.len() == 1 {
+                                Err(ServerError::StaleControl)
+                            } else {
+                                Ok(Reply::Reading { accepted: true })
+                            }
+                        }
+                        Request::ReadingStatus { .. } if refused_after_admission && delivered.len() == 1 => {
+                            Err(ServerError::StaleControl)
+                        }
+                        Request::ReadingStatus { .. } => Ok(Reply::ReadingReady {
+                            generation: 17,
+                            selection_revision: 17,
+                            selection_present: false,
+                        }),
+                        _ => panic!("unexpected reading request"),
+                    })
+                    .unwrap()
+            };
+            for _ in 0..4 {
+                poll(&mut reader, &mut delivered);
+            }
+            // Motion and Release arriving after the refusal belong to the abandoned gesture.
+            for operation in [
+                pointer(Motion, 3.0),
+                pointer(Release, 3.0),
+                pointer(Press, 9.0),
+            ] {
+                state.reading.lock().unwrap().enqueue(operation);
+            }
+            for _ in 0..4 {
+                poll(&mut reader, &mut delivered);
+            }
+            assert_eq!(
+                phases(&delivered),
+                vec![("press", 1.0), ("press", 9.0)],
+                "refused after admission: {refused_after_admission}"
+            );
+            assert_eq!(state.epoch.load(Ordering::Acquire), adapter.active.epoch);
+        }
+    }
+
+    fn wheel(phase: pane::WheelPhase, vertical_steps: i32) -> pane::Wheel {
+        pane::Wheel {
+            screen_generation: 17,
+            horizontal_steps: 0,
+            vertical_steps,
+            phase,
+            x: 1.0,
+            y: 1.0,
+            modifiers: 0,
+            shift_selection: false,
+        }
+    }
+
+    #[test]
+    fn queued_native_scrolling_coalesces_within_server_limits_and_keeps_its_edges() {
+        use pane::WheelPhase::*;
+        let adapter = Adapter::new();
+        let state = &adapter.handle.state;
+        let events = [(GestureStarted, 3)]
+            .into_iter()
+            .chain(std::iter::repeat_n((GestureChanged, 30), 5))
+            .chain([
+                (GestureEnded, 0),
+                (MomentumChanged, 4),
+                (MomentumChanged, 4),
+                // Reversing at a limit must still move back, so it is never summed away.
+                (MomentumChanged, -8),
+            ]);
+        for (phase, steps) in events {
+            state
+                .reading
+                .lock()
+                .unwrap()
+                .enqueue(Operation::Wheel(wheel(phase, steps)));
+        }
+        let queued: Vec<_> = state
+            .reading
+            .lock()
+            .unwrap()
+            .queue
+            .iter()
+            .map(|operation| match operation {
+                Operation::Wheel(w) => (format!("{:?}", w.phase), w.vertical_steps),
+                _ => panic!("expected wheel"),
+            })
+            .collect();
+        let expected: Vec<_> = [
+            ("GestureStarted", 3),
+            ("GestureChanged", 90),
+            ("GestureChanged", 60),
+            ("GestureEnded", 0),
+            ("MomentumChanged", 8),
+            ("MomentumChanged", -8),
+        ]
+        .into_iter()
+        .map(|(phase, steps)| (phase.to_owned(), steps))
+        .collect();
+        assert_eq!(queued, expected);
+    }
+
+    #[test]
+    fn a_large_native_delta_is_divided_into_accepted_operations_without_losing_steps() {
+        use pane::WheelPhase::*;
+        let parts = |phase, steps| {
+            split_wheel(wheel(phase, steps))
+                .into_iter()
+                .map(|w| (format!("{:?}", w.phase), w.vertical_steps))
+                .collect::<Vec<_>>()
+        };
+        let owned = |parts: &[(&str, i32)]| {
+            parts
+                .iter()
+                .map(|(phase, steps)| ((*phase).to_owned(), *steps))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            parts(GestureStarted, -250),
+            owned(&[
+                ("GestureStarted", -100),
+                ("GestureChanged", -100),
+                ("GestureChanged", -50)
+            ])
+        );
+        assert_eq!(
+            parts(MomentumEnded, 101),
+            owned(&[("MomentumChanged", 100), ("MomentumEnded", 1)])
+        );
+        // An implausible device delta is bounded, keeps its edge and leaves no long tail.
+        for (phase, steps) in [(GestureEnded, i32::MIN), (MomentumCancelled, i32::MAX)] {
+            let parts = split_wheel(wheel(phase, steps));
+            assert_eq!(parts.len(), MAX_WHEEL_PARTS as usize);
+            assert_eq!(
+                parts
+                    .iter()
+                    .map(|w| i64::from(w.vertical_steps))
+                    .sum::<i64>(),
+                i64::from(MAX_WHEEL_STEPS * MAX_WHEEL_PARTS) * i64::from(steps.signum())
+            );
+            assert_eq!(
+                format!("{:?}", parts.last().unwrap().phase),
+                format!("{phase:?}")
+            );
+        }
+        assert_eq!(
+            parts(GestureChanged, 100),
+            owned(&[("GestureChanged", 100)])
+        );
+        assert_eq!(parts(GestureEnded, 0), owned(&[("GestureEnded", 0)]));
+    }
+
+    #[test]
+    fn a_prepared_selection_transfers_every_chunk_without_waiting_for_an_output_check() {
+        let adapter = Adapter::new();
+        let bytes = serde_json::to_vec(&pane::reading::Selection {
+            plain_text: "x".repeat(800 * 1024),
+            html: None,
+        })
+        .unwrap();
+        let chunks = bytes.len().div_ceil(SELECTION_CHUNK_BYTES);
+        let mut reader = Reader::default();
+        reader.screen(&adapter.handle.state, mapping(&adapter), true);
+        let mut polls = 0;
+        loop {
+            polls += 1;
+            let more = reader
+                .poll(
+                    &adapter.handle.state,
+                    adapter.active.lease,
+                    &mut |request| {
+                        let Request::SelectionChunk {
+                            generation, offset, ..
+                        } = request
+                        else {
+                            panic!("expected selection transfer")
+                        };
+                        let end = (*offset + SELECTION_CHUNK_BYTES).min(bytes.len());
+                        Ok(Reply::SelectionChunk {
+                            generation: *generation,
+                            offset: *offset,
+                            total: bytes.len(),
+                            bytes: bytes[*offset..end].to_vec(),
+                        })
+                    },
+                )
+                .unwrap();
+            if more != Next::Continue {
+                break;
+            }
+        }
+        assert_eq!(polls, chunks, "each ready chunk continues at once");
+        assert!(adapter.handle.copy_selection().unwrap().is_some());
+    }
+
+    #[test]
+    fn queued_scrolling_settles_without_awaiting_output_checks() {
+        use pane::WheelPhase::*;
+        let adapter = Adapter::new();
+        let state = &adapter.handle.state;
+        let mut current = mapping(&adapter);
+        let mut reader = Reader::default();
+        reader.screen(state, current, false);
+        // Each event names a different displayed screen, so none merge.
+        for generation in 0..128 {
+            state
+                .reading
+                .lock()
+                .unwrap()
+                .enqueue(Operation::Wheel(pane::Wheel {
+                    screen_generation: 17 + generation,
+                    ..wheel(GestureChanged, -1)
+                }));
+        }
+        let (mut barrier_checks, mut applied) = (0, 0);
+        let mut turns = vec![];
+        while !state.reading.lock().unwrap().queue.is_empty() || reader.awaiting_read {
+            let next = reader
+                .poll(state, adapter.active.lease, &mut |request| match request {
+                    Request::Read { .. } => Ok(Reply::Reading { accepted: true }),
+                    // The terminal worker presents the scrolled view at its second check.
+                    Request::ReadingStatus { .. } => {
+                        barrier_checks += 1;
+                        if barrier_checks % 2 == 1 {
+                            Ok(Reply::SelectionPending)
+                        } else {
+                            applied += 1;
+                            Ok(Reply::ReadingReady {
+                                generation: current.wire + 1,
+                                selection_revision: current.selection,
+                                selection_present: false,
+                            })
+                        }
+                    }
+                    _ => panic!("unexpected reading request"),
+                })
+                .unwrap();
+            if next == Next::Refresh {
+                current.wire += 1;
+                current.local = PresentationGeneration::test(current.wire);
+                reader.screen(state, current, false);
+            }
+            turns.push(next);
+            assert!(turns.len() < 1000, "reading must settle");
+        }
+        assert_eq!(applied, 128);
+        assert!(
+            !turns.contains(&Next::Idle),
+            "pending reading never waits for the output check"
+        );
+        assert_eq!(
+            turns.iter().filter(|next| **next == Next::Recheck).count(),
+            128,
+            "each barrier wait is one bounded recheck"
+        );
+        assert_eq!(
+            turns.iter().filter(|next| **next == Next::Refresh).count(),
+            128,
+            "each applied operation's screen is fetched at once"
         );
     }
 }

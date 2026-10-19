@@ -135,7 +135,13 @@ impl SharedServerConnector for AccountConnector {
         let server = client.server.clone();
         Some(SharedServerConnection {
             edits: client.source,
-            sessions: SharedPaneSessions::new(server.clone(), client_home, local_files, panes),
+            sessions: SharedPaneSessions::new(
+                server.clone(),
+                client.controls,
+                client_home,
+                local_files,
+                panes,
+            ),
             retained: Some(server),
         })
     }

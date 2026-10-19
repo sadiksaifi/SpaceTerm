@@ -1,5 +1,6 @@
 //! One authenticated inventory subscription and durable edit journal per desktop client.
 use crate::local_server::{LocalServer, ServerError};
+use crate::terminal::server_session::PaneControls;
 use spaceterm_server::{
     hierarchy::{ClientJournal, Inventory, Mutation, RetainedOutcome},
     pane::{PaneConnection, Reply, Request},
@@ -33,7 +34,12 @@ impl Drop for SharedWorkspaceClient {
     }
 }
 impl SharedWorkspaceClient {
-    pub(crate) fn new(server: LocalServer, legacy_location: String) -> Self {
+    /// Pane control records last only as long as the server lists their Panes.
+    pub(crate) fn new(
+        server: LocalServer,
+        controls: Arc<PaneControls>,
+        legacy_location: String,
+    ) -> Self {
         let snapshot = Arc::new(Mutex::new(SharedWorkspaceSnapshot {
             worktree_writes: false,
             inventory: None,
@@ -50,7 +56,7 @@ impl SharedWorkspaceClient {
         let running = Arc::clone(&alive);
         if std::thread::Builder::new()
             .name("spaceterm-shared-workspaces".into())
-            .spawn(move || run(server, state, receiver, running, legacy_location))
+            .spawn(move || run(server, controls, state, receiver, running, legacy_location))
             .is_err()
         {
             snapshot.lock().unwrap_or_else(|e| e.into_inner()).error =
@@ -101,7 +107,10 @@ impl SharedWorkspaceClient {
         true
     }
 }
-fn inventory(connection: &mut PaneConnection) -> Result<(Inventory, u64), ServerError> {
+fn inventory(
+    connection: &mut PaneConnection,
+    controls: &PaneControls,
+) -> Result<(Inventory, u64), ServerError> {
     let Reply::Inventory {
         inventory,
         next_sequence,
@@ -109,11 +118,13 @@ fn inventory(connection: &mut PaneConnection) -> Result<(Inventory, u64), Server
     else {
         return Err(ServerError::Protocol);
     };
+    controls.retain(&inventory);
     Ok((inventory, next_sequence))
 }
 fn finish(
     connection: &mut PaneConnection,
     journal: &mut ClientJournal,
+    controls: &PaneControls,
 ) -> Result<Option<RetainedOutcome>, ServerError> {
     let Some(pending) = journal.pending().cloned() else {
         return Ok(journal.last().cloned());
@@ -142,7 +153,7 @@ fn finish(
             return Err(ServerError::Protocol);
         };
         // Reconcile the accepted membership before retiring the operation identity.
-        inventory(connection)?;
+        inventory(connection, controls)?;
         journal.complete(outcome.clone())?;
         outcome
     };
@@ -158,6 +169,7 @@ fn finish(
 }
 fn run(
     server: LocalServer,
+    controls: Arc<PaneControls>,
     state: Arc<Mutex<SharedWorkspaceSnapshot>>,
     commands: mpsc::Receiver<Mutation>,
     alive: Arc<AtomicBool>,
@@ -177,7 +189,7 @@ fn run(
                 ))?;
             }
             // Authoritative reconciliation always precedes a retry of a previously submitted edit.
-            let (initial, _) = inventory(&mut connection)?;
+            let (initial, _) = inventory(&mut connection, &controls)?;
             {
                 let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
                 s.worktree_writes = connection.worktree_writes();
@@ -196,7 +208,7 @@ fn run(
                     active = None;
                 }
             }
-            let outcome = finish(&mut connection, &mut journal)?;
+            let outcome = finish(&mut connection, &mut journal, &controls)?;
             {
                 let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
                 s.outcome = outcome;
@@ -209,7 +221,7 @@ fn run(
                     return Ok(());
                 }
                 attachments.release_pending(&mut connection)?;
-                let (current, sequence) = inventory(&mut connection)?;
+                let (current, sequence) = inventory(&mut connection, &controls)?;
                 {
                     let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
                     s.inventory = Some(current);
@@ -220,8 +232,8 @@ fn run(
                     Ok(mutation) => {
                         active = Some((sequence, mutation.clone()));
                         journal.submit(sequence, mutation)?;
-                        let outcome = finish(&mut connection, &mut journal)?;
-                        let (current, _) = inventory(&mut connection)?;
+                        let outcome = finish(&mut connection, &mut journal, &controls)?;
+                        let (current, _) = inventory(&mut connection, &controls)?;
                         let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
                         s.inventory = Some(current);
                         s.outcome = outcome;

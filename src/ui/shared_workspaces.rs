@@ -57,7 +57,7 @@ mod development {
     use crate::close_confirmation::CloseTarget;
     use crate::domain::{PaneId, TabId, ValidatedLocalDirectory, WorkspaceId};
     use crate::local_server::LocalServer;
-    use crate::terminal::server_session::DevelopmentServerSessionFactory;
+    use crate::terminal::server_session::{DevelopmentServerSessionFactory, PaneControls};
     use crate::terminal::shared_workspace::{SharedWorkspaceClient, SharedWorkspaceSnapshot};
     use crate::terminal::{PreparedWorkspaceTerminalLaunch, WorkspaceTerminalSessionFactory};
     use crate::ui::pane_lifecycle::PaneConstruction;
@@ -573,6 +573,7 @@ mod development {
     /// The local server's own Panes.
     struct LocalServerPanes {
         server: LocalServer,
+        controls: Arc<PaneControls>,
         /// Completes the launch plan the server factory ignores. It is client launch scaffolding
         /// and never a directory the server's Terminal Session starts in.
         client_home: ValidatedLocalDirectory,
@@ -589,6 +590,7 @@ mod development {
         fn open(&self, pane: Id) -> Option<SharedPaneSubscription> {
             let (factory, state) = DevelopmentServerSessionFactory::for_pane(
                 self.server.clone(),
+                &self.controls,
                 self.local_files.clone(),
                 pane,
             );
@@ -618,6 +620,7 @@ mod development {
     impl SharedPaneSessions {
         pub(crate) fn new(
             server: LocalServer,
+            controls: Arc<PaneControls>,
             client_home: ValidatedLocalDirectory,
             local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
             panes: &PaneConstruction,
@@ -625,6 +628,7 @@ mod development {
             Self::with_opener(
                 Rc::new(LocalServerPanes {
                     server,
+                    controls,
                     client_home,
                     local_files,
                 }),

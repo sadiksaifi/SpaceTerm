@@ -11,9 +11,6 @@ use crate::terminal::accessibility::{
 use pane::accessibility as wire;
 use std::ops::Range;
 
-/// Bounds one poll's transfer work, so semantics never starve input or Screens.
-const CHUNKS_PER_POLL: usize = 16;
-
 /// The rows this client retains for one connection epoch. A new epoch starts empty, so nothing
 /// a former lease presented can resolve a Selection or reach a later snapshot.
 #[derive(Default)]
@@ -129,6 +126,8 @@ pub(super) struct Fetcher {
     failed_revision: Option<u64>,
     transfer: Option<Transfer>,
     requested: bool,
+    /// A partial transfer whose next chunk is ready now.
+    continues: bool,
 }
 
 impl Fetcher {
@@ -139,7 +138,13 @@ impl Fetcher {
             failed_revision: None,
             transfer: None,
             requested: false,
+            continues: false,
         }
+    }
+
+    /// Whether the next chunk of a partial transfer can follow without an output check.
+    pub(super) fn can_continue(&self) -> bool {
+        self.continues
     }
 
     pub(super) fn note_revision(&mut self, revision: u64) {
@@ -162,13 +167,15 @@ impl Fetcher {
             .rebind(generation)
     }
 
-    /// Advances the current transfer, returning a model to publish when one completes.
+    /// Advances the current transfer by one chunk, returning a model to publish when one
+    /// completes. Input is serviced between chunks.
     pub(super) fn poll(
         &mut self,
         state: &DevelopmentPaneState,
         generation: PresentationGeneration,
         exchange: &mut impl FnMut(&Request) -> Result<Reply, ServerError>,
     ) -> Result<Option<Arc<TerminalAccessibilityModel>>, ServerError> {
+        self.continues = false;
         if !state.accessibility_demand.load(Ordering::Acquire) {
             self.transfer = None;
             if std::mem::take(&mut self.requested) {
@@ -197,72 +204,70 @@ impl Fetcher {
                 bytes: Vec::new(),
             });
         }
-        for _ in 0..CHUNKS_PER_POLL {
-            let Some(transfer) = self.transfer.as_mut() else {
+        let Some(transfer) = self.transfer.as_mut() else {
+            return Ok(None);
+        };
+        let reply = exchange(&Request::Accessibility {
+            lease: self.lease,
+            revision: transfer.revision,
+            offset: transfer.bytes.len(),
+            base: transfer.base,
+        })?;
+        self.requested = true;
+        let Reply::Accessibility(result) = reply else {
+            return Err(ServerError::Protocol);
+        };
+        let chunk = match result {
+            Ok(chunk) => chunk,
+            Err(wire::Error::Pending) => return Ok(None),
+            Err(wire::Error::Stale) => {
+                self.transfer = None;
                 return Ok(None);
-            };
-            let reply = exchange(&Request::Accessibility {
-                lease: self.lease,
-                revision: transfer.revision,
-                offset: transfer.bytes.len(),
-                base: transfer.base,
-            })?;
-            self.requested = true;
-            let Reply::Accessibility(result) = reply else {
-                return Err(ServerError::Protocol);
-            };
-            let chunk = match result {
-                Ok(chunk) => chunk,
-                Err(wire::Error::Pending) => return Ok(None),
-                Err(wire::Error::Stale) => {
-                    self.transfer = None;
-                    return Ok(None);
-                }
-                Err(wire::Error::TooLarge) => {
-                    self.failed_revision = transfer.revision.or(self.server_revision);
-                    self.transfer = None;
-                    return Ok(None);
-                }
-            };
-            if !transfer.accepts(&chunk) {
-                return Err(ServerError::Protocol);
             }
-            transfer.revision = Some(chunk.revision);
-            transfer.total = Some(chunk.total);
-            transfer.bytes.extend_from_slice(&chunk.bytes);
-            if transfer.bytes.len() < chunk.total {
-                continue;
-            }
-            let Some(transfer) = self.transfer.take() else {
+            Err(wire::Error::TooLarge) => {
+                self.failed_revision = transfer.revision.or(self.server_revision);
+                self.transfer = None;
                 return Ok(None);
-            };
-            let snapshot = serde_json::from_slice::<wire::Snapshot>(&transfer.bytes)
-                .map_err(|_| ServerError::Protocol)?;
-            if snapshot.revision != chunk.revision {
-                return Err(ServerError::Protocol);
             }
-            self.server_revision = Some(
-                self.server_revision
-                    .map_or(chunk.revision, |known| known.max(chunk.revision)),
-            );
-            let mut retained = state
-                .accessibility
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            return match retained.apply(snapshot, generation) {
-                Ok(model) => {
-                    self.failed_revision = None;
-                    Ok(model)
-                }
-                Err(Rejected::MissingBase) => {
-                    // The next transfer carries every row, because no base is named.
-                    *retained = RetainedSemantics::default();
-                    Ok(None)
-                }
-                Err(Rejected::Malformed) => Err(ServerError::Protocol),
-            };
+        };
+        if !transfer.accepts(&chunk) {
+            return Err(ServerError::Protocol);
         }
-        Ok(None)
+        transfer.revision = Some(chunk.revision);
+        transfer.total = Some(chunk.total);
+        transfer.bytes.extend_from_slice(&chunk.bytes);
+        if transfer.bytes.len() < chunk.total {
+            self.continues = true;
+            return Ok(None);
+        }
+        let Some(transfer) = self.transfer.take() else {
+            return Ok(None);
+        };
+        let snapshot = serde_json::from_slice::<wire::Snapshot>(&transfer.bytes)
+            .map_err(|_| ServerError::Protocol)?;
+        if snapshot.revision != chunk.revision {
+            return Err(ServerError::Protocol);
+        }
+        self.server_revision = Some(
+            self.server_revision
+                .map_or(chunk.revision, |known| known.max(chunk.revision)),
+        );
+        let mut retained = state
+            .accessibility
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        match retained.apply(snapshot, generation) {
+            Ok(model) => {
+                self.failed_revision = None;
+                Ok(model)
+            }
+            Err(Rejected::MissingBase) => {
+                // The next transfer carries every row, because no base is named.
+                *retained = RetainedSemantics::default();
+                Ok(None)
+            }
+            Err(Rejected::Malformed) => Err(ServerError::Protocol),
+        }
     }
 }
 
@@ -754,5 +759,54 @@ mod tests {
             (rebound.generation(), rebound.shares_document(&first)),
             (next, true)
         );
+    }
+
+    #[test]
+    fn a_large_document_arrives_one_chunk_per_turn_without_awaiting_output_checks() {
+        let state = demanded();
+        let mut fetcher = Fetcher::new(lease());
+        let text = "x".repeat(200);
+        let topology: Vec<u16> = (0..100).collect();
+        let document = snapshot(
+            1,
+            &topology,
+            topology
+                .iter()
+                .map(|&page_row| row(page_row, 1, &text))
+                .collect(),
+        );
+        let chunks = serde_json::to_vec(&document)
+            .unwrap()
+            .len()
+            .div_ceil(wire::CHUNK_BYTES);
+        assert!(chunks > 1, "the document must need several chunks");
+        let mut server = Server::new(document);
+        let mut turns = 0;
+        let model = loop {
+            turns += 1;
+            let before = server.requests.borrow().len();
+            let model = fetcher
+                .poll(
+                    &state,
+                    PresentationGeneration::default(),
+                    &mut server.exchange(),
+                )
+                .unwrap();
+            assert_eq!(
+                server.requests.borrow().len(),
+                before + 1,
+                "one chunk per turn"
+            );
+            if let Some(model) = model {
+                break model;
+            }
+            assert!(
+                fetcher.can_continue(),
+                "a partial transfer continues at once"
+            );
+        };
+        assert_eq!(turns, chunks);
+        assert!(!fetcher.can_continue());
+        assert_eq!(rows(&model).len(), 100);
     }
 }
