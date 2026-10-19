@@ -385,6 +385,18 @@ run = "git-cliff --config cliff.toml --unreleased --offline --strip all"
 description = "Test local server account admission and private storage"
 run = "cargo test --package spaceterm-server --package spaceterm-server-host --package spaceterm-directories --all-features --locked"
 
+[tasks."status-area:build"]
+description = "Build the native status-area helper independently of the desktop"
+run = "cargo build --package spaceterm-status-area --locked"
+
+[tasks."status-area:test"]
+description = "Test the status-area menu and local controls"
+run = "cargo test --package spaceterm-status-area --all-targets --locked"
+
+[tasks."status-area:check"]
+description = "Lint the native status-area helper"
+run = "cargo clippy --package spaceterm-status-area --all-targets --locked --no-deps -- -D warnings"
+
 [tasks."server:test:headless"]
 description = "Test the server without native credential adapters"
 run = "cargo test --package spaceterm-server --no-default-features --locked"
