@@ -248,8 +248,9 @@ impl StatusItem {
                 self.state.set(state);
                 self.render();
                 status_menu::end_operation(cx);
-                if let Err(error) = result {
-                    self.report(command, error, cx);
+                match result {
+                    Ok(status) => status_menu::operation_succeeded(cx, status),
+                    Err(error) => self.report(command, error, cx),
                 }
             }
         }

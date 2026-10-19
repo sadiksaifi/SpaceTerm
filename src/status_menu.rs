@@ -5,6 +5,7 @@ pub(crate) mod model;
 pub(crate) mod worker;
 
 use gpui::{App, Global};
+use spaceterm_server::service::ServiceStatus;
 use std::rc::Rc;
 
 /// Work deferred until no admitted server operation is running.
@@ -98,5 +99,13 @@ pub(crate) fn after_operations(cx: &mut App, work: impl FnOnce(&mut App) + 'stat
         update(cx, |status| status.after_operations.push(Box::new(work)));
     } else {
         work(cx);
+    }
+}
+
+/// A status-surface operation succeeded. A server it left running reaches every Workspace Window
+/// still waiting on it, as a Start from Settings does. Nothing here opens a window.
+pub(crate) fn operation_succeeded(cx: &mut App, status: ServiceStatus) {
+    if status.running && !status.stopped {
+        crate::ui::resume_waiting_launches(cx);
     }
 }

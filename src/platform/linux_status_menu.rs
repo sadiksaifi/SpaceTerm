@@ -182,7 +182,7 @@ impl LinuxStatusItem {
                     _ => Operation::Start,
                 };
                 match result {
-                    Ok(_) => {}
+                    Ok(status) => status_menu::operation_succeeded(cx, status),
                     Err(ServerError::AuthorizationRequired) => {
                         self.open_control(operation, Step::Authorize { declined: false }, cx);
                     }

@@ -13,7 +13,7 @@ use gpui::{
 use spaceterm_server::{
     ServerError,
     service::{
-        LingerAuthorization,
+        LingerAuthorization, ServiceStatus,
         control::{Confirmation, Controller},
     },
 };
@@ -352,7 +352,7 @@ impl ServerControlWindow {
             (Some(Step::Ask(confirmation)), Response::Confirm) => {
                 let controller = self.controller.clone();
                 self.run(
-                    cx.background_spawn(async move { controller.confirm(confirmation).map(drop) }),
+                    cx.background_spawn(async move { controller.confirm(confirmation) }),
                     window,
                     cx,
                 );
@@ -364,7 +364,6 @@ impl ServerControlWindow {
                         controller
                             .enable_linger(LingerAuthorization::Desktop)
                             .and_then(|()| controller.start())
-                            .map(drop)
                     }),
                     window,
                     cx,
@@ -381,7 +380,7 @@ impl ServerControlWindow {
     /// Runs the admitted operation off the event thread and closes when it succeeds.
     fn run(
         &mut self,
-        work: Task<Result<(), ServerError>>,
+        work: Task<Result<ServiceStatus, ServerError>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -396,8 +395,11 @@ impl ServerControlWindow {
             let Some(control) = control else {
                 return;
             };
+            if let Ok(status) = result {
+                cx.update(|cx| crate::status_menu::operation_succeeded(cx, status));
+            }
             let _ = control.update(cx, |this, window, cx| match result {
-                Ok(()) => window.remove_window(),
+                Ok(_) => window.remove_window(),
                 // The operating system's prompt was cancelled or refused. Nothing changed.
                 Err(ServerError::AuthorizationRequired) if this.operation == Operation::Start => {
                     this.show(Step::Authorize { declined: true }, window, cx);

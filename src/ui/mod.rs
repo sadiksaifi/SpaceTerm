@@ -86,7 +86,7 @@ pub(crate) use workspace_manager::launch_testing;
 #[cfg(test)]
 pub(crate) use workspace_manager::tests::assert_scroll_shortcuts_from_sidebar_focus;
 pub(crate) use workspace_manager::{
-    LocalServerAdapters, WorkspaceManager, WorkspaceManagerAdapters,
+    LocalServerAdapters, WorkspaceManager, WorkspaceManagerAdapters, resume_waiting_launches,
 };
 
 /// Finishes every hover transition in progress, since test windows have no frame loop.
