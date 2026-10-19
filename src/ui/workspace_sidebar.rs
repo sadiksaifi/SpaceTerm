@@ -189,9 +189,9 @@ pub(super) struct SharedWorkspaceRow {
     pub(super) edits: bool,
     /// Why a shared edit is unavailable, for a disabled command and its row status.
     pub(super) edits_reason: &'static str,
-    /// The short status line 2 shows in place of the directory while an edit waits or the server
-    /// is unreachable.
-    pub(super) status: Option<&'static str>,
+    /// The short status line 2 shows in place of the directory while an edit that changes this
+    /// row waits, or after the server connection was lost.
+    pub(super) status: Option<crate::ui::shared_workspaces::SharedRowStatus>,
     /// Whether this client can change its Workspace Attachments now. Detaching needs no server,
     /// so being offline never withholds it; an attachment write SpaceTerm could not confirm does,
     /// until SpaceTerm reopens.

@@ -4798,13 +4798,11 @@ impl WorkspaceManager {
                 name_version: facts.name_version,
                 edits: editability.available(),
                 edits_reason: editability.explanation(),
-                status: shared
-                    .worktree_status(
-                        facts.server,
-                        self.shared_inventory(workspace_id)
-                            .map(|inventory| inventory.main_root.as_path()),
-                    )
-                    .or_else(|| editability.status()),
+                status: shared.row_status(
+                    facts.server,
+                    self.shared_inventory(workspace_id)
+                        .map(|inventory| inventory.main_root.as_path()),
+                ),
                 detaches: shared.attachments_changeable(),
             },
             directory: directory.to_owned(),

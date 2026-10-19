@@ -27,7 +27,7 @@ pub(crate) use development::{
     POLL_INTERVAL, SharedAcceptance, SharedAttachmentFailure, SharedCloseApproval,
     SharedCloseReview, SharedCloseState, SharedCloseUnavailable, SharedEditSource,
     SharedPaneSessions, SharedPanes, SharedRefusal, SharedRefusalReason, SharedRemoval,
-    SharedSubmission, SharedTabs, SharedWorkspaceConflict, SharedWorkspaceFacts,
+    SharedRowStatus, SharedSubmission, SharedTabs, SharedWorkspaceConflict, SharedWorkspaceFacts,
     SharedWorkspaceHost, SharedWorkspacePlan, SharedWorkspaces, presenting_window,
     shared_close_changed_title,
 };
@@ -211,6 +211,11 @@ mod development {
             Ok(receiver)
         }
 
+        /// Whether the edit this process submitted and has not seen answered satisfies `test`.
+        fn submitted_satisfies(&self, test: impl Fn(&Mutation) -> bool) -> bool {
+            self.submitted.borrow().as_ref().is_some_and(test)
+        }
+
         /// Whether this process asked for the edit an answer settles, which it reports once.
         fn claims(&self, mutation: &Mutation) -> bool {
             let mut submitted = self.submitted.borrow_mut();
@@ -277,15 +282,33 @@ mod development {
                 Self::Pending => "SpaceTerm is waiting for the server to answer the last change.",
             }
         }
+    }
 
-        /// The short status a sidebar row shows.
-        pub(crate) const fn status(self) -> Option<&'static str> {
-            match self {
-                Self::Available => None,
-                Self::Offline => Some("Not connected"),
-                Self::Pending => Some("Saving…"),
+    /// What one shared Workspace's sidebar row says in place of its directory.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) struct SharedRowStatus {
+        pub(crate) text: &'static str,
+        /// Whether the status reports a problem, rather than work in progress.
+        pub(crate) warning: bool,
+    }
+
+    impl SharedRowStatus {
+        const fn progress(text: &'static str) -> Self {
+            Self {
+                text,
+                warning: false,
             }
         }
+    }
+
+    /// Whether `mutation` changes what `workspace`'s row shows: its name or its directory.
+    fn changes_row(mutation: &Mutation, workspace: Id) -> bool {
+        matches!(
+            mutation,
+            Mutation::RenameWorkspace { workspace: target, .. }
+                | Mutation::PinWorkspace { workspace: target, .. }
+                if *target == workspace
+        )
     }
 
     /// What asking for a shared edit did. A refusal submitted nothing and retains nothing.
@@ -1204,6 +1227,41 @@ mod development {
                     root,
                     ..
                 })) if repository == Some(root.as_path()) => Some("Removing Worktree…"),
+                _ => None,
+            }
+        }
+        /// What `workspace`'s sidebar row says in place of its directory, if anything.
+        ///
+        /// A row speaks only for itself. A waiting edit marks the one row whose name, directory,
+        /// or Worktree it changes, so creating a Tab or a Workspace marks none. "Not connected"
+        /// waits for an established loss: a connection still finishing its handshake has lost
+        /// nothing, though its edits stay unavailable until it connects.
+        pub(crate) fn row_status(
+            &self,
+            workspace: Id,
+            repository: Option<&Path>,
+        ) -> Option<SharedRowStatus> {
+            if let Some(text) = self.worktree_status(workspace, repository) {
+                return Some(SharedRowStatus::progress(text));
+            }
+            match self.edits.editability() {
+                SharedEditability::Offline if self.connection_error.is_some() => {
+                    Some(SharedRowStatus {
+                        text: "Not connected",
+                        warning: true,
+                    })
+                }
+                SharedEditability::Pending
+                    if self
+                        .pending_operation
+                        .as_ref()
+                        .is_some_and(|mutation| changes_row(mutation, workspace))
+                        || self
+                            .edits
+                            .submitted_satisfies(|mutation| changes_row(mutation, workspace)) =>
+                {
+                    Some(SharedRowStatus::progress("Saving…"))
+                }
                 _ => None,
             }
         }

@@ -1364,19 +1364,21 @@ mod edits {
             Some("Removing Worktree…")
         );
         assert_eq!(
-            shared.worktree_status([10; 32], Some(std::path::Path::new("/other-repository"))),
+            shared.row_status([10; 32], Some(std::path::Path::new("/other-repository"))),
             None,
-            "an unrelated Workspace must keep its common waiting status"
+            "an unrelated Workspace's row says nothing about another row's edit"
         );
         assert!(shared.removing_worktree(&path));
         edits.set_connected(false);
+        edits.set_error(spaceterm_server::ServerError::NotRunning);
         shared.poll();
         assert_eq!(
-            shared.worktree_status(WORKSPACE, Some(std::path::Path::new("/fixture"))),
-            None,
+            shared
+                .row_status(WORKSPACE, Some(std::path::Path::new("/fixture")))
+                .map(|status| (status.text, status.warning)),
+            Some(("Not connected", true)),
             "the Workspace row must show its offline status"
         );
-        assert_eq!(shared.editability().status(), Some("Not connected"));
         assert!(
             shared.removing_worktree(&path),
             "the Worktree row still names its unresolved original"

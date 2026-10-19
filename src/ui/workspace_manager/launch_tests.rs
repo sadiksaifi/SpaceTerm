@@ -628,6 +628,70 @@ fn ready_harness(cx: &mut TestAppContext) -> (LaunchHarness, &mut VisualTestCont
     (harness, cx)
 }
 
+/// Whether the window's only Workspace row replaces its directory with a shared status.
+fn shared_row_status_drawn(harness: &LaunchHarness, cx: &mut VisualTestContext) -> bool {
+    let id = harness.manager.read_with(cx, |manager, _| {
+        manager
+            .workspaces
+            .iter()
+            .next()
+            .expect("one Workspace row")
+            .id()
+    });
+    let selector: &'static str =
+        Box::leak(format!("workspace-row-shared-status-{}", id.get()).into_boxed_str());
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    cx.debug_bounds(selector).is_some()
+}
+
+#[gpui::test]
+fn a_tab_creation_leaves_the_workspace_rows_as_they_are(cx: &mut TestAppContext) {
+    use spaceterm_server::hierarchy::Mutation;
+    let (harness, cx) = ready_harness(cx);
+    assert!(!shared_row_status_drawn(&harness, cx));
+
+    harness.click("create-tab-button", cx);
+    sync(&harness, cx);
+    assert!(matches!(
+        harness.edits.submitted().as_slice(),
+        [Mutation::CreateTab { .. }]
+    ));
+    assert!(
+        !shared_row_status_drawn(&harness, cx),
+        "a waiting Tab creation changes nothing a Workspace row shows"
+    );
+}
+
+#[gpui::test]
+fn a_pending_rename_says_saving_on_its_own_row(cx: &mut TestAppContext) {
+    let (harness, cx) = ready_harness(cx);
+    harness.manager.update(cx, |manager, cx| {
+        let id = manager.workspaces.iter().next().expect("one row").id();
+        let shared = manager.shared.as_mut().expect("shared Workspaces");
+        let _ = shared.rename(id, "Logs".to_owned(), None);
+        cx.notify();
+    });
+    sync(&harness, cx);
+    assert!(shared_row_status_drawn(&harness, cx));
+}
+
+#[gpui::test]
+fn not_connected_appears_only_once_the_connection_is_lost(cx: &mut TestAppContext) {
+    let (harness, cx) = ready_harness(cx);
+    // The connection published its inventory and is still finishing its handshake.
+    harness.edits.set_connected(false);
+    sync(&harness, cx);
+    assert!(
+        !shared_row_status_drawn(&harness, cx),
+        "a connection still being established has not been lost"
+    );
+
+    harness.edits.set_error(ServerError::NotRunning);
+    sync(&harness, cx);
+    assert!(shared_row_status_drawn(&harness, cx));
+}
+
 fn created_names(harness: &LaunchHarness) -> Vec<String> {
     use spaceterm_server::hierarchy::Mutation;
     harness

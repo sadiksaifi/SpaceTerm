@@ -337,8 +337,9 @@ impl WorkspaceSidebar {
         let shared_status = shared.as_ref().and_then(|shared| shared.status);
         let (detail, detail_color, detail_selector) = if let Some(status) = shared_status {
             (
-                status.into(),
-                Some(row_colors.warning),
+                status.text.into(),
+                // Work in progress keeps the directory's quiet color; only a problem warns.
+                status.warning.then_some(row_colors.warning),
                 Some(format!(
                     "workspace-row-shared-status-{}",
                     workspace_id.get()
@@ -385,9 +386,10 @@ impl WorkspaceSidebar {
         };
         let accessibility_name = match (shared.as_ref(), remote_status) {
             (Some(_), _) => match shared_status {
-                Some(status) => {
-                    format!("Workspace actions for {name} on a SpaceTerm Server, {status}")
-                }
+                Some(status) => format!(
+                    "Workspace actions for {name} on a SpaceTerm Server, {}",
+                    status.text
+                ),
                 None => format!("Workspace actions for {name} on a SpaceTerm Server"),
             },
             (None, Some(status)) => format!("Workspace actions for {name}, connection {status}"),
