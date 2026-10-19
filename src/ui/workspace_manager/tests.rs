@@ -13115,6 +13115,10 @@ fn a_dormant_neighbor_should_take_the_keyboard_on_its_screen(cx: &mut TestAppCon
     let selections = harness.panes.pane(ATTACHED_BUILD_PANE).selections();
 
     harness.close_desktop_workspace(cx);
+    let landing = A11yTree::read(cx)
+        .focused()
+        .map(|node| node["aria"]["label"].clone());
+    assert_eq!(landing, Some(serde_json::json!("Server Restarted")));
     cx.simulate_keystrokes("tab");
     cx.run_until_parked();
     let focused = A11yTree::read(cx)
