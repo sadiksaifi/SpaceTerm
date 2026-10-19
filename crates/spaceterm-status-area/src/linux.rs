@@ -146,7 +146,7 @@ pub fn run(controller: Controller) -> Result<(), StatusError> {
                 match command {
                     Command::Open => {
                         if let Some(desktop) = &desktop {
-                            let _ = detached(std::process::Command::new(desktop)).spawn();
+                            launch(std::process::Command::new(desktop), || {});
                         }
                     }
                     Command::Start => {
@@ -205,19 +205,20 @@ fn open_control(desktop: Option<&Path>, action: &str, sender: &mpsc::Sender<Mess
     };
     let mut command = std::process::Command::new(desktop);
     command.args(["--server-control", action]);
-    let Ok(mut child) = detached(command).spawn() else {
-        return false;
-    };
     let sender = sender.clone();
-    std::thread::spawn(move || {
-        let _ = child.wait();
+    launch(command, move || {
         let _ = sender.send(Message::ControlClosed);
-    });
-    true
+    })
+    .is_some()
 }
 
-/// A process in its own session, so it outlives this item.
-fn detached(mut command: std::process::Command) -> std::process::Command {
+/// Starts a process in its own session, so it outlives this item, and reaps it when it exits so
+/// a long-lived item collects no zombies. `exited` runs after the process ended. Returns the
+/// process id, or `None` when it could not start.
+fn launch(
+    mut command: std::process::Command,
+    exited: impl FnOnce() + Send + 'static,
+) -> Option<u32> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -229,7 +230,13 @@ fn detached(mut command: std::process::Command) -> std::process::Command {
             Ok(())
         });
     }
-    command
+    let mut child = command.spawn().ok()?;
+    let id = child.id();
+    std::thread::spawn(move || {
+        let _ = child.wait();
+        exited();
+    });
+    Some(id)
 }
 
 /// Tells the session's status-area host about the item. Without a host this does nothing.
@@ -614,4 +621,23 @@ impl Menu {
         revision: u32,
         parent: i32,
     ) -> zbus::Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_launched_process_is_reaped_after_it_exits() {
+        let (reaped, exited) = mpsc::channel();
+        let id = launch(std::process::Command::new("/bin/true"), move || {
+            let _ = reaped.send(());
+        })
+        .expect("the process starts");
+        exited
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the process exits");
+        // A process that exited but was never waited for stays in /proc as a zombie.
+        assert!(!Path::new(&format!("/proc/{id}")).exists());
+    }
 }
