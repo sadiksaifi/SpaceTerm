@@ -24,9 +24,9 @@ pub(crate) mod remote_workspace_flow;
 mod render_lifecycle;
 pub(crate) mod repository_status_store;
 mod selection_chip;
-pub(crate) mod server_pane;
 #[cfg(target_os = "linux")]
 pub(crate) mod server_control_window;
+pub(crate) mod server_pane;
 pub(crate) mod server_worktrees;
 pub(crate) mod settings_file;
 pub(crate) mod settings_recovery;

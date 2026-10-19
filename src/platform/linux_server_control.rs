@@ -52,10 +52,9 @@ pub(crate) fn main(argument: &std::ffi::OsStr) -> i32 {
         bus.as_ref(),
         &super::app_directories::DesktopResourceDirectories::capture(),
     );
-    let window_frame = super::window_frame::WindowFrameGeometry::new(Some(
-        controls.style.corner_radius(),
-    ))
-    .with_outer_edge_width(1.0);
+    let window_frame =
+        super::window_frame::WindowFrameGeometry::new(Some(controls.style.corner_radius()))
+            .with_outer_edge_width(1.0);
     let window_chrome = super::window_chrome::WindowChrome::client().with_controls(controls);
     let window_movement: Rc<dyn super::window_movement::WindowMovementFactory> =
         Rc::new(super::linux_window_drag::LinuxWindowMovementFactory);

@@ -74,13 +74,13 @@ use crate::ui::sidebar_window::form::{
 };
 use catalog::SettingsRowId;
 pub(crate) use catalog::SettingsSectionId;
-/// The server control window shares the service row's progress and authorization wording.
-#[cfg(target_os = "linux")]
-pub(crate) use servers::{AuthorizationPrompt, AuthorizedRequest, ServiceAction};
 use editor::{SaveStatus, SettingsEditor};
 use keybindings::ShortcutRows;
 use microphone::MicrophoneAccessRow;
 use permission_access::{PermissionAccessChanges, PermissionAccessRows};
+/// The server control window shares the service row's progress and authorization wording.
+#[cfg(target_os = "linux")]
+pub(crate) use servers::{AuthorizationPrompt, AuthorizedRequest, ServiceAction};
 use theme_gallery::ThemeGallery;
 use theme_store::ThemeStore;
 

@@ -80,9 +80,11 @@ pub(crate) enum Step {
     /// Asks before Stop or Restart, with the shared confirmation every control surface shows.
     Ask(Confirmation),
     /// Explains startup authorization before the operating system asks for a password.
-    Authorize { declined: bool },
+    Authorize {
+        declined: bool,
+    },
     Working(Operation),
-    Failed(Operation, ServerError),
+    Failed(ServerError),
 }
 
 /// Prepares the first step without opening any window, so the status item's choice is checked
@@ -92,8 +94,10 @@ pub(crate) fn first_step(controller: &Controller, operation: Operation) -> Optio
         Operation::Start => {
             return match controller.start() {
                 Ok(_) => None,
-                Err(ServerError::AuthorizationRequired) => Some(Step::Authorize { declined: false }),
-                Err(error) => Some(Step::Failed(operation, error)),
+                Err(ServerError::AuthorizationRequired) => {
+                    Some(Step::Authorize { declined: false })
+                }
+                Err(error) => Some(Step::Failed(error)),
             };
         }
         Operation::Stop => Action::Stop,
@@ -101,7 +105,7 @@ pub(crate) fn first_step(controller: &Controller, operation: Operation) -> Optio
     };
     Some(match controller.prepare(action) {
         Ok(confirmation) => Step::Ask(confirmation),
-        Err(error) => Step::Failed(operation, error),
+        Err(error) => Step::Failed(error),
     })
 }
 
@@ -231,7 +235,7 @@ impl Content {
                 body: None,
                 buttons: Vec::new(),
             },
-            Step::Failed(_, error) => Self {
+            Step::Failed(error) => Self {
                 title: format!("{name} Server").into(),
                 heading: format!("The {name} server couldn't {}.", operation.verb()).into(),
                 body: Some(error.to_string().into()),
@@ -393,7 +397,7 @@ impl ServerControlWindow {
                 Err(ServerError::AuthorizationRequired) if this.operation == Operation::Start => {
                     this.show(Step::Authorize { declined: true }, window, cx);
                 }
-                Err(error) => this.show(Step::Failed(this.operation, error), window, cx),
+                Err(error) => this.show(Step::Failed(error), window, cx),
             });
         }));
     }
