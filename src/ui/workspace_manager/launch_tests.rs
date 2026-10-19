@@ -1051,3 +1051,60 @@ fn a_service_start_elsewhere_reconnects_the_stopped_panes_of_a_presenting_window
         (1, 0, 0)
     );
 }
+
+/// A launch that runs again but has not answered yet, as when a person retries.
+fn launching_after_stop(
+    answers: Vec<Result<LaunchOutcome, ServerError>>,
+    cx: &mut TestAppContext,
+) -> (LaunchHarness, &mut VisualTestContext) {
+    let (harness, cx) = launch_harness(
+        std::iter::once(Ok(LaunchOutcome::Stopped))
+            .chain(answers)
+            .collect(),
+        cx,
+    );
+    cx.run_until_parked();
+    let manager = harness.manager.clone();
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| manager.run_local_launch(None, window, cx));
+    });
+    assert_eq!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.launch.state),
+        launch::LaunchState::Launching,
+        "the second launch has not answered yet"
+    );
+    (harness, cx)
+}
+
+/// A service started elsewhere while this window's launch is still answering, such as a
+/// Restart finishing before a launch that observed it stopped, is not lost. Launch runs once
+/// more and opens the Workspaces, and a server that stays stopped still asks for Start.
+#[gpui::test]
+fn a_service_start_during_launch_runs_launch_again_when_it_finishes(cx: &mut TestAppContext) {
+    let (harness, cx) = launching_after_stop(vec![Ok(LaunchOutcome::Stopped), ready()], cx);
+    cx.cx
+        .update(crate::ui::workspace_manager::resume_waiting_launches);
+    cx.run_until_parked();
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "run", "run"],
+        "no Start of its own"
+    );
+    assert_eq!(harness.shared_rows(cx), 1);
+}
+
+#[gpui::test]
+fn a_service_start_during_launch_keeps_a_deliberate_stop(cx: &mut TestAppContext) {
+    let (harness, cx) = launching_after_stop(
+        vec![Ok(LaunchOutcome::Stopped), Ok(LaunchOutcome::Stopped)],
+        cx,
+    );
+    cx.cx
+        .update(crate::ui::workspace_manager::resume_waiting_launches);
+    cx.run_until_parked();
+    assert_eq!(harness.launch.steps(), ["run", "run", "run"]);
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+    assert_eq!(harness.shared_rows(cx), 0);
+}

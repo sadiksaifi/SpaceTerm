@@ -304,6 +304,9 @@ pub(super) struct LocalLaunchState {
     pub(super) state: LaunchState,
     cancelled: Arc<AtomicBool>,
     _task: Option<Task<()>>,
+    /// The server was started elsewhere while this launch was answering. A launch that then
+    /// finishes waiting runs once more, because its answer may predate that start.
+    resume: bool,
     /// The message assistive technology last announced, so each change is spoken once.
     announced: std::cell::RefCell<Option<SharedString>>,
 }
@@ -315,6 +318,7 @@ impl LocalLaunchState {
             state: LaunchState::Launching,
             cancelled: Arc::new(AtomicBool::new(false)),
             _task: None,
+            resume: false,
             announced: std::cell::RefCell::default(),
         }
     }
@@ -365,8 +369,8 @@ pub(crate) fn start_local_server(window: &mut Window, cx: &mut App) {
 
 /// Runs launch again in every Workspace Window still waiting on the server, after the person
 /// started or installed it from Settings. A window already presenting its Workspaces reconnects
-/// the Panes the stop interrupted instead. A window still launching is left alone, and nothing
-/// here starts the server itself.
+/// the Panes the stop interrupted instead. A window still launching runs launch once more if it
+/// then finishes waiting. Nothing here starts the server itself, so a retained Stop stays.
 pub(crate) fn resume_waiting_launches(cx: &mut App) {
     for window in cx.windows() {
         let Some(window) = window.downcast::<WorkspaceManager>() else {
@@ -381,6 +385,8 @@ pub(crate) fn resume_waiting_launches(cx: &mut App) {
             ) && manager.launch._task.is_none()
             {
                 manager.run_local_launch(None, window, cx);
+            } else if manager.launch._task.is_some() {
+                manager.launch.resume = true;
             } else if manager.launch.state == LaunchState::Ready {
                 manager.server_started(cx);
             }
@@ -450,6 +456,17 @@ impl WorkspaceManager {
         };
         self.launch.state = state;
         self.launch._task = None;
+        if std::mem::take(&mut self.launch.resume)
+            && matches!(
+                state,
+                LaunchState::Stopped
+                    | LaunchState::AuthorizationRequired { .. }
+                    | LaunchState::Failed(_)
+            )
+        {
+            self.run_local_launch(None, window, cx);
+            return;
+        }
         // A running server answers the Panes a stop interrupted, so they connect again.
         if state == LaunchState::Ready {
             self.server_started(cx);
