@@ -267,7 +267,6 @@ impl WorkspaceSidebar {
             tooltip,
             pinned,
             remote_connection_phase,
-            available,
             repository,
             worktrees,
             creates_worktrees,
@@ -327,25 +326,16 @@ impl WorkspaceSidebar {
         let remote_status = remote_connection_phase.and_then(remote_connection_status);
         let remote_color =
             remote_connection_phase.map(|phase| remote_connection_color(phase, &row_colors));
-        // An unavailable directory and the Remote connection status take line 2 from the
-        // repository, as they take it from the directory.
-        let repository = repository.filter(|_| available && remote_status.is_none());
+        // The Remote connection status takes line 2 from the repository, as it takes it from the
+        // directory.
+        let repository = repository.filter(|_| remote_status.is_none());
         let pull_request_paint = appearance.colors.pull_request(if selected {
             appearance.colors.row_selected_background
         } else {
             crate::ui::workspace_frame::base_surface(&appearance.colors)
         });
         let shared_status = shared.as_ref().and_then(|shared| shared.status);
-        let (detail, detail_color, detail_selector) = if !available {
-            (
-                "Directory unavailable".into(),
-                Some(row_colors.warning),
-                Some(format!(
-                    "workspace-row-directory-unavailable-{}",
-                    workspace_id.get()
-                )),
-            )
-        } else if let Some(status) = shared_status {
+        let (detail, detail_color, detail_selector) = if let Some(status) = shared_status {
             (
                 status.into(),
                 Some(row_colors.warning),
@@ -378,19 +368,15 @@ impl WorkspaceSidebar {
                 &row_colors,
             ))
         });
-        // The row icon carries one status in the same precedence as the collapsed identity: an
-        // unavailable directory first, then the Remote connection.
-        let icon_paint = (!available)
-            .then_some(row_colors.warning)
-            .or(remote_color)
-            .map(|color| {
-                under_pointer(workspace_row_status_paint(
-                    color,
-                    selected,
-                    3.0,
-                    &row_colors,
-                ))
-            });
+        // The row icon carries the Remote connection status, as the collapsed identity does.
+        let icon_paint = remote_color.map(|color| {
+            under_pointer(workspace_row_status_paint(
+                color,
+                selected,
+                3.0,
+                &row_colors,
+            ))
+        });
         let target_name = name.clone();
         let target_detail = if single_line {
             tooltip.clone()
@@ -436,9 +422,7 @@ impl WorkspaceSidebar {
             .map(|status| format!("{tooltip}: {status}"))
             .unwrap_or_else(|| tooltip.to_string());
         let tooltip_text = format!("{name}\n{tooltip_text}");
-        let tooltip_label = if !available {
-            "Workspace unavailable"
-        } else if shared.is_some() {
+        let tooltip_label = if shared.is_some() {
             "Server Workspace"
         } else if remote_status.is_some() {
             "Remote Workspace connection"
@@ -945,11 +929,7 @@ impl WorkspaceSidebar {
         let new_workspace_menu = Menu::new(
             "new-workspace-menu",
             "New Workspace",
-            new_workspace_menu_entries(
-                presentation,
-                remote_disabled,
-                self.creates_server_workspaces,
-            ),
+            new_workspace_menu_entries(presentation, remote_disabled),
         )
         .size(MenuSize::Wide)
         .placement(AnchoredPlacementConfig::new(
@@ -1515,9 +1495,8 @@ impl WorkspaceSidebar {
                     Icon::new(IconName::Copy, size, foreground).into_any_element()
                 })
                 .debug_selector("worktree-menu-row-copy-path"),
-            // A shared Worktree's Tabs close one at a time, each with its own confirmation.
             MenuEntry::action("Close Tabs", WorktreeMenuCommand::CloseTabs)
-                .disabled(!worktree.has_tabs || worktree.shared)
+                .disabled(!worktree.closes_tabs)
                 .icon(|foreground, size| {
                     Icon::new(IconName::X, size, foreground).into_any_element()
                 })
@@ -1688,10 +1667,9 @@ fn new_worktree_button(
 fn new_workspace_menu_entries(
     presentation: &crate::desktop_profile::DesktopPresentation,
     remote_disabled: bool,
-    creates_server_workspaces: bool,
 ) -> Vec<MenuEntry<WorkspaceCreation>> {
     let mut entries = Vec::new();
-    for creation in WorkspaceCreation::rows(creates_server_workspaces) {
+    for creation in WorkspaceCreation::ALL {
         if creation.starts_group() {
             entries.push(MenuEntry::separator());
         }

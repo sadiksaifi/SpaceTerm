@@ -387,7 +387,12 @@ mod development {
                     locked: record.locked,
                     missing: missing || record.missing,
                     removal,
-                    shared: true,
+                    closes_tabs: self
+                        .shared
+                        .as_ref()
+                        .is_some_and(|shared| shared.editability().available())
+                        && counts.contains_key(&id)
+                        && manager.has_tabs_besides(&manager.worktree_tab_ids(id)),
                 }
             };
             let mut groups = Vec::new();

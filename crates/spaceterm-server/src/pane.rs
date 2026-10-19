@@ -376,6 +376,8 @@ pub enum Reply {
         directory_recovery: bool,
         #[serde(default)]
         worktree_writes: bool,
+        #[serde(default)]
+        workspace_policy: bool,
     },
     Restored {
         #[serde(default)]
@@ -563,6 +565,7 @@ impl PaneConnection {
                 accessibility,
                 directory_recovery,
                 worktree_writes,
+                workspace_policy: true,
             } => {
                 let mut connection = Self::new(stream, pane_takeover);
                 std::sync::Arc::get_mut(&mut connection.transport)
@@ -588,6 +591,11 @@ impl PaneConnection {
                     .directory_recovery = directory_recovery;
                 Ok(connection)
             }
+            Reply::Capabilities {
+                development_pane: true,
+                workspace_policy: false,
+                ..
+            } => Err(ServerError::IncompatibleProtocol),
             Reply::Refused(reason) => Err(reason.into()),
             _ => Err(ServerError::Unsupported),
         }
@@ -656,6 +664,30 @@ impl PaneConnection {
 mod transport_tests {
     use super::*;
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn a_retained_runtime_without_workspace_policy_is_refused_before_operations() {
+        for capability in [None, Some(false)] {
+            let (client, mut server) = UnixStream::pair().unwrap();
+            let peer = std::thread::spawn(move || {
+                let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
+                assert!(matches!(
+                    wire.read::<Request>().unwrap(),
+                    Request::Capabilities
+                ));
+                let mut reply = serde_json::json!({ "Capabilities": { "development_pane": true } });
+                if let Some(capability) = capability {
+                    reply["Capabilities"]["workspace_policy"] = capability.into();
+                }
+                wire.write(&reply).unwrap();
+            });
+            assert!(matches!(
+                PaneConnection::negotiate(client),
+                Err(ServerError::IncompatibleProtocol)
+            ));
+            peer.join().unwrap();
+        }
+    }
 
     #[test]
     fn uncertain_exchange_fences_all_subscribers_before_reconnecting() {

@@ -215,17 +215,6 @@ impl CloseHierarchy {
         })
     }
 
-    /// The number of Tabs `target` closes.
-    pub(crate) fn affected_tab_count(&self, target: CloseTarget) -> usize {
-        let mut tabs = Vec::new();
-        for pane in self.matching_panes(target) {
-            if !tabs.contains(&(pane.workspace, pane.tab)) {
-                tabs.push((pane.workspace, pane.tab));
-            }
-        }
-        tabs.len()
-    }
-
     fn matching_panes(&self, target: CloseTarget) -> impl Iterator<Item = &HierarchyPane> {
         self.panes.iter().filter(move |pane| match target {
             CloseTarget::Pane {
@@ -339,57 +328,26 @@ pub(crate) enum CloseTabOutcome<T> {
     },
 }
 
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) enum CloseWorkspaceOutcome<T> {
-    WorkspaceClosed {
-        closed_workspace_id: WorkspaceId,
-        active_workspace_id: WorkspaceId,
-        payload: T,
-    },
-    FinalWorkspaceReplaced {
-        closed_workspace_id: WorkspaceId,
-        replacement_workspace_id: WorkspaceId,
-        payload: T,
-    },
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) enum FinalTabCloseOutcome<T> {
-    WorkspaceClosed {
-        closed_workspace_id: WorkspaceId,
-        active_workspace_id: WorkspaceId,
-        payload: T,
-    },
-    CloseOperatingSystemWindow {
-        workspace_id: WorkspaceId,
-    },
-}
-
 #[derive(Clone, Copy)]
 pub(crate) enum HierarchyClose {
     Pane,
     Tab,
-    Workspace,
-    FinalTab,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CloseContinuation {
     Remove,
     Parent,
-    Replace,
-    Window,
 }
 
 impl HierarchyClose {
+    /// Closing a final Pane or Tab closes its parent. A final Workspace leaves the empty view.
     pub(crate) const fn resolve(self, siblings: usize) -> CloseContinuation {
         if siblings > 1 {
             return CloseContinuation::Remove;
         }
         match self {
             Self::Pane | Self::Tab => CloseContinuation::Parent,
-            Self::Workspace => CloseContinuation::Replace,
-            Self::FinalTab => CloseContinuation::Window,
         }
     }
 }
@@ -621,12 +579,10 @@ mod tests {
     }
 
     #[test]
-    fn final_child_escalation_and_explicit_workspace_replacement_are_distinct() {
+    fn a_final_pane_or_tab_escalates_to_its_parent() {
         for (scope, expected) in [
             (HierarchyClose::Pane, CloseContinuation::Parent),
             (HierarchyClose::Tab, CloseContinuation::Parent),
-            (HierarchyClose::Workspace, CloseContinuation::Replace),
-            (HierarchyClose::FinalTab, CloseContinuation::Window),
         ] {
             assert_eq!(scope.resolve(1), expected);
             assert_eq!(scope.resolve(2), CloseContinuation::Remove);

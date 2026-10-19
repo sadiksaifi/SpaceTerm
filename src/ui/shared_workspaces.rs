@@ -1,9 +1,9 @@
 //! Shared server Workspaces inside the main Workspace Window.
 //!
 //! A SpaceTerm Server owns these Workspaces, their Tabs, their Panes, and the Terminal Sessions
-//! the Panes present. The desktop keeps its own Workspaces exactly as they are: adopting shared
-//! Workspaces adds rows to the existing sidebar, Tabs to the existing Tab strip, and Panes to the
-//! existing split geometry, and it never changes the Active Workspace or ends desktop-owned work.
+//! the Panes present. Normal launch presents the account server's Workspaces this client has
+//! attached beside any Remote Workspaces the window owns. Another client's Workspace joins as
+//! membership and never changes the Active Workspace.
 //!
 //! Every shared change goes to the server as one [`Mutation`]. Nothing here creates, renames, or
 //! pins a Workspace locally and tells the server afterwards, so two clients cannot disagree about
@@ -28,7 +28,7 @@ pub(crate) use development::{
     SharedCloseReview, SharedCloseState, SharedCloseUnavailable, SharedEditSource,
     SharedPaneSessions, SharedPanes, SharedRefusal, SharedRefusalReason, SharedRemoval,
     SharedSubmission, SharedTabs, SharedWorkspaceConflict, SharedWorkspaceFacts,
-    SharedWorkspaceHost, SharedWorkspacePlan, SharedWorkspaces, adopt, adopted,
+    SharedWorkspaceHost, SharedWorkspacePlan, SharedWorkspaces, presenting_window,
     shared_close_changed_title,
 };
 
@@ -71,7 +71,7 @@ mod development {
     ///
     /// One device holds one durable edit journal and one connection per Pane, so a second window
     /// cannot present the same server: it would stay offline behind the journal lock and fence
-    /// every Pane the first window holds. A repeated request activates this window instead.
+    /// every Pane the first window holds. Another window activates this one instead.
     pub(crate) struct SharedWorkspaceHost(
         pub(crate) gpui::WindowHandle<crate::ui::WorkspaceManager>,
     );
@@ -88,42 +88,11 @@ mod development {
             .then_some(handle)
     }
 
-    /// Whether a Workspace Window already presents this device's shared Workspaces.
-    pub(crate) fn adopted(cx: &App) -> bool {
-        host(cx).is_some()
-    }
-
-    /// Presents the server's shared Workspaces in a Workspace Window, or activates the window
-    /// already presenting them.
-    pub(crate) fn adopt(cx: &mut App) {
-        if let Some(existing) = host(cx) {
-            cx.defer(move |cx| {
-                let _ = existing.update(cx, |_, window, _| window.activate_window());
-            });
-            cx.activate(true);
-            return;
-        }
-        let Some(handle) = crate::ui::updates::front_workspace_window(cx) else {
-            eprintln!("shared Workspaces need an open Workspace Window");
-            return;
-        };
-        let answered_over_settings = handle
-            .update(cx, |manager, window, cx| {
-                manager.adopt_shared_workspaces(window, cx)
-            })
-            .unwrap_or(false);
-        // A refusal answered over Settings stays in front; raising the Workspace Window would
-        // cover it.
-        if answered_over_settings {
-            return;
-        }
-        // The request usually comes from Settings. Bring the Workspace Window forward so its
-        // result, or an alert explaining why it could not be shown, is not left behind Settings.
-        // Desktops that refuse the raise keep Settings in front, and the alert follows it there.
-        cx.defer(move |cx| {
-            let _ = handle.update(cx, |_, window, _| window.activate_window());
-        });
-        cx.activate(true);
+    /// The other live Workspace Window already presenting this device's shared Workspaces.
+    pub(crate) fn presenting_window(
+        cx: &App,
+    ) -> Option<gpui::WindowHandle<crate::ui::WorkspaceManager>> {
+        host(cx)
     }
 
     /// The server-side edits one desktop client submits, and the last answer it received.
@@ -470,14 +439,14 @@ mod development {
 
         pub(crate) const fn title(self) -> &'static str {
             match self {
-                Self::Read | Self::UnsafeStorage => "Shared Workspaces Unavailable",
+                Self::Read | Self::UnsafeStorage => "Workspaces Unavailable",
                 Self::Write => "Changes Could Not Be Saved",
             }
         }
 
         const fn accessibility_label(self) -> &'static str {
             match self {
-                Self::Read | Self::UnsafeStorage => "Shared Workspaces unavailable",
+                Self::Read | Self::UnsafeStorage => "Workspaces unavailable",
                 Self::Write => "Changes could not be saved",
             }
         }
@@ -485,19 +454,19 @@ mod development {
         pub(crate) const fn detail(self) -> &'static str {
             match self {
                 Self::Read => {
-                    "SpaceTerm could not read which shared Workspaces this device presents, or their Tab order \
-                     and Pane Layouts. Shared Workspaces stay closed, so nothing saved is replaced. Quit and \
+                    "SpaceTerm could not read which Workspaces this device presents, or their Tab order \
+                     and Pane Layouts. Workspaces stay closed, so nothing saved is replaced. Quit and \
                      reopen SpaceTerm to try again."
                 }
                 Self::UnsafeStorage => {
-                    "SpaceTerm could not validate which shared Workspaces this device presents, their Tab order \
-                     and Pane Layouts, or the storage that holds them. Shared Workspaces stay closed, and \
+                    "SpaceTerm could not validate which Workspaces this device presents, their Tab order \
+                     and Pane Layouts, or the storage that holds them. Workspaces stay closed, and \
                      SpaceTerm keeps the saved data."
                 }
                 Self::Write => {
-                    "SpaceTerm could not confirm that it saved which shared Workspaces this device \
+                    "SpaceTerm could not confirm that it saved which Workspaces this device \
                      presents, or their Tab order and Pane Layouts. Until you quit and reopen \
-                     SpaceTerm, some of these changes may not be saved. Shared Workspaces keep \
+                     SpaceTerm, some of these changes may not be saved. Workspaces keep \
                      running on the server."
                 }
             }
@@ -592,6 +561,13 @@ mod development {
     /// because only an explicit selection of that Pane asks the server for one.
     pub(crate) trait SharedPaneOpener {
         fn open(&self, pane: Id) -> Option<SharedPaneSubscription>;
+
+        /// Only an account-local route can interpret server directory text on this client.
+        fn local_filesystem(
+            &self,
+        ) -> Option<&crate::platform::local_filesystem::LocalFilesystemAuthority> {
+            None
+        }
     }
 
     /// The local server's own Panes.
@@ -604,6 +580,12 @@ mod development {
     }
 
     impl SharedPaneOpener for LocalServerPanes {
+        fn local_filesystem(
+            &self,
+        ) -> Option<&crate::platform::local_filesystem::LocalFilesystemAuthority> {
+            Some(&self.local_files)
+        }
+
         fn open(&self, pane: Id) -> Option<SharedPaneSubscription> {
             let (factory, state) = DevelopmentServerSessionFactory::for_pane(
                 self.server.clone(),
@@ -658,6 +640,12 @@ mod development {
                 opener,
                 panes: panes.clone(),
             }
+        }
+
+        pub(crate) fn local_filesystem(
+            &self,
+        ) -> Option<&crate::platform::local_filesystem::LocalFilesystemAuthority> {
+            self.opener.local_filesystem()
         }
 
         pub(crate) const fn panes(&self) -> &PaneConstruction {
@@ -866,10 +854,33 @@ mod development {
         }
 
         /// Asks the server for another Tab in this Workspace.
-        pub(crate) fn create_tab(&self) -> SharedSubmission {
-            self.edits.submit(Mutation::CreateTab {
-                workspace: self.workspace,
-            })
+        pub(crate) fn create_tab(&self, source: Id) -> SharedSubmission {
+            let snapshot = self.edits.edits.snapshot();
+            let tab = snapshot
+                .inventory
+                .as_ref()
+                .and_then(|i| i.workspaces.iter().find(|w| w.id == self.workspace))
+                .and_then(|w| {
+                    w.tabs
+                        .iter()
+                        .find(|t| t.panes.iter().any(|p| p.id == source))
+                });
+            let mutation =
+                match tab.and_then(|t| t.worktree_repository.as_ref().zip(t.worktree.as_ref())) {
+                    Some((root, path)) => {
+                        Mutation::Worktree(spaceterm_server::worktree::Operation::OpenTab {
+                            workspace: self.workspace,
+                            root: root.clone(),
+                            path: path.clone(),
+                            source: Some(source),
+                        })
+                    }
+                    None => Mutation::CreateTab {
+                        workspace: self.workspace,
+                        source: Some(source),
+                    },
+                };
+            self.edits.submit(mutation)
         }
     }
 
@@ -895,6 +906,7 @@ mod development {
         /// The inventory revision this client has applied.
         revision: Option<u64>,
         connected: bool,
+        connection_error: Option<spaceterm_server::ServerError>,
         pending: bool,
         pending_operation: Option<Mutation>,
         /// The sequence of the last outcome this client presented, so one answer is read once.
@@ -946,6 +958,7 @@ mod development {
                 workspaces: BTreeMap::new(),
                 revision: None,
                 connected: false,
+                connection_error: None,
                 pending: false,
                 pending_operation: None,
                 consumed: None,
@@ -1208,11 +1221,24 @@ mod development {
                 ServerCloseTarget::Pane { .. } => SharedCloseScope::Pane,
                 ServerCloseTarget::Tab { .. } => SharedCloseScope::Tab,
                 ServerCloseTarget::Workspace { .. } => SharedCloseScope::Workspace,
+                ServerCloseTarget::Worktree { .. } => SharedCloseScope::Worktree,
             };
             Ok(SharedCloseApproval {
                 target,
                 scope,
                 workspace: workspace.name.clone(),
+                tabs: workspace
+                    .tabs
+                    .iter()
+                    .filter(|tab| {
+                        tab.panes.iter().any(|pane| {
+                            confirmation
+                                .panes
+                                .iter()
+                                .any(|confirmed| confirmed.id == pane.id)
+                        })
+                    })
+                    .count(),
                 confirmation,
             })
         }
@@ -1326,6 +1352,10 @@ mod development {
             self.refusal.take()
         }
 
+        pub(crate) const fn connection_error(&self) -> Option<spaceterm_server::ServerError> {
+            self.connection_error
+        }
+
         /// Reads the server's answer and its inventory together, and reports both.
         ///
         /// One answer is read once. An answer recovered after a relaunch still reports the draft
@@ -1337,6 +1367,10 @@ mod development {
             let mut poll = SharedPoll::default();
             self.pending_operation
                 .clone_from(&snapshot.pending_operation);
+            if self.connection_error != snapshot.error {
+                self.connection_error = snapshot.error;
+                poll.changed = true;
+            }
             if self.connected != snapshot.connected || self.pending != snapshot.pending {
                 self.connected = snapshot.connected;
                 self.pending = snapshot.pending;
@@ -1375,9 +1409,16 @@ mod development {
                 .inventory
                 .filter(|inventory| self.revision != Some(inventory.revision))
             {
-                if let Err(error) = self.attachments.reconcile(&inventory) {
-                    self.attachment_error = Some(error);
-                    return poll;
+                // A new client's first view presents the server's first Workspace. Retained
+                // choices, including a deliberately empty view, always win.
+                let initial = inventory.workspaces.first().map(|workspace| workspace.id);
+                match self.attachments.initialize(&inventory, initial) {
+                    Ok(true) => poll.initial = initial,
+                    Ok(false) => {}
+                    Err(error) => {
+                        self.attachment_error = Some(error);
+                        return poll;
+                    }
                 }
                 if let Some(accepted) = &poll.accepted
                     && matches!(accepted.mutation, Mutation::CreateWorkspace { .. })
@@ -1511,9 +1552,13 @@ mod development {
             plan
         }
 
-        /// Asks the server for another shared Workspace.
-        pub(crate) fn create_workspace(&mut self, name: String) -> SharedSubmission {
-            self.ask(Mutation::CreateWorkspace { name })
+        /// Asks the server for a Workspace, pinned at `directory` with its first Pane there.
+        pub(crate) fn create_workspace(
+            &mut self,
+            name: String,
+            directory: Option<PathBuf>,
+        ) -> SharedSubmission {
+            self.ask(Mutation::CreateWorkspace { name, directory })
         }
 
         /// Asks the server to rename a shared Workspace.
@@ -1602,7 +1647,8 @@ mod development {
         let workspace = match target {
             ServerCloseTarget::Pane { workspace, .. }
             | ServerCloseTarget::Tab { workspace, .. }
-            | ServerCloseTarget::Workspace { workspace } => workspace,
+            | ServerCloseTarget::Workspace { workspace }
+            | ServerCloseTarget::Worktree { workspace, .. } => workspace,
         };
         inventory
             .workspaces
@@ -1617,6 +1663,13 @@ mod development {
             match target {
                 ServerCloseTarget::Workspace { .. } => true,
                 ServerCloseTarget::Tab { tab: id, .. } => tab(id).is_some(),
+                ServerCloseTarget::Worktree { tab: id, .. } => tab(id).is_some_and(|anchor| {
+                    anchor.worktree.is_some()
+                        && workspace.tabs.iter().any(|tab| {
+                            tab.worktree != anchor.worktree
+                                || tab.worktree_repository != anchor.worktree_repository
+                        })
+                }),
                 ServerCloseTarget::Pane { tab: id, pane, .. } => {
                     tab(id).is_some_and(|tab| tab.panes.iter().any(|p| p.id == pane))
                 }
@@ -1633,6 +1686,7 @@ mod development {
         target: ServerCloseTarget,
         confirmation: ServerCloseConfirmation,
         scope: SharedCloseScope,
+        tabs: usize,
         /// The Workspace's name as the server published it.
         workspace: String,
     }
@@ -1643,6 +1697,7 @@ mod development {
         Pane,
         Tab,
         Workspace,
+        Worktree,
     }
 
     impl SharedCloseApproval {
@@ -1660,6 +1715,7 @@ mod development {
             match self.scope {
                 SharedCloseScope::Pane => "Close Pane?".to_owned(),
                 SharedCloseScope::Tab => "Close Tab?".to_owned(),
+                SharedCloseScope::Worktree => "Close Tabs?".to_owned(),
                 SharedCloseScope::Workspace => {
                     format!("Kill Workspace \u{201C}{}\u{201D}?", self.workspace)
                 }
@@ -1670,6 +1726,7 @@ mod development {
             match self.scope {
                 SharedCloseScope::Pane => "Close Pane",
                 SharedCloseScope::Tab => "Close Tab",
+                SharedCloseScope::Worktree => "Close Tabs",
                 SharedCloseScope::Workspace => "Kill Workspace",
             }
         }
@@ -1682,6 +1739,17 @@ mod development {
                 SharedCloseScope::Workspace => {
                     "Its Tabs and Panes are permanently removed for every client.".to_owned()
                 }
+                SharedCloseScope::Worktree => match (self.tabs, panes) {
+                    (1, 1) => {
+                        "The Worktree\u{2019}s Tab and its Pane close for every client.".to_owned()
+                    }
+                    (1, panes) => format!(
+                        "The Worktree\u{2019}s Tab and its {panes} Panes close for every client."
+                    ),
+                    (tabs, panes) => format!(
+                        "The Worktree\u{2019}s {tabs} Tabs and their {panes} Panes close for every client."
+                    ),
+                },
                 _ if self.confirmation.removes_workspace => format!(
                     "This is the only {} in \u{201C}{}\u{201D}, so the Workspace is permanently \
                      removed for every client.",
@@ -1717,6 +1785,11 @@ mod development {
 
         /// What a removed Workspace leaves behind, when the close removes one.
         pub(crate) fn detail(&self) -> Option<&'static str> {
+            if self.scope == SharedCloseScope::Worktree {
+                return Some(
+                    "The Worktree, its files, and its branch are kept. Tabs outside this Worktree keep running.",
+                );
+            }
             self.confirmation.removes_workspace.then_some(
                 "Other Workspaces keep running. Repository files and Git Worktree directories \
                  stay on disk. Neither a server restart nor another client can bring this \
@@ -1735,6 +1808,7 @@ mod development {
             match self.scope {
                 SharedCloseScope::Pane => "Pane Already Closed",
                 SharedCloseScope::Tab => "Tab Already Closed",
+                SharedCloseScope::Worktree => "Tabs Already Closed",
                 SharedCloseScope::Workspace => "Workspace Already Removed",
             }
         }
@@ -1746,6 +1820,7 @@ mod development {
         match target {
             ServerCloseTarget::Pane { .. } => "Pane Changed on Another Client",
             ServerCloseTarget::Tab { .. } => "Tab Changed on Another Client",
+            ServerCloseTarget::Worktree { .. } => "Tabs Changed on Another Client",
             ServerCloseTarget::Workspace { .. } => "Workspace Changed on Another Client",
         }
     }
@@ -1799,6 +1874,9 @@ mod development {
         /// The server accepted an edit this process asked for, so the window opens what it
         /// created. An accepted edit from another client is absent here.
         pub(crate) accepted: Option<SharedAcceptance>,
+        /// The Workspace this client chose as its first-ever view just now. Opening it is the
+        /// person's first use, so the window opens its Active Tab for them.
+        pub(crate) initial: Option<Id>,
     }
 
     /// One accepted edit this process asked for, and the server identity it created or changed.
@@ -1926,6 +2004,7 @@ mod development {
         /// Scripted Pane subscriptions over one local Terminal Session factory, so a test drives
         /// the real binding and reconciliation without a server.
         pub(crate) struct ScriptedPanes {
+            local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
             session_factory: crate::terminal::WorkspaceTerminalSessionFactory,
             panes: Mutex<std::collections::BTreeMap<super::Id, std::sync::Arc<ScriptedPane>>>,
         }
@@ -1935,6 +2014,7 @@ mod development {
                 session_factory: crate::terminal::WorkspaceTerminalSessionFactory,
             ) -> std::rc::Rc<Self> {
                 std::rc::Rc::new(Self {
+                    local_files: crate::runtime::local_filesystem(),
                     session_factory,
                     panes: Mutex::new(std::collections::BTreeMap::new()),
                 })
@@ -1953,6 +2033,12 @@ mod development {
         }
 
         impl super::SharedPaneOpener for ScriptedPanes {
+            fn local_filesystem(
+                &self,
+            ) -> Option<&crate::platform::local_filesystem::LocalFilesystemAuthority> {
+                Some(&self.local_files)
+            }
+
             fn open(&self, pane: super::Id) -> Option<super::SharedPaneSubscription> {
                 let connection = ScriptedPane::new();
                 self.panes
@@ -1996,6 +2082,10 @@ mod development {
 
             pub(crate) fn set_connected(&self, connected: bool) {
                 self.snapshot.lock().expect("snapshot").connected = connected;
+            }
+
+            pub(crate) fn set_error(&self, error: spaceterm_server::ServerError) {
+                self.snapshot.lock().expect("snapshot").error = Some(error);
             }
 
             /// Answers the last submitted edit with `outcome`.

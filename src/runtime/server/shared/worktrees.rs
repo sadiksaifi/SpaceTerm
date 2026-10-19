@@ -18,6 +18,44 @@ use std::{
 mod preparing;
 mod reads;
 
+/// The old local factory's scoped launch rule, validated on the owning server.
+pub(super) fn starting_directory(
+    workspace: &spaceterm_server::hierarchy::Workspace,
+    source: Option<Id>,
+    root: &Path,
+) -> Result<PathBuf, Refusal> {
+    let source = source
+        .map(|id| {
+            workspace
+                .tabs
+                .iter()
+                .flat_map(|t| &t.panes)
+                .find(|p| p.id == id)
+                .ok_or(Refusal::Missing)
+        })
+        .transpose()?;
+    let filesystem = local_filesystem();
+    if let Some(pin) = &workspace.pinned_directory {
+        filesystem
+            .validate_directory(pin)
+            .map_err(|_| Refusal::DirectoryUnavailable)?;
+    }
+    let start = workspace
+        .pinned_directory
+        .as_deref()
+        .filter(|pin| filesystem.physically_contains(root, pin))
+        .or_else(|| {
+            source
+                .map(crate::runtime::server::repositories::pane_directory)
+                .filter(|cwd| filesystem.physically_contains(root, cwd))
+        })
+        .unwrap_or(root);
+    filesystem
+        .validate_directory(start)
+        .map(|directory| directory.path().to_owned())
+        .map_err(|_| Refusal::DirectoryUnavailable)
+}
+
 enum JobResult {
     Prepared(Result<preparing::Prepared, Error>),
     Finished(Result<Option<PathBuf>, Error>),
@@ -313,10 +351,19 @@ impl SharedWorkspaceHost {
         match prepared {
             preparing::Prepared::Open {
                 workspace,
+                source,
                 root,
                 path,
             } => {
-                let outcome = match next.add_worktree_tab(device, workspace, root, path) {
+                let selected = next
+                    .inventory
+                    .workspaces
+                    .iter()
+                    .find(|w| w.id == workspace)
+                    .ok_or(Refusal::Missing)
+                    .and_then(|w| starting_directory(w, source, &path))
+                    .and_then(|start| next.add_worktree_tab(device, workspace, root, path, start));
+                let outcome = match selected {
                     Ok(target) => Outcome::Accepted { target },
                     Err(_) => Outcome::WorktreeFailed(Error::Unavailable),
                 };
@@ -341,7 +388,13 @@ impl SharedWorkspaceHost {
                     {
                         // Reserve capacity before Git starts, without publishing a speculative Tab.
                         next.clone()
-                            .add_worktree_tab(device, *workspace, root.clone(), path.clone())
+                            .add_worktree_tab(
+                                device,
+                                *workspace,
+                                root.clone(),
+                                path.clone(),
+                                path.clone(),
+                            )
                             .map_err(|_| Error::Unavailable)?;
                     }
                     Ok(())
@@ -420,9 +473,10 @@ impl SharedWorkspaceHost {
                     workspace, root, ..
                 }) = operation
                 {
-                    match path
-                        .and_then(|path| next.add_worktree_tab(device, workspace, root, path).ok())
-                    {
+                    match path.and_then(|path| {
+                        next.add_worktree_tab(device, workspace, root, path.clone(), path)
+                            .ok()
+                    }) {
                         Some(target) => Outcome::Accepted { target },
                         None => Outcome::WorktreeFailed(Error::Interrupted),
                     }
@@ -441,7 +495,6 @@ impl SharedWorkspaceHost {
 
 fn removal_error(error: WorktreeRemoveError) -> Error {
     match error {
-        WorktreeRemoveError::HoldsPinnedDirectory => Error::Pinned,
         WorktreeRemoveError::Replaced | WorktreeRemoveError::Changed => Error::Changed,
         _ => Error::Unavailable,
     }
@@ -454,6 +507,282 @@ mod tests {
         repository_tests::{GitFixture, finish_write, git_facts, review_removal},
         tests::{create_shared, host, shared_inventory, size},
     };
+
+    #[test]
+    fn splitting_a_worktree_pane_keeps_its_scope_when_the_pin_or_cwd_is_outside() {
+        use spaceterm_server::hierarchy::Axis;
+        let git = GitFixture::new();
+        let tree = git.0.join("linked");
+        git.git(&["worktree", "add", "-b", "feature", tree.to_str().unwrap()]);
+        let mut prototype = host();
+        prototype.directory = git.0.clone();
+        let mut host = SharedWorkspaceHost::new(prototype);
+        let workspace = create_shared(&mut host, 1);
+        assert!(
+            matches!(host.request([1; 32], [1; 32], Request::Mutate { sequence: 2, mutation: Mutation::PinWorkspace { workspace, version: 0, directory: Some(git.0.clone()) } }), Reply::Outcome(record) if matches!(record.outcome, Outcome::Accepted { .. }))
+        );
+        let Outcome::Accepted { target: tab } = finish_write(
+            &mut host,
+            3,
+            Operation::OpenTab {
+                workspace,
+                root: git.0.clone(),
+                path: tree.clone(),
+                source: None,
+            },
+        ) else {
+            panic!("Worktree Tab");
+        };
+        let source = host.state.inventory.workspaces[0]
+            .tabs
+            .iter()
+            .find(|t| t.id == tab)
+            .unwrap()
+            .root_pane;
+        host.state.confirm_directory(source, git.0.clone());
+        let Reply::Outcome(record) = host.request(
+            [1; 32],
+            [1; 32],
+            Request::Mutate {
+                sequence: 4,
+                mutation: Mutation::SplitPane {
+                    workspace,
+                    tab,
+                    source,
+                    axis: Axis::Right,
+                },
+            },
+        ) else {
+            panic!("split");
+        };
+        let Outcome::Accepted { target: pane } = record.outcome else {
+            panic!("accepted split");
+        };
+        assert_eq!(host.state.pane(pane).unwrap().2.starting_directory, tree);
+        assert!(
+            host.panes.is_empty(),
+            "membership creates no implicit shell"
+        );
+        let Reply::Attached { lease } = host.request(
+            [1; 32],
+            [2; 32],
+            Request::SelectPane {
+                pane,
+                explicit: true,
+                size: PaneSize {
+                    columns: 240,
+                    ..size()
+                },
+                style: None,
+            },
+        ) else {
+            panic!("explicit split shell");
+        };
+        crate::runtime::server::tests::command(
+            &mut host,
+            2,
+            lease,
+            "printf '\\nSPLIT-CWD:%s\\n' \"$PWD\"\n",
+        );
+        crate::runtime::server::tests::await_text(
+            &mut host,
+            2,
+            lease,
+            &format!("SPLIT-CWD:{}", tree.display()),
+        );
+        let pin = git.0.join("lost-pin");
+        std::fs::create_dir(&pin).unwrap();
+        assert!(matches!(host.request([1; 32], [1; 32], Request::Mutate {
+            sequence: 5, mutation: Mutation::PinWorkspace { workspace, version: 1, directory: Some(pin.clone()) },
+        }), Reply::Outcome(record) if matches!(record.outcome, Outcome::Accepted { .. })));
+        std::fs::remove_dir(&pin).unwrap();
+        let mutation = Mutation::SplitPane {
+            workspace,
+            tab,
+            source,
+            axis: Axis::Down,
+        };
+        assert!(
+            matches!(host.request([1; 32], [1; 32], Request::Mutate { sequence: 6, mutation: mutation.clone() }), Reply::Outcome(record) if record.outcome == Outcome::Invalid)
+        );
+        std::fs::create_dir(&pin).unwrap();
+        assert!(
+            matches!(host.request([1; 32], [1; 32], Request::Mutate { sequence: 6, mutation: mutation.clone() }), Reply::Outcome(record) if record.outcome == Outcome::Invalid),
+            "repair cannot change the original outcome"
+        );
+        assert!(
+            matches!(host.request([1; 32], [1; 32], Request::Mutate { sequence: 7, mutation }), Reply::Outcome(record) if matches!(record.outcome, Outcome::Accepted { .. })),
+            "a fresh edit can proceed"
+        );
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn confirmed_worktree_close_ends_its_shell_and_preserves_git_and_the_outside_tab() {
+        use crate::runtime::server::tests::{await_text, command};
+        use spaceterm_server::hierarchy::CloseTarget;
+        let git = GitFixture::new();
+        let tree = git.0.join("linked");
+        git.git(&["worktree", "add", "-b", "feature", tree.to_str().unwrap()]);
+        std::fs::write(tree.join("kept"), b"kept").unwrap();
+        let mut prototype = host();
+        prototype.directory = git.0.clone();
+        let mut host = SharedWorkspaceHost::new(prototype);
+        let workspace = create_shared(&mut host, 1);
+        let outside = host.state.inventory.workspaces[0].root_tab;
+        let Outcome::Accepted { target: tab } = finish_write(
+            &mut host,
+            2,
+            Operation::OpenTab {
+                workspace,
+                root: git.0.clone(),
+                path: tree.clone(),
+                source: None,
+            },
+        ) else {
+            panic!("open Worktree");
+        };
+        assert!(host.panes.is_empty(), "creating membership starts no shell");
+        let pane = host.state.inventory.workspaces[0]
+            .tabs
+            .iter()
+            .find(|t| t.id == tab)
+            .unwrap()
+            .root_pane;
+        let Reply::Attached { lease } = host.request(
+            [1; 32],
+            [2; 32],
+            Request::SelectPane {
+                pane,
+                explicit: true,
+                size: PaneSize {
+                    columns: 240,
+                    ..size()
+                },
+                style: None,
+            },
+        ) else {
+            panic!("explicit shell");
+        };
+        command(
+            &mut host,
+            2,
+            lease,
+            "printf '\\nSOURCE-CWD:%s\\n' \"$PWD\"\n",
+        );
+        await_text(
+            &mut host,
+            2,
+            lease,
+            &format!("SOURCE-CWD:{}", tree.display()),
+        );
+        let target = CloseTarget::Worktree { workspace, tab };
+        let confirmation = shared_inventory(&mut host)
+            .close_confirmation(target)
+            .unwrap();
+        assert!(confirmation.panes.iter().any(|pane| pane.session.is_some()));
+        assert!(
+            matches!(host.request([3; 32], [3; 32], Request::Mutate { sequence: 1, mutation: Mutation::Close { target, confirmation } }), Reply::Outcome(record) if record.outcome == Outcome::Accepted { target: workspace })
+        );
+        assert_eq!(
+            host.state.inventory.workspaces[0]
+                .tabs
+                .iter()
+                .map(|tab| tab.id)
+                .collect::<Vec<_>>(),
+            [outside]
+        );
+        assert_eq!(std::fs::read(tree.join("kept")).unwrap(), b"kept");
+        git.git(&["show-ref", "--verify", "refs/heads/feature"]);
+        git.git(&["worktree", "list", "--porcelain"]);
+        assert!(
+            host.panes
+                .get(&pane)
+                .is_none_or(|host| host.pane.as_ref().is_none_or(|pane| pane.ended))
+        );
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn worktree_tabs_use_the_source_directory_and_contained_pin_before_the_root() {
+        let git = GitFixture::new();
+        let tree = git.0.join("linked");
+        git.git(&["worktree", "add", "-b", "feature", tree.to_str().unwrap()]);
+        let cwd = tree.join("src");
+        let pin = tree.join("pinned");
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::create_dir(&pin).unwrap();
+        let mut prototype = host();
+        prototype.directory = git.0.clone();
+        let mut host = SharedWorkspaceHost::new(prototype);
+        let workspace = create_shared(&mut host, 1);
+        let source = host.state.inventory.workspaces[0].tabs[0].root_pane;
+        host.state.confirm_directory(source, cwd.clone());
+        for (index, (pinned, expected)) in [
+            (None, cwd.clone()),
+            (Some(pin.clone()), pin),
+            (Some(git.0.clone()), cwd),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let pin_sequence = 2 + index as u64 * 2;
+            assert!(matches!(host.request([1; 32], [1; 32], Request::Mutate {
+                sequence: pin_sequence,
+                mutation: Mutation::PinWorkspace { workspace, version: index as u64, directory: pinned },
+            }), Reply::Outcome(record) if matches!(record.outcome, Outcome::Accepted { .. })));
+            let Outcome::Accepted { target } = finish_write(
+                &mut host,
+                pin_sequence + 1,
+                Operation::OpenTab {
+                    workspace,
+                    root: git.0.clone(),
+                    path: tree.clone(),
+                    source: Some(source),
+                },
+            ) else {
+                panic!("open Worktree Tab");
+            };
+            let workspace = &host.state.inventory.workspaces[0];
+            let tab = workspace.tabs.iter().find(|tab| tab.id == target).unwrap();
+            assert_eq!(
+                (tab.worktree.as_ref(), &tab.panes[0].starting_directory),
+                (Some(&tree), &expected)
+            );
+            if index == 0 {
+                let pane = tab.root_pane;
+                assert!(host.panes.is_empty(), "New Tab starts no implicit shell");
+                let Reply::Attached { lease } = host.request(
+                    [1; 32],
+                    [2; 32],
+                    Request::SelectPane {
+                        pane,
+                        explicit: true,
+                        size: PaneSize {
+                            columns: 240,
+                            ..size()
+                        },
+                        style: None,
+                    },
+                ) else {
+                    panic!("explicit new Tab shell");
+                };
+                crate::runtime::server::tests::command(
+                    &mut host,
+                    2,
+                    lease,
+                    "printf '\\nTAB-CWD:%s\\n' \"$PWD\"\n",
+                );
+                crate::runtime::server::tests::await_text(
+                    &mut host,
+                    2,
+                    lease,
+                    &format!("TAB-CWD:{}", expected.display()),
+                );
+            }
+        }
+        host.shutdown().unwrap();
+    }
 
     struct FilterGate(PathBuf);
     impl Drop for FilterGate {
@@ -569,6 +898,7 @@ mod tests {
         };
         let other = Mutation::CreateWorkspace {
             name: "Other client".into(),
+            directory: None,
         };
         assert!(matches!(
             host.request(

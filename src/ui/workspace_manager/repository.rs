@@ -8,8 +8,8 @@ use gpui::{App, Context, Entity, Subscription};
 
 use super::WorkspaceManager;
 use crate::domain::{
-    DirectoryAvailability, PinnedDirectory, RemoteConnectionPhase, RemoteConnectionState,
-    WorkspaceEntry, WorkspaceId, WorkspaceLocation, WorktreeId,
+    PinnedDirectory, RemoteConnectionPhase, RemoteConnectionState, WorkspaceEntry, WorkspaceId,
+    WorkspaceLocation,
 };
 use crate::repository_status::presentation::{SidebarBadge, chip_tooltip_line};
 use crate::repository_status::scheduler::{Interest, InterestId, SourceDirectory};
@@ -29,7 +29,6 @@ pub(super) struct SidebarRepositories {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) enum RowKey {
     Workspace(WorkspaceId),
-    Worktree(WorkspaceId, WorktreeId),
 }
 
 struct RowInterest {
@@ -55,7 +54,7 @@ impl WorkspaceManager {
         let Some(store) = InstalledRepositoryStatus::store(cx) else {
             return;
         };
-        let mut wanted: BTreeMap<RowKey, RowFacts> = self
+        let wanted: BTreeMap<RowKey, RowFacts> = self
             .workspaces
             .iter()
             .filter_map(|workspace| {
@@ -65,7 +64,6 @@ impl WorkspaceManager {
                 ))
             })
             .collect();
-        wanted.extend(self.worktree_row_facts(cx));
         let gone: Vec<RowKey> = self
             .sidebar_repositories
             .rows
@@ -124,25 +122,6 @@ impl WorkspaceManager {
         cx: &App,
     ) -> Option<SidebarBadge> {
         SidebarBadge::from_view(&self.row_view(workspace_id, cx)?)
-    }
-
-    /// What a Worktree row's second line shows after its directory, once its status is read.
-    pub(super) fn worktree_badge(
-        &self,
-        workspace_id: WorkspaceId,
-        worktree_id: WorktreeId,
-        cx: &App,
-    ) -> Option<SidebarBadge> {
-        #[cfg(feature = "developer-tools")]
-        if let Some(view) = crate::ui::developer_workbench::repository_view_fixture(cx) {
-            return SidebarBadge::from_view(&view);
-        }
-        let _ = cx;
-        SidebarBadge::from_view(
-            self.sidebar_repositories
-                .views
-                .get(&RowKey::Worktree(workspace_id, worktree_id))?,
-        )
     }
 
     /// The collapsed title-bar chip's tooltip line for a Workspace.
@@ -248,8 +227,7 @@ impl WorkspaceManager {
         Some(RowFacts {
             machine,
             directory,
-            available: connected
-                && matches!(workspace.availability(), DirectoryAvailability::Available),
+            available: connected,
             visible: true,
         })
     }

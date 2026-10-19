@@ -23,17 +23,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let name = std::env::var("SPACETERM_DEVELOPMENT_CLIENT").unwrap_or("restore-smoke".into());
     let client = LocalServer::for_development_client(&name, major)?;
     require_idle(&client)?;
-    // Setup locates its sibling binary. Stage the built host beside this example, including
-    // when Cargo uses a shared target directory outside the working tree.
-    let directory = std::env::current_exe()?
-        .parent()
-        .ok_or("example directory")?
-        .to_owned();
-    let companion = directory.join("spaceterm-server");
-    if !companion.try_exists()? {
-        std::os::unix::fs::symlink("../spaceterm-server", &companion)?;
-    }
-    client.setup_and_start()?;
+    client.setup()?;
+    let mut host = Server::start()?;
     let mut setup = connect(&client)?;
     match setup.exchange(&Request::Select {
         create: false,
@@ -49,7 +40,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     setup.exchange(&Request::Shutdown)?;
     drop(setup);
-    std::thread::sleep(Duration::from_millis(200));
+    host.0.wait()?;
     #[cfg(target_os = "linux")]
     let uncertain_ids = faults::exercise(&client)?;
     let mut host = Server::start()?;

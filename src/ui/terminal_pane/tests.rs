@@ -832,6 +832,13 @@ fn stale_guarded_written_paste_does_not_clear_newer_attention(cx: &mut TestAppCo
     );
 }
 
+/// Sessions with this client's file authority, as a same-machine server grants local Panes.
+fn same_machine_sessions(records: TestTerminalSessionRecords) -> TestTerminalSessionFactory {
+    TestTerminalSessionFactory::new(records).with_client_filesystem(
+        crate::platform::local_filesystem::LocalFilesystemAuthority::testing(),
+    )
+}
+
 fn connected_terminal_pane(
     cx: &mut TestAppContext,
 ) -> (
@@ -840,7 +847,7 @@ fn connected_terminal_pane(
     TestTerminalSessionRecords,
 ) {
     let records = TestTerminalSessionRecords::default();
-    let (pane, cx) = focused_pane(cx, TestTerminalSessionFactory::new(records.clone()));
+    let (pane, cx) = focused_pane(cx, same_machine_sessions(records.clone()));
     (pane, cx, records)
 }
 
@@ -1587,7 +1594,7 @@ fn clearing_a_server_presentation_forgets_the_former_screen_and_text(cx: &mut Te
         Rc::new(
             TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
                 .server_backed()
-                .with_fallback_title("Development Pane"),
+                .with_fallback_title("Terminal"),
         ),
         test_local_directory(PathBuf::from("/tmp/spaceterm-terminal-pane-test")),
     );
@@ -1610,7 +1617,7 @@ fn clearing_a_server_presentation_forgets_the_former_screen_and_text(cx: &mut Te
         assert!(pane.screen.rows.is_empty());
         assert!(pane.last_valid_screen.rows.is_empty());
         assert!(pane.accessibility.text().is_empty());
-        assert_eq!(pane.title().as_ref(), "Development Pane");
+        assert_eq!(pane.title().as_ref(), "Terminal");
         // The connection published this model before the takeover; it arrives afterwards.
         pane.handle_session_accessibility(
             epoch,
@@ -2386,7 +2393,7 @@ fn terminal_pane_with_session_options(
     cx.update(crate::ui::init).unwrap();
     let records = TestTerminalSessionRecords::default();
     let session_factory = WorkspaceTerminalSessionFactory::new_local(
-        Rc::new(configure(TestTerminalSessionFactory::new(records.clone()))),
+        Rc::new(configure(same_machine_sessions(records.clone()))),
         test_local_directory(std::env::temp_dir()),
     );
     let (pane, cx) = cx.add_window_view(|window, cx| {
@@ -9708,7 +9715,7 @@ mod permission_requests {
                 if local_authority {
                     sessions.with_client_filesystem(crate::platform::runtime_local_filesystem())
                 } else {
-                    sessions
+                    sessions.without_client_filesystem()
                 }
             });
             let access = install_setup(

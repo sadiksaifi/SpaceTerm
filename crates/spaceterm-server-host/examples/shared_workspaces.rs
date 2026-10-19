@@ -71,6 +71,7 @@ fn attachment_workflow(a: &LocalServer, b: &LocalServer) -> Result<(), Box<dyn E
         &mut first,
         Mutation::CreateWorkspace {
             name: "Attachments smoke".into(),
+            directory: None,
         },
     )?;
     let current = inventory(&mut first)?.0;
@@ -160,18 +161,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let a = LocalServer::for_development_client("shared-smoke-a", major)?;
     let b = LocalServer::for_development_client("shared-smoke-b", major)?;
     require_idle(&a)?;
-    let directory = std::env::current_exe()?
-        .parent()
-        .ok_or("example directory")?
-        .to_owned();
-    let companion = directory.join("spaceterm-server");
-    if !companion.try_exists()? {
-        std::os::unix::fs::symlink("../spaceterm-server", &companion)?;
-    }
-    a.setup_and_start()?;
-    b.setup_and_start()?;
-    connect(&a)?.exchange(&Request::Shutdown)?;
-    std::thread::sleep(Duration::from_millis(200));
+    a.setup()?;
+    b.setup()?;
     let mut host = Server::start()?;
     attachment_workflow(&a, &b)?;
     let mut first = connect(&a)?;
@@ -180,6 +171,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &mut first,
         Mutation::CreateWorkspace {
             name: "Shared smoke".into(),
+            directory: None,
         },
     )?;
     let (published, _) = inventory(&mut second)?;
@@ -270,7 +262,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
     )?;
     let (_, sequence) = inventory(&mut first)?;
-    let creation = Mutation::CreateTab { workspace };
+    let creation = Mutation::CreateTab {
+        workspace,
+        source: None,
+    };
     // Discard the result at the application boundary and reconnect with its original identity.
     first.exchange(&Request::Mutate {
         sequence,
@@ -363,6 +358,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &mut first,
         Mutation::CreateWorkspace {
             name: "Survivor".into(),
+            directory: None,
         },
     )?;
     let current = inventory(&mut first)?.0;
@@ -448,7 +444,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     let (_, sequence) = inventory(&mut first)?;
     assert!(
-        matches!(first.exchange(&Request::Mutate { sequence, mutation: Mutation::CreateTab { workspace } })?, Reply::Outcome(o) if o.outcome == Outcome::Missing)
+        matches!(first.exchange(&Request::Mutate { sequence, mutation: Mutation::CreateTab { workspace, source: None } })?, Reply::Outcome(o) if o.outcome == Outcome::Missing)
     );
     first.exchange(&Request::Acknowledge { sequence })?;
     assert!(matches!(

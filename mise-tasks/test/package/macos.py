@@ -14,6 +14,7 @@ from pathlib import Path
 
 from spaceterm_tasks import ROOT
 from tests.macos_signing_fixture import certificate
+from tests.server_artifact_fixture import configure_trust, prepare
 
 
 class PackageTests(unittest.TestCase):
@@ -43,6 +44,7 @@ class PackageTests(unittest.TestCase):
                 config.read_text(),
             )
         )
+        configure_trust(self.root)
         # Release packaging requires a clean Git checkout.
         (self.root / ".gitignore").write_text("/target/\n/dist/\n__pycache__/\n")
         for arguments in (("init", "-q"), ("add", "-A"), ("commit", "-qm", "fixture")):
@@ -88,8 +90,9 @@ Path(os.environ["BUILD_RECORD"]).write_text(json.dumps({{
     ).stdout,
 }}))
 binary = sys.argv[sys.argv.index("--bin") + 1]
+assert binary == "spaceterm", "the desktop builds no sibling server executable"
 print(json.dumps({{"reason": "compiler-artifact", "target": {{"name": binary}},
-                  "executable": os.environ["BUILD_SERVER" if binary == "spaceterm-server" else "BUILD_EXECUTABLE"]}}))
+                  "executable": os.environ["BUILD_EXECUTABLE"]}}))
 sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
 """)
         (self.bin / "cargo").chmod(0o755)
@@ -104,9 +107,6 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         }
         self.artifact = self.root / "target/aarch64-apple-darwin/release/spaceterm"
         self.env["BUILD_EXECUTABLE"] = str(self.artifact)
-        self.server = self.artifact.with_name("spaceterm-server")
-        self.env["BUILD_SERVER"] = str(self.server)
-        self.compile_executable(self.server, "SpaceTerm Server")
         self.stale = self.root / "target/release/spaceterm"
         self.compile_executable(self.stale, "SpaceTerm Development")
 
@@ -154,6 +154,7 @@ int main(int argc, char **argv) {{
         )
 
     def package(self, release_tag=None):
+        prepare(self.root, self.env, release_tag, self.fingerprint, self.credentials)
         if release_tag:
             return self.task("release/package/macos.py", release_tag)
         return self.task("preflight/package/macos.py")
@@ -173,8 +174,16 @@ int main(int argc, char **argv) {{
         self.assertEqual(self.executable_uuid(bundled), self.executable_uuid(self.artifact))
         self.assertNotEqual(self.executable_uuid(bundled), self.executable_uuid(self.stale))
         server = bundled.with_name("spaceterm-server")
-        self.assertTrue(os.access(server, os.X_OK))
-        self.assertEqual(self.executable_uuid(server), self.executable_uuid(self.server))
+        self.assertFalse(server.exists())
+        artifact = bundled.parent.parent / "Resources/server-artifact"
+        self.assertEqual(
+            (artifact / "artifact.tar.gz").read_bytes(),
+            Path(self.env["SPACETERM_SERVER_ARCHIVE"]).read_bytes(),
+        )
+        self.assertEqual(
+            (artifact / "artifact.sig").read_bytes(),
+            Path(self.env["SPACETERM_SERVER_SIGNATURE"]).read_bytes(),
+        )
         record = json.loads(self.record.read_text())
         self.assertIn("--message-format=json-render-diagnostics", record["arguments"])
         self.assertEqual(record["packaged"], "1")
@@ -201,10 +210,7 @@ int main(int argc, char **argv) {{
         bundled = self.root / "dist/SpaceTerm.app/Contents/MacOS/SpaceTerm"
         self.assertEqual(self.executable_uuid(bundled), self.executable_uuid(self.artifact))
         self.assertNotEqual(self.executable_uuid(bundled), self.executable_uuid(self.stale))
-        self.assertEqual(
-            self.executable_uuid(bundled.with_name("spaceterm-server")),
-            self.executable_uuid(self.server),
-        )
+        self.assertFalse(bundled.with_name("spaceterm-server").exists())
         self.assertEqual(json.loads(self.record.read_text())["release_tag"], "v0.0.1")
         self.assertEqual(json.loads(self.record.read_text())["private_inputs"], [])
         self.assertFalse(json.loads(self.record.read_text())["signing_available"])

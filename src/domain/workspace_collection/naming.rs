@@ -86,7 +86,10 @@ mod tests {
 
     #[test]
     fn remote_home_names_should_ignore_trailing_separators_in_live_and_pinned_directories() {
-        let mut workspaces = WorkspaceCollection::new_local(validated("/home/local", 0), |_, _| ());
+        let mut workspaces = crate::domain::workspace_collection::tests::local_collection(
+            validated("/home/local", 0),
+            |_, _| (),
+        );
         let home = RemoteDirectoryIdentity::new("/home/remote".into()).unwrap();
         let id = workspaces
             .create_remote_workspace(
@@ -134,17 +137,14 @@ mod tests {
 
     #[test]
     fn default_should_be_reused_without_renumbering_survivors() {
-        let mut workspaces = WorkspaceCollection::new_local(validated("/home/test", 0), |_, _| ());
+        let mut workspaces = crate::domain::workspace_collection::tests::local_collection(
+            validated("/home/test", 0),
+            |_, _| (),
+        );
         let second = workspaces
             .create_local_workspace(validated("/home/test", 0), |_, _| ())
             .unwrap();
-        workspaces
-            .close_workspace_with_local_replacement(
-                WorkspaceId::new(1),
-                validated("/home/test", 0),
-                |_, _| (),
-            )
-            .unwrap();
+        workspaces.remove_workspace(WorkspaceId::new(1)).unwrap();
         let third = workspaces
             .create_local_workspace(validated("/home/test", 0), |_, _| ())
             .unwrap();
@@ -159,7 +159,10 @@ mod tests {
 
     #[test]
     fn automatic_name_should_follow_directory_and_return_to_an_available_default() {
-        let mut workspaces = WorkspaceCollection::new_local(validated("/home/test", 0), |_, _| ());
+        let mut workspaces = crate::domain::workspace_collection::tests::local_collection(
+            validated("/home/test", 0),
+            |_, _| (),
+        );
         let first = workspaces.active_id();
         workspaces
             .update_automatic_directory(
@@ -189,7 +192,10 @@ mod tests {
 
     #[test]
     fn automatic_directory_should_reject_cross_machine_values_without_mutation() {
-        let mut workspaces = WorkspaceCollection::new_local(validated("/home/test", 0), |_, _| ());
+        let mut workspaces = crate::domain::workspace_collection::tests::local_collection(
+            validated("/home/test", 0),
+            |_, _| (),
+        );
         let id = workspaces.active_id();
         assert_eq!(
             workspaces.update_automatic_directory(
@@ -206,7 +212,10 @@ mod tests {
 
     #[test]
     fn automatic_names_should_avoid_generated_suffixes_and_custom_names() {
-        let mut workspaces = WorkspaceCollection::new_local(validated("/home/test", 0), |_, _| ());
+        let mut workspaces = crate::domain::workspace_collection::tests::local_collection(
+            validated("/home/test", 0),
+            |_, _| (),
+        );
         for (index, directory) in ["/one/project", "/two/project", "/three/project (2)"]
             .into_iter()
             .enumerate()
@@ -239,7 +248,10 @@ mod tests {
 
     #[test]
     fn remote_name_should_match_local_basename_behavior() {
-        let mut workspaces = WorkspaceCollection::new_local(validated("/home/local", 0), |_, _| ());
+        let mut workspaces = crate::domain::workspace_collection::tests::local_collection(
+            validated("/home/local", 0),
+            |_, _| (),
+        );
         let home = RemoteDirectoryIdentity::new("/home/remote".into()).unwrap();
         let id = workspaces
             .create_remote_workspace(
@@ -260,7 +272,10 @@ mod tests {
 
     #[test]
     fn automatic_name_collisions_should_span_all_machines() {
-        let mut workspaces = WorkspaceCollection::new_local(validated("/home/local", 0), |_, _| ());
+        let mut workspaces = crate::domain::workspace_collection::tests::local_collection(
+            validated("/home/local", 0),
+            |_, _| (),
+        );
         let home = RemoteDirectoryIdentity::new("/home/remote".into()).unwrap();
         let mut create = |destination: &str| {
             workspaces

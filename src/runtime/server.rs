@@ -375,6 +375,7 @@ impl DevelopmentPaneHost {
                 accessibility: true,
                 directory_recovery: true,
                 worktree_writes: false,
+                workspace_policy: false,
             });
         }
         self.recover()?;
@@ -2590,6 +2591,7 @@ mod tests {
                 sequence,
                 mutation: Mutation::CreateWorkspace {
                     name: "Build".into(),
+                    directory: None,
                 },
             },
         ) else {
@@ -2725,7 +2727,10 @@ mod tests {
             [1; 32],
             Request::Mutate {
                 sequence: 2,
-                mutation: Mutation::CreateTab { workspace },
+                mutation: Mutation::CreateTab {
+                    workspace,
+                    source: None,
+                },
             },
         );
         assert!(
@@ -2758,7 +2763,10 @@ mod tests {
                     axis: Axis::Down,
                 }
             } else {
-                Mutation::CreateTab { workspace }
+                Mutation::CreateTab {
+                    workspace,
+                    source: None,
+                }
             };
             let Reply::Outcome(result) = host.request(
                 [1; 32],
@@ -2857,6 +2865,58 @@ mod tests {
     }
 
     #[test]
+    fn initial_shared_organization_is_prepared_once_without_starting_a_shell() {
+        let mut host = SharedWorkspaceHost::new(host());
+        host.prepare_initial_organization().unwrap();
+        let initial = shared_inventory(&mut host);
+        assert_eq!(initial.workspaces.len(), 1);
+        assert!(
+            initial
+                .close
+                .as_ref()
+                .unwrap()
+                .sessions
+                .iter()
+                .all(|p| p.session.is_none())
+        );
+        host.prepare_initial_organization().unwrap();
+        assert_eq!(shared_inventory(&mut host).workspaces, initial.workspaces);
+        host.shutdown().unwrap();
+    }
+
+    #[test]
+    fn legacy_opening_does_not_refill_deliberately_empty_shared_organization() {
+        use spaceterm_server::hierarchy::{CloseTarget, Mutation, Outcome};
+        let mut host = SharedWorkspaceHost::new(host());
+        let workspace = create_shared(&mut host, 1);
+        let confirmation = shared_inventory(&mut host)
+            .close_confirmation(CloseTarget::Workspace { workspace })
+            .unwrap();
+        assert!(matches!(host.request([1; 32], [1; 32], Request::Mutate {
+            sequence: 2,
+            mutation: Mutation::Close { target: CloseTarget::Workspace { workspace }, confirmation },
+        }), Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. })));
+        for create in [false, true] {
+            assert!(matches!(
+                host.request(
+                    [1; 32],
+                    [2; 32],
+                    Request::Attach {
+                        create,
+                        size: size(),
+                        resume: None,
+                        style: None,
+                    }
+                ),
+                Reply::Refused(Refusal::Missing)
+            ));
+        }
+        host.prepare_initial_organization().unwrap();
+        assert!(shared_inventory(&mut host).workspaces.is_empty());
+        host.shutdown().unwrap();
+    }
+
+    #[test]
     fn opening_the_legacy_pane_cannot_consume_a_shared_edits_operation_identity() {
         use spaceterm_server::hierarchy::{Mutation, Outcome};
         let mut host = SharedWorkspaceHost::new(host());
@@ -2879,7 +2939,7 @@ mod tests {
             Reply::Attached { .. }
         ));
         assert!(
-            matches!(host.request([1; 32], [1; 32], Request::Mutate { sequence: next_sequence, mutation: Mutation::CreateWorkspace { name: "Explicit creation".into() } }), Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. }))
+            matches!(host.request([1; 32], [1; 32], Request::Mutate { sequence: next_sequence, mutation: Mutation::CreateWorkspace { name: "Explicit creation".into(), directory: None } }), Reply::Outcome(result) if matches!(result.outcome, Outcome::Accepted { .. }))
         );
         host.shutdown().unwrap();
     }
@@ -2895,6 +2955,7 @@ mod tests {
                 sequence: 1,
                 mutation: Mutation::CreateWorkspace {
                     name: "Build".into(),
+                    directory: None,
                 },
             },
         );
@@ -2958,7 +3019,10 @@ mod tests {
             [4; 32],
             Request::Mutate {
                 sequence: 2,
-                mutation: Mutation::CreateTab { workspace: w.id },
+                mutation: Mutation::CreateTab {
+                    workspace: w.id,
+                    source: None,
+                },
             },
         ) else {
             panic!()
@@ -3380,6 +3444,7 @@ mod tests {
                 sequence: 1,
                 mutation: Mutation::CreateWorkspace {
                     name: "work".into(),
+                    directory: None,
                 },
             },
         );

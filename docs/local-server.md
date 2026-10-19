@@ -2,7 +2,17 @@
 
 The desktop and local server use your operating-system account's authority. They do not pair or open a credential store. Independent clients retain nonsecret identities so their views, attachments and Pane control survive relaunch. [ADR 0027](adr/0027-trust-paired-clients-equally.md) owns the trust decision.
 
-The current server workflow is explicit: open Settings > Servers, set up or start the server, then choose Use Shared Workspaces. Normal production startup remains with [#561](https://github.com/sadiksaifi/SpaceTerm/issues/561). The `server:*` mise tasks exercise the Development identity. Setup and status use `server:setup` and `server:status`; status never starts a server. A deliberately stopped service requires its explicit Start action.
+Normal desktop launch connects to the account-local server and presents its retained Workspaces in the main Workspace Window. Quitting the desktop leaves server-owned terminal programs running. A deliberately stopped server stays stopped until the person chooses Start. Settings > Servers retains service management. The `server:*` mise tasks exercise the Development identity; status never starts a server.
+
+## Server artifacts for desktop startup
+
+The desktop startup adapter in [src/local_startup.rs](../src/local_startup.rs) prepares or reuses the account service on a worker. Existing service policy selects the approved installation. Launch does not select a newer artifact or reverse Stop.
+
+Fresh service setup requires an independently signed server archive and signature for the desktop's exact application identity, target, commit and version. Packaged candidates carry this pair in their resources. Signing happens during candidate preparation, never during app launch.
+
+Source builds must supply both `SPACETERM_SERVER_ARCHIVE` and `SPACETERM_SERVER_SIGNATURE` for fresh service setup. Prepare the exact clean source revision with `mise run server:package --identity spaceterm-development` using the existing signing inputs, then point those variables at its archive and adjacent `.sig` file. An absent or incomplete pair refuses fresh setup. Existing approved service policy needs neither variable. A sibling `spaceterm-server` executable is never an approved retained service runtime.
+
+Linux first setup can return an authorization requirement before service registration. The caller must obtain explicit scoped linger authorization through the existing service control, then retry startup. Cancellation before service mutation preserves the previous policy; admitted service registration or Start is observed to completion without claiming rollback.
 
 ## Replacing incompatible development state
 
@@ -10,9 +20,9 @@ Unreleased local state is replaced directly. Quit the desktops and finish server
 
 Run `mise run server:reset --identity spaceterm-development` to preview the exact selected account paths and digest. The task selects only `identity.json` and `clients` beneath that account/build's server directory. Obtain explicit owner confirmation of the displayed scope and loss before repeating with `--confirm DIGEST`. A changed scope requires a fresh preview. `spaceterm-preflight` must be selected separately; the task never selects Release.
 
-The selected server identity, Workspace organization, completed outcomes, client identities, attachments, deferred releases and views leave active use. Their exact bytes remain in a private `reset-*` archive. Settings schema 7, serialized Commands, repository files, signed installations, service registration and Stop intent, SSH trust, credentials and signing keys remain outside the reset. Setup stays explicit. A stopped service stays stopped.
+The selected server identity, Workspace organization, completed outcomes, client identities, attachments, deferred releases and views leave active use. Their exact bytes remain in a private `reset-*` archive. Settings schema 7, serialized Commands, repository files, signed installations, service registration and Stop intent, SSH trust, credentials and signing keys remain outside the reset. A stopped service stays stopped.
 
-After reset, `mise run server:setup --state-only` recreates Development state without starting anything or reversing Stop. The CLI equivalent is `setup-state IDENTITY` in a client-enabled server build. Only the service's explicit Start can resume a stopped service. Its selected signed runtime must support the new state and protocol; reset never selects an update or weakens artifact verification.
+After reset, `mise run server:setup-state` recreates Development state without starting anything or reversing Stop. The CLI equivalent is `setup-state IDENTITY` in a client-enabled server build. Only the service's explicit Start can resume a stopped service. Its selected signed runtime must support the new state and protocol; reset never selects an update or weakens artifact verification.
 
 ## Optional obsolete credential cleanup
 

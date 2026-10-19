@@ -81,10 +81,8 @@ impl SettingsSectionId {
                 "The branch and changes of the repository each terminal pane is in, read with your own Git and GitHub CLI."
             }
             Self::Servers => {
-                "The SpaceTerm Server for your account. Use Shared Workspaces presents the \
-                 server's Workspaces beside your own, running their terminals in the server while \
-                 your own keep running theirs in SpaceTerm. The Development Pane window presents \
-                 a single server Pane instead."
+                "The SpaceTerm Server for your account. It runs your Workspaces' terminals, so \
+                 they keep running after SpaceTerm quits."
             }
             Self::Updates => {
                 "SpaceTerm keeps itself current in the background and asks before it restarts."

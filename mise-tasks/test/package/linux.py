@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 
 from spaceterm_tasks import ROOT
+from tests.server_artifact_fixture import configure_trust, prepare
 
 FIXTURE = r"""
 #include <stdio.h>
@@ -59,6 +60,7 @@ class PackageTests(unittest.TestCase):
                 ignore=shutil.ignore_patterns("__pycache__"),
             )
         shutil.copyfile(ROOT / "Cargo.toml", self.root / "Cargo.toml")
+        configure_trust(self.root)
         # Release packaging requires a clean Git checkout.
         (self.root / ".gitignore").write_text("/target/\n/dist/\n__pycache__/\n")
         for arguments in (("init", "-q"), ("add", "-A"), ("commit", "-qm", "fixture")):
@@ -95,8 +97,9 @@ Path(os.environ["BUILD_RECORD"]).write_text(json.dumps({{
     "release_tag": os.environ.get("SPACETERM_RELEASE_TAG"),
 }}))
 binary = sys.argv[sys.argv.index("--bin") + 1]
+assert binary == "spaceterm", "the desktop builds no sibling server executable"
 print(json.dumps({{"reason": "compiler-artifact", "target": {{"name": binary}},
-                  "executable": os.environ["BUILD_SERVER" if binary == "spaceterm-server" else "BUILD_EXECUTABLE"]}}))
+                  "executable": os.environ["BUILD_EXECUTABLE"]}}))
 sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
 """)
         (self.bin / "cargo").chmod(0o755)
@@ -108,10 +111,7 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
             "PYTHONPATH": str(self.root / "mise-tasks/lib"),
             "BUILD_RECORD": str(self.record),
             "BUILD_EXECUTABLE": str(self.artifact),
-            "BUILD_SERVER": str(self.artifact.with_name("spaceterm-server")),
         }
-        self.compile_executable("SpaceTerm Server 0.0.0")
-        self.artifact.rename(self.artifact.with_name("spaceterm-server"))
 
     def compile_executable(self, identity, *definitions):
         self.artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -143,6 +143,7 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         )
 
     def package(self, release_tag=None):
+        prepare(self.root, self.env, release_tag)
         if release_tag:
             return self.task("release/package/linux.py", release_tag)
         return self.task("preflight/package/linux.py")
@@ -161,13 +162,15 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         identifier = "io.github.sadiksaifi.spaceterm-preflight"
         for name in (
             "spaceterm-preflight/bin/spaceterm",
-            "spaceterm-preflight/bin/spaceterm-server",
+            "spaceterm-preflight/share/spaceterm/server-artifact/artifact.tar.gz",
+            "spaceterm-preflight/share/spaceterm/server-artifact/artifact.sig",
             "spaceterm-preflight/share/spaceterm/THIRD-PARTY-NOTICES.txt",
             "spaceterm-preflight/share/spaceterm/terminfo/x/xterm-spaceterm",
             f"spaceterm-preflight/share/applications/{identifier}.desktop",
             f"spaceterm-preflight/share/icons/hicolor/scalable/apps/{identifier}.svg",
         ):
             self.assertIn(name, members)
+        self.assertNotIn("spaceterm-preflight/bin/spaceterm-server", members)
         executable = members["spaceterm-preflight/bin/spaceterm"]
         self.assertEqual((executable.mode, executable.uid, executable.uname), (0o755, 0, ""))
         with tarfile.open(archive, "r:gz") as source:
@@ -198,7 +201,7 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         members = self.members(self.root / "dist/spaceterm-linux-x86_64.tar.gz")
         self.assertIn("spaceterm/bin/spaceterm", members)
-        self.assertIn("spaceterm/bin/spaceterm-server", members)
+        self.assertNotIn("spaceterm/bin/spaceterm-server", members)
         self.assertEqual(json.loads(self.record.read_text())["release_tag"], "v0.0.1")
 
     def test_release_archive_rejects_an_executable_of_another_version(self):

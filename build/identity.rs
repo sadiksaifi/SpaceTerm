@@ -9,6 +9,8 @@ use std::{
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Identity {
+    /// The exact source revision used for independent artifact admission.
+    pub commit: String,
     /// The full version: the release version, or `dev.<commit>[.dirty]`.
     pub version: String,
     /// The bundle version: the release version, or `0.0.0`.
@@ -54,6 +56,7 @@ pub fn resolve(root: &Path, release_tag: Option<&str>) -> Result<Identity, &'sta
         return Ok(Identity {
             version: format!("dev.{}{suffix}", &commit[..12]),
             bundle_version: "0.0.0".to_owned(),
+            commit,
         });
     };
     let version =
@@ -69,6 +72,7 @@ pub fn resolve(root: &Path, release_tag: Option<&str>) -> Result<Identity, &'sta
         return Err("a release build requires a clean checkout");
     }
     Ok(Identity {
+        commit,
         version: version.to_owned(),
         bundle_version: version.to_owned(),
     })

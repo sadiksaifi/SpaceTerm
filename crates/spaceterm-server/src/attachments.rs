@@ -102,19 +102,38 @@ impl Attachments {
             storage: Some((directory, lock, server, client)),
         }))))
     }
-    /// Preserve the existing Development adoption once. Later discoveries remain detached.
+    /// Prepare a new client's exact initial attachment, or its deliberately empty view.
+    /// Retained choices always win. Returns whether this call made the client's initial choice.
+    pub fn initialize(
+        &self,
+        inventory: &Inventory,
+        workspace: Option<Id>,
+    ) -> Result<bool, ServerError> {
+        let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if state.choices.initialized {
+            drop(state);
+            self.reconcile(inventory)?;
+            return Ok(false);
+        }
+        let mut next = state.choices.clone();
+        if let Some(workspace) = workspace {
+            if !inventory.workspaces.iter().any(|w| w.id == workspace) {
+                return Err(ServerError::SessionUnavailable);
+            }
+            next.attach(workspace)?;
+        }
+        next.initialized = true;
+        state.save(next)?;
+        drop(state);
+        self.reconcile(inventory)?;
+        Ok(true)
+    }
+    /// Forget attachments to Workspaces the server no longer has. Never attaches anything.
     pub fn reconcile(&self, inventory: &Inventory) -> Result<(), ServerError> {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let mut next = state.choices.clone();
-        if !next.initialized {
-            for workspace in &inventory.workspaces {
-                next.attach(workspace.id)?;
-            }
-            next.initialized = true;
-        } else {
-            next.attached
-                .retain(|a| inventory.workspaces.iter().any(|w| w.id == a.workspace));
-        }
+        next.attached
+            .retain(|a| inventory.workspaces.iter().any(|w| w.id == a.workspace));
         state.save(next)?;
         state.catalog = inventory
             .workspaces
@@ -287,7 +306,9 @@ impl AttachmentPermit {
     }
 }
 impl Choices {
+    /// An explicit attachment is itself the client's choice, so it completes initialization.
     fn attach(&mut self, workspace: Id) -> Result<(), ServerError> {
+        self.initialized = true;
         if !self.attached.iter().any(|a| a.workspace == workspace) {
             self.next_generation = self
                 .next_generation
@@ -377,10 +398,111 @@ mod tests {
         }
     }
     #[test]
-    fn offline_detach_invalidates_old_presentations_and_retains_exact_release_after_reattach() {
+    fn reconciliation_attaches_nothing_until_one_explicit_initial_choice() {
         let choices = Attachments::memory();
         let inventory = inventory();
         choices.reconcile(&inventory).unwrap();
+        assert!(!choices.is_attached([1; 32]));
+        assert!(choices.permit([3; 32]).is_none());
+        assert!(choices.initialize(&inventory, Some([1; 32])).unwrap());
+        assert!(choices.is_attached([1; 32]));
+        choices.detach([1; 32]).unwrap();
+        assert!(
+            !choices.initialize(&inventory, Some([1; 32])).unwrap(),
+            "a client chooses its initial view once"
+        );
+        assert!(!choices.is_attached([1; 32]));
+    }
+
+    #[test]
+    fn initializing_an_empty_view_never_adopts_available_work_on_reconciliation() {
+        let choices = Attachments::memory();
+        let inventory = inventory();
+        choices.initialize(&inventory, None).unwrap();
+        choices.reconcile(&inventory).unwrap();
+        assert!(!choices.is_attached([1; 32]));
+        assert!(choices.permit([3; 32]).is_none());
+        assert!(choices.attach([1; 32]).unwrap());
+        assert!(choices.permit([3; 32]).is_some());
+    }
+
+    #[test]
+    fn initialization_attaches_only_the_selected_available_workspace() {
+        let choices = Attachments::memory();
+        let mut inventory = inventory();
+        let mut other = inventory.workspaces[0].clone();
+        other.id = [4; 32];
+        other.root_tab = [5; 32];
+        other.tabs[0].id = [5; 32];
+        other.tabs[0].root_pane = [6; 32];
+        other.tabs[0].panes[0].id = [6; 32];
+        inventory.workspaces.push(other);
+        assert_eq!(
+            choices.initialize(&inventory, Some([9; 32])),
+            Err(ServerError::SessionUnavailable)
+        );
+        choices.initialize(&inventory, Some([4; 32])).unwrap();
+        choices.reconcile(&inventory).unwrap();
+        assert!(choices.is_attached([4; 32]));
+        assert!(!choices.is_attached([1; 32]));
+        assert!(choices.permit([3; 32]).is_none());
+        assert!(choices.permit([6; 32]).is_some());
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn empty_and_detached_initial_choices_survive_reopen_without_renewing_control() {
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "st-initial-view-{}",
+            u128::from_be_bytes(crate::protocol::random().unwrap()[..16].try_into().unwrap())
+        ));
+        let open = || {
+            Attachments::open(
+                crate::storage::Directory::open(&root, true).unwrap(),
+                [8; 32],
+                [9; 32],
+            )
+            .unwrap()
+        };
+        let inventory = inventory();
+        {
+            let choices = open();
+            choices.initialize(&inventory, None).unwrap();
+        }
+        let original = {
+            let choices = open();
+            choices.initialize(&inventory, Some([1; 32])).unwrap();
+            choices.reconcile(&inventory).unwrap();
+            assert!(
+                !choices.is_attached([1; 32]),
+                "retained empty view wins over a startup default"
+            );
+            choices.attach([1; 32]).unwrap();
+            let permit = choices.permit([3; 32]).unwrap();
+            choices.detach([1; 32]).unwrap();
+            assert!(!permit.active());
+            permit.attachment()
+        };
+        {
+            let choices = open();
+            choices.initialize(&inventory, Some([1; 32])).unwrap();
+            assert!(!choices.is_attached([1; 32]));
+            assert!(choices.permit([3; 32]).is_none());
+            assert_eq!(choices.pending(), vec![original]);
+            choices.attach([1; 32]).unwrap();
+            let later = choices.permit([3; 32]).unwrap().attachment();
+            assert!(later.generation > original.generation);
+            choices.released(original).unwrap();
+            assert!(choices.is_attached([1; 32]));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn offline_detach_invalidates_old_presentations_and_retains_exact_release_after_reattach() {
+        let choices = Attachments::memory();
+        let inventory = inventory();
+        choices.initialize(&inventory, Some([1; 32])).unwrap();
         let original = choices.permit([3; 32]).unwrap();
         choices.detach([1; 32]).unwrap();
         assert!(!original.active());

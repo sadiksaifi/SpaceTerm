@@ -70,6 +70,7 @@ fn release_uses_an_annotated_tag_on_head() {
     assert_eq!(
         resolve(repository.path(), Some("v0.1.0")),
         Ok(Identity {
+            commit: repository.git(&["rev-parse", "HEAD"]),
             version: "0.1.0".to_owned(),
             bundle_version: "0.1.0".to_owned(),
         })

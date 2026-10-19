@@ -288,7 +288,7 @@ impl SettingsWindow {
             );
         }
         (
-            "Where this server creates new Worktrees for shared Workspaces. Use {repository} and {branch}. For example: ~/.worktrees/my-app/feature-login".into(),
+            "Where this server creates new Worktrees for its Workspaces. Use {repository} and {branch}. For example: ~/.worktrees/my-app/feature-login".into(),
             CaptionTone::Guidance,
         )
     }

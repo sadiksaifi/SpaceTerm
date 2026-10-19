@@ -84,11 +84,17 @@ fn installed_service_preserves_sessions_and_restores_dormant_organization() {
     let native = crate::LocalServer::for_identity("spaceterm-preflight").unwrap();
     if phase == "stopped" {
         assert!(service.status().unwrap().stopped);
-        assert_eq!(native.setup_and_start(), Err(ServerError::Stopped));
+        assert!(matches!(
+            crate::LocalStartup::for_identity("spaceterm-preflight")
+                .unwrap()
+                .run(|| panic!("stopped service cannot provision"), || false)
+                .unwrap(),
+            crate::StartupOutcome::Stopped
+        ));
         assert!(native.connect_pane().is_err());
         let status = service.status().unwrap();
         assert!(status.stopped && !status.running);
-        println!("Stop survived native client setup and reconnect without starting a server.");
+        println!("Stop survived normal launch and reconnect without starting a server.");
         return;
     }
     assert!(service.status().unwrap().running);
@@ -117,6 +123,7 @@ fn installed_service_preserves_sessions_and_restores_dormant_organization() {
                 sequence: next_sequence,
                 mutation: Mutation::CreateWorkspace {
                     name: "Disposable lifecycle fixture".into(),
+                    directory: None,
                 },
             })
             .unwrap()

@@ -1,8 +1,7 @@
 //! Presentation shared by every Pane whose Terminal Session a SpaceTerm Server owns.
 //!
-//! The Development Pane window and the Panes of a shared server Workspace show the same screens,
-//! interruption notices, and action statuses, so their copy and composition live here once. The
-//! surfaces are deliberately plain: a screen replaces the Pane outright, so nothing of a former
+//! Every server-backed Pane shows the same screens, interruption notices, and action statuses, so
+//! their copy and composition live here once. The surfaces are deliberately plain: a screen replaces the Pane outright, so nothing of a former
 //! shell's output paints or reaches assistive technology after another client takes control or the
 //! server restarts.
 
@@ -23,7 +22,9 @@ use super::chrome_icons::IconRole;
 use super::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use super::terminal_pane::StatusIntent;
 
-pub(crate) const TAKEOVER_TITLE: &str = "Controlled by Another Client";
+/// What the window knows when the server offers Take Over: this window does not control the
+/// Pane. Another client may, or nobody does after this client released it.
+pub(crate) const TAKEOVER_TITLE: &str = "Not Controlled by This Window";
 pub(crate) const TAKEOVER_DETAIL: &str =
     "Take Over to type and resize here. The shell keeps running.";
 pub(crate) const TAKEOVER_FAILED_DETAIL: &str =
@@ -98,7 +99,8 @@ pub(crate) struct ScreenStatus {
 }
 
 /// A centered screen replacing a Pane: a title, its detail, one action, and a status slot under
-/// the action.
+/// the action. The screen is one Group named by its title, which a caller can give the Pane's
+/// focus so the keyboard lands on something assistive technology announces.
 pub(crate) fn render_screen(
     selector: SharedString,
     copy: ScreenCopy,
@@ -107,7 +109,7 @@ pub(crate) fn render_screen(
     status: Option<ScreenStatus>,
     announcements: &ScreenAnnouncements,
     cx: &App,
-) -> AnyElement {
+) -> Stateful<gpui::Div> {
     render_screen_content(
         selector,
         copy,
@@ -127,7 +129,7 @@ pub(crate) fn render_directory_screen(
     missing_worktree: bool,
     announcements: &ScreenAnnouncements,
     cx: &App,
-) -> AnyElement {
+) -> Stateful<gpui::Div> {
     let detail = if missing_worktree {
         "This Tab's Worktree is missing, and SpaceTerm doesn't recreate Worktrees. Retry after restoring it with git, or choose another directory for this Pane."
     } else {
@@ -169,7 +171,7 @@ fn render_screen_content(
     status: Option<ScreenStatus>,
     announcements: &ScreenAnnouncements,
     cx: &App,
-) -> AnyElement {
+) -> Stateful<gpui::Div> {
     let ScreenCopy {
         title,
         detail,
@@ -268,7 +270,6 @@ fn render_screen_content(
                 .items_center()
                 .children(status.map(|status| status.content)),
         )
-        .into_any_element()
 }
 
 /// Progress is available for exploration, without interrupting the action's outcome speech.
@@ -320,11 +321,11 @@ pub(crate) fn note_status(selector: SharedString, label: SharedString, cx: &App)
     }
 }
 
-/// The Retry and Choose Directory pair the directory screen offers in both presentations.
+/// The Retry and Choose Directory pair the directory screen offers.
 ///
 /// The caller owns the element ids, what it knows about availability, and what each action does.
-/// The copy and the enablement policy belong here, so one screen never explains itself differently
-/// in the Development Pane window and in a shared Workspace.
+/// The copy and the enablement policy belong here, so the screen always explains itself the same
+/// way.
 pub(crate) struct DirectoryActions<Retry, Choose> {
     /// Element id and debug selector for Retry.
     pub(crate) retry: SharedString,
@@ -498,6 +499,21 @@ pub(crate) fn render_notice(
         .into_any_element()
 }
 
+/// The Start Server action of a Pane whose server the person stopped. Retrying could never
+/// connect, and only an explicit Start reverses Stop.
+pub(crate) fn start_server_button(
+    selector: SharedString,
+    on_activate: impl Fn(&mut gpui::Window, &mut App) + 'static,
+) -> Button {
+    let debug_selector = selector.clone();
+    Button::new(selector, "Start Server")
+        .variant(ButtonVariant::Link)
+        .size(ButtonSize::Compact)
+        .tab_stop(true)
+        .debug_selector(debug_selector)
+        .on_activate(move |_, window, cx| on_activate(window, cx))
+}
+
 /// The standard Retry action of an interruption notice.
 pub(crate) fn retry_button(
     selector: SharedString,
@@ -666,8 +682,7 @@ mod connection {
     /// One Pane's view of its server connection: the last status read, and the screen that
     /// replaces the Pane while no authoritative shell output belongs to this client.
     ///
-    /// The same rules as the Development Pane window apply, minus the window's own lifecycle: an
-    /// unanswered Take Over or Start New Shell is claimed by nobody, and a screen stays through
+    /// An unanswered Take Over or Start New Shell is claimed by nobody, and a screen stays through
     /// interruptions until a fresh screen arrives for this client.
     pub(crate) struct ServerPaneView {
         announcements: ScreenAnnouncements,
@@ -908,6 +923,15 @@ mod connection {
                 {
                     None
                 }
+                DevelopmentPaneStatus::Failed(ServerError::Stopped)
+                | DevelopmentPaneStatus::TakeoverFailed(ServerError::Stopped) => Some((
+                    SharedString::new_static("Server Stopped"),
+                    SharedString::new_static(
+                        "You stopped the server, so the programs in this Pane ended. Start it \
+                         to keep working here.",
+                    ),
+                    super::StatusIntent::Warning,
+                )),
                 DevelopmentPaneStatus::Failed(error)
                 | DevelopmentPaneStatus::TakeoverFailed(error) => Some((
                     SharedString::new_static("Not Connected"),
@@ -918,9 +942,20 @@ mod connection {
             }
         }
 
-        /// Whether a person can ask for a connection attempt now.
+        /// Whether the person stopped the server behind this Pane, which only Start reverses.
+        pub(crate) fn server_stopped(&self) -> bool {
+            matches!(
+                self.status,
+                DevelopmentPaneStatus::Failed(ServerError::Stopped)
+                    | DevelopmentPaneStatus::TakeoverFailed(ServerError::Stopped)
+            )
+        }
+
+        /// Whether a person can ask for a connection attempt now. A stopped server offers
+        /// Start Server instead, because a retry could never connect.
         pub(crate) fn can_retry(&self) -> bool {
             !self.session_ended()
+                && !self.server_stopped()
                 && self.status != DevelopmentPaneStatus::Failed(ServerError::DirectoryUnavailable)
                 && matches!(
                     self.status,
@@ -929,6 +964,17 @@ mod connection {
                         | DevelopmentPaneStatus::TakeoverFailed(_)
                         | DevelopmentPaneStatus::Failed(_)
                 )
+        }
+
+        /// Connects again once the person started the server this Pane stopped with. The
+        /// connection keeps its mode, so the server says what became of the Pane; nothing takes
+        /// control or starts a shell. Any other Pane is left alone.
+        pub(crate) fn server_started(&mut self) -> ServerPaneSync {
+            if !self.server_stopped() {
+                return ServerPaneSync::default();
+            }
+            self.connection.retry();
+            self.sync()
         }
 
         /// Retries the connection only. It never starts a shell in a dormant Pane.

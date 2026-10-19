@@ -116,63 +116,10 @@ impl WorkspaceManager {
                 })
                 .unwrap_or_default()
         });
-        let detail = SharedString::new_static(self.empty_detail());
-        let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
-        let mut action = Button::new("empty-workspace-choose", EMPTY_ACTION)
-            .variant(ButtonVariant::Primary)
-            .size(ButtonSize::Regular)
-            .tab_stop(true)
-            .debug_selector("empty-workspace-choose")
-            .tooltip(
-                Tooltip::new("empty-workspace-choose-tooltip", "Switch Workspace")
-                    .shortcut(presentation.shortcut(&SwitchWorkspace).unwrap_or_default()),
-            )
-            .on_activate(move |_, window, cx| {
-                let _ = switcher_manager.update(cx, |manager, cx| {
-                    manager.open_workspace_switcher(window, cx);
-                });
-            });
-        if let Some(shortcut) = presentation.shortcut(&SwitchWorkspace) {
-            action = action.shortcut(shortcut);
-        }
-        let message = div()
-            .id("empty-workspace")
-            .debug_selector(|| "empty-workspace".to_owned())
-            .role(gpui::accesskit::Role::Group)
-            .aria_label(EMPTY_TITLE)
-            .aria_description(detail.clone())
-            .size_full()
-            .track_focus(&self.empty_focus)
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(appearance.spacing(12.0))
-            .px(appearance.spacing(24.0))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(appearance.spacing(4.0))
-                    .max_w(appearance.spacing(360.0))
-                    .text_center()
-                    .child(
-                        div()
-                            .chrome_text(appearance.typography.style(TextRole::Section))
-                            .text_color(gpui_color(appearance.colors.text))
-                            .child(EMPTY_TITLE),
-                    )
-                    .child(
-                        div()
-                            .debug_selector(|| "empty-workspace-detail".to_owned())
-                            .whitespace_normal()
-                            .chrome_text(appearance.typography.style(TextRole::Secondary))
-                            .text_color(gpui_color(appearance.colors.text_secondary))
-                            .child(detail),
-                    ),
-            )
-            .child(action);
+        let message = match self.launch_presentation() {
+            Some(launch) => self.render_launch_message(launch, &self.empty_focus, cx),
+            None => self.render_empty_message(switcher_manager, cx),
+        };
         div()
             .id("empty-workspace-stage")
             .debug_selector(|| "empty-workspace-stage".to_owned())
@@ -216,6 +163,72 @@ impl WorkspaceManager {
                     .child(with_tab_traversal(message)),
             )
             .into_any_element()
+    }
+
+    /// The deliberately empty view's explanation and its one action.
+    fn render_empty_message(
+        &self,
+        switcher_manager: gpui::WeakEntity<Self>,
+        cx: &Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let appearance = super::super::appearance::chrome(cx);
+        let detail = SharedString::new_static(self.empty_detail());
+        let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
+        let mut action = Button::new("empty-workspace-choose", EMPTY_ACTION)
+            .variant(ButtonVariant::Primary)
+            .size(ButtonSize::Regular)
+            .tab_stop(true)
+            .debug_selector("empty-workspace-choose")
+            .tooltip(
+                Tooltip::new("empty-workspace-choose-tooltip", "Switch Workspace")
+                    .shortcut(presentation.shortcut(&SwitchWorkspace).unwrap_or_default()),
+            )
+            .on_activate(move |_, window, cx| {
+                let _ = switcher_manager.update(cx, |manager, cx| {
+                    manager.open_workspace_switcher(window, cx);
+                });
+            });
+        if let Some(shortcut) = presentation.shortcut(&SwitchWorkspace) {
+            action = action.shortcut(shortcut);
+        }
+        div()
+            .id("empty-workspace")
+            .debug_selector(|| "empty-workspace".to_owned())
+            .role(gpui::accesskit::Role::Group)
+            .aria_label(EMPTY_TITLE)
+            .aria_description(detail.clone())
+            .size_full()
+            .track_focus(&self.empty_focus)
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(appearance.spacing(12.0))
+            .px(appearance.spacing(24.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(appearance.spacing(4.0))
+                    .max_w(appearance.spacing(360.0))
+                    .text_center()
+                    .child(
+                        div()
+                            .chrome_text(appearance.typography.style(TextRole::Section))
+                            .text_color(gpui_color(appearance.colors.text))
+                            .child(EMPTY_TITLE),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "empty-workspace-detail".to_owned())
+                            .whitespace_normal()
+                            .chrome_text(appearance.typography.style(TextRole::Secondary))
+                            .text_color(gpui_color(appearance.colors.text_secondary))
+                            .child(detail),
+                    ),
+            )
+            .child(action)
     }
 
     /// What the empty view says about detached Workspaces, which depends on whether the server

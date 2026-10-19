@@ -27,7 +27,7 @@ impl Organization {
             workspace: crate::protocol::random()?,
             tab: crate::protocol::random()?,
             pane: crate::protocol::random()?,
-            name: "Development".into(),
+            name: "Default".into(),
             pinned_directory: None,
             starting_directory,
             confirmed_directory: None,

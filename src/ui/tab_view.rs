@@ -685,8 +685,21 @@ impl TabView {
         }
     }
 
+    /// Moves the keyboard to the Focused Pane. A server Pane presenting a screen in place of its
+    /// shell takes it on that screen, so Tab reaches the screen's action and typing meant for a
+    /// shell reaches nothing. Focusing selects nothing.
     pub(crate) fn focus(&self, window: &mut Window, cx: &mut App) {
-        let Some(terminal) = self.tab.pane(self.tab.focused_pane_id()) else {
+        let pane_id = self.tab.focused_pane_id();
+        if let Some(focus) = self.shared.as_ref().and_then(|shared| {
+            shared
+                .view(pane_id)
+                .and_then(crate::ui::server_pane::ServerPaneView::screen)
+                .and_then(|_| shared.screen_focus(pane_id))
+        }) {
+            focus.focus(window, cx);
+            return;
+        }
+        let Some(terminal) = self.tab.pane(pane_id) else {
             return;
         };
         terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
@@ -797,11 +810,6 @@ impl TabView {
 
     pub(crate) fn set_pinned_directory(&mut self, directory: Option<PinnedDirectory>) {
         self.session_factory.set_pinned_directory(directory);
-    }
-
-    /// Scopes this Tab's later Panes to a Worktree's root, or to the Workspace with `None`.
-    pub(crate) fn set_worktree_root(&mut self, root: Option<std::path::PathBuf>) {
-        self.session_factory.set_worktree_root(root);
     }
 
     pub(crate) fn tab_focus(&self) -> &FocusHandle {
@@ -3061,28 +3069,29 @@ impl TabView {
                 )
             }
         });
-        // The screen rests on its own focus, so plain Tab the terminal never took reaches its
-        // action while terminal input is paused.
-        let screen = screen.map(|screen| {
-            let surface = div()
-                .id(selector("screen"))
-                .absolute()
-                .inset_0()
-                .child(screen);
-            match &screen_focus {
-                Some(focus) => {
-                    server_pane::with_tab_traversal(surface.track_focus(focus)).into_any_element()
-                }
-                None => surface.into_any_element(),
+        // The screen's labeled Group rests on its own focus, so assistive technology announces
+        // where the keyboard landed, and plain Tab the terminal never took reaches its action
+        // while terminal input is paused.
+        let screen = screen.map(|screen| match &screen_focus {
+            Some(focus) => {
+                server_pane::with_tab_traversal(screen.track_focus(focus)).into_any_element()
             }
+            None => screen.into_any_element(),
         });
         let notice = pane.notice().map(|(title, detail, intent)| {
-            let retry = pane.can_retry().then(|| {
-                let owner = view.clone();
-                server_pane::retry_button(selector("retry"), move |_, cx| {
-                    let _ = owner.update(cx, |view, cx| view.retry_shared_pane(pane_id, cx));
+            let retry = if pane.server_stopped() {
+                Some(server_pane::start_server_button(
+                    selector("start-server"),
+                    crate::ui::workspace_manager::start_local_server,
+                ))
+            } else {
+                pane.can_retry().then(|| {
+                    let owner = view.clone();
+                    server_pane::retry_button(selector("retry"), move |_, cx| {
+                        let _ = owner.update(cx, |view, cx| view.retry_shared_pane(pane_id, cx));
+                    })
                 })
-            });
+            };
             server_pane::render_notice(selector("notice"), title, detail, intent, retry, true, cx)
         });
         SharedPaneSurface { screen, notice }
@@ -3233,6 +3242,19 @@ impl TabView {
             self.focus(window, cx);
         }
     }
+    /// Reconnects each shared Pane the person's stop interrupted, once they started the server.
+    pub(crate) fn server_started(&mut self, cx: &mut Context<Self>) {
+        let Some(shared) = self.shared.as_mut() else {
+            return;
+        };
+        for pane_id in shared.pane_ids() {
+            if let Some(view) = shared.view_mut(pane_id) {
+                view.server_started();
+            }
+        }
+        cx.notify();
+    }
+
     fn retry_shared_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
         if self
             .shared
@@ -4811,13 +4833,39 @@ mod tests {
         }
     }
 
+    /// A desktop-owned Tab's Panes, which production Remote Workspaces own.
     fn test_session_factory() -> WorkspaceTerminalSessionFactory {
-        WorkspaceTerminalSessionFactory::new_local(
-            Rc::new(
-                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                    .with_selection_copy_response(Ok(None)),
+        desktop_session_factory(Rc::new(
+            TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+                .with_selection_copy_response(Ok(None)),
+        ))
+    }
+
+    /// Desktop-owned Panes over `terminal`, whose children each receive a fresh channel.
+    fn desktop_session_factory(
+        terminal: Rc<dyn TerminalSessionFactory>,
+    ) -> WorkspaceTerminalSessionFactory {
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let command_context = Arc::new(crate::ssh::testing::SshConnectionFixture::new(
+            destination.clone(),
+        ));
+        WorkspaceTerminalSessionFactory::new_remote(
+            terminal,
+            crate::domain::ValidatedLocalDirectory::new(
+                PathBuf::from("/missing/local/home-is-not-a-workspace"),
+                crate::domain::LocalDirectoryIdentity::for_test(71074),
             ),
-            crate::terminal::testing::test_local_directory(test_home_directory()),
+            crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+                destination,
+                crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
+            ),
+            crate::domain::RemoteDirectoryIdentity::new("/home/tester/project".to_owned()).unwrap(),
+            "project on remote".to_owned(),
+            Arc::new(move || {
+                Ok(command_context.prepare_terminal_session_channel(
+                    ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+                ))
+            }),
         )
     }
 
@@ -6017,7 +6065,7 @@ mod tests {
 
         assert_eq!(
             view.read_with(cx, |view, _| view.tab_title()),
-            "• Terminal · spaceterm-test-workspace"
+            "• project on remote · project"
         );
         assert_eq!(
             view.read_with(cx, |view, _| view.pane_attention.clone()),
@@ -7817,9 +7865,10 @@ mod tests {
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
                 view.split_focused(SplitAxis::Horizontal, window, cx);
-                view.focus_pane(PaneId::new(1), cx);
             });
         });
+        cx.run_until_parked();
+        view.update(cx, |view, cx| view.focus_pane(PaneId::new(1), cx));
         cx.run_until_parked();
 
         let caption_state = (
@@ -7948,8 +7997,11 @@ mod tests {
         cx.update(crate::ui::init)
             .expect("UI initialization should succeed");
         let records = TestTerminalSessionRecords::default();
-        let session_factory: Rc<dyn TerminalSessionFactory> =
-            Rc::new(TestTerminalSessionFactory::new(records.clone()));
+        let session_factory: Rc<dyn TerminalSessionFactory> = Rc::new(
+            TestTerminalSessionFactory::new(records.clone()).with_client_filesystem(
+                crate::platform::local_filesystem::LocalFilesystemAuthority::testing(),
+            ),
+        );
         let session_factory = WorkspaceTerminalSessionFactory::new_local(
             session_factory,
             crate::terminal::testing::test_local_directory(test_home_directory()),
@@ -8956,60 +9008,6 @@ mod tests {
                 crate::domain::RemoteDirectory::new("/srv/backend".into()).unwrap()
             ))
         );
-    }
-
-    #[gpui::test]
-    fn local_split_should_inherit_target_apply_pins_and_reject_unavailable_directories(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(crate::ui::init).unwrap();
-        let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-        let authority = crate::platform::local_filesystem::LocalFilesystemAuthority::testing();
-        let home = fixture.path().to_owned();
-        let first = home.join("shell-integration/bash");
-        let second = home.join("shell-integration/zsh");
-        let records = TestTerminalSessionRecords::default();
-        let factory = WorkspaceTerminalSessionFactory::new_local_with_authority(
-            Rc::new(TestTerminalSessionFactory::new(records.clone())),
-            authority.validate_directory(&home).unwrap(),
-            authority.clone(),
-        );
-        let (view, cx) =
-            cx.add_window_view(|window, cx| TabView::new(TabId::new(1), factory, window, cx));
-        cx.run_until_parked();
-        report_current_directory(&records, 1, 1, first.to_str().unwrap(), false);
-        cx.run_until_parked();
-        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
-        report_current_directory(&records, 2, 1, second.to_str().unwrap(), false);
-        cx.run_until_parked();
-        split_test_pane(&view, PaneId::new(1), SplitAxis::Vertical, cx);
-        view.update(cx, |view, _| {
-            view.set_pinned_directory(Some(PinnedDirectory::Local(
-                authority.validate_directory(&second).unwrap(),
-            )))
-        });
-        split_test_pane(&view, PaneId::new(1), SplitAxis::Horizontal, cx);
-        view.update(cx, |view, _| view.set_pinned_directory(None));
-        report_current_directory(
-            &records,
-            1,
-            2,
-            home.join("missing").to_str().unwrap(),
-            false,
-        );
-        cx.run_until_parked();
-        let count = view.read_with(cx, |view, _| view.pane_count());
-        split_test_pane(&view, PaneId::new(1), SplitAxis::Vertical, cx);
-        assert_eq!(view.read_with(cx, |view, _| view.pane_count()), count);
-        assert_eq!(
-            records
-                .starts()
-                .iter()
-                .map(|start| start.local_working_directory().unwrap().path().to_owned())
-                .collect::<Vec<_>>(),
-            vec![home, first.clone(), first, second]
-        );
-        assert!(records.dropped_session_ids().is_empty());
     }
 
     #[gpui::test]

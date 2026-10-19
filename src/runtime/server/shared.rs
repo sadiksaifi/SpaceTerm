@@ -13,6 +13,7 @@ pub struct SharedWorkspaceHost {
     panes: BTreeMap<Id, DevelopmentPaneHost>,
     store: Option<OrganizationStore>,
     uncertain: bool,
+    organization_prepared: bool,
     attachment_generations: BTreeMap<(Id, Id), (u64, u64)>,
 }
 impl SharedWorkspaceHost {
@@ -38,8 +39,27 @@ impl SharedWorkspaceHost {
             panes: BTreeMap::new(),
             store: None,
             uncertain: false,
+            organization_prepared: false,
             attachment_generations: BTreeMap::new(),
         }
+    }
+    /// Prepare the first organization once, without starting a Terminal Session.
+    /// Retained organization, including an empty inventory, is already prepared.
+    pub fn prepare_initial_organization(&mut self) -> Result<(), Refusal> {
+        self.recover()?;
+        if self.organization_prepared {
+            return Ok(());
+        }
+        let mut next = self.state.clone();
+        if next.inventory.workspaces.is_empty() {
+            let organization = Organization::first(self.prototype.directory.clone())
+                .map_err(|_| Refusal::Failed)?;
+            let settings = next.worktree_settings.take();
+            next = State::from_legacy(&organization);
+            next.worktree_settings = settings;
+            next.begin_boot(self.prototype.boot);
+        }
+        self.commit(next)
     }
     fn commit(&mut self, mut next: State) -> Result<(), Refusal> {
         // Runtime facts authorize an in-memory comparison, never a later recovery read.
@@ -55,6 +75,7 @@ impl SharedWorkspaceHost {
             }
         }
         self.state = next;
+        self.organization_prepared = true;
         Ok(())
     }
     fn recover(&mut self) -> Result<(), Refusal> {
@@ -65,13 +86,16 @@ impl SharedWorkspaceHost {
                 .ok_or(Refusal::StorageUnavailable)?
                 .read()
                 .map_err(|_| Refusal::StorageUnavailable)?;
-            self.state = record
-                .as_ref()
-                .map_or_else(State::empty, State::from_legacy);
-            self.state.begin_boot(self.prototype.boot);
+            self.restore_organization(record.as_ref());
             self.uncertain = false;
         }
         Ok(())
+    }
+    fn restore_organization(&mut self, record: Option<&Organization>) {
+        self.state = record.map_or_else(State::empty, State::from_legacy);
+        // Recovery in the same boot preserves creator reservations; a restart clears them.
+        self.state.begin_boot(self.prototype.boot);
+        self.organization_prepared = record.is_some();
     }
     fn synchronize(&mut self) -> Result<(), Refusal> {
         self.recover()?;
@@ -389,6 +413,7 @@ impl SharedWorkspaceHost {
                 accessibility: true,
                 directory_recovery: true,
                 worktree_writes: true,
+                workspace_policy: true,
             }),
             Request::Inventory => Ok(Reply::Inventory {
                 inventory: self.inventory(),
@@ -416,12 +441,33 @@ impl SharedWorkspaceHost {
                 }
                 let mut next = self.state.clone();
                 next.inventory = self.inventory();
+                let mut directory = Ok(self.prototype.directory.clone());
+                if let spaceterm_server::hierarchy::Mutation::SplitPane {
+                    workspace,
+                    tab,
+                    source,
+                    ..
+                } = &mutation
+                    && let Some(workspace) = next
+                        .inventory
+                        .workspaces
+                        .iter()
+                        .find(|w| w.id == *workspace)
+                    && let Some(root) = workspace
+                        .tabs
+                        .iter()
+                        .find(|t| t.id == *tab)
+                        .and_then(|t| t.worktree.as_deref())
+                {
+                    directory = worktrees::starting_directory(workspace, Some(*source), root);
+                }
+                // A directory refusal finishes this journaled edit, so retry cannot admit it later.
                 next.apply(
                     device,
                     sequence,
                     mutation,
-                    &self.prototype.directory,
-                    |path| local_filesystem().validate_directory(path).is_ok(),
+                    directory.as_deref().unwrap_or(&self.prototype.directory),
+                    |path| directory.is_ok() && local_filesystem().validate_directory(path).is_ok(),
                 )?;
                 let outcome = next
                     .outcome(device, sequence)
@@ -492,7 +538,7 @@ impl SharedWorkspaceHost {
                 resume,
                 style,
             } => {
-                let id = self.legacy_pane(device, create)?;
+                let id = self.legacy_pane(create)?;
                 self.pane_host(id)?.handle(
                     device,
                     connection,
@@ -510,7 +556,7 @@ impl SharedWorkspaceHost {
                 resume,
                 style,
             } => {
-                let id = self.legacy_pane(device, create)?;
+                let id = self.legacy_pane(create)?;
                 self.pane_host(id)?.handle(
                     device,
                     connection,
@@ -567,11 +613,9 @@ impl SharedWorkspaceHost {
             }
         }
     }
-    fn legacy_pane(&mut self, device: Id, create: bool) -> Result<Id, Refusal> {
-        if self.state.inventory.workspaces.is_empty() && create {
-            let mut next = self.state.clone();
-            next.ensure_first_workspace(device, &self.prototype.directory)?;
-            self.commit(next)?;
+    fn legacy_pane(&mut self, create: bool) -> Result<Id, Refusal> {
+        if create {
+            self.prepare_initial_organization()?;
         }
         self.state
             .inventory
@@ -585,18 +629,15 @@ impl SharedWorkspaceHost {
 }
 impl PaneService for SharedWorkspaceHost {
     fn restore(&mut self, store: OrganizationStore) -> Result<(), ServerError> {
-        self.state = store
-            .read()?
-            .as_ref()
-            .map_or_else(State::empty, State::from_legacy);
-        // This also fences a later recovery read of the previous boot's retained record.
-        self.state.begin_boot(self.prototype.boot);
+        let record = store.read()?;
+        self.restore_organization(record.as_ref());
         // Existing organization predates seeding and must never be overwritten by a client.
-        if self.state.worktree_settings.is_none() && store.read()?.is_some() {
+        if self.state.worktree_settings.is_none() && record.is_some() {
             self.state.worktree_settings = Some(Default::default());
         }
         self.store = Some(store);
-        Ok(())
+        self.prepare_initial_organization()
+            .map_err(|_| ServerError::StorageUnavailable)
     }
     fn tick(&mut self) {
         let _ = self.finish_worktrees(false);
@@ -629,5 +670,122 @@ impl PaneService for SharedWorkspaceHost {
         self.synchronize()
             .map_err(|_| ServerError::StorageUnavailable)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{host, shared_inventory, size};
+    use super::*;
+    use spaceterm_server::attachments::Attachment;
+
+    fn retained(host: &SharedWorkspaceHost) -> Organization {
+        serde_json::from_slice(
+            &serde_json::to_vec(&host.state.envelope(&host.prototype.directory).unwrap()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn retained_empty_organization_is_prepared_even_without_a_previous_mutation() {
+        let original = SharedWorkspaceHost::new(host());
+        let record = retained(&original);
+        let mut restored = SharedWorkspaceHost::new(host());
+        restored.restore_organization(Some(&record));
+        restored.prepare_initial_organization().unwrap();
+        assert!(shared_inventory(&mut restored).workspaces.is_empty());
+        assert!(matches!(
+            restored.request(
+                [1; 32],
+                [1; 32],
+                Request::Select {
+                    create: true,
+                    size: size(),
+                    resume: None,
+                    style: None,
+                }
+            ),
+            Reply::Refused(Refusal::Missing)
+        ));
+        restored.shutdown().unwrap();
+    }
+
+    #[test]
+    fn retained_attachments_observe_dormant_restart_then_resume_only_running_owned_work() {
+        let mut original = SharedWorkspaceHost::new(host());
+        original.prepare_initial_organization().unwrap();
+        let initial = shared_inventory(&mut original);
+        let workspace = &initial.workspaces[0];
+        let pane = workspace.tabs[0].root_pane;
+        let attachment = Attachment {
+            workspace: workspace.id,
+            generation: 1,
+        };
+        let claim = |explicit| Request::ClaimPane {
+            attachment,
+            pane,
+            claim: AttachmentClaim::Select { explicit },
+            size: size(),
+            style: None,
+        };
+        let Reply::Attached { lease: old } = original.request([1; 32], [1; 32], claim(true)) else {
+            panic!("first selection starts a shell");
+        };
+        original.shutdown().unwrap();
+        let record = retained(&original);
+        let mut restored = SharedWorkspaceHost::new(host());
+        restored.restore_organization(Some(&record));
+        restored.prepare_initial_organization().unwrap();
+        assert_eq!(
+            shared_inventory(&mut restored).workspaces,
+            initial.workspaces
+        );
+        assert!(matches!(
+            restored.request([1; 32], [2; 32], claim(false)),
+            Reply::Restored { .. }
+        ));
+        assert!(
+            shared_inventory(&mut restored)
+                .close
+                .unwrap()
+                .sessions
+                .iter()
+                .all(|p| p.session.is_none())
+        );
+        assert!(matches!(
+            restored.request(
+                [1; 32],
+                [2; 32],
+                Request::ClaimPane {
+                    attachment,
+                    pane,
+                    claim: AttachmentClaim::Start { server: old.server },
+                    size: size(),
+                    style: None,
+                }
+            ),
+            Reply::Refused(Refusal::Stale)
+        ));
+        let Reply::Attached { lease: started } = restored.request([1; 32], [2; 32], claim(true))
+        else {
+            panic!("explicit first use starts the dormant Pane");
+        };
+        assert_ne!(started.server, old.server);
+        assert_ne!(started.session, old.session);
+        restored.disconnected([2; 32]);
+        let Reply::Attached { lease: resumed } = restored.request([1; 32], [3; 32], claim(false))
+        else {
+            panic!("reopen resumes the running owned Session");
+        };
+        assert_eq!(resumed.session, started.session);
+        assert!(matches!(
+            restored.request([2; 32], [4; 32], claim(false)),
+            Reply::Takeover { .. }
+        ));
+        assert_eq!(
+            shared_inventory(&mut restored).close.unwrap().sessions[0].session,
+            Some(started.session)
+        );
+        restored.shutdown().unwrap();
     }
 }

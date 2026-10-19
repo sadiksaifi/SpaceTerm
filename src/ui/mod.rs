@@ -13,7 +13,6 @@ mod client_view_state;
 mod control_theme;
 #[cfg(feature = "developer-tools")]
 pub(crate) mod developer_workbench;
-pub(crate) mod development_pane;
 pub(crate) mod directory_picker;
 mod drag_and_drop;
 mod native_remote_workspace_flow_backend;
@@ -54,7 +53,7 @@ mod workspace_manager;
 mod workspace_sidebar;
 mod workspace_status;
 mod worktree_form;
-pub(crate) mod worktree_store;
+pub(crate) mod worktree_path_template;
 
 use gpui::{App, actions};
 
@@ -78,8 +77,12 @@ pub(crate) use terminal_pane::{
 };
 pub(crate) use workspace_frame::WorkspaceFrame;
 #[cfg(test)]
+pub(crate) use workspace_manager::launch_testing;
+#[cfg(test)]
 pub(crate) use workspace_manager::tests::assert_scroll_shortcuts_from_sidebar_focus;
-pub(crate) use workspace_manager::{WorkspaceManager, WorkspaceManagerAdapters};
+pub(crate) use workspace_manager::{
+    LocalServerAdapters, WorkspaceManager, WorkspaceManagerAdapters,
+};
 
 /// Finishes every hover transition in progress, since test windows have no frame loop.
 #[cfg(test)]

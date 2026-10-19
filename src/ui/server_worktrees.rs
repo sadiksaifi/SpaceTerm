@@ -38,8 +38,7 @@ impl Client {
             crate::application_identity::ApplicationIdentity::current().directory_name(),
         )
         .ok()?;
-        let legacy = crate::ui::worktree_store::InstalledWorktrees::store(cx)
-            .map(|s| s.read(cx).path_template())
+        let legacy = crate::ui::worktree_path_template::path_template(cx)
             .unwrap_or_else(|| spaceterm_server::worktree::Settings::default().template);
         let edits = Rc::new(SharedWorkspaceClient::new(server.clone(), legacy));
         let client = Self {

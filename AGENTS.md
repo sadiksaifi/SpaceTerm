@@ -11,7 +11,7 @@ A native desktop terminal multiplexer for macOS and Linux, coming soon for Windo
 
 ## Architecture
 
-- The native application owns production Workspace and Terminal Session lifecycles. Each explicitly started local SpaceTerm Server owns its retained Workspaces, Tabs, Panes, and Terminal Sessions.
+- The account-local SpaceTerm Server owns local Workspaces, Tabs, Panes, and Terminal Sessions. The desktop owns their presentation and client view. Production SSH Workspaces retain native ownership until their server integration lands.
 - Put behavior, invariants, and cleanup in deep modules with narrow interfaces. Expose intentional operations and typed recoverable failures.
 - Keep product policy portable. Reach frameworks, external systems, and operating system capabilities through narrow adapters chosen by constructor injection. Add a boundary only for durable replaceability or locality.
 - Use Apple's Human Interface Guidelines for macOS 27 as the UI design baseline.
@@ -27,5 +27,5 @@ A native desktop terminal multiplexer for macOS and Linux, coming soon for Windo
 
 - Run commands with `mise run` and follow the task conventions in [`.mise.toml`](.mise.toml).
 - For local server setup or incompatible development state, follow [the local workflow](docs/local-server.md).
-- For Linux work, connect with `ssh penguin`.
+- For Linux work and native verification, use Penguin directly: `ssh penguin` for commands and Remora for its desktop.
 - Repositories live at `~/Projects/{SpaceTerm,zed,accesskit}` on both hosts. Clone missing forks from `github.com/sadiksaifi/{zed,accesskit}`.

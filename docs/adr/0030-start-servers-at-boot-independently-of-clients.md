@@ -1,6 +1,6 @@
 # Run account servers independently of clients
 
-For the planned [server architecture](https://github.com/sadiksaifi/SpaceTerm/issues/520), the owning nonroot account runs its SpaceTerm Server through the host's service manager. Client exits, crashes, and disconnections leave server-owned terminal work running.
+The owning nonroot account runs its SpaceTerm Server through the host's service manager. Normal desktop launch provisions an exact verified independent runtime only when service policy is absent, then presents server-owned local work. Client exits, crashes, and disconnections leave server-owned terminal work running.
 
 On macOS, an account LaunchAgent starts at login and stops at logout. Installation requires no administrator password. On Linux, a systemd user service starts at boot and survives logout only with confirmed enabled linger. Enabling linger requires one scoped administrator authorization through CLI sudo, desktop pkexec, or explicit SSH Bootstrap. Installation that starts the Linux server and explicit Start Server require confirmed enabled linger.
 

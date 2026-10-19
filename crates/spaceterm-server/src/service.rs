@@ -181,15 +181,22 @@ impl Service {
     pub fn install(&self, installation: &Path) -> Result<ServiceStatus, ServerError> {
         let data = Directory::open(&self.paths.data, true)?;
         let _operation = data.lock("service.lock", false)?;
+        self.install_locked(&data, installation)
+    }
+    fn install_locked(
+        &self,
+        data: &Directory,
+        installation: &Path,
+    ) -> Result<ServiceStatus, ServerError> {
         data.verify_path(&self.paths.data)?;
-        if let Some(mut state) = Self::state(&data)?
+        if let Some(mut state) = Self::state(data)?
             && state.installed
         {
             if state.removing {
                 return Err(ServerError::CleanupUnresolved);
             }
             if !state.stopped {
-                self.start_locked(&data, &mut state, false)?;
+                self.start_locked(data, &mut state, false)?;
             }
             return self.snapshot(&state);
         }
@@ -209,7 +216,7 @@ impl Service {
         // This directory lock is shared with the signed-package retention task.
         lock_directory(&installations)?;
         runtime::verify(installation, &self.identity)?;
-        let previous = Self::state(&data)?;
+        let previous = Self::state(data)?;
         let mut state = previous.unwrap_or(State {
             installation: digest.to_owned(),
             stopped: false,
@@ -221,7 +228,7 @@ impl Service {
         runtime::verify(&self.runtime(&state), &self.identity)?;
         {
             let _setup = data.lock("setup.lock", false)?;
-            if Self::state(&data)?.is_some() {
+            if Self::state(data)?.is_some() {
                 data.read()?;
             } else {
                 data.read_or_create()?;
@@ -237,9 +244,73 @@ impl Service {
         if state.stopped {
             self.supervisor.disable()?;
         } else {
-            self.start_locked(&data, &mut state, false)?;
+            self.start_locked(data, &mut state, false)?;
         }
         self.snapshot(&state)
+    }
+    #[cfg(feature = "client")]
+    pub(crate) fn local_server(&self) -> Result<crate::LocalServer, ServerError> {
+        crate::LocalServer::with_paths(self.paths.clone())
+    }
+    /// Serialize normal launch with installation and explicit service controls.
+    #[cfg(feature = "client")]
+    pub(crate) fn launch(
+        &self,
+        provision: impl FnOnce() -> Result<PathBuf, ServerError>,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<Option<ServiceStatus>, ServerError> {
+        if cancelled() {
+            return Ok(None);
+        }
+        let data = Directory::open(&self.paths.data, true)?;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let _operation = loop {
+            if cancelled() {
+                return Ok(None);
+            }
+            if let Some(lock) = data.try_lock("service.lock")? {
+                break lock;
+            }
+            if Instant::now() >= deadline {
+                return Err(ServerError::ServiceUnavailable);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        data.verify_path(&self.paths.data)?;
+        if cancelled() {
+            return Ok(None);
+        }
+        if let Some(mut state) = Self::state(&data)? {
+            let status = self.snapshot(&state)?;
+            if status.stopped {
+                return Ok(Some(status));
+            }
+            if !status.installed {
+                return Err(ServerError::NotInstalled);
+            }
+            data.read()?;
+            if !status.running {
+                if cancelled() {
+                    return Ok(None);
+                }
+                self.start_locked(&data, &mut state, false)?;
+            }
+            return self.snapshot(&state).map(Some);
+        }
+        // Existing but incompatible identity is never first setup. Leave its exact bytes intact.
+        match data.read() {
+            Ok(_) | Err(ServerError::NotSetUp) => {}
+            Err(error) => return Err(error),
+        }
+        if cancelled() {
+            return Ok(None);
+        }
+        let installation = provision()?;
+        if cancelled() {
+            return Ok(None);
+        }
+        // Registration/start is now admitted. Observe its result even if cancellation arrives.
+        self.install_locked(&data, &installation).map(Some)
     }
     /// Explicit Start is the only operation that clears retained Stop intent.
     pub fn start(&self) -> Result<ServiceStatus, ServerError> {
@@ -251,16 +322,6 @@ impl Service {
         }
         self.start_locked(&data, &mut state, true)?;
         self.snapshot(&state)
-    }
-    #[cfg(feature = "client")]
-    pub(crate) fn start_if_enabled(&self) -> Result<(), ServerError> {
-        let (data, _) = self.read()?.ok_or(ServerError::NotInstalled)?;
-        let _operation = data.lock("service.lock", false)?;
-        let mut state = Self::state(&data)?.ok_or(ServerError::NotInstalled)?;
-        if state.stopped || !state.installed {
-            return Err(ServerError::Stopped);
-        }
-        self.start_locked(&data, &mut state, false)
     }
     fn start_locked(
         &self,
@@ -275,18 +336,18 @@ impl Service {
         if state.stopped && !explicit {
             return Err(ServerError::Stopped);
         }
+        if state.removing {
+            return Err(ServerError::CleanupUnresolved);
+        }
         if self.supervisor.running()? {
-            self.supervisor.prepare_start()?;
             return if state.stopped {
                 Err(ServerError::CleanupUnresolved)
             } else {
                 Ok(())
             };
         }
-        if state.removing {
-            return Err(ServerError::CleanupUnresolved);
-        }
         check_cleanup(state)?;
+        self.prove_quiescent()?;
         state.run = None;
         data.read()?; // Unavailable or missing identity is never replaced by service controls.
         runtime::verify(&self.runtime(state), &self.identity)?;
@@ -338,6 +399,9 @@ impl Service {
         if !state.installed {
             return Err(ServerError::NotInstalled);
         }
+        if state.stopped {
+            return Err(ServerError::Stopped);
+        }
         self.stop_locked(&data, &mut state)?;
         self.start_locked(&data, &mut state, true)?;
         self.snapshot(&state)
@@ -384,12 +448,15 @@ impl Service {
         Ok(state)
     }
     fn snapshot(&self, state: &State) -> Result<ServiceStatus, ServerError> {
+        if state.removing {
+            return Err(ServerError::CleanupUnresolved);
+        }
         if state.installed {
             self.supervisor
                 .check(&self.runtime(state), state.removing)?;
         }
         let running = self.supervisor.running()?;
-        if running && !state.installed {
+        if running && (!state.installed || state.stopped) {
             return Err(ServerError::CleanupUnresolved);
         }
         if !running {
@@ -444,7 +511,7 @@ impl Service {
     }
 }
 
-// Retained Stop also fences explicit foreground and temporary desktop startup paths.
+// Retained Stop also fences explicit foreground startup.
 pub(crate) fn check_start(paths: &Paths) -> Result<(), ServerError> {
     let data = match Directory::open(&paths.data, false) {
         Ok(data) => data,
@@ -797,24 +864,6 @@ mod tests {
         assert_eq!(reopened.read().unwrap().server, seed);
         assert!(Service::state(&reopened).unwrap().unwrap().stopped);
     }
-    #[cfg(feature = "client")]
-    #[test]
-    fn connection_setup_cannot_restart_a_durably_stopped_service() {
-        let fixture = Fixture::new();
-        retain_stop(&fixture.paths).unwrap();
-        let service = Service::new(
-            fixture.paths.clone(),
-            "spaceterm-development".into(),
-            std::sync::Arc::new(TestSupervisor::default()),
-        );
-        assert_eq!(service.start_if_enabled(), Err(ServerError::Stopped));
-        assert!(
-            Service::state(&Directory::open(&fixture.paths.data, false).unwrap())
-                .unwrap()
-                .unwrap()
-                .stopped
-        );
-    }
     #[test]
     fn service_definition_publication_reuses_exact_bytes_and_preserves_changed_entries() {
         let fixture = Fixture::new();
@@ -873,6 +922,17 @@ mod tests {
         assert_eq!(check_start(&fixture.paths), Err(ServerError::UnsafeStorage));
     }
     #[test]
+    fn restart_cannot_reverse_a_deliberate_stop() {
+        let fixture = Fixture::new();
+        retain_stop(&fixture.paths).unwrap();
+        let service = Service::new(
+            fixture.paths.clone(),
+            "spaceterm-development".into(),
+            std::sync::Arc::new(TestSupervisor::default()),
+        );
+        assert_eq!(service.restart(), Err(ServerError::Stopped));
+    }
+    #[test]
     fn quiescence_refuses_unowned_endpoint_cleanup() {
         use std::os::unix::fs::PermissionsExt;
         let fixture = Fixture::new();
@@ -891,5 +951,684 @@ mod tests {
         );
         drop(listener);
         assert!(socket.exists());
+    }
+
+    #[cfg(feature = "client")]
+    mod launch {
+        use super::*;
+        use crate::{LocalStartup, StartupOutcome, pane, protocol};
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+
+        struct TestPanes;
+        impl pane::PaneService for TestPanes {
+            fn request(&mut self, _: [u8; 32], _: [u8; 32], request: pane::Request) -> pane::Reply {
+                match request {
+                    pane::Request::Shutdown => pane::Reply::Closed,
+                    _ => pane::Reply::Refused(pane::Refusal::Unsupported),
+                }
+            }
+            fn disconnected(&mut self, _: [u8; 32]) {}
+            fn shutdown(&mut self) -> Result<(), ServerError> {
+                Ok(())
+            }
+        }
+
+        // Substitute the native supervisor only. Storage, verification, startup policy and
+        // account-local admission all run their real implementations against private fixtures.
+        struct AccountSupervisor {
+            paths: Paths,
+            registered: Mutex<Option<PathBuf>>,
+            host: Mutex<Option<std::thread::JoinHandle<Result<(), ServerError>>>>,
+            authorized: AtomicBool,
+            authorizations: AtomicUsize,
+            installs: AtomicUsize,
+            starts: AtomicUsize,
+            observed_running: AtomicBool,
+        }
+        impl AccountSupervisor {
+            fn new(paths: Paths) -> Arc<Self> {
+                Arc::new(Self {
+                    paths,
+                    registered: Mutex::default(),
+                    host: Mutex::default(),
+                    authorized: AtomicBool::new(true),
+                    authorizations: AtomicUsize::new(0),
+                    installs: AtomicUsize::new(0),
+                    starts: AtomicUsize::new(0),
+                    observed_running: AtomicBool::new(false),
+                })
+            }
+            fn service(self: &Arc<Self>) -> Service {
+                Service::new(
+                    self.paths.clone(),
+                    self.paths.identity.clone(),
+                    self.clone(),
+                )
+            }
+            fn spawn_host(&self, delay: Duration) {
+                let paths = self.paths.clone();
+                *self.host.lock().unwrap() = Some(std::thread::spawn(move || {
+                    std::thread::sleep(delay);
+                    crate::host::serve_runtime(&paths, Some(Box::new(TestPanes)), true)
+                }));
+            }
+            fn close_host(&self) -> Result<(), ServerError> {
+                let Some(host) = self.host.lock().unwrap().take() else {
+                    return Ok(());
+                };
+                if !host.is_finished() {
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    let mut stream = loop {
+                        match crate::host::connect(&self.paths) {
+                            Ok(stream) => break stream,
+                            Err(ServerError::NotRunning) if Instant::now() < deadline => {
+                                std::thread::sleep(Duration::from_millis(10));
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    };
+                    let pin = Directory::open(&self.paths.data, false)?.read()?.server;
+                    protocol::admit_client(
+                        &mut stream,
+                        &[11; 32],
+                        &pin,
+                        &self.paths.identity,
+                        &[protocol::MAJOR],
+                    )?;
+                    let mut wire = protocol::Wire::terminal(&mut stream)?;
+                    wire.write(&pane::Request::Shutdown)?;
+                    assert!(matches!(wire.read::<pane::Reply>()?, pane::Reply::Closed));
+                }
+                host.join().unwrap()
+            }
+        }
+        impl Drop for AccountSupervisor {
+            fn drop(&mut self) {
+                self.close_host().unwrap();
+            }
+        }
+        impl Supervisor for AccountSupervisor {
+            fn startup(&self) -> ServiceStartup {
+                ServiceStartup::AtBoot
+            }
+            fn check(&self, runtime: &Path, _: bool) -> Result<(), ServerError> {
+                if self.registered.lock().unwrap().as_deref() == Some(runtime) {
+                    Ok(())
+                } else {
+                    Err(ServerError::CleanupUnresolved)
+                }
+            }
+            fn install(&self, runtime: &Path) -> Result<(), ServerError> {
+                self.installs.fetch_add(1, Ordering::Relaxed);
+                *self.registered.lock().unwrap() = Some(runtime.to_owned());
+                Ok(())
+            }
+            fn prepare_start(&self) -> Result<(), ServerError> {
+                if self.authorized.load(Ordering::Relaxed) {
+                    Ok(())
+                } else {
+                    Err(ServerError::AuthorizationRequired)
+                }
+            }
+            fn start(&self) -> Result<(), ServerError> {
+                self.starts.fetch_add(1, Ordering::Relaxed);
+                self.spawn_host(Duration::ZERO);
+                Ok(())
+            }
+            fn disable(&self) -> Result<(), ServerError> {
+                self.close_host()
+            }
+            fn uninstall(&self, _: &Path) -> Result<(), ServerError> {
+                *self.registered.lock().unwrap() = None;
+                Ok(())
+            }
+            fn running(&self) -> Result<bool, ServerError> {
+                self.observed_running.store(true, Ordering::Relaxed);
+                Ok(self
+                    .host
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|v| !v.is_finished()))
+            }
+            fn enable_linger(&self, _: LingerAuthorization) -> Result<(), ServerError> {
+                self.authorizations.fetch_add(1, Ordering::Relaxed);
+                self.authorized.store(true, Ordering::Relaxed);
+                Ok(())
+            }
+        }
+
+        fn no_provision() -> Result<PathBuf, ServerError> {
+            panic!("retained policy must never select a different runtime")
+        }
+        fn ready(outcome: StartupOutcome) -> crate::LocalServer {
+            match outcome {
+                StartupOutcome::Ready { server, status } => {
+                    assert_eq!(status.protocol_major, 1);
+                    server
+                }
+                _ => panic!("launch did not connect"),
+            }
+        }
+        fn fresh(fixture: &Fixture) {
+            std::fs::remove_file(fixture.paths.data.join("service.json")).unwrap();
+        }
+        fn provision(
+            service: &Service,
+            archive: &Path,
+            signature: &Path,
+        ) -> Result<PathBuf, ServerError> {
+            service
+                .provision(
+                    archive,
+                    signature,
+                    runtime::test_support::target(),
+                    runtime::test_support::COMMIT,
+                    runtime::test_support::VERSION,
+                )
+                .map(|v| v.directory)
+        }
+
+        #[test]
+        fn first_launch_and_reopen_reuse_one_service_and_nonsecret_client_identity() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let service = supervisor.service();
+            let startup = LocalStartup::with_service(service.clone()).unwrap();
+            std::fs::remove_file(fixture.paths.data.join("identity.json")).unwrap();
+            runtime::test_support::with_artifact(
+                &fixture.root.join("artifact"),
+                &fixture.paths.identity,
+                |archive, signature| {
+                    let server = ready(
+                        startup
+                            .run(|| provision(&service, archive, signature), || false)
+                            .unwrap(),
+                    );
+                    let seed = std::fs::read(fixture.paths.data.join("identity.json")).unwrap();
+                    let clients = fixture.paths.data.join("clients/desktop/client.json");
+                    let client = std::fs::read(&clients).unwrap();
+                    let identity: serde_json::Value = serde_json::from_slice(&client).unwrap();
+                    assert_eq!(identity["format"], "account-local-1");
+                    assert_eq!(identity.as_object().unwrap().len(), 2);
+                    drop(server);
+                    drop(startup);
+                    // A running service remains reusable even when Linux start authorization is lost.
+                    supervisor.authorized.store(false, Ordering::Relaxed);
+                    ready(
+                        LocalStartup::with_service(service.clone())
+                            .unwrap()
+                            .run(no_provision, || false)
+                            .unwrap(),
+                    );
+                    assert_eq!(std::fs::read(clients).unwrap(), client);
+                    assert_eq!(
+                        std::fs::read(fixture.paths.data.join("identity.json")).unwrap(),
+                        seed
+                    );
+                    assert_eq!(supervisor.installs.load(Ordering::Relaxed), 1);
+                    assert_eq!(supervisor.starts.load(Ordering::Relaxed), 1);
+                },
+            );
+        }
+
+        #[test]
+        fn launch_waits_for_existing_service_ipc_without_restarting_or_reauthorizing() {
+            let fixture = Fixture::new();
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            *supervisor.registered.lock().unwrap() = Some(
+                fixture
+                    .paths
+                    .data
+                    .join("installations")
+                    .join("a".repeat(64)),
+            );
+            supervisor.authorized.store(false, Ordering::Relaxed);
+            supervisor.spawn_host(Duration::from_millis(100));
+            ready(
+                LocalStartup::with_service(supervisor.service())
+                    .unwrap()
+                    .run(no_provision, || false)
+                    .unwrap(),
+            );
+            assert_eq!(supervisor.starts.load(Ordering::Relaxed), 0);
+            assert_eq!(supervisor.installs.load(Ordering::Relaxed), 0);
+            assert_eq!(supervisor.authorizations.load(Ordering::Relaxed), 0);
+        }
+
+        #[test]
+        fn uninstalled_stop_bypasses_provision_and_only_explicit_start_can_resume() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let service = supervisor.service();
+            runtime::test_support::with_artifact(
+                &fixture.root.join("artifact"),
+                &fixture.paths.identity,
+                |archive, signature| {
+                    let startup = LocalStartup::with_service(service.clone()).unwrap();
+                    ready(
+                        startup
+                            .run(|| provision(&service, archive, signature), || false)
+                            .unwrap(),
+                    );
+                    service.stop().unwrap();
+                    assert!(matches!(
+                        startup.run(no_provision, || false),
+                        Ok(StartupOutcome::Stopped)
+                    ));
+                    service.uninstall().unwrap();
+                    assert!(matches!(
+                        startup.run(no_provision, || false),
+                        Ok(StartupOutcome::Stopped)
+                    ));
+                    // Explicit installation preserves Stop and the approved retained runtime too.
+                    let selected = service
+                        .retained_installations()
+                        .unwrap()
+                        .remove(0)
+                        .directory;
+                    assert!(service.install(&selected).unwrap().stopped);
+                    assert_eq!(service.restart(), Err(ServerError::Stopped));
+                    assert!(service.start().unwrap().running);
+                    ready(startup.run(no_provision, || false).unwrap());
+                    assert_eq!(supervisor.starts.load(Ordering::Relaxed), 2);
+                },
+            );
+        }
+
+        #[test]
+        fn linux_first_setup_resumes_only_after_explicit_linger_authorization() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            supervisor.authorized.store(false, Ordering::Relaxed);
+            let service = supervisor.service();
+            let startup = LocalStartup::with_service(service.clone()).unwrap();
+            let seed = std::fs::read(fixture.paths.data.join("identity.json")).unwrap();
+            runtime::test_support::with_artifact(
+                &fixture.root.join("artifact"),
+                &fixture.paths.identity,
+                |archive, signature| {
+                    for _ in 0..2 {
+                        assert!(matches!(
+                            startup.run(|| provision(&service, archive, signature), || false),
+                            Ok(StartupOutcome::AuthorizationRequired)
+                        ));
+                    }
+                    assert_eq!(supervisor.authorizations.load(Ordering::Relaxed), 0);
+                    assert_eq!(supervisor.installs.load(Ordering::Relaxed), 0);
+                    assert!(!fixture.paths.data.join("service.json").exists());
+                    service.enable_linger(LingerAuthorization::Desktop).unwrap();
+                    ready(
+                        startup
+                            .run(|| provision(&service, archive, signature), || false)
+                            .unwrap(),
+                    );
+                    assert_eq!(supervisor.authorizations.load(Ordering::Relaxed), 1);
+                    assert_eq!(supervisor.starts.load(Ordering::Relaxed), 1);
+                    assert_eq!(
+                        std::fs::read(fixture.paths.data.join("identity.json")).unwrap(),
+                        seed
+                    );
+                },
+            );
+        }
+
+        #[test]
+        fn cancellation_before_admission_leaves_policy_unchanged_and_can_resume() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let service = supervisor.service();
+            let startup = LocalStartup::with_service(service.clone()).unwrap();
+            let cancelled = AtomicBool::new(false);
+            runtime::test_support::with_artifact(
+                &fixture.root.join("artifact"),
+                &fixture.paths.identity,
+                |archive, signature| {
+                    assert!(matches!(
+                        startup.run(
+                            || {
+                                let selected = provision(&service, archive, signature)?;
+                                cancelled.store(true, Ordering::Relaxed);
+                                Ok(selected)
+                            },
+                            || cancelled.load(Ordering::Relaxed)
+                        ),
+                        Ok(StartupOutcome::Cancelled)
+                    ));
+                    assert!(!fixture.paths.data.join("service.json").exists());
+                    assert_eq!(supervisor.installs.load(Ordering::Relaxed), 0);
+                    ready(
+                        startup
+                            .run(|| provision(&service, archive, signature), || false)
+                            .unwrap(),
+                    );
+                },
+            );
+        }
+
+        #[test]
+        fn cancellation_after_start_admission_reports_the_running_service() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let service = supervisor.service();
+            runtime::test_support::with_artifact(
+                &fixture.root.join("artifact"),
+                &fixture.paths.identity,
+                |archive, signature| {
+                    ready(
+                        LocalStartup::with_service(service.clone())
+                            .unwrap()
+                            .run(
+                                || provision(&service, archive, signature),
+                                || supervisor.starts.load(Ordering::Relaxed) > 0,
+                            )
+                            .unwrap(),
+                    );
+                    assert!(service.status().unwrap().running);
+                },
+            );
+        }
+
+        #[test]
+        fn waiting_launch_can_cancel_while_the_service_operation_lock_is_held() {
+            let fixture = Fixture::new();
+            let data = Directory::open(&fixture.paths.data, false).unwrap();
+            let _operation = data.lock("service.lock", false).unwrap();
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let checks = AtomicUsize::new(0);
+            assert!(matches!(
+                LocalStartup::with_service(supervisor.service())
+                    .unwrap()
+                    .run(no_provision, || checks.fetch_add(1, Ordering::Relaxed) >= 3),
+                Ok(StartupOutcome::Cancelled)
+            ));
+            assert_eq!(supervisor.starts.load(Ordering::Relaxed), 0);
+        }
+
+        #[test]
+        fn waiting_launch_observes_stop_published_before_it_acquires_the_lock() {
+            let fixture = Fixture::new();
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            *supervisor.registered.lock().unwrap() = Some(
+                fixture
+                    .paths
+                    .data
+                    .join("installations")
+                    .join("a".repeat(64)),
+            );
+            let data = Directory::open(&fixture.paths.data, false).unwrap();
+            let operation = data.lock("service.lock", false).unwrap();
+            let startup = LocalStartup::with_service(supervisor.service()).unwrap();
+            let (entered, waiting) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let sent = AtomicBool::new(false);
+                startup.run(no_provision, || {
+                    if !sent.swap(true, Ordering::Relaxed) {
+                        entered.send(()).unwrap();
+                    }
+                    false
+                })
+            });
+            waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+            retain_stop(&fixture.paths).unwrap();
+            drop(operation);
+            assert!(matches!(
+                worker.join().unwrap(),
+                Ok(StartupOutcome::Stopped)
+            ));
+            assert_eq!(supervisor.starts.load(Ordering::Relaxed), 0);
+        }
+
+        #[test]
+        fn launch_lock_storage_failure_is_never_retried_as_contention() {
+            let fixture = Fixture::new();
+            std::os::unix::fs::symlink(
+                fixture.root.join("outside"),
+                fixture.paths.data.join("service.lock"),
+            )
+            .unwrap();
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let checks = AtomicUsize::new(0);
+            assert!(matches!(
+                LocalStartup::with_service(supervisor.service())
+                    .unwrap()
+                    .run(no_provision, || checks.fetch_add(1, Ordering::Relaxed) >= 2,),
+                Err(ServerError::UnsafeStorage)
+            ));
+            assert_eq!(checks.load(Ordering::Relaxed), 2);
+            assert!(fixture.paths.data.join("service.lock").is_symlink());
+        }
+
+        #[test]
+        fn concurrent_launches_provision_and_start_one_approved_runtime() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let service = supervisor.service();
+            let barrier = std::sync::Barrier::new(2);
+            let provisions = AtomicUsize::new(0);
+            std::thread::scope(|scope| {
+                for index in 0..2 {
+                    let source = fixture.root.join(format!("artifact-{index}"));
+                    let service = &service;
+                    let barrier = &barrier;
+                    let provisions = &provisions;
+                    scope.spawn(move || {
+                        runtime::test_support::with_artifact(
+                            &source,
+                            &service.identity,
+                            |archive, signature| {
+                                barrier.wait();
+                                ready(
+                                    LocalStartup::with_service(service.clone())
+                                        .unwrap()
+                                        .run(
+                                            || {
+                                                provisions.fetch_add(1, Ordering::Relaxed);
+                                                provision(service, archive, signature)
+                                            },
+                                            || false,
+                                        )
+                                        .unwrap(),
+                                );
+                            },
+                        );
+                    });
+                }
+            });
+            assert_eq!(provisions.load(Ordering::Relaxed), 1);
+            assert_eq!(supervisor.installs.load(Ordering::Relaxed), 1);
+            assert_eq!(supervisor.starts.load(Ordering::Relaxed), 1);
+        }
+
+        #[test]
+        fn dormant_service_respects_cancellation_then_starts_its_approved_runtime() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let service = supervisor.service();
+            runtime::test_support::with_artifact(
+                &fixture.root.join("artifact"),
+                &fixture.paths.identity,
+                |archive, signature| {
+                    let selected = provision(&service, archive, signature).unwrap();
+                    let data = Directory::open(&fixture.paths.data, false).unwrap();
+                    data.write_json(
+                        c"service.json",
+                        &State {
+                            installation: selected
+                                .file_name()
+                                .unwrap()
+                                .to_str()
+                                .unwrap()
+                                .to_owned(),
+                            installed: true,
+                            stopped: false,
+                            removing: false,
+                            run: None,
+                        },
+                    )
+                    .unwrap();
+                    *supervisor.registered.lock().unwrap() = Some(selected.clone());
+                    let policy = std::fs::read(fixture.paths.data.join("service.json")).unwrap();
+                    let startup = LocalStartup::with_service(service.clone()).unwrap();
+                    let outcome = startup.run(no_provision, || {
+                        supervisor.observed_running.load(Ordering::Relaxed)
+                    });
+                    assert_eq!(supervisor.starts.load(Ordering::Relaxed), 0);
+                    assert!(matches!(outcome, Ok(StartupOutcome::Cancelled)));
+                    assert_eq!(
+                        std::fs::read(fixture.paths.data.join("service.json")).unwrap(),
+                        policy
+                    );
+                    ready(
+                        LocalStartup::with_service(service.clone())
+                            .unwrap()
+                            .run(no_provision, || false)
+                            .unwrap(),
+                    );
+                    assert_eq!(*supervisor.registered.lock().unwrap(), Some(selected));
+                    assert_eq!(supervisor.installs.load(Ordering::Relaxed), 0);
+                    assert_eq!(supervisor.starts.load(Ordering::Relaxed), 1);
+                },
+            );
+        }
+
+        #[test]
+        fn dormant_start_refuses_an_unowned_live_endpoint_before_starting_a_process() {
+            use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+            let fixture = Fixture::new();
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            *supervisor.registered.lock().unwrap() = Some(
+                fixture
+                    .paths
+                    .data
+                    .join("installations")
+                    .join("a".repeat(64)),
+            );
+            Directory::open(&fixture.paths.runtime, true).unwrap();
+            let _listener = UnixListener::bind(fixture.paths.socket()).unwrap();
+            std::fs::set_permissions(
+                fixture.paths.socket(),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            assert!(matches!(
+                LocalStartup::with_service(supervisor.service())
+                    .unwrap()
+                    .run(no_provision, || false),
+                Err(ServerError::CleanupUnresolved)
+            ));
+            assert!(fixture.paths.socket().exists());
+            assert_eq!(supervisor.starts.load(Ordering::Relaxed), 0);
+        }
+
+        #[test]
+        fn an_incompatible_running_peer_is_refused_without_retry_or_runtime_selection() {
+            use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+            let fixture = Fixture::new();
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            *supervisor.registered.lock().unwrap() = Some(
+                fixture
+                    .paths
+                    .data
+                    .join("installations")
+                    .join("a".repeat(64)),
+            );
+            Directory::open(&fixture.paths.runtime, true).unwrap();
+            let listener = UnixListener::bind(fixture.paths.socket()).unwrap();
+            std::fs::set_permissions(
+                fixture.paths.socket(),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            *supervisor.host.lock().unwrap() = Some(std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut wire = protocol::Wire::terminal(&mut stream)?;
+                let hello: serde_json::Value = wire.read()?;
+                wire.write(&serde_json::json!({"selected":0, "build":hello["build"], "server":hello["server"]}))
+            }));
+            assert!(matches!(
+                LocalStartup::with_service(supervisor.service())
+                    .unwrap()
+                    .run(no_provision, || false),
+                Err(ServerError::IncompatibleProtocol)
+            ));
+            assert_eq!(supervisor.starts.load(Ordering::Relaxed), 0);
+            assert_eq!(supervisor.installs.load(Ordering::Relaxed), 0);
+            supervisor
+                .host
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap()
+                .join()
+                .unwrap()
+                .unwrap();
+        }
+
+        #[test]
+        fn incompatible_identity_and_unresolved_cleanup_never_invoke_provision() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let startup = LocalStartup::with_service(supervisor.service()).unwrap();
+            let data = Directory::open(&fixture.paths.data, false).unwrap();
+            data.write_json(
+                c"identity.json",
+                &serde_json::json!({"format":"old", "server":[1]}),
+            )
+            .unwrap();
+            let identity = std::fs::read(fixture.paths.data.join("identity.json")).unwrap();
+            assert!(matches!(
+                startup.run(no_provision, || false),
+                Err(ServerError::IncompatibleState)
+            ));
+            assert_eq!(
+                std::fs::read(fixture.paths.data.join("identity.json")).unwrap(),
+                identity
+            );
+            data.write_json(
+                c"service.json",
+                &State {
+                    installation: "a".repeat(64),
+                    installed: true,
+                    stopped: false,
+                    removing: true,
+                    run: None,
+                },
+            )
+            .unwrap();
+            assert!(matches!(
+                startup.run(no_provision, || false),
+                Err(ServerError::CleanupUnresolved)
+            ));
+            assert_eq!(supervisor.starts.load(Ordering::Relaxed), 0);
+        }
+
+        #[test]
+        fn first_setup_rejects_a_sibling_executable_without_publishing_policy() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let sibling = fixture.root.join("spaceterm-server");
+            std::fs::write(&sibling, b"unverified sibling").unwrap();
+            assert!(matches!(
+                LocalStartup::with_service(supervisor.service())
+                    .unwrap()
+                    .run(|| Ok(sibling.clone()), || false),
+                Err(ServerError::RuntimeUnavailable)
+            ));
+            assert!(!fixture.paths.data.join("service.json").exists());
+            assert_eq!(supervisor.installs.load(Ordering::Relaxed), 0);
+        }
     }
 }

@@ -21,6 +21,12 @@ fn select(connection: &mut PaneConnection, create: bool) -> Result<Reply, Server
     })
 }
 fn main() -> Result<(), Box<dyn Error>> {
+    if !spaceterm_server::service::Service::for_identity("spaceterm-development")?
+        .status()?
+        .installed
+    {
+        return Err(ServerError::NotInstalled.into());
+    }
     let major = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "1".into())
@@ -28,7 +34,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let first = LocalServer::for_development_client("takeover-first", major)?;
     let second = LocalServer::for_development_client("takeover-second", major)?;
     for client in [&first, &second] {
-        assert_eq!(client.setup_and_start()?.protocol_major, major);
+        assert_eq!(client.refresh()?.protocol_major, major);
     }
     let mut a = first.connect_pane()?;
     let original = attach(&mut a, true)?;

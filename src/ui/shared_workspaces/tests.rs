@@ -34,7 +34,7 @@ const SECOND_REPLACEMENT_PANE: Id = [8; 32];
 
 /// The first Workspace a collection owns, which every harness here binds the server Workspace to.
 fn first_workspace_id() -> crate::domain::WorkspaceId {
-    crate::domain::WorkspaceCollection::new_local(
+    crate::domain::workspace_collection::tests::local_collection(
         crate::terminal::testing::test_local_directory(PathBuf::from("/tmp/spaceterm-shared")),
         |_, _| (),
     )
@@ -229,7 +229,8 @@ fn new_tab_in_a_shared_workspace_should_ask_the_server_and_create_nothing_locall
     assert_eq!(
         harness.edits.submitted(),
         vec![Mutation::CreateTab {
-            workspace: WORKSPACE
+            workspace: WORKSPACE,
+            source: Some(ROOT_PANE),
         }],
         "New Tab should ask the server"
     );
@@ -1249,7 +1250,7 @@ mod edits {
         edits.answer(Outcome::Conflict);
 
         assert_eq!(
-            shared.create_workspace("Logs".to_owned()),
+            shared.create_workspace("Logs".to_owned(), None),
             SharedSubmission::Refused(SharedRefusalReason::Pending),
             "a second submission must not erase a conflict before the window reads it"
         );
@@ -1259,7 +1260,7 @@ mod edits {
             SharedWorkspaceDraft::Name("Mine".to_owned())
         );
         assert_eq!(
-            shared.create_workspace("Logs".to_owned()),
+            shared.create_workspace("Logs".to_owned(), None),
             SharedSubmission::Submitted
         );
     }
@@ -1334,6 +1335,7 @@ mod edits {
         bind(&mut shared, &root_only());
         edits.submit_for_recovery(Mutation::CreateTab {
             workspace: WORKSPACE,
+            source: None,
         });
         edits.answer(Outcome::Accepted { target: SECOND_TAB });
 
@@ -1385,7 +1387,7 @@ mod edits {
     fn an_accepted_creation_this_client_asked_for_should_open_once() {
         let (mut shared, edits) = shared(Some(root_only()));
         bind(&mut shared, &root_only());
-        shared.create_workspace("Logs".to_owned());
+        shared.create_workspace("Logs".to_owned(), None);
         edits.answer(Outcome::Accepted { target: WORKSPACE });
 
         let accepted = shared.poll().accepted.expect("the creator opens its own");
@@ -1953,7 +1955,6 @@ mod draft {
             tooltip: "Server: /server/work".into(),
             pinned: false,
             remote_connection_phase: None,
-            available: true,
             repository: None,
             worktrees: None,
             creates_worktrees: false,
@@ -1996,9 +1997,7 @@ mod draft {
         cx: &mut VisualTestContext,
     ) {
         cx.update(|_, cx| {
-            sidebar.update(cx, |sidebar, cx| {
-                sidebar.set_rows(vec![row], None, true, cx)
-            });
+            sidebar.update(cx, |sidebar, cx| sidebar.set_rows(vec![row], None, cx));
         });
         cx.run_until_parked();
     }

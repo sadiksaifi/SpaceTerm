@@ -24,9 +24,23 @@ pub struct Inventory {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CloseTarget {
-    Pane { workspace: Id, tab: Id, pane: Id },
-    Tab { workspace: Id, tab: Id },
-    Workspace { workspace: Id },
+    Pane {
+        workspace: Id,
+        tab: Id,
+        pane: Id,
+    },
+    Tab {
+        workspace: Id,
+        tab: Id,
+    },
+    Workspace {
+        workspace: Id,
+    },
+    /// One surviving Tab identifies the server-owned Worktree membership to close.
+    Worktree {
+        workspace: Id,
+        tab: Id,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,7 +70,8 @@ impl Inventory {
         let workspace = match target {
             CloseTarget::Pane { workspace, .. }
             | CloseTarget::Tab { workspace, .. }
-            | CloseTarget::Workspace { workspace } => workspace,
+            | CloseTarget::Workspace { workspace }
+            | CloseTarget::Worktree { workspace, .. } => workspace,
         };
         let workspace = self.workspaces.iter().find(|w| w.id == workspace)?;
         // Sibling removal can change the consequences without changing any target Pane.
@@ -64,7 +79,9 @@ impl Inventory {
             CloseTarget::Pane { tab, .. } => {
                 workspace.tabs.iter().find(|t| t.id == tab)?.panes.len() == 1
             }
-            CloseTarget::Tab { .. } | CloseTarget::Workspace { .. } => true,
+            CloseTarget::Tab { .. }
+            | CloseTarget::Workspace { .. }
+            | CloseTarget::Worktree { .. } => true,
         };
         let removes_workspace =
             ids.len() == workspace.tabs.iter().map(|t| t.panes.len()).sum::<usize>();
@@ -84,10 +101,26 @@ impl Inventory {
         let workspace = match target {
             CloseTarget::Pane { workspace, .. }
             | CloseTarget::Tab { workspace, .. }
-            | CloseTarget::Workspace { workspace } => workspace,
+            | CloseTarget::Workspace { workspace }
+            | CloseTarget::Worktree { workspace, .. } => workspace,
         };
         let w = self.workspaces.iter().find(|w| w.id == workspace)?;
         match target {
+            CloseTarget::Worktree { tab, .. } => {
+                let anchor = w.tabs.iter().find(|t| t.id == tab)?;
+                anchor.worktree.as_ref()?;
+                Some(
+                    w.tabs
+                        .iter()
+                        .filter(|t| {
+                            t.worktree == anchor.worktree
+                                && t.worktree_repository == anchor.worktree_repository
+                        })
+                        .flat_map(|t| &t.panes)
+                        .map(|p| p.id)
+                        .collect(),
+                )
+            }
             CloseTarget::Workspace { .. } => {
                 Some(w.tabs.iter().flat_map(|t| &t.panes).map(|p| p.id).collect())
             }
@@ -160,9 +193,12 @@ pub enum Mutation {
     },
     CreateWorkspace {
         name: String,
+        /// Pins the new Workspace here, and its first Pane starts here.
+        directory: Option<PathBuf>,
     },
     CreateTab {
         workspace: Id,
+        source: Option<Id>,
     },
     SplitPane {
         workspace: Id,
@@ -188,9 +224,10 @@ impl Mutation {
             Self::Close { confirmation, .. } => {
                 !confirmation.panes.is_empty() && confirmation.panes.len() <= MAX_PANES
             }
-            Self::CreateWorkspace { name } | Self::RenameWorkspace { name, .. } => {
-                name.len() <= 256
+            Self::CreateWorkspace { name, directory } => {
+                name.len() <= 256 && directory.as_deref().is_none_or(valid_path)
             }
+            Self::RenameWorkspace { name, .. } => name.len() <= 256,
             Self::PinWorkspace {
                 directory: Some(path),
                 ..
@@ -223,7 +260,15 @@ struct DeviceOutcomes {
     pending: Vec<RetainedOutcome>,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct WorkspaceName {
+    workspace: Id,
+    custom: Option<String>,
+    automatic_base: String,
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct State {
+    home_directory: Option<PathBuf>,
+    names: Vec<WorkspaceName>,
     #[serde(default)]
     pub worktree_settings: Option<crate::worktree::Settings>,
     pub inventory: Inventory,
@@ -234,6 +279,8 @@ pub struct State {
 impl State {
     pub fn empty() -> Self {
         Self {
+            home_directory: None,
+            names: Vec::new(),
             worktree_settings: None,
             inventory: Inventory {
                 repositories: None,
@@ -265,6 +312,7 @@ impl State {
                 device,
                 &Mutation::CreateWorkspace {
                     name: "Development".into(),
+                    directory: None,
                 },
                 directory,
                 |_| true,
@@ -274,6 +322,12 @@ impl State {
     }
     pub fn from_legacy(org: &crate::organization::Organization) -> Self {
         org.shared.as_deref().cloned().unwrap_or_else(|| Self {
+            home_directory: Some(org.starting_directory.clone()),
+            names: vec![WorkspaceName {
+                workspace: org.workspace,
+                custom: (org.name != "Default").then(|| org.name.clone()),
+                automatic_base: "Default".into(),
+            }],
             worktree_settings: None,
             inventory: Inventory {
                 repositories: None,
@@ -393,6 +447,7 @@ impl State {
         workspace: Id,
         root: PathBuf,
         path: PathBuf,
+        starting_directory: PathBuf,
     ) -> Result<Id, Refusal> {
         if self.tab_count() >= MAX_TABS || self.pane_count() >= MAX_PANES {
             return Err(Refusal::Capacity);
@@ -415,7 +470,7 @@ impl State {
                 id: pane,
                 source: None,
                 axis: Axis::Right,
-                starting_directory: path,
+                starting_directory,
                 confirmed_directory: None,
                 creator: Some(device),
             }],
@@ -499,6 +554,8 @@ impl State {
         directory: &Path,
         validate_pin: impl FnOnce(&Path) -> bool,
     ) -> Result<Outcome, Refusal> {
+        self.home_directory
+            .get_or_insert_with(|| directory.to_owned());
         let new_id = || crate::protocol::random().map_err(|_| Refusal::Failed);
         let valid_name = |name: &str| {
             !name.trim().is_empty() && name.len() <= 256 && !name.chars().any(char::is_control)
@@ -515,17 +572,28 @@ impl State {
                 if self.inventory.close_confirmation(*target).as_ref() != Some(confirmation) {
                     return Ok(Outcome::StaleConfirmation);
                 }
+                // Close Tabs keeps an existing Tab outside the Worktree; it never starts one.
+                if matches!(target, CloseTarget::Worktree { .. }) && confirmation.removes_workspace
+                {
+                    return Ok(Outcome::Invalid);
+                }
                 for id in ids {
                     self.remove_pane(id);
                 }
                 match target {
                     CloseTarget::Pane { pane, .. } => *pane,
                     CloseTarget::Tab { tab, .. } => *tab,
-                    CloseTarget::Workspace { workspace } => *workspace,
+                    CloseTarget::Workspace { workspace }
+                    | CloseTarget::Worktree { workspace, .. } => *workspace,
                 }
             }
-            Mutation::CreateWorkspace { name } => {
-                if !valid_name(name) {
+            Mutation::CreateWorkspace {
+                name,
+                directory: pin,
+            } => {
+                if (!name.trim().is_empty() && !valid_name(name))
+                    || pin.as_deref().is_some_and(|path| !validate_pin(path))
+                {
                     return Ok(Outcome::Invalid);
                 }
                 if self.inventory.workspaces.len() >= MAX_WORKSPACES
@@ -537,12 +605,17 @@ impl State {
                 let id = new_id()?;
                 let tab = new_id()?;
                 let pane = new_id()?;
+                self.names.push(WorkspaceName {
+                    workspace: id,
+                    custom: (!name.trim().is_empty()).then(|| name.trim().to_owned()),
+                    automatic_base: String::new(),
+                });
                 self.inventory.workspaces.push(Workspace {
                     id,
                     name: name.trim().to_owned(),
                     name_version: 0,
                     pin_version: 0,
-                    pinned_directory: None,
+                    pinned_directory: pin.clone(),
                     root_tab: tab,
                     tabs: vec![Tab {
                         worktree: None,
@@ -554,7 +627,7 @@ impl State {
                             id: pane,
                             source: None,
                             axis: Axis::Right,
-                            starting_directory: directory.to_owned(),
+                            starting_directory: pin.clone().unwrap_or_else(|| directory.to_owned()),
                             confirmed_directory: None,
                             creator: Some(device),
                         }],
@@ -562,7 +635,7 @@ impl State {
                 });
                 id
             }
-            Mutation::CreateTab { workspace } => {
+            Mutation::CreateTab { workspace, source } => {
                 if self.tab_count() >= MAX_TABS || self.pane_count() >= MAX_PANES {
                     return Ok(Outcome::Limit);
                 }
@@ -574,21 +647,27 @@ impl State {
                 else {
                     return Ok(Outcome::Missing);
                 };
-                let start = w.pinned_directory.clone().unwrap_or_else(|| {
-                    w.tabs
+                let source = match source {
+                    Some(id) => w.tabs.iter().flat_map(|t| &t.panes).find(|p| p.id == *id),
+                    None => w
+                        .tabs
                         .iter()
                         .find(|t| t.id == w.root_tab)
-                        .and_then(|t| t.panes.iter().find(|p| p.id == t.root_pane))
-                        .map_or_else(
-                            || directory.to_owned(),
-                            |p| {
-                                p.confirmed_directory
-                                    .as_ref()
-                                    .unwrap_or(&p.starting_directory)
-                                    .clone()
-                            },
-                        )
+                        .and_then(|t| t.panes.iter().find(|p| p.id == t.root_pane)),
+                };
+                let Some(source) = source else {
+                    return Ok(Outcome::Missing);
+                };
+                let start = w.pinned_directory.clone().unwrap_or_else(|| {
+                    source
+                        .confirmed_directory
+                        .as_ref()
+                        .unwrap_or(&source.starting_directory)
+                        .clone()
                 });
+                if !validate_pin(&start) {
+                    return Ok(Outcome::Invalid);
+                }
                 let id = new_id()?;
                 let pane = new_id()?;
                 w.tabs.push(Tab {
@@ -631,12 +710,20 @@ impl State {
                 let Some(p) = t.panes.iter().find(|p| p.id == *source) else {
                     return Ok(Outcome::Missing);
                 };
-                let start = w.pinned_directory.clone().unwrap_or_else(|| {
-                    p.confirmed_directory
-                        .as_ref()
-                        .unwrap_or(&p.starting_directory)
-                        .clone()
-                });
+                // Scoped launches have been physically selected and validated by the server.
+                let start = if t.worktree.is_some() {
+                    directory.to_owned()
+                } else {
+                    w.pinned_directory.clone().unwrap_or_else(|| {
+                        p.confirmed_directory
+                            .as_ref()
+                            .unwrap_or(&p.starting_directory)
+                            .clone()
+                    })
+                };
+                if !validate_pin(&start) {
+                    return Ok(Outcome::Invalid);
+                }
                 let id = new_id()?;
                 t.panes.push(Pane {
                     id,
@@ -667,7 +754,12 @@ impl State {
                 if *version != w.name_version {
                     return Ok(Outcome::Conflict);
                 }
-                w.name = name.trim().to_owned();
+                let naming = self
+                    .names
+                    .iter_mut()
+                    .find(|n| n.workspace == *workspace)
+                    .ok_or(Refusal::Failed)?;
+                naming.custom = Some(name.trim().to_owned());
                 w.name_version += 1;
                 *workspace
             }
@@ -697,6 +789,7 @@ impl State {
                 *workspace
             }
         };
+        self.recalculate_names();
         self.inventory.revision = self
             .inventory
             .revision
@@ -744,6 +837,13 @@ impl State {
             }
         }
         self.inventory.workspaces.retain(|w| !w.tabs.is_empty());
+        self.names.retain(|name| {
+            self.inventory
+                .workspaces
+                .iter()
+                .any(|w| w.id == name.workspace)
+        });
+        self.recalculate_names();
         self.inventory.revision += 1;
     }
     pub fn repair_directory(&mut self, id: Id, path: PathBuf) -> Result<(), Refusal> {
@@ -752,6 +852,7 @@ impl State {
                 if let Some(pane) = tab.panes.iter_mut().find(|p| p.id == id) {
                     pane.confirmed_directory = Some(path);
                     tab.worktree_membership_fixed = true;
+                    self.recalculate_names();
                     self.inventory.revision = self
                         .inventory
                         .revision
@@ -769,6 +870,7 @@ impl State {
                 if let Some(p) = t.panes.iter_mut().find(|p| p.id == id) {
                     if p.confirmed_directory.as_ref() != Some(&path) {
                         p.confirmed_directory = Some(path);
+                        self.recalculate_names();
                         self.inventory.revision += 1;
                     }
                     return;
@@ -776,9 +878,97 @@ impl State {
             }
         }
     }
+    /// The allocation policy from domain/workspace_collection/naming.rs, at the local owner.
+    fn recalculate_names(&mut self) {
+        let mut occupied: std::collections::HashSet<String> =
+            self.names.iter().filter_map(|n| n.custom.clone()).collect();
+        let mut pending = Vec::new();
+        for workspace in &mut self.inventory.workspaces {
+            let Some(naming) = self.names.iter_mut().find(|n| n.workspace == workspace.id) else {
+                continue;
+            };
+            if let Some(custom) = &naming.custom {
+                if workspace.name != *custom {
+                    workspace.name.clone_from(custom);
+                }
+                continue;
+            }
+            let root = workspace
+                .tabs
+                .iter()
+                .find(|t| t.id == workspace.root_tab)
+                .and_then(|t| t.panes.iter().find(|p| p.id == t.root_pane));
+            let directory = workspace.pinned_directory.as_deref().or_else(|| {
+                root.map(|p| {
+                    p.confirmed_directory
+                        .as_deref()
+                        .unwrap_or(&p.starting_directory)
+                })
+            });
+            let mut base = match directory {
+                Some(directory) if Some(directory) != self.home_directory.as_deref() => directory
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "/".into()),
+                _ => "Default".into(),
+            };
+            // Leave room for the largest collision suffix within the protocol name bound.
+            base.retain(|character| !character.is_control());
+            while base.len() > 251 {
+                base.pop();
+            }
+            if base.trim().is_empty() {
+                base = "/".into();
+            }
+            // Reserve unchanged identities before allocating names for moving Workspaces.
+            if naming.automatic_base == base && occupied.insert(workspace.name.clone()) {
+                continue;
+            }
+            pending.push((workspace, base));
+        }
+        for (workspace, base) in pending {
+            let Some(naming) = self.names.iter_mut().find(|n| n.workspace == workspace.id) else {
+                continue;
+            };
+            let mut name = base.clone();
+            let mut ordinal = 2;
+            while !occupied.insert(name.clone()) {
+                name = format!("{base} ({ordinal})");
+                ordinal += 1;
+            }
+            if workspace.name != name {
+                workspace.name = name;
+                workspace.name_version += 1;
+            }
+            naming.automatic_base = base;
+        }
+    }
     pub(crate) fn validate(&self) -> Result<(), ServerError> {
         let invalid = || ServerError::UnsafeStorage;
-        if self.inventory.workspaces.len() > MAX_WORKSPACES
+        if self.names.len() != self.inventory.workspaces.len()
+            || self
+                .inventory
+                .workspaces
+                .iter()
+                .any(|w| self.names.iter().filter(|n| n.workspace == w.id).count() != 1)
+            || (!self.inventory.workspaces.is_empty() && self.home_directory.is_none())
+            || self.names.iter().any(|n| {
+                !self
+                    .inventory
+                    .workspaces
+                    .iter()
+                    .any(|w| w.id == n.workspace)
+                    || n.custom.as_ref().is_some_and(|name| {
+                        name.trim().is_empty()
+                            || name.len() > 256
+                            || name.chars().any(char::is_control)
+                    })
+            })
+            || self
+                .home_directory
+                .as_deref()
+                .is_some_and(|path| !valid_path(path))
+            || self.inventory.workspaces.len() > MAX_WORKSPACES
             || self.tab_count() > MAX_TABS
             || self.pane_count() > MAX_PANES
             || self.devices.len() > 64
@@ -965,6 +1155,474 @@ mod tests {
     use super::*;
 
     #[test]
+    fn confirmed_worktree_close_is_exact_and_keeps_outside_tabs_and_workspaces() {
+        let mut state = State::empty();
+        state
+            .apply(
+                [1; 32],
+                1,
+                Mutation::CreateWorkspace {
+                    name: "Build".into(),
+                    directory: None,
+                },
+                "/home/test".as_ref(),
+                |_| true,
+            )
+            .unwrap();
+        let workspace = state.inventory.workspaces[0].id;
+        let outside = state.inventory.workspaces[0].root_tab;
+        let outside_pane = state.inventory.workspaces[0].tabs[0].root_pane;
+        let mut anchor = [0; 32];
+        for _ in 0..2 {
+            anchor = state
+                .add_worktree_tab(
+                    [1; 32],
+                    workspace,
+                    "/repo/main".into(),
+                    "/repo/feature".into(),
+                    "/repo/feature".into(),
+                )
+                .unwrap();
+        }
+        let Outcome::Accepted { target: other } = state
+            .apply(
+                [1; 32],
+                2,
+                Mutation::CreateWorkspace {
+                    name: "Other".into(),
+                    directory: None,
+                },
+                "/home/test".as_ref(),
+                |_| true,
+            )
+            .unwrap()
+        else {
+            panic!("other Workspace");
+        };
+        state
+            .add_worktree_tab(
+                [1; 32],
+                other,
+                "/repo/main".into(),
+                "/repo/feature".into(),
+                "/repo/feature".into(),
+            )
+            .unwrap();
+        state.inventory.close = Some(CloseInventory {
+            boot: [9; 32],
+            sessions: state
+                .inventory
+                .workspaces
+                .iter()
+                .flat_map(|w| &w.tabs)
+                .flat_map(|t| &t.panes)
+                .map(|p| ConfirmedPane {
+                    id: p.id,
+                    session: Some(p.id),
+                })
+                .collect(),
+        });
+        let target = CloseTarget::Worktree {
+            workspace,
+            tab: anchor,
+        };
+        let confirmation = state.inventory.close_confirmation(target).unwrap();
+        assert_eq!(confirmation.panes.len(), 2);
+        let changed = confirmation.panes[0].id;
+        state
+            .inventory
+            .close
+            .as_mut()
+            .unwrap()
+            .sessions
+            .iter_mut()
+            .find(|p| p.id == changed)
+            .unwrap()
+            .session = Some([8; 32]);
+        assert_eq!(
+            state
+                .apply(
+                    [1; 32],
+                    3,
+                    Mutation::Close {
+                        target,
+                        confirmation
+                    },
+                    "/home/test".as_ref(),
+                    |_| true
+                )
+                .unwrap(),
+            Outcome::StaleConfirmation
+        );
+        assert_eq!(state.inventory.workspaces[0].tabs.len(), 3);
+        let confirmation = state.inventory.close_confirmation(target).unwrap();
+        state
+            .apply(
+                [1; 32],
+                4,
+                Mutation::Close {
+                    target,
+                    confirmation,
+                },
+                "/home/test".as_ref(),
+                |_| true,
+            )
+            .unwrap();
+        assert_eq!(
+            state.inventory.workspaces[0]
+                .tabs
+                .iter()
+                .map(|t| t.id)
+                .collect::<Vec<_>>(),
+            [outside]
+        );
+        assert_eq!(
+            state.inventory.workspaces[1].tabs.len(),
+            2,
+            "another Workspace's matching Worktree stays untouched"
+        );
+        let tab = state
+            .add_worktree_tab(
+                [1; 32],
+                workspace,
+                "/repo/main".into(),
+                "/repo/feature".into(),
+                "/repo/feature".into(),
+            )
+            .unwrap();
+        state.remove_pane(outside_pane);
+        state.inventory.close = Some(CloseInventory {
+            boot: [9; 32],
+            sessions: state
+                .inventory
+                .workspaces
+                .iter()
+                .flat_map(|w| &w.tabs)
+                .flat_map(|t| &t.panes)
+                .map(|p| ConfirmedPane {
+                    id: p.id,
+                    session: None,
+                })
+                .collect(),
+        });
+        let target = CloseTarget::Worktree { workspace, tab };
+        let confirmation = state.inventory.close_confirmation(target).unwrap();
+        assert_eq!(
+            state
+                .apply(
+                    [1; 32],
+                    5,
+                    Mutation::Close {
+                        target,
+                        confirmation
+                    },
+                    "/home/test".as_ref(),
+                    |_| true
+                )
+                .unwrap(),
+            Outcome::Invalid
+        );
+        assert_eq!(
+            state.inventory.workspaces[0].tabs.len(),
+            1,
+            "no replacement Tab or shell"
+        );
+    }
+
+    #[test]
+    fn automatic_names_follow_the_root_directory_and_pin_but_custom_names_do_not() {
+        let mut state = State::empty();
+        assert!(matches!(
+            state
+                .apply(
+                    [1; 32],
+                    1,
+                    Mutation::CreateWorkspace {
+                        name: String::new(),
+                        directory: None
+                    },
+                    "/home/test".as_ref(),
+                    |_| true
+                )
+                .unwrap(),
+            Outcome::Accepted { .. }
+        ));
+        let workspace = state.inventory.workspaces[0].id;
+        let tab = state.inventory.workspaces[0].root_tab;
+        let root = state.inventory.workspaces[0].tabs[0].root_pane;
+        assert_eq!(state.inventory.workspaces[0].name, "Default");
+        let Outcome::Accepted { target: split } = state
+            .apply(
+                [1; 32],
+                2,
+                Mutation::SplitPane {
+                    workspace,
+                    tab,
+                    source: root,
+                    axis: Axis::Right,
+                },
+                "/home/test".as_ref(),
+                |_| true,
+            )
+            .unwrap()
+        else {
+            panic!("split");
+        };
+        state.confirm_directory(split, "/other/ignored".into());
+        assert_eq!(state.inventory.workspaces[0].name, "Default");
+        state.confirm_directory(root, "/projects/api".into());
+        assert_eq!(state.inventory.workspaces[0].name, "api");
+        for (version, pin, expected) in [
+            (0, Some("/projects/pinned".into()), "pinned"),
+            (1, None, "api"),
+        ] {
+            state
+                .apply(
+                    [1; 32],
+                    3 + version,
+                    Mutation::PinWorkspace {
+                        workspace,
+                        version,
+                        directory: pin,
+                    },
+                    "/home/test".as_ref(),
+                    |_| true,
+                )
+                .unwrap();
+            assert_eq!(state.inventory.workspaces[0].name, expected);
+        }
+        state = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        state.remove_pane(root);
+        assert_eq!(state.inventory.workspaces[0].name, "ignored");
+        state
+            .apply(
+                [1; 32],
+                5,
+                Mutation::RenameWorkspace {
+                    workspace,
+                    version: state.inventory.workspaces[0].name_version,
+                    name: "Build".into(),
+                },
+                "/home/test".as_ref(),
+                |_| true,
+            )
+            .unwrap();
+        state.confirm_directory(split, "/home/test".into());
+        assert_eq!(state.inventory.workspaces[0].name, "Build");
+    }
+
+    #[test]
+    fn automatic_name_collisions_keep_survivors_and_reserve_custom_names() {
+        let mut state = State::empty();
+        for sequence in 1..=3 {
+            state
+                .apply(
+                    [1; 32],
+                    sequence,
+                    Mutation::CreateWorkspace {
+                        name: String::new(),
+                        directory: None,
+                    },
+                    "/home/test".as_ref(),
+                    |_| true,
+                )
+                .unwrap();
+        }
+        let pane = state.inventory.workspaces[0].tabs[0].root_pane;
+        state.remove_pane(pane);
+        state
+            .apply(
+                [1; 32],
+                4,
+                Mutation::CreateWorkspace {
+                    name: String::new(),
+                    directory: None,
+                },
+                "/home/test".as_ref(),
+                |_| true,
+            )
+            .unwrap();
+        assert_eq!(
+            state
+                .inventory
+                .workspaces
+                .iter()
+                .map(|w| w.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Default (2)", "Default (3)", "Default"]
+        );
+        let workspace = state.inventory.workspaces[2].id;
+        state
+            .apply(
+                [1; 32],
+                5,
+                Mutation::RenameWorkspace {
+                    workspace,
+                    version: state.inventory.workspaces[2].name_version,
+                    name: "Default (2)".into(),
+                },
+                "/home/test".as_ref(),
+                |_| true,
+            )
+            .unwrap();
+        assert_eq!(
+            state
+                .inventory
+                .workspaces
+                .iter()
+                .map(|w| w.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Default", "Default (3)", "Default (2)"]
+        );
+    }
+
+    #[test]
+    fn new_tabs_refuse_an_unavailable_pin_and_keep_the_refusal_after_repair() {
+        let mut state = State::empty();
+        let pin = Path::new("/repo/pin");
+        let home = Path::new("/home/test");
+        let Outcome::Accepted { target: workspace } = state
+            .apply(
+                [1; 32],
+                1,
+                Mutation::CreateWorkspace {
+                    name: "Build".into(),
+                    directory: Some(pin.into()),
+                },
+                home,
+                |_| true,
+            )
+            .unwrap()
+        else {
+            panic!("create the pinned Workspace");
+        };
+        let inventory = state.inventory.clone();
+        let create = Mutation::CreateTab {
+            workspace,
+            source: None,
+        };
+        assert_eq!(
+            state
+                .apply([1; 32], 2, create.clone(), home, |path| {
+                    assert_eq!(path, pin);
+                    false
+                })
+                .unwrap(),
+            Outcome::Invalid
+        );
+        assert_eq!(state.inventory, inventory);
+        let retained = serde_json::to_vec(&state).unwrap();
+        let mut state: State = serde_json::from_slice(&retained).unwrap();
+        assert_eq!(
+            state
+                .apply([1; 32], 2, create.clone(), home, |path| path == pin)
+                .unwrap(),
+            Outcome::Invalid,
+            "repair does not retry a completed operation"
+        );
+        assert_eq!(serde_json::to_vec(&state).unwrap(), retained);
+        let accepted = state
+            .apply([1; 32], 3, create.clone(), home, |path| path == pin)
+            .unwrap();
+        assert!(matches!(accepted, Outcome::Accepted { .. }));
+        assert_eq!(
+            state
+                .apply([1; 32], 3, create, home, |path| path == pin)
+                .unwrap(),
+            accepted
+        );
+        assert_eq!(state.inventory.workspaces[0].tabs.len(), 2);
+        assert_eq!(
+            state.inventory.workspaces[0].tabs[1].panes[0].starting_directory,
+            pin
+        );
+    }
+
+    #[test]
+    fn new_tabs_follow_the_source_pane_unless_the_workspace_is_pinned() {
+        let mut state = State::empty();
+        state
+            .apply(
+                [1; 32],
+                1,
+                Mutation::CreateWorkspace {
+                    name: "Build".into(),
+                    directory: None,
+                },
+                "/home/test".as_ref(),
+                |_| true,
+            )
+            .unwrap();
+        let workspace = state.inventory.workspaces[0].id;
+        let tab = state.inventory.workspaces[0].root_tab;
+        let root = state.inventory.workspaces[0].tabs[0].root_pane;
+        let Outcome::Accepted { target: source } = state
+            .apply(
+                [1; 32],
+                2,
+                Mutation::SplitPane {
+                    workspace,
+                    tab,
+                    source: root,
+                    axis: Axis::Right,
+                },
+                "/home/test".as_ref(),
+                |_| true,
+            )
+            .unwrap()
+        else {
+            panic!("split");
+        };
+        state.confirm_directory(root, "/repo/main".into());
+        state.confirm_directory(source, "/repo/feature".into());
+        state
+            .apply(
+                [1; 32],
+                3,
+                Mutation::CreateTab {
+                    workspace,
+                    source: Some(source),
+                },
+                "/home/test".as_ref(),
+                |_| true,
+            )
+            .unwrap();
+        assert_eq!(
+            state.inventory.workspaces[0].tabs[1].panes[0].starting_directory,
+            Path::new("/repo/feature")
+        );
+        state
+            .apply(
+                [1; 32],
+                4,
+                Mutation::PinWorkspace {
+                    workspace,
+                    version: 0,
+                    directory: Some("/repo/pin".into()),
+                },
+                "/home/test".as_ref(),
+                |_| true,
+            )
+            .unwrap();
+        state
+            .apply(
+                [1; 32],
+                5,
+                Mutation::CreateTab {
+                    workspace,
+                    source: Some(source),
+                },
+                "/home/test".as_ref(),
+                |_| true,
+            )
+            .unwrap();
+        assert_eq!(
+            state.inventory.workspaces[0].tabs[2].panes[0].starting_directory,
+            Path::new("/repo/pin")
+        );
+    }
+
+    #[test]
     fn confirmed_close_promotes_roots_and_replay_cannot_remove_later_work() {
         let mut state = State::empty();
         state
@@ -973,6 +1631,7 @@ mod tests {
                 1,
                 Mutation::CreateWorkspace {
                     name: "Build".into(),
+                    directory: None,
                 },
                 "/tmp".as_ref(),
                 |_| true,
@@ -984,7 +1643,10 @@ mod tests {
             .apply(
                 [1; 32],
                 2,
-                Mutation::CreateTab { workspace },
+                Mutation::CreateTab {
+                    workspace,
+                    source: None,
+                },
                 "/tmp".as_ref(),
                 |_| true,
             )
@@ -1032,6 +1694,7 @@ mod tests {
         let mut state = State::empty();
         let create = Mutation::CreateWorkspace {
             name: "Build".into(),
+            directory: None,
         };
         let Outcome::Accepted { target: workspace } = state
             .apply([1; 32], 1, create, "/tmp".as_ref(), |_| true)
@@ -1048,7 +1711,10 @@ mod tests {
             .apply(
                 [1; 32],
                 2,
-                Mutation::CreateTab { workspace },
+                Mutation::CreateTab {
+                    workspace,
+                    source: None,
+                },
                 "/tmp".as_ref(),
                 |_| true,
             )
@@ -1079,6 +1745,7 @@ mod tests {
         let mut state = State::empty();
         let create = Mutation::CreateWorkspace {
             name: "Build".into(),
+            directory: None,
         };
         let first = state
             .apply([1; 32], 1, create.clone(), "/tmp".as_ref(), |_| true)
@@ -1108,6 +1775,7 @@ mod tests {
                     sequence,
                     Mutation::CreateWorkspace {
                         name: "Build".into(),
+                        directory: None,
                     },
                     "/tmp".as_ref(),
                     |_| true,
@@ -1116,6 +1784,7 @@ mod tests {
         }
         let create = Mutation::CreateWorkspace {
             name: "More".into(),
+            directory: None,
         };
         assert!(matches!(
             state.apply([1; 32], 33, create.clone(), "/tmp".as_ref(), |_| true),
@@ -1130,6 +1799,34 @@ mod tests {
     }
 
     #[test]
+    fn creating_a_workspace_at_a_directory_pins_it_and_roots_its_first_pane_there() {
+        let mut state = State::empty();
+        let create = |directory: &str| Mutation::CreateWorkspace {
+            name: "Site".into(),
+            directory: Some(directory.into()),
+        };
+        assert_eq!(
+            state
+                .apply([1; 32], 1, create("/missing"), "/home".as_ref(), |_| false)
+                .unwrap(),
+            Outcome::Invalid
+        );
+        assert!(state.inventory.workspaces.is_empty());
+        assert!(!create("relative").is_bounded());
+        state
+            .apply([1; 32], 2, create("/srv/site"), "/home".as_ref(), |path| {
+                path == Path::new("/srv/site")
+            })
+            .unwrap();
+        let workspace = &state.inventory.workspaces[0];
+        assert_eq!(workspace.pinned_directory, Some("/srv/site".into()));
+        assert_eq!(
+            workspace.tabs[0].panes[0].starting_directory,
+            Path::new("/srv/site")
+        );
+    }
+
+    #[test]
     fn stale_pin_preserves_the_conflict_even_if_its_draft_directory_became_unavailable() {
         let mut state = State::empty();
         let Outcome::Accepted { target: workspace } = state
@@ -1138,6 +1835,7 @@ mod tests {
                 1,
                 Mutation::CreateWorkspace {
                     name: "Build".into(),
+                    directory: None,
                 },
                 "/tmp".as_ref(),
                 |_| true,
@@ -1187,6 +1885,7 @@ mod tests {
                 1,
                 Mutation::CreateWorkspace {
                     name: "Build".into(),
+                    directory: None,
                 },
                 "/tmp".as_ref(),
                 |_| true,
@@ -1216,6 +1915,7 @@ mod tests {
                 1,
                 Mutation::CreateWorkspace {
                     name: "Build".into(),
+                    directory: None,
                 },
                 "/tmp".as_ref(),
                 |_| true,
@@ -1260,7 +1960,10 @@ mod tests {
                 .apply(
                     [1; 32],
                     3,
-                    Mutation::CreateTab { workspace },
+                    Mutation::CreateTab {
+                        workspace,
+                        source: None
+                    },
                     "/tmp".as_ref(),
                     |_| true
                 )

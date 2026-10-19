@@ -12,4 +12,8 @@ if __name__ == "__main__":
     parser.add_argument("--identity", choices=IDENTITIES, default="spaceterm-preflight")
     parser.add_argument("--release-tag")
     args = parser.parse_args()
-    main(lambda: package(args.identity, args.release_tag))
+
+    def run():
+        package(args.identity, args.release_tag)
+
+    main(run)

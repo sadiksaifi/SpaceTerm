@@ -219,7 +219,7 @@ def register(prefix: Path, root: Path = ROOT) -> None:
     atomic_write(destination, contents)
 
 
-def stage_prefix(executable: Path, server_executable: Path, root: Path = ROOT) -> Path:
+def stage_prefix(executable: Path, root: Path = ROOT) -> Path:
     """Stage an installed layout beside Cargo's artifact and rename it into place."""
     parent = executable.parent.parent / "development-apps"
     parent.mkdir(parents=True, exist_ok=True)
@@ -228,8 +228,6 @@ def stage_prefix(executable: Path, server_executable: Path, root: Path = ROOT) -
         (staging / "bin").mkdir()
         shutil.copyfile(executable, staging / "bin" / "spaceterm")
         (staging / "bin" / "spaceterm").chmod(0o755)
-        shutil.copyfile(server_executable, staging / "bin" / "spaceterm-server")
-        (staging / "bin" / "spaceterm-server").chmod(0o755)
         resources = staging / "share" / "spaceterm"
         shutil.copytree(root / SHELL_INTEGRATION, resources / "shell-integration")
         compiled = subprocess.run(
@@ -268,14 +266,7 @@ def launch(backend: str | None = None) -> None:
             raise TaskError(f"{tool} is required; run mise doctor project")
     for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, interrupt)
-    server = build_executable(
-        "--package",
-        "spaceterm-server-host",
-        "--no-default-features",
-        "--locked",
-        binary="spaceterm-server",
-    )
-    prefix = stage_prefix(build_executable("--locked"), server)
+    prefix = stage_prefix(build_executable("--locked"))
     try:
         register(prefix)
     except (OSError, ValueError, subprocess.CalledProcessError):

@@ -44,7 +44,7 @@ def cached_icon(parent, name):
     return cache
 
 
-def stage_bundle(executable, server_executable):
+def stage_bundle(executable):
     template = identity(IDENTITY)
     name = template["CFBundleName"]
     if name != template["CFBundleExecutable"]:
@@ -67,8 +67,6 @@ def stage_bundle(executable, server_executable):
         (contents / "Info.plist").write_bytes(plistlib.dumps(info))
         shutil.copyfile(executable, contents / "MacOS" / name)
         (contents / "MacOS" / name).chmod(0o755)
-        shutil.copyfile(server_executable, contents / "MacOS" / "spaceterm-server")
-        (contents / "MacOS" / "spaceterm-server").chmod(0o755)
         resources = contents / "Resources"
         shutil.copytree(SHELL_INTEGRATION, resources / "shell-integration")
         shutil.copyfile(NOTICES, resources / NOTICES.name)
@@ -92,14 +90,7 @@ def stage_bundle(executable, server_executable):
 
 
 def launch():
-    server = build_executable(
-        "--package",
-        "spaceterm-server-host",
-        "--no-default-features",
-        "--locked",
-        binary="spaceterm-server",
-    )
-    bundle = stage_bundle(build_executable("--locked"), server)
+    bundle = stage_bundle(build_executable("--locked"))
     scenario = os.environ.get("SPACETERM_UPDATE_PREVIEW")
     if scenario:
         print(f"Update preview: {scenario}. Choose SpaceTerm Development > Check for Updates…")

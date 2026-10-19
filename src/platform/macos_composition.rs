@@ -209,6 +209,7 @@ fn compose(
             remote_workspace,
             repository_status: Some(repository_status),
             background_images: Some(background_images),
+            local_server: crate::ui::LocalServerAdapters::account(),
         },
         services: Some(Rc::new(super::macos_services::NativeServicesRegistration)),
         window_movement: Rc::new(super::macos_window_drag::WindowMovementFactory),

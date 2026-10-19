@@ -3,9 +3,6 @@ mod naming;
 use super::remote_workspace::{
     RemoteConnectionPhase, RemoteConnectionReduction, RemoteConnectionState,
 };
-use crate::close_confirmation::{
-    CloseContinuation, CloseWorkspaceOutcome, FinalTabCloseOutcome, HierarchyClose,
-};
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -250,12 +247,6 @@ pub(crate) enum PinnedDirectory {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum DirectoryAvailability {
-    Available,
-    Unavailable { reason: String },
-}
-
 #[derive(Clone, Eq)]
 /// A validated local directory and its local filesystem identity.
 ///
@@ -328,7 +319,6 @@ pub(crate) struct WorkspaceEntry<T> {
     location: WorkspaceLocation,
     pinned_directory: Option<PinnedDirectory>,
     directory_location: HomeDirectoryLocation,
-    availability: DirectoryAvailability,
     payload: T,
 }
 
@@ -401,10 +391,6 @@ impl<T> WorkspaceEntry<T> {
         self.pinned_directory.as_ref()
     }
 
-    pub(crate) const fn availability(&self) -> &DirectoryAvailability {
-        &self.availability
-    }
-
     pub(crate) const fn payload(&self) -> &T {
         &self.payload
     }
@@ -412,37 +398,22 @@ impl<T> WorkspaceEntry<T> {
 
 pub(crate) struct WorkspaceCollection<T> {
     workspaces: Vec<WorkspaceEntry<T>>,
-    /// The Workspace the window presents. It is `None` only after [`Self::remove_workspace`]
-    /// removed the final Workspace, which leaves a deliberately empty collection.
+    /// The Workspace the window presents. It is `None` only while the collection is empty.
     active_workspace_id: Option<WorkspaceId>,
     next_workspace_id: u64,
 }
 
 impl<T> WorkspaceCollection<T> {
-    pub(crate) fn new_local(
-        directory: ValidatedLocalDirectory,
-        create_initial_payload: impl FnOnce(WorkspaceId, &Path) -> T,
-    ) -> Self {
-        let id = WorkspaceId::from_raw(1);
-        let payload = create_initial_payload(id, directory.path());
+    /// A collection presenting nothing yet, whose Workspaces another owner supplies.
+    pub(crate) const fn empty() -> Self {
         Self {
-            workspaces: vec![WorkspaceEntry {
-                id,
-                name: default_workspace_name(1),
-                custom_name: None,
-                automatic_name_base: "Default".to_owned(),
-                automatic_directory: None,
-                location: WorkspaceLocation::Local,
-                pinned_directory: None,
-                directory_location: HomeDirectoryLocation::Local(directory),
-                availability: DirectoryAvailability::Available,
-                payload,
-            }],
-            active_workspace_id: Some(id),
-            next_workspace_id: 2,
+            workspaces: Vec::new(),
+            active_workspace_id: None,
+            next_workspace_id: 1,
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.workspaces.len()
     }
@@ -492,20 +463,6 @@ impl<T> WorkspaceCollection<T> {
         next: RemoteConnectionState,
     ) -> Result<RemoteConnectionReduction, WorkspaceError> {
         Ok(self.remote_connection_state_mut(workspace_id)?.reduce(next))
-    }
-
-    /// Finds the Local Workspace pinned to the directory `identity` names, whatever its spelling.
-    pub(crate) fn local_workspace_pinned_to(
-        &self,
-        identity: &LocalDirectoryIdentity,
-    ) -> Option<WorkspaceId> {
-        self.workspaces
-            .iter()
-            .find(|workspace| {
-                matches!(&workspace.pinned_directory,
-                    Some(PinnedDirectory::Local(directory)) if directory.identity == *identity)
-            })
-            .map(WorkspaceEntry::id)
     }
 
     /// Finds the open Remote Workspace on `destination` pinned to the directory `identity` names.
@@ -563,7 +520,6 @@ impl<T> WorkspaceCollection<T> {
             location: WorkspaceLocation::Local,
             pinned_directory: None,
             directory_location: HomeDirectoryLocation::Local(directory),
-            availability: DirectoryAvailability::Available,
             payload,
         });
         self.active_workspace_id = Some(id);
@@ -600,7 +556,6 @@ impl<T> WorkspaceCollection<T> {
             location,
             pinned_directory: None,
             directory_location: HomeDirectoryLocation::Remote,
-            availability: DirectoryAvailability::Available,
             payload,
         });
         self.active_workspace_id = Some(id);
@@ -656,7 +611,6 @@ impl<T> WorkspaceCollection<T> {
             return Err(WorkspaceError::DirectoryLocationMismatch(workspace_id));
         }
         workspace.pinned_directory = pin;
-        workspace.availability = DirectoryAvailability::Available;
         self.recalculate_automatic_names();
         Ok(())
     }
@@ -717,18 +671,6 @@ impl<T> WorkspaceCollection<T> {
         Ok(())
     }
 
-    pub(crate) fn set_directory_unavailable(
-        &mut self,
-        workspace_id: WorkspaceId,
-        reason: String,
-    ) -> Result<(), WorkspaceError> {
-        let Some(workspace) = self.workspace_mut(workspace_id) else {
-            return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
-        };
-        workspace.availability = DirectoryAvailability::Unavailable { reason };
-        Ok(())
-    }
-
     pub(crate) fn set_remote_user(
         &mut self,
         workspace_id: WorkspaceId,
@@ -746,66 +688,6 @@ impl<T> WorkspaceCollection<T> {
         };
         *stored_user = remote_user;
         Ok(())
-    }
-
-    pub(crate) fn close_workspace_with_local_replacement(
-        &mut self,
-        workspace_id: WorkspaceId,
-        replacement: ValidatedLocalDirectory,
-        create_replacement: impl FnOnce(WorkspaceId, &Path) -> T,
-    ) -> Result<CloseWorkspaceOutcome<T>, WorkspaceError> {
-        let Some(index) = self
-            .workspaces
-            .iter()
-            .position(|workspace| workspace.id == workspace_id)
-        else {
-            return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
-        };
-
-        if HierarchyClose::Workspace.resolve(self.workspaces.len()) == CloseContinuation::Replace {
-            let (replacement_workspace_id, next_workspace_id) = self.next_workspace_id()?;
-            let replacement_name = self.next_default_workspace_name(Some(workspace_id));
-            let replacement_payload =
-                create_replacement(replacement_workspace_id, replacement.path());
-            let closed_workspace = std::mem::replace(
-                &mut self.workspaces[index],
-                WorkspaceEntry {
-                    id: replacement_workspace_id,
-                    automatic_name_base: "Default".to_owned(),
-                    automatic_directory: None,
-                    name: replacement_name,
-                    custom_name: None,
-                    location: WorkspaceLocation::Local,
-                    pinned_directory: None,
-                    directory_location: HomeDirectoryLocation::Local(replacement),
-                    availability: DirectoryAvailability::Available,
-                    payload: replacement_payload,
-                },
-            );
-            self.active_workspace_id = Some(replacement_workspace_id);
-            self.next_workspace_id = next_workspace_id;
-
-            return Ok(CloseWorkspaceOutcome::FinalWorkspaceReplaced {
-                closed_workspace_id: closed_workspace.id,
-                replacement_workspace_id,
-                payload: closed_workspace.payload,
-            });
-        }
-
-        let closed_workspace = self.workspaces.remove(index);
-        // Neither close path empties the collection: a final Workspace is replaced or closes the
-        // window instead, so a neighbor always remains.
-        let neighbor = self.workspaces[index.min(self.workspaces.len() - 1)].id;
-        if self.active_workspace_id == Some(workspace_id) {
-            self.active_workspace_id = Some(neighbor);
-        }
-
-        self.recalculate_automatic_names();
-        Ok(CloseWorkspaceOutcome::WorkspaceClosed {
-            closed_workspace_id: closed_workspace.id,
-            active_workspace_id: self.active_workspace_id.unwrap_or(neighbor),
-            payload: closed_workspace.payload,
-        })
     }
 
     /// Removes a Workspace from the presentation without replacing it, returning its payload.
@@ -838,38 +720,6 @@ impl<T> WorkspaceCollection<T> {
         }
         self.recalculate_automatic_names();
         Ok(removed.payload)
-    }
-
-    pub(crate) fn close_workspace_for_final_tab(
-        &mut self,
-        workspace_id: WorkspaceId,
-    ) -> Result<FinalTabCloseOutcome<T>, WorkspaceError> {
-        let Some(index) = self
-            .workspaces
-            .iter()
-            .position(|workspace| workspace.id == workspace_id)
-        else {
-            return Err(WorkspaceError::WorkspaceNotFound(workspace_id));
-        };
-
-        if HierarchyClose::FinalTab.resolve(self.workspaces.len()) == CloseContinuation::Window {
-            return Ok(FinalTabCloseOutcome::CloseOperatingSystemWindow { workspace_id });
-        }
-
-        let closed_workspace = self.workspaces.remove(index);
-        // Neither close path empties the collection: a final Workspace is replaced or closes the
-        // window instead, so a neighbor always remains.
-        let neighbor = self.workspaces[index.min(self.workspaces.len() - 1)].id;
-        if self.active_workspace_id == Some(workspace_id) {
-            self.active_workspace_id = Some(neighbor);
-        }
-
-        self.recalculate_automatic_names();
-        Ok(FinalTabCloseOutcome::WorkspaceClosed {
-            closed_workspace_id: closed_workspace.id,
-            active_workspace_id: self.active_workspace_id.unwrap_or(neighbor),
-            payload: closed_workspace.payload,
-        })
     }
 
     fn workspace_mut(&mut self, workspace_id: WorkspaceId) -> Option<&mut WorkspaceEntry<T>> {
@@ -926,9 +776,8 @@ fn default_workspace_name(workspace_number: usize) -> String {
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+pub(crate) mod tests {
     use std::cell::Cell;
-    use std::rc::Rc;
 
     use super::*;
 
@@ -948,26 +797,23 @@ pub(super) mod tests {
         }
     }
 
-    /// `u64::MAX` makes every creation fail with an exhausted ID space.
-    pub(crate) fn set_next_workspace_id<T>(workspaces: &mut WorkspaceCollection<T>, next: u64) {
-        workspaces.next_workspace_id = next;
-    }
-
-    struct DropProbe {
-        drops: Rc<Cell<usize>>,
-    }
-
-    impl Drop for DropProbe {
-        fn drop(&mut self) {
-            self.drops.update(|drops| drops + 1);
-        }
-    }
-
     fn new_workspaces<T>(payload: T) -> WorkspaceCollection<T> {
-        WorkspaceCollection::new_local(validated("/first", 0), |_, working_directory| {
+        local_collection(validated("/first", 0), |_, working_directory| {
             assert_eq!(working_directory, Path::new("/first"));
             payload
         })
+    }
+
+    /// A collection presenting one Workspace at `directory`, as a window's first one.
+    pub(crate) fn local_collection<T>(
+        directory: ValidatedLocalDirectory,
+        payload: impl FnOnce(WorkspaceId, &Path) -> T,
+    ) -> WorkspaceCollection<T> {
+        let mut workspaces = WorkspaceCollection::empty();
+        workspaces
+            .create_local_workspace(directory, payload)
+            .expect("an empty collection accepts its first Workspace");
+        workspaces
     }
 
     fn validated(path: &str, identity_label: u64) -> ValidatedLocalDirectory {
@@ -1069,8 +915,7 @@ pub(super) mod tests {
 
     #[test]
     fn remote_directories_never_provide_local_filesystem_authority() {
-        let mut workspaces =
-            WorkspaceCollection::new_local(validated("/Users/test", 10), |_, _| ());
+        let mut workspaces = local_collection(validated("/Users/test", 10), |_, _| ());
         let workspace_id = workspaces
             .create_remote_workspace(
                 remote_key("orb", "/home/test/project"),
@@ -1113,8 +958,7 @@ pub(super) mod tests {
 
     #[test]
     fn remote_workspace_key_keeps_different_destination_aliases_distinct() {
-        let mut workspaces =
-            WorkspaceCollection::new_local(validated("/Users/test", 10), |_, _| ());
+        let mut workspaces = local_collection(validated("/Users/test", 10), |_, _| ());
         let first = workspaces
             .create_remote_workspace(
                 remote_key("orb", "/srv/project"),
@@ -1201,8 +1045,7 @@ pub(super) mod tests {
 
     #[test]
     fn remote_connection_operations_reject_missing_and_local_workspaces_without_mutation() {
-        let mut workspaces =
-            WorkspaceCollection::new_local(validated("/Users/test", 10), |_, _| ());
+        let mut workspaces = local_collection(validated("/Users/test", 10), |_, _| ());
         let local_id = workspaces
             .create_local_workspace(validated("/Users/test/project", 20), |_, _| ())
             .unwrap();
@@ -1253,8 +1096,7 @@ pub(super) mod tests {
 
     #[test]
     fn reconnect_generation_exhaustion_does_not_mutate_remote_state() {
-        let mut workspaces =
-            WorkspaceCollection::new_local(validated("/Users/test", 10), |_, _| ());
+        let mut workspaces = local_collection(validated("/Users/test", 10), |_, _| ());
         let workspace_id = workspaces
             .create_remote_workspace(
                 remote_key("orb", "/srv/project"),
@@ -1282,8 +1124,7 @@ pub(super) mod tests {
 
     #[test]
     fn begin_remote_reconnect_advances_once_and_rejects_a_second_begin() {
-        let mut workspaces =
-            WorkspaceCollection::new_local(validated("/Users/test", 10), |_, _| ());
+        let mut workspaces = local_collection(validated("/Users/test", 10), |_, _| ());
         let workspace_id = workspaces
             .create_remote_workspace(
                 remote_key("orb", "/srv/project"),
@@ -1313,8 +1154,7 @@ pub(super) mod tests {
 
     #[test]
     fn begin_remote_reconnect_rejects_connected_state_without_advancing() {
-        let mut workspaces =
-            WorkspaceCollection::new_local(validated("/Users/test", 10), |_, _| ());
+        let mut workspaces = local_collection(validated("/Users/test", 10), |_, _| ());
         let workspace_id = workspaces
             .create_remote_workspace(
                 remote_key("orb", "/srv/project"),
@@ -1349,8 +1189,7 @@ pub(super) mod tests {
         .into_iter()
         .enumerate()
         {
-            let mut workspaces =
-                WorkspaceCollection::new_local(validated("/Users/test", 10), |_, _| ());
+            let mut workspaces = local_collection(validated("/Users/test", 10), |_, _| ());
             let workspace_id = workspaces
                 .create_remote_workspace(
                     remote_key(&format!("orb-{index}"), "/srv/project"),
@@ -1377,8 +1216,7 @@ pub(super) mod tests {
 
     #[test]
     fn collection_reducer_preserves_stale_and_illegal_results_without_mutation() {
-        let mut workspaces =
-            WorkspaceCollection::new_local(validated("/Users/test", 10), |_, _| ());
+        let mut workspaces = local_collection(validated("/Users/test", 10), |_, _| ());
         let workspace_id = workspaces
             .create_remote_workspace(
                 remote_key("orb", "/srv/project"),
@@ -1443,8 +1281,7 @@ pub(super) mod tests {
 
     #[test]
     fn collection_remote_lifecycle_reduces_legal_transitions_and_closing_is_terminal() {
-        let mut workspaces =
-            WorkspaceCollection::new_local(validated("/Users/test", 10), |_, _| ());
+        let mut workspaces = local_collection(validated("/Users/test", 10), |_, _| ());
         let workspace_id = workspaces
             .create_remote_workspace(
                 remote_key("orb", "/srv/project"),
@@ -1515,7 +1352,7 @@ pub(super) mod tests {
 
     #[test]
     fn pins_are_explicit_independent_and_do_not_change_home() {
-        let mut workspaces = WorkspaceCollection::new_local(validated("/home/me", 1), |_, _| ());
+        let mut workspaces = local_collection(validated("/home/me", 1), |_, _| ());
         let first = workspaces.active_id();
         let second = workspaces
             .create_local_workspace(validated("/home/me", 1), |_, _| ())
@@ -1552,7 +1389,7 @@ pub(super) mod tests {
 
     #[test]
     fn pinned_workspace_lookup_should_match_the_directory_identity_on_the_same_machine() {
-        let mut workspaces = WorkspaceCollection::new_local(validated("/home/me", 1), |_, _| ());
+        let mut workspaces = local_collection(validated("/home/me", 1), |_, _| ());
         let local = WorkspaceId::new(1);
         let identity = remote_identity("/srv/app");
         let pin = |directory: &str| PinnedDirectory::Remote {
@@ -1574,10 +1411,6 @@ pub(super) mod tests {
         let server = create_remote("server");
         let other = create_remote("other");
         assert_eq!(
-            workspaces.local_workspace_pinned_to(&LocalDirectoryIdentity::for_test(2)),
-            None
-        );
-        assert_eq!(
             workspaces.remote_workspace_pinned_to(&ssh_destination("server"), &identity),
             None
         );
@@ -1595,14 +1428,6 @@ pub(super) mod tests {
             .set_pinned_directory(server, Some(pin("~/../../srv/app")))
             .unwrap();
 
-        assert_eq!(
-            workspaces.local_workspace_pinned_to(&LocalDirectoryIdentity::for_test(2)),
-            Some(local)
-        );
-        assert_eq!(
-            workspaces.local_workspace_pinned_to(&LocalDirectoryIdentity::for_test(3)),
-            None
-        );
         assert_eq!(
             workspaces.remote_workspace_pinned_to(&ssh_destination("server"), &identity),
             Some(server)
@@ -1626,7 +1451,7 @@ pub(super) mod tests {
 
     #[test]
     fn remote_workspaces_at_the_same_home_are_independent_and_pins_keep_remote_authority() {
-        let mut workspaces = WorkspaceCollection::new_local(validated("/home/me", 1), |_, _| ());
+        let mut workspaces = local_collection(validated("/home/me", 1), |_, _| ());
         let mut create = || {
             workspaces
                 .create_remote_workspace(
@@ -2154,42 +1979,12 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn non_final_close_should_not_allocate_a_replacement_workspace_id() {
-        let mut workspaces = new_workspaces("first payload");
-        workspaces
-            .create_local_workspace(validated("/second", 0), |_, _| "second payload")
-            .unwrap();
-        workspaces.next_workspace_id = u64::MAX;
-
-        let outcome = workspaces
-            .close_workspace_with_local_replacement(
-                WorkspaceId::new(1),
-                validated("/replacement", 0),
-                |_, _| unreachable!("a replacement is not needed"),
-            )
-            .unwrap();
-
-        assert_eq!(
-            outcome,
-            CloseWorkspaceOutcome::WorkspaceClosed {
-                closed_workspace_id: WorkspaceId::new(1),
-                active_workspace_id: WorkspaceId::new(2),
-                payload: "first payload",
-            }
-        );
-    }
-
-    #[test]
-    fn closed_workspace_ids_should_not_be_reused() {
+    fn removed_workspace_ids_should_not_be_reused() {
         let mut workspaces = new_workspaces("first payload");
         let second = workspaces
             .create_local_workspace(validated("/second", 0), |_, _| "second payload")
             .unwrap();
-        workspaces
-            .close_workspace_with_local_replacement(second, validated("/replacement", 0), |_, _| {
-                unreachable!("a replacement is not needed")
-            })
-            .unwrap();
+        workspaces.remove_workspace(second).unwrap();
 
         let third = workspaces
             .create_local_workspace(validated("/third", 0), |_, _| "third payload")
@@ -2199,259 +1994,14 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn close_workspace_should_focus_the_next_workspace_when_closing_the_active_middle_workspace() {
+    fn removing_the_active_last_workspace_should_activate_the_previous_one() {
         let mut workspaces = new_workspaces("first payload");
-        workspaces
-            .create_local_workspace(validated("/second", 0), |_, _| "second payload")
-            .unwrap();
-        workspaces
-            .create_local_workspace(validated("/third", 0), |_, _| "third payload")
-            .unwrap();
-        workspaces.activate_workspace(WorkspaceId::new(2)).unwrap();
-
-        let outcome = workspaces
-            .close_workspace_with_local_replacement(
-                WorkspaceId::new(2),
-                validated("/replacement", 0),
-                |_, _| unreachable!("a replacement is not needed"),
-            )
-            .unwrap();
-
-        let CloseWorkspaceOutcome::WorkspaceClosed {
-            active_workspace_id,
-            ..
-        } = outcome
-        else {
-            panic!("closing one of multiple Workspaces must remove it")
-        };
-        assert_eq!(active_workspace_id, WorkspaceId::new(3));
-    }
-
-    #[test]
-    fn close_workspace_should_focus_the_previous_workspace_when_closing_the_active_last_workspace()
-    {
-        let mut workspaces = new_workspaces("first payload");
-        workspaces
+        let second = workspaces
             .create_local_workspace(validated("/second", 0), |_, _| "second payload")
             .unwrap();
 
-        let outcome = workspaces
-            .close_workspace_with_local_replacement(
-                WorkspaceId::new(2),
-                validated("/replacement", 0),
-                |_, _| unreachable!("a replacement is not needed"),
-            )
-            .unwrap();
+        workspaces.remove_workspace(second).unwrap();
 
-        let CloseWorkspaceOutcome::WorkspaceClosed {
-            active_workspace_id,
-            ..
-        } = outcome
-        else {
-            panic!("closing one of multiple Workspaces must remove it")
-        };
-        assert_eq!(active_workspace_id, WorkspaceId::new(1));
-    }
-
-    #[test]
-    fn close_workspace_should_reject_an_unknown_id_without_factory_side_effects_or_mutation() {
-        let mut workspaces = new_workspaces("first payload");
-        let creations = Cell::new(0);
-
-        let result = workspaces.close_workspace_with_local_replacement(
-            WorkspaceId::new(99),
-            validated("/replacement", 0),
-            |_, _| {
-                creations.update(|count| count + 1);
-                "replacement payload"
-            },
-        );
-
-        assert_eq!(
-            (
-                result.err(),
-                creations.get(),
-                workspaces.len(),
-                workspaces.active_id(),
-            ),
-            (
-                Some(WorkspaceError::WorkspaceNotFound(WorkspaceId::new(99))),
-                0,
-                1,
-                WorkspaceId::new(1),
-            )
-        );
-    }
-
-    #[test]
-    fn close_workspace_should_atomically_replace_and_activate_the_final_workspace() {
-        let mut workspaces = new_workspaces("first payload");
-
-        let outcome = workspaces
-            .close_workspace_with_local_replacement(
-                WorkspaceId::new(1),
-                validated("/replacement", 0),
-                |id, working_directory| {
-                    assert_eq!(id, WorkspaceId::new(2));
-                    assert_eq!(working_directory, Path::new("/replacement"));
-                    "replacement payload"
-                },
-            )
-            .unwrap();
-
-        let replacement_working_directory = workspaces.active().local_home_directory().unwrap();
-
-        assert_eq!(
-            (
-                outcome,
-                workspaces.len(),
-                workspaces.active_id(),
-                workspaces.active().id(),
-                workspaces.active().name(),
-                replacement_working_directory,
-                workspaces.active().payload(),
-            ),
-            (
-                CloseWorkspaceOutcome::FinalWorkspaceReplaced {
-                    closed_workspace_id: WorkspaceId::new(1),
-                    replacement_workspace_id: WorkspaceId::new(2),
-                    payload: "first payload",
-                },
-                1,
-                WorkspaceId::new(2),
-                WorkspaceId::new(2),
-                "Default",
-                Path::new("/replacement"),
-                &"replacement payload",
-            )
-        );
-    }
-
-    #[test]
-    fn final_tab_close_should_remove_a_non_final_workspace_without_allocating_a_replacement() {
-        let mut workspaces = new_workspaces("first payload");
-        workspaces
-            .create_local_workspace(validated("/second", 0), |_, _| "second payload")
-            .unwrap();
-        workspaces.next_workspace_id = u64::MAX;
-
-        let outcome = workspaces
-            .close_workspace_for_final_tab(WorkspaceId::new(1))
-            .unwrap();
-
-        assert_eq!(
-            outcome,
-            FinalTabCloseOutcome::WorkspaceClosed {
-                closed_workspace_id: WorkspaceId::new(1),
-                active_workspace_id: WorkspaceId::new(2),
-                payload: "first payload",
-            }
-        );
-        assert_eq!(workspaces.active().payload(), &"second payload");
-    }
-
-    #[test]
-    fn final_tab_close_should_preserve_the_globally_final_workspace() {
-        let mut workspaces = new_workspaces("first payload");
-        workspaces.next_workspace_id = u64::MAX;
-
-        let outcome = workspaces
-            .close_workspace_for_final_tab(WorkspaceId::new(1))
-            .unwrap();
-
-        assert_eq!(
-            outcome,
-            FinalTabCloseOutcome::CloseOperatingSystemWindow {
-                workspace_id: WorkspaceId::new(1),
-            }
-        );
-        assert_eq!(
-            (
-                workspaces.len(),
-                workspaces.active_id(),
-                workspaces.active().payload(),
-            ),
-            (1, WorkspaceId::new(1), &"first payload")
-        );
-    }
-
-    #[test]
-    fn final_tab_close_should_transfer_ownership_and_drop_each_payload_exactly_once() {
-        let drops = Rc::new(Cell::new(0));
-        let mut workspaces = new_workspaces(DropProbe {
-            drops: Rc::clone(&drops),
-        });
-        workspaces
-            .create_local_workspace(validated("/second", 0), |_, _| DropProbe {
-                drops: Rc::clone(&drops),
-            })
-            .unwrap();
-
-        let outcome = workspaces
-            .close_workspace_for_final_tab(WorkspaceId::new(1))
-            .unwrap();
-        assert_eq!(drops.get(), 0);
-
-        drop(outcome);
-        assert_eq!(drops.get(), 1);
-
-        drop(workspaces);
-        assert_eq!(drops.get(), 2);
-    }
-
-    #[test]
-    fn close_workspace_should_reject_exhausted_ids_before_factory_side_effects() {
-        let mut workspaces = new_workspaces("first payload");
-        workspaces.next_workspace_id = u64::MAX;
-        let creations = Cell::new(0);
-
-        let result = workspaces.close_workspace_with_local_replacement(
-            WorkspaceId::new(1),
-            validated("/replacement", 0),
-            |_, _| {
-                creations.update(|count| count + 1);
-                "replacement payload"
-            },
-        );
-
-        assert_eq!(
-            (
-                result.err(),
-                creations.get(),
-                workspaces.len(),
-                workspaces.active_id(),
-            ),
-            (
-                Some(WorkspaceError::IdSpaceExhausted),
-                0,
-                1,
-                WorkspaceId::new(1),
-            )
-        );
-    }
-
-    #[test]
-    fn close_workspace_should_transfer_ownership_and_drop_each_payload_exactly_once() {
-        let drops = Rc::new(Cell::new(0));
-        let mut workspaces = new_workspaces(DropProbe {
-            drops: Rc::clone(&drops),
-        });
-
-        let outcome = workspaces
-            .close_workspace_with_local_replacement(
-                WorkspaceId::new(1),
-                validated("/replacement", 0),
-                |_, _| DropProbe {
-                    drops: Rc::clone(&drops),
-                },
-            )
-            .unwrap();
-        assert_eq!(drops.get(), 0);
-
-        drop(outcome);
-        assert_eq!(drops.get(), 1);
-
-        drop(workspaces);
-        assert_eq!(drops.get(), 2);
+        assert_eq!(workspaces.active_workspace_id(), Some(WorkspaceId::new(1)));
     }
 }

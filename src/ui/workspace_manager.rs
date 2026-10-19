@@ -49,7 +49,7 @@ use super::{
     PreviousWorktree, RemoteChildLaunchUnavailable, ScrollPageDown, ScrollPageUp, ScrollToBottom,
     ScrollToTop, ShowRepositoryStatus, SplitDown, SplitRight, SwitchWorkspace,
     TERMINAL_KEY_CONTEXT, TabManager, TabManagerEvent, TogglePaneZoom, ToggleSidebar,
-    ToggleSidebarFocus, WORKSPACE_SIDEBAR_DEFAULT_WIDTH,
+    ToggleSidebarFocus,
 };
 use crate::appearance::Color;
 use crate::close_confirmation::{
@@ -58,10 +58,9 @@ use crate::close_confirmation::{
 };
 use crate::directory_selection::SystemDirectorySelection;
 use crate::domain::{
-    CloseWorkspaceOutcome, DirectoryAvailability, FinalTabCloseOutcome, LocalDirectoryIdentity,
-    PinnedDirectory, RemoteConnectionReduction, RemoteConnectionState, RemoteDirectory,
-    RemoteWorkspaceTarget, ValidatedLocalDirectory, WorkspaceCollection, WorkspaceEntry,
-    WorkspaceError, WorkspaceId, WorkspaceLocation,
+    LocalDirectoryIdentity, PinnedDirectory, RemoteConnectionReduction, RemoteConnectionState,
+    RemoteDirectory, RemoteWorkspaceTarget, ValidatedLocalDirectory, WorkspaceCollection,
+    WorkspaceEntry, WorkspaceError, WorkspaceId, WorkspaceLocation,
 };
 use crate::platform::local_filesystem::{LocalFilesystemAuthority, LocalFilesystemError};
 use crate::platform::window_movement::{
@@ -79,7 +78,7 @@ use gpui::prelude::*;
 
 use gpui::{
     Action, AnyElement, App, Context, Edges, Entity, FocusHandle, Pixels, Render, Task, WeakEntity,
-    Window, div, px,
+    Window, div,
 };
 use spaceterm_ui::{
     Alert, AlertIntent, AlertOutcome, AnchoredAlignment, AnchoredPlacement,
@@ -190,6 +189,8 @@ pub(crate) struct WorkspaceManagerAdapters {
     pub(crate) directory_selection: Rc<dyn SystemDirectorySelection>,
     pub(crate) window_drag: Rc<dyn OperatingSystemWindowDragPlatform>,
     pub(crate) remote_workspace: Arc<dyn RemoteWorkspaceFlowBackendFactory>,
+    /// The account-local server this window launches and presents. It owns local Workspaces.
+    pub(crate) local_server: launch::LocalServerAdapters,
 }
 
 struct PendingRemoteActivation {
@@ -338,6 +339,8 @@ pub(crate) struct WorkspaceManager {
     _shared_poll: Option<Task<()>>,
     /// Where the keyboard rests while the window presents no Workspace.
     empty_focus: FocusHandle,
+    /// Normal launch of the account-local server this window presents.
+    launch: launch::LocalLaunchState,
 }
 
 impl WorkspaceManager {
@@ -378,6 +381,7 @@ impl WorkspaceManager {
             directory_selection,
             window_drag: operating_system_window_drag_platform,
             remote_workspace: remote_workspace_backend_factory,
+            local_server,
         } = adapters;
         let pane_construction = PaneConstruction::new(
             key_input_adapter_factory,
@@ -385,40 +389,10 @@ impl WorkspaceManager {
             native_service_adapters,
             lifecycle_dependencies,
         );
-        let (default_directory, initial_directory_error) =
-            initial_home_directory(local_home_directory_path.clone(), &local_filesystem);
-        let local_home_identity = default_directory.identity();
-        let initial_workspace_identity = default_directory.identity();
-        let initial_window_drag_platform = Rc::clone(&operating_system_window_drag_platform);
-        let mut workspaces =
-            WorkspaceCollection::new_local(default_directory, |workspace_id, home_directory| {
-                Self::create_local_tab_manager(
-                    WorkspaceTerminalSessionFactory::new_local_with_authority(
-                        Rc::clone(&session_factory),
-                        ValidatedLocalDirectory::new(
-                            home_directory.to_path_buf(),
-                            initial_workspace_identity,
-                        ),
-                        local_filesystem.clone(),
-                    ),
-                    TabManagerCreation {
-                        workspace_id,
-                        sidebar_visible,
-                        sidebar_width: px(WORKSPACE_SIDEBAR_DEFAULT_WIDTH),
-                        operating_system_window_drag_platform: Rc::clone(
-                            &initial_window_drag_platform,
-                        ),
-                        pane_construction: pane_construction.clone(),
-                    },
-                    window,
-                    cx,
-                )
-            });
-        if let Some((reason, workspace_id)) =
-            initial_directory_error.zip(workspaces.active_workspace_id())
-        {
-            let _ = workspaces.set_directory_unavailable(workspace_id, reason);
-        }
+        let local_home_identity =
+            local_home_identity(local_home_directory_path.clone(), &local_filesystem);
+        // The server owns this window's local Workspaces, which arrive once it is ready.
+        let workspaces = WorkspaceCollection::empty();
         cx.on_app_quit(|manager, cx| {
             manager.save_shared_arrangements(cx);
             if let Some(shared) = manager.shared.as_mut() {
@@ -429,7 +403,6 @@ impl WorkspaceManager {
         .detach();
         cx.on_release(|manager, cx| {
             manager.release_sidebar_repositories(cx);
-            manager.release_sidebar_worktrees(cx);
             manager.save_shared_arrangements(cx);
         })
         .detach();
@@ -465,14 +438,11 @@ impl WorkspaceManager {
             {
                 store.update(cx, |store, cx| store.window_activated(cx));
             }
-            if window.is_window_active() {
-                Self::worktrees_window_activated(cx);
-            }
             cx.notify();
         })
         .detach();
 
-        Self {
+        let mut manager = Self {
             window_appearance,
             window_traffic_lights,
             transient: WorkspaceTransientUi {
@@ -510,35 +480,10 @@ impl WorkspaceManager {
             shared: None,
             _shared_poll: None,
             empty_focus: cx.focus_handle(),
-        }
-    }
-
-    fn create_local_tab_manager(
-        session_factory: WorkspaceTerminalSessionFactory,
-        creation: TabManagerCreation,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<TabManager> {
-        match Self::try_create_tab_manager(session_factory, creation, window, cx) {
-            Ok(manager) => manager,
-            Err(error) => unreachable!("Local initial launch preparation is infallible: {error}"),
-        }
-    }
-
-    fn try_create_tab_manager(
-        session_factory: WorkspaceTerminalSessionFactory,
-        creation: TabManagerCreation,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Result<Entity<TabManager>, crate::terminal::TerminalSessionChannelUnavailable> {
-        let prepared_launch = session_factory.prepare_child_launch()?;
-        Ok(Self::create_tab_manager_with_prepared_launch(
-            session_factory,
-            prepared_launch,
-            creation,
-            window,
-            cx,
-        ))
+            launch: launch::LocalLaunchState::new(local_server),
+        };
+        manager.run_local_launch(None, window, cx);
+        manager
     }
 
     fn create_tab_manager_with_prepared_launch(
@@ -1017,119 +962,7 @@ impl WorkspaceManager {
         }
     }
 
-    fn create_local_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.create_named_local_workspace(None, window, cx);
-    }
-
-    fn create_named_local_workspace(
-        &mut self,
-        name: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.create_pinned_local_workspace(name, None, window, cx);
-    }
-
-    /// Creates and activates a Local Workspace whose Terminal Sessions start in `pin`, including
-    /// its first, or at the local home directory when there is no pin.
-    fn create_pinned_local_workspace(
-        &mut self,
-        name: Option<String>,
-        pin: Option<ValidatedLocalDirectory>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let previous_manager = self.active_tab_manager();
-        let pane_construction = self.pane_construction.clone();
-        let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
-        let sidebar_visible = self.sidebar.read(cx).layout().visible;
-        let sidebar_width = self.sidebar.read(cx).layout().width;
-        let directory = match self.local_home_directory() {
-            Ok(directory) => directory,
-            Err(_) => {
-                Self::show_home_directory_unavailable(window, cx);
-                return false;
-            }
-        };
-        let mut session_factory = WorkspaceTerminalSessionFactory::new_local_with_authority(
-            Rc::clone(&self.session_factory),
-            directory.clone(),
-            self.local_filesystem.clone(),
-        );
-        session_factory.set_pinned_directory(pin.clone().map(PinnedDirectory::Local));
-        let launch_factory = if pin.is_some() {
-            match session_factory.for_source_directory(None) {
-                Ok(launch_factory) => launch_factory,
-                Err(_) => return false,
-            }
-        } else {
-            session_factory.clone()
-        };
-        let prepared_launch = match launch_factory.prepare_child_launch() {
-            Ok(prepared_launch) => prepared_launch,
-            Err(error) => unreachable!("Local initial launch preparation is infallible: {error}"),
-        };
-        let result = self
-            .workspaces
-            .create_local_workspace(directory, |workspace_id, _| {
-                Self::create_tab_manager_with_prepared_launch(
-                    session_factory,
-                    prepared_launch,
-                    TabManagerCreation {
-                        workspace_id,
-                        sidebar_visible,
-                        sidebar_width,
-                        operating_system_window_drag_platform: window_drag_platform,
-                        pane_construction,
-                    },
-                    window,
-                    cx,
-                )
-            });
-        let workspace_id = match result {
-            Ok(workspace_id) => workspace_id,
-            Err(error) => {
-                Self::report_workspace_error("create", error);
-                return false;
-            }
-        };
-        if let Some(pin) = pin
-            && let Err(error) = self
-                .workspaces
-                .set_pinned_directory(workspace_id, Some(PinnedDirectory::Local(pin)))
-        {
-            Self::report_workspace_error("pin", error);
-        }
-        if let Some(name) = name
-            && let Err(error) = self.workspaces.rename_workspace(workspace_id, name)
-        {
-            Self::report_workspace_error("rename", error);
-        }
-        let Some(next_manager) = self
-            .workspaces
-            .workspace(workspace_id)
-            .map(|workspace| workspace.payload().clone())
-        else {
-            unreachable!("a newly created Workspace must remain owned by its collection")
-        };
-
-        self.synchronize_tab_manager_layout(workspace_id, window, cx);
-        if let Some(previous_manager) = &previous_manager {
-            previous_manager.update(cx, |manager, cx| manager.deactivate(cx));
-        }
-        next_manager.update(cx, |manager, cx| manager.activate(window, cx));
-        Self::hand_over_tab_strip(previous_manager.as_ref(), &next_manager, cx);
-        self.sidebar.update(cx, |sidebar, cx| {
-            sidebar.cancel_rename(cx);
-        });
-        self.sync_terminal_focus_blocker(window, cx);
-        self.scroll_active_workspace_into_view(cx);
-
-        cx.notify();
-        true
-    }
-
-    /// Activates the Local Workspace already pinned to `directory`, or creates one pinned to it.
+    /// Opens a chosen local directory as a Workspace the account server owns.
     fn open_local_directory_workspace(
         &mut self,
         directory: ValidatedLocalDirectory,
@@ -1140,29 +973,49 @@ impl WorkspaceManager {
         let Ok(directory) = self.local_filesystem.revalidate_directory(&directory) else {
             return PinApplication::Failed;
         };
-        let opened = match self
-            .workspaces
-            .local_workspace_pinned_to(&directory.identity())
-        {
+        self.open_shared_directory_workspace(directory, name, window, cx)
+    }
+
+    /// Opens a chosen directory as a Workspace the account server owns: the presented Workspace
+    /// already pinned there, or a new one whose first Pane starts there.
+    fn open_shared_directory_workspace(
+        &mut self,
+        directory: ValidatedLocalDirectory,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> PinApplication {
+        let existing = self.shared.as_ref().and_then(|shared| {
+            let filesystem = shared.sessions().local_filesystem()?;
+            self.workspaces.iter().find_map(|entry| {
+                let pin = shared
+                    .server_workspace(entry.id())?
+                    .pinned_directory
+                    .as_deref()?;
+                filesystem
+                    .validate_directory(pin)
+                    .ok()
+                    .filter(|pinned| pinned.identity() == directory.identity())
+                    .map(|_| entry.id())
+            })
+        });
+        let opened = match existing {
             Some(workspace_id) => self.activate_workspace(workspace_id, window, cx),
-            None if self.local_home_directory().is_err() => {
-                // The failure is not about the chosen directory, so end the attempt before
-                // alerting.
-                if let Some(picker) = self.pin_picker.take() {
-                    picker.update(cx, |picker, cx| picker.cancel(window, cx));
-                }
-                self.transient.end_pin();
-                Self::show_home_directory_unavailable(window, cx);
-                return PinApplication::Reported;
+            None => {
+                self.create_shared_workspace(name, Some(directory.path().to_owned()), window, cx)
             }
-            None => self.create_pinned_local_workspace(Some(name), Some(directory), window, cx),
         };
-        // A failure keeps the operation current so the still-open picker can retry.
         if opened {
             self.pin_operation = self.pin_operation.wrapping_add(1);
             self.transient.end_pin();
+            return PinApplication::Applied;
         }
-        PinApplication::from_applied(opened)
+        // The refusal was presented, so the chooser ends rather than offering a retry.
+        if let Some(picker) = self.pin_picker.take() {
+            picker.update(cx, |picker, cx| picker.cancel(window, cx));
+        }
+        self.transient.end_pin();
+        PinApplication::Reported
     }
 
     /// Pins a validated local directory to `target`, creating the Workspace a new target names.
@@ -2785,9 +2638,10 @@ impl WorkspaceManager {
         self.close_workspace_activating(workspace_id, true, window, cx);
     }
 
-    /// Closes a Workspace. `activate_next` opens the Workspace that takes its place for the
-    /// person, which selects that Workspace's Focused Pane; a close the server published passes
-    /// `false`, because nobody asked for a Pane there.
+    /// Closes a Workspace. `activate_next` moves the keyboard into the Workspace that takes its
+    /// place; nobody chose that Workspace, so its Focused Pane is not selected either way. A close
+    /// the server published passes `false`. Nothing replaces a final Workspace: the window
+    /// presents its empty view instead.
     fn close_workspace_activating(
         &mut self,
         workspace_id: WorkspaceId,
@@ -2795,82 +2649,44 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let replacement = if self.workspaces.len() == 1 {
-            match self.local_home_directory() {
-                Ok(directory) => directory,
-                Err(_) => {
-                    Self::show_home_directory_unavailable(window, cx);
-                    return;
-                }
-            }
-        } else {
-            ValidatedLocalDirectory::new(
-                self.local_home_directory_path.clone(),
-                self.local_home_identity.clone(),
-            )
-        };
         self.begin_remote_workspace_close(workspace_id, window, cx);
         let was_active = self.workspaces.active_workspace_id() == Some(workspace_id);
-        let local_filesystem = self.local_filesystem.clone();
-        let session_factory = Rc::clone(&self.session_factory);
-        let pane_construction = self.pane_construction.clone();
-        let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
-        let sidebar_visible = self.sidebar.read(cx).layout().visible;
-        let sidebar_width = self.sidebar.read(cx).layout().width;
-        let replacement_identity = replacement.identity();
-        let outcome = self.workspaces.close_workspace_with_local_replacement(
-            workspace_id,
-            replacement,
-            |replacement_workspace_id, home_directory| {
-                Self::create_local_tab_manager(
-                    WorkspaceTerminalSessionFactory::new_local_with_authority(
-                        session_factory,
-                        ValidatedLocalDirectory::new(
-                            home_directory.to_path_buf(),
-                            replacement_identity,
-                        ),
-                        local_filesystem.clone(),
-                    ),
-                    TabManagerCreation {
-                        workspace_id: replacement_workspace_id,
-                        sidebar_visible,
-                        sidebar_width,
-                        operating_system_window_drag_platform: window_drag_platform,
-                        pane_construction,
-                    },
-                    window,
-                    cx,
-                )
-            },
-        );
-        let outcome = match outcome {
-            Ok(outcome) => outcome,
+        let held_keyboard = self
+            .workspaces
+            .workspace(workspace_id)
+            .is_some_and(|entry| entry.payload().read(cx).holds_keyboard(window, cx));
+        let closed_manager = match self.workspaces.remove_workspace(workspace_id) {
+            Ok(closed_manager) => closed_manager,
             Err(error) => {
                 Self::report_workspace_error("close", error);
                 return;
             }
         };
-        let closed_manager = match outcome {
-            CloseWorkspaceOutcome::WorkspaceClosed { payload, .. }
-            | CloseWorkspaceOutcome::FinalWorkspaceReplaced { payload, .. } => payload,
-        };
         closed_manager.update(cx, |manager, cx| manager.close_all(cx));
+        self.pending_final_tab_closes.remove(&workspace_id);
         self.remote_workspace_runtimes.remove(&workspace_id);
         self.debug_assert_remote_runtime_invariants();
-        // Closing never empties the collection: a final Workspace is replaced.
-        if let Some(active_workspace_id) = self.workspaces.active_workspace_id() {
-            self.synchronize_tab_manager_layout(active_workspace_id, window, cx);
+        if let Some(shared) = self.shared.as_mut() {
+            shared.forget(workspace_id);
         }
-
-        if was_active && let Some(active_manager) = self.active_tab_manager() {
-            if !activate_next
-                || self.sidebar.read(cx).is_focused(window)
-                || self.sidebar.read(cx).rename_is_focused(window)
-            {
-                active_manager.update(cx, |manager, cx| manager.activate_without_focus(cx));
-            } else {
-                active_manager.update(cx, |manager, cx| manager.activate(window, cx));
+        match self.workspaces.active_workspace_id() {
+            Some(active_workspace_id) => {
+                self.synchronize_tab_manager_layout(active_workspace_id, window, cx);
+                if was_active && let Some(active_manager) = self.active_tab_manager() {
+                    if !activate_next
+                        || self.sidebar.read(cx).is_focused(window)
+                        || self.sidebar.read(cx).rename_is_focused(window)
+                    {
+                        active_manager.update(cx, |manager, cx| manager.activate_without_focus(cx));
+                    } else {
+                        active_manager
+                            .update(cx, |manager, cx| manager.activate_in_place(window, cx));
+                    }
+                }
             }
+            // The empty view takes the keyboard that was in the final Workspace.
+            None if held_keyboard || was_active => self.empty_focus.focus(window, cx),
+            None => {}
         }
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.cancel_rename_for(workspace_id, cx)
@@ -2884,71 +2700,18 @@ impl WorkspaceManager {
         cx.notify();
     }
 
+    /// Closes a Workspace whose final Tab closed, as a confirmed close of the Workspace would.
     fn close_workspace_for_final_tab(
         &mut self,
         workspace_id: WorkspaceId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.begin_remote_workspace_close(workspace_id, window, cx);
-        let was_active = self.workspaces.active_workspace_id() == Some(workspace_id);
-        let outcome = match self.workspaces.close_workspace_for_final_tab(workspace_id) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                self.pending_final_tab_closes.remove(&workspace_id);
-                Self::report_workspace_error("close for final Tab", error);
-                return;
-            }
-        };
-
-        match outcome {
-            FinalTabCloseOutcome::WorkspaceClosed {
-                closed_workspace_id,
-                active_workspace_id,
-                payload,
-            } => {
-                debug_assert_eq!(closed_workspace_id, workspace_id);
-                payload.update(cx, |manager, cx| manager.close_all(cx));
-                self.remote_workspace_runtimes.remove(&workspace_id);
-                self.debug_assert_remote_runtime_invariants();
-                self.synchronize_tab_manager_layout(active_workspace_id, window, cx);
-
-                if was_active && let Some(active_manager) = self.active_tab_manager() {
-                    if self.sidebar.read(cx).is_focused(window)
-                        || self.sidebar.read(cx).rename_is_focused(window)
-                    {
-                        active_manager.update(cx, |manager, cx| manager.activate_without_focus(cx));
-                    } else {
-                        active_manager.update(cx, |manager, cx| manager.activate(window, cx));
-                    }
-                }
-                debug_assert_eq!(
-                    Some(active_workspace_id),
-                    self.workspaces.active_workspace_id()
-                );
-                self.pending_final_tab_closes.remove(&workspace_id);
-                self.sidebar.update(cx, |sidebar, cx| {
-                    sidebar.cancel_rename_for(workspace_id, cx)
-                });
-                self.sync_terminal_focus_blocker(window, cx);
-                if was_active {
-                    self.scroll_active_workspace_into_view(cx);
-                }
-
-                cx.notify();
-            }
-            FinalTabCloseOutcome::CloseOperatingSystemWindow {
-                workspace_id: final_workspace_id,
-            } => {
-                debug_assert_eq!(final_workspace_id, workspace_id);
-                if let Some(manager) = self.active_tab_manager() {
-                    manager.update(cx, |manager, cx| manager.close_all(cx));
-                }
-                self.remote_workspace_runtimes.remove(&workspace_id);
-                self.pending_final_tab_closes.remove(&workspace_id);
-                window.remove_window();
-            }
+        if self.workspaces.workspace(workspace_id).is_none() {
+            self.pending_final_tab_closes.remove(&workspace_id);
+            return;
         }
+        self.close_workspace_activating(workspace_id, true, window, cx);
     }
 
     fn begin_remote_workspace_close(
@@ -3041,9 +2804,6 @@ impl WorkspaceManager {
                 if let Err(error) = self.workspaces.move_workspace(workspace_id, position) {
                     Self::report_workspace_error("move", error);
                 }
-            }
-            SidebarEvent::Create(WorkspaceCreation::Local) => {
-                self.create_local_workspace(window, cx)
             }
             SidebarEvent::Create(creation) => {
                 // The creation menu returns focus to its trigger on close, so return it to
@@ -3237,7 +2997,10 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         match creation {
-            WorkspaceCreation::Local => self.create_named_local_workspace(Some(name), window, cx),
+            // The account server owns local work, so a new local Workspace is the server's.
+            WorkspaceCreation::Local => {
+                self.create_shared_workspace(name, None, window, cx);
+            }
             WorkspaceCreation::Remote => {
                 self.present_remote_workspace_flow(name, RemoteWorkspaceStart::Home, window, cx)
             }
@@ -3248,7 +3011,6 @@ impl WorkspaceManager {
                 window,
                 cx,
             ),
-            WorkspaceCreation::Server => self.create_shared_workspace(name, window, cx),
         }
     }
 
@@ -3438,12 +3200,9 @@ impl WorkspaceManager {
                 &self.local_home_directory_path,
             ),
         };
-        let tooltip_detail = match workspace.availability() {
-            DirectoryAvailability::Unavailable { reason } => format!("{path}: {reason}"),
-            DirectoryAvailability::Available => remote_status
-                .map(|status| format!("{path}: {status}"))
-                .unwrap_or_else(|| path.clone()),
-        };
+        let tooltip_detail = remote_status
+            .map(|status| format!("{path}: {status}"))
+            .unwrap_or_else(|| path.clone());
 
         // A shared Workspace's Repository Status is what the owning server read.
         let repository = match &shared {
@@ -3495,7 +3254,7 @@ impl WorkspaceManager {
         let combo_lifecycle_window = window.window_handle();
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let remote_unavailable_reason = self.remote_workspace_unavailable_reason.clone();
-        let creation_rows = WorkspaceCreation::rows(self.shared.is_some());
+        let creation_rows = WorkspaceCreation::ALL.to_vec();
         let creation_shortcuts: Vec<_> = creation_rows
             .iter()
             .map(|creation| creation.shortcut(presentation))
@@ -3780,14 +3539,8 @@ impl WorkspaceManager {
                     workspace.remote_display_directory(),
                     &self.local_home_directory_path,
                 );
-                let (available, tooltip) = match workspace.availability() {
-                    DirectoryAvailability::Available => (true, directory_tooltip),
-                    DirectoryAvailability::Unavailable { reason } => {
-                        (false, format!("{directory_tooltip}: {reason}"))
-                    }
-                };
                 let mut path: gpui::SharedString = path.into();
-                let mut tooltip = tooltip;
+                let mut tooltip = directory_tooltip;
                 // A shared Workspace's directory, pin, Worktrees, and Repository Status all live
                 // on the owning server. The row shows what the server read and published; this
                 // client reads none of it.
@@ -3806,7 +3559,7 @@ impl WorkspaceManager {
                 let worktrees = self.worktree_section(workspace.id(), cx);
                 // A disclosing row describes the Workspace. Its directory and branch belong to
                 // its Worktrees, and a collapsed row shows its Active Worktree's.
-                if let Some(section) = worktrees.as_ref().filter(|_| available) {
+                if let Some(section) = worktrees.as_ref() {
                     let pinned = match &shared {
                         Some(shared) => shared.pinned.then(|| shared.directory.clone()),
                         None => workspace
@@ -3854,10 +3607,9 @@ impl WorkspaceManager {
                     remote_connection_phase: workspace
                         .remote_connection_state()
                         .map(RemoteConnectionState::phase),
-                    available,
                     repository,
                     worktrees,
-                    creates_worktrees: available && self.creates_worktrees(workspace.id(), cx),
+                    creates_worktrees: self.creates_worktrees(workspace.id(), cx),
                     active: Some(workspace.id()) == active_workspace_id,
                     shared: shared.map(|shared| shared.row),
                 }
@@ -3878,64 +3630,6 @@ struct SharedRowFacts {
 /// Shared server Workspaces: adopting them, presenting what the server publishes, submitting the
 /// edits a person asks for, and refusing the operations the server path does not support yet.
 impl WorkspaceManager {
-    /// Presents the local SpaceTerm Server's Workspaces beside this window's own.
-    ///
-    /// Adopting changes nothing a person is working in: the Workspaces this window owns keep their
-    /// Tabs, Panes, and Terminal Sessions, and the Active Workspace stays where it was. Production
-    /// defaults stay desktop-owned, so the server's Workspaces only ever join the sidebar.
-    /// Returns whether a refusal was answered over the active Settings Window.
-    pub(crate) fn adopt_shared_workspaces(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        use super::shared_workspaces::SharedPaneSessions;
-
-        if self.shared.is_some() {
-            return false;
-        }
-        // One device holds one authenticated connection per Pane, and one durable edit journal.
-        // A second presentation of the same server would rebind each Pane's lease and fence the
-        // first into reconnecting, so only one surface presents them at a time.
-        if super::development_pane::is_open(cx) {
-            return Self::show_shared_unavailable(
-                "The Development Pane window is presenting a Pane this server owns. Close it \
-                 first: one device holds one connection per Pane.",
-                window,
-                cx,
-            );
-        }
-        // The client home only completes the launch plan a server-backed Terminal Session ignores.
-        // It is never the directory the server starts a shell in, and it grants this Workspace no
-        // local directory of its own.
-        let Ok(client_home) = self.local_home_directory() else {
-            let answered =
-                super::settings_window::present_over_active_settings(cx, |window, cx| {
-                    let _ = Self::home_directory_alert().present(window, cx, |_, _| {});
-                });
-            if !answered {
-                Self::show_home_directory_unavailable(window, cx);
-            }
-            return answered;
-        };
-        let Some(client) = super::server_worktrees::Client::get(cx) else {
-            return false;
-        };
-        let server = client.server.clone();
-        let edits = client.source;
-        let sessions = SharedPaneSessions::new(
-            server.clone(),
-            client_home,
-            self.local_filesystem.clone(),
-            &self.pane_construction,
-        );
-        self.present_shared_workspaces(edits, sessions, window, cx);
-        if let Some(shared) = self.shared.as_mut() {
-            shared.retain_client_views(server);
-        }
-        false
-    }
-
     /// Presents the Workspaces one shared edit channel publishes.
     ///
     /// The server this reaches is chosen by construction, so the local SpaceTerm Server and a
@@ -3957,11 +3651,10 @@ impl WorkspaceManager {
         if let Some(handle) = window.window_handle().downcast::<Self>() {
             cx.set_global(super::shared_workspaces::SharedWorkspaceHost(handle));
         }
+        // The first reading happens at once, so launch presents Workspaces as soon as the server
+        // publishes them rather than one interval later.
         self._shared_poll = Some(cx.spawn_in(window, async move |manager, cx| {
             loop {
-                cx.background_executor()
-                    .timer(super::shared_workspaces::POLL_INTERVAL)
-                    .await;
                 if manager
                     .update_in(cx, |manager, window, cx| {
                         manager.sync_shared_workspaces(window, cx);
@@ -3970,6 +3663,9 @@ impl WorkspaceManager {
                 {
                     break;
                 }
+                cx.background_executor()
+                    .timer(super::shared_workspaces::POLL_INTERVAL)
+                    .await;
             }
         }));
         cx.notify();
@@ -4005,6 +3701,15 @@ impl WorkspaceManager {
         };
         if let Some(inventory) = poll.inventory {
             self.apply_shared_inventory(&inventory, removal, window, cx);
+        }
+        // A new client's first view is the person opening SpaceTerm to work, so it opens the
+        // Active Tab and its Focused Pane's shell. Later launches restore views passively.
+        if let Some(workspace_id) = poll
+            .initial
+            .and_then(|server| self.shared.as_ref()?.local(server))
+            && self.activate_workspace(workspace_id, window, cx)
+        {
+            self.focus(window, cx);
         }
         // The client that asked for a creation opens it, once, after the server published it.
         if let Some(accepted) = poll.accepted {
@@ -4191,6 +3896,10 @@ impl WorkspaceManager {
             return;
         };
         let active_workspace_id = self.workspaces.active_workspace_id();
+        // The empty view or launch screen held the keyboard, which moves to the Workspace that
+        // takes its place, without asking the server for its Pane.
+        let empty_held_keyboard =
+            active_workspace_id.is_none() && self.empty_focus.is_focused(window);
         let active_manager = self.active_tab_manager();
         let window_drag_platform = Rc::clone(&self.operating_system_window_drag_platform);
         let sidebar_visible = self.sidebar.read(cx).layout().visible;
@@ -4259,6 +3968,9 @@ impl WorkspaceManager {
             .as_ref()
             .unwrap_or(&manager)
             .update(cx, |manager, cx| manager.activate_without_focus(cx));
+        if empty_held_keyboard {
+            manager.update(cx, |manager, cx| manager.focus(window, cx));
+        }
         if let Some(shared) = self.shared.as_mut() {
             shared.register(workspace_id, facts.clone());
         }
@@ -4291,31 +4003,36 @@ impl WorkspaceManager {
     }
 
     /// Asks the server for a Workspace it owns and every connected client presents.
+    /// Returns whether the request reached the server. A refusal is presented here.
     fn create_shared_workspace(
         &mut self,
         name: String,
+        directory: Option<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        use super::shared_workspaces::SharedSubmission;
+    ) -> bool {
+        use super::shared_workspaces::{SharedRefusalReason, SharedSubmission};
 
-        let name = match name.trim() {
-            "" => Self::next_shared_workspace_name(),
-            name => name.to_owned(),
-        };
         let Some(shared) = self.shared.as_mut() else {
-            return;
+            // The launch screen already says why the server is not ready, and offers its step.
+            if self.workspaces.active_workspace_id().is_none() {
+                self.focus(window, cx);
+            } else {
+                Self::show_shared_refusal(
+                    "create a Workspace",
+                    SharedRefusalReason::Offline,
+                    window,
+                    cx,
+                );
+            }
+            return false;
         };
-        if let SharedSubmission::Refused(reason) = shared.create_workspace(name) {
+        let submission = shared.create_workspace(name, directory);
+        if let SharedSubmission::Refused(reason) = submission {
             Self::show_shared_refusal("create a Workspace", reason, window, cx);
         }
         cx.notify();
-    }
-
-    /// The name a new shared Workspace takes when a person supplied none. The server owns the
-    /// name, so this client suggests one rather than deriving it from local state.
-    fn next_shared_workspace_name() -> String {
-        super::workspace_sidebar::SERVER_WORKSPACE_BADGE.to_owned()
+        submission == SharedSubmission::Submitted
     }
 
     /// Asks the server to rename a shared Workspace, and reports whether the Workspace was one.
@@ -4415,13 +4132,41 @@ impl WorkspaceManager {
             return true;
         }
         let Some(server_target) = self.shared_close_target(target, cx) else {
-            // A shared Workspace lists no Worktrees, and a Tab or Pane this window cannot name on
-            // the server has already left it.
+            // A target this window can no longer name closes nothing.
             return true;
         };
         let Some(shared) = self.shared.as_ref() else {
             return true;
         };
+        if let spaceterm_server::hierarchy::CloseTarget::Worktree { workspace, tab } = server_target
+            && let Some(workspace) = shared
+                .latest_inventory()
+                .and_then(|i| i.workspaces.iter().find(|w| w.id == workspace))
+            && let Some(anchor) = workspace.tabs.iter().find(|t| t.id == tab)
+            && workspace.tabs.iter().all(|t| {
+                t.worktree == anchor.worktree && t.worktree_repository == anchor.worktree_repository
+            })
+        {
+            let detail = format!(
+                "Closing them would leave \u{201C}{}\u{201D} without a Tab, so nothing closed. Open a Tab outside this Worktree first, or kill the Workspace.",
+                workspace.name
+            );
+            let _ = Alert::new(
+                ModalId::new("worktree-tabs-not-closed"),
+                "Tabs Not Closed",
+                "Tabs Not Closed",
+                detail,
+                vec![ModalAction::new(
+                    (),
+                    "OK",
+                    ModalActionRole::Cancel,
+                    "worktree-tabs-not-closed-ok",
+                )],
+            )
+            .intent(AlertIntent::Warning)
+            .present(window, cx, |_, _| {});
+            return true;
+        }
         let approval = match shared.close_approval(server_target) {
             Ok(approval) => approval,
             Err(SharedCloseUnavailable::Edits(reason)) => {
@@ -4514,6 +4259,7 @@ impl WorkspaceManager {
         match target {
             CloseTarget::Pane { .. } => "close the Pane",
             CloseTarget::Tab { .. } => "close the Tab",
+            CloseTarget::Worktree { .. } => "close the Worktree\u{2019}s Tabs",
             _ => "kill the Workspace",
         }
     }
@@ -4555,7 +4301,22 @@ impl WorkspaceManager {
                     pane: manager.shared_server_pane(tab_id, pane_id, cx)?,
                 })
             }
-            CloseTarget::Worktree { .. } | CloseTarget::Window => None,
+            CloseTarget::Worktree {
+                workspace_id,
+                worktree_id,
+            } => {
+                let workspace = shared.server_workspace(workspace_id)?;
+                let path = self.shared_worktree_root(workspace_id, worktree_id)?;
+                let anchor = workspace
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.worktree.as_ref() == Some(&path))?;
+                Some(ServerCloseTarget::Worktree {
+                    workspace: workspace.id,
+                    tab: anchor.id,
+                })
+            }
+            CloseTarget::Window => None,
         }
     }
 
@@ -4931,7 +4692,7 @@ impl WorkspaceManager {
                     self.scroll_active_workspace_into_view(cx);
                 }
             }
-            Mutation::CreateTab { workspace }
+            Mutation::CreateTab { workspace, .. }
             | Mutation::SplitPane { workspace, .. }
             | Mutation::Worktree(spaceterm_server::worktree::Operation::OpenTab {
                 workspace,
@@ -4961,8 +4722,8 @@ impl WorkspaceManager {
     /// Removes a Workspace the server no longer has.
     ///
     /// The server already removed it, so this needs no confirmation here. It ends nothing on the
-    /// server: closing the local Panes drops their subscriptions. The collection keeps its
-    /// invariants, replacing a final Workspace with a Local one this window owns.
+    /// server: closing the local Panes drops their subscriptions. A final Workspace leaves the
+    /// empty view.
     fn remove_shared_workspace(
         &mut self,
         workspace_id: WorkspaceId,
@@ -5142,15 +4903,15 @@ impl WorkspaceManager {
         }
         // A write SpaceTerm cannot confirm still stops this presentation: the person asked for
         // that, and the Panes' control may already be released.
-        self.remove_detached_workspace(workspace_id, window, cx);
+        self.remove_workspace_presentation(workspace_id, window, cx);
         if let Err(failure) = outcome {
             Self::present_attachment_failure(AttachmentChange::Detach, failure, window, cx);
         }
     }
 
-    /// Removes a detached Workspace's presentation. Closing its local Panes drops their
-    /// subscriptions and ends nothing on the server.
-    fn remove_detached_workspace(
+    /// Removes one Workspace's presentation without replacing it. Closing a shared Workspace's
+    /// local Panes drops their subscriptions and ends nothing on the server.
+    fn remove_workspace_presentation(
         &mut self,
         workspace_id: WorkspaceId,
         window: &mut Window,
@@ -5189,7 +4950,8 @@ impl WorkspaceManager {
                     {
                         active_manager.update(cx, |manager, cx| manager.activate_without_focus(cx));
                     } else {
-                        active_manager.update(cx, |manager, cx| manager.activate(window, cx));
+                        active_manager
+                            .update(cx, |manager, cx| manager.activate_in_place(window, cx));
                     }
                 }
                 self.scroll_active_workspace_into_view(cx);
@@ -5310,7 +5072,6 @@ impl Drop for WorkspaceManager {
 impl Render for WorkspaceManager {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_sidebar_repositories(cx);
-        self.sync_sidebar_worktrees(cx);
         let activity = super::appearance::window_activity(window);
         activity.mount(activity.with_scope(|| self.render_chrome(window, cx)))
     }
@@ -5364,9 +5125,9 @@ impl WorkspaceManager {
         };
         let rows = self.sidebar_rows(cx);
         let remote_unavailable = self.remote_workspace_unavailable_reason.clone();
-        let creates_server_workspaces = self.shared.is_some();
+
         self.sidebar.update(cx, |sidebar, cx| {
-            sidebar.set_rows(rows, remote_unavailable, creates_server_workspaces, cx)
+            sidebar.set_rows(rows, remote_unavailable, cx)
         });
         // The New Worktree Command is available only where it can act, so its menu item disables
         // elsewhere.
@@ -5615,7 +5376,6 @@ fn chrome_identity<T>(workspace: &WorkspaceEntry<T>) -> WorkspaceChromeIdentity 
         worktree: None,
         pinned: workspace.pinned_directory().is_some(),
         status: WorkspaceChromeStatus::resolve(
-            matches!(workspace.availability(), DirectoryAvailability::Available),
             workspace
                 .remote_connection_state()
                 .map(RemoteConnectionState::phase),
@@ -5695,25 +5455,21 @@ fn remote_machine(account: &RemoteWorkspaceAccount) -> crate::terminal::metadata
     )
 }
 
-fn initial_home_directory(
+/// The local home directory's identity, which completes server-backed launch plans and names
+/// the directory local file actions may read.
+fn local_home_identity(
     path: PathBuf,
     local_filesystem: &LocalFilesystemAuthority,
-) -> (ValidatedLocalDirectory, Option<String>) {
+) -> LocalDirectoryIdentity {
     #[cfg(test)]
-    let _ = local_filesystem;
+    let _ = (path, local_filesystem);
     #[cfg(test)]
-    return (
-        ValidatedLocalDirectory::new(path, LocalDirectoryIdentity::for_test(0)),
-        None,
-    );
+    return LocalDirectoryIdentity::for_test(0);
     #[cfg(not(test))]
-    match local_filesystem.validate_directory(&path) {
-        Ok(directory) => (directory, None),
-        Err(error) => (
-            ValidatedLocalDirectory::new(path, LocalDirectoryIdentity::unavailable()),
-            Some(error.to_string()),
-        ),
-    }
+    local_filesystem.validate_directory(&path).map_or_else(
+        |_| LocalDirectoryIdentity::unavailable(),
+        |directory| directory.identity(),
+    )
 }
 
 #[cfg(test)]
@@ -5737,6 +5493,10 @@ impl WorkspaceManager {
 }
 
 mod empty;
+mod launch;
+#[cfg(test)]
+pub(crate) use launch::testing as launch_testing;
+pub(crate) use launch::{LocalServerAdapters, resume_waiting_launches, start_local_server};
 #[path = "workspace_manager/repository.rs"]
 mod repository;
 mod shared_repositories;

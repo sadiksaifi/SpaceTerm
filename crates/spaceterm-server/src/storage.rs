@@ -190,6 +190,20 @@ impl Directory {
         }
         Ok(file)
     }
+    /// Attempt an exclusive lock, distinguishing contention from unavailable storage.
+    #[cfg(feature = "client")]
+    pub fn try_lock(&self, name: &str) -> Result<Option<File>, ServerError> {
+        let file = self.file(name, true)?;
+        // SAFETY: flock acts only on the supplied live descriptor.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(Some(file));
+        }
+        if std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
+            Ok(None)
+        } else {
+            Err(ServerError::StorageUnavailable)
+        }
+    }
     /// Validate and synchronize retained state before setup or authentication accepts it.
     pub fn read(&self) -> Result<Record, ServerError> {
         let file = self.file("identity.json", false)?;
@@ -206,8 +220,9 @@ impl Directory {
         if value.get("format").and_then(|v| v.as_str()) != Some("account-local-1") {
             return Err(ServerError::IncompatibleState);
         }
+        // Valid JSON in this format can retain a schema this build no longer understands.
         let record: Record =
-            serde_json::from_value(value).map_err(|_| ServerError::UnsafeStorage)?;
+            serde_json::from_value(value).map_err(|_| ServerError::IncompatibleState)?;
         if record.format != "account-local-1" || record.server == [0; 32] {
             return Err(ServerError::UnsafeStorage);
         }
@@ -505,7 +520,7 @@ mod tests {
         };
         let original = {
             let choices = Attachments::open(fixture.open(), [8; 32], [9; 32]).unwrap();
-            choices.reconcile(&inventory).unwrap();
+            choices.initialize(&inventory, Some([1; 32])).unwrap();
             let permit = choices.permit([3; 32]).unwrap();
             choices.detach([1; 32]).unwrap();
             assert!(!permit.active());
@@ -593,6 +608,38 @@ mod tests {
         assert_eq!(serde_json::to_value(&restored).unwrap(), value);
     }
 
+    #[test]
+    fn older_shared_organization_is_incompatible_and_left_unchanged() {
+        let fixture = Fixture::new();
+        let data = fixture.open();
+        let _lock = data.lock("setup.lock", false).unwrap();
+        let mut record = data.read_or_create().unwrap();
+        let first = crate::organization::Organization::first(fixture.0.clone()).unwrap();
+        record.organization = Some(
+            crate::hierarchy::State::from_legacy(&first)
+                .envelope(&fixture.0)
+                .unwrap(),
+        );
+        let mut value = serde_json::to_value(&record).unwrap();
+        let shared = value["organization"]["shared"].as_object_mut().unwrap();
+        // Retained organization from before automatic naming has neither field.
+        assert!(shared.remove("names").is_some());
+        assert!(shared.remove("home_directory").is_some());
+        let original = serde_json::to_vec(&value).unwrap();
+        let path = fixture.0.join("identity.json");
+        fs::write(&path, &original).unwrap();
+        assert_eq!(fs::metadata(&fixture.0).unwrap().mode() & 0o7777, 0o700);
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o7777, 0o600);
+
+        let reopened = fixture.open();
+        assert_eq!(reopened.read().err(), Some(ServerError::IncompatibleState));
+        assert_eq!(
+            reopened.read_or_create().err(),
+            Some(ServerError::IncompatibleState)
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
     #[cfg(feature = "client")]
     #[test]
     fn pending_edits_and_validated_conflict_drafts_survive_client_reopen() {
@@ -669,7 +716,8 @@ mod tests {
             journal.submit(
                 1,
                 Mutation::CreateWorkspace {
-                    name: "Draft".into()
+                    name: "Draft".into(),
+                    directory: None,
                 }
             ),
             Err(ServerError::StorageUnavailable)
@@ -782,6 +830,7 @@ mod tests {
         let mut shared = crate::hierarchy::State::from_legacy(&organization);
         let creation = crate::hierarchy::Mutation::CreateTab {
             workspace: organization.workspace,
+            source: None,
         };
         let accepted = shared
             .apply([42; 32], 1, creation.clone(), &fixture.0, |_| true)

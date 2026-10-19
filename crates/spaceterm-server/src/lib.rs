@@ -10,11 +10,15 @@ pub mod pane;
 mod protocol;
 pub mod repository;
 pub mod service;
+#[cfg(feature = "client")]
+mod startup;
 mod storage;
 pub mod worktree;
 
 #[cfg(feature = "client")]
 pub use client::LocalServer;
+#[cfg(feature = "client")]
+pub use startup::{LocalStartup, StartupOutcome};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AuthenticatedStatus {
@@ -63,7 +67,7 @@ pub enum ServerError {
     SessionUnavailable,
     #[error("This connection no longer controls the Terminal Session.")]
     StaleControl,
-    #[error("This operation is unavailable for this Development Pane.")]
+    #[error("This operation isn't supported here.")]
     Unsupported,
     #[error("Directory unavailable.")]
     DirectoryUnavailable,

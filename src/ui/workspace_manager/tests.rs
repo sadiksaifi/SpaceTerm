@@ -5,8 +5,11 @@ use crate::terminal::GpuiTerminalKeyInputAdapterFactory;
 use crate::ui::drag_and_drop::finish_slides;
 use crate::ui::workspace_frame::WorkspaceFrame;
 use crate::ui::workspace_sidebar::SIDEBAR_ROW_SELECTION_INSET_Y;
-use crate::ui::{TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_MINIMUM_WIDTH};
+use crate::ui::{
+    TOP_CHROME_HEIGHT, WORKSPACE_SIDEBAR_DEFAULT_WIDTH, WORKSPACE_SIDEBAR_MINIMUM_WIDTH,
+};
 use gpui::MouseButton;
+use gpui::px;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fs;
@@ -81,7 +84,7 @@ fn sidebar_should_follow_the_local_root_in_background_and_promote_on_close(
         "api"
     );
 
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     records.report_directory(
         1,
@@ -375,7 +378,7 @@ fn sidebar_rows_end_with_the_branch_and_let_a_pull_request_open_in_the_browser(
 #[gpui::test]
 fn sidebar_rows_contain_semantic_text_in_both_densities(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
-    click_new_workspace_menu("new-workspace-menu-create-local", cx);
+    new_desktop_workspace(cx);
 
     for density in [
         crate::appearance::ChromeDensity::Compact,
@@ -1086,7 +1089,7 @@ fn remote_completion_with_active_alias_pin_failure(
 }
 
 #[gpui::test]
-fn native_service_factory_reaches_initial_new_and_replacement_hierarchy(cx: &mut TestAppContext) {
+fn native_service_factory_reaches_initial_and_new_hierarchy(cx: &mut TestAppContext) {
     use crate::terminal::native_services::file_preview::{FilePreviewFactory, FilePreviewPanel};
 
     struct CountingFilePreviewFactory {
@@ -1112,7 +1115,7 @@ fn native_service_factory_reaches_initial_new_and_replacement_hierarchy(cx: &mut
         TestTerminalSessionRecords::default(),
     ));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
@@ -1127,11 +1130,13 @@ fn native_service_factory_reaches_initial_new_and_replacement_hierarchy(cx: &mut
     cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
     cx.run_until_parked();
     assert_eq!(created.get(), 1);
-    for (shortcut, expected) in [("cmd-d", 2), ("cmd-t", 3), ("cmd-n", 4)] {
+    for (shortcut, expected) in [("cmd-d", 2), ("cmd-t", 3)] {
         cx.simulate_keystrokes(shortcut);
         cx.run_until_parked();
         assert_eq!(created.get(), expected, "{shortcut}");
     }
+    new_desktop_workspace(cx);
+    assert_eq!(created.get(), 4, "new Workspace");
     cx.update(|window, cx| {
         manager.update(cx, |manager, cx| {
             let workspace_id = manager.workspaces.active_id();
@@ -1141,7 +1146,7 @@ fn native_service_factory_reaches_initial_new_and_replacement_hierarchy(cx: &mut
         });
     });
     cx.run_until_parked();
-    assert_eq!(created.get(), 5, "replacement Workspace");
+    assert_eq!(created.get(), 4, "nothing replaces the final Workspace");
 }
 
 #[gpui::test]
@@ -1156,7 +1161,7 @@ fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes
         TestTerminalSessionRecords::default(),
     ));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
@@ -1171,11 +1176,13 @@ fn accessibility_factory_reaches_initial_and_new_workspaces_tabs_and_split_panes
     cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
     cx.run_until_parked();
     assert_eq!(factory.records.borrow().len(), 1);
-    for (shortcut, expected) in [("cmd-d", 2), ("cmd-t", 3), ("cmd-n", 4)] {
+    for (shortcut, expected) in [("cmd-d", 2), ("cmd-t", 3)] {
         cx.simulate_keystrokes(shortcut);
         cx.run_until_parked();
         assert_eq!(factory.records.borrow().len(), expected, "{shortcut}");
     }
+    new_desktop_workspace(cx);
+    assert_eq!(factory.records.borrow().len(), 4, "new Workspace");
     let records = factory.records.borrow();
     assert!(
         records[0]
@@ -1207,6 +1214,99 @@ fn workspace_adapters(
         directory_selection: Rc::new(GpuiDirectorySelection),
         window_drag: Rc::new(RecordingOperatingSystemWindowDragPlatform::default()),
         remote_workspace,
+        local_server: crate::ui::launch_testing::unanswered(),
+    }
+}
+
+/// Adds and activates one more desktop-owned Workspace in the window under test, as a person
+/// opening another Workspace does.
+fn new_desktop_workspace(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| {
+        let manager = window
+            .root::<WorkspaceManager>()
+            .flatten()
+            .expect("the window presents a Workspace manager");
+        manager.update(cx, |manager, cx| {
+            manager.present_desktop_workspace(window, cx);
+        });
+    });
+    cx.run_until_parked();
+}
+
+/// A Workspace Window presenting one desktop-owned Workspace at `home_directory`.
+///
+/// Production desktop-owned Workspaces are Remote Workspaces; these tests exercise the window's
+/// own behavior around any desktop-owned Workspace without opening an SSH connection.
+fn new_desktop_manager(
+    session_factory: Rc<dyn TerminalSessionFactory>,
+    home_directory: PathBuf,
+    adapters: WorkspaceManagerAdapters,
+    sidebar: SidebarState,
+    window: &mut Window,
+    cx: &mut Context<WorkspaceManager>,
+) -> WorkspaceManager {
+    let mut manager = WorkspaceManager::new_with_adapters(
+        session_factory,
+        home_directory,
+        adapters,
+        sidebar,
+        window,
+        cx,
+    );
+    manager.present_desktop_workspace(window, cx);
+    manager
+}
+
+impl WorkspaceManager {
+    /// Presents and activates one desktop-owned Workspace at this window's home directory.
+    pub(crate) fn present_desktop_workspace(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> WorkspaceId {
+        let directory = ValidatedLocalDirectory::new(
+            self.local_home_directory_path.clone(),
+            self.local_home_identity.clone(),
+        );
+        let session_factory = WorkspaceTerminalSessionFactory::new_local(
+            Rc::clone(&self.session_factory),
+            directory.clone(),
+        );
+        let prepared_launch = session_factory
+            .prepare_child_launch()
+            .expect("a local launch reserves no channel");
+        let sidebar_visible = self.sidebar.read(cx).layout().visible;
+        let sidebar_width = self.sidebar.read(cx).layout().width;
+        let window_drag = Rc::clone(&self.operating_system_window_drag_platform);
+        let pane_construction = self.pane_construction.clone();
+        let previous = self.workspaces.active_workspace_id();
+        let workspace_id = self
+            .workspaces
+            .create_local_workspace(directory, |workspace_id, _| {
+                Self::create_tab_manager_with_prepared_launch(
+                    session_factory,
+                    prepared_launch,
+                    TabManagerCreation {
+                        workspace_id,
+                        sidebar_visible,
+                        sidebar_width,
+                        operating_system_window_drag_platform: window_drag,
+                        pane_construction,
+                    },
+                    window,
+                    cx,
+                )
+            })
+            .expect("the test Workspace is created");
+        // Creation activates the Workspace in the collection; the window then opens it as a
+        // person's activation does, from the Workspace that was active.
+        if let Some(previous) = previous {
+            self.workspaces
+                .activate_workspace(previous)
+                .expect("the previous Workspace remains");
+        }
+        self.activate_workspace(workspace_id, window, cx);
+        workspace_id
     }
 }
 
@@ -1223,7 +1323,7 @@ fn workspace_manager(
     let session_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             workspace_adapters(test_remote_backend_factory()),
@@ -1272,7 +1372,7 @@ fn workspace_manager_with_application_actions(
     let session_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             workspace_adapters(test_remote_backend_factory()),
@@ -1305,7 +1405,7 @@ fn workspace_manager_with_remote_backend(
     let factory: Arc<dyn RemoteWorkspaceFlowBackendFactory> =
         Arc::new(TestRemoteWorkspaceFlowBackendFactory { backend });
     let (manager, cx) = cx.add_window_view(move |window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             workspace_adapters(factory),
@@ -1416,7 +1516,7 @@ fn workspace_manager_with_operating_system_window_drag_platform(
     let platform = Rc::new(RecordingOperatingSystemWindowDragPlatform::default());
     let injected_platform = Rc::clone(&platform);
     let (manager, cx) = cx.add_window_view(move |window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
@@ -1453,7 +1553,7 @@ fn workspace_manager_with_directory_selection(
     let directory_selection: Rc<dyn SystemDirectorySelection> =
         Rc::new(ScriptedDirectorySelection::new(selections));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
@@ -1633,7 +1733,7 @@ fn application_rtl_locale_installation_should_mirror_production_modal_footer(
     let session_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(records).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             workspace_adapters(test_remote_backend_factory()),
@@ -1877,7 +1977,7 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
     let second_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(second_records.clone()).with_fallback_title("zsh"));
     let first = cx.add_window(|window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             first_factory,
             PathBuf::from("/Users/first"),
             workspace_adapters(test_remote_backend_factory()),
@@ -1887,7 +1987,7 @@ fn simultaneous_modals_should_block_and_restore_terminal_input_focus_per_operati
         )
     });
     let second = cx.add_window(|window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             second_factory,
             PathBuf::from("/Users/second"),
             workspace_adapters(test_remote_backend_factory()),
@@ -2154,62 +2254,6 @@ fn hiding_the_sidebar_should_keep_the_top_combo_box_and_its_focus_blocker(cx: &m
 }
 
 #[gpui::test]
-fn top_combo_box_local_choice_should_create_without_a_directory_picker(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    open_workspace_switcher_for_creation(cx);
-    click("workspace-switcher-create-local", cx);
-    assert_eq!(
-        cx.update(|window, cx| {
-            let manager = manager.read(cx);
-            (
-                window_combo_box_is_open(window, cx),
-                manager.terminal_focus_blocker(window, cx),
-                manager
-                    .workspaces
-                    .active()
-                    .payload()
-                    .read(cx)
-                    .focused_terminal_is_focused(window, cx),
-                manager.workspaces.len(),
-                records.starts().len(),
-            )
-        }),
-        (false, None, true, 2, 2)
-    );
-    assert!(manager.read_with(cx, |manager, _| manager.pin_picker.is_none()));
-}
-
-#[gpui::test]
-fn top_combo_box_keyboard_acceptance_should_create_exactly_one_local_workspace(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    open_workspace_switcher_for_creation(cx);
-
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
-
-    assert_eq!(
-        cx.update(|window, cx| {
-            let manager = manager.read(cx);
-            (
-                manager.workspaces.len(),
-                records.starts().len(),
-                window_combo_box_is_open(window, cx),
-                manager.terminal_focus_blocker(window, cx),
-                manager
-                    .workspaces
-                    .active()
-                    .payload()
-                    .read(cx)
-                    .focused_terminal_is_focused(window, cx),
-            )
-        }),
-        (2, 2, false, None, true)
-    );
-}
-
-#[gpui::test]
 fn top_combo_box_available_remote_should_open_one_flow_and_keep_terminal_input_blocked(
     cx: &mut TestAppContext,
 ) {
@@ -2290,7 +2334,7 @@ fn top_combo_box_unavailable_remote_should_reject_acceptance_and_keep_terminal_i
             create_calls: Arc::clone(&create_calls),
         });
     let (manager, cx) = cx.add_window_view(move |window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             workspace_adapters(factory),
@@ -2592,7 +2636,7 @@ fn backend_construction_failure_should_disable_remote_instead_of_leaving_an_iner
             create_calls: Arc::clone(&create_calls),
         });
     let (manager, cx) = cx.add_window_view(move |window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             workspace_adapters(factory),
@@ -4308,251 +4352,6 @@ fn confirm_directory_picker_path(path: &str, cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-fn active_local_pin(
-    manager: &Entity<WorkspaceManager>,
-    cx: &mut VisualTestContext,
-) -> Option<PathBuf> {
-    manager.read_with(cx, |manager, _| {
-        match manager.workspaces.active().pinned_directory() {
-            Some(PinnedDirectory::Local(directory)) => Some(directory.path().to_owned()),
-            _ => None,
-        }
-    })
-}
-
-#[gpui::test]
-fn open_local_directory_should_create_a_pinned_workspace_named_by_the_switcher_query(
-    cx: &mut TestAppContext,
-) {
-    let project = temporary_directory("open-local");
-    fs::create_dir_all(&project).unwrap();
-    let (manager, records, cx) = workspace_manager_with_directory_selection([], cx);
-    open_workspace_switcher_for_creation(cx);
-    cx.simulate_keystrokes("cmd-o");
-    cx.run_until_parked();
-    assert!(manager.read_with(cx, |manager, _| manager.pin_picker.is_some()));
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.len()),
-        1
-    );
-
-    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
-
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 2);
-        assert_eq!(manager.workspaces.active_id(), WorkspaceId::new(2));
-        assert_eq!(manager.workspaces.active().name(), "fresh workspace");
-        assert!(manager.pin_picker.is_none());
-    });
-    assert_eq!(active_local_pin(&manager, cx), Some(project.clone()));
-    let starts = records.starts();
-    assert_eq!(starts.len(), 2);
-    assert_eq!(
-        starts
-            .last()
-            .unwrap()
-            .local_working_directory()
-            .unwrap()
-            .path(),
-        project.as_path()
-    );
-    fs::remove_dir_all(project).unwrap();
-}
-
-#[gpui::test]
-fn open_local_directory_should_activate_the_workspace_already_pinned_to_the_directory(
-    cx: &mut TestAppContext,
-) {
-    let project = temporary_directory("open-local-existing");
-    fs::create_dir_all(&project).unwrap();
-    let (manager, records, cx) = workspace_manager_with_directory_selection([], cx);
-    let path = format!("{}/", project.to_str().unwrap());
-    cx.simulate_keystrokes("cmd-o");
-    cx.run_until_parked();
-    confirm_directory_picker_path(&path, cx);
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            assert!(manager.activate_workspace(WorkspaceId::new(1), window, cx));
-        })
-    });
-
-    cx.simulate_keystrokes("cmd-o");
-    cx.run_until_parked();
-    confirm_directory_picker_path(&path, cx);
-
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 2);
-        assert_eq!(manager.workspaces.active_id(), WorkspaceId::new(2));
-    });
-    assert_eq!(records.starts().len(), 2);
-    fs::remove_dir_all(project).unwrap();
-}
-
-#[gpui::test]
-fn open_local_directory_should_keep_the_picker_usable_after_a_failed_creation(
-    cx: &mut TestAppContext,
-) {
-    let project = temporary_directory("open-local-retry");
-    fs::create_dir_all(&project).unwrap();
-    let (manager, _, cx) = workspace_manager_with_directory_selection([], cx);
-    manager.update(cx, |manager, _| {
-        crate::domain::set_next_workspace_id(&mut manager.workspaces, u64::MAX);
-    });
-    cx.simulate_keystrokes("cmd-o");
-    cx.run_until_parked();
-    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 1);
-        assert!(manager.pin_picker.is_some());
-    });
-
-    manager.update(cx, |manager, _| {
-        crate::domain::set_next_workspace_id(&mut manager.workspaces, 2);
-    });
-    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
-
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 2);
-        assert!(manager.pin_picker.is_none());
-    });
-    assert_eq!(active_local_pin(&manager, cx), Some(project.clone()));
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active()
-            .payload()
-            .read(cx)
-            .focused_terminal_is_focused(window, cx)
-    }));
-    fs::remove_dir_all(project).unwrap();
-}
-
-#[gpui::test]
-fn open_local_directory_should_activate_the_pinned_workspace_when_home_is_unavailable(
-    cx: &mut TestAppContext,
-) {
-    let project = temporary_directory("open-local-reuse-missing-home");
-    fs::create_dir_all(&project).unwrap();
-    let (manager, records, cx) = workspace_manager_with_directory_selection([], cx);
-    cx.simulate_keystrokes("cmd-o");
-    cx.run_until_parked();
-    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
-    let pinned = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    manager.update(cx, |manager, _| {
-        manager.local_home_directory_path =
-            temporary_directory("open-local-reuse-missing-home-directory");
-    });
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            assert!(manager.activate_workspace(WorkspaceId::new(1), window, cx));
-        })
-    });
-
-    cx.simulate_keystrokes("cmd-o");
-    cx.run_until_parked();
-    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
-
-    assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 2);
-        assert_eq!(manager.workspaces.active_id(), pinned);
-        assert!(manager.pin_picker.is_none());
-    });
-    assert_eq!(records.starts().len(), 2);
-    fs::remove_dir_all(project).unwrap();
-}
-
-#[gpui::test]
-fn open_local_directory_should_alert_once_when_system_selection_meets_an_unavailable_home(
-    cx: &mut TestAppContext,
-) {
-    let project = temporary_directory("open-local-system-missing-home");
-    fs::create_dir_all(&project).unwrap();
-    let (manager, _, cx) =
-        workspace_manager_with_directory_selection([Ok(Some(project.clone()))], cx);
-    manager.update(cx, |manager, _| {
-        manager.local_home_directory_path =
-            temporary_directory("open-local-system-missing-home-directory");
-    });
-    cx.simulate_keystrokes("cmd-o");
-    cx.run_until_parked();
-    click("directory-picker-confirm-menu", cx);
-    click(
-        "command-palette-primary-menu-directory-picker-system-selection",
-        cx,
-    );
-
-    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-    click("modal-action-workspace-home-error-ok", cx);
-
-    assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-    manager.read_with(cx, |manager, _| assert_eq!(manager.workspaces.len(), 1));
-    fs::remove_dir_all(project).unwrap();
-}
-
-#[gpui::test]
-fn open_local_directory_should_close_the_picker_and_alert_when_home_is_unavailable(
-    cx: &mut TestAppContext,
-) {
-    let project = temporary_directory("open-local-missing-home-project");
-    fs::create_dir_all(&project).unwrap();
-    let (manager, records, cx) = workspace_manager_with_directory_selection([], cx);
-    manager.update(cx, |manager, _| {
-        manager.local_home_directory_path = temporary_directory("open-local-missing-home");
-    });
-    cx.simulate_keystrokes("cmd-o");
-    cx.run_until_parked();
-    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
-
-    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 1);
-        assert!(manager.pin_picker.is_none());
-    });
-    click("modal-action-workspace-home-error-ok", cx);
-    assert_eq!(records.starts().len(), 1);
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active()
-            .payload()
-            .read(cx)
-            .focused_terminal_is_focused(window, cx)
-    }));
-    fs::remove_dir_all(project).unwrap();
-}
-
-#[gpui::test]
-fn sidebar_open_local_directory_should_name_the_workspace_automatically_or_create_nothing(
-    cx: &mut TestAppContext,
-) {
-    let project = temporary_directory("open-local-sidebar");
-    fs::create_dir_all(&project).unwrap();
-    let (manager, records, cx) = workspace_manager_with_directory_selection([], cx);
-    click_new_workspace_menu("new-workspace-menu-open-local-directory", cx);
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.len()),
-        1
-    );
-    assert!(manager.read_with(cx, |manager, _| manager.pin_picker.is_none()));
-
-    click_new_workspace_menu("new-workspace-menu-open-local-directory", cx);
-    confirm_directory_picker_path(&format!("{}/", project.to_str().unwrap()), cx);
-
-    let expected_name = project.file_name().unwrap().to_str().unwrap().to_owned();
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 2);
-        assert_eq!(manager.workspaces.active().name(), expected_name);
-    });
-    assert_eq!(active_local_pin(&manager, cx), Some(project.clone()));
-    assert_eq!(records.starts().len(), 2);
-    fs::remove_dir_all(project).unwrap();
-}
-
 #[gpui::test]
 fn open_remote_directory_should_start_the_remote_flow_at_a_chosen_directory(
     cx: &mut TestAppContext,
@@ -4716,53 +4515,6 @@ fn open_remote_directory_should_pin_the_new_workspace_and_reuse_it_for_the_same_
 }
 
 #[gpui::test]
-fn unavailable_pinned_directory_should_block_children_and_recover_when_restored(
-    cx: &mut TestAppContext,
-) {
-    let root = temporary_directory("availability");
-    let project = root.join("project");
-    let parked = root.join("parked");
-    fs::create_dir_all(&project).unwrap();
-    let (manager, records, cx) =
-        workspace_manager_with_directory_selection([Ok(Some(project.clone()))], cx);
-    choose_pin_directory(&manager, cx);
-    assert_eq!(records.starts().len(), 1);
-
-    fs::rename(&project, &parked).unwrap();
-    cx.simulate_keystrokes("cmd-t");
-    cx.run_until_parked();
-    assert_eq!(records.starts().len(), 1);
-    assert!(manager.read_with(cx, |manager, _| {
-        manager.workspaces.active().pinned_directory().is_some()
-    }));
-    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-    click("modal-action-tab-start-error-ok", cx);
-    cx.run_until_parked();
-    assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active()
-            .payload()
-            .read(cx)
-            .focused_terminal_is_focused(window, cx)
-    }));
-
-    fs::rename(&parked, &project).unwrap();
-    cx.simulate_keystrokes("cmd-t");
-    cx.run_until_parked();
-    assert_eq!(records.starts().len(), 2);
-    assert!(manager.read_with(cx, |manager, _| {
-        matches!(
-            manager.workspaces.active().availability(),
-            crate::domain::DirectoryAvailability::Available
-        )
-    }));
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[gpui::test]
 fn unusable_directory_selection_should_not_pin_the_workspace(cx: &mut TestAppContext) {
     let missing = temporary_directory("missing");
     let (manager, records, cx) =
@@ -4917,7 +4669,7 @@ fn open_workspace_switcher_should_remove_a_workspace_after_its_final_terminal_se
     let inactive_sender = records
         .event_sender(1)
         .expect("the initial Workspace Terminal Session must have started");
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     manager.update(cx, |manager, cx| {
         manager
@@ -4936,8 +4688,6 @@ fn open_workspace_switcher_should_remove_a_workspace_after_its_final_terminal_se
         .try_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success))
         .expect("the inactive shell exit must be delivered");
     cx.run_until_parked();
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
 
     let state = manager.read_with(cx, |manager, _| {
         (
@@ -4945,21 +4695,17 @@ fn open_workspace_switcher_should_remove_a_workspace_after_its_final_terminal_se
             manager.workspaces.active_id(),
         )
     });
-    assert_eq!(state, (true, WorkspaceId::new(3)));
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .active()
-            .name()
-            .to_owned()),
-        "alpha"
+    assert_eq!(state, (true, WorkspaceId::new(2)));
+    assert!(
+        cx.update(|window, cx| window_combo_box_is_open(window, cx)),
+        "the open switcher stays open without the removed Workspace"
     );
 }
 
 #[gpui::test]
 fn workspace_switcher_selection_should_activate_the_matching_workspace(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     manager.update(cx, |manager, cx| {
         manager
@@ -5347,9 +5093,10 @@ fn command_w_should_confirm_kill_workspace_even_when_its_panes_are_idle(cx: &mut
     click("modal-action-close-confirmation-confirm", cx);
     redraw(cx);
     assert_eq!(records.dropped_session_ids(), vec![1]);
-    assert_ne!(
-        manager.read_with(cx, |manager, _| manager.workspaces.active_id()),
-        workspace_id
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.len()),
+        0,
+        "nothing replaces the final Workspace"
     );
 }
 
@@ -5511,14 +5258,13 @@ fn direct_multi_tab_workspace_close_should_use_one_aggregate_confirmation(cx: &m
     click("modal-action-close-confirmation-confirm", cx);
 
     assert_eq!(
-        manager.read_with(cx, |manager, _| (
-            manager.workspaces.len(),
-            manager.workspaces.active_id(),
-        )),
-        (1, WorkspaceId::new(2))
+        manager.read_with(cx, |manager, _| manager.workspaces.len()),
+        0
     );
     assert_eq!(records.dropped_session_ids(), vec![1, 2]);
-    assert_eq!(records.session_count(), 3);
+    assert_eq!(records.session_count(), 2);
+    // The empty stage remains, with nothing desktop-owned in it.
+    assert!(cx.debug_bounds("empty-workspace-stage").is_some());
 }
 
 #[gpui::test]
@@ -6231,7 +5977,7 @@ fn workspace_popup_name_should_fit_at_fractional_scales(cx: &mut TestAppContext)
         RecordingRenderedText::context_with_measurement(cx, name, px(266.9));
     let (manager, _records, cx) = workspace_manager(&mut text_context);
     for _ in 0..9 {
-        cx.simulate_keystrokes("cmd-n");
+        new_desktop_workspace(cx);
     }
     manager.update(cx, |manager, cx| {
         manager
@@ -7175,7 +6921,8 @@ fn collapsed_sidebar_resize_should_not_leak_held_pointer_events_to_terminal_sess
 #[gpui::test]
 fn selected_workspace_should_use_an_inset_chip_without_row_separators(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n cmd-n");
+    new_desktop_workspace(cx);
+    new_desktop_workspace(cx);
     cx.run_until_parked();
 
     let first_row = cx
@@ -7352,27 +7099,6 @@ fn sidebar_new_workspace_menu_should_mirror_switcher_creation_rows(cx: &mut Test
 }
 
 #[gpui::test]
-fn sidebar_new_workspace_button_should_create_local_immediately(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    click_new_workspace_menu("new-workspace-menu-create-local", cx);
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.len()),
-        2
-    );
-    assert_eq!(records.starts().len(), 2);
-    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active()
-            .payload()
-            .read(cx)
-            .focused_terminal_is_focused(window, cx)
-    }));
-}
-
-#[gpui::test]
 fn top_chrome_buttons_should_toggle_sidebar_and_present_the_new_workspace_combo_box(
     cx: &mut TestAppContext,
 ) {
@@ -7466,75 +7192,6 @@ fn workspace_pin_indicator_should_track_explicit_pin_state(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-fn a_pinned_workspace_row_disclosing_worktrees_should_mark_the_pin_beside_its_name(
-    cx: &mut TestAppContext,
-) {
-    use crate::domain::RepositoryIdentity;
-    use crate::worktrees::WorktreeSnapshot;
-    use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
-
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let base = temporary_directory("pinned-repository");
-    let main = base.join("main");
-    let linked = base.join("linked");
-    fs::create_dir_all(&main).unwrap();
-    fs::create_dir_all(&linked).unwrap();
-    let (manager, _records, cx) =
-        workspace_manager_with_directory_selection([Ok(Some(main.clone()))], cx);
-    choose_pin_directory(&manager, cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    manager.update(cx, |manager, cx| {
-        manager
-            .workspaces
-            .rename_workspace(workspace_id, "chuchi".into())
-            .unwrap();
-        cx.notify();
-    });
-    let record = |root: &Path, branch: &str| WorktreeRecord {
-        root: root.to_path_buf(),
-        head: WorktreeHead::Branch(branch.into()),
-        locked: false,
-        missing: false,
-    };
-    let store =
-        cx.update(|_, cx| crate::ui::worktree_store::InstalledWorktrees::store(cx).unwrap());
-    store.update(cx, |store, cx| {
-        store.present(
-            &main,
-            Some(WorktreeSnapshot {
-                repository: RepositoryIdentity::new(main.clone()),
-                current: Some(0),
-                common_directory: main.join(".git"),
-                worktrees: vec![record(&main, "main"), record(&linked, "feature/login")],
-            }),
-            cx,
-        )
-    });
-    cx.run_until_parked();
-
-    let id = workspace_id.get();
-    let name = cx.debug_bounds(format!("workspace-row-name-{id}").leak());
-    let pin = cx.debug_bounds(format!("workspace-row-pin-{id}").leak());
-    let disclosure = cx.debug_bounds(format!("workspace-disclosure-{id}-expanded").leak());
-    let _ = fs::remove_dir_all(&base);
-    let (name, pin, disclosure) = (name.unwrap(), pin.unwrap(), disclosure.unwrap());
-    let text = cx.update(|window, cx| {
-        crate::ui::appearance::chrome(cx).typography.measure(
-            crate::ui::chrome_typography::TextRole::Navigation,
-            "chuchi",
-            window,
-        )
-    });
-    assert!(
-        pin.left() >= name.right() && pin.left() - name.left() <= text.ceil() + px(5.0),
-        "the pin follows the name, as it leads the directory of a row without Worktrees"
-    );
-    assert!(pin.right() < disclosure.left());
-}
-
-#[gpui::test]
 fn the_workspace_chip_should_appear_only_while_the_sidebar_is_hidden(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
 
@@ -7570,7 +7227,7 @@ fn the_workspace_chip_should_follow_the_active_workspace(cx: &mut TestAppContext
     let (manager, _, cx) = workspace_manager(cx);
 
     click("toggle-sidebar-button", cx);
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     manager.update(cx, |manager, cx| {
         manager
             .workspaces
@@ -7664,28 +7321,6 @@ fn collapsed_top_chrome_should_ignore_a_larger_resized_sidebar_width(cx: &mut Te
             root.origin.x + collapsed_width,
             root.origin.x + collapsed_width,
         )
-    );
-}
-
-#[gpui::test]
-fn collapsed_identity_should_keep_an_unavailable_local_workspace_visible(cx: &mut TestAppContext) {
-    let (manager, _, cx) = workspace_manager(cx);
-    manager.update(cx, |manager, cx| {
-        let workspace_id = manager.workspaces.active_id();
-        manager
-            .workspaces
-            .set_directory_unavailable(workspace_id, "Directory unavailable".to_owned())
-            .expect("the Active Workspace should remain present");
-        cx.notify();
-    });
-
-    click("toggle-sidebar-button", cx);
-
-    assert!(cx.debug_bounds("workspace-chip-label").is_some());
-    assert!(
-        cx.debug_bounds("workspace-switcher-status-unavailable")
-            .is_some(),
-        "the collapsed identity must keep the Active Workspace's unavailable state visible"
     );
 }
 
@@ -7982,43 +7617,13 @@ fn collapsed_chrome_geometry_survives_combo_box_theme_replacement(cx: &mut TestA
 }
 
 #[gpui::test]
-fn collapsed_workspace_name_should_open_filter_and_create_a_named_workspace(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    click("toggle-sidebar-button", cx);
-    click("workspace-chip-label", cx);
-    cx.simulate_keystrokes("f r e s h space w o r k s p a c e");
-    cx.run_until_parked();
-    click("workspace-switcher-create-local", cx);
-    assert_eq!(
-        manager.read_with(cx, |manager, _| {
-            manager.workspaces.active().name().to_owned()
-        }),
-        "fresh workspace"
-    );
-    assert_eq!(records.starts().len(), 2);
-    assert!(!manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).layout().visible));
-    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active()
-            .payload()
-            .read(cx)
-            .focused_terminal_is_focused(window, cx)
-    }));
-}
-
-#[gpui::test]
 fn workspace_created_while_collapsed_should_share_the_active_top_chrome_width(
     cx: &mut TestAppContext,
 ) {
     let (_, _, cx) = workspace_manager(cx);
     click("toggle-sidebar-button", cx);
 
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
 
     let chrome = cx
@@ -8078,7 +7683,7 @@ fn collapsed_top_chrome_should_preserve_name_after_inactive_shell_exit(cx: &mut 
     let inactive_sender = records
         .event_sender(1)
         .expect("the initial Workspace Terminal Session must have started");
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     manager.update(cx, |manager, cx| {
         manager
             .workspaces
@@ -8119,7 +7724,7 @@ fn collapsed_top_chrome_should_preserve_name_after_inactive_shell_exit(cx: &mut 
 fn cmd_n_should_create_a_local_workspace_without_the_panel(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
 
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
 
     assert_eq!(
@@ -8139,7 +7744,7 @@ fn cmd_n_should_create_a_local_workspace_without_the_panel(cx: &mut TestAppConte
 fn workspace_list_should_scroll_vertically_with_the_mouse_wheel(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-n");
+        new_desktop_workspace(cx);
     }
 
     manager.read_with(cx, |manager, cx| {
@@ -8175,7 +7780,7 @@ fn workspace_list_should_scroll_vertically_with_the_mouse_wheel(cx: &mut TestApp
 fn workspace_scrollbar_should_reveal_when_the_list_scrolls(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-n");
+        new_desktop_workspace(cx);
     }
     manager.read_with(cx, |manager, cx| {
         manager
@@ -8215,7 +7820,7 @@ fn workspace_list_publishes_a_named_scroll_bar_before_it_is_revealed(cx: &mut Te
 
     let (_manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-n");
+        new_desktop_workspace(cx);
     }
     let tree = A11yTree::read(cx);
     assert_eq!(tree.node("Workspace list")["aria"]["role"], "ScrollBar");
@@ -8235,8 +7840,8 @@ fn workspace_order(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContex
 #[gpui::test]
 fn a_workspace_row_drag_released_on_its_first_move_should_land(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
     let release =
@@ -8255,8 +7860,8 @@ fn a_workspace_row_drag_released_on_its_first_move_should_land(cx: &mut TestAppC
 #[gpui::test]
 fn a_workspace_row_released_just_below_the_list_should_land_at_its_end(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
     let list = cx.debug_bounds("workspace-list").unwrap();
@@ -8284,8 +7889,8 @@ fn a_workspace_row_released_just_below_the_list_should_land_at_its_end(cx: &mut 
 #[gpui::test]
 fn dragging_a_workspace_row_should_open_a_gap_and_settle_there_on_release(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
     let second = cx.debug_bounds("workspace-row-2-inactive").unwrap();
@@ -8378,7 +7983,7 @@ fn dragging_a_workspace_row_should_open_a_gap_and_settle_there_on_release(cx: &m
 #[gpui::test]
 fn a_closed_workspace_row_should_leave_a_gap_that_closes(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
@@ -8405,7 +8010,7 @@ fn a_closed_workspace_row_should_leave_a_gap_that_closes(cx: &mut TestAppContext
 #[gpui::test]
 fn selecting_another_workspace_should_move_the_selection_from_the_old_row(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     finish_slides(cx);
     cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
@@ -8434,7 +8039,8 @@ fn switching_to_a_workspace_with_fewer_tabs_should_start_its_tab_strip_from_the_
     cx: &mut TestAppContext,
 ) {
     let (_manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-t cmd-t cmd-n");
+    cx.simulate_keystrokes("cmd-t cmd-t");
+    new_desktop_workspace(cx);
     finish_slides(cx);
     click("workspace-row-1-inactive", cx);
     finish_slides(cx);
@@ -8476,7 +8082,7 @@ fn switching_to_a_workspace_with_an_overflowing_tab_strip_should_keep_its_tabs_i
     for _ in 0..13 {
         cx.simulate_keystrokes("cmd-t");
     }
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     finish_slides(cx);
     click("workspace-row-1-inactive", cx);
     finish_slides(cx);
@@ -8520,7 +8126,7 @@ fn a_new_workspace_should_start_its_tab_strip_from_a_scrolled_old_one(cx: &mut T
     let selection = cx.debug_bounds("tab-item-14-chip").unwrap().origin;
     let create = cx.debug_bounds("create-tab-button").unwrap().origin;
 
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     let leaving = (
         cx.debug_bounds("tab-item-1-chip")
@@ -8561,7 +8167,7 @@ fn switching_workspaces_while_a_dropped_tab_settles_should_move_the_selection_fr
     cx.run_until_parked();
     let drawn = cx.debug_bounds("tab-item-3-chip").unwrap().origin;
 
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     let leaving = cx
         .debug_bounds("tab-item-1-chip")
@@ -8589,7 +8195,7 @@ fn a_new_workspace_should_start_its_tab_strip_from_the_old_one(cx: &mut TestAppC
             .origin
     };
 
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     let leaving = chip(cx);
     finish_slides(cx);
@@ -8607,7 +8213,8 @@ fn switching_to_a_workspace_with_more_tabs_should_grow_the_tabs_the_old_strip_la
     cx: &mut TestAppContext,
 ) {
     let (_manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-t cmd-t cmd-n");
+    cx.simulate_keystrokes("cmd-t cmd-t");
+    new_desktop_workspace(cx);
     finish_slides(cx);
     cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
     let selection = cx.debug_bounds("tab-item-1-chip").unwrap().origin;
@@ -8636,7 +8243,8 @@ fn switching_back_and_forth_quickly_should_start_each_tab_strip_from_the_old_end
     cx: &mut TestAppContext,
 ) {
     let (_manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-t cmd-t cmd-n");
+    cx.simulate_keystrokes("cmd-t cmd-t");
+    new_desktop_workspace(cx);
     finish_slides(cx);
     cx.update(|_, cx| cx.set_global(crate::ui::drag_and_drop::AnimatePresence));
     let end = |cx: &mut VisualTestContext| cx.debug_bounds("create-tab-button").unwrap().origin.x;
@@ -8666,8 +8274,8 @@ fn escape_should_cancel_a_workspace_row_drag_and_return_every_row_to_its_place(
     cx: &mut TestAppContext,
 ) {
     let (manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
     let third = cx.debug_bounds("workspace-row-3-active").unwrap();
@@ -8707,8 +8315,8 @@ fn escape_should_cancel_a_workspace_row_drag_and_return_every_row_to_its_place(
 #[gpui::test]
 fn a_single_motion_should_move_a_workspace_row_on_release(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
     let third = cx.debug_bounds("workspace-row-3-active").unwrap();
@@ -8727,7 +8335,7 @@ fn a_single_motion_should_move_a_workspace_row_on_release(cx: &mut TestAppContex
 fn escape_should_cancel_only_the_drag_in_progress(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     cx.simulate_keystrokes("cmd-t");
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.simulate_keystrokes("cmd-t");
     cx.simulate_keystrokes("ctrl-1");
     cx.run_until_parked();
@@ -8783,7 +8391,7 @@ fn escape_should_cancel_only_the_drag_in_progress(cx: &mut TestAppContext) {
 fn workspace_scrollbar_thumb_should_drag_the_list(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-n");
+        new_desktop_workspace(cx);
     }
     manager.update(cx, |manager, cx| {
         manager
@@ -8834,7 +8442,7 @@ fn closing_an_inactive_workspace_should_keep_the_sidebar_where_it_was_scrolled(
 ) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-n");
+        new_desktop_workspace(cx);
     }
     finish_slides(cx);
     manager.update(cx, |manager, cx| {
@@ -8874,7 +8482,7 @@ fn closing_an_inactive_workspace_should_keep_the_sidebar_where_it_was_scrolled(
 fn creating_workspaces_should_scroll_the_active_workspace_into_view(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-n");
+        new_desktop_workspace(cx);
     }
 
     let state = manager.read_with(cx, |manager, cx| {
@@ -8901,7 +8509,7 @@ fn creating_workspaces_should_scroll_the_active_workspace_into_view(cx: &mut Tes
 fn overflowing_workspace_list_should_not_cover_the_creation_footer(cx: &mut TestAppContext) {
     let (_manager, _records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-n");
+        new_desktop_workspace(cx);
     }
 
     let sidebar = cx
@@ -9063,7 +8671,7 @@ fn a_secondary_click_should_leave_focus_in_the_pane(cx: &mut TestAppContext) {
 fn command_n_creates_and_activates_a_home_workspace(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
 
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
 
     let state = manager.read_with(cx, |manager, _| {
@@ -9105,7 +8713,8 @@ fn command_n_creates_and_activates_a_home_workspace(cx: &mut TestAppContext) {
 #[gpui::test]
 fn control_number_should_activate_workspaces_by_position(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n cmd-n");
+    new_desktop_workspace(cx);
+    new_desktop_workspace(cx);
     cx.run_until_parked();
 
     cx.simulate_keystrokes("ctrl-1");
@@ -9151,7 +8760,8 @@ fn control_number_should_activate_workspaces_by_position(cx: &mut TestAppContext
 #[gpui::test]
 fn clicking_an_inactive_workspace_should_restore_its_focused_pane(cx: &mut TestAppContext) {
     let (manager, _records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-d cmd-n");
+    cx.simulate_keystrokes("cmd-d");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
 
     click("workspace-row-1-inactive", cx);
@@ -9202,7 +8812,7 @@ fn right_clicking_an_inactive_workspace_should_open_its_menu_without_activating_
 ) {
     let (manager, _records, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
 
     right_click("workspace-row-1-inactive", cx);
@@ -9297,7 +8907,7 @@ fn tab_shortcuts_should_create_and_activate_tabs_while_sidebar_is_focused(cx: &m
 }
 
 #[gpui::test]
-fn close_pane_shortcut_from_sidebar_should_close_the_globally_final_operating_system_window(
+fn close_pane_shortcut_from_sidebar_should_leave_the_empty_view_after_the_final_pane(
     cx: &mut TestAppContext,
 ) {
     let (manager, records, cx) = workspace_manager(cx);
@@ -9311,19 +8921,18 @@ fn close_pane_shortcut_from_sidebar_should_close_the_globally_final_operating_sy
     let state = manager.read_with(cx, |manager, _| {
         (
             manager.workspaces.len(),
-            manager.workspaces.active_id(),
             records.dropped_session_ids(),
             records.session_count(),
         )
     });
-    assert_eq!(state, (1, WorkspaceId::new(1), vec![1], 1));
-    assert!(cx.windows().is_empty());
+    assert_eq!(state, (0, vec![1], 1));
+    assert_eq!(cx.windows().len(), 1, "the window stays open");
+    // The empty stage remains, with nothing desktop-owned in it.
+    assert!(cx.debug_bounds("empty-workspace-stage").is_some());
 }
 
 #[gpui::test]
-fn duplicate_final_tab_close_requests_should_schedule_one_operating_system_window_close(
-    cx: &mut TestAppContext,
-) {
+fn duplicate_final_tab_close_requests_should_close_the_workspace_once(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
     let tab_manager = manager.read_with(cx, |manager, _| {
         manager.workspaces.active().payload().clone()
@@ -9340,7 +8949,11 @@ fn duplicate_final_tab_close_requests_should_schedule_one_operating_system_windo
     cx.run_until_parked();
 
     assert_eq!(records.dropped_session_ids(), vec![1]);
-    assert!(cx.windows().is_empty());
+    assert_eq!(
+        manager.read_with(cx, |manager, _| manager.workspaces.len()),
+        0
+    );
+    assert_eq!(cx.windows().len(), 1);
 }
 
 #[gpui::test]
@@ -9745,7 +9358,7 @@ fn blurring_inline_rename_should_commit_the_edited_name(cx: &mut TestAppContext)
 #[gpui::test]
 fn activating_another_workspace_should_cancel_the_previous_inline_rename(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     click("workspace-row-1-inactive", cx);
     right_click("workspace-row-1-active", cx);
@@ -9790,9 +9403,7 @@ fn activating_another_workspace_should_cancel_the_previous_inline_rename(cx: &mu
 }
 
 #[gpui::test]
-fn explicitly_closing_the_final_workspace_should_replace_it_and_keep_the_window_open(
-    cx: &mut TestAppContext,
-) {
+fn explicitly_closing_the_final_workspace_should_leave_the_empty_view(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
 
     right_click("workspace-row-1-active", cx);
@@ -9802,13 +9413,18 @@ fn explicitly_closing_the_final_workspace_should_replace_it_and_keep_the_window_
     let state = manager.read_with(cx, |manager, _| {
         (
             manager.workspaces.len(),
-            manager.workspaces.active_id(),
             records.dropped_session_ids(),
             records.session_count(),
         )
     });
-    assert_eq!(state, (1, WorkspaceId::new(2), vec![1], 2));
+    assert_eq!(
+        state,
+        (0, vec![1], 1),
+        "nothing replaces the final Workspace"
+    );
     assert_eq!(cx.windows().len(), 1);
+    // The empty stage remains, with nothing desktop-owned in it.
+    assert!(cx.debug_bounds("empty-workspace-stage").is_some());
 }
 
 #[gpui::test]
@@ -9820,7 +9436,7 @@ fn inactive_shell_exit_should_close_its_workspace_without_stealing_activation(
     let inactive_sender = records
         .event_sender(1)
         .expect("the initial Workspace Terminal Session must have started");
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
 
     assert!(active_terminal_has_input_focus(&manager, cx));
@@ -9833,7 +9449,7 @@ fn inactive_shell_exit_should_close_its_workspace_without_stealing_activation(
         WorkspaceId::new(2)
     );
     assert!(active_terminal_has_input_focus(&manager, cx));
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
 
     let state = manager.read_with(cx, |manager, _| {
@@ -9852,80 +9468,6 @@ fn inactive_shell_exit_should_close_its_workspace_without_stealing_activation(
 ))]
 mod unix_adapter_tests {
     include!("../../platform/unix_adapter_tests/workspace_manager.rs");
-}
-
-#[gpui::test]
-fn pin_change_and_unpin_should_only_affect_future_terminal_starts(cx: &mut TestAppContext) {
-    let root = temporary_directory("pin-policy");
-    let first = root.join("first");
-    let second = root.join("second");
-    fs::create_dir_all(&first).unwrap();
-    fs::create_dir_all(&second).unwrap();
-    let (manager, records, cx) = workspace_manager(cx);
-    for (directory, existing_count) in [(&first, 1), (&second, 2)] {
-        cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| {
-                let directory = manager
-                    .local_filesystem
-                    .validate_directory(directory)
-                    .unwrap();
-                manager.apply_directory_pin(
-                    WorkspaceId::new(1),
-                    Some(PinnedDirectory::Local(directory)),
-                    window,
-                    cx,
-                );
-            })
-        });
-        cx.run_until_parked();
-        assert_eq!(records.starts().len(), existing_count);
-        assert!(records.dropped_session_ids().is_empty());
-        cx.simulate_keystrokes("cmd-t");
-        cx.run_until_parked();
-        assert_eq!(
-            records
-                .starts()
-                .last()
-                .unwrap()
-                .local_working_directory()
-                .unwrap()
-                .path(),
-            directory.as_path()
-        );
-    }
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.apply_directory_pin(WorkspaceId::new(1), None, window, cx);
-        })
-    });
-    assert_eq!(records.starts().len(), 3);
-    cx.simulate_keystrokes("cmd-t");
-    cx.run_until_parked();
-    let starts = records
-        .starts()
-        .iter()
-        .map(|start| {
-            start
-                .local_working_directory()
-                .unwrap()
-                .path()
-                .to_path_buf()
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        starts,
-        [std::env::temp_dir(), first, second.clone(), second]
-    );
-    assert!(records.dropped_session_ids().is_empty());
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .active()
-            .name()
-            .to_owned()),
-        "Default"
-    );
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[gpui::test]
@@ -10070,52 +9612,9 @@ fn directory_picker_should_pin_its_target_and_keep_the_connection(cx: &mut TestA
 }
 
 #[gpui::test]
-fn unavailable_home_should_reject_new_workspace_before_mutating_hierarchy(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    let missing_home = temporary_directory("missing-home");
-    manager.update(cx, |manager, _| {
-        manager.local_home_directory_path = missing_home
-    });
-
-    cx.simulate_keystrokes("cmd-n");
-    cx.run_until_parked();
-
-    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 1);
-        assert_eq!(manager.workspaces.active_id(), WorkspaceId::new(1));
-    });
-    assert_eq!(records.session_count(), 1);
-    assert!(records.dropped_session_ids().is_empty());
-}
-
-#[gpui::test]
-fn unavailable_home_should_reject_final_workspace_replacement_before_closing(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    let missing_home = temporary_directory("missing-home");
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.local_home_directory_path = missing_home;
-            manager.close_workspace(WorkspaceId::new(1), window, cx);
-        });
-    });
-    cx.run_until_parked();
-
-    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 1);
-        assert_eq!(manager.workspaces.active_id(), WorkspaceId::new(1));
-    });
-    assert_eq!(records.session_count(), 1);
-    assert!(records.dropped_session_ids().is_empty());
-}
-
-#[gpui::test]
 fn unavailable_home_should_allow_closing_a_workspace_without_replacement(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     let missing_home = temporary_directory("missing-home");
     cx.update(|window, cx| {
@@ -10189,7 +9688,7 @@ fn workspace_switcher_should_not_expose_the_workspace_path_as_a_description(
 #[gpui::test]
 fn workspace_switcher_should_not_match_workspace_paths(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     manager.update(cx, |manager, _| {
         manager
@@ -10222,7 +9721,7 @@ fn workspace_switcher_should_not_match_workspace_paths(cx: &mut TestAppContext) 
 #[gpui::test]
 fn workspace_switcher_should_preserve_empty_order_and_show_fuzzy_ranking(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
     manager.update(cx, |manager, _| {
         manager
@@ -10318,56 +9817,6 @@ fn sidebar_remote_creation_should_open_host_selection_and_restore_focus_on_cance
 }
 
 #[gpui::test]
-fn switcher_should_preserve_explicit_local_names_without_switching_to_the_match(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    for expected in ["fresh workspace"; 3] {
-        open_workspace_switcher_for_creation(cx);
-        click("workspace-switcher-create-local", cx);
-        assert_eq!(
-            manager.read_with(cx, |manager, _| manager
-                .workspaces
-                .active()
-                .name()
-                .to_owned()),
-            expected
-        );
-    }
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.len()),
-        4
-    );
-    assert_eq!(records.starts().len(), 4);
-}
-
-#[gpui::test]
-fn creation_shortcut_should_accept_local_switcher_name_instead_of_highlight(
-    cx: &mut TestAppContext,
-) {
-    let (manager, records, cx) = workspace_manager(cx);
-    open_workspace_switcher_for_creation(cx);
-    cx.simulate_keystrokes("down cmd-n");
-    cx.run_until_parked();
-    manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.active().name(), "fresh workspace");
-        assert_eq!(manager.workspaces.len(), 2);
-        assert!(manager.remote_workspace_flow.is_none());
-    });
-    assert_eq!(records.starts().len(), 2);
-    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
-    assert!(cx.update(|window, cx| {
-        manager
-            .read(cx)
-            .workspaces
-            .active()
-            .payload()
-            .read(cx)
-            .focused_terminal_is_focused(window, cx)
-    }));
-}
-
-#[gpui::test]
 fn creation_shortcut_should_accept_remote_switcher_name_instead_of_highlight(
     cx: &mut TestAppContext,
 ) {
@@ -10400,8 +9849,15 @@ fn creation_shortcut_should_accept_remote_switcher_name_instead_of_highlight(
 #[gpui::test]
 fn switcher_should_preserve_explicit_remote_names_across_destinations(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
-    open_workspace_switcher_for_creation(cx);
-    click("workspace-switcher-create-local", cx);
+    new_desktop_workspace(cx);
+    manager.update(cx, |manager, cx| {
+        let workspace_id = manager.workspaces.active_id();
+        manager
+            .workspaces
+            .rename_workspace(workspace_id, "fresh workspace".to_owned())
+            .unwrap();
+        cx.notify();
+    });
     for (destination, expected) in [
         ("work", "fresh workspace"),
         ("work", "fresh workspace"),
@@ -10472,47 +9928,6 @@ fn creation_shortcut_should_open_remote_setup_without_reusing_cancelled_query(
 }
 
 #[gpui::test]
-fn creation_shortcut_should_use_automatic_local_name_for_blank_and_cancelled_input(
-    cx: &mut TestAppContext,
-) {
-    let (manager, _, cx) = workspace_manager(cx);
-    open_workspace_switcher_for_creation(cx);
-    cx.simulate_keystrokes("escape cmd-n");
-    cx.run_until_parked();
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .active()
-            .name()
-            .to_owned()),
-        "Default (2)"
-    );
-    open_workspace_switcher(cx);
-    cx.simulate_keystrokes("space space cmd-n");
-    cx.run_until_parked();
-    let id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    manager.update(cx, |manager, _| {
-        manager
-            .workspaces
-            .update_automatic_directory(
-                id,
-                crate::terminal::metadata::CurrentDirectory::Local(PathBuf::from(
-                    "/project/automatic",
-                )),
-            )
-            .unwrap();
-    });
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .active()
-            .name()
-            .to_owned()),
-        "automatic"
-    );
-}
-
-#[gpui::test]
 fn creation_shortcut_should_use_automatic_remote_name_for_blank_input(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
     open_workspace_switcher(cx);
@@ -10534,106 +9949,12 @@ fn creation_shortcut_should_use_automatic_remote_name_for_blank_input(cx: &mut T
 }
 
 #[gpui::test]
-fn creation_shortcut_should_create_named_local_even_with_existing_match(cx: &mut TestAppContext) {
-    let (manager, _, cx) = workspace_manager(cx);
-    manager.update(cx, |manager, _| {
-        manager
-            .workspaces
-            .rename_workspace(WorkspaceId::new(1), "Alpha".into())
-            .unwrap()
-    });
-    open_workspace_switcher(cx);
-    cx.simulate_keystrokes("space A l p h a space cmd-n");
-    cx.run_until_parked();
-    let id = manager.read_with(cx, |manager, _| {
-        assert_eq!(manager.workspaces.len(), 2);
-        manager.workspaces.active_id()
-    });
-    manager.update(cx, |manager, _| {
-        manager
-            .workspaces
-            .update_automatic_directory(
-                id,
-                crate::terminal::metadata::CurrentDirectory::Local(PathBuf::from(
-                    "/project/changed",
-                )),
-            )
-            .unwrap();
-    });
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .active()
-            .name()
-            .to_owned()),
-        "Alpha"
-    );
-}
-
-#[gpui::test]
-fn creation_shortcuts_should_not_escape_a_modal(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    cx.update(|window, cx| {
-        manager.update(cx, |_, cx| {
-            Alert::new(
-                ModalId::new("creation-shortcut-blocker"),
-                "Shortcut blocker",
-                "Blocking dialog",
-                "Finish this dialog first.",
-                vec![
-                    ModalAction::new(
-                        (),
-                        "OK",
-                        ModalActionRole::Affirmative,
-                        "creation-shortcut-blocker-ok",
-                    )
-                    .default_action(true),
-                ],
-            )
-            .present(window, cx, |_, _| {})
-            .unwrap();
-        });
-    });
-    cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-n cmd-shift-n");
-    cx.run_until_parked();
-    assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-    assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
-    assert_eq!(records.starts().len(), 1);
-}
-
-#[gpui::test]
-fn creation_shortcuts_should_not_escape_switcher_input_context_menu(cx: &mut TestAppContext) {
-    let (manager, records, cx) = workspace_manager(cx);
-    open_workspace_switcher_for_creation(cx);
-    let input = cx.debug_bounds("combo-box-input").unwrap().center();
-    cx.simulate_mouse_down(input, MouseButton::Right, Modifiers::none());
-    cx.simulate_mouse_up(input, MouseButton::Right, Modifiers::none());
-    cx.run_until_parked();
-    assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
-    cx.simulate_keystrokes("cmd-n cmd-shift-n");
-    cx.run_until_parked();
-    assert!(cx.update(|window, cx| spaceterm_ui::window_menu_is_open(window, cx)));
-    assert!(manager.read_with(cx, |manager, _| manager.remote_workspace_flow.is_none()));
-    assert_eq!(records.starts().len(), 1);
-    cx.simulate_keystrokes("escape cmd-n");
-    cx.run_until_parked();
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .active()
-            .name()
-            .to_owned()),
-        "fresh workspace"
-    );
-}
-
-#[gpui::test]
 fn workspace_switcher_check_should_follow_active_workspace_not_keyboard_highlight(
     cx: &mut TestAppContext,
 ) {
     let (manager, _, cx) = workspace_manager(cx);
-    cx.simulate_keystrokes("cmd-n ctrl-1");
+    new_desktop_workspace(cx);
+    cx.simulate_keystrokes("ctrl-1");
     cx.run_until_parked();
     open_workspace_switcher(cx);
     cx.simulate_keystrokes("down");
@@ -10682,33 +10003,10 @@ fn workspace_switcher_creation_rows_should_start_in_the_checkmark_column(cx: &mu
 }
 
 #[gpui::test]
-fn workspace_filter_icon_should_precede_editable_input_without_affecting_creation(
-    cx: &mut TestAppContext,
-) {
-    let (manager, _, cx) = workspace_manager(cx);
-    open_workspace_switcher(cx);
-    let icon = cx.debug_bounds("combo-box-input-leading").unwrap();
-    let input = cx.debug_bounds("combo-box-input").unwrap();
-    assert!(icon.right() <= input.left());
-    assert!(input.size.width > px(0.0));
-    cx.simulate_keystrokes("f i l t e r enter");
-    cx.run_until_parked();
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager
-            .workspaces
-            .active()
-            .name()
-            .to_owned()),
-        "filter"
-    );
-    assert!(!cx.update(|window, cx| window_combo_box_is_open(window, cx)));
-}
-
-#[gpui::test]
 fn workspace_activation_hints_should_follow_sidebar_order_after_closing(cx: &mut TestAppContext) {
     let (manager, _, cx) = workspace_manager(cx);
     for _ in 0..9 {
-        cx.simulate_keystrokes("cmd-n");
+        new_desktop_workspace(cx);
     }
     cx.run_until_parked();
     let hints = cx.update(|_, cx| {
@@ -10864,7 +10162,7 @@ fn sidebar_resize_cancel_should_respect_the_current_window_width(cx: &mut TestAp
 fn sidebar_keyboard_should_navigate_reveal_and_stop_at_both_ends(cx: &mut TestAppContext) {
     let (manager, records, cx) = workspace_manager(cx);
     for _ in 0..24 {
-        cx.simulate_keystrokes("cmd-n");
+        new_desktop_workspace(cx);
     }
     cx.simulate_keystrokes("cmd-shift-e home up");
     cx.run_until_parked();
@@ -11378,1312 +10676,6 @@ fn assert_rendered_text(
     }
 }
 
-fn selected_tree_item_labels(cx: &mut VisualTestContext) -> Vec<String> {
-    spaceterm_ui::a11y_testing::A11yTree::read(cx)
-        .with_role("TreeItem")
-        .iter()
-        .filter(|item| item["aria"]["selected"] == true)
-        .map(|item| {
-            item["aria"]["label"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned()
-        })
-        .collect()
-}
-
-fn active_workspace_worktree_tab_counts(
-    manager: &Entity<WorkspaceManager>,
-    cx: &mut VisualTestContext,
-) -> Vec<usize> {
-    manager.read_with(cx, |manager, cx| {
-        manager
-            .workspaces
-            .active()
-            .payload()
-            .read(cx)
-            .worktree_tab_counts()
-            .into_values()
-            .collect()
-    })
-}
-
-/// A repository whose Main Worktree is the test home, with a linked Worktree at each `linked`.
-fn present_worktrees(cx: &mut VisualTestContext, linked: &[&Path]) {
-    present_worktrees_containing(cx, linked, 0);
-}
-
-/// Like `present_worktrees`, with the test home inside the listed Worktree at `current`.
-fn present_worktrees_containing(cx: &mut VisualTestContext, linked: &[&Path], current: usize) {
-    use crate::domain::RepositoryIdentity;
-    use crate::worktrees::WorktreeSnapshot;
-    use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
-
-    let main = std::env::temp_dir();
-    let record = |root: &Path, branch: &str| WorktreeRecord {
-        root: root.to_path_buf(),
-        head: WorktreeHead::Branch(branch.into()),
-        locked: false,
-        missing: false,
-    };
-    let snapshot = WorktreeSnapshot {
-        repository: RepositoryIdentity::new(main.clone()),
-        current: Some(current),
-        common_directory: main.join(".git"),
-        worktrees: std::iter::once(record(&main, "main"))
-            .chain(linked.iter().map(|root| record(root, "feature/login")))
-            .collect(),
-    };
-    let store =
-        cx.update(|_, cx| crate::ui::worktree_store::InstalledWorktrees::store(cx).unwrap());
-    store.update(cx, |store, cx| store.present(&main, Some(snapshot), cx));
-    cx.run_until_parked();
-}
-
-#[gpui::test]
-fn git_workspace_rows_should_disclose_worktrees_that_open_lazily(cx: &mut TestAppContext) {
-    use gpui::accesskit::Action;
-    use spaceterm_ui::a11y_testing::{A11yTree, perform};
-
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (manager, records, cx) = workspace_manager(cx);
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    let linked = fixture.path().join("shell-integration");
-    present_worktrees(cx, &[&linked]);
-    let items = |cx: &mut VisualTestContext| {
-        A11yTree::read(cx)
-            .with_role("TreeItem")
-            .iter()
-            .map(|item| {
-                (
-                    item["aria"]["label"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_owned(),
-                    item["aria"]["level"].as_u64().unwrap_or_default(),
-                    item["aria"]["selected"] == true,
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-
-    let disclosed = items(cx);
-    let tabs_before = active_workspace_worktree_tab_counts(&manager, cx);
-    let tree = A11yTree::read(cx);
-    let feature = tree
-        .with_role("TreeItem")
-        .into_iter()
-        .find(|item| item["aria"]["label"] == "shell-integration")
-        .expect("the linked Worktree's row");
-    assert_eq!(
-        (
-            feature["aria"]["position_in_set"].as_u64(),
-            feature["aria"]["size_of_set"].as_u64()
-        ),
-        (Some(2), Some(2))
-    );
-    perform(cx, feature, Action::Click);
-    cx.run_until_parked();
-
-    let main = std::env::temp_dir()
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
-    assert_eq!(
-        disclosed,
-        [
-            ("Default".to_owned(), 1, false),
-            (main.clone(), 2, true),
-            ("shell-integration".to_owned(), 2, false),
-        ],
-        "two Worktrees disclose under the Workspace, and the Active Worktree carries the selection"
-    );
-    assert_eq!(
-        tabs_before,
-        [1],
-        "the Root Tab belongs to the Main Worktree"
-    );
-    assert_eq!(
-        items(cx)
-            .into_iter()
-            .map(|(label, _, selected)| (label, selected))
-            .collect::<Vec<_>>(),
-        [
-            ("Default".to_owned(), false),
-            (main, false),
-            ("shell-integration".to_owned(), true),
-        ]
-    );
-    assert_eq!(
-        active_workspace_worktree_tab_counts(&manager, cx),
-        [1, 1],
-        "opening a Worktree with no Tabs opens its first Tab"
-    );
-    assert_eq!(
-        records
-            .starts()
-            .last()
-            .and_then(|start| start.local_working_directory())
-            .map(|directory| directory.path().to_owned()),
-        Some(linked)
-    );
-}
-
-#[gpui::test]
-fn a_repository_without_linked_worktrees_should_keep_a_plain_workspace_row(
-    cx: &mut TestAppContext,
-) {
-    use spaceterm_ui::a11y_testing::A11yTree;
-
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (_manager, _records, cx) = workspace_manager(cx);
-    present_worktrees(cx, &[]);
-
-    let tree = A11yTree::read(cx);
-    let rows = tree.with_role("TreeItem");
-    assert_eq!(
-        rows.iter()
-            .map(|row| (
-                row["aria"]["label"].as_str().unwrap_or_default(),
-                row["aria"]["expanded"].is_null()
-            ))
-            .collect::<Vec<_>>(),
-        [("Default", true)],
-        "the Main Worktree alone discloses nothing"
-    );
-}
-
-#[gpui::test]
-fn worktree_rows_should_carry_the_directory_and_branch_that_a_collapsed_row_shows(
-    cx: &mut TestAppContext,
-) {
-    use gpui::accesskit::Action;
-    use spaceterm_ui::a11y_testing::{A11yTree, perform};
-
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    let linked = fixture.path().join("shell-integration");
-    present_worktrees(cx, &[&linked]);
-    let (workspace_id, home) = manager.read_with(cx, |manager, _| {
-        (
-            manager.workspaces.active_id(),
-            manager.local_home_directory_path.clone(),
-        )
-    });
-    let main = std::env::temp_dir();
-    let items = |cx: &mut VisualTestContext| {
-        A11yTree::read(cx)
-            .with_role("TreeItem")
-            .iter()
-            .map(|item| {
-                (
-                    item["aria"]["label"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_owned(),
-                    item["aria"]["description"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_owned(),
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-
-    let expanded = items(cx);
-    let tree = A11yTree::read(cx);
-    let feature = tree
-        .with_role("TreeItem")
-        .into_iter()
-        .find(|item| item["aria"]["label"] == "shell-integration")
-        .expect("the linked Worktree's row");
-    perform(cx, feature, Action::Click);
-    cx.run_until_parked();
-    manager.update(cx, |manager, cx| {
-        manager.set_worktrees_expanded(workspace_id, false);
-        cx.notify();
-    });
-    cx.run_until_parked();
-
-    let name = |path: &Path| path.file_name().unwrap().to_string_lossy().into_owned();
-    assert_eq!(
-        expanded,
-        [
-            (
-                "Default".to_owned(),
-                format!("Repository: {}", compact_home_path(&main, &home)),
-            ),
-            (
-                name(&main),
-                format!("Branch main, {}, Main Worktree", main.display()),
-            ),
-            (
-                "shell-integration".to_owned(),
-                format!("Branch feature/login, {}, No Tabs", linked.display()),
-            ),
-        ],
-        "an expanded Workspace row describes its repository, and each Worktree row its own \
-         directory and branch"
-    );
-    assert_eq!(
-        items(cx),
-        [("Default".to_owned(), compact_home_path(&linked, &home))],
-        "a collapsed Workspace row shows its Active Worktree's directory"
-    );
-}
-
-#[gpui::test]
-fn a_nested_shell_should_not_change_the_directory_of_a_worktree_row(cx: &mut TestAppContext) {
-    use crate::terminal::metadata::{MetadataTracker, PromptOwner, TerminalMetadataContext};
-
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (manager, records, cx) = workspace_manager(cx);
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    cx.simulate_keystrokes("cmd-d");
-    cx.run_until_parked();
-    let directory = fixture.path().join("shell-integration/bash");
-    let epoch = Instant::now();
-    let mut tracker = MetadataTracker::new_with_context(
-        TerminalMetadataContext::local(
-            crate::local_path::LocalPathSemantics::Posix,
-            directory.to_str().unwrap(),
-            Default::default(),
-        )
-        .with_prompt_owner(PromptOwner::fixture("0f1e")),
-        "zsh",
-        epoch,
-    );
-    tracker.apply_semantic_prompt("A;redraw=1;spaceterm=0f1e", epoch);
-    tracker.apply_semantic_prompt("C;cmdline=ssh%20host;spaceterm=0f1e", epoch);
-    tracker.set_reported_directory("file://localhost/srv/project");
-    tracker.apply_semantic_prompt("A;redraw=1", epoch);
-    records.report_metadata(records.starts().last().unwrap().session_id, |metadata| {
-        *metadata = (*tracker.snapshot()).clone();
-    });
-    cx.run_until_parked();
-
-    assert_eq!(
-        manager.read_with(cx, |manager, cx| {
-            manager
-                .worktree_section(manager.workspaces.active_id(), cx)
-                .unwrap()
-                .groups[0]
-                .rows[0]
-                .directory_tooltip
-                .to_string()
-        }),
-        directory.to_str().unwrap()
-    );
-}
-
-#[gpui::test]
-fn a_disclosure_chevron_should_trail_the_workspace_name(cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    redraw(cx);
-    let id = workspace_id.get();
-    let name = cx
-        .debug_bounds(format!("workspace-row-name-{id}").leak())
-        .expect("the Workspace name");
-    let disclosure = cx
-        .debug_bounds(format!("workspace-disclosure-{id}-expanded").leak())
-        .expect("the disclosure chevron");
-    let group = cx
-        .debug_bounds(format!("workspace-group-{id}").leak())
-        .expect("the Workspace group");
-
-    click(format!("workspace-disclosure-{id}-expanded").leak(), cx);
-    let collapsed_name = cx
-        .debug_bounds(format!("workspace-row-name-{id}").leak())
-        .expect("the Workspace name");
-    let collapsed = cx
-        .debug_bounds(format!("workspace-disclosure-{id}-collapsed").leak())
-        .expect("the collapsed disclosure chevron");
-    let branch = cx
-        .debug_bounds(format!("workspace-row-branch-{id}").leak())
-        .expect("line 2's branch");
-
-    assert!(
-        disclosure.left() >= name.right() && disclosure.right() > group.right() - px(40.0),
-        "the chevron trails the Workspace name at the row's end"
-    );
-    assert_eq!(
-        (collapsed.center().y, branch.right()),
-        (collapsed_name.center().y, collapsed.right()),
-        "a collapsed row's chevron trails line 1, so line 2 runs to the row's end"
-    );
-}
-
-#[gpui::test]
-fn a_focused_git_workspace_row_should_collapse_and_expand_from_the_keyboard(
-    cx: &mut TestAppContext,
-) {
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    let expanded = |cx: &mut VisualTestContext| {
-        manager.read_with(cx, |manager, cx| {
-            manager.worktree_section(workspace_id, cx).unwrap().expanded
-        })
-    };
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| manager.toggle_sidebar_focus(window, cx));
-    });
-    cx.simulate_keystrokes("up");
-    cx.run_until_parked();
-    let mut states = vec![expanded(cx)];
-
-    for key in ["enter", "space", "left", "left", "right", "right"] {
-        cx.simulate_keystrokes(key);
-        cx.run_until_parked();
-        states.push(expanded(cx));
-    }
-
-    assert_eq!(states, [true, false, true, false, false, true, true]);
-    assert!(
-        cx.update(|window, cx| manager.read(cx).sidebar.read(cx).is_focused(window)),
-        "toggling keeps the keyboard in the sidebar"
-    );
-}
-
-#[gpui::test]
-fn worktree_rows_should_match_a_two_line_workspace_row_height(cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    let linked = manager.read_with(cx, |manager, cx| {
-        manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
-    });
-    redraw(cx);
-    let id = workspace_id.get();
-    let worktree = cx
-        .debug_bounds(format!("worktree-row-{id}-{linked}-unselected").leak())
-        .expect("the linked Worktree row");
-
-    manager.update(cx, |manager, cx| {
-        manager.set_worktrees_expanded(workspace_id, false);
-        cx.notify();
-    });
-    cx.run_until_parked();
-    redraw(cx);
-    let workspace = cx
-        .debug_bounds(format!("workspace-row-{id}-active").leak())
-        .expect("the collapsed Workspace row");
-
-    assert_eq!(worktree.size.height, workspace.size.height);
-}
-
-#[gpui::test]
-fn a_git_workspace_should_create_a_worktree_and_open_its_first_tab_once_listed(
-    cx: &mut TestAppContext,
-) {
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (manager, records, cx) = workspace_manager(cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    let workspace_row: &'static str = format!("workspace-row-{}-active", workspace_id.get()).leak();
-    let plus: &'static str = format!("workspace-new-worktree-{}", workspace_id.get()).leak();
-    let offered = |cx: &mut VisualTestContext| {
-        right_click(workspace_row, cx);
-        let offered = cx.debug_bounds("workspace-menu-row-new-worktree").is_some();
-        cx.simulate_keystrokes("escape");
-        cx.run_until_parked();
-        (offered, cx.debug_bounds(plus).is_some())
-    };
-
-    let command_available = |cx: &mut VisualTestContext| {
-        cx.update(|window, cx| window.is_action_available(&crate::ui::NewWorktree, cx))
-    };
-
-    let outside_repository = offered(cx);
-    let command_outside = command_available(cx);
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    let linked = fixture.path().join("linked");
-    present_worktrees(cx, &[]);
-    let main_only = offered(cx);
-    let command_inside = command_available(cx);
-    present_worktrees(cx, &[&linked]);
-    click(
-        format!("workspace-disclosure-{}-expanded", workspace_id.get()).leak(),
-        cx,
-    );
-    let collapsed = offered(cx);
-    click(
-        format!("workspace-disclosure-{}-collapsed", workspace_id.get()).leak(),
-        cx,
-    );
-    let expanded = offered(cx);
-    let plus_bounds = cx.debug_bounds(plus).expect("the New Worktree button");
-    let chevron = cx
-        .debug_bounds(format!("workspace-disclosure-{}-expanded", workspace_id.get()).leak())
-        .expect("the expanded disclosure");
-    click(plus, cx);
-    let form = manager
-        .read_with(cx, |manager, _| manager.worktree_form())
-        .expect("the New Worktree dialog");
-    let presented = form.read_with(cx, |form, _| form.is_open());
-    let created = fixture.path().join("shell-integration");
-    form.update(cx, |_, cx| {
-        cx.emit(crate::ui::worktree_form::WorktreeFormEvent::Created(
-            created.clone(),
-        ));
-    });
-    cx.run_until_parked();
-    let unrelated = fixture.path().join("unrelated");
-    present_worktrees(cx, &[&linked, &unrelated]);
-    let before_listing = active_workspace_worktree_tab_counts(&manager, cx);
-    present_worktrees(cx, &[&linked, &unrelated, &created]);
-
-    assert_eq!(
-        (
-            outside_repository,
-            main_only,
-            collapsed,
-            expanded,
-            presented
-        ),
-        (
-            (false, false),
-            (true, false),
-            (true, false),
-            (true, true),
-            true
-        ),
-        "only a Workspace in a repository offers New Worktree: from its menu, and from its row \
-         while expanded"
-    );
-    assert_eq!(
-        plus_bounds.right(),
-        chevron.left(),
-        "the New Worktree button sits against the disclosure chevron"
-    );
-    assert_eq!(
-        (command_outside, command_inside),
-        (false, true),
-        "the New Worktree Command and its menu item act only in a repository"
-    );
-    assert_eq!(
-        (
-            before_listing,
-            active_workspace_worktree_tab_counts(&manager, cx)
-        ),
-        (vec![1], vec![1, 1]),
-        "the created Worktree's first Tab opens once git lists it"
-    );
-    assert_eq!(
-        records
-            .starts()
-            .last()
-            .and_then(|start| start.local_working_directory())
-            .map(|directory| directory.path().to_owned()),
-        Some(created)
-    );
-    assert!(manager.read_with(cx, |manager, cx| {
-        manager
-            .worktree_section(workspace_id, cx)
-            .is_some_and(|section| section.expanded)
-    }));
-}
-
-#[gpui::test]
-fn worktree_rows_should_open_tabs_from_their_own_menu(cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    let linked = manager.read_with(cx, |manager, cx| {
-        manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
-    });
-    let workspace_row: &'static str = format!("workspace-row-{}-active", workspace_id.get()).leak();
-    let linked_row = |state: &str| -> &'static str {
-        format!("worktree-row-{}-{linked}-{state}", workspace_id.get()).leak()
-    };
-    let new_tab_offered = |row: &'static str, cx: &mut VisualTestContext| {
-        right_click(row, cx);
-        let offered = cx.debug_bounds("workspace-menu-row-new-tab").is_some();
-        cx.simulate_keystrokes("escape");
-        cx.run_until_parked();
-        offered
-    };
-
-    let expanded_offers_new_tab = new_tab_offered(workspace_row, cx);
-    right_click(linked_row("unselected"), cx);
-    let after_menu = active_workspace_worktree_tab_counts(&manager, cx);
-    click("worktree-menu-row-new-tab", cx);
-    let after_first = active_workspace_worktree_tab_counts(&manager, cx);
-    right_click(linked_row("selected"), cx);
-    click("worktree-menu-row-new-tab", cx);
-    let after_second = active_workspace_worktree_tab_counts(&manager, cx);
-    manager.update(cx, |manager, cx| {
-        manager.set_worktrees_expanded(workspace_id, false);
-        cx.notify();
-    });
-    cx.run_until_parked();
-    let collapsed_offers_new_tab = new_tab_offered(workspace_row, cx);
-
-    assert!(
-        !expanded_offers_new_tab,
-        "an expanded Workspace leaves New Tab to its Worktree rows"
-    );
-    assert_eq!(
-        (after_menu, after_first, after_second),
-        (vec![1], vec![1, 1], vec![1, 2]),
-        "opening the menu leaves the Worktree unopened, and New Tab opens its first Tab, then \
-         another"
-    );
-    assert!(
-        collapsed_offers_new_tab,
-        "a collapsed Workspace opens a Tab in its Active Worktree"
-    );
-}
-
-/// The rendered selector of a Worktree row, whichever selection state it shows.
-fn worktree_row(
-    workspace_id: WorkspaceId,
-    worktree_id: crate::domain::WorktreeId,
-    cx: &mut VisualTestContext,
-) -> &'static str {
-    ["selected", "unselected"]
-        .into_iter()
-        .map(|state| -> &'static str {
-            format!("worktree-row-{}-{worktree_id}-{state}", workspace_id.get()).leak()
-        })
-        .find(|selector| cx.debug_bounds(selector).is_some())
-        .unwrap_or_else(|| panic!("worktree row {worktree_id} was not rendered"))
-}
-
-#[gpui::test]
-fn worktree_menus_should_offer_removal_only_where_git_allows_it(cx: &mut TestAppContext) {
-    use spaceterm_ui::a11y_testing::A11yTree;
-
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    let (main, linked) = manager.read_with(cx, |manager, cx| {
-        let rows = &manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows;
-        (rows[0].worktree_id, rows[1].worktree_id)
-    });
-    let row = |worktree, cx: &mut VisualTestContext| worktree_row(workspace_id, worktree, cx);
-    let removal = |row: &'static str, label: &str, cx: &mut VisualTestContext| {
-        right_click(row, cx);
-        let tree = A11yTree::read(cx);
-        let entry = tree
-            .find(label)
-            .map(|entry| entry["aria"]["disabled"] == true);
-        cx.simulate_keystrokes("escape");
-        cx.run_until_parked();
-        entry
-    };
-
-    let main_entry = removal(row(main, cx), "Main Worktree Can\u{2019}t Be Removed", cx);
-    let linked_entry = removal(row(linked, cx), "Remove Worktree\u{2026}", cx);
-    right_click(row(linked, cx), cx);
-    click("worktree-menu-row-new-tab", cx);
-    manager.update(cx, |manager, cx| {
-        manager.set_worktrees_expanded(workspace_id, false);
-        cx.notify();
-    });
-    cx.run_until_parked();
-    let workspace_row: &'static str = format!("workspace-row-{}-active", workspace_id.get()).leak();
-    let collapsed_entry = removal(
-        workspace_row,
-        "Remove Worktree \u{201c}shell-integration\u{201d}\u{2026}",
-        cx,
-    );
-
-    assert_eq!(
-        main_entry,
-        Some(true),
-        "the Main Worktree states why it can't be removed"
-    );
-    assert_eq!(
-        linked_entry,
-        Some(false),
-        "a linked Worktree can be removed"
-    );
-    assert_eq!(
-        collapsed_entry,
-        Some(false),
-        "a collapsed Workspace offers to remove its Active Worktree by name"
-    );
-}
-
-#[gpui::test]
-fn a_worktree_should_hold_a_pinned_directory_chosen_through_a_symbolic_link_for_every_workspace(
-    cx: &mut TestAppContext,
-) {
-    use crate::domain::RepositoryIdentity;
-    use crate::ui::workspace_sidebar::WorktreeRemoval;
-    use crate::worktrees::WorktreeSnapshot;
-    use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
-
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let base = temporary_directory("pinned-worktree-link");
-    let main = base.join("main");
-    let linked = base.join("linked");
-    // git names the Worktree holding the Pinned Directory by another spelling, as it does when
-    // the Pinned Directory was chosen through a symbolic link to the Worktree.
-    let pinned = base.join("alias").join("sub");
-    fs::create_dir_all(&main).unwrap();
-    fs::create_dir_all(&linked).unwrap();
-    fs::create_dir_all(&pinned).unwrap();
-    let (manager, _records, cx) =
-        workspace_manager_with_directory_selection([Ok(Some(pinned.clone()))], cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.transient.pin_target = Some(PinTarget::Workspace(workspace_id));
-            manager.choose_local_pin_directory(PinTarget::Workspace(workspace_id), window, cx);
-        })
-    });
-    cx.run_until_parked();
-    let record = |root: &Path, branch: &str| WorktreeRecord {
-        root: root.to_path_buf(),
-        head: WorktreeHead::Branch(branch.into()),
-        locked: false,
-        missing: false,
-    };
-    let snapshot = WorktreeSnapshot {
-        repository: RepositoryIdentity::new(main.clone()),
-        current: Some(1),
-        common_directory: main.join(".git"),
-        worktrees: vec![record(&main, "main"), record(&linked, "feature/login")],
-    };
-    let store =
-        cx.update(|_, cx| crate::ui::worktree_store::InstalledWorktrees::store(cx).unwrap());
-    store.update(cx, |store, cx| {
-        store.present(&pinned, Some(snapshot.clone()), cx)
-    });
-    // Another Workspace lists the same repository from its Main Worktree.
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| manager.create_local_workspace(window, cx));
-    });
-    cx.run_until_parked();
-    let other = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    store.update(cx, |store, cx| {
-        store.present(
-            &std::env::temp_dir(),
-            Some(WorktreeSnapshot {
-                current: Some(0),
-                ..snapshot
-            }),
-            cx,
-        );
-    });
-    cx.run_until_parked();
-
-    let removal = |workspace_id: WorkspaceId, cx: &mut VisualTestContext| {
-        manager.read_with(cx, |manager, cx| {
-            manager
-                .worktree_section(workspace_id, cx)
-                .expect("the pinned repository lists its Worktrees")
-                .groups[0]
-                .rows[1]
-                .removal
-        })
-    };
-    let (pinned_removal, other_removal) = (removal(workspace_id, cx), removal(other, cx));
-    let _ = fs::remove_dir_all(&base);
-    assert_eq!(pinned_removal, WorktreeRemoval::HoldsPinnedDirectory);
-    assert_eq!(
-        other_removal,
-        WorktreeRemoval::HoldsPinnedDirectory,
-        "another Workspace's Pinned Directory keeps the Worktree too"
-    );
-}
-
-#[gpui::test]
-fn a_missing_worktree_row_should_offer_its_menu_to_assistive_technology(cx: &mut TestAppContext) {
-    use crate::domain::RepositoryIdentity;
-    use crate::worktrees::WorktreeSnapshot;
-    use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
-    use gpui::accesskit::Action;
-    use spaceterm_ui::a11y_testing::{A11yTree, perform};
-
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (_manager, _records, cx) = workspace_manager(cx);
-    let main = std::env::temp_dir();
-    let record = |root: PathBuf, branch: &str, missing: bool| WorktreeRecord {
-        root,
-        head: WorktreeHead::Branch(branch.into()),
-        locked: false,
-        missing,
-    };
-    let snapshot = WorktreeSnapshot {
-        repository: RepositoryIdentity::new(main.clone()),
-        current: Some(0),
-        common_directory: main.join(".git"),
-        worktrees: vec![
-            record(main.clone(), "main", false),
-            record(
-                temporary_directory("missing-worktree"),
-                "feature/gone",
-                true,
-            ),
-        ],
-    };
-    let store =
-        cx.update(|_, cx| crate::ui::worktree_store::InstalledWorktrees::store(cx).unwrap());
-    store.update(cx, |store, cx| store.present(&main, Some(snapshot), cx));
-    cx.run_until_parked();
-
-    let tree = A11yTree::read(cx);
-    let items = tree.with_role("TreeItem");
-    assert_eq!(
-        items.len(),
-        3,
-        "the Workspace, its Main Worktree, and the Missing one"
-    );
-    perform(cx, items[2], Action::ShowContextMenu);
-    let tree = A11yTree::read(cx);
-    assert_eq!(tree.with_role("Menu").len(), 1);
-    assert!(tree.find("Remove Worktree\u{2026}").is_some());
-}
-
-#[gpui::test]
-fn worktree_rows_should_copy_their_path_and_close_their_tabs(cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    let linked_root = fixture.path().join("shell-integration");
-    // The Root Pane is in the linked Worktree, so it holds the Root Tab and main has none.
-    present_worktrees_containing(cx, &[&linked_root], 1);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    let linked = manager.read_with(cx, |manager, cx| {
-        manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
-    });
-    let row = |cx: &mut VisualTestContext| worktree_row(workspace_id, linked, cx);
-    let tabs = |cx: &mut VisualTestContext| {
-        manager.read_with(cx, |manager, cx| {
-            let tabs = manager.workspaces.active().payload().read(cx);
-            (tabs.worktree_tab_counts(), tabs.tab_ids())
-        })
-    };
-    right_click(row(cx), cx);
-    click("worktree-menu-row-copy-path", cx);
-    let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
-    right_click(row(cx), cx);
-    click("worktree-menu-row-new-tab", cx);
-    let before = tabs(cx);
-    right_click(row(cx), cx);
-    click("worktree-menu-row-close-tabs", cx);
-    let asked = tabs(cx);
-    click("modal-action-close-confirmation-confirm", cx);
-    let after = tabs(cx);
-
-    assert_eq!(copied, Some(linked_root.display().to_string()));
-    assert_eq!(
-        before.0.clone().into_iter().collect::<Vec<_>>(),
-        vec![(linked, 2)],
-        "the linked Worktree holds every Tab"
-    );
-    assert_eq!(asked, before, "running Tabs close only after confirmation");
-    assert_eq!(after.1.len(), 1, "the Workspace keeps one Tab");
-    assert!(
-        !before.1.contains(&after.1[0]),
-        "the kept Tab is a new one, opened before the Worktree's Tabs closed"
-    );
-    assert!(
-        manager.read_with(cx, |manager, cx| {
-            manager
-                .worktree_section(workspace_id, cx)
-                .unwrap()
-                .rows()
-                .any(|row| row.worktree_id == linked)
-        }),
-        "the closed Worktree keeps its row"
-    );
-}
-
-#[gpui::test]
-fn closing_a_worktrees_tabs_should_keep_them_when_no_other_tab_can_open(cx: &mut TestAppContext) {
-    use crate::domain::RepositoryIdentity;
-    use crate::worktrees::WorktreeSnapshot;
-    use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
-
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    // A second Workspace keeps the window open, so closing the first would show in the count.
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| manager.create_local_workspace(window, cx));
-    });
-    cx.run_until_parked();
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    let linked_root = fixture.path().join("shell-integration");
-    // The Main Worktree's directory is gone, so no Tab can open there.
-    let main = temporary_directory("absent-main-worktree");
-    let record = |root: &Path, branch: &str| WorktreeRecord {
-        root: root.to_path_buf(),
-        head: WorktreeHead::Branch(branch.into()),
-        locked: false,
-        missing: false,
-    };
-    let snapshot = WorktreeSnapshot {
-        repository: RepositoryIdentity::new(main.clone()),
-        current: Some(1),
-        common_directory: main.join(".git"),
-        worktrees: vec![record(&main, "main"), record(&linked_root, "feature/login")],
-    };
-    let store =
-        cx.update(|_, cx| crate::ui::worktree_store::InstalledWorktrees::store(cx).unwrap());
-    store.update(cx, |store, cx| {
-        store.present(&std::env::temp_dir(), Some(snapshot), cx)
-    });
-    cx.run_until_parked();
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    let linked = manager.read_with(cx, |manager, cx| {
-        manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
-    });
-    let tab_ids = |cx: &mut VisualTestContext| {
-        manager.read_with(cx, |manager, cx| {
-            manager.workspaces.active().payload().read(cx).tab_ids()
-        })
-    };
-    let before = tab_ids(cx);
-    right_click(worktree_row(workspace_id, linked, cx), cx);
-    click("worktree-menu-row-close-tabs", cx);
-    if cx
-        .debug_bounds("modal-action-close-confirmation-confirm")
-        .is_some()
-    {
-        click("modal-action-close-confirmation-confirm", cx);
-    }
-    cx.run_until_parked();
-
-    assert_eq!(
-        manager.read_with(cx, |manager, _| manager.workspaces.len()),
-        2,
-        "the Workspace stays open"
-    );
-    assert_eq!(tab_ids(cx), before, "the Worktree's Tabs stay open");
-}
-
-#[gpui::test]
-fn removing_a_worktree_should_confirm_then_close_its_tabs_before_git_runs(cx: &mut TestAppContext) {
-    use spaceterm_ui::a11y_testing::A11yTree;
-
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install_with_removal_git(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    let linked = manager.read_with(cx, |manager, cx| {
-        manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
-    });
-    let row = |cx: &mut VisualTestContext| worktree_row(workspace_id, linked, cx);
-    let linked_tabs = |cx: &mut VisualTestContext| {
-        manager.read_with(cx, |manager, cx| {
-            manager
-                .workspaces
-                .active()
-                .payload()
-                .read(cx)
-                .worktree_tab_ids(linked)
-                .len()
-        })
-    };
-    right_click(row(cx), cx);
-    click("worktree-menu-row-new-tab", cx);
-
-    right_click(row(cx), cx);
-    click("worktree-menu-row-remove", cx);
-    let tree = A11yTree::read(cx);
-    let asked = tree.with_role("AlertDialog").len();
-    let message = tree
-        .find_text(
-            "Closes 1 Tab. The command running in it will stop. The branch \u{201c}feature/login\u{201d} \
-             is kept.",
-        )
-        .is_some();
-    let tabs_while_asking = linked_tabs(cx);
-    click("modal-action-worktree-removal-cancel", cx);
-    let tabs_after_cancel = linked_tabs(cx);
-    right_click(row(cx), cx);
-    click("worktree-menu-row-remove", cx);
-    click("modal-action-worktree-removal-confirm", cx);
-    let tabs_after_confirm = linked_tabs(cx);
-    let failure_reported = cx
-        .debug_bounds("modal-action-worktree-removal-failed-ok")
-        .is_some();
-    click("modal-action-worktree-removal-failed-ok", cx);
-
-    assert_eq!(asked, 1, "removal asks first");
-    assert!(
-        message,
-        "the alert names the Tabs it closes and the kept branch"
-    );
-    assert_eq!(
-        (tabs_while_asking, tabs_after_cancel, tabs_after_confirm),
-        (1, 1, 0),
-        "only a confirmed removal closes the Worktree's Tabs"
-    );
-    assert!(failure_reported, "a failed git removal is reported");
-    assert!(
-        !manager.read_with(cx, |manager, _| manager.worktree_removal_pending()),
-        "a finished removal allows another"
-    );
-}
-
-#[gpui::test]
-fn worktree_commands_should_cycle_worktrees_with_tabs_and_the_hidden_sidebar_chrome_names_one(
-    cx: &mut TestAppContext,
-) {
-    use spaceterm_ui::a11y_testing::A11yTree;
-
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    let integration = fixture.path().join("shell-integration");
-    present_worktrees(cx, &[&integration.join("bash"), &integration.join("zsh")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    let (main, unopened, zsh) = manager.read_with(cx, |manager, cx| {
-        let rows = &manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows;
-        (
-            rows[0].worktree_id,
-            rows[1].worktree_id,
-            rows[2].worktree_id,
-        )
-    });
-    let active = |cx: &mut VisualTestContext| {
-        manager.read_with(cx, |manager, cx| {
-            manager
-                .workspaces
-                .active()
-                .payload()
-                .read(cx)
-                .active_worktree()
-        })
-    };
-    let step = |keystroke: &str, cx: &mut VisualTestContext| {
-        cx.simulate_keystrokes(keystroke);
-        cx.run_until_parked();
-        active(cx)
-    };
-
-    let alone = step("alt-cmd-]", cx);
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.open_worktree(workspace_id, zsh, true, window, cx)
-        })
-    });
-    cx.run_until_parked();
-    let forward = [step("alt-cmd-]", cx), step("alt-cmd-]", cx)];
-    let backward = step("alt-cmd-[", cx);
-    let shown_with_sidebar = cx.debug_bounds("workspace-chip-worktree").is_some();
-    cx.simulate_keystrokes("cmd-b");
-    cx.run_until_parked();
-    let hidden_step = step("alt-cmd-[", cx);
-    let workspace_name = manager.read_with(cx, |manager, _| {
-        manager.workspaces.active().name().to_owned()
-    });
-    let chip_names = A11yTree::read(cx)
-        .find(&format!("Switch Workspace, {workspace_name}, Worktree zsh"))
-        .is_some();
-
-    assert_eq!(
-        alone,
-        Some(main),
-        "one Worktree with Tabs has nothing to step to"
-    );
-    assert_eq!(
-        forward,
-        [Some(main), Some(zsh)],
-        "Next Worktree wraps and skips the Worktree without Tabs"
-    );
-    assert_ne!(backward, Some(unopened));
-    assert_eq!(backward, Some(main), "Previous Worktree steps back");
-    assert_eq!(
-        hidden_step,
-        Some(zsh),
-        "the Commands work with the sidebar hidden"
-    );
-    assert!(
-        !shown_with_sidebar,
-        "the sidebar names the Active Worktree while it is shown"
-    );
-    assert!(
-        cx.debug_bounds("workspace-chip-worktree").is_some() && chip_names,
-        "the hidden sidebar's Workspace chip names the Active Worktree"
-    );
-}
-
-#[gpui::test]
-fn the_keyboard_should_reveal_each_worktree_row_of_a_group_taller_than_the_list(
-    cx: &mut TestAppContext,
-) {
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    let roots: Vec<PathBuf> = (0..24)
-        .map(|index| std::env::temp_dir().join(format!("spaceterm-tall-group-{index}")))
-        .collect();
-    let linked: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
-    present_worktrees(cx, &linked);
-    cx.simulate_resize(gpui::size(px(1000.0), px(400.0)));
-    redraw(cx);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    let rows = manager.read_with(cx, |manager, cx| {
-        manager
-            .worktree_section(workspace_id, cx)
-            .unwrap()
-            .rows()
-            .map(|row| row.worktree_id)
-            .collect::<Vec<_>>()
-    });
-    assert_eq!(rows.len(), 25);
-    let sidebar_focus =
-        manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).focus_handle());
-    cx.update(|window, cx| sidebar_focus.focus(window, cx));
-    cx.run_until_parked();
-    let list = cx.debug_bounds("workspace-list").unwrap();
-    let group = cx
-        .debug_bounds(format!("workspace-group-{}", workspace_id.get()).leak())
-        .unwrap();
-    assert!(
-        group.size.height > list.size.height,
-        "the Workspace group is taller than the list"
-    );
-
-    let mut hidden = Vec::new();
-    // The Main Worktree holds the Root Tab, so the walk starts on it.
-    for (index, &worktree_id) in rows.iter().enumerate().skip(1) {
-        cx.simulate_keystrokes("down");
-        redraw(cx);
-        let selector = worktree_row(workspace_id, worktree_id, cx);
-        let row = cx.debug_bounds(selector).unwrap();
-        if row.top() < list.top() || row.bottom() > list.bottom() {
-            hidden.push(index);
-        }
-    }
-    cx.simulate_keystrokes("up");
-    redraw(cx);
-    let selector = worktree_row(workspace_id, rows[rows.len() - 2], cx);
-    let row = cx.debug_bounds(selector).unwrap();
-    assert_eq!(hidden, Vec::<usize>::new(), "every selected row is in view");
-    assert!(row.top() >= list.top() && row.bottom() <= list.bottom());
-}
-
-#[gpui::test]
-fn the_keyboard_should_walk_worktrees_and_open_one_only_on_return(cx: &mut TestAppContext) {
-    use spaceterm_ui::a11y_testing::A11yTree;
-
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let sidebar_focus =
-        manager.read_with(cx, |manager, cx| manager.sidebar.read(cx).focus_handle());
-    cx.update(|window, cx| sidebar_focus.focus(window, cx));
-    cx.run_until_parked();
-    let state = |cx: &mut VisualTestContext| {
-        let tree = A11yTree::read(cx);
-        let items = tree.with_role("TreeItem");
-        let selected = items
-            .iter()
-            .find(|item| item["aria"]["selected"] == true)
-            .and_then(|item| item["aria"]["label"].as_str())
-            .unwrap_or_default()
-            .to_owned();
-        let tab_counts = active_workspace_worktree_tab_counts(&manager, cx);
-        (items.len(), selected, tab_counts)
-    };
-
-    let mut steps = Vec::new();
-    for keys in ["down", "left", "left", "right", "down down", "enter"] {
-        cx.simulate_keystrokes(keys);
-        cx.run_until_parked();
-        steps.push(state(cx));
-    }
-
-    let step =
-        |items: usize, selected: &str, tabs: &[usize]| (items, selected.to_owned(), tabs.to_vec());
-    assert_eq!(
-        steps,
-        [
-            step(3, "shell-integration", &[1]),
-            step(3, "Default", &[1]),
-            step(1, "Default", &[1]),
-            step(3, "Default", &[1]),
-            step(3, "shell-integration", &[1]),
-            step(3, "shell-integration", &[1, 1]),
-        ],
-        "arrows stand on a Worktree with no Tabs without opening it, Left and Right collapse and \
-         expand, and Return opens it"
-    );
-    assert!(
-        cx.update(|window, _| !sidebar_focus.is_focused(window)),
-        "Return moves focus to the new Tab"
-    );
-}
-
-#[gpui::test]
-fn the_root_tab_should_stay_reachable_after_its_workspace_leaves_a_repository(
-    cx: &mut TestAppContext,
-) {
-    use crate::ui::workspace_sidebar::{WorktreeGroup, WorktreeSection};
-
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    let linked_id = manager.read_with(cx, |manager, cx| {
-        manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
-    });
-    let open_linked = |cx: &mut VisualTestContext| {
-        cx.update(|window, cx| {
-            manager.update(cx, |manager, cx| {
-                manager.open_worktree(workspace_id, linked_id, true, window, cx)
-            })
-        });
-        cx.run_until_parked();
-    };
-    let active_worktree = |cx: &mut VisualTestContext| {
-        manager.read_with(cx, |manager, cx| {
-            manager
-                .workspaces
-                .active()
-                .payload()
-                .read(cx)
-                .active_worktree()
-        })
-    };
-    open_linked(cx);
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            let tabs = manager.workspaces.active().payload().clone();
-            let root_tab = tabs.read(cx).tab_ids()[0];
-            tabs.update(cx, |tabs, cx| {
-                tabs.activate_tab_for_test(root_tab, window, cx)
-            });
-        })
-    });
-    let store =
-        cx.update(|_, cx| crate::ui::worktree_store::InstalledWorktrees::store(cx).unwrap());
-    store.update(cx, |store, cx| {
-        store.present(&std::env::temp_dir(), None, cx)
-    });
-    cx.run_until_parked();
-    let section = manager
-        .read_with(cx, |manager, cx| manager.worktree_section(workspace_id, cx))
-        .expect("a Worktree with Tabs keeps the disclosure");
-    let former = std::env::temp_dir()
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
-    assert_eq!(
-        section,
-        WorktreeSection {
-            expanded: true,
-            repository: None,
-            groups: vec![WorktreeGroup {
-                former_repository: Some(former.into()),
-                rows: vec![crate::ui::workspace_sidebar::WorktreeRowViewModel {
-                    active: false,
-                    ..section.groups[0].rows[0].clone()
-                }],
-            }],
-        }
-    );
-    assert_eq!(section.groups[0].rows[0].worktree_id, linked_id);
-    assert_eq!(
-        manager.read_with(cx, |manager, cx| manager
-            .workspaces
-            .active()
-            .payload()
-            .read(cx)
-            .active_worktree()),
-        None,
-        "the Root Tab follows its Root Pane out of the repository"
-    );
-    assert_eq!(active_worktree(cx), None);
-
-    open_linked(cx);
-    assert_eq!(active_worktree(cx), Some(linked_id));
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.handle_sidebar_event(
-                SidebarEvent::Activate {
-                    workspace_id,
-                    focus_pane: false,
-                },
-                window,
-                cx,
-            )
-        })
-    });
-    assert_eq!(
-        active_worktree(cx),
-        None,
-        "the expanded Workspace row shows the Root Tab again"
-    );
-
-    open_linked(cx);
-    assert!(cx.update(|_, cx| manager.read(cx).steps_worktrees(cx)));
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| manager.step_worktree(true, window, cx))
-    });
-    assert_eq!(
-        active_worktree(cx),
-        None,
-        "Next Worktree steps from the last Worktree back to the Root Tab"
-    );
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| manager.step_worktree(true, window, cx))
-    });
-    assert_eq!(active_worktree(cx), Some(linked_id));
-}
-
 #[gpui::test]
 fn workspace_rows_publish_a_tree_that_selects_on_press(cx: &mut TestAppContext) {
     use gpui::accesskit::Action;
@@ -12691,7 +10683,9 @@ fn workspace_rows_publish_a_tree_that_selects_on_press(cx: &mut TestAppContext) 
 
     let (manager, _records, cx) = workspace_manager(cx);
     cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| manager.create_local_workspace(window, cx));
+        manager.update(cx, |manager, cx| {
+            manager.present_desktop_workspace(window, cx);
+        });
     });
     cx.run_until_parked();
 
@@ -13044,7 +11038,7 @@ fn workspace_manager_with_terminal_nodes(
     let session_factory: Rc<dyn TerminalSessionFactory> =
         Rc::new(TestTerminalSessionFactory::new(records.clone()).with_fallback_title("zsh"));
     let (manager, cx) = cx.add_window_view(|window, cx| {
-        WorkspaceManager::new_with_adapters(
+        new_desktop_manager(
             session_factory,
             std::env::temp_dir(),
             WorkspaceManagerAdapters {
@@ -13488,495 +11482,12 @@ fn close_confirmation_restores_accessibility_focus_after_escape_and_cancel(
 }
 
 #[gpui::test]
-fn row_menus_should_place_their_destructive_commands_below_the_divider(cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    let linked_root = fixture.path().join("shell-integration");
-    // The Root Pane is in the linked Worktree, so the collapsed row stands for a removable one.
-    present_worktrees_containing(cx, &[&linked_root], 1);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    let linked = manager.read_with(cx, |manager, cx| {
-        manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
-    });
-    let bounds = |selector: &'static str, cx: &mut VisualTestContext| {
-        cx.debug_bounds(selector)
-            .unwrap_or_else(|| panic!("{selector} was not rendered"))
-    };
-    // Rows of one group touch; a divider leaves a gap between two rows.
-    let gap = |above: &'static str, below: &'static str, cx: &mut VisualTestContext| {
-        f32::from(bounds(below, cx).top() - bounds(above, cx).bottom())
-    };
-
-    let row = worktree_row(workspace_id, linked, cx);
-    right_click(row, cx);
-    let worktree_menu = (
-        gap(
-            "worktree-menu-row-copy-path",
-            "worktree-menu-row-close-tabs",
-            cx,
-        ),
-        gap(
-            "worktree-menu-row-close-tabs",
-            "worktree-menu-row-remove",
-            cx,
-        ) > 0.0,
-    );
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    click(
-        format!("workspace-disclosure-{}-expanded", workspace_id.get()).leak(),
-        cx,
-    );
-    right_click(
-        format!("workspace-row-{}-active", workspace_id.get()).leak(),
-        cx,
-    );
-    let workspace_menu = (
-        gap(
-            "workspace-menu-row-pin-directory",
-            "workspace-menu-row-remove-worktree",
-            cx,
-        ) > 0.0,
-        gap(
-            "workspace-menu-row-remove-worktree",
-            "workspace-menu-row-close",
-            cx,
-        ),
-    );
-
-    assert_eq!(
-        (worktree_menu, workspace_menu),
-        ((0.0, true), (true, 0.0)),
-        "Close Tabs stays in the first group; Remove Worktree and Kill Workspace sit together \
-         below the divider"
-    );
-}
-
-#[gpui::test]
-fn removing_a_worktree_that_cannot_be_checked_should_report_it_and_keep_its_tabs(
-    cx: &mut TestAppContext,
-) {
-    use spaceterm_ui::a11y_testing::A11yTree;
-
-    cx.update(|cx| {
-        // This store has no git, so the check before confirmation fails.
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    let linked = manager.read_with(cx, |manager, cx| {
-        manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
-    });
-    right_click(worktree_row(workspace_id, linked, cx), cx);
-    click("worktree-menu-row-new-tab", cx);
-    right_click(worktree_row(workspace_id, linked, cx), cx);
-    click("worktree-menu-row-remove", cx);
-
-    let tree = A11yTree::read(cx);
-    let reported = tree
-        .find_text("SpaceTerm couldn\u{2019}t check it for changes, so nothing was removed.")
-        .is_some();
-    let asked = cx
-        .debug_bounds("modal-action-worktree-removal-confirm")
-        .is_some();
-    click("modal-action-worktree-removal-failed-ok", cx);
-
-    assert_eq!((reported, asked), (true, false));
-    assert_eq!(
-        manager.read_with(cx, |manager, cx| {
-            manager
-                .workspaces
-                .active()
-                .payload()
-                .read(cx)
-                .worktree_tab_ids(linked)
-                .len()
-        }),
-        1,
-        "the Worktree keeps its Tab"
-    );
-    assert!(!manager.read_with(cx, |manager, _| manager.worktree_removal_pending()));
-}
-
-#[gpui::test]
-fn closing_the_tabs_of_a_main_worktree_holding_every_tab_should_leave_one_new_tab(
-    cx: &mut TestAppContext,
-) {
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    // The Root Pane is in the Main Worktree, so it holds every Tab.
-    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    let main = manager.read_with(cx, |manager, cx| {
-        manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[0].worktree_id
-    });
-    let tabs = |cx: &mut VisualTestContext| {
-        manager.read_with(cx, |manager, cx| {
-            let tabs = manager.workspaces.active().payload().read(cx);
-            (tabs.worktree_tab_counts(), tabs.worktree_tab_ids(main))
-        })
-    };
-    let (_, before) = tabs(cx);
-    right_click(worktree_row(workspace_id, main, cx), cx);
-    click("worktree-menu-row-close-tabs", cx);
-    if cx
-        .debug_bounds("modal-action-close-confirmation-confirm")
-        .is_some()
-    {
-        click("modal-action-close-confirmation-confirm", cx);
-    }
-    let (counts, after) = tabs(cx);
-
-    assert_eq!(
-        counts.into_iter().collect::<Vec<_>>(),
-        vec![(main, 1)],
-        "one Tab remains, in the Main Worktree"
-    );
-    assert!(
-        after.iter().all(|tab| !before.contains(tab)),
-        "every Tab the Main Worktree held closes: {before:?} {after:?}"
-    );
-}
-
-#[gpui::test]
-fn closing_every_tab_in_a_bare_repository_layout_should_open_the_next_tab_in_another_worktree(
-    cx: &mut TestAppContext,
-) {
-    use crate::domain::RepositoryIdentity;
-    use crate::worktrees::WorktreeSnapshot;
-    use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
-
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    let first = fixture.path().join("one");
-    let second = fixture.path().join("two");
-    std::fs::create_dir(&first).unwrap();
-    std::fs::create_dir(&second).unwrap();
-    // git lists the bare repository first; the test home is in the first linked Worktree.
-    let bare = std::env::temp_dir();
-    let record = |root: &std::path::Path, head: WorktreeHead| WorktreeRecord {
-        root: root.to_path_buf(),
-        head,
-        locked: false,
-        missing: false,
-    };
-    let snapshot = WorktreeSnapshot {
-        repository: RepositoryIdentity::new(bare.clone()),
-        current: Some(1),
-        common_directory: bare.clone(),
-        worktrees: vec![
-            record(&bare, WorktreeHead::Bare),
-            record(&first, WorktreeHead::Branch("one".into())),
-            record(&second, WorktreeHead::Branch("two".into())),
-        ],
-    };
-    let store =
-        cx.update(|_, cx| crate::ui::worktree_store::InstalledWorktrees::store(cx).unwrap());
-    store.update(cx, |store, cx| {
-        store.present(&bare, Some(snapshot.clone()), cx)
-    });
-    cx.run_until_parked();
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    let rows = manager.read_with(cx, |manager, cx| {
-        manager.worktree_section(workspace_id, cx).unwrap().groups[0]
-            .rows
-            .iter()
-            .map(|row| (row.worktree_id, row.label.to_string()))
-            .collect::<Vec<_>>()
-    });
-    let (one, two) = (rows[0].0, rows[1].0);
-    let tabs = |cx: &mut VisualTestContext| {
-        manager.read_with(cx, |manager, cx| {
-            let tabs = manager.workspaces.active().payload().read(cx);
-            (
-                tabs.worktree_tab_counts().into_iter().collect::<Vec<_>>(),
-                tabs.tab_ids(),
-            )
-        })
-    };
-    let before = tabs(cx);
-
-    right_click(worktree_row(workspace_id, one, cx), cx);
-    click("worktree-menu-row-close-tabs", cx);
-    if cx
-        .debug_bounds("modal-action-close-confirmation-confirm")
-        .is_some()
-    {
-        click("modal-action-close-confirmation-confirm", cx);
-    }
-    let closed = tabs(cx);
-    // The new Root Pane is in the second Worktree, so git lists that one as current next.
-    store.update(cx, |store, cx| {
-        store.present(
-            &bare,
-            Some(WorktreeSnapshot {
-                current: Some(2),
-                ..snapshot
-            }),
-            cx,
-        );
-    });
-    cx.run_until_parked();
-    let after = tabs(cx);
-    let rows_after = manager.read_with(cx, |manager, cx| {
-        manager.worktree_section(workspace_id, cx).unwrap().groups[0]
-            .rows
-            .len()
-    });
-
-    assert_eq!(
-        rows.iter()
-            .map(|(_, label)| label.as_str())
-            .collect::<Vec<_>>(),
-        ["one", "two"],
-        "the bare repository has no row"
-    );
-    assert_eq!(before.0, vec![(one, 1)]);
-    assert_eq!(closed.1.len(), 1, "the Workspace keeps one Tab");
-    assert!(
-        !before.1.contains(&closed.1[0]),
-        "the first Worktree's Tab closes around a new one"
-    );
-    assert_eq!(
-        after.0,
-        vec![(two, 1)],
-        "the new Tab is in another Worktree"
-    );
-    assert_eq!(rows_after, 2, "no Tab opens in the bare repository");
-}
-
-#[gpui::test]
-fn removing_a_worktree_should_close_its_tabs_in_every_workspace(cx: &mut TestAppContext) {
-    use spaceterm_ui::a11y_testing::A11yTree;
-
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install_with_removal_git(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    let first = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| manager.create_local_workspace(window, cx));
-    });
-    cx.run_until_parked();
-    let second = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    // Both Workspaces start in the same repository, so each lists the linked Worktree.
-    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let linked = |workspace_id: WorkspaceId, cx: &mut VisualTestContext| {
-        manager.read_with(cx, |manager, cx| {
-            manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[1].worktree_id
-        })
-    };
-    let (first_linked, second_linked) = (linked(first, cx), linked(second, cx));
-    let linked_tabs = |cx: &mut VisualTestContext| {
-        manager.read_with(cx, |manager, cx| {
-            [(first, first_linked), (second, second_linked)].map(|(workspace_id, worktree_id)| {
-                manager
-                    .workspaces
-                    .workspace(workspace_id)
-                    .unwrap()
-                    .payload()
-                    .read(cx)
-                    .worktree_tab_ids(worktree_id)
-                    .len()
-            })
-        })
-    };
-    cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| {
-            manager.open_worktree(second, second_linked, true, window, cx);
-            manager.activate_workspace(first, window, cx);
-            manager.open_worktree(first, first_linked, true, window, cx);
-        });
-    });
-    cx.run_until_parked();
-    let before = linked_tabs(cx);
-
-    right_click(worktree_row(first, first_linked, cx), cx);
-    click("worktree-menu-row-remove", cx);
-    let message = A11yTree::read(cx)
-        .find_text(
-            "Closes 2 Tabs, including 1 in another Workspace. Commands running in them will \
-             stop. The branch \u{201c}feature/login\u{201d} is kept.",
-        )
-        .is_some();
-    click("modal-action-worktree-removal-confirm", cx);
-    let after = linked_tabs(cx);
-
-    assert_eq!(before, [1, 1]);
-    assert!(
-        message,
-        "the alert counts the Tabs other Workspaces hold in the Worktree"
-    );
-    assert_eq!(after, [0, 0], "every Workspace's Tabs in it close");
-}
-
-#[gpui::test]
-fn removing_a_worktree_with_no_other_to_keep_a_tab_in_should_report_it_and_keep_its_tabs(
-    cx: &mut TestAppContext,
-) {
-    use crate::domain::RepositoryIdentity;
-    use crate::worktrees::WorktreeSnapshot;
-    use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
-    use spaceterm_ui::a11y_testing::A11yTree;
-
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install_with_removal_git(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    let only = fixture.path().join("one");
-    std::fs::create_dir(&only).unwrap();
-    // A bare repository has no Main Worktree, and the other Worktree is missing.
-    let bare = std::env::temp_dir();
-    let record = |root: &std::path::Path, head: WorktreeHead| WorktreeRecord {
-        root: root.to_path_buf(),
-        head,
-        locked: false,
-        missing: false,
-    };
-    let snapshot = WorktreeSnapshot {
-        repository: RepositoryIdentity::new(bare.clone()),
-        current: Some(1),
-        common_directory: bare.clone(),
-        worktrees: vec![
-            record(&bare, WorktreeHead::Bare),
-            record(&only, WorktreeHead::Branch("one".into())),
-            WorktreeRecord {
-                missing: true,
-                ..record(
-                    &fixture.path().join("two"),
-                    WorktreeHead::Branch("two".into()),
-                )
-            },
-        ],
-    };
-    let store =
-        cx.update(|_, cx| crate::ui::worktree_store::InstalledWorktrees::store(cx).unwrap());
-    store.update(cx, |store, cx| store.present(&bare, Some(snapshot), cx));
-    cx.run_until_parked();
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    let one = manager.read_with(cx, |manager, cx| {
-        manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows[0].worktree_id
-    });
-    let tab_ids = |cx: &mut VisualTestContext| {
-        manager.read_with(cx, |manager, cx| {
-            manager.workspaces.active().payload().read(cx).tab_ids()
-        })
-    };
-    let before = tab_ids(cx);
-
-    right_click(worktree_row(workspace_id, one, cx), cx);
-    click("worktree-menu-row-remove", cx);
-    click("modal-action-worktree-removal-confirm", cx);
-    let reported = A11yTree::read(cx)
-        .find_text("Closing its Tabs would leave a Workspace with no Tab, so nothing was removed.")
-        .is_some();
-
-    assert!(reported, "the refusal is reported");
-    assert_eq!(tab_ids(cx), before, "the Worktree's Tabs stay open");
-}
-
-#[gpui::test]
-fn a_worktree_menu_should_keep_the_selection_and_return_typing_to_the_pane(
-    cx: &mut TestAppContext,
-) {
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install_with_removal_git(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    // Activation lists the Worktrees again, so it comes before the presented listing.
-    cx.update(|window, _| window.activate_window());
-    cx.run_until_parked();
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    present_worktrees(cx, &[&fixture.path().join("shell-integration")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    let (main, linked) = manager.read_with(cx, |manager, cx| {
-        let rows = &manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows;
-        (rows[0].worktree_id, rows[1].worktree_id)
-    });
-    let label = |worktree_id: crate::domain::WorktreeId, cx: &mut VisualTestContext| {
-        manager.read_with(cx, |manager, cx| {
-            manager
-                .worktree_section(workspace_id, cx)
-                .unwrap()
-                .rows()
-                .find(|row| row.worktree_id == worktree_id)
-                .unwrap()
-                .name
-                .to_string()
-        })
-    };
-    let (main_label, linked_label) = (label(main, cx), label(linked, cx));
-
-    right_click(worktree_row(workspace_id, linked, cx), cx);
-    click("worktree-menu-row-new-tab", cx);
-    // The linked Worktree's new Tab is active. A secondary click on the Main Worktree's row
-    // opens its menu and keeps the selection.
-    right_click(worktree_row(workspace_id, main, cx), cx);
-    let selected_with_menu = selected_tree_item_labels(cx);
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    let typing_after_escape = active_terminal_has_input_focus(&manager, cx);
-
-    // Cancelling a removal returns typing to the Pane.
-    right_click(worktree_row(workspace_id, linked, cx), cx);
-    click("worktree-menu-row-remove", cx);
-    click("modal-action-worktree-removal-cancel", cx);
-    let typing_after_cancel = active_terminal_has_input_focus(&manager, cx);
-
-    // Closing the linked Worktree's Tabs selects the Main Worktree, which holds the next Tab.
-    right_click(worktree_row(workspace_id, linked, cx), cx);
-    click("worktree-menu-row-close-tabs", cx);
-    click("modal-action-close-confirmation-confirm", cx);
-    let selected_after_close = selected_tree_item_labels(cx);
-    let typing_after_close = active_terminal_has_input_focus(&manager, cx);
-
-    assert!(
-        selected_with_menu
-            .iter()
-            .any(|label| label.starts_with(&linked_label))
-    );
-    assert!(
-        !selected_with_menu
-            .iter()
-            .any(|label| label.starts_with(&main_label))
-    );
-    assert!(typing_after_escape, "Escape returns typing to the Pane");
-    assert!(typing_after_cancel, "Cancel returns typing to the Pane");
-    assert!(
-        selected_after_close
-            .iter()
-            .any(|label| label.starts_with(&main_label))
-            && !selected_after_close
-                .iter()
-                .any(|label| label.starts_with(&linked_label)),
-        "the selection follows the Active Tab: {selected_after_close:?}"
-    );
-    assert!(
-        typing_after_close,
-        "closing the Tabs returns typing to the Pane"
-    );
-}
-
-#[gpui::test]
 fn an_inactive_workspace_menu_should_open_its_tab_there_and_rename_it_in_place(
     cx: &mut TestAppContext,
 ) {
     let (manager, _records, cx) = workspace_manager(cx);
     cx.update(|window, _| window.activate_window());
-    cx.simulate_keystrokes("cmd-n");
+    new_desktop_workspace(cx);
     cx.run_until_parked();
 
     right_click("workspace-row-1-inactive", cx);
@@ -14026,116 +11537,6 @@ fn an_inactive_workspace_menu_should_open_its_tab_there_and_rename_it_in_place(
         "New Tab opens in its row's Workspace and shows it"
     );
     assert!(active_terminal_has_input_focus(&manager, cx));
-}
-
-#[gpui::test]
-fn a_menu_should_keep_the_keyboards_row_in_a_focused_sidebar(cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    // Focus moves only in an active window.
-    cx.update(|window, _| window.activate_window());
-    cx.run_until_parked();
-    let fixture = crate::terminal::testing::ShellResourcesFixture::new();
-    let integration = fixture.path().join("shell-integration");
-    present_worktrees(cx, &[&integration.join("bash"), &integration.join("zsh")]);
-    let workspace_id = manager.read_with(cx, |manager, _| manager.workspaces.active_id());
-    let (bash, zsh) = manager.read_with(cx, |manager, cx| {
-        let rows = &manager.worktree_section(workspace_id, cx).unwrap().groups[0].rows;
-        (rows[1].worktree_id, rows[2].worktree_id)
-    });
-    // The keyboard lands on a Worktree with no Tabs, which only moves its row.
-    cx.simulate_keystrokes("cmd-shift-e down");
-    cx.run_until_parked();
-    let landed = selected_tree_item_labels(cx);
-
-    right_click(worktree_row(workspace_id, zsh, cx), cx);
-    redraw(cx);
-    let with_pointer_menu = selected_tree_item_labels(cx);
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    let after_pointer_menu = selected_tree_item_labels(cx);
-    let sidebar_focused =
-        cx.update(|window, cx| manager.read(cx).sidebar.read(cx).is_focused(window));
-    cx.simulate_keystrokes("shift-f10");
-    cx.run_until_parked();
-    let with_keyboard_menu = selected_tree_item_labels(cx);
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    let after_keyboard_menu = selected_tree_item_labels(cx);
-
-    assert_eq!(landed.len(), 1);
-    assert!(
-        landed[0].starts_with("bash"),
-        "the keyboard's row is the first linked Worktree: {landed:?} {bash:?}"
-    );
-    assert_eq!(
-        with_pointer_menu, landed,
-        "a secondary click keeps the keyboard's row"
-    );
-    assert_eq!(after_pointer_menu, landed);
-    assert!(
-        sidebar_focused,
-        "the menu returns focus to the sidebar it borrowed it from"
-    );
-    assert_eq!(
-        with_keyboard_menu, landed,
-        "Shift-F10 opens the selected row's menu"
-    );
-    assert_eq!(after_keyboard_menu, landed);
-}
-
-#[gpui::test]
-fn an_expanded_workspace_group_released_below_the_list_should_land_at_its_end(
-    cx: &mut TestAppContext,
-) {
-    cx.update(|cx| {
-        crate::ui::worktree_store::testing::install(cx);
-    });
-    let (manager, _records, cx) = workspace_manager(cx);
-    let roots: Vec<PathBuf> = (0..5)
-        .map(|index| std::env::temp_dir().join(format!("spaceterm-dragged-group-{index}")))
-        .collect();
-    let linked: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
-    present_worktrees(cx, &linked);
-    cx.simulate_keystrokes("cmd-n");
-    cx.simulate_keystrokes("cmd-n");
-    redraw(cx);
-    click("workspace-disclosure-2-expanded", cx);
-    click("workspace-disclosure-3-expanded", cx);
-    cx.simulate_resize(gpui::size(px(1000.0), px(600.0)));
-    redraw(cx);
-    let first = cx.debug_bounds("workspace-row-1-inactive").unwrap();
-    let group = cx.debug_bounds("workspace-group-1").unwrap();
-    let last = cx.debug_bounds("workspace-row-3-active").unwrap();
-    let list = cx.debug_bounds("workspace-list").unwrap();
-    let footer = cx.debug_bounds("workspace-sidebar-footer").unwrap();
-    assert!(
-        group.size.height > list.size.height / 2.0 && last.bottom() <= list.bottom(),
-        "the expanded group fills more than half of the list {list:?}, which shows every row"
-    );
-    let below = point(first.center().x, footer.center().y);
-
-    cx.simulate_mouse_move(first.center(), None, Modifiers::none());
-    cx.simulate_mouse_down(first.center(), MouseButton::Left, Modifiers::none());
-    cx.simulate_mouse_move(
-        first.center() + point(px(0.0), px(8.0)),
-        MouseButton::Left,
-        Modifiers::none(),
-    );
-    cx.run_until_parked();
-    cx.simulate_mouse_move(below, MouseButton::Left, Modifiers::none());
-    cx.run_until_parked();
-    let copy = cx.debug_bounds("drag-preview");
-    cx.simulate_mouse_up(below, MouseButton::Left, Modifiers::none());
-    cx.run_until_parked();
-
-    assert_eq!(
-        workspace_order(&manager, cx),
-        vec![2, 3, 1],
-        "the lifted Workspace row, held at the list's end at {copy:?}, must land there"
-    );
 }
 
 /// The pin version a shared Workspace's chooser opened at, carried through the completion route
@@ -14340,13 +11741,19 @@ fn shared_pane_harness(cx: &mut TestAppContext) -> (SharedPaneHarness, &mut Visu
     // The server reaches the Pane and publishes this client's screen, as a fresh connection does.
     harness.panes.pane(SHARED_FOCUS_PANE).reconnect();
     settle_shared_panes(cx);
-    // Opening the Workspace from the sidebar focuses its Focused Pane, as it does for any other.
-    click("workspace-row-2-inactive", cx);
+    // A new client's first view opens the server's Workspace and focuses its Focused Pane.
+    focus_active_workspace(&harness.manager, cx);
     assert!(
         shared_terminal_is_focused(&harness, cx),
         "opening the shared Workspace should leave the keyboard in its Pane"
     );
     (harness, cx)
+}
+
+/// Returns the keyboard to the Active Workspace once its Pane's screen is connected.
+fn focus_active_workspace(manager: &Entity<WorkspaceManager>, cx: &mut VisualTestContext) {
+    cx.update(|window, cx| manager.update(cx, |manager, cx| manager.focus(window, cx)));
+    cx.run_until_parked();
 }
 
 /// Lets every shared Pane read its connection and paints the frame that follows.
@@ -14612,7 +12019,7 @@ fn shared_close_harness(cx: &mut TestAppContext) -> (SharedCloseHarness, &mut Vi
     };
     harness.panes.pane(SHARED_CLOSE_ROOT_PANE).reconnect();
     settle_shared_panes(cx);
-    click("workspace-row-2-inactive", cx);
+    focus_active_workspace(&harness.manager, cx);
     (harness, cx)
 }
 
@@ -15409,169 +12816,6 @@ fn another_clients_removal_of_where_the_keyboard_rests_should_hand_it_to_what_re
     );
 }
 
-/// Use Shared Workspaces is chosen in the Settings Window. The Workspace Window it presents into
-/// comes forward, so the result, or an alert explaining why it could not be shown, is not left
-/// behind Settings.
-#[gpui::test]
-fn first_adoption_brings_the_workspace_window_in_front_of_settings(cx: &mut TestAppContext) {
-    let (_manager, _records, cx) = workspace_manager(cx);
-    let settings = cx.add_empty_window().window_handle();
-    cx.update(|_, cx| {
-        settings
-            .update(cx, |_, window, _| window.activate_window())
-            .expect("the Settings stand-in is open");
-    });
-    cx.run_until_parked();
-    assert_ne!(
-        cx.update(|_, cx| cx.active_window().map(|active| active.window_id())),
-        Some(cx.update(|window, _| window.window_handle().window_id())),
-    );
-
-    cx.update(|_, cx| crate::ui::shared_workspaces::adopt(cx));
-    cx.run_until_parked();
-
-    assert!(
-        cx.update(|window, cx| {
-            cx.active_window().map(|active| active.window_id())
-                == Some(window.window_handle().window_id())
-        }),
-        "the Workspace Window presenting shared Workspaces comes forward"
-    );
-}
-
-/// Use Shared Workspaces answers over Settings when it cannot present the Workspaces, so the
-/// person sees why without relying on a desktop that may refuse to raise the Workspace Window.
-#[gpui::test]
-fn refused_adoption_from_settings_alerts_over_settings(cx: &mut TestAppContext) {
-    let (manager, _records, cx) = workspace_manager(cx);
-    manager.update(cx, |manager, _| {
-        manager.local_home_directory_path = temporary_directory("shared-adoption-missing-home");
-    });
-    struct StillMovement;
-    impl crate::platform::window_movement::WindowMovementFactory for StillMovement {
-        fn create(
-            &self,
-        ) -> Rc<dyn crate::platform::window_movement::OperatingSystemWindowDragPlatform> {
-            Rc::new(crate::platform::window_movement::RecordingOperatingSystemWindowDragPlatform::default())
-        }
-    }
-    let workspace_window = cx.update(|window, _| window.window_handle());
-    cx.update(|_, cx| {
-        if !cx.has_global::<crate::ui::appearance_runtime::AppearanceRuntime>() {
-            crate::ui::appearance_runtime::install(
-                crate::settings::Settings::load(
-                    crate::settings::storage::testing::MemoryStorage::with_document(
-                        &crate::settings::SettingsDocument::default(),
-                    ),
-                ),
-                Rc::new(
-                    crate::platform::appearance::testing::RecordingAppearancePlatform::default(),
-                ),
-                cx,
-            )
-            .expect("appearance runtime should install");
-        }
-        crate::ui::settings_window::configure_window_chrome(
-            Rc::new(StillMovement),
-            Default::default(),
-            None,
-            cx,
-        );
-        crate::ui::settings_window::open_or_activate(None, cx);
-    });
-    cx.run_until_parked();
-    let settings = cx
-        .update(|_, cx| cx.windows())
-        .into_iter()
-        .find_map(|window| window.downcast::<crate::ui::settings_window::SettingsWindow>())
-        .expect("Settings opens");
-    cx.update(|_, cx| {
-        settings
-            .update(cx, |_, window, _| window.activate_window())
-            .expect("Settings is open");
-    });
-    cx.run_until_parked();
-
-    // Use Shared Workspaces runs inside Settings.
-    cx.cx.update(|cx| {
-        settings
-            .update(cx, |_, _, cx| crate::ui::shared_workspaces::adopt(cx))
-            .expect("Settings is open");
-    });
-    cx.run_until_parked();
-
-    assert!(
-        cx.cx.update(|cx| settings
-            .update(cx, |_, window, cx| spaceterm_ui::window_modal_is_open(
-                window, cx
-            ))
-            .expect("Settings is open")),
-        "the refusal is presented over Settings, where the person asked"
-    );
-    assert!(!cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
-    assert_ne!(
-        cx.cx
-            .update(|cx| cx.active_window().map(|active| active.window_id())),
-        Some(workspace_window.window_id()),
-        "a refusal does not raise the Workspace Window over its own alert"
-    );
-    assert!(!cx.update(|_, cx| crate::ui::shared_workspaces::adopted(cx)));
-}
-
-/// One device presents its shared Workspaces in one Workspace Window. Asking a second window to
-/// present them brings the first one forward instead.
-#[gpui::test]
-fn a_second_workspace_window_should_bring_the_shared_one_forward_instead(cx: &mut TestAppContext) {
-    let (harness, cx) = shared_close_harness(cx);
-    let records = TestTerminalSessionRecords::default();
-    let session_factory: Rc<dyn TerminalSessionFactory> =
-        Rc::new(TestTerminalSessionFactory::new(records).with_fallback_title("zsh"));
-    let other = cx.add_window(|window, cx| {
-        WorkspaceManager::new_with_adapters(
-            session_factory,
-            std::env::temp_dir(),
-            workspace_adapters(test_remote_backend_factory()),
-            SidebarState::Expanded,
-            window,
-            cx,
-        )
-    });
-    other
-        .update(cx, |_, window, _| window.activate_window())
-        .expect("the second window is open");
-    cx.run_until_parked();
-
-    cx.update(|_, cx| crate::ui::shared_workspaces::adopt(cx));
-    cx.run_until_parked();
-
-    let presented = other
-        .read_with(cx, |manager, _| {
-            manager
-                .workspaces
-                .iter()
-                .filter(|workspace| manager.is_shared_workspace(workspace.id()))
-                .count()
-        })
-        .expect("the second window is open");
-    assert_eq!(
-        presented, 0,
-        "a second window must not present the same server's Workspaces"
-    );
-    assert_eq!(
-        harness.shared_rows(cx),
-        1,
-        "the first window keeps presenting them"
-    );
-    assert!(cx.update(|_, cx| crate::ui::shared_workspaces::adopted(cx)));
-    assert!(
-        cx.update(|window, cx| {
-            cx.active_window().map(|active| active.window_id())
-                == Some(window.window_handle().window_id())
-        }),
-        "the Workspace Window presenting them comes forward"
-    );
-}
-
 const ATTACHED_BUILD: [u8; 32] = [21; 32];
 const ATTACHED_BUILD_TAB: [u8; 32] = [22; 32];
 const ATTACHED_BUILD_PANE: [u8; 32] = [23; 32];
@@ -15581,9 +12825,9 @@ const ATTACHED_DOCS_PANE: [u8; 32] = [26; 32];
 /// The Workspace Switcher result of the detached Build Workspace, named by its leading bytes.
 const DETACHED_BUILD_RESULT: &str = "workspace-switcher-detached-15151515";
 
-/// Two shared Workspaces, Build and Docs, beside this window's own Workspace. Adoption attaches
-/// the Workspaces the server already holds, so the sidebar lists the desktop Workspace first,
-/// then Build as Workspace 2 and Docs as Workspace 3.
+/// Two shared Workspaces, Build and Docs, beside this window's own Workspace. A new client
+/// attaches Build, and the person attaches Docs, so the sidebar lists the desktop Workspace
+/// first, then Build as Workspace 2 and Docs as Workspace 3.
 struct AttachmentHarness {
     manager: Entity<WorkspaceManager>,
     edits: Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
@@ -15667,9 +12911,18 @@ fn attachment_harness(cx: &mut TestAppContext) -> (AttachmentHarness, &mut Visua
     harness.sync(cx);
     assert_eq!(
         harness.presented(cx),
-        vec![1, 2, 3],
-        "a first adoption attaches the Workspaces the server already holds"
+        vec![1, 2],
+        "a new client attaches only the server's first Workspace"
     );
+    // The person attaches the other Workspace, then returns to the one they started in.
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.attach_detached_workspace(ATTACHED_DOCS, window, cx);
+            manager.activate_workspace(WorkspaceId::new(1), window, cx);
+        });
+    });
+    settle_shared_panes(cx);
+    assert_eq!(harness.presented(cx), vec![1, 2, 3]);
     (harness, cx)
 }
 
@@ -15822,6 +13075,88 @@ fn choosing_a_detached_workspace_should_attach_and_activate_it_without_taking_ov
     assert_eq!(harness.edits.submitted(), Vec::new());
 }
 
+/// The Workspace that takes the place of one the person closed gets the keyboard, but nobody chose
+/// it, so its Focused Pane is not selected and a restored Pane starts no shell.
+#[gpui::test]
+fn killing_the_active_workspace_should_open_its_neighbor_without_selecting_its_pane(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = attachment_harness(cx);
+    let selections = || {
+        [ATTACHED_BUILD_PANE, ATTACHED_DOCS_PANE].map(|pane| harness.panes.pane(pane).selections())
+    };
+    let before = selections();
+
+    harness.close_desktop_workspace(cx);
+
+    assert_eq!(harness.presented(cx), vec![2, 3]);
+    assert_eq!(harness.active(cx), Some(WorkspaceId::new(2)));
+    assert_eq!(selections(), before);
+    assert!(
+        active_terminal_has_input_focus(&harness.manager, cx),
+        "the keyboard moves into the Workspace that took the closed one's place"
+    );
+}
+
+/// A neighbor whose Pane waits for first use takes the keyboard on the screen in the Pane's
+/// place, so Tab reaches Start New Shell and nothing starts until the person presses it.
+#[gpui::test]
+fn a_dormant_neighbor_should_take_the_keyboard_on_its_screen(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (harness, cx) = attachment_harness(cx);
+    for pane in [ATTACHED_BUILD_PANE, ATTACHED_DOCS_PANE] {
+        harness
+            .panes
+            .pane(pane)
+            .set(crate::terminal::server_session::DevelopmentPaneStatus::Restored);
+    }
+    settle_shared_panes(cx);
+    let selections = harness.panes.pane(ATTACHED_BUILD_PANE).selections();
+
+    harness.close_desktop_workspace(cx);
+    let landing = A11yTree::read(cx)
+        .focused()
+        .map(|node| node["aria"]["label"].clone());
+    assert_eq!(landing, Some(serde_json::json!("Server Restarted")));
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    let focused = A11yTree::read(cx)
+        .focused()
+        .map(|node| node["aria"]["label"].clone());
+
+    assert_eq!(harness.active(cx), Some(WorkspaceId::new(2)));
+    assert_eq!(focused, Some(serde_json::json!("Start New Shell")));
+    assert_eq!(
+        harness.panes.pane(ATTACHED_BUILD_PANE).selections(),
+        selections
+    );
+    assert_eq!(harness.panes.pane(ATTACHED_BUILD_PANE).restored_starts(), 0);
+}
+
+/// Detaching the Active Workspace opens its neighbor the same way: with the keyboard, without
+/// selecting the neighbor's Focused Pane.
+#[gpui::test]
+fn detaching_the_active_workspace_should_open_its_neighbor_without_selecting_its_pane(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = attachment_harness(cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.activate_workspace(WorkspaceId::new(3), window, cx);
+        });
+    });
+    settle_shared_panes(cx);
+    let before = harness.panes.pane(ATTACHED_BUILD_PANE).selections();
+
+    harness.detach(3, cx);
+
+    assert_eq!(harness.presented(cx), vec![1, 2]);
+    assert_eq!(harness.active(cx), Some(WorkspaceId::new(2)));
+    assert_eq!(harness.panes.pane(ATTACHED_BUILD_PANE).selections(), before);
+    assert!(active_terminal_has_input_focus(&harness.manager, cx));
+}
+
 #[gpui::test]
 fn detaching_the_final_workspace_should_leave_an_empty_view_without_a_replacement(
     cx: &mut TestAppContext,
@@ -15880,7 +13215,7 @@ fn the_empty_view_action_should_open_the_switcher_with_the_detached_workspaces(
     let switcher_open = cx.update(|window, cx| window_combo_box_is_open(window, cx));
     // The switcher's creation commands share its option role, and how many of them render
     // depends on the platform's viewport, so only the remaining options are Workspaces.
-    let creations = WorkspaceCreation::rows(true)
+    let creations = WorkspaceCreation::ALL
         .into_iter()
         .map(WorkspaceCreation::label)
         .collect::<Vec<_>>();
@@ -16241,6 +13576,8 @@ mod shared_repositories {
                     cx,
                 );
                 manager.sync_shared_workspaces(window, cx);
+                // The person returns to the desktop's own Workspace, so this one is inactive.
+                manager.activate_workspace(WorkspaceId::new(1), window, cx);
             });
         });
         cx.run_until_parked();
@@ -16304,10 +13641,9 @@ mod shared_repositories {
         assert_eq!(harness.edits.submitted(), Vec::new());
     }
 
-    /// Server Worktree rows show the server's inventory and membership, and offer no write: no
-    /// removal, no Tab in a chosen Worktree, and no Worktree-wide close.
+    /// Worktree actions follow the owning server's availability and existing Tab membership.
     #[gpui::test]
-    fn shared_worktree_rows_should_follow_server_membership_and_offer_no_writes(
+    fn shared_worktree_rows_should_follow_server_membership_and_available_actions(
         cx: &mut TestAppContext,
     ) {
         let (harness, cx) = harness(cx, published(1, "main", true));
@@ -16330,7 +13666,7 @@ mod shared_repositories {
         );
         assert_eq!(rows[0].removal, WorktreeRemoval::Main);
         assert_eq!(rows[1].removal, WorktreeRemoval::Server);
-        assert!(rows.iter().all(|row| row.shared && !row.opens_tabs()));
+        assert!(rows.iter().all(|row| !row.opens_tabs() && row.closes_tabs));
         assert!(!creates_worktrees, "New Worktree stays unavailable");
     }
 
@@ -16629,4 +13965,413 @@ mod shared_repositories {
         assert_eq!(copied_root, Some(PathBuf::from(FEATURE_ROOT)));
         assert_eq!(harness.edits.submitted(), Vec::new());
     }
+
+    /// The shared Workspace, active, with its two Worktree rows disclosed.
+    fn active_harness(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+        let (harness, cx) = harness(cx, published(1, "main", true));
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                manager.activate_workspace(harness.shared, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        (harness, cx)
+    }
+
+    fn worktree_ids(
+        harness: &Harness,
+        cx: &mut VisualTestContext,
+    ) -> (crate::domain::WorktreeId, crate::domain::WorktreeId) {
+        let section = harness.row(cx).worktrees.expect("the Worktree rows");
+        let rows: Vec<_> = section.rows().map(|row| row.worktree_id).collect();
+        (rows[0], rows[1])
+    }
+
+    #[gpui::test]
+    fn worktree_menu_new_tab_uses_its_recent_tabs_focused_pane(cx: &mut TestAppContext) {
+        use spaceterm_server::hierarchy::Mutation;
+        use spaceterm_server::worktree::Operation;
+
+        let mut initial = published(1, "main", true);
+        let mut recent = initial.workspaces[0].tabs[1].clone();
+        recent.id = [70; 32];
+        recent.root_pane = [71; 32];
+        recent.panes[0].id = recent.root_pane;
+        let mut child = pane([72; 32], "/srv/app-feature/src");
+        child.source = Some(recent.root_pane);
+        recent.panes.push(child);
+        initial.workspaces[0].tabs.push(recent);
+        let (harness, cx) = harness(cx, initial);
+        cx.update(|window, cx| {
+            window.activate_window();
+            harness.manager.update(cx, |manager, cx| {
+                manager.activate_workspace(harness.shared, window, cx);
+                manager
+                    .workspaces
+                    .workspace(harness.shared)
+                    .unwrap()
+                    .payload()
+                    .update(cx, |tabs, cx| {
+                        tabs.open_accepted_shared([70; 32], window, cx);
+                    });
+            });
+        });
+        redraw(cx);
+        cx.dispatch_action(crate::ui::FocusPaneRight);
+        cx.run_until_parked();
+        let (main, feature) = worktree_ids(&harness, cx);
+        click(worktree_row(harness.shared, main, cx), cx);
+        cx.update(|_, cx| {
+            let sidebar = harness.manager.read(cx).sidebar.clone();
+            sidebar.update(cx, |_, cx| {
+                cx.emit(SidebarEvent::WorktreeCommand {
+                    workspace_id: harness.shared,
+                    worktree_id: feature,
+                    command: WorktreeMenuCommand::NewTab,
+                });
+            });
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            harness.edits.submitted(),
+            [Mutation::Worktree(Operation::OpenTab {
+                workspace: WORKSPACE,
+                source: Some([72; 32]),
+                root: MAIN_ROOT.into(),
+                path: FEATURE_ROOT.into(),
+            })]
+        );
+    }
+
+    #[gpui::test]
+    fn worktree_rows_copy_the_path_and_confirm_their_server_tabs(cx: &mut TestAppContext) {
+        use spaceterm_server::hierarchy::{
+            CloseInventory, CloseTarget as ServerCloseTarget, ConfirmedPane, Mutation, Outcome,
+        };
+        let mut initial = published(1, "main", true);
+        let mut second = initial.workspaces[0].tabs[1].clone();
+        second.id = [70; 32];
+        second.root_pane = [71; 32];
+        second.panes[0].id = second.root_pane;
+        initial.workspaces[0].tabs.push(second);
+        initial.close = Some(CloseInventory {
+            boot: [9; 32],
+            sessions: initial.workspaces[0]
+                .tabs
+                .iter()
+                .flat_map(|t| &t.panes)
+                .map(|p| ConfirmedPane {
+                    id: p.id,
+                    session: None,
+                })
+                .collect(),
+        });
+        let (harness, cx) = harness(cx, initial.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            harness.manager.update(cx, |manager, cx| {
+                manager.activate_workspace(harness.shared, window, cx);
+            });
+        });
+        redraw(cx);
+        let (_, feature) = worktree_ids(&harness, cx);
+        right_click(worktree_row(harness.shared, feature, cx), cx);
+        click("worktree-menu-row-copy-path", cx);
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
+            Some(FEATURE_ROOT.into())
+        );
+        right_click(worktree_row(harness.shared, feature, cx), cx);
+        click("worktree-menu-row-close-tabs", cx);
+        assert!(
+            harness.edits.submitted().is_empty(),
+            "confirmation sends nothing"
+        );
+        assert!(
+            spaceterm_ui::a11y_testing::A11yTree::read(cx)
+                .find("Close Tabs?")
+                .is_some()
+        );
+        click("modal-action-shared-close-confirm", cx);
+        let target = ServerCloseTarget::Worktree {
+            workspace: WORKSPACE,
+            tab: FEATURE_TAB,
+        };
+        assert_eq!(
+            harness.edits.submitted(),
+            [Mutation::Close {
+                target,
+                confirmation: initial.close_confirmation(target).unwrap()
+            }]
+        );
+        assert!(
+            harness
+                .row(cx)
+                .worktrees
+                .unwrap()
+                .rows()
+                .any(|row| row.worktree_id == feature && row.has_tabs),
+            "publication owns removal"
+        );
+        harness
+            .edits
+            .answer(Outcome::Accepted { target: WORKSPACE });
+        initial.workspaces[0].tabs.retain(|tab| tab.id == ROOT_TAB);
+        initial.revision += 1;
+        harness.publish(initial, cx);
+        assert!(
+            harness
+                .row(cx)
+                .worktrees
+                .unwrap()
+                .rows()
+                .any(|row| row.worktree_id == feature && !row.has_tabs),
+            "the Git Worktree row remains"
+        );
+    }
+
+    #[gpui::test]
+    fn closing_every_worktree_tab_refuses_without_a_confirmation_or_mutation(
+        cx: &mut TestAppContext,
+    ) {
+        let mut initial = published(1, "main", true);
+        initial.workspaces[0]
+            .tabs
+            .retain(|tab| tab.id == FEATURE_TAB);
+        initial.workspaces[0].root_tab = FEATURE_TAB;
+        let (harness, cx) = harness(cx, initial);
+        let (_, feature) = worktree_ids(&harness, cx);
+        assert!(
+            !harness
+                .row(cx)
+                .worktrees
+                .unwrap()
+                .rows()
+                .find(|row| row.worktree_id == feature)
+                .unwrap()
+                .closes_tabs
+        );
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                manager.handle_sidebar_event(
+                    SidebarEvent::WorktreeCommand {
+                        workspace_id: harness.shared,
+                        worktree_id: feature,
+                        command: WorktreeMenuCommand::CloseTabs,
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+        redraw(cx);
+        assert!(
+            spaceterm_ui::a11y_testing::A11yTree::read(cx)
+                .find("Tabs Not Closed")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("modal-action-shared-close-confirm")
+                .is_none()
+        );
+        assert!(harness.edits.submitted().is_empty());
+    }
+
+    #[gpui::test]
+    fn a_disclosure_chevron_should_trail_the_workspace_name(cx: &mut TestAppContext) {
+        let (harness, cx) = active_harness(cx);
+        redraw(cx);
+        let id = harness.shared.get();
+        let name = cx
+            .debug_bounds(format!("workspace-row-name-{id}").leak())
+            .expect("the Workspace name");
+        let disclosure = cx
+            .debug_bounds(format!("workspace-disclosure-{id}-expanded").leak())
+            .expect("the disclosure chevron");
+        let group = cx
+            .debug_bounds(format!("workspace-group-{id}").leak())
+            .expect("the Workspace group");
+
+        click(format!("workspace-disclosure-{id}-expanded").leak(), cx);
+        let collapsed_name = cx
+            .debug_bounds(format!("workspace-row-name-{id}").leak())
+            .expect("the Workspace name");
+        let collapsed = cx
+            .debug_bounds(format!("workspace-disclosure-{id}-collapsed").leak())
+            .expect("the collapsed disclosure chevron");
+        let branch = cx
+            .debug_bounds(format!("workspace-row-branch-{id}").leak())
+            .expect("line 2's branch");
+
+        assert!(
+            disclosure.left() >= name.right() && disclosure.right() > group.right() - px(40.0),
+            "the chevron trails the Workspace name at the row's end"
+        );
+        assert_eq!(
+            (collapsed.center().y, branch.right()),
+            (collapsed_name.center().y, collapsed.right()),
+            "a collapsed row's chevron trails line 1, so line 2 runs to the row's end"
+        );
+    }
+
+    #[gpui::test]
+    fn a_focused_git_workspace_row_should_collapse_and_expand_from_the_keyboard(
+        cx: &mut TestAppContext,
+    ) {
+        let (harness, cx) = active_harness(cx);
+        let expanded = |cx: &mut VisualTestContext| {
+            harness.manager.read_with(cx, |manager, cx| {
+                manager
+                    .worktree_section(harness.shared, cx)
+                    .unwrap()
+                    .expanded
+            })
+        };
+        cx.update(|window, cx| {
+            harness
+                .manager
+                .update(cx, |manager, cx| manager.toggle_sidebar_focus(window, cx));
+        });
+        cx.simulate_keystrokes("up");
+        cx.run_until_parked();
+        let mut states = vec![expanded(cx)];
+
+        for key in ["enter", "space", "left", "left", "right", "right"] {
+            cx.simulate_keystrokes(key);
+            cx.run_until_parked();
+            states.push(expanded(cx));
+        }
+
+        assert_eq!(states, [true, false, true, false, false, true, true]);
+        assert!(
+            cx.update(|window, cx| harness.manager.read(cx).sidebar.read(cx).is_focused(window)),
+            "toggling keeps the keyboard in the sidebar"
+        );
+    }
+
+    #[gpui::test]
+    fn worktree_rows_should_match_a_two_line_workspace_row_height(cx: &mut TestAppContext) {
+        let (harness, cx) = active_harness(cx);
+        let (_, feature) = worktree_ids(&harness, cx);
+        redraw(cx);
+        let row = worktree_row(harness.shared, feature, cx);
+        let worktree = cx.debug_bounds(row).expect("the feature Worktree row");
+
+        harness.manager.update(cx, |manager, cx| {
+            manager.set_worktrees_expanded(harness.shared, false);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        redraw(cx);
+        let workspace = cx
+            .debug_bounds(format!("workspace-row-{}-active", harness.shared.get()).leak())
+            .expect("the collapsed Workspace row");
+
+        assert_eq!(worktree.size.height, workspace.size.height);
+    }
+
+    /// Arrows show the Tabs of each Worktree row they stand on, Left and Right collapse and
+    /// expand the group without changing the Active Worktree, and Return moves typing to it.
+    #[gpui::test]
+    fn the_keyboard_should_walk_worktrees_and_return_to_the_pane(cx: &mut TestAppContext) {
+        let (harness, cx) = active_harness(cx);
+        let (main, feature) = worktree_ids(&harness, cx);
+        let sidebar_focus = harness
+            .manager
+            .read_with(cx, |manager, cx| manager.sidebar.read(cx).focus_handle());
+        let active_worktree = |cx: &mut VisualTestContext| {
+            harness.manager.read_with(cx, |manager, cx| {
+                manager
+                    .workspaces
+                    .workspace(harness.shared)
+                    .and_then(|workspace| workspace.payload().read(cx).active_worktree())
+            })
+        };
+        let initial = active_worktree(cx);
+        cx.update(|window, cx| sidebar_focus.focus(window, cx));
+        cx.run_until_parked();
+
+        let mut steps = Vec::new();
+        for keys in ["down", "left", "left", "right", "down down", "enter"] {
+            cx.simulate_keystrokes(keys);
+            cx.run_until_parked();
+            steps.push((selected_tree_item_labels(cx), active_worktree(cx)));
+        }
+
+        let step = |selected: &str, worktree| (vec![selected.to_owned()], Some(worktree));
+        assert_eq!(initial, Some(main));
+        assert_eq!(
+            steps,
+            [
+                step("app-feature", feature),
+                step("Build", feature),
+                step("Build", feature),
+                step("Build", feature),
+                step("app-feature", feature),
+                step("app-feature", feature),
+            ]
+        );
+        assert!(
+            cx.update(|window, _| !sidebar_focus.is_focused(window)),
+            "Return moves typing to the Worktree's Tab"
+        );
+        assert_eq!(harness.edits.submitted(), Vec::new());
+    }
+
+    /// A secondary click on another Worktree row opens its menu and keeps the selection, and
+    /// Escape returns typing to the Pane.
+    #[gpui::test]
+    fn a_worktree_menu_should_keep_the_selection_and_return_typing_to_the_pane(
+        cx: &mut TestAppContext,
+    ) {
+        let (harness, cx) = active_harness(cx);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let (_, feature) = worktree_ids(&harness, cx);
+        redraw(cx);
+        let selected = selected_tree_item_labels(cx);
+
+        right_click(worktree_row(harness.shared, feature, cx), cx);
+        let selected_with_menu = selected_tree_item_labels(cx);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert_eq!(selected_with_menu, selected);
+        assert!(
+            active_terminal_has_input_focus(&harness.manager, cx),
+            "Escape returns typing to the Pane"
+        );
+    }
+
+    fn selected_tree_item_labels(cx: &mut VisualTestContext) -> Vec<String> {
+        spaceterm_ui::a11y_testing::A11yTree::read(cx)
+            .with_role("TreeItem")
+            .iter()
+            .filter(|item| item["aria"]["selected"] == true)
+            .map(|item| {
+                item["aria"]["label"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    fn worktree_row(
+        workspace_id: WorkspaceId,
+        worktree_id: crate::domain::WorktreeId,
+        cx: &mut VisualTestContext,
+    ) -> &'static str {
+        ["selected", "unselected"]
+            .into_iter()
+            .map(|state| -> &'static str {
+                format!("worktree-row-{}-{worktree_id}-{state}", workspace_id.get()).leak()
+            })
+            .find(|selector| cx.debug_bounds(selector).is_some())
+            .unwrap_or_else(|| panic!("worktree row {worktree_id} was not rendered"))
+    }
 }
+
+#[path = "launch_tests.rs"]
+mod launch_tests;

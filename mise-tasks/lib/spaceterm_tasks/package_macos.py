@@ -76,15 +76,6 @@ def package_bundle(release_tag=None):
         environment["SPACETERM_SPARKLE_DIR"] = str(updater)
         config["macos"]["frameworks"] = [str(updater / "Sparkle.framework")]
     print(f"Building the Apple Silicon {template['CFBundleName']} executable")
-    server = build_executable(
-        "--release",
-        "--locked",
-        "--package",
-        "spaceterm-server-host",
-        "--no-default-features",
-        binary="spaceterm-server",
-        env=environment,
-    )
     executable = build_executable(
         "--release", "--locked", "--no-default-features", "--features", "desktop", env=environment
     )
@@ -92,9 +83,14 @@ def package_bundle(release_tag=None):
     binaries.mkdir()
     shutil.copyfile(executable, binaries / template["CFBundleExecutable"])
     (binaries / template["CFBundleExecutable"]).chmod(0o755)
-    shutil.copyfile(server, binaries / "spaceterm-server")
-    (binaries / "spaceterm-server").chmod(0o755)
-    config["binaries"].append({"path": "spaceterm-server", "main": False})
+    from spaceterm_tasks.server_package import prepare_desktop_artifact
+
+    prepare_desktop_artifact(
+        STAGE / "server-artifact",
+        template["CFBundleIdentifier"].removeprefix("io.github.sadiksaifi."),
+        release_tag,
+    )
+    config["resources"].append({"src": str(STAGE / "server-artifact"), "target": "server-artifact"})
     config["version"] = version
     # cargo-packager stamps CFBundleVersion with the build time; the identity's Info.plist
     # entries override its generated ones, so add the tag-derived versions to them.
@@ -201,26 +197,6 @@ def verify_bundle(app, name, release_tag, label):
         raise TaskError(f"{label} executable deployment target differs from its bundle minimum")
     verify_application_identity(executable, template["CFBundleName"], label)
     verify_askpass_helper_mode(executable, label)
-    server = contents / "MacOS" / "spaceterm-server"
-    if not os.access(server, os.X_OK):
-        raise TaskError(f"{label} server executable is missing")
-    verify_application_identity(server, "SpaceTerm Server", f"{label} server")
-    server_architectures = checked(
-        ["lipo", "-archs", str(server)], f"{label} server architecture could not be read", text=True
-    )
-    if server_architectures.split() != ["arm64"]:
-        raise TaskError(f"{label} server must contain only Apple Silicon code")
-    server_build = checked(
-        ["xcrun", "vtool", "-show-build", str(server)],
-        f"{label} server deployment target could not be read",
-        text=True,
-    )
-    if f"minos {MINIMUM_MACOS}" not in " ".join(server_build.split()):
-        raise TaskError(f"{label} server deployment target differs from its bundle minimum")
-    checked(
-        ["codesign", "--verify", "--strict", str(server)], f"{label} server signature is invalid"
-    )
-
     resources = contents / "Resources"
     if not (resources / f"{ICON_NAME}.icns").is_file():
         raise TaskError(f"{label} app icon is missing")
@@ -236,6 +212,13 @@ def verify_bundle(app, name, release_tag, label):
     ):
         raise TaskError(f"{label} asset catalog has no 1024-pixel {ICON_NAME} icon")
     verify_resources(resources, label)
+    from spaceterm_tasks.server_package import verify_desktop_artifact
+
+    verify_desktop_artifact(
+        resources / "server-artifact",
+        template["CFBundleIdentifier"].removeprefix("io.github.sadiksaifi."),
+        release_tag,
+    )
 
     signature = ["codesign", "--verify", "--strict", *(["--deep"] if release_tag else []), str(app)]
     checked(signature, f"{label} app signature verification failed")

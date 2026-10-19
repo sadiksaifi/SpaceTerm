@@ -5,6 +5,12 @@ use std::{error::Error, time::Duration};
 use support::{attach, await_output, command};
 
 fn main() -> Result<(), Box<dyn Error>> {
+    if !spaceterm_server::service::Service::for_identity("spaceterm-development")?
+        .status()?
+        .installed
+    {
+        return Err(ServerError::NotInstalled.into());
+    }
     let server = LocalServer::for_identity("spaceterm-development")?;
     let mut first = server.connect_pane()?;
     let original = attach(&mut first, true)?;

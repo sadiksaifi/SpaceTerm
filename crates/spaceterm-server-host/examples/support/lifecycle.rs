@@ -23,23 +23,7 @@ pub fn require_idle(client: &LocalServer) -> Result<(), Box<dyn Error>> {
         Err(error) => Err(error.into()),
     }
 }
-/// Explicit setup locates the headless executable beside its caller, as the installed app does.
-#[allow(
-    dead_code,
-    reason = "Only examples that start through LocalServer need a companion executable."
-)]
-pub fn prepare_companion() -> Result<(), Box<dyn Error>> {
-    let examples = std::env::current_exe()?
-        .parent()
-        .ok_or("example directory")?
-        .to_owned();
-    let companion = examples.join("spaceterm-server");
-    if !companion.try_exists()? {
-        std::os::unix::fs::symlink("../spaceterm-server", companion)?;
-    }
-    Ok(())
-}
-
+/// Explicit runtime fixture; never discovers, installs or replaces an account service.
 pub struct Server(pub Child);
 impl Server {
     pub fn start() -> Result<Self, Box<dyn Error>> {

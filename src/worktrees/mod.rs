@@ -6,7 +6,6 @@
 //! same hardening its reads use. Values can carry paths and branch names for presentation; errors
 //! never do.
 
-pub(crate) mod catalog;
 pub(crate) mod git;
 pub(crate) mod listing;
 pub(crate) mod path_template;

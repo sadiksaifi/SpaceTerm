@@ -1,6 +1,15 @@
 //! Desktop dialogs submit Worktree operations to the same server edit journal as shared closes.
+use std::rc::Rc;
+
+use gpui::AppContext as _;
+
 use super::*;
+use crate::repository_status::presentation::{MAXIMUM_NAME_CHARS, sanitize_for_display};
 use crate::ui::server_worktrees::{Client, FormBackend, WriteError};
+use crate::ui::shared_workspaces::SharedSubmission;
+use crate::ui::worktree_form::{LocationProbe, WorktreeFormContext, WorktreeFormEvent};
+use crate::worktrees::listing::{WorktreeHead, WorktreeRecord};
+use spaceterm_server::hierarchy::Mutation;
 use spaceterm_server::worktree::{Operation, Read, ReadReply};
 impl WorkspaceManager {
     pub(in crate::ui::workspace_manager) fn new_shared_worktree(
@@ -35,14 +44,7 @@ impl WorkspaceManager {
             .workspaces
             .workspace(workspace_id)
             .and_then(|w| w.payload().read(cx).active_worktree())
-            .and_then(|id| {
-                self.sidebar_worktrees
-                    .workspaces
-                    .get(&workspace_id)?
-                    .registry
-                    .key(id)
-            })
-            .map(|key| key.root().to_owned());
+            .and_then(|id| self.shared_worktree_root(workspace_id, id));
         let context = client.read(Read::Context { root: root.clone() }, cx);
         let handle = window.window_handle().downcast::<WorkspaceManager>();
         cx.spawn(async move |_, cx| {
@@ -230,31 +232,22 @@ impl WorkspaceManager {
             Self::show_shared_refusal("open the Worktree", shared.editability().into(), window, cx);
             return false;
         }
-        let Some(client) = Client::get(cx) else {
-            return false;
-        };
-        let task = client.write(
-            Operation::OpenTab {
+        let source = self
+            .workspaces
+            .workspace(workspace_id)
+            .and_then(|w| w.payload().read(cx).shared_worktree_pane(worktree_id, cx));
+        let submission = shared
+            .edits()
+            .submit(Mutation::Worktree(Operation::OpenTab {
                 workspace,
+                source,
                 root,
                 path,
-            },
-            cx,
-        );
-        let handle = window.window_handle();
-        cx.spawn(async move |manager, cx| {
-            let result = task.await.and_then(crate::ui::server_worktrees::result);
-            let _ = handle.update(cx, |_, window, cx| {
-                let _ = manager.update(cx, |_manager, cx| match result {
-                    Err(WriteError::Refused(reason)) => {
-                        Self::show_shared_refusal("open the Worktree", reason, window, cx)
-                    }
-                    Err(WriteError::Server(_)) => (), // The inventory poll presents the retained outcome once.
-                    Ok(()) => (),
-                });
-            });
-        })
-        .detach();
+            }));
+        if let SharedSubmission::Refused(reason) = submission {
+            Self::show_shared_refusal("open the Worktree", reason, window, cx);
+            return false;
+        }
         true
     }
 }

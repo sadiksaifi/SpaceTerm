@@ -202,7 +202,10 @@ impl PreparedShellLaunch {
         self
     }
 
-    #[cfg(target_os = "linux")]
+    #[allow(
+        dead_code,
+        reason = "Only adapters that remove inherited variables use this operation"
+    )]
     pub(crate) fn without_environment_value(mut self, name: &str) -> Self {
         self.environment.retain(|(key, _)| key != name);
         self.environment_removals.push(name.into());

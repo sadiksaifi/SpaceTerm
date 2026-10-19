@@ -29,15 +29,5 @@ fn main() {
         "cargo:rustc-env=SPACETERM_SERVER_TARGET={}",
         std::env::var("TARGET").unwrap()
     );
-    let commit = std::process::Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .expect("Git is required");
-    assert!(commit.status.success());
-    println!(
-        "cargo:rustc-env=SPACETERM_SERVER_COMMIT={}",
-        String::from_utf8(commit.stdout).unwrap().trim()
-    );
+    println!("cargo:rustc-env=SPACETERM_SERVER_COMMIT={}", build.commit);
 }

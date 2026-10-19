@@ -15,7 +15,7 @@ import tempfile
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path, PurePosixPath
 
-from spaceterm_tasks import ROOT, TaskError
+from spaceterm_tasks import ROOT, TaskError, macos_signing
 from spaceterm_tasks.cargo import build_executable
 from spaceterm_tasks.development_linux import icon_svg
 from spaceterm_tasks.macos_bundle import identity, identity_directory
@@ -65,13 +65,11 @@ def icon_document(name):
     return identity_directory(name) / f"{identity(name)['CFBundleName']}.icon"
 
 
-def stage(name, executable, server, tree):
+def stage(name, executable, tree):
     """Lay out one identity's installed directory at `tree`."""
     (tree / "bin").mkdir(parents=True)
     shutil.copyfile(executable, tree / "bin" / "spaceterm")
     (tree / "bin" / "spaceterm").chmod(0o755)
-    shutil.copyfile(server, tree / "bin" / "spaceterm-server")
-    (tree / "bin" / "spaceterm-server").chmod(0o755)
     resources = tree / "share" / "spaceterm"
     shutil.copytree(SHELL_INTEGRATION, resources / "shell-integration")
     shutil.copyfile(NOTICES, resources / NOTICES.name)
@@ -113,27 +111,26 @@ def package(release_tag=None):
         require_clean_checkout()
     name = selected_identity(release_tag)
     display_name = identity(name)["CFBundleName"]
+    environment = macos_signing.signing_environment(packaged_environment(release_tag))
     print(f"Building the x86_64 Linux {display_name} executable")
-    server = build_executable(
-        "--release",
-        "--locked",
-        "--package",
-        "spaceterm-server-host",
-        "--no-default-features",
-        binary="spaceterm-server",
-        env=packaged_environment(release_tag),
-    )
     executable = build_executable(
         "--release",
         "--locked",
         "--no-default-features",
         "--features",
         "desktop",
-        env=packaged_environment(release_tag),
+        env=environment,
     )
     shutil.rmtree(STAGE, ignore_errors=True)
     STAGE.mkdir(parents=True)
-    stage(name, executable, server, STAGE / DIRECTORIES[name])
+    stage(name, executable, STAGE / DIRECTORIES[name])
+    from spaceterm_tasks.server_package import prepare_desktop_artifact
+
+    prepare_desktop_artifact(
+        STAGE / DIRECTORIES[name] / "share/spaceterm/server-artifact",
+        DIRECTORIES[name],
+        release_tag,
+    )
     DIST.mkdir(exist_ok=True)
     destination = archive_path(name)
     with tempfile.TemporaryDirectory(dir=DIST, prefix=".package.") as temporary:
@@ -184,16 +181,12 @@ def verify_tree(tree, name, release_tag):
     version = release_version(release_tag) if release_tag else None
     verify_application_identity(executable, identity(name)["CFBundleName"], label, version)
     verify_askpass_helper_mode(executable, label)
-    server = tree / "bin" / "spaceterm-server"
-    if not os.access(server, os.X_OK):
-        raise TaskError(f"{label} server executable is missing")
-    server_header = checked(["objdump", "-f", str(server)], f"{label} server is unreadable")
-    if b"elf64-x86-64" not in server_header:
-        raise TaskError(f"{label} server must contain only x86_64 code")
-    if release_tag:
-        verify_glibc_baseline(server, f"{label} server")
-    verify_application_identity(server, "SpaceTerm Server", f"{label} server")
     verify_resources(tree / "share" / "spaceterm", label)
+    from spaceterm_tasks.server_package import verify_desktop_artifact
+
+    verify_desktop_artifact(
+        tree / "share/spaceterm/server-artifact", DIRECTORIES[name], release_tag
+    )
 
     identifier = application_id(name)
     entry = tree / "share" / "applications" / f"{identifier}.desktop"

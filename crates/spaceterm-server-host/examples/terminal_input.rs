@@ -281,19 +281,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let first = LocalServer::for_development_client("input-first", major)?;
     let second = LocalServer::for_development_client("input-second", major)?;
     require_idle(&first)?;
-    // Setup finds the sibling executable, as in the existing lifecycle examples.
-    let directory = std::env::current_exe()?
-        .parent()
-        .ok_or("example directory")?
-        .to_owned();
-    let companion = directory.join("spaceterm-server");
-    if !companion.try_exists()? {
-        std::os::unix::fs::symlink("../spaceterm-server", &companion)?;
-    }
-    assert_eq!(first.setup_and_start()?.protocol_major, major);
-    assert_eq!(second.setup_and_start()?.protocol_major, major);
-    connect(&first)?.exchange(&Request::Shutdown)?;
-    std::thread::sleep(Duration::from_millis(200));
+    first.setup()?;
+    second.setup()?;
     let mut server = Server::start()?;
     let mut a = connect(&first)?;
     assert!(a.supports_interactive_input());
@@ -309,6 +298,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         sequence: next_sequence,
         mutation: Mutation::CreateWorkspace {
             name: "Interactive input check".into(),
+            directory: None,
         },
     })?
     else {
