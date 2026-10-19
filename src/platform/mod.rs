@@ -300,6 +300,9 @@ mod linux_fonts;
 pub(crate) mod linux_fonts;
 #[cfg(target_os = "linux")]
 #[cfg(feature = "desktop")]
+mod linux_status_host;
+#[cfg(target_os = "linux")]
+#[cfg(feature = "desktop")]
 mod linux_status_menu;
 #[cfg(target_os = "linux")]
 #[cfg(feature = "desktop")]

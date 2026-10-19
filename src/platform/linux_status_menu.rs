@@ -4,7 +4,7 @@
 //!
 //! Without a status-area host the item stays on the bus and appears once a host starts. Meanwhile
 //! the client reports the item unavailable, so closing its last window exits it rather than
-//! leaving it unreachable.
+//! leaving it unreachable. `linux_status_host` decides whether a host shows it.
 use crate::status_menu::{
     self,
     model::{Command, Item, Presentation, State},
@@ -32,15 +32,12 @@ use zbus::{
 
 const ITEM_PATH: &str = "/StatusNotifierItem";
 const MENU_PATH: &str = "/MenuBar";
-const WATCHER: &str = "org.kde.StatusNotifierWatcher";
 
 enum Message {
     Worker(Event),
     Command(Command),
-    /// Whether the session's status-area host now shows the item.
+    /// Whether a status-area host now shows the item.
     Hosted(bool),
-    /// A status-area host started, so the item registers with it.
-    HostStarted,
     /// The person opened the menu.
     Refresh,
 }
@@ -108,12 +105,15 @@ pub(crate) fn install(
             Err(_) => return,
         }
     };
-    watch_hosts(&connection, sender.clone());
-    register_item(&connection, sender.clone());
+    {
+        let sender = sender.clone();
+        super::linux_status_host::observe(&connection, move |hosted| {
+            let _ = sender.send_blocking(Message::Hosted(hosted));
+        });
+    }
     worker.send(Request::Refresh);
     let item = Rc::new(LinuxStatusItem {
         name,
-        sender,
         controller,
         worker,
         connection,
@@ -148,7 +148,6 @@ fn icon(identity: &str) -> String {
 
 struct LinuxStatusItem {
     name: String,
-    sender: async_channel::Sender<Message>,
     controller: Controller,
     worker: Worker,
     connection: Connection,
@@ -161,7 +160,6 @@ impl LinuxStatusItem {
     fn handle(self: Rc<Self>, message: Message, cx: &mut App) {
         match message {
             Message::Refresh => self.worker.send(Request::Refresh),
-            Message::HostStarted => register_item(&self.connection, self.sender.clone()),
             Message::Hosted(hosted) => status_menu::set_available(cx, hosted),
             Message::Worker(Event::Status(status)) => self.change(|state| {
                 state.status = Some(status);
@@ -273,54 +271,6 @@ impl LinuxStatusItem {
             Presentation::of(&self.name, self.state.get()),
         );
     }
-}
-
-/// Tells the session's status-area host about the item, off the event thread. The answer says
-/// whether the host shows it.
-///
-/// The item registers by this connection's unique name. A previous client registered its own,
-/// so a host that processes that client's exit after this registration removes only its item.
-fn register_item(connection: &Connection, sender: async_channel::Sender<Message>) {
-    let connection = connection.clone();
-    std::thread::spawn(move || {
-        let Some(unique) = connection.unique_name().map(|name| name.to_string()) else {
-            return;
-        };
-        let hosted = connection
-            .call_method(
-                Some(WATCHER),
-                "/StatusNotifierWatcher",
-                Some(WATCHER),
-                "RegisterStatusNotifierItem",
-                &(unique.as_str(),),
-            )
-            .is_ok();
-        let _ = sender.send_blocking(Message::Hosted(hosted));
-    });
-}
-
-/// Follows the status-area host: registers again when one starts, such as after the shell
-/// restarts, and reports the item unavailable when it exits.
-fn watch_hosts(connection: &Connection, sender: async_channel::Sender<Message>) {
-    let Ok(proxy) = zbus::blocking::fdo::DBusProxy::new(connection) else {
-        return;
-    };
-    let Ok(changes) = proxy.receive_name_owner_changed_with_args(&[(0, WATCHER)]) else {
-        return;
-    };
-    std::thread::spawn(move || {
-        for change in changes {
-            let started = change.args().is_ok_and(|args| args.new_owner().is_some());
-            let message = if started {
-                Message::HostStarted
-            } else {
-                Message::Hosted(false)
-            };
-            if sender.send_blocking(message).is_err() {
-                return;
-            }
-        }
-    });
 }
 
 fn publish(connection: &Connection, shared: &Shared, presentation: Presentation) {
