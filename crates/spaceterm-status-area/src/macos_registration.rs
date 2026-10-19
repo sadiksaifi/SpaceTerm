@@ -4,6 +4,7 @@ use crate::account::home;
 use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    time::{Duration, Instant},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -37,14 +38,16 @@ pub fn register(identity: &str, _name: &str) -> Result<(), RegistrationError> {
     }
     if !unchanged {
         write(&directory, &path, &contents)?;
-        // A loaded job keeps its old program until it is unloaded.
-        launchctl(&["bootout", &target]);
+        // A loaded job keeps its old program until it is unloaded. launchd finishes removing it
+        // after bootout returns, and bootstrapping the label before then fails.
+        if launchctl(&["bootout", &target]) {
+            wait(|| !launchctl(&["print", &target]));
+        }
     }
-    if !launchctl(&[
-        "bootstrap",
-        &domain,
-        path.to_str().ok_or(RegistrationError::Unavailable)?,
-    ]) {
+    let path = path.to_str().ok_or(RegistrationError::Unavailable)?;
+    // A refusal that outlasts the old job's removal is the system's answer, such as a background
+    // item turned off in Login Items.
+    if !wait(|| launchctl(&["bootstrap", &domain, path])) {
         return Err(RegistrationError::Refused);
     }
     Ok(())
@@ -106,6 +109,20 @@ fn write(directory: &Path, path: &Path, contents: &[u8]) -> Result<(), Registrat
             let _ = std::fs::remove_file(&staged);
             RegistrationError::Unavailable
         })
+}
+
+/// Retries `done` for up to five seconds and reports whether it succeeded.
+fn wait(mut done: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if done() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn launchctl(arguments: &[&str]) -> bool {
