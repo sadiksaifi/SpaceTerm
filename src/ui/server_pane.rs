@@ -34,10 +34,6 @@ pub(crate) const SESSION_ENDED_DETAIL: &str =
     "This Terminal Session is no longer available on the server.";
 pub(crate) const TAKING_OVER: &str = "Taking Over…";
 pub(crate) const TAKE_OVER_UNCONFIRMED: &str = "Take Over was not confirmed.";
-/// A Pane this client released, or one nobody controls, offered for Take Over.
-pub(crate) const UNCLAIMED_TITLE: &str = "Available to Take Over";
-pub(crate) const UNCLAIMED_DETAIL: &str = "No other client controls this Pane. Take Over to type and resize here. The shell keeps \
-     running.";
 pub(crate) const RESTORED_TITLE: &str = "Server Restarted";
 pub(crate) const RESTORED_DETAIL: &str = "Programs that were running in this Pane ended when the \
                                           server stopped. Start a new shell to keep working here.";
