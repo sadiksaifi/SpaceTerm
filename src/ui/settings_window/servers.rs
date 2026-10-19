@@ -15,7 +15,7 @@ use super::SettingsWindow;
 use crate::application_identity::ApplicationIdentity;
 pub(super) use crate::local_server::service::ServiceStartup;
 use crate::local_server::service::{
-    LingerAuthorization, RetainedInstallation, Service, ServiceStatus,
+    LingerAuthorization, RetainedInstallation, Service, ServiceStatus, control,
 };
 use crate::local_server::{AuthenticatedStatus, LocalServer, ServerError};
 use crate::ui::appearance::ChromeAppearance;
@@ -561,13 +561,14 @@ pub(super) struct PendingAuthorization {
     pub(super) declined: bool,
 }
 
-/// The alert that asks before Stop, Restart, or Uninstall.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// The alert that asks before Stop, Restart, or Uninstall, in the wording every control surface
+/// shows: it names this build's server and says every client's Terminal Sessions end.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ServiceConfirmation {
     id: &'static str,
     pub(super) title: &'static str,
-    pub(super) message: &'static str,
-    pub(super) detail: &'static str,
+    pub(super) message: SharedString,
+    pub(super) detail: SharedString,
     pub(super) confirm: &'static str,
     confirm_selector: &'static str,
     cancel_selector: &'static str,
@@ -577,70 +578,50 @@ impl ServiceConfirmation {
     /// The confirmation for one action, or `None` for an action that needs none. Uninstalling a
     /// server that is not running ends no Terminal Session, and the message says so. The detail
     /// names the platform's startup, since a stopped or uninstalled server misses it.
-    pub(super) const fn for_action(
+    pub(super) fn for_action(
         action: ServiceAction,
         running: bool,
         startup: ServiceStartup,
     ) -> Option<Self> {
-        Some(match action {
-            ServiceAction::Stop => Self {
-                id: "settings-server-stop",
-                title: "Stop Server",
-                message: "Stop the server and end its Terminal Sessions?",
-                detail: match startup {
-                    ServiceStartup::AtLogin => {
-                        "Programs running in them stop. Workspaces are kept. The server stays \
-                         stopped, even after you log in again, until you choose Start Server."
-                    }
-                    ServiceStartup::AtBoot => {
-                        "Programs running in them stop. Workspaces are kept. The server stays \
-                         stopped, even after the computer restarts, until you choose Start Server."
-                    }
-                },
-                confirm: "Stop Server",
-                confirm_selector: STOP_CONFIRM_SELECTOR,
-                cancel_selector: STOP_CANCEL_SELECTOR,
-            },
-            ServiceAction::Restart => Self {
-                id: "settings-server-restart",
-                title: "Restart Server",
-                message: "Restart the server and end its Terminal Sessions?",
-                detail: "Programs running in them stop. Workspaces are kept, and each Pane starts \
-                         a new shell when you next use it.",
-                confirm: "Restart Server",
-                confirm_selector: RESTART_CONFIRM_SELECTOR,
-                cancel_selector: RESTART_CANCEL_SELECTOR,
-            },
-            ServiceAction::Uninstall => Self {
-                id: "settings-server-uninstall",
-                title: "Uninstall Server",
-                message: if running {
-                    "Uninstall the server and end its Terminal Sessions?"
-                } else {
-                    "Uninstall the server?"
-                },
-                detail: match startup {
-                    ServiceStartup::AtLogin => {
-                        "It no longer starts when you log in. Workspaces and \
-                         verified server installations are kept, so you can install it again."
-                    }
-                    // Lingering is account policy other services may rely on, so it stays on.
-                    ServiceStartup::AtBoot => {
-                        "It no longer starts when the computer starts. Workspaces and \
-                         verified server installations are kept, so you can install \
-                         it again. Lingering stays on for your account, because other services \
-                         may rely on it. To turn it off, run loginctl disable-linger."
-                    }
-                },
-                confirm: "Uninstall",
-                confirm_selector: UNINSTALL_CONFIRM_SELECTOR,
-                cancel_selector: UNINSTALL_CANCEL_SELECTOR,
-            },
+        let (id, control, confirm_selector, cancel_selector) = match action {
+            ServiceAction::Stop => (
+                "settings-server-stop",
+                control::Action::Stop,
+                STOP_CONFIRM_SELECTOR,
+                STOP_CANCEL_SELECTOR,
+            ),
+            ServiceAction::Restart => (
+                "settings-server-restart",
+                control::Action::Restart,
+                RESTART_CONFIRM_SELECTOR,
+                RESTART_CANCEL_SELECTOR,
+            ),
+            ServiceAction::Uninstall => (
+                "settings-server-uninstall",
+                control::Action::Uninstall,
+                UNINSTALL_CONFIRM_SELECTOR,
+                UNINSTALL_CANCEL_SELECTOR,
+            ),
             ServiceAction::Check
             | ServiceAction::Install
             | ServiceAction::Start
             | ServiceAction::AuthorizeInstall
             | ServiceAction::AuthorizeStart => return None,
+        };
+        let wording = control::Wording::new(
+            ApplicationIdentity::current().directory_name(),
+            control,
+            running,
+            startup,
+        );
+        Some(Self {
+            id,
+            title: wording.title(),
+            message: wording.message().into(),
+            detail: wording.detail().into(),
+            confirm: wording.confirm_label(),
+            confirm_selector,
+            cancel_selector,
         })
     }
 }
@@ -1449,7 +1430,7 @@ impl SettingsWindow {
             ModalId::new(confirmation.id),
             confirmation.title,
             confirmation.title,
-            confirmation.message,
+            confirmation.message.clone(),
             vec![
                 ModalAction::new(
                     true,
@@ -1468,7 +1449,7 @@ impl SettingsWindow {
             ],
         )
         .intent(AlertIntent::Critical)
-        .detail(confirmation.detail)
+        .detail(confirmation.detail.clone())
         .present(window, cx, move |outcome, cx| {
             if !matches!(
                 outcome,

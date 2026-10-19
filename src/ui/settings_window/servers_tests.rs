@@ -587,7 +587,12 @@ fn only_actions_that_end_sessions_or_remove_the_service_ask_first() {
     for action in [ServiceAction::Stop, ServiceAction::Restart] {
         let confirmation =
             ServiceConfirmation::for_action(action, true, login).expect("confirmation");
-        assert!(confirmation.message.contains("end its Terminal Sessions"));
+        assert!(
+            confirmation
+                .message
+                .contains("server and end all of its Terminal Sessions")
+        );
+        assert!(confirmation.detail.contains("for every client"));
         assert_eq!(confirmation.confirm, action.label());
     }
     // Uninstalling a server that is not running ends no Terminal Session.
@@ -596,7 +601,7 @@ fn only_actions_that_end_sessions_or_remove_the_service_ask_first() {
     let live =
         ServiceConfirmation::for_action(ServiceAction::Uninstall, true, login).expect("live");
     assert!(!idle.message.contains("Terminal Sessions"));
-    assert!(live.message.contains("end its Terminal Sessions"));
+    assert!(live.message.contains("end all of its Terminal Sessions"));
 }
 
 #[gpui::test]
