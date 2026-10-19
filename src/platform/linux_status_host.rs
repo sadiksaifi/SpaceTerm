@@ -253,14 +253,20 @@ mod tests {
         });
         let unique = item.unique_name().unwrap().to_string();
         assert_eq!(watcher.registered.recv_timeout(WAIT).unwrap(), unique);
-        assert_eq!(reports.recv_timeout(WAIT).unwrap(), false);
+        assert!(
+            !reports.recv_timeout(WAIT).unwrap(),
+            "no host draws the item"
+        );
 
         watcher.set_host(true);
-        assert_eq!(reports.recv_timeout(WAIT).unwrap(), true);
+        assert!(
+            reports.recv_timeout(WAIT).unwrap(),
+            "the host shows the item"
+        );
 
         // The last host leaves while its watcher stays.
         watcher.set_host(false);
-        assert_eq!(reports.recv_timeout(WAIT).unwrap(), false);
+        assert!(!reports.recv_timeout(WAIT).unwrap(), "no host remains");
 
         // A replacement watcher with a host receives the item again.
         drop(watcher);
