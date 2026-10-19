@@ -384,9 +384,12 @@ impl WorkspaceManager {
         let work = cx.background_spawn(async move {
             let refused = match step {
                 Some(LaunchStep::Start) => adapter.start().err().map(StepResult::Failed),
-                Some(LaunchStep::Authorize) => {
-                    adapter.authorize().err().map(|_| StepResult::Declined)
-                }
+                // Only a cancelled or refused prompt leaves startup unchanged. Any other failure
+                // says what went wrong and claims nothing about what the system changed.
+                Some(LaunchStep::Authorize) => adapter.authorize().err().map(|error| match error {
+                    ServerError::AuthorizationRequired => StepResult::Declined,
+                    error => StepResult::Failed(error),
+                }),
                 None => None,
             };
             if let Some(refused) = refused {
@@ -801,8 +804,10 @@ pub(crate) mod testing {
         pub(crate) fn refuse_start(&self, error: ServerError) {
             *self.start.lock().unwrap() = Some(error);
         }
-        pub(crate) fn refuse_authorization(&self) {
-            *self.authorize.lock().unwrap() = Some(ServerError::AuthorizationRequired);
+        /// Answers the next authorization with `error`. `AuthorizationRequired` is a prompt
+        /// that was cancelled or refused.
+        pub(crate) fn refuse_authorization(&self, error: ServerError) {
+            *self.authorize.lock().unwrap() = Some(error);
         }
         /// Every step in order: `run`, `start`, and `authorize`.
         pub(crate) fn steps(&self) -> Vec<&'static str> {

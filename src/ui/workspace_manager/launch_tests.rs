@@ -284,7 +284,9 @@ fn startup_authorization_runs_only_from_its_explicit_step(cx: &mut TestAppContex
     assert_eq!(harness.launch_title(cx), Some(launch::AUTHORIZATION_TITLE));
     assert_eq!(harness.launch.steps(), ["run"]);
 
-    harness.launch.refuse_authorization();
+    harness
+        .launch
+        .refuse_authorization(ServerError::AuthorizationRequired);
     harness.click(LAUNCH_AUTHORIZE_SELECTOR, cx);
     assert_eq!(
         harness.launch.steps(),
@@ -305,6 +307,50 @@ fn startup_authorization_runs_only_from_its_explicit_step(cx: &mut TestAppContex
     );
     sync(&harness, cx);
     assert_eq!(harness.shared_rows(cx), 1);
+}
+
+/// An authorization that failed for another reason, before the prompt or after the system may
+/// already have changed the account's startup policy, names its failure and claims nothing about
+/// what changed.
+fn assert_authorization_failure_explains_itself(
+    error: ServerError,
+    title: &str,
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::AuthorizationRequired)], cx);
+    cx.run_until_parked();
+    harness.launch.refuse_authorization(error);
+
+    harness.click(LAUNCH_AUTHORIZE_SELECTOR, cx);
+    let presentation = harness
+        .manager
+        .read_with(cx, |manager, _| manager.launch_presentation())
+        .expect("the launch screen stays");
+
+    assert_eq!(harness.launch.steps(), ["run", "authorize"]);
+    assert_eq!(presentation.title, title);
+    assert_eq!(presentation.detail, error.to_string());
+    assert!(!presentation.detail.contains("nothing changed"));
+    assert!(cx.debug_bounds(LAUNCH_RETRY_SELECTOR).is_some());
+}
+
+#[gpui::test]
+fn an_authorization_whose_result_is_unconfirmed_reports_its_failure(cx: &mut TestAppContext) {
+    // The system may have enabled startup before the service could confirm it.
+    assert_authorization_failure_explains_itself(
+        ServerError::ServiceUnavailable,
+        "Couldn\u{2019}t Open Workspaces",
+        cx,
+    );
+}
+
+#[gpui::test]
+fn an_authorization_that_fails_before_its_prompt_is_not_a_cancellation(cx: &mut TestAppContext) {
+    assert_authorization_failure_explains_itself(
+        ServerError::StorageUnavailable,
+        "Server Storage Unavailable",
+        cx,
+    );
 }
 
 #[gpui::test]
