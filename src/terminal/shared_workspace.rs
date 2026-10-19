@@ -49,7 +49,10 @@ impl PublishedSnapshot {
         receiver
     }
     fn publish<R>(&self, update: impl FnOnce(&mut SharedWorkspaceSnapshot) -> R) -> R {
-        let result = update(&mut self.value.lock().unwrap_or_else(|e| e.into_inner()));
+        let result = {
+            let mut value = self.value.lock().unwrap_or_else(|e| e.into_inner());
+            update(&mut value)
+        };
         // The value is visible before the hint; consumers may immediately read it on another thread.
         self.subscribers
             .lock()
@@ -167,14 +170,23 @@ fn inventory(
     controls.retain(&inventory);
     Ok((inventory, next_sequence))
 }
+struct FinishedOperation {
+    outcome: Option<RetainedOutcome>,
+    reconciled: Option<(Inventory, u64)>,
+}
+
 fn finish(
     connection: &mut PaneConnection,
     journal: &mut ClientJournal,
     controls: &PaneControls,
-) -> Result<Option<RetainedOutcome>, ServerError> {
+) -> Result<FinishedOperation, ServerError> {
     let Some(pending) = journal.pending().cloned() else {
-        return Ok(journal.last().cloned());
+        return Ok(FinishedOperation {
+            outcome: journal.last().cloned(),
+            reconciled: None,
+        });
     };
+    let mut reconciled = None;
     let result = if let Some(result) = pending.result {
         result
     } else {
@@ -199,7 +211,7 @@ fn finish(
             return Err(ServerError::Protocol);
         };
         // Reconcile the accepted membership before retiring the operation identity.
-        inventory(connection, controls)?;
+        reconciled = Some(inventory(connection, controls)?);
         journal.complete(outcome.clone())?;
         outcome
     };
@@ -211,7 +223,10 @@ fn finish(
         sequence: pending.sequence,
     })?;
     journal.retire()?;
-    Ok(Some(result))
+    Ok(FinishedOperation {
+        outcome: Some(result),
+        reconciled,
+    })
 }
 fn run(
     server: LocalServer,
@@ -235,7 +250,7 @@ fn run(
                 ))?;
             }
             // Authoritative reconciliation always precedes a retry of a previously submitted edit.
-            let (initial, _) = inventory(&mut connection, &controls)?;
+            let (initial, mut sequence) = inventory(&mut connection, &controls)?;
             state.publish(|s| {
                 s.worktree_writes = connection.worktree_writes();
                 s.inventory = Some(initial);
@@ -253,9 +268,16 @@ fn run(
                     active = None;
                 }
             });
-            let outcome = finish(&mut connection, &mut journal, &controls)?;
+            let finished = finish(&mut connection, &mut journal, &controls)?;
+            attachments.release_pending(&mut connection)?;
             state.publish(|s| {
-                s.outcome = outcome;
+                if let Some((current, next_sequence)) = finished.reconciled {
+                    s.inventory = Some(current);
+                    sequence = next_sequence;
+                }
+                s.connected = true;
+                s.error = None;
+                s.outcome = finished.outcome;
                 s.pending = false;
                 s.pending_operation = None;
                 active = None;
@@ -265,28 +287,28 @@ fn run(
                     return Ok(());
                 }
                 attachments.release_pending(&mut connection)?;
-                let (current, sequence) = inventory(&mut connection, &controls)?;
-                state.publish(|s| {
-                    s.inventory = Some(current);
-                    s.connected = true;
-                    s.error = None;
-                });
                 match commands.recv_timeout(Duration::from_millis(150)) {
                     Ok(mutation) => {
                         active = Some((sequence, mutation.clone()));
                         journal.submit(sequence, mutation)?;
-                        let outcome = finish(&mut connection, &mut journal, &controls)?;
-                        let (current, _) = inventory(&mut connection, &controls)?;
+                        let finished = finish(&mut connection, &mut journal, &controls)?;
+                        let (current, next_sequence) =
+                            finished.reconciled.ok_or(ServerError::Protocol)?;
+                        sequence = next_sequence;
                         state.publish(|s| {
                             s.inventory = Some(current);
-                            s.outcome = outcome;
+                            s.outcome = finished.outcome;
                             s.pending = false;
                             s.pending_operation = None;
                             active = None;
                         });
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        let (current, next_sequence) = inventory(&mut connection, &controls)?;
+                        sequence = next_sequence;
+                        state.publish(|s| s.inventory = Some(current));
+                    }
                 }
             }
         })();
@@ -356,6 +378,10 @@ mod tests {
             assert!(!snapshot.connected);
             assert_eq!(snapshot.error, Some(ServerError::NotRunning));
         }
+        drop(second);
+        state.publish(|snapshot| snapshot.connected = true);
+        first.try_recv().unwrap();
+        assert_eq!(state.subscribers.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -380,9 +406,18 @@ mod tests {
             version: 0,
             template: "~/.worktrees/{repository}/{branch}".into(),
         });
+        let changes = client.subscribe();
+        changes.try_recv().unwrap();
         assert!(client.submit(operation.clone()));
-        state.value.lock().unwrap().connected = false;
+        changes
+            .try_recv()
+            .expect("submission publishes its pending state");
+        assert!(client.snapshot().pending);
+        state.publish(|snapshot| snapshot.connected = false);
         reject_queued(&state, &receiver);
+        changes
+            .try_recv()
+            .expect("disconnect and rejection wake the consumer");
         let snapshot = client.snapshot();
         assert_eq!(snapshot.rejected, Some(operation));
         assert!(!snapshot.pending);
