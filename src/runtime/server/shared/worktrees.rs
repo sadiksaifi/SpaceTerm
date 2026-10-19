@@ -664,7 +664,12 @@ mod tests {
         ) else {
             panic!("explicit shell");
         };
-        command(&mut host, 2, lease, "printf '\\nSOURCE-CWD:%s\\n' \"$PWD\"\n");
+        command(
+            &mut host,
+            2,
+            lease,
+            "printf '\\nSOURCE-CWD:%s\\n' \"$PWD\"\n",
+        );
         await_text(
             &mut host,
             2,

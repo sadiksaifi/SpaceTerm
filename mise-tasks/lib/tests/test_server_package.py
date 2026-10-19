@@ -167,14 +167,14 @@ class ServerArchiveTests(unittest.TestCase):
             patch.object(subprocess, "run", side_effect=native_run),
         ):
             baseline = self.root / "desktop/baseline"
-            server_package.stage_desktop_artifact(
-                archive, signature, baseline, self.info
-            )
+            server_package.stage_desktop_artifact(archive, signature, baseline, self.info)
             self.assertEqual((baseline / "artifact.tar.gz").read_bytes(), archive.read_bytes())
             self.assertEqual((baseline / "artifact.sig").read_bytes(), signature.read_bytes())
             destination = self.root / "desktop/wrong-build"
             expected = {**self.info, "commit": "b" * 40, "version": "dev.bbbbbbbbbbbb"}
-            with self.assertRaisesRegex(TaskError, "artifact differs from the requested exact build"):
+            with self.assertRaisesRegex(
+                TaskError, "artifact differs from the requested exact build"
+            ):
                 server_package.stage_desktop_artifact(archive, signature, destination, expected)
         self.assertFalse(destination.exists())
 
