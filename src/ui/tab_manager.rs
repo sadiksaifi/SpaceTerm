@@ -672,6 +672,13 @@ impl TabManager {
         self.sync_terminal_focus_blocker(cx);
     }
 
+    /// Reconnects each Pane the person's stop interrupted, once they started the server.
+    pub(crate) fn server_started(&self, cx: &mut App) {
+        for (_, view) in self.tabs.iter() {
+            view.update(cx, |view, cx| view.server_started(cx));
+        }
+    }
+
     pub(crate) fn close_all(&self, cx: &mut App) {
         for (_, view) in self.tabs.iter() {
             view.update(cx, |view, cx| view.close_all(cx));

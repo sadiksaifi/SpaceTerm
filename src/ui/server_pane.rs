@@ -966,6 +966,17 @@ mod connection {
                 )
         }
 
+        /// Connects again once the person started the server this Pane stopped with. The
+        /// connection keeps its mode, so the server says what became of the Pane; nothing takes
+        /// control or starts a shell. Any other Pane is left alone.
+        pub(crate) fn server_started(&mut self) -> ServerPaneSync {
+            if !self.server_stopped() {
+                return ServerPaneSync::default();
+            }
+            self.connection.retry();
+            self.sync()
+        }
+
         /// Retries the connection only. It never starts a shell in a dormant Pane.
         pub(crate) fn retry(&mut self) -> ServerPaneSync {
             if !self.can_retry() {

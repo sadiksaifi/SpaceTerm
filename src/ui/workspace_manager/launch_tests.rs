@@ -847,12 +847,20 @@ fn a_service_start_elsewhere_resumes_only_a_waiting_launch(cx: &mut TestAppConte
 /// Stopping the server from Settings while its Workspaces are open leaves each Pane saying so,
 /// with Start Server where retrying could never connect.
 fn stopped_in_session(cx: &mut TestAppContext) -> (LaunchHarness, &mut VisualTestContext) {
+    stopped_in_session_as(
+        crate::terminal::server_session::DevelopmentPaneStatus::Failed(ServerError::Stopped),
+        cx,
+    )
+}
+
+/// Like `stopped_in_session`, with the Pane left in `status` when the server stopped.
+fn stopped_in_session_as(
+    status: crate::terminal::server_session::DevelopmentPaneStatus,
+    cx: &mut TestAppContext,
+) -> (LaunchHarness, &mut VisualTestContext) {
     let (harness, cx) = ready_harness(cx);
     harness.launch.answer(ready());
-    harness
-        .panes
-        .pane(PANE)
-        .set(crate::terminal::server_session::DevelopmentPaneStatus::Failed(ServerError::Stopped));
+    harness.panes.pane(PANE).set(status);
     cx.executor()
         .advance_clock(crate::ui::shared_workspaces::POLL_INTERVAL * 3);
     cx.run_until_parked();
@@ -870,10 +878,44 @@ fn a_pane_stopped_in_session_offers_start_server_instead_of_retry(cx: &mut TestA
     harness.click("shared-pane-start-server-1", cx);
 
     assert_eq!(harness.launch.steps(), ["run", "start", "run"]);
+}
+
+/// Once Start Server in a Pane starts the server, a Pane it stopped connects again, so the
+/// server says what became of it. Nothing takes control or starts a shell on the person's behalf.
+fn assert_start_reconnects(
+    status: crate::terminal::server_session::DevelopmentPaneStatus,
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = stopped_in_session_as(status, cx);
+    let pane = harness.panes.pane(PANE);
+
+    harness.click("shared-pane-start-server-1", cx);
+
     assert_eq!(
-        harness.panes.pane(PANE).retries(),
-        0,
-        "a retry could never connect"
+        (pane.retries(), pane.take_overs(), pane.restored_starts()),
+        (1, 0, 0)
+    );
+}
+
+#[gpui::test]
+fn starting_the_server_from_a_pane_reconnects_its_stopped_pane(cx: &mut TestAppContext) {
+    assert_start_reconnects(
+        crate::terminal::server_session::DevelopmentPaneStatus::Failed(ServerError::Stopped),
+        cx,
+    );
+}
+
+/// A Pane this window did not control offers Take Over again once the server answers, rather
+/// than waiting on a connection that never retries.
+#[gpui::test]
+fn starting_the_server_reconnects_a_stopped_take_over_pane_without_taking_control(
+    cx: &mut TestAppContext,
+) {
+    assert_start_reconnects(
+        crate::terminal::server_session::DevelopmentPaneStatus::TakeoverFailed(
+            ServerError::Stopped,
+        ),
+        cx,
     );
 }
 
@@ -886,4 +928,29 @@ fn a_refused_start_while_presenting_explains_itself(cx: &mut TestAppContext) {
 
     assert_eq!(harness.launch.steps(), ["run", "start"]);
     assert!(cx.update(|window, cx| spaceterm_ui::window_modal_is_open(window, cx)));
+    assert_eq!(
+        harness.panes.pane(PANE).retries(),
+        0,
+        "the server is still stopped"
+    );
+}
+
+/// Starting the server from Settings reconnects the Panes a presenting window shows stopped,
+/// without running launch again, taking control, or starting a shell.
+#[gpui::test]
+fn a_service_start_elsewhere_reconnects_the_stopped_panes_of_a_presenting_window(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = stopped_in_session(cx);
+    let pane = harness.panes.pane(PANE);
+
+    cx.cx
+        .update(crate::ui::workspace_manager::resume_waiting_launches);
+    cx.run_until_parked();
+
+    assert_eq!(harness.launch.steps(), ["run"]);
+    assert_eq!(
+        (pane.retries(), pane.take_overs(), pane.restored_starts()),
+        (1, 0, 0)
+    );
 }

@@ -345,8 +345,9 @@ pub(crate) fn start_local_server(window: &mut Window, cx: &mut App) {
 }
 
 /// Runs launch again in every Workspace Window still waiting on the server, after the person
-/// started or installed it from Settings. A window already presenting its Workspaces, or still
-/// launching, is left alone, and nothing here starts the server itself.
+/// started or installed it from Settings. A window already presenting its Workspaces reconnects
+/// the Panes the stop interrupted instead. A window still launching is left alone, and nothing
+/// here starts the server itself.
 pub(crate) fn resume_waiting_launches(cx: &mut App) {
     for window in cx.windows() {
         let Some(window) = window.downcast::<WorkspaceManager>() else {
@@ -361,6 +362,8 @@ pub(crate) fn resume_waiting_launches(cx: &mut App) {
             ) && manager.launch._task.is_none()
             {
                 manager.run_local_launch(None, window, cx);
+            } else if manager.launch.state == LaunchState::Ready {
+                manager.server_started(cx);
             }
         });
     }
@@ -425,6 +428,10 @@ impl WorkspaceManager {
         };
         self.launch.state = state;
         self.launch._task = None;
+        // A running server answers the Panes a stop interrupted, so they connect again.
+        if state == LaunchState::Ready {
+            self.server_started(cx);
+        }
         // While Workspaces are presented the launch screen is hidden, so a step that could not
         // finish explains itself in an alert instead.
         if self.launch_presentation().is_none()
@@ -437,6 +444,15 @@ impl WorkspaceManager {
             self.focus(window, cx);
         }
         cx.notify();
+    }
+
+    /// Reconnects each Pane the person's stop interrupted, once the server runs again.
+    fn server_started(&self, cx: &mut App) {
+        for workspace in self.workspaces.iter() {
+            workspace
+                .payload()
+                .update(cx, |manager, cx| manager.server_started(cx));
+        }
     }
 
     /// Presents a ready server's Workspaces in this window.

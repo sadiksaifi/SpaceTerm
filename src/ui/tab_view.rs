@@ -3235,6 +3235,19 @@ impl TabView {
             self.focus(window, cx);
         }
     }
+    /// Reconnects each shared Pane the person's stop interrupted, once they started the server.
+    pub(crate) fn server_started(&mut self, cx: &mut Context<Self>) {
+        let Some(shared) = self.shared.as_mut() else {
+            return;
+        };
+        for pane_id in shared.pane_ids() {
+            if let Some(view) = shared.view_mut(pane_id) {
+                view.server_started();
+            }
+        }
+        cx.notify();
+    }
+
     fn retry_shared_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
         if self
             .shared
