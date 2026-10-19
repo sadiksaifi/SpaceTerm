@@ -1213,11 +1213,24 @@ mod development {
                 ServerCloseTarget::Pane { .. } => SharedCloseScope::Pane,
                 ServerCloseTarget::Tab { .. } => SharedCloseScope::Tab,
                 ServerCloseTarget::Workspace { .. } => SharedCloseScope::Workspace,
+                ServerCloseTarget::Worktree { .. } => SharedCloseScope::Worktree,
             };
             Ok(SharedCloseApproval {
                 target,
                 scope,
                 workspace: workspace.name.clone(),
+                tabs: workspace
+                    .tabs
+                    .iter()
+                    .filter(|tab| {
+                        tab.panes.iter().any(|pane| {
+                            confirmation
+                                .panes
+                                .iter()
+                                .any(|confirmed| confirmed.id == pane.id)
+                        })
+                    })
+                    .count(),
                 confirmation,
             })
         }
@@ -1623,7 +1636,8 @@ mod development {
         let workspace = match target {
             ServerCloseTarget::Pane { workspace, .. }
             | ServerCloseTarget::Tab { workspace, .. }
-            | ServerCloseTarget::Workspace { workspace } => workspace,
+            | ServerCloseTarget::Workspace { workspace }
+            | ServerCloseTarget::Worktree { workspace, .. } => workspace,
         };
         inventory
             .workspaces
@@ -1638,6 +1652,13 @@ mod development {
             match target {
                 ServerCloseTarget::Workspace { .. } => true,
                 ServerCloseTarget::Tab { tab: id, .. } => tab(id).is_some(),
+                ServerCloseTarget::Worktree { tab: id, .. } => tab(id).is_some_and(|anchor| {
+                    anchor.worktree.is_some()
+                        && workspace.tabs.iter().any(|tab| {
+                            tab.worktree != anchor.worktree
+                                || tab.worktree_repository != anchor.worktree_repository
+                        })
+                }),
                 ServerCloseTarget::Pane { tab: id, pane, .. } => {
                     tab(id).is_some_and(|tab| tab.panes.iter().any(|p| p.id == pane))
                 }
@@ -1654,6 +1675,7 @@ mod development {
         target: ServerCloseTarget,
         confirmation: ServerCloseConfirmation,
         scope: SharedCloseScope,
+        tabs: usize,
         /// The Workspace's name as the server published it.
         workspace: String,
     }
@@ -1664,6 +1686,7 @@ mod development {
         Pane,
         Tab,
         Workspace,
+        Worktree,
     }
 
     impl SharedCloseApproval {
@@ -1681,6 +1704,7 @@ mod development {
             match self.scope {
                 SharedCloseScope::Pane => "Close Pane?".to_owned(),
                 SharedCloseScope::Tab => "Close Tab?".to_owned(),
+                SharedCloseScope::Worktree => "Close Tabs?".to_owned(),
                 SharedCloseScope::Workspace => {
                     format!("Kill Workspace \u{201C}{}\u{201D}?", self.workspace)
                 }
@@ -1691,6 +1715,7 @@ mod development {
             match self.scope {
                 SharedCloseScope::Pane => "Close Pane",
                 SharedCloseScope::Tab => "Close Tab",
+                SharedCloseScope::Worktree => "Close Tabs",
                 SharedCloseScope::Workspace => "Kill Workspace",
             }
         }
@@ -1703,6 +1728,17 @@ mod development {
                 SharedCloseScope::Workspace => {
                     "Its Tabs and Panes are permanently removed for every client.".to_owned()
                 }
+                SharedCloseScope::Worktree => match (self.tabs, panes) {
+                    (1, 1) => {
+                        "The Worktree\u{2019}s Tab and its Pane close for every client.".to_owned()
+                    }
+                    (1, panes) => format!(
+                        "The Worktree\u{2019}s Tab and its {panes} Panes close for every client."
+                    ),
+                    (tabs, panes) => format!(
+                        "The Worktree\u{2019}s {tabs} Tabs and their {panes} Panes close for every client."
+                    ),
+                },
                 _ if self.confirmation.removes_workspace => format!(
                     "This is the only {} in \u{201C}{}\u{201D}, so the Workspace is permanently \
                      removed for every client.",
@@ -1738,6 +1774,11 @@ mod development {
 
         /// What a removed Workspace leaves behind, when the close removes one.
         pub(crate) fn detail(&self) -> Option<&'static str> {
+            if self.scope == SharedCloseScope::Worktree {
+                return Some(
+                    "The Worktree, its files, and its branch are kept. Tabs outside this Worktree keep running.",
+                );
+            }
             self.confirmation.removes_workspace.then_some(
                 "Other Workspaces keep running. Repository files and Git Worktree directories \
                  stay on disk. Neither a server restart nor another client can bring this \
@@ -1756,6 +1797,7 @@ mod development {
             match self.scope {
                 SharedCloseScope::Pane => "Pane Already Closed",
                 SharedCloseScope::Tab => "Tab Already Closed",
+                SharedCloseScope::Worktree => "Tabs Already Closed",
                 SharedCloseScope::Workspace => "Workspace Already Removed",
             }
         }
@@ -1767,6 +1809,7 @@ mod development {
         match target {
             ServerCloseTarget::Pane { .. } => "Pane Changed on Another Client",
             ServerCloseTarget::Tab { .. } => "Tab Changed on Another Client",
+            ServerCloseTarget::Worktree { .. } => "Tabs Changed on Another Client",
             ServerCloseTarget::Workspace { .. } => "Workspace Changed on Another Client",
         }
     }

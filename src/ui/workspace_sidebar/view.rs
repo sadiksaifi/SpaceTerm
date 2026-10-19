@@ -1495,9 +1495,8 @@ impl WorkspaceSidebar {
                     Icon::new(IconName::Copy, size, foreground).into_any_element()
                 })
                 .debug_selector("worktree-menu-row-copy-path"),
-            // A shared Worktree's Tabs close one at a time, each with its own confirmation.
             MenuEntry::action("Close Tabs", WorktreeMenuCommand::CloseTabs)
-                .disabled(!worktree.has_tabs || worktree.shared)
+                .disabled(!worktree.closes_tabs)
                 .icon(|foreground, size| {
                     Icon::new(IconName::X, size, foreground).into_any_element()
                 })

@@ -4136,13 +4136,41 @@ impl WorkspaceManager {
             return true;
         }
         let Some(server_target) = self.shared_close_target(target, cx) else {
-            // A shared Workspace lists no Worktrees, and a Tab or Pane this window cannot name on
-            // the server has already left it.
+            // A target this window can no longer name closes nothing.
             return true;
         };
         let Some(shared) = self.shared.as_ref() else {
             return true;
         };
+        if let spaceterm_server::hierarchy::CloseTarget::Worktree { workspace, tab } = server_target
+            && let Some(workspace) = shared
+                .latest_inventory()
+                .and_then(|i| i.workspaces.iter().find(|w| w.id == workspace))
+            && let Some(anchor) = workspace.tabs.iter().find(|t| t.id == tab)
+            && workspace.tabs.iter().all(|t| {
+                t.worktree == anchor.worktree && t.worktree_repository == anchor.worktree_repository
+            })
+        {
+            let detail = format!(
+                "Closing them would leave \u{201C}{}\u{201D} without a Tab, so nothing closed. Open a Tab outside this Worktree first, or kill the Workspace.",
+                workspace.name
+            );
+            let _ = Alert::new(
+                ModalId::new("worktree-tabs-not-closed"),
+                "Tabs Not Closed",
+                "Tabs Not Closed",
+                detail,
+                vec![ModalAction::new(
+                    (),
+                    "OK",
+                    ModalActionRole::Cancel,
+                    "worktree-tabs-not-closed-ok",
+                )],
+            )
+            .intent(AlertIntent::Warning)
+            .present(window, cx, |_, _| {});
+            return true;
+        }
         let approval = match shared.close_approval(server_target) {
             Ok(approval) => approval,
             Err(SharedCloseUnavailable::Edits(reason)) => {
@@ -4235,6 +4263,7 @@ impl WorkspaceManager {
         match target {
             CloseTarget::Pane { .. } => "close the Pane",
             CloseTarget::Tab { .. } => "close the Tab",
+            CloseTarget::Worktree { .. } => "close the Worktree\u{2019}s Tabs",
             _ => "kill the Workspace",
         }
     }
@@ -4276,7 +4305,22 @@ impl WorkspaceManager {
                     pane: manager.shared_server_pane(tab_id, pane_id, cx)?,
                 })
             }
-            CloseTarget::Worktree { .. } | CloseTarget::Window => None,
+            CloseTarget::Worktree {
+                workspace_id,
+                worktree_id,
+            } => {
+                let workspace = shared.server_workspace(workspace_id)?;
+                let path = self.shared_worktree_root(workspace_id, worktree_id)?;
+                let anchor = workspace
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.worktree.as_ref() == Some(&path))?;
+                Some(ServerCloseTarget::Worktree {
+                    workspace: workspace.id,
+                    tab: anchor.id,
+                })
+            }
+            CloseTarget::Window => None,
         }
     }
 

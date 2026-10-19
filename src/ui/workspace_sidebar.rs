@@ -258,9 +258,8 @@ pub(super) struct WorktreeRowViewModel {
     /// Git no longer has the Worktree's directory.
     pub(super) missing: bool,
     pub(super) removal: WorktreeRemoval,
-    /// A SpaceTerm Server lists the Worktree and owns its Tabs. The row shows and switches to its
-    /// Tabs and requests its first Tab through the owning server.
-    pub(super) shared: bool,
+    /// The editable Worktree has Tabs and an existing Tab outside it to keep.
+    pub(super) closes_tabs: bool,
 }
 
 impl WorktreeRowViewModel {
@@ -271,7 +270,7 @@ impl WorktreeRowViewModel {
 
     /// Whether the row offers New Tab: a Tab in this Worktree's directory.
     pub(super) fn opens_tabs(&self) -> bool {
-        self.openable() && !self.shared
+        self.openable() && self.opens_first_tab
     }
 }
 

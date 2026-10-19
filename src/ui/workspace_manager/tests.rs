@@ -13641,10 +13641,9 @@ mod shared_repositories {
         assert_eq!(harness.edits.submitted(), Vec::new());
     }
 
-    /// Server Worktree rows show the server's inventory and membership, and offer no write: no
-    /// removal, no Tab in a chosen Worktree, and no Worktree-wide close.
+    /// Worktree actions follow the owning server's availability and existing Tab membership.
     #[gpui::test]
-    fn shared_worktree_rows_should_follow_server_membership_and_offer_no_writes(
+    fn shared_worktree_rows_should_follow_server_membership_and_available_actions(
         cx: &mut TestAppContext,
     ) {
         let (harness, cx) = harness(cx, published(1, "main", true));
@@ -13667,7 +13666,7 @@ mod shared_repositories {
         );
         assert_eq!(rows[0].removal, WorktreeRemoval::Main);
         assert_eq!(rows[1].removal, WorktreeRemoval::Server);
-        assert!(rows.iter().all(|row| row.shared && !row.opens_tabs()));
+        assert!(rows.iter().all(|row| !row.opens_tabs() && row.closes_tabs));
         assert!(!creates_worktrees, "New Worktree stays unavailable");
     }
 
@@ -13986,6 +13985,140 @@ mod shared_repositories {
         let section = harness.row(cx).worktrees.expect("the Worktree rows");
         let rows: Vec<_> = section.rows().map(|row| row.worktree_id).collect();
         (rows[0], rows[1])
+    }
+
+    #[gpui::test]
+    fn worktree_rows_copy_the_path_and_confirm_their_server_tabs(cx: &mut TestAppContext) {
+        use spaceterm_server::hierarchy::{
+            CloseInventory, CloseTarget as ServerCloseTarget, ConfirmedPane, Mutation, Outcome,
+        };
+        let mut initial = published(1, "main", true);
+        let mut second = initial.workspaces[0].tabs[1].clone();
+        second.id = [70; 32];
+        second.root_pane = [71; 32];
+        second.panes[0].id = second.root_pane;
+        initial.workspaces[0].tabs.push(second);
+        initial.close = Some(CloseInventory {
+            boot: [9; 32],
+            sessions: initial.workspaces[0]
+                .tabs
+                .iter()
+                .flat_map(|t| &t.panes)
+                .map(|p| ConfirmedPane {
+                    id: p.id,
+                    session: None,
+                })
+                .collect(),
+        });
+        let (harness, cx) = harness(cx, initial.clone());
+        cx.update(|window, cx| {
+            window.activate_window();
+            harness.manager.update(cx, |manager, cx| {
+                manager.activate_workspace(harness.shared, window, cx);
+            });
+        });
+        redraw(cx);
+        let (_, feature) = worktree_ids(&harness, cx);
+        right_click(worktree_row(harness.shared, feature, cx), cx);
+        click("worktree-menu-row-copy-path", cx);
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
+            Some(FEATURE_ROOT.into())
+        );
+        right_click(worktree_row(harness.shared, feature, cx), cx);
+        click("worktree-menu-row-close-tabs", cx);
+        assert!(
+            harness.edits.submitted().is_empty(),
+            "confirmation sends nothing"
+        );
+        assert!(
+            spaceterm_ui::a11y_testing::A11yTree::read(cx)
+                .find("Close Tabs?")
+                .is_some()
+        );
+        click("modal-action-shared-close-confirm", cx);
+        let target = ServerCloseTarget::Worktree {
+            workspace: WORKSPACE,
+            tab: FEATURE_TAB,
+        };
+        assert_eq!(
+            harness.edits.submitted(),
+            [Mutation::Close {
+                target,
+                confirmation: initial.close_confirmation(target).unwrap()
+            }]
+        );
+        assert!(
+            harness
+                .row(cx)
+                .worktrees
+                .unwrap()
+                .rows()
+                .any(|row| row.worktree_id == feature && row.has_tabs),
+            "publication owns removal"
+        );
+        harness
+            .edits
+            .answer(Outcome::Accepted { target: WORKSPACE });
+        initial.workspaces[0].tabs.retain(|tab| tab.id == ROOT_TAB);
+        initial.revision += 1;
+        harness.publish(initial, cx);
+        assert!(
+            harness
+                .row(cx)
+                .worktrees
+                .unwrap()
+                .rows()
+                .any(|row| row.worktree_id == feature && !row.has_tabs),
+            "the Git Worktree row remains"
+        );
+    }
+
+    #[gpui::test]
+    fn closing_every_worktree_tab_refuses_without_a_confirmation_or_mutation(
+        cx: &mut TestAppContext,
+    ) {
+        let mut initial = published(1, "main", true);
+        initial.workspaces[0]
+            .tabs
+            .retain(|tab| tab.id == FEATURE_TAB);
+        initial.workspaces[0].root_tab = FEATURE_TAB;
+        let (harness, cx) = harness(cx, initial);
+        let (_, feature) = worktree_ids(&harness, cx);
+        assert!(
+            !harness
+                .row(cx)
+                .worktrees
+                .unwrap()
+                .rows()
+                .find(|row| row.worktree_id == feature)
+                .unwrap()
+                .closes_tabs
+        );
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                manager.handle_sidebar_event(
+                    SidebarEvent::WorktreeCommand {
+                        workspace_id: harness.shared,
+                        worktree_id: feature,
+                        command: WorktreeMenuCommand::CloseTabs,
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+        redraw(cx);
+        assert!(
+            spaceterm_ui::a11y_testing::A11yTree::read(cx)
+                .find("Tabs Not Closed")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("modal-action-shared-close-confirm")
+                .is_none()
+        );
+        assert!(harness.edits.submitted().is_empty());
     }
 
     #[gpui::test]

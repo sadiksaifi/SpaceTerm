@@ -24,9 +24,23 @@ pub struct Inventory {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CloseTarget {
-    Pane { workspace: Id, tab: Id, pane: Id },
-    Tab { workspace: Id, tab: Id },
-    Workspace { workspace: Id },
+    Pane {
+        workspace: Id,
+        tab: Id,
+        pane: Id,
+    },
+    Tab {
+        workspace: Id,
+        tab: Id,
+    },
+    Workspace {
+        workspace: Id,
+    },
+    /// One surviving Tab identifies the server-owned Worktree membership to close.
+    Worktree {
+        workspace: Id,
+        tab: Id,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,7 +70,8 @@ impl Inventory {
         let workspace = match target {
             CloseTarget::Pane { workspace, .. }
             | CloseTarget::Tab { workspace, .. }
-            | CloseTarget::Workspace { workspace } => workspace,
+            | CloseTarget::Workspace { workspace }
+            | CloseTarget::Worktree { workspace, .. } => workspace,
         };
         let workspace = self.workspaces.iter().find(|w| w.id == workspace)?;
         // Sibling removal can change the consequences without changing any target Pane.
@@ -64,7 +79,9 @@ impl Inventory {
             CloseTarget::Pane { tab, .. } => {
                 workspace.tabs.iter().find(|t| t.id == tab)?.panes.len() == 1
             }
-            CloseTarget::Tab { .. } | CloseTarget::Workspace { .. } => true,
+            CloseTarget::Tab { .. }
+            | CloseTarget::Workspace { .. }
+            | CloseTarget::Worktree { .. } => true,
         };
         let removes_workspace =
             ids.len() == workspace.tabs.iter().map(|t| t.panes.len()).sum::<usize>();
@@ -84,10 +101,26 @@ impl Inventory {
         let workspace = match target {
             CloseTarget::Pane { workspace, .. }
             | CloseTarget::Tab { workspace, .. }
-            | CloseTarget::Workspace { workspace } => workspace,
+            | CloseTarget::Workspace { workspace }
+            | CloseTarget::Worktree { workspace, .. } => workspace,
         };
         let w = self.workspaces.iter().find(|w| w.id == workspace)?;
         match target {
+            CloseTarget::Worktree { tab, .. } => {
+                let anchor = w.tabs.iter().find(|t| t.id == tab)?;
+                anchor.worktree.as_ref()?;
+                Some(
+                    w.tabs
+                        .iter()
+                        .filter(|t| {
+                            t.worktree == anchor.worktree
+                                && t.worktree_repository == anchor.worktree_repository
+                        })
+                        .flat_map(|t| &t.panes)
+                        .map(|p| p.id)
+                        .collect(),
+                )
+            }
             CloseTarget::Workspace { .. } => {
                 Some(w.tabs.iter().flat_map(|t| &t.panes).map(|p| p.id).collect())
             }
@@ -539,13 +572,19 @@ impl State {
                 if self.inventory.close_confirmation(*target).as_ref() != Some(confirmation) {
                     return Ok(Outcome::StaleConfirmation);
                 }
+                // Close Tabs keeps an existing Tab outside the Worktree; it never starts one.
+                if matches!(target, CloseTarget::Worktree { .. }) && confirmation.removes_workspace
+                {
+                    return Ok(Outcome::Invalid);
+                }
                 for id in ids {
                     self.remove_pane(id);
                 }
                 match target {
                     CloseTarget::Pane { pane, .. } => *pane,
                     CloseTarget::Tab { tab, .. } => *tab,
-                    CloseTarget::Workspace { workspace } => *workspace,
+                    CloseTarget::Workspace { workspace }
+                    | CloseTarget::Worktree { workspace, .. } => *workspace,
                 }
             }
             Mutation::CreateWorkspace {
@@ -1103,6 +1142,181 @@ impl ClientJournal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn confirmed_worktree_close_is_exact_and_keeps_outside_tabs_and_workspaces() {
+        let mut state = State::empty();
+        state
+            .apply(
+                [1; 32],
+                1,
+                Mutation::CreateWorkspace {
+                    name: "Build".into(),
+                    directory: None,
+                },
+                "/home/test".as_ref(),
+                |_| true,
+            )
+            .unwrap();
+        let workspace = state.inventory.workspaces[0].id;
+        let outside = state.inventory.workspaces[0].root_tab;
+        let outside_pane = state.inventory.workspaces[0].tabs[0].root_pane;
+        let mut anchor = [0; 32];
+        for _ in 0..2 {
+            anchor = state
+                .add_worktree_tab(
+                    [1; 32],
+                    workspace,
+                    "/repo/main".into(),
+                    "/repo/feature".into(),
+                    "/repo/feature".into(),
+                )
+                .unwrap();
+        }
+        let Outcome::Accepted { target: other } = state
+            .apply(
+                [1; 32],
+                2,
+                Mutation::CreateWorkspace {
+                    name: "Other".into(),
+                    directory: None,
+                },
+                "/home/test".as_ref(),
+                |_| true,
+            )
+            .unwrap()
+        else {
+            panic!("other Workspace");
+        };
+        state
+            .add_worktree_tab(
+                [1; 32],
+                other,
+                "/repo/main".into(),
+                "/repo/feature".into(),
+                "/repo/feature".into(),
+            )
+            .unwrap();
+        state.inventory.close = Some(CloseInventory {
+            boot: [9; 32],
+            sessions: state
+                .inventory
+                .workspaces
+                .iter()
+                .flat_map(|w| &w.tabs)
+                .flat_map(|t| &t.panes)
+                .map(|p| ConfirmedPane {
+                    id: p.id,
+                    session: Some(p.id),
+                })
+                .collect(),
+        });
+        let target = CloseTarget::Worktree {
+            workspace,
+            tab: anchor,
+        };
+        let confirmation = state.inventory.close_confirmation(target).unwrap();
+        assert_eq!(confirmation.panes.len(), 2);
+        let changed = confirmation.panes[0].id;
+        state
+            .inventory
+            .close
+            .as_mut()
+            .unwrap()
+            .sessions
+            .iter_mut()
+            .find(|p| p.id == changed)
+            .unwrap()
+            .session = Some([8; 32]);
+        assert_eq!(
+            state
+                .apply(
+                    [1; 32],
+                    3,
+                    Mutation::Close {
+                        target,
+                        confirmation
+                    },
+                    "/home/test".as_ref(),
+                    |_| true
+                )
+                .unwrap(),
+            Outcome::StaleConfirmation
+        );
+        assert_eq!(state.inventory.workspaces[0].tabs.len(), 3);
+        let confirmation = state.inventory.close_confirmation(target).unwrap();
+        state
+            .apply(
+                [1; 32],
+                4,
+                Mutation::Close {
+                    target,
+                    confirmation,
+                },
+                "/home/test".as_ref(),
+                |_| true,
+            )
+            .unwrap();
+        assert_eq!(
+            state.inventory.workspaces[0]
+                .tabs
+                .iter()
+                .map(|t| t.id)
+                .collect::<Vec<_>>(),
+            [outside]
+        );
+        assert_eq!(
+            state.inventory.workspaces[1].tabs.len(),
+            2,
+            "another Workspace's matching Worktree stays untouched"
+        );
+        let tab = state
+            .add_worktree_tab(
+                [1; 32],
+                workspace,
+                "/repo/main".into(),
+                "/repo/feature".into(),
+                "/repo/feature".into(),
+            )
+            .unwrap();
+        state.remove_pane(outside_pane);
+        state.inventory.close = Some(CloseInventory {
+            boot: [9; 32],
+            sessions: state
+                .inventory
+                .workspaces
+                .iter()
+                .flat_map(|w| &w.tabs)
+                .flat_map(|t| &t.panes)
+                .map(|p| ConfirmedPane {
+                    id: p.id,
+                    session: None,
+                })
+                .collect(),
+        });
+        let target = CloseTarget::Worktree { workspace, tab };
+        let confirmation = state.inventory.close_confirmation(target).unwrap();
+        assert_eq!(
+            state
+                .apply(
+                    [1; 32],
+                    5,
+                    Mutation::Close {
+                        target,
+                        confirmation
+                    },
+                    "/home/test".as_ref(),
+                    |_| true
+                )
+                .unwrap(),
+            Outcome::Invalid
+        );
+        assert_eq!(
+            state.inventory.workspaces[0].tabs.len(),
+            1,
+            "no replacement Tab or shell"
+        );
+    }
 
     #[test]
     fn automatic_names_follow_the_root_directory_and_pin_but_custom_names_do_not() {

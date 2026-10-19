@@ -497,6 +497,87 @@ mod tests {
     };
 
     #[test]
+    fn confirmed_worktree_close_ends_its_shell_and_preserves_git_and_the_outside_tab() {
+        use crate::runtime::server::tests::{await_text, command};
+        use spaceterm_server::hierarchy::CloseTarget;
+        let git = GitFixture::new();
+        let tree = git.0.join("linked");
+        git.git(&["worktree", "add", "-b", "feature", tree.to_str().unwrap()]);
+        std::fs::write(tree.join("kept"), b"kept").unwrap();
+        let mut prototype = host();
+        prototype.directory = git.0.clone();
+        let mut host = SharedWorkspaceHost::new(prototype);
+        let workspace = create_shared(&mut host, 1);
+        let outside = host.state.inventory.workspaces[0].root_tab;
+        let Outcome::Accepted { target: tab } = finish_write(
+            &mut host,
+            2,
+            Operation::OpenTab {
+                workspace,
+                root: git.0.clone(),
+                path: tree.clone(),
+                source: None,
+            },
+        ) else {
+            panic!("open Worktree");
+        };
+        assert!(host.panes.is_empty(), "creating membership starts no shell");
+        let pane = host.state.inventory.workspaces[0]
+            .tabs
+            .iter()
+            .find(|t| t.id == tab)
+            .unwrap()
+            .root_pane;
+        let Reply::Attached { lease } = host.request(
+            [1; 32],
+            [2; 32],
+            Request::SelectPane {
+                pane,
+                explicit: true,
+                size: PaneSize {
+                    columns: 240,
+                    ..size()
+                },
+                style: None,
+            },
+        ) else {
+            panic!("explicit shell");
+        };
+        command(&mut host, 2, lease, "printf 'SOURCE-CWD:%s\\n' \"$PWD\"\n");
+        await_text(
+            &mut host,
+            2,
+            lease,
+            &format!("SOURCE-CWD:{}", tree.display()),
+        );
+        let target = CloseTarget::Worktree { workspace, tab };
+        let confirmation = shared_inventory(&mut host)
+            .close_confirmation(target)
+            .unwrap();
+        assert!(confirmation.panes.iter().any(|pane| pane.session.is_some()));
+        assert!(
+            matches!(host.request([3; 32], [3; 32], Request::Mutate { sequence: 1, mutation: Mutation::Close { target, confirmation } }), Reply::Outcome(record) if record.outcome == Outcome::Accepted { target: workspace })
+        );
+        assert_eq!(
+            host.state.inventory.workspaces[0]
+                .tabs
+                .iter()
+                .map(|tab| tab.id)
+                .collect::<Vec<_>>(),
+            [outside]
+        );
+        assert_eq!(std::fs::read(tree.join("kept")).unwrap(), b"kept");
+        git.git(&["show-ref", "--verify", "refs/heads/feature"]);
+        git.git(&["worktree", "list", "--porcelain"]);
+        assert!(
+            host.panes
+                .get(&pane)
+                .is_none_or(|host| host.pane.as_ref().is_none_or(|pane| pane.ended))
+        );
+        host.shutdown().unwrap();
+    }
+
+    #[test]
     fn worktree_tabs_use_the_source_directory_and_contained_pin_before_the_root() {
         let git = GitFixture::new();
         let tree = git.0.join("linked");
