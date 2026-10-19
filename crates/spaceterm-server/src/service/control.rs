@@ -125,7 +125,7 @@ pub fn display_name(identity: &str) -> &str {
     }
 }
 
-/// Blocking owning-account controls, injected into a CLI or native status-area host.
+/// Blocking owning-account controls shared by command-line and desktop clients.
 #[derive(Clone)]
 pub struct Controller {
     service: Service,

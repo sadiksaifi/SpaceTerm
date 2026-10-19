@@ -1,4 +1,4 @@
-//! Owning-account service commands shared by headless and status-area executables.
+//! Owning-account service commands shared by headless and desktop executables.
 
 use super::{Action, Controller};
 use crate::{
