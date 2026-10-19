@@ -698,6 +698,7 @@ fn close_all_windows(cx: &mut App) {
             });
         } else if !crate::ui::settings_window::request_window_close(window, cx)
             && !crate::ui::server_control_window::request_window_close(window, cx)
+            && !crate::ui::updates::request_launch_window_close(window, cx)
         {
             let _ = window.update(cx, |_, window, _| window.remove_window());
         }

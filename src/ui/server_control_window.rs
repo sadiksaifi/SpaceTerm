@@ -148,6 +148,10 @@ pub(crate) fn request_window_close(window: gpui::AnyWindowHandle, cx: &mut App) 
         return false;
     };
     let _ = control.update(cx, |this, window, cx| {
+        // A window that stays keeps the client windowed with it.
+        if matches!(this.step, Some(Step::Working(_))) {
+            crate::app::dismissal_cancelled(cx);
+        }
         this.respond(Response::Cancel, window, cx);
     });
     true

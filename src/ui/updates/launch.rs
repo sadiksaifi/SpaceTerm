@@ -95,6 +95,16 @@ fn open_window(cx: &mut App) {
     }
 }
 
+/// Closes the launch view the way its own close request does: it stays until the gate opens, and
+/// the client stays windowed with it. Reports whether `window` is the launch view.
+pub(crate) fn request_window_close(window: gpui::AnyWindowHandle, cx: &mut App) -> bool {
+    if window.downcast::<LaunchView>().is_none() {
+        return false;
+    }
+    crate::app::dismissal_cancelled(cx);
+    true
+}
+
 /// What the launch view says for one gate and service state.
 #[derive(Clone, Debug, PartialEq)]
 struct LaunchPresentation {
@@ -437,6 +447,51 @@ mod tests {
                 .iter()
                 .any(|label| label["aria"]["value"] == "SpaceTerm opens in a moment.")
         );
+    }
+
+    #[gpui::test]
+    fn close_all_windows_keeps_the_held_launch_progress(cx: &mut gpui::TestAppContext) {
+        use crate::settings::storage::testing::MemoryStorage;
+
+        let settings = crate::settings::Settings::load(MemoryStorage::with_document(
+            &crate::settings::SettingsDocument::default(),
+        ));
+        let adapter = std::rc::Rc::new(crate::updates::testing::RecordingAdapter::available());
+        cx.update(|cx| {
+            crate::ui::appearance_runtime::install(
+                settings,
+                std::rc::Rc::new(
+                    crate::platform::appearance::testing::RecordingAppearancePlatform::default(),
+                ),
+                cx,
+            )
+            .expect("appearance runtime should install");
+            crate::ui::init(cx).expect("UI initialization should succeed");
+            crate::app::init(
+                cx,
+                std::rc::Rc::new(
+                    crate::platform::application_menu::testing::RecordingApplicationMenuAdapter::default(),
+                ),
+                std::rc::Rc::new(
+                    crate::platform::application_quit::testing::RecordingApplicationQuitAdapter::default(),
+                ),
+            )
+            .expect("application actions should install");
+            ApplicationUpdates::install(adapter, cx);
+        });
+        let updates = cx.update(|cx| service(cx).expect("the update service is installed"));
+        updates.update(cx, |updates, cx| {
+            updates.begin_launch(std::rc::Rc::new(|_| {}), cx)
+        });
+        cx.update(open_window);
+        cx.run_until_parked();
+        assert_eq!(cx.windows().len(), 1, "the held launch shows its progress");
+
+        cx.update(|cx| cx.dispatch_action(&crate::app::CloseAllWindows));
+        cx.run_until_parked();
+
+        // The gate decides when the launch continues; nothing else can show its progress.
+        assert_eq!(cx.windows().len(), 1);
     }
 
     #[test]
