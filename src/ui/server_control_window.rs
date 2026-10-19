@@ -105,7 +105,7 @@ pub(crate) fn open(
     }
     let name = controller.display_name().to_owned();
     let content = Content::of(&name, operation, &step);
-    let window_size = window_size(&content, cx);
+    let window_size = reachable_size(&name, operation, &content, cx);
     let options = cx
         .global::<crate::platform::window_chrome::WindowChrome>()
         .options(
@@ -268,6 +268,32 @@ impl Typography {
             body: appearance.typography.style(TextRole::Secondary).clone(),
         }
     }
+}
+
+/// The size that fits `content` and every later step its window can reach. A window that
+/// cannot be resized keeps one size, because some compositors keep a fixed-size window at its
+/// smaller size when it later asks to grow, clipping the step's text and buttons.
+fn reachable_size(name: &str, operation: Operation, content: &Content, cx: &App) -> Size<Pixels> {
+    let mut later = vec![Content::of(name, operation, &Step::Working(operation))];
+    // Start and Restart can need startup authorization, then continue as Start, and the
+    // operating system's prompt can be refused.
+    if operation != Operation::Stop {
+        let start = Operation::Start;
+        later.push(Content::of(name, start, &Step::Working(start)));
+        for (declined, stopped) in [(true, false), (false, operation == Operation::Restart)] {
+            later.push(Content::of(
+                name,
+                start,
+                &Step::Authorize { declined, stopped },
+            ));
+        }
+    }
+    std::iter::once(content)
+        .chain(&later)
+        .map(|content| window_size(content, cx))
+        .fold(size(px(WINDOW_WIDTH), px(0.0)), |fits, needed| {
+            size(fits.width, fits.height.max(needed.height))
+        })
 }
 
 /// The fixed width, and the height the step's wrapped text and controls take.
@@ -438,7 +464,13 @@ impl ServerControlWindow {
     fn show(&mut self, step: Step, window: &mut Window, cx: &mut Context<Self>) {
         let content = Content::of(&self.name, self.operation, &step);
         window.set_window_title(&content.title);
-        window.resize(window_size(&content, cx));
+        // The window opened at a size every expected step fits. Only an unexpectedly long
+        // refusal grows it, and nothing shrinks it.
+        let needed = window_size(&content, cx);
+        let current = window.bounds().size;
+        if needed.height > current.height {
+            window.resize(size(current.width, needed.height));
+        }
         self.step = Some(step);
         cx.notify();
     }
@@ -515,11 +547,9 @@ impl ServerControlWindow {
                 line("server-control-detail", &typography.body, secondary, body)
                     .mt(appearance.spacing(HEADING_TO_BODY))
             }))
-            .child(
-                div()
-                    .mt(appearance.spacing(BODY_TO_BUTTONS))
-                    .child(controls),
-            );
+            // A shorter step leaves its space above the buttons, which stay at the bottom.
+            .child(div().flex_1().min_h(appearance.spacing(BODY_TO_BUTTONS)))
+            .child(controls);
         let movement = self.window_movement.region(
             "server-control-drag-region".to_owned(),
             // Like an alert dialog, the window has no close control: Cancel, Escape, and the

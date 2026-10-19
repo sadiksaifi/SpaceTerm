@@ -183,3 +183,41 @@ fn a_restart_that_needs_authorization_continues_as_start(cx: &mut TestAppContext
     assert_eq!(operation, Operation::Start);
     assert!(!cx.update(|cx| crate::status_menu::operations_running(cx)));
 }
+
+/// A fixed-size window that changes size between steps can stay at its smaller size on some
+/// compositors, clipping the next step's text and buttons. The window therefore opens at a size
+/// that fits every step it can reach and keeps that size.
+#[gpui::test]
+fn every_step_a_restart_reaches_fits_the_size_the_window_opened_at(cx: &mut TestAppContext) {
+    let window = open_window_for(Operation::Restart, Step::Working(Operation::Restart), cx);
+    let control = window.downcast::<ServerControlWindow>().unwrap();
+    let opened = control
+        .update(cx, |_, window, _| window.bounds().size)
+        .unwrap();
+    let fits = |cx: &mut TestAppContext| {
+        control
+            .update(cx, |this, window, cx| {
+                let step = this.step.as_ref().unwrap();
+                let needed = window_size(&Content::of(&this.name, this.operation, step), cx);
+                (window.bounds().size, needed)
+            })
+            .unwrap()
+    };
+    for result in [
+        // The Restart stopped the server, and starting it needs authorization.
+        Err(ServerError::AuthorizationRequired),
+        // The person approved, and the operating system's prompt was refused.
+        Err(ServerError::AuthorizationRequired),
+        Err(ServerError::StartupFailed),
+    ] {
+        control
+            .update(cx, |this, window, cx| {
+                this.run(Task::ready(result), window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let (size, needed) = fits(cx);
+        assert_eq!(size, opened, "the window keeps the size it opened at");
+        assert!(needed.height <= size.height, "{needed:?} fits in {size:?}");
+    }
+}
