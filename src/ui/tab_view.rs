@@ -4818,13 +4818,39 @@ mod tests {
         }
     }
 
+    /// A desktop-owned Tab's Panes, which production Remote Workspaces own.
     fn test_session_factory() -> WorkspaceTerminalSessionFactory {
-        WorkspaceTerminalSessionFactory::new_local(
-            Rc::new(
-                TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
-                    .with_selection_copy_response(Ok(None)),
+        desktop_session_factory(Rc::new(
+            TestTerminalSessionFactory::new(TestTerminalSessionRecords::default())
+                .with_selection_copy_response(Ok(None)),
+        ))
+    }
+
+    /// Desktop-owned Panes over `terminal`, whose children each receive a fresh channel.
+    fn desktop_session_factory(
+        terminal: Rc<dyn TerminalSessionFactory>,
+    ) -> WorkspaceTerminalSessionFactory {
+        let destination = crate::domain::SshDestination::new("tester@remote".to_owned()).unwrap();
+        let command_context = Arc::new(crate::ssh::testing::SshConnectionFixture::new(
+            destination.clone(),
+        ));
+        WorkspaceTerminalSessionFactory::new_remote(
+            terminal,
+            crate::domain::ValidatedLocalDirectory::new(
+                PathBuf::from("/missing/local/home-is-not-a-workspace"),
+                crate::domain::LocalDirectoryIdentity::for_test(71074),
             ),
-            crate::terminal::testing::test_local_directory(test_home_directory()),
+            crate::terminal::metadata::RemoteTerminalMetadataContext::new(
+                destination,
+                crate::domain::RemoteDirectory::new("~/project".to_owned()).unwrap(),
+            ),
+            crate::domain::RemoteDirectoryIdentity::new("/home/tester/project".to_owned()).unwrap(),
+            "project on remote".to_owned(),
+            Arc::new(move || {
+                Ok(command_context.prepare_terminal_session_channel(
+                    ValidatedRemoteShellCommand::new("exec /bin/zsh -l".to_owned()).unwrap(),
+                ))
+            }),
         )
     }
 
@@ -6024,7 +6050,7 @@ mod tests {
 
         assert_eq!(
             view.read_with(cx, |view, _| view.tab_title()),
-            "• Terminal · spaceterm-test-workspace"
+            "• project on remote · project"
         );
         assert_eq!(
             view.read_with(cx, |view, _| view.pane_attention.clone()),
@@ -7824,9 +7850,10 @@ mod tests {
         cx.update(|window, cx| {
             view.update(cx, |view, cx| {
                 view.split_focused(SplitAxis::Horizontal, window, cx);
-                view.focus_pane(PaneId::new(1), cx);
             });
         });
+        cx.run_until_parked();
+        view.update(cx, |view, cx| view.focus_pane(PaneId::new(1), cx));
         cx.run_until_parked();
 
         let caption_state = (
