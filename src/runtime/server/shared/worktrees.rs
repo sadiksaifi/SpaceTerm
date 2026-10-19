@@ -582,7 +582,7 @@ mod tests {
             &mut host,
             2,
             lease,
-            "printf 'SPLIT-CWD:%s\\n' \"$PWD\"\n",
+            "printf '\\nSPLIT-CWD:%s\\n' \"$PWD\"\n",
         );
         crate::runtime::server::tests::await_text(
             &mut host,
@@ -664,7 +664,7 @@ mod tests {
         ) else {
             panic!("explicit shell");
         };
-        command(&mut host, 2, lease, "printf 'SOURCE-CWD:%s\\n' \"$PWD\"\n");
+        command(&mut host, 2, lease, "printf '\\nSOURCE-CWD:%s\\n' \"$PWD\"\n");
         await_text(
             &mut host,
             2,
@@ -766,7 +766,7 @@ mod tests {
                     &mut host,
                     2,
                     lease,
-                    "printf 'TAB-CWD:%s\\n' \"$PWD\"\n",
+                    "printf '\\nTAB-CWD:%s\\n' \"$PWD\"\n",
                 );
                 crate::runtime::server::tests::await_text(
                     &mut host,
