@@ -329,7 +329,8 @@ impl DevelopmentPaneState {
 #[derive(Clone)]
 pub(crate) struct DevelopmentServerSessionFactory {
     server: LocalServer,
-    local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
+    local_files: Option<crate::platform::local_filesystem::LocalFilesystemAuthority>,
+    remote_metadata: Option<super::metadata::RemoteTerminalMetadataContext>,
     pane_id: spaceterm_server::hierarchy::Id,
     attachment: Option<spaceterm_server::attachments::AttachmentPermit>,
     control: Arc<control::PaneControl>,
@@ -343,6 +344,30 @@ impl DevelopmentServerSessionFactory {
         local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
         pane_id: spaceterm_server::hierarchy::Id,
     ) -> (Self, Arc<DevelopmentPaneState>) {
+        let local_files = server.is_account_local().then_some(local_files);
+        Self::for_origin(server, controls, local_files, None, pane_id)
+    }
+
+    pub(crate) fn for_remote_pane(
+        server: LocalServer,
+        controls: &PaneControls,
+        destination: crate::domain::SshDestination,
+        pane_id: spaceterm_server::hierarchy::Id,
+    ) -> (Self, Arc<DevelopmentPaneState>) {
+        let metadata = super::metadata::RemoteTerminalMetadataContext::new(
+            destination,
+            crate::domain::RemoteDirectory::home(),
+        );
+        Self::for_origin(server, controls, None, Some(metadata), pane_id)
+    }
+
+    fn for_origin(
+        server: LocalServer,
+        controls: &PaneControls,
+        local_files: Option<crate::platform::local_filesystem::LocalFilesystemAuthority>,
+        remote_metadata: Option<super::metadata::RemoteTerminalMetadataContext>,
+        pane_id: spaceterm_server::hierarchy::Id,
+    ) -> (Self, Arc<DevelopmentPaneState>) {
         let state = Arc::new(DevelopmentPaneState::new());
         *state
             .directory_server
@@ -352,6 +377,7 @@ impl DevelopmentServerSessionFactory {
             Self {
                 server,
                 local_files,
+                remote_metadata,
                 pane_id,
                 attachment: None,
                 control: controls.pane(pane_id),
@@ -1068,12 +1094,12 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
         true
     }
     fn allows_local_file_insertion(&self) -> bool {
-        true
+        self.local_files.is_some()
     }
     fn local_file_authority(
         &self,
     ) -> Option<&crate::platform::local_filesystem::LocalFilesystemAuthority> {
-        Some(&self.local_files)
+        self.local_files.as_ref()
     }
     fn fallback_title(&self) -> String {
         "Terminal".into()
@@ -1181,6 +1207,7 @@ fn present(
     let DevelopmentServerSessionFactory {
         server,
         local_files,
+        remote_metadata,
         pane_id,
         attachment,
         control: _,
@@ -1549,8 +1576,14 @@ fn present(
                                 *screen,
                                 generation,
                                 &appearance.lock().unwrap_or_else(|e| e.into_inner()),
-                                Some(&local_files),
+                                local_files.as_ref(),
                             )?;
+                            if let Some(metadata) = &remote_metadata {
+                                Arc::make_mut(&mut Arc::make_mut(&mut screen).metadata).context =
+                                    super::metadata::TerminalMetadataContext::Remote(
+                                        metadata.clone(),
+                                    );
+                            }
                             Arc::make_mut(&mut screen).graphics = graphics.snapshot();
                             if !ready {
                                 // Claims apply their measured controller facts once.
@@ -2459,6 +2492,37 @@ fn decode_screen(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssh_panes_have_no_local_file_authority_even_with_local_composition() {
+        struct Route;
+        impl spaceterm_server::account_bridge::AccountConnector for Route {
+            fn connect(
+                &self,
+            ) -> Result<spaceterm_server::account_bridge::AccountBridge, ServerError> {
+                panic!("factory construction must not connect");
+            }
+        }
+        let server = LocalServer::remote(
+            "spaceterm-development",
+            [4; 32],
+            spaceterm_server::account_bridge::AccountBridgeIdentity {
+                account: 1000,
+                build: "spaceterm-development".into(),
+                server: [9; 32],
+            },
+            Arc::new(Route),
+        )
+        .unwrap();
+        let (factory, _) = DevelopmentServerSessionFactory::for_pane(
+            server,
+            &PaneControls::default(),
+            crate::platform::runtime_local_filesystem(),
+            [8; 32],
+        );
+        assert!(!factory.allows_local_file_insertion());
+        assert!(factory.local_file_authority().is_none());
+    }
 
     #[test]
     fn reading_commands_are_queued_without_terminal_input_focus() {
