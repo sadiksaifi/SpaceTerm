@@ -115,6 +115,8 @@ impl SshConnectBackend for Computers {
 #[derive(Default)]
 struct SavedConnections {
     records: Mutex<Vec<RetainedSshConnection>>,
+    /// Whether removing a record fails, as unavailable storage does.
+    removal_fails: std::sync::atomic::AtomicBool,
 }
 
 impl SavedConnections {
@@ -142,6 +144,9 @@ impl SshConnectionIntentStore for SavedConnections {
         Ok(())
     }
     fn remove(&self, destination: &SshDestination) -> Result<(), SshIntentStoreError> {
+        if self.removal_fails.load(Ordering::SeqCst) {
+            return Err(SshIntentStoreError::Unavailable);
+        }
         self.records
             .lock()
             .unwrap()
@@ -733,6 +738,32 @@ fn a_failed_connection_offers_to_stop_reconnecting_and_stays_saved(cx: &mut Test
         servers.cx
     ));
     assert_eq!(listed(servers.cx)[1].0, "nohost");
+}
+
+/// A removal SpaceTerm couldn't save would bring the connection back at relaunch, so Settings
+/// names it and offers to remove it again.
+#[gpui::test]
+fn a_removal_that_could_not_be_saved_names_the_host_and_can_be_retried(cx: &mut TestAppContext) {
+    let servers = open_servers(true, &["penguin"], cx);
+    servers.saved.removal_fails.store(true, Ordering::SeqCst);
+    select("penguin", servers.cx);
+    click(super::super::ssh_servers::REMOVE_SELECTOR, servers.cx);
+    let connections = servers.connections.clone();
+    settle(servers.cx, |_| !connections.unsaved_removals().is_empty());
+
+    let notice = A11yTree::read(servers.cx).node(super::super::ssh_servers::UNSAVED_REMOVAL_NAME)
+        ["aria"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(notice.contains("\u{201C}penguin\u{201D}"), "got {notice:?}");
+    assert!(notice.contains("reopens"), "got {notice:?}");
+
+    servers.saved.removal_fails.store(false, Ordering::SeqCst);
+    click("settings-ssh-server-remove-again", servers.cx);
+    settle(servers.cx, |_| connections.unsaved_removals().is_empty());
+    assert!(servers.saved.destinations().is_empty());
+    assert!(!rendered("settings-ssh-server-remove-again", servers.cx));
 }
 
 /// Short queries are partial words a person is still typing, so they select no server.

@@ -45,6 +45,10 @@ pub(super) const CONNECT_CHOICE_SELECTOR: &str = "settings-ssh-server-connect-ch
 pub(super) const INSTALL_CONFIRM_SELECTOR: &str = "settings-ssh-server-install-confirm";
 pub(super) const INSTALL_CANCEL_SELECTOR: &str = "settings-ssh-server-install-cancel";
 pub(super) const PERSISTENCE_SELECTOR: &str = "settings-ssh-servers-persistence";
+pub(super) const UNSAVED_REMOVAL_SELECTOR: &str = "settings-ssh-server-unsaved-removal";
+pub(super) const REMOVE_AGAIN_SELECTOR: &str = "settings-ssh-server-remove-again";
+/// The unsaved-removal notice's name for assistive technology.
+pub(super) const UNSAVED_REMOVAL_NAME: &str = "Removal not saved";
 pub(super) const STATUS_SELECTOR: &str = "settings-ssh-server-status";
 pub(super) const REMOVE_SELECTOR: &str = "settings-ssh-server-remove";
 
@@ -526,7 +530,13 @@ impl SettingsWindow {
             return div().into_any_element();
         };
         let listed = rows.connections.connections();
-        let persistence = rows.connections.persistence_error();
+        let unsaved = rows.connections.unsaved_removals();
+        // A removal that wasn't saved says exactly what returns; the general notice would only
+        // repeat it less precisely.
+        let persistence = rows
+            .connections
+            .persistence_error()
+            .filter(|_| unsaved.is_empty());
         let offered = rows.offered(&listed);
         let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
         let owner = cx.weak_entity();
@@ -623,12 +633,54 @@ impl SettingsWindow {
                 .whitespace_normal()
                 .child(persistence_warning(error))
         });
+        let unsaved = (!unsaved.is_empty()).then(|| {
+            let text = unsaved_removal_warning(&unsaved);
+            let again_owner = owner.clone();
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(appearance.spacing(8.0))
+                .child(
+                    div()
+                        .id(UNSAVED_REMOVAL_SELECTOR)
+                        .debug_selector(|| UNSAVED_REMOVAL_SELECTOR.to_owned())
+                        .role(accesskit::Role::Status)
+                        .aria_label(UNSAVED_REMOVAL_NAME)
+                        .aria_description(SharedString::from(text.clone()))
+                        .flex_1()
+                        .min_w_0()
+                        .chrome_text(appearance.typography.style(TextRole::Secondary))
+                        .text_color(gpui_color(colors.warning))
+                        .whitespace_normal()
+                        .child(text),
+                )
+                .child(
+                    Button::new(REMOVE_AGAIN_SELECTOR, "Remove Again")
+                        .variant(ButtonVariant::Outline)
+                        .size(ButtonSize::Regular)
+                        .tab_stop(true)
+                        .debug_selector(REMOVE_AGAIN_SELECTOR)
+                        .accessibility_description("Save the removal of these connections again")
+                        .on_activate(move |_, _, cx| {
+                            let _ = again_owner.update(cx, |settings, cx| {
+                                if let Some(rows) = settings.ssh_servers.as_ref() {
+                                    for destination in rows.connections.unsaved_removals() {
+                                        rows.connections.remove(&destination);
+                                    }
+                                }
+                                cx.notify();
+                            });
+                        }),
+                )
+        });
         div()
             .debug_selector(|| CONTROL_SELECTOR.to_owned())
             .flex()
             .flex_col()
             .w_full()
             .gap(appearance.spacing(4.0))
+            .children(unsaved)
             .children(persistence)
             .child(
                 div()
@@ -742,4 +794,17 @@ fn ssh_server_fact(
         },
         _ => (unknown(), None),
     }
+}
+
+/// Names each removed connection whose removal wasn't saved and what that changes next time.
+fn unsaved_removal_warning(unsaved: &[SshDestination]) -> String {
+    let names = unsaved
+        .iter()
+        .map(|destination| format!("\u{201C}{}\u{201D}", destination.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "SpaceTerm couldn\u{2019}t save that you removed {names}. It may appear again and \
+         reconnect on its own when SpaceTerm reopens."
+    )
 }

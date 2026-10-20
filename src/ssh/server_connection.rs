@@ -292,6 +292,9 @@ struct State {
     next_generation: u64,
     resumed: bool,
     persistence_error: Option<SshIntentStoreError>,
+    /// Removed connections whose removal SpaceTerm couldn't save, so they come back when it
+    /// reopens until a later removal saves.
+    unsaved_removals: Vec<SshDestination>,
 }
 struct Inner {
     state: Mutex<State>,
@@ -327,6 +330,7 @@ impl SshServerConnections {
                 next_generation: 0,
                 resumed: false,
                 persistence_error: None,
+                unsaved_removals: Vec::new(),
             }),
             backend,
             intents,
@@ -406,6 +410,16 @@ impl SshServerConnections {
                 .and_then(|entry| entry.presented.clone())
         })
     }
+    /// Connections the person removed whose removal couldn't be saved. Each one reappears and may
+    /// reconnect when SpaceTerm reopens unless a later removal saves.
+    pub(crate) fn unsaved_removals(&self) -> Vec<SshDestination> {
+        self.inner
+            .state
+            .lock()
+            .ok()
+            .map(|state| state.unsaved_removals.clone())
+            .unwrap_or_default()
+    }
     pub(crate) fn persistence_error(&self) -> Option<SshIntentStoreError> {
         self.inner
             .state
@@ -454,11 +468,15 @@ impl SshServerConnections {
         let Ok(mut state) = self.inner.state.lock() else {
             return;
         };
-        let Some(entry) = state.entries.remove(destination.as_str()) else {
-            return;
-        };
-        entry.cancellation.cancel();
-        self.inner.backend.forget(destination);
+        match state.entries.remove(destination.as_str()) {
+            Some(entry) => {
+                entry.cancellation.cancel();
+                self.inner.backend.forget(destination);
+            }
+            // Removing again retries a removal whose saving failed.
+            None if state.unsaved_removals.contains(destination) => {}
+            None => return,
+        }
         let _ = self
             .inner
             .persistence
@@ -981,7 +999,19 @@ fn persistence_worker(inner: Weak<Inner>, receiver: async_channel::Receiver<Pers
                     None => Ok(()),
                 }
             }
-            PersistenceCommand::Remove(destination) => owner.intents.remove(&destination),
+            PersistenceCommand::Remove(destination) => {
+                let result = owner.intents.remove(&destination);
+                if let Ok(mut state) = owner.state.lock() {
+                    state
+                        .unsaved_removals
+                        .retain(|unsaved| *unsaved != destination);
+                    if result.is_err() {
+                        state.unsaved_removals.push(destination);
+                    }
+                    notify(&mut state);
+                }
+                result
+            }
         };
         if let Err(error) = result
             && let Ok(mut state) = owner.state.lock()
@@ -1002,6 +1032,8 @@ mod tests {
         records: Mutex<Vec<RetainedSshConnection>>,
         loads: AtomicUsize,
         writes: AtomicUsize,
+        /// Whether removing a record fails, as unavailable storage does.
+        removal_fails: std::sync::atomic::AtomicBool,
     }
     impl SshConnectionIntentStore for Intents {
         fn load(&self) -> Result<Vec<RetainedSshConnection>, SshIntentStoreError> {
@@ -1016,6 +1048,9 @@ mod tests {
             Ok(())
         }
         fn remove(&self, destination: &SshDestination) -> Result<(), SshIntentStoreError> {
+            if self.removal_fails.load(Ordering::SeqCst) {
+                return Err(SshIntentStoreError::Unavailable);
+            }
             self.records
                 .lock()
                 .unwrap()
@@ -1296,6 +1331,25 @@ mod tests {
                 RemoteConnectionStatus::Connected { .. }
             )
         });
+    }
+    #[test]
+    fn a_removal_that_could_not_be_saved_is_reported_until_a_later_removal_saves() {
+        let (registry, _, intents, _, _) = setup(false);
+        intents.records.lock().unwrap().push(saved(false));
+        registry.resume_retained();
+        eventually(|| registry.connections().len() == 1);
+        intents.removal_fails.store(true, Ordering::SeqCst);
+        registry.remove(&destination());
+        eventually(|| registry.unsaved_removals() == vec![destination()]);
+        assert!(
+            registry.connections().is_empty(),
+            "the removal still applies now"
+        );
+
+        intents.removal_fails.store(false, Ordering::SeqCst);
+        registry.remove(&destination());
+        eventually(|| registry.unsaved_removals().is_empty());
+        assert!(intents.active(&destination()).is_none());
     }
     #[test]
     fn check_status_observes_once_and_leaves_intent_and_presentation_unchanged() {
