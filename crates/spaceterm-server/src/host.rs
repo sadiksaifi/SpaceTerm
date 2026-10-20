@@ -234,6 +234,9 @@ pub(crate) fn serve_runtime(
         .socket_identity(c"p")?
         .ok_or(ServerError::UnsafeStorage)?;
     runtime.verify_path(&paths.runtime)?;
+    if supervised {
+        crate::service::activation::ready(paths)?;
+    }
     runtime.publish_socket(c"p", socket_identity)?;
     let mut connections: Vec<(std::thread::JoinHandle<()>, UnixStream)> = Vec::new();
     use std::sync::{

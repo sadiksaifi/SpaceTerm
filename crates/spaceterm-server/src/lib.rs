@@ -39,6 +39,12 @@ pub enum ServerError {
     Stopped,
     #[error("The server changed since you were asked. Review and confirm again.")]
     Changed,
+    #[error(
+        "The admitted server update could not be resolved. Finish Update to check its original outcome."
+    )]
+    ActivationUnresolved,
+    #[error("Returning to the previous server runtime could not be proved safe.")]
+    ReturnUnavailable,
     #[error("This server package could not be verified for this application identity.")]
     RuntimeUnavailable,
     #[error("Administrator authorization is required to enable linger for this account.")]
@@ -59,6 +65,12 @@ pub enum ServerError {
     AuthenticationRefused,
     #[error("The client and server have no compatible protocol version.")]
     IncompatibleProtocol,
+    #[error("This server lacks a required capability. Its Terminal Sessions are still running.")]
+    MissingRequiredCapability,
+    #[error(
+        "The server candidate changed after this client was built. Restart the client to use its installed candidate."
+    )]
+    CandidateChanged,
     #[error("The local server connection did not complete.")]
     Protocol,
     #[error("The local server could not start. Reinstall SpaceTerm and try again.")]

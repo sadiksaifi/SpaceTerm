@@ -4,37 +4,118 @@
 use spaceterm_server::{LocalStartup, ServerError, StartupOutcome, service::Service};
 use std::path::{Path, PathBuf};
 
-/// Prepare or reuse the current build's account service without opening credentials or UI.
-///
-/// Existing service policy bypasses artifact discovery. Fresh setup verifies the independent
-/// archive against this desktop's exact build. Packaged applications ignore source overrides;
-/// source builds require both explicit artifact paths. Only explicit Service::start reverses Stop.
+/// Prepare or reuse the account service. Only explicit Start reverses deliberate Stop.
+/// Existing service policy bypasses candidate discovery.
 pub fn run(cancelled: impl Fn() -> bool) -> Result<StartupOutcome, ServerError> {
     let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
-    let startup = LocalStartup::for_identity(identity)?;
-    startup.run(
+    LocalStartup::for_identity(identity)?.run(
         || {
-            let paths = artifact_paths(
-                cfg!(spaceterm_packaged),
-                env!("SPACETERM_TARGET") == "aarch64-apple-darwin",
-                &std::env::current_exe().map_err(|_| ServerError::RuntimeUnavailable)?,
-                std::env::var_os("SPACETERM_SERVER_ARCHIVE").map(PathBuf::from),
-                std::env::var_os("SPACETERM_SERVER_SIGNATURE").map(PathBuf::from),
-            )?;
-            Service::for_identity(identity)?
-                .provision(
-                    &paths.archive,
-                    &paths.signature,
-                    env!("SPACETERM_TARGET"),
-                    env!("SPACETERM_COMMIT"),
-                    env!("SPACETERM_VERSION"),
-                )
-                .map(|installation| installation.directory)
+            discover_candidate()
+                .map_err(|error| match error {
+                    CandidateError::Unavailable => ServerError::RuntimeUnavailable,
+                    CandidateError::ClientRestartRequired => ServerError::CandidateChanged,
+                    CandidateError::Verification(error) => error,
+                })
+                .and_then(|candidate| candidate.stage().map(|installation| installation.directory))
         },
         cancelled,
     )
 }
 
+/// Authenticated candidate declarations and the exact source pair to revalidate during staging.
+#[derive(Clone, Debug)]
+pub struct Candidate {
+    metadata: spaceterm_server::service::CandidateMetadata,
+    digest: String,
+    paths: ArtifactPaths,
+}
+
+impl Candidate {
+    pub fn version(&self) -> &str {
+        &self.metadata.version
+    }
+    pub fn commit(&self) -> &str {
+        &self.metadata.commit
+    }
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+    pub fn protocol_major(&self) -> u16 {
+        self.metadata.protocol_major
+    }
+    pub fn capabilities(&self) -> &[String] {
+        &self.metadata.capabilities
+    }
+    pub fn is_approved(
+        &self,
+        installation: &spaceterm_server::service::RetainedInstallation,
+    ) -> bool {
+        installation
+            .directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some(self.digest())
+    }
+
+    /// Revalidate and retain this exact candidate. No server starts and no policy changes.
+    pub fn stage(&self) -> Result<spaceterm_server::service::RetainedInstallation, ServerError> {
+        let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
+        Service::for_identity(identity)?.provision_candidate(
+            &self.paths.archive,
+            &self.paths.signature,
+            &self.digest,
+            1,
+            &["workspace_policy"],
+        )
+    }
+}
+
+/// Bounded classifications for candidate availability and verification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CandidateError {
+    Unavailable,
+    ClientRestartRequired,
+    Verification(ServerError),
+}
+
+/// Read the pinned candidate without staging files or changing service policy.
+/// Run off the UI thread. Native executable verification occurs during explicit staging.
+pub fn discover_candidate() -> Result<Candidate, CandidateError> {
+    let digest = env!("SPACETERM_SERVER_SHA256");
+    if digest.is_empty() {
+        return Err(CandidateError::Unavailable);
+    }
+    let paths = artifact_paths(
+        cfg!(spaceterm_packaged),
+        env!("SPACETERM_TARGET") == "aarch64-apple-darwin",
+        &std::env::current_exe().map_err(|_| CandidateError::Unavailable)?,
+        std::env::var_os("SPACETERM_SERVER_ARCHIVE").map(PathBuf::from),
+        std::env::var_os("SPACETERM_SERVER_SIGNATURE").map(PathBuf::from),
+    )
+    .map_err(|_| CandidateError::Unavailable)?;
+    let identity = crate::application_identity::ApplicationIdentity::current().directory_name();
+    let metadata = Service::for_identity(identity)
+        .and_then(|service| {
+            service.inspect_candidate(
+                &paths.archive,
+                &paths.signature,
+                digest,
+                1,
+                &["workspace_policy"],
+            )
+        })
+        .map_err(|error| match error {
+            ServerError::CandidateChanged => CandidateError::ClientRestartRequired,
+            other => CandidateError::Verification(other),
+        })?;
+    Ok(Candidate {
+        metadata,
+        paths,
+        digest: digest.to_owned(),
+    })
+}
+
+#[derive(Clone, Debug)]
 struct ArtifactPaths {
     archive: PathBuf,
     signature: PathBuf,

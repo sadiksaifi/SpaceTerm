@@ -14,7 +14,7 @@ pub(super) fn key() -> Vec<u8> {
     pair().public_key().as_ref().to_vec()
 }
 pub(super) fn native_build(identity: &str) -> Vec<u8> {
-    serde_json::json!({"schema":1,"identity":identity,"target":target(),"commit":COMMIT,"version":VERSION}).to_string().into_bytes()
+    serde_json::json!({"schema":1,"identity":identity,"target":target(),"commit":COMMIT,"version":VERSION,"protocol_major":1,"capabilities":["workspace_policy"]}).to_string().into_bytes()
 }
 pub(super) fn sign(archive: &Path, signature: &Path) {
     std::fs::write(
@@ -45,7 +45,7 @@ pub(crate) fn with_artifact<T>(
     std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
     let archive = directory.join("archive.tar.gz");
     let signature = directory.join("artifact.sig");
-    let manifest = serde_json::json!({"schema":1,"identity":identity,"target":target(),"commit":COMMIT,"version":VERSION}).to_string();
+    let manifest = serde_json::json!({"schema":1,"identity":identity,"target":target(),"commit":COMMIT,"version":VERSION,"protocol_major":1,"capabilities":["workspace_policy"]}).to_string();
     let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     let mut tar = tar::Builder::new(encoder);
     let mut entries = vec![

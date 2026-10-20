@@ -16,7 +16,11 @@ use std::{
 const REFRESH: Duration = Duration::from_secs(10);
 
 pub(crate) enum Request {
+    /// Reads the service, and whether a verified server build is offered to update to.
     Refresh,
+    /// Reads the service only, as the periodic refresh does. Verifying the included build is
+    /// left to reads the person causes, such as opening the menu.
+    Poll,
     Start,
     /// On Linux the server control window prepares and confirms instead.
     #[cfg(target_os = "macos")]
@@ -28,6 +32,8 @@ pub(crate) enum Request {
 
 pub(crate) enum Event {
     Status(Result<ServiceStatus, ServerError>),
+    /// Whether the Server version row offers Update Server.
+    Update(bool),
     /// A confirmation to present, or why the operation is no longer available.
     #[cfg(target_os = "macos")]
     Prepared(Action, Result<Confirmation, ServerError>),
@@ -40,8 +46,10 @@ pub(crate) struct Worker {
 
 impl Worker {
     /// `deliver` runs on the worker thread and hands each event to the UI thread.
+    /// `update_offered` reads whether a verified build is offered, without staging anything.
     pub(crate) fn spawn(
         controller: Controller,
+        update_offered: impl Fn() -> bool + Send + 'static,
         deliver: impl Fn(Event) + Send + 'static,
     ) -> std::io::Result<Self> {
         let (requests, received) = mpsc::channel();
@@ -51,11 +59,15 @@ impl Worker {
                 loop {
                     let request = match received.recv_timeout(REFRESH) {
                         Ok(request) => request,
-                        Err(RecvTimeoutError::Timeout) => Request::Refresh,
+                        Err(RecvTimeoutError::Timeout) => Request::Poll,
                         Err(RecvTimeoutError::Disconnected) => return,
                     };
                     match request {
-                        Request::Refresh => deliver(Event::Status(controller.status())),
+                        Request::Refresh => {
+                            deliver(Event::Status(controller.status()));
+                            deliver(Event::Update(update_offered()));
+                        }
+                        Request::Poll => deliver(Event::Status(controller.status())),
                         Request::Start => {
                             finish(&controller, &deliver, Command::Start, controller.start())
                         }

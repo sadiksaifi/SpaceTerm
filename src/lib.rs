@@ -10,13 +10,27 @@ pub fn run_desktop() {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     let identity = application_identity::ApplicationIdentity::current();
     match arguments.as_slice() {
+        [argument] if argument == "--build-info" => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema": 1,
+                    "identity": identity.directory_name(),
+                    "version": env!("SPACETERM_VERSION"),
+                    "commit": env!("SPACETERM_COMMIT"),
+                    "target": env!("SPACETERM_TARGET"),
+                    "server_candidate_sha256": env!("SPACETERM_SERVER_SHA256"),
+                })
+            );
+            return;
+        }
         [argument] if argument == "--version" => {
             println!("{}", identity.version_label());
             return;
         }
         [argument] if argument == "--help" => {
             println!(
-                "Usage: {} [--version | --help | service-COMMAND IDENTITY]\n\n{}",
+                "Usage: {} [--version | --build-info | --help | service-COMMAND IDENTITY]\n\n{}",
                 std::env::args()
                     .next()
                     .unwrap_or_else(|| "spaceterm".to_owned()),

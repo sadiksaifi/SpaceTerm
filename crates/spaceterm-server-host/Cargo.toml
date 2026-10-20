@@ -55,3 +55,7 @@ required-features = ["client"]
 [[example]]
 name = "worktree_writes"
 required-features = ["client"]
+
+[[example]]
+name = "server_update"
+required-features = ["client"]

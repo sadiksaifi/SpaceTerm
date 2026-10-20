@@ -3782,6 +3782,7 @@ impl WorkspaceManager {
         }
         self.save_shared_arrangements(cx);
         self.report_client_view_error(window, cx);
+        self.read_refusal_offer(cx);
         // Membership, connection, and Git facts all decide what each view presents, including
         // Workspaces nobody is looking at.
         if poll.changed {

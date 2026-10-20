@@ -28,6 +28,7 @@ pub(super) const LAUNCH_START_SELECTOR: &str = "server-launch-start";
 pub(super) const LAUNCH_AUTHORIZE_SELECTOR: &str = "server-launch-authorize";
 pub(super) const LAUNCH_RETRY_SELECTOR: &str = "server-launch-retry";
 pub(super) const LAUNCH_SETTINGS_SELECTOR: &str = "server-launch-settings";
+pub(super) const LAUNCH_UPDATE_SELECTOR: &str = "server-launch-update";
 const LAUNCH_QUIET_SELECTOR: &str = "server-launch-quiet";
 
 /// How long a window's first launch may wait for the server before it says so. Opening an
@@ -56,6 +57,9 @@ pub(crate) trait LocalLaunch: Send + Sync {
     fn start(&self) -> Result<(), ServerError>;
     /// The person's explicit startup authorization. Cancelling the system prompt changes nothing.
     fn authorize(&self) -> Result<(), ServerError>;
+    /// Whether this SpaceTerm includes a verified server build other than the approved one.
+    /// Reads only: it stages, installs, and starts nothing.
+    fn update_offered(&self) -> bool;
 }
 
 /// The Workspaces a ready server presents, and the connection that retains this client's views.
@@ -124,6 +128,11 @@ impl LocalLaunch for AccountLaunch {
         // account only. No SpaceTerm code runs as root.
         Self::service()?.enable_linger(crate::local_server::service::LingerAuthorization::Desktop)
     }
+
+    fn update_offered(&self) -> bool {
+        // The same offer the Server version row makes, so both surfaces agree.
+        Self::service().is_ok_and(|service| crate::ui::settings_window::update_offered(&service))
+    }
 }
 
 struct AccountConnector;
@@ -171,6 +180,12 @@ pub(super) enum LaunchState {
         declined: bool,
     },
     Failed(ServerError),
+    /// This client refused the server, which keeps running with its Terminal Sessions.
+    /// `update` is whether this SpaceTerm includes a verified server build to update it to.
+    Incompatible {
+        reason: ServerError,
+        update: bool,
+    },
     Ready,
 }
 
@@ -181,6 +196,8 @@ pub(super) enum LaunchAction {
     Authorize,
     Retry,
     Settings,
+    /// Opens Settings on Servers and starts the Update Server journey there.
+    Update,
 }
 
 impl LaunchAction {
@@ -190,6 +207,7 @@ impl LaunchAction {
             Self::Authorize => "Authorize\u{2026}",
             Self::Retry => "Try Again",
             Self::Settings => "Server Settings\u{2026}",
+            Self::Update => "Update Server\u{2026}",
         }
     }
 
@@ -199,6 +217,7 @@ impl LaunchAction {
             Self::Authorize => LAUNCH_AUTHORIZE_SELECTOR,
             Self::Retry => LAUNCH_RETRY_SELECTOR,
             Self::Settings => LAUNCH_SETTINGS_SELECTOR,
+            Self::Update => LAUNCH_UPDATE_SELECTOR,
         }
     }
 }
@@ -238,7 +257,13 @@ const AUTHORIZING_DETAIL: &str = "Enter an administrator password in the system 
 /// The title for a launch that could not finish. The detail names the exact reason.
 const fn failure_title(error: ServerError) -> &'static str {
     match error {
-        ServerError::IncompatibleState | ServerError::IncompatibleProtocol => "Incompatible Server",
+        ServerError::IncompatibleState
+        | ServerError::IncompatibleProtocol
+        | ServerError::MissingRequiredCapability => "Incompatible Server",
+        ServerError::ActivationUnresolved | ServerError::ReturnUnavailable => {
+            "Server Update Unfinished"
+        }
+        ServerError::CandidateChanged => "Restart SpaceTerm",
         ServerError::RuntimeUnavailable => "Server Unavailable",
         ServerError::UnsafeStorage => "Unsafe Server Storage",
         ServerError::StorageUnavailable => "Server Storage Unavailable",
@@ -254,6 +279,8 @@ const fn ends_opening(error: ServerError) -> bool {
     matches!(
         error,
         ServerError::IncompatibleProtocol
+            | ServerError::MissingRequiredCapability
+            | ServerError::ActivationUnresolved
             | ServerError::IncompatibleState
             | ServerError::StorageUnavailable
             | ServerError::UnsafeStorage
@@ -261,8 +288,29 @@ const fn ends_opening(error: ServerError) -> bool {
     )
 }
 
+/// Whether this client refused the server itself, which keeps running for its other clients.
+const fn incompatible(error: ServerError) -> bool {
+    matches!(
+        error,
+        ServerError::IncompatibleProtocol | ServerError::MissingRequiredCapability
+    )
+}
+
+/// What launch presents for a failure. A refused server offers the update journey only when a
+/// read found a verified build to update it to.
+const fn failed(error: ServerError, update: bool) -> LaunchState {
+    if incompatible(error) {
+        LaunchState::Incompatible {
+            reason: error,
+            update,
+        }
+    } else {
+        LaunchState::Failed(error)
+    }
+}
+
 pub(super) fn present(state: LaunchState) -> LaunchPresentation {
-    use LaunchAction::{Authorize, Retry, Settings, Start};
+    use LaunchAction::{Authorize, Retry, Settings, Start, Update};
     let fixed = SharedString::new_static;
     match state {
         LaunchState::Launching | LaunchState::Ready => LaunchPresentation {
@@ -304,6 +352,38 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
             actions: &[Authorize, Settings],
             waiting: false,
         },
+        LaunchState::Incompatible { reason, update } => {
+            let refusal = if reason == ServerError::MissingRequiredCapability {
+                crate::ui::settings_window::MISSING_CAPABILITY
+            } else {
+                crate::ui::settings_window::INCOMPATIBLE_PROTOCOL
+            };
+            // Release numbers say nothing about which side is older, so only a verified
+            // included build the server can update to names a next step.
+            let next = match (update, reason) {
+                (true, _) => {
+                    "SpaceTerm includes a server version that works with it. Updating the server \
+                     ends its Terminal Sessions for every client, so SpaceTerm asks first."
+                }
+                (false, ServerError::MissingRequiredCapability) => {
+                    "To connect, the server needs a version that supports it."
+                }
+                (false, _) => {
+                    "To connect, SpaceTerm and the server need versions that work together."
+                }
+            };
+            LaunchPresentation {
+                title: failure_title(reason),
+                detail: format!("{refusal} {next}").into(),
+                progress: None,
+                actions: if update {
+                    &[Update, Retry]
+                } else {
+                    &[Retry, Settings]
+                },
+                waiting: false,
+            }
+        }
         LaunchState::Failed(error) => LaunchPresentation {
             title: failure_title(error),
             detail: error.to_string().into(),
@@ -334,6 +414,10 @@ pub(super) struct LocalLaunchState {
     /// Presents the server's Workspaces as soon as this client's saved arrangement is read,
     /// rather than at the next periodic reading.
     _views_read: Option<Task<()>>,
+    /// The open connection's refusal and whether a verified build can update its server. Read
+    /// once per refusal, off the event thread; `false` until the read answers.
+    refusal_offer: Option<(ServerError, bool)>,
+    _refusal_offer: Option<Task<()>>,
 }
 
 impl LocalLaunchState {
@@ -349,6 +433,8 @@ impl LocalLaunchState {
             spoke: std::cell::Cell::new(false),
             _quiet: None,
             _views_read: None,
+            refusal_offer: None,
+            _refusal_offer: None,
         }
     }
 
@@ -380,6 +466,8 @@ impl Drop for LocalLaunchState {
 enum StepResult {
     Outcome(LaunchOutcome),
     Failed(ServerError),
+    /// The client refused the server. `update` is whether a verified build can update it.
+    Incompatible(ServerError, bool),
     /// The person's authorization did not complete.
     Declined,
 }
@@ -411,6 +499,7 @@ pub(crate) fn resume_waiting_launches(cx: &mut App) {
                 LaunchState::Stopped
                     | LaunchState::AuthorizationRequired { .. }
                     | LaunchState::Failed(_)
+                    | LaunchState::Incompatible { .. }
             ) && manager.launch._task.is_none()
             {
                 manager.run_local_launch(None, window, cx);
@@ -461,6 +550,9 @@ impl WorkspaceManager {
             let observed = move || cancelled.load(Ordering::Acquire);
             match adapter.run(&observed) {
                 Ok(outcome) => StepResult::Outcome(outcome),
+                Err(error) if incompatible(error) => {
+                    StepResult::Incompatible(error, adapter.update_offered())
+                }
                 Err(error) => StepResult::Failed(error),
             }
         });
@@ -489,6 +581,7 @@ impl WorkspaceManager {
             StepResult::Declined => LaunchState::AuthorizationRequired { declined: true },
             StepResult::Failed(ServerError::Stopped) => LaunchState::Stopped,
             StepResult::Failed(error) => LaunchState::Failed(error),
+            StepResult::Incompatible(error, update) => failed(error, update),
             // Only a closing window cancels, so there is nothing left to present.
             StepResult::Outcome(LaunchOutcome::Cancelled) => return,
         };
@@ -500,6 +593,7 @@ impl WorkspaceManager {
                 LaunchState::Stopped
                     | LaunchState::AuthorizationRequired { .. }
                     | LaunchState::Failed(_)
+                    | LaunchState::Incompatible { .. }
             )
         {
             self.run_local_launch(None, window, cx);
@@ -613,12 +707,59 @@ impl WorkspaceManager {
             }
             Some(shared) => Some(present(match shared.connection_error() {
                 Some(ServerError::Stopped) => LaunchState::Stopped,
-                Some(error) if ends_opening(error) => LaunchState::Failed(error),
+                // An open connection's refusal offers what the Server version row offers.
+                Some(error) if ends_opening(error) => failed(
+                    error,
+                    self.launch
+                        .refusal_offer
+                        .is_some_and(|(refused, update)| refused == error && update),
+                ),
                 // The connection retries an interruption by itself, so opening goes on.
                 _ => LaunchState::Launching,
             })),
             None => Some(present(self.launch.state)),
         }
+    }
+
+    /// Reads whether a verified build can update a server the open connection refused before
+    /// its first inventory. Admission can succeed before Pane negotiation refuses a required
+    /// capability, so this refusal reads the same offer launch reads, once per refusal.
+    pub(super) fn read_refusal_offer(&mut self, cx: &mut Context<Self>) {
+        let refused = self
+            .shared
+            .as_ref()
+            .filter(|shared| shared.latest_inventory().is_none())
+            .and_then(|shared| shared.connection_error())
+            .filter(|error| incompatible(*error));
+        let Some(error) = refused else {
+            self.launch.refusal_offer = None;
+            self.launch._refusal_offer = None;
+            return;
+        };
+        if self
+            .launch
+            .refusal_offer
+            .is_some_and(|(read, _)| read == error)
+        {
+            return;
+        }
+        self.launch.refusal_offer = Some((error, false));
+        let adapter = Arc::clone(&self.launch.adapters.launch);
+        let offered = cx.background_spawn(async move { adapter.update_offered() });
+        self.launch._refusal_offer = Some(cx.spawn(async move |manager, cx| {
+            let update = offered.await;
+            let _ = manager.update(cx, |manager, cx| {
+                // A later refusal reads its own offer.
+                if manager
+                    .launch
+                    .refusal_offer
+                    .is_some_and(|(read, _)| read == error)
+                {
+                    manager.launch.refusal_offer = Some((error, update));
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     /// Whether the stage presents nothing for `presentation` now: the window's first launch is
@@ -793,6 +934,9 @@ impl WorkspaceManager {
                 Some(crate::ui::settings_window::SettingsSectionId::Servers),
                 cx,
             ),
+            // The journey reads the server again and asks before it changes anything. A
+            // finished update runs launch again in every waiting window.
+            LaunchAction::Update => crate::ui::settings_window::open_server_update(cx),
             LaunchAction::Start if ready => {
                 self.run_local_launch(Some(LaunchStep::Start), window, cx);
             }
@@ -910,9 +1054,15 @@ pub(crate) mod testing {
         steps: Mutex<Vec<&'static str>>,
         start: Mutex<Option<ServerError>>,
         authorize: Mutex<Option<ServerError>>,
+        /// Whether a verified build can update a refused server.
+        update: Mutex<bool>,
     }
 
     impl ScriptedLaunch {
+        /// Offers a verified server build when a run refuses the server.
+        pub(crate) fn offer_update(&self) {
+            *self.update.lock().unwrap() = true;
+        }
         pub(crate) fn answer(&self, result: Result<LaunchOutcome, ServerError>) {
             self.runs.lock().unwrap().push_back(result);
         }
@@ -924,7 +1074,7 @@ pub(crate) mod testing {
         pub(crate) fn refuse_authorization(&self, error: ServerError) {
             *self.authorize.lock().unwrap() = Some(error);
         }
-        /// Every step in order: `run`, `start`, and `authorize`.
+        /// Every step in order: `run`, `start`, `authorize`, and `update_offered`.
         pub(crate) fn steps(&self) -> Vec<&'static str> {
             self.steps.lock().unwrap().clone()
         }
@@ -950,6 +1100,10 @@ pub(crate) mod testing {
         fn authorize(&self) -> Result<(), ServerError> {
             self.steps.lock().unwrap().push("authorize");
             self.authorize.lock().unwrap().take().map_or(Ok(()), Err)
+        }
+        fn update_offered(&self) -> bool {
+            self.steps.lock().unwrap().push("update_offered");
+            *self.update.lock().unwrap()
         }
     }
 }

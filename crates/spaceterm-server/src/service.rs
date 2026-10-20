@@ -1,4 +1,5 @@
 //! Explicit account service installation and lifecycle. Discovery never starts a service.
+pub mod activation;
 mod command;
 pub mod control;
 #[cfg(target_os = "linux")]
@@ -7,6 +8,7 @@ mod linux;
 mod macos;
 mod registration;
 mod runtime;
+pub use runtime::CandidateMetadata;
 
 use crate::{ServerError, host::Paths, storage::Directory};
 use serde::{Deserialize, Serialize};
@@ -63,7 +65,7 @@ pub struct RetainedInstallation {
     pub commit: String,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct State {
     installation: String,
@@ -73,9 +75,11 @@ struct State {
     removing: bool,
     #[serde(default)]
     run: Option<Run>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activation: Option<activation::Operation>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Run {
     boot: String,
@@ -99,6 +103,10 @@ trait Supervisor: Send + Sync {
     fn disable(&self) -> Result<(), ServerError>;
     fn uninstall(&self, runtime: &Path) -> Result<(), ServerError>;
     fn running(&self) -> Result<bool, ServerError>;
+    /// Replace only the admitted old definition or finish its exact already-published replacement.
+    fn replace(&self, _previous: &Path, _candidate: &Path) -> Result<(), ServerError> {
+        Err(ServerError::Unsupported)
+    }
     fn observe(&self, runtime: &Path, removing: bool) -> Result<bool, ServerError> {
         self.check(runtime, removing)?;
         self.running()
@@ -133,6 +141,7 @@ impl Service {
         self.supervisor.enable_linger(authorization)
     }
     pub fn status(&self) -> Result<ServiceStatus, ServerError> {
+        self.recover_activation()?;
         let Some((_, state)) = self.read()? else {
             return Ok(ServiceStatus::default());
         };
@@ -197,6 +206,7 @@ impl Service {
         installation: &Path,
     ) -> Result<ServiceStatus, ServerError> {
         data.verify_path(&self.paths.data)?;
+        self.resume_activation(data)?;
         if let Some(mut state) = Self::state(data)?
             && state.installed
         {
@@ -231,6 +241,7 @@ impl Service {
             installed: false,
             removing: false,
             run: None,
+            activation: None,
         });
         // Uninstall never authorizes a different runtime. Update activation owns that transition.
         runtime::verify(&self.runtime(&state), &self.identity)?;
@@ -285,6 +296,7 @@ impl Service {
             std::thread::sleep(Duration::from_millis(20));
         };
         data.verify_path(&self.paths.data)?;
+        self.resume_activation(&data)?;
         if cancelled() {
             return Ok(None);
         }
@@ -325,7 +337,16 @@ impl Service {
     pub fn start(&self) -> Result<ServiceStatus, ServerError> {
         let (data, _) = self.read()?.ok_or(ServerError::NotInstalled)?;
         let _operation = data.lock("service.lock", false)?;
+        let recovering = Self::state(&data)?.is_some_and(|s| {
+            s.activation
+                .as_ref()
+                .is_some_and(activation::Operation::pending)
+        });
+        self.resume_activation(&data)?;
         let mut state = Self::state(&data)?.ok_or(ServerError::NotInstalled)?;
+        if recovering {
+            return self.snapshot(&state);
+        }
         if !state.installed {
             return Err(ServerError::NotInstalled);
         }
@@ -364,8 +385,19 @@ impl Service {
         state.stopped = false;
         data.write_json(c"service.json", state)?;
         drop(intent);
-        self.supervisor.start()?;
-        self.wait_running(true)
+        let result = self
+            .supervisor
+            .start()
+            .and_then(|()| self.wait_running(true));
+        if result.is_err() {
+            let _intent = data.lock("service-intent.lock", false)?;
+            let mut latest = Self::state(data)?.ok_or(ServerError::StorageUnavailable)?;
+            if let Some(operation) = latest.activation.as_mut() {
+                operation.startup_failed();
+                data.write_json(c"service.json", &latest)?;
+            }
+        }
+        result
     }
     pub fn stop(&self) -> Result<ServiceStatus, ServerError> {
         self.apply_control(control::Action::Stop, None)
@@ -408,7 +440,16 @@ impl Service {
     ) -> Result<ServiceStatus, ServerError> {
         let (data, _) = self.read()?.ok_or(ServerError::NotInstalled)?;
         let _operation = data.lock("service.lock", false)?;
+        let recovering = Self::state(&data)?.is_some_and(|s| {
+            s.activation
+                .as_ref()
+                .is_some_and(activation::Operation::pending)
+        });
+        self.resume_activation(&data)?;
         let mut state = Self::state(&data)?.ok_or(ServerError::NotInstalled)?;
+        if recovering {
+            return self.snapshot(&state);
+        }
         if action == control::Action::Uninstall && !state.installed && !state.removing {
             return self.snapshot(&state);
         }
@@ -459,6 +500,11 @@ impl Service {
             .is_some_and(|v| !runtime::digest_valid(&v.installation))
         {
             return Err(ServerError::UnsafeStorage);
+        }
+        if let Some(state) = &state
+            && let Some(operation) = &state.activation
+        {
+            operation.validate(state)?;
         }
         Ok(state)
     }
@@ -534,7 +580,14 @@ pub(crate) fn check_start(paths: &Paths) -> Result<(), ServerError> {
         Err(ServerError::NotSetUp) => return Ok(()),
         Err(error) => return Err(error),
     };
-    if Service::state(&data)?.is_some_and(|v| v.stopped || !v.installed) {
+    let state = Service::state(&data)?;
+    if state
+        .as_ref()
+        .is_some_and(|s| s.activation.as_ref().is_some_and(|o| !o.permits_start()))
+    {
+        return Err(ServerError::ActivationUnresolved);
+    }
+    if state.is_some_and(|v| v.stopped || !v.installed) {
         return Err(ServerError::Stopped);
     }
     Ok(())
@@ -592,6 +645,13 @@ pub fn run(
     if state.stopped || !state.installed {
         return Ok(());
     }
+    if state
+        .activation
+        .as_ref()
+        .is_some_and(|o| !o.permits_start())
+    {
+        return Err(ServerError::ActivationUnresolved);
+    }
     check_cleanup(&state)?;
     let executable = std::env::current_exe().map_err(|_| ServerError::RuntimeUnavailable)?;
     if executable != service.runtime(&state).join("bin/spaceterm-server") {
@@ -603,6 +663,7 @@ pub fn run(
         boot: boot()?,
         token: crate::protocol::random()?,
     };
+    activation::admit_run(&mut state, &run)?;
     state.run = Some(run.clone());
     data.write_json(c"service.json", &state)?;
     drop(intent);
@@ -752,6 +813,13 @@ pub(crate) fn retain_stop(paths: &Paths) -> Result<(), ServerError> {
     let data = Directory::open(&paths.data, false)?;
     let _intent = data.lock("service-intent.lock", false)?;
     if let Some(mut state) = Service::state(&data)? {
+        if state
+            .activation
+            .as_ref()
+            .is_some_and(activation::Operation::pending)
+        {
+            return Err(ServerError::ActivationUnresolved);
+        }
         state.stopped = true;
         data.write_json(c"service.json", &state)?;
     }
@@ -820,12 +888,12 @@ mod tests {
             }
         }
     }
-    struct Fixture {
-        root: PathBuf,
-        paths: Paths,
+    pub(super) struct Fixture {
+        pub(super) root: PathBuf,
+        pub(super) paths: Paths,
     }
     impl Fixture {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
                 "sts-{:x}",
                 u64::from_be_bytes(crate::protocol::random().unwrap()[..8].try_into().unwrap())
@@ -845,6 +913,7 @@ mod tests {
                     installed: true,
                     removing: false,
                     run: None,
+                    activation: None,
                 },
             )
             .unwrap();
@@ -1855,6 +1924,7 @@ mod tests {
                             stopped: false,
                             removing: false,
                             run: None,
+                            activation: None,
                         },
                     )
                     .unwrap();
@@ -1985,6 +2055,7 @@ mod tests {
                     stopped: false,
                     removing: true,
                     run: None,
+                    activation: None,
                 },
             )
             .unwrap();

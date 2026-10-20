@@ -452,12 +452,108 @@ fn a_failure_before_inventory_explains_itself_and_offers_recovery(cx: &mut TestA
     harness.edits.set_error(ServerError::NotRunning);
     sync(&harness, cx);
     assert_eq!(harness.launch_title(cx), Some(launch::OPENING_TITLE));
+    // The incompatible refusal only read whether an update is offered.
     assert_eq!(
         harness.launch.steps(),
-        ["run"],
+        ["run", "update_offered"],
         "no implicit Start or runtime activation"
     );
     assert!(harness.edits.submitted().is_empty());
+}
+
+/// A refused server keeps running. Launch names the refusal without guessing which side is
+/// older, and offers the update journey only when a verified included build can update it.
+#[gpui::test]
+fn a_refused_server_offers_an_update_only_from_a_verified_build(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(
+        vec![
+            Err(ServerError::IncompatibleProtocol),
+            Err(ServerError::IncompatibleProtocol),
+        ],
+        cx,
+    );
+    cx.run_until_parked();
+    // Without a verified build, the refusal names no side and offers no update.
+    let presentation = harness
+        .manager
+        .read_with(cx, |manager, _| manager.launch_presentation())
+        .expect("the refusal is presented");
+    assert!(
+        presentation
+            .detail
+            .contains("SpaceTerm and the server need versions that work together")
+    );
+    assert!(cx.debug_bounds(launch::LAUNCH_UPDATE_SELECTOR).is_none());
+
+    harness.launch.offer_update();
+    harness.click(LAUNCH_RETRY_SELECTOR, cx);
+    let presentation = harness
+        .manager
+        .read_with(cx, |manager, _| manager.launch_presentation())
+        .expect("the refusal is presented");
+    assert_eq!(presentation.title, "Incompatible Server");
+    assert!(
+        presentation
+            .detail
+            .contains("Terminal Sessions keep running")
+    );
+    assert!(presentation.detail.contains("SpaceTerm asks first"));
+    assert!(cx.debug_bounds(launch::LAUNCH_UPDATE_SELECTOR).is_some());
+    assert!(cx.debug_bounds(LAUNCH_RETRY_SELECTOR).is_some());
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "update_offered", "run", "update_offered"],
+        "reading the offer starts, stages, and activates nothing"
+    );
+}
+
+/// Admission can succeed before Pane negotiation refuses a required capability. That refusal
+/// reads the same verified offer, once, and offers the same update journey.
+#[gpui::test]
+fn a_refusal_after_admission_offers_the_verified_update(cx: &mut TestAppContext) {
+    let edits = ScriptedEdits::new(None);
+    edits.set_connected(false);
+    let (harness, cx) = launch_harness_with(vec![ready()], edits, [], cx);
+    harness.launch.offer_update();
+    cx.run_until_parked();
+    sync(&harness, cx);
+    assert_eq!(harness.launch.steps(), ["run"]);
+
+    harness
+        .edits
+        .set_error(ServerError::MissingRequiredCapability);
+    sync(&harness, cx);
+    assert_eq!(harness.launch_title(cx), Some("Incompatible Server"));
+    assert!(cx.debug_bounds(launch::LAUNCH_UPDATE_SELECTOR).is_some());
+    sync(&harness, cx);
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "update_offered"],
+        "one read per refusal, and nothing starts or activates"
+    );
+}
+
+#[gpui::test]
+fn a_missing_capability_without_a_build_names_no_update(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![Err(ServerError::MissingRequiredCapability)], cx);
+    cx.run_until_parked();
+    let presentation = harness
+        .manager
+        .read_with(cx, |manager, _| manager.launch_presentation())
+        .expect("the refusal is presented");
+    assert_eq!(presentation.title, "Incompatible Server");
+    assert!(
+        presentation
+            .detail
+            .contains("doesn\u{2019}t support a feature this SpaceTerm requires")
+    );
+    assert!(
+        presentation
+            .detail
+            .contains("the server needs a version that supports it")
+    );
+    assert!(cx.debug_bounds(launch::LAUNCH_UPDATE_SELECTOR).is_none());
+    assert!(cx.debug_bounds(launch::LAUNCH_SETTINGS_SELECTOR).is_some());
 }
 
 /// A Stop between admission and the first inventory offers Start Server, which opens the

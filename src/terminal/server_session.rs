@@ -241,6 +241,8 @@ impl DevelopmentPaneState {
             .unwrap_or(Err(ServerError::NotRunning))
     }
     fn connection_failed(&self, error: ServerError, has_takeover: bool) -> bool {
+        // An admitted server update refuses connections only until it resolves, so the Pane
+        // keeps reconnecting on its backoff in every client, whoever started the update.
         let retryable = matches!(
             error,
             ServerError::DirectoryUnavailable
@@ -248,6 +250,7 @@ impl DevelopmentPaneState {
                 | ServerError::NotRunning
                 | ServerError::StaleControl
                 | ServerError::Controlled
+                | ServerError::ActivationUnresolved
         );
         {
             let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
@@ -3823,6 +3826,33 @@ mod tests {
             InteractiveInput::Refused,
             "a connection that negotiated no input refuses it"
         );
+    }
+
+    #[test]
+    fn a_resolving_update_keeps_the_pane_reconnecting_without_carrying_a_click() {
+        for (takeover, reconnecting) in [
+            (false, DevelopmentPaneStatus::Reconnecting),
+            (true, DevelopmentPaneStatus::TakeoverReconnecting),
+        ] {
+            let state = DevelopmentPaneState::new();
+            state.take_over.store(true, Ordering::Release);
+            state.start_restored.store(true, Ordering::Release);
+            assert!(state.connection_failed(ServerError::ActivationUnresolved, takeover));
+            assert_eq!(state.status(), reconnecting);
+            // The reconnect neither takes control nor starts a shell on the person's behalf.
+            assert!(!state.take_over.load(Ordering::Acquire));
+            assert!(!state.start_restored.load(Ordering::Acquire));
+        }
+        // A deliberate Stop and permanent refusals still wait for the person.
+        for error in [
+            ServerError::Stopped,
+            ServerError::AuthenticationRefused,
+            ServerError::MissingRequiredCapability,
+        ] {
+            let state = DevelopmentPaneState::new();
+            assert!(!state.connection_failed(error, false), "{error:?}");
+            assert_eq!(state.status(), DevelopmentPaneStatus::Failed(error));
+        }
     }
 
     #[test]

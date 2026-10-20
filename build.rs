@@ -1,7 +1,48 @@
 #[path = "build/identity.rs"]
 mod identity;
 
+use sha2::{Digest, Sha256};
 use std::{env, path::PathBuf, process::Command};
+
+fn candidate_provenance(packaged: bool) {
+    for key in ["SPACETERM_SERVER_ARCHIVE", "SPACETERM_SERVER_SIGNATURE"] {
+        println!("cargo:rerun-if-env-changed={key}");
+    }
+    let pair = (
+        env::var_os("SPACETERM_SERVER_ARCHIVE"),
+        env::var_os("SPACETERM_SERVER_SIGNATURE"),
+    );
+    let digest = match pair {
+        (Some(archive), Some(signature)) => {
+            let archive = PathBuf::from(archive);
+            let signature = PathBuf::from(signature);
+            println!("cargo:rerun-if-changed={}", archive.display());
+            println!("cargo:rerun-if-changed={}", signature.display());
+            let bytes = std::fs::read(archive).expect("the selected server archive is unavailable");
+            assert!(
+                bytes.len() <= 256 * 1024 * 1024,
+                "the selected server archive is too large"
+            );
+            assert_eq!(
+                std::fs::metadata(signature)
+                    .expect("the selected server signature is unavailable")
+                    .len(),
+                64,
+                "the selected server signature is invalid"
+            );
+            format!("{:x}", Sha256::digest(bytes))
+        }
+        (None, None) => {
+            assert!(
+                !packaged,
+                "a packaged client requires a selected signed server artifact"
+            );
+            String::new()
+        }
+        _ => panic!("select both server archive and signature before building the client"),
+    };
+    println!("cargo:rustc-env=SPACETERM_SERVER_SHA256={digest}");
+}
 
 fn main() {
     println!("cargo:rerun-if-env-changed=SPACETERM_PACKAGED");
@@ -33,6 +74,8 @@ fn main() {
     );
     // The application identity follows these inputs.
     let packaged = env::var("SPACETERM_PACKAGED").as_deref() == Ok("1");
+    // The headless server depends on this library but does not carry a client candidate.
+    candidate_provenance(packaged && env::var_os("CARGO_FEATURE_DESKTOP").is_some());
     if packaged {
         assert!(
             env::var_os("CARGO_FEATURE_DEVELOPER_TOOLS").is_none(),

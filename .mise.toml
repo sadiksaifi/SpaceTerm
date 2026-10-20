@@ -490,6 +490,23 @@ run = [
 description = "Test the headless executable's build isolation"
 run = "cargo test --package spaceterm-server-host --no-default-features --locked"
 
+[tasks."server:update:build"]
+description = "Build the signed native update check before code signing"
+run = "cargo build --package spaceterm-server-host --features client --example server_update --locked"
+
+[tasks."server:update:smoke"]
+description = "Exercise exact signed updates against disposable Development service state"
+usage = '''
+arg "<previous-archive>" help="Verified signed initial server archive"
+arg "<previous-signature>" help="Initial archive signature"
+arg "<previous-sha256>" help="Initial complete archive SHA256"
+arg "<candidate-archive>" help="Verified signed different server archive"
+arg "<candidate-signature>" help="Candidate archive signature"
+arg "<candidate-sha256>" help="Candidate complete archive SHA256"
+flag "--confirm-disposable-development" help="Authorize replacement of disposable Development server work"
+'''
+run = "target/debug/examples/server_update {{usage.previous_archive | quote}} {{usage.previous_signature | quote}} {{usage.previous_sha256 | quote}} {{usage.candidate_archive | quote}} {{usage.candidate_signature | quote}} {{usage.candidate_sha256 | quote}} {% if usage.confirm_disposable_development %}--confirm-disposable-development{% endif %}"
+
 [tasks."server:admission:host"]
 description = "Observe refusal of a real other-account peer without sending requests"
 run = "cargo test --package spaceterm-server --locked --lib host::tests::refuses_a_real_other_account_peer_without_sending_protocol_bytes -- --ignored --exact"

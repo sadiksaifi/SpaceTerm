@@ -91,6 +91,28 @@ impl LaunchAgent {
     }
 }
 impl Supervisor for LaunchAgent {
+    fn replace(&self, previous: &Path, candidate: &Path) -> Result<(), ServerError> {
+        self.registration()
+            .check(&self.contents(previous)?, false)
+            .or_else(|_| self.registration().check(&self.contents(candidate)?, false))?;
+        // Never reload a running job. disable already delivered the sole destructive dispatch.
+        if self.running()? {
+            return Err(ServerError::ActivationUnresolved);
+        }
+        if let Ok(bytes) = command(
+            "/bin/launchctl",
+            &["list".into(), self.label.clone().into()],
+        ) {
+            self.validate_observation(previous, false, &bytes)
+                .or_else(|_| self.validate_observation(candidate, false, &bytes))?;
+            command(
+                "/bin/launchctl",
+                &["bootout".into(), self.target.clone().into()],
+            )?;
+        }
+        self.registration()
+            .replace(&self.contents(previous)?, &self.contents(candidate)?)
+    }
     fn startup(&self) -> ServiceStartup {
         ServiceStartup::AtLogin
     }

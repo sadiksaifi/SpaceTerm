@@ -82,6 +82,8 @@ fn run() -> Result<ExitCode, cli::Error> {
                 "version": env!("SPACETERM_SERVER_VERSION"),
                 "commit": env!("SPACETERM_SERVER_COMMIT"),
                 "target": env!("SPACETERM_SERVER_TARGET"),
+                "protocol_major": 1,
+                "capabilities": ["workspace_policy"],
             })
         );
         return Ok(ExitCode::SUCCESS);

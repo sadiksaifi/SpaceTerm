@@ -32,6 +32,8 @@ class ServerArchiveTests(unittest.TestCase):
         self.commit = "a" * 40
         self.info = {
             "schema": 1,
+            "protocol_major": 1,
+            "capabilities": ["workspace_policy"],
             "identity": "spaceterm-preflight",
             "target": "x86_64-unknown-linux-gnu",
             "commit": self.commit,
@@ -147,11 +149,25 @@ class ServerArchiveTests(unittest.TestCase):
         (tree / "bin/spaceterm-server").chmod(0o755)
         archive, signature = archive_tree(ROOT, tree, self.info)
         run = subprocess.run
+        client = self.root / "client"
+        client_pin = {"value": release.sha256(archive)}
+        server_queries = []
 
         def native_run(arguments, **kwargs):
-            if arguments[0] == "objdump":
+            if arguments[0] == client:
+                output = json.dumps(
+                    {
+                        "schema": 1,
+                        "identity": self.info["identity"],
+                        "target": self.info["target"],
+                        "version": "99.0.0",
+                        "server_candidate_sha256": client_pin["value"],
+                    }
+                ).encode()
+            elif arguments[0] == "objdump":
                 output = b"elf64-x86-64" if arguments[1] == "-f" else b""
             elif arguments[1:] == ["--build-info"]:
+                server_queries.append(arguments[0])
                 output = json.dumps(self.info).encode()
             elif arguments[1:] == ["--check"]:
                 output = b"Installed server PTY and shell resources verified.\n"
@@ -170,6 +186,42 @@ class ServerArchiveTests(unittest.TestCase):
             server_package.stage_desktop_artifact(archive, signature, baseline, self.info)
             self.assertEqual((baseline / "artifact.tar.gz").read_bytes(), archive.read_bytes())
             self.assertEqual((baseline / "artifact.sig").read_bytes(), signature.read_bytes())
+            # The client release is independent; its compiled pin owns the exact candidate.
+            server_package.verify_desktop_artifact(
+                baseline, self.info["identity"], "v99.0.0", executable=client
+            )
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "PATH": os.environ["PATH"],
+                        "SPACETERM_SERVER_ARCHIVE": str(archive),
+                        "SPACETERM_SERVER_SIGNATURE": str(signature),
+                    },
+                    clear=True,
+                ),
+                patch.object(server_package, "require_clean_checkout"),
+                patch.object(
+                    server_package, "package", side_effect=AssertionError("must reuse signed bytes")
+                ),
+            ):
+                reused = self.root / "desktop/reused"
+                selected = server_package.prepare_desktop_artifact(
+                    reused, self.info["identity"], "v99.0.0"
+                )
+                self.assertEqual(
+                    Path(selected["SPACETERM_SERVER_ARCHIVE"]).read_bytes(), archive.read_bytes()
+                )
+                server_package.verify_desktop_artifact(
+                    reused, self.info["identity"], executable=client
+                )
+            verified_queries = len(server_queries)
+            client_pin["value"] = "0" * 64
+            with self.assertRaisesRegex(TaskError, "compiled candidate pin"):
+                server_package.verify_desktop_artifact(
+                    baseline, self.info["identity"], executable=client
+                )
+            self.assertEqual(len(server_queries), verified_queries)
             destination = self.root / "desktop/wrong-build"
             expected = {**self.info, "commit": "b" * 40, "version": "dev.bbbbbbbbbbbb"}
             with self.assertRaisesRegex(
@@ -177,6 +229,22 @@ class ServerArchiveTests(unittest.TestCase):
             ):
                 server_package.stage_desktop_artifact(archive, signature, destination, expected)
         self.assertFalse(destination.exists())
+
+    def test_candidate_compatibility_requires_major_and_required_capability_only(self):
+        with patch.object(server_package, "host_target", return_value=self.info["target"]):
+            server_package.compatible_candidate(self.info, self.info["identity"])
+        for changed, reason in [
+            ({"protocol_major": 2}, "protocol major"),
+            ({"capabilities": ["future_optional"]}, "required capability"),
+        ]:
+            with self.subTest(changed=changed):
+                with (
+                    patch.object(server_package, "host_target", return_value=self.info["target"]),
+                    self.assertRaisesRegex(TaskError, reason),
+                ):
+                    server_package.compatible_candidate(
+                        {**self.info, **changed}, self.info["identity"]
+                    )
 
     def test_desktop_candidate_requires_both_explicit_artifact_inputs(self):
         with patch.dict(os.environ, {"SPACETERM_SERVER_ARCHIVE": str(self.archive)}, clear=True):
