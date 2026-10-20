@@ -442,6 +442,39 @@ fn check_status_observes_an_inactive_server_once_and_leaves_a_presented_one_alon
 }
 
 #[gpui::test]
+fn after_disconnect_the_detail_presents_the_facts_last_observed(cx: &mut TestAppContext) {
+    let servers = open_servers(true, &["penguin"], cx);
+    select("penguin", servers.cx);
+    click("settings-ssh-server-connect", servers.cx);
+    let connections = servers.connections.clone();
+    settle(servers.cx, |_| {
+        connections.server(&destination("penguin")).is_some()
+    });
+    assert!(
+        A11yTree::read(servers.cx)
+            .find_text(LAST_OBSERVED)
+            .is_none(),
+        "a connected server's facts are current"
+    );
+
+    click("settings-ssh-server-disconnect", servers.cx);
+
+    let tree = A11yTree::read(servers.cx);
+    assert!(
+        tree.find_text("1.4.0").is_some(),
+        "the version stays presented"
+    );
+    assert!(
+        tree.find_text(LAST_OBSERVED).is_some(),
+        "the detail says the facts were observed earlier"
+    );
+    assert_eq!(servers.computers.observations.load(Ordering::SeqCst), 0);
+}
+
+const LAST_OBSERVED: &str = "SpaceTerm last observed these details when it connected or checked \
+                             the status. They may have changed since.";
+
+#[gpui::test]
 fn remove_forgets_the_connection_at_once_and_selects_the_local_server(cx: &mut TestAppContext) {
     let servers = open_servers(true, &["build.local", "penguin"], cx);
     select("penguin", servers.cx);

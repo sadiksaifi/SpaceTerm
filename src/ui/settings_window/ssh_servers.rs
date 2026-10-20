@@ -2,9 +2,9 @@
 //!
 //! The selected SSH server shows its state and the steps that state allows: Connect, Cancel,
 //! Disconnect, Check Status, and Install after the person reviews what installing does. Its facts
-//! come from the latest observation. Every row reads the registry's snapshot, so rendering asks no
-//! computer anything. The host list reads this computer's SSH configuration when the section
-//! opens.
+//! come from the latest observation, which outlives Disconnect as the facts last observed. Every
+//! row reads the registry's snapshot, so rendering asks no computer anything. The host list reads
+//! this computer's SSH configuration when the section opens.
 
 use std::sync::Arc;
 
@@ -288,6 +288,20 @@ impl SettingsWindow {
         Some((destination, status))
     }
 
+    /// One SSH detail row's value and caption for the selected server, from its latest status
+    /// and the facts the registry last observed.
+    fn selected_ssh_server_fact(
+        &self,
+        row: SettingsRowId,
+    ) -> Option<(SharedString, Option<SharedString>)> {
+        let (destination, status) = self.selected_ssh_server()?;
+        let last = self
+            .ssh_servers
+            .as_ref()
+            .and_then(|rows| rows.connections.last_facts(&destination));
+        Some(ssh_server_fact(row, &status, last.as_ref()))
+    }
+
     /// The steps the selected SSH server's state allows. Check Status asks for a fresh observation
     /// only of a server SpaceTerm isn't presenting: a presented one reports its state already.
     fn ssh_server_actions(
@@ -410,10 +424,9 @@ impl SettingsWindow {
         row: SettingsRowId,
         appearance: &ChromeAppearance,
     ) -> AnyElement {
-        let value = self.selected_ssh_server().map_or_else(
-            || SharedString::new_static(UNKNOWN),
-            |(_, status)| ssh_server_fact(row, &status).0,
-        );
+        let value = self
+            .selected_ssh_server_fact(row)
+            .map_or_else(|| SharedString::new_static(UNKNOWN), |(value, _)| value);
         self.render_server_value(row, value, appearance)
     }
 
@@ -466,7 +479,8 @@ impl SettingsWindow {
                 )),
                 CaptionTone::Guidance,
             )),
-            _ => ssh_server_fact(row, &status)
+            _ => self
+                .selected_ssh_server_fact(row)?
                 .1
                 .map(|caption| (caption, CaptionTone::Guidance)),
         }
@@ -620,20 +634,30 @@ fn observed_facts(status: &RemoteConnectionStatus) -> Option<&SshServerFacts> {
     }
 }
 
-/// One SSH detail row's value and caption, from the server's latest status alone.
+/// One SSH detail row's value and caption, from the server's latest status, or from the facts
+/// `last` observed when that status carries none.
 fn ssh_server_fact(
     row: SettingsRowId,
     status: &RemoteConnectionStatus,
+    last: Option<&SshServerFacts>,
 ) -> (SharedString, Option<SharedString>) {
-    let facts = observed_facts(status);
+    let current = observed_facts(status);
+    let facts = current.or(last);
+    // The version row leads the facts, so its caption says when a stale set was observed.
+    let earlier = (current.is_none() && last.is_some()).then(|| {
+        SharedString::new_static(
+            "SpaceTerm last observed these details when it connected or checked the status. \
+             They may have changed since.",
+        )
+    });
     let unknown = || SharedString::new_static(UNKNOWN);
     match row {
         SettingsRowId::SshServerVersion => match facts {
             Some(SshServerFacts {
                 version: Some(version),
                 ..
-            }) => (SharedString::from(version.clone()), None),
-            Some(_) => (SharedString::new_static("Not Installed"), None),
+            }) => (SharedString::from(version.clone()), earlier),
+            Some(_) => (SharedString::new_static("Not Installed"), earlier),
             None => (
                 unknown(),
                 Some(SharedString::new_static(
