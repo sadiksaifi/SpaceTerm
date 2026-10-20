@@ -2,6 +2,7 @@
 # MISE description="Exercise Linux packaging with controlled Cargo artifacts and real archives"
 """Exercise Linux packaging with controlled Cargo artifacts and real archives."""
 
+import hashlib
 import json
 import os
 import shutil
@@ -27,6 +28,10 @@ extern int pidfd_getpid(int) __attribute__((weak));
 #endif
 int main(int argc, char **argv) {
     if (getenv("SPACETERM_SSH_ASKPASS_MODE")) return 2;
+    if (argc == 2 && strcmp(argv[1], "--build-info") == 0) {
+        puts(BUILD_INFO);
+        return 0;
+    }
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
         puts(IDENTITY);
         return 0;
@@ -119,7 +124,22 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
             "BUILD_EXECUTABLE": str(self.artifact),
         }
 
-    def compile_executable(self, identity, *definitions):
+    def compile_executable(self, identity, *definitions, candidate_digest=""):
+        self.compiled_identity = identity
+        self.compiled_definitions = definitions
+        name, _, _ = identity.rpartition(" ")
+        build = json.dumps(
+            {
+                "schema": 1,
+                "identity": {
+                    "SpaceTerm": "spaceterm",
+                    "SpaceTerm Preflight": "spaceterm-preflight",
+                    "SpaceTerm Development": "spaceterm-development",
+                }[name],
+                "target": "x86_64-unknown-linux-gnu",
+                "server_candidate_sha256": candidate_digest,
+            }
+        )
         self.artifact.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(
             [
@@ -127,6 +147,7 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
                 "-x",
                 "c",
                 f"-DIDENTITY={json.dumps(identity)}",
+                f"-DBUILD_INFO={json.dumps(build)}",
                 *(f"-D{definition}" for definition in definitions),
                 "-",
                 "-o",
@@ -148,8 +169,17 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
             timeout=300,
         )
 
-    def package(self, release_tag=None):
-        prepare(self.root, self.env, release_tag)
+    def package(self, release_tag=None, *, candidate_digest=None):
+        # Client and server releases are independent. Release fixtures reuse an older server.
+        archive, _ = prepare(self.root, self.env, "v0.0.0" if release_tag else None)
+        digest = (
+            candidate_digest
+            if candidate_digest is not None
+            else hashlib.sha256(archive.read_bytes()).hexdigest()
+        )
+        self.compile_executable(
+            self.compiled_identity, *self.compiled_definitions, candidate_digest=digest
+        )
         if release_tag:
             return self.task("release/package/linux.py", release_tag)
         return self.task("preflight/package/linux.py")
@@ -186,6 +216,13 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         record = json.loads(self.record.read_text())
         self.assertIn("--no-default-features", record["arguments"])
         self.assertEqual((record["packaged"], record["release_tag"]), ("1", None))
+
+    def test_packaging_rejects_an_artifact_different_from_the_compiled_pin(self):
+        self.compile_executable("SpaceTerm Preflight 0.0.0")
+        result = self.package(candidate_digest="0" * 64)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("compiled candidate pin", result.stderr)
+        self.assertFalse((self.root / "dist/spaceterm-preflight-linux-x86_64.tar.gz").exists())
 
     def test_packaging_rejects_development_identity_in_a_preflight_archive(self):
         self.compile_executable("SpaceTerm Development 0.0.0")

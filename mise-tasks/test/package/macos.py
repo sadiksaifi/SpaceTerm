@@ -2,6 +2,7 @@
 # MISE description="Exercise macOS packaging with controlled Cargo artifacts and real bundles"
 """Exercise macOS packaging with controlled Cargo artifacts and real bundles."""
 
+import hashlib
 import json
 import os
 import re
@@ -107,6 +108,7 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
         }
         self.artifact = self.root / "target/aarch64-apple-darwin/release/spaceterm"
         self.env["BUILD_EXECUTABLE"] = str(self.artifact)
+        self.compiled_identities = {}
         self.stale = self.root / "target/release/spaceterm"
         self.compile_executable(self.stale, "SpaceTerm Development")
 
@@ -115,7 +117,20 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
             args, cwd=self.root, capture_output=True, text=True, check=True, **kwargs
         )
 
-    def compile_executable(self, output, identity):
+    def compile_executable(self, output, identity, candidate_digest=""):
+        self.compiled_identities[output] = identity
+        build = json.dumps(
+            {
+                "schema": 1,
+                "identity": {
+                    "SpaceTerm": "spaceterm",
+                    "SpaceTerm Preflight": "spaceterm-preflight",
+                    "SpaceTerm Development": "spaceterm-development",
+                }[identity],
+                "target": "aarch64-apple-darwin",
+                "server_candidate_sha256": candidate_digest,
+            }
+        )
         output.parent.mkdir(parents=True, exist_ok=True)
         self.run_command(
             "xcrun",
@@ -134,6 +149,10 @@ sys.exit(int(os.environ.get("BUILD_EXIT", "0")))
 #include <string.h>
 int main(int argc, char **argv) {{
     if (getenv("SPACETERM_SSH_ASKPASS_MODE")) return 2;
+    if (argc == 2 && strcmp(argv[1], "--build-info") == 0) {{
+        puts({json.dumps(build)});
+        return 0;
+    }}
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {{
         puts("{identity} 0.0.1");
         return 0;
@@ -153,8 +172,16 @@ int main(int argc, char **argv) {{
             timeout=300,
         )
 
-    def package(self, release_tag=None):
-        prepare(self.root, self.env, release_tag, self.fingerprint, self.credentials)
+    def package(self, release_tag=None, *, candidate_digest=None):
+        # Client and server releases are independent. Release fixtures reuse an older server.
+        server_tag = "v0.0.0" if release_tag else None
+        archive, _ = prepare(self.root, self.env, server_tag, self.fingerprint, self.credentials)
+        digest = (
+            candidate_digest
+            if candidate_digest is not None
+            else hashlib.sha256(archive.read_bytes()).hexdigest()
+        )
+        self.compile_executable(self.artifact, self.compiled_identities[self.artifact], digest)
         if release_tag:
             return self.task("release/package/macos.py", release_tag)
         return self.task("preflight/package/macos.py")
@@ -187,6 +214,13 @@ int main(int argc, char **argv) {{
         record = json.loads(self.record.read_text())
         self.assertIn("--message-format=json-render-diagnostics", record["arguments"])
         self.assertEqual(record["packaged"], "1")
+
+    def test_packaging_rejects_an_artifact_different_from_the_compiled_pin(self):
+        self.compile_executable(self.artifact, "SpaceTerm Preflight")
+        result = self.package(candidate_digest="0" * 64)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("compiled candidate pin", result.stderr)
+        self.assertFalse((self.root / "dist/SpaceTerm Preflight.app").exists())
 
     def test_packaging_rejects_development_identity_in_a_preflight_bundle(self):
         self.compile_executable(self.artifact, "SpaceTerm Development")
