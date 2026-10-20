@@ -425,13 +425,9 @@ const fn unconfirmed_detail(operation: UnconfirmedOperation) -> &'static str {
     }
 }
 
-/// A person-facing name for an operating system and processor the backend reports.
+/// A person-facing name for the other computer's operating system and processor. The backend
+/// reports the system's display name, which this presents unchanged.
 fn platform_name(os: &str, arch: &str) -> String {
-    let os = match os.to_ascii_lowercase().as_str() {
-        "macos" | "darwin" => "macOS",
-        "linux" => "Linux",
-        _ => os,
-    };
     let arch = match arch.to_ascii_lowercase().as_str() {
         "aarch64" | "arm64" => "ARM",
         "x86_64" | "amd64" => "x86-64",
@@ -440,20 +436,21 @@ fn platform_name(os: &str, arch: &str) -> String {
     format!("{os} on {arch}")
 }
 
-/// What installing the offered server will do on that computer, which the person approves before
-/// anything is installed.
+/// What installing the offered server will do on the other computer, which the person approves
+/// before anything is installed. `os` names that computer's system as the backend reports it; it
+/// never describes this computer.
 pub(crate) fn installation_consequence(os: &str) -> &'static str {
     match os.to_ascii_lowercase().as_str() {
         "linux" => {
             "SpaceTerm installs the server in your account on that computer and runs it as a \
-             systemd user service. To keep it running after you log out, Linux needs lingering \
+             systemd user service. To keep it running after you log out, systemd needs lingering \
              turned on for your account; if it isn\u{2019}t already, SpaceTerm asks for your sudo \
              password on that computer. Your SSH settings and keys aren\u{2019}t changed."
         }
         "macos" | "darwin" => {
-            "SpaceTerm installs the server in your account on that Mac and runs it as a login \
-             item (LaunchAgent), so it runs while you\u{2019}re logged in there. No administrator \
-             password is needed. Your SSH settings and keys aren\u{2019}t changed."
+            "SpaceTerm installs the server in your account on that computer and runs it as a \
+             login item (LaunchAgent), so it runs while you\u{2019}re logged in there. No \
+             administrator password is needed. Your SSH settings and keys aren\u{2019}t changed."
         }
         _ => {
             "SpaceTerm installs the server in this account. Existing SSH settings and keys \

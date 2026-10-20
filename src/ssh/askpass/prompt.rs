@@ -257,7 +257,7 @@ impl AskPassPresentation {
         Self {
             kind: AskPassPresentationKind::RemoteAdministrator,
             title: "Allow the Server to Keep Running",
-            detail: "To keep the SpaceTerm server running on the remote Linux computer after you log out, Linux needs to turn on lingering for your account there. Enter the sudo password for your account on that computer, not the password for this computer.\n\nSpaceTerm sends it once to sudo on that computer and doesn't store it.".into(),
+            detail: "To keep the SpaceTerm server running on the remote computer after you log out, systemd needs lingering turned on for your account there. Enter the sudo password for your account on that computer, not the password for this computer.\n\nSpaceTerm sends it once to sudo on that computer and doesn't store it.".into(),
             affirmative: "Allow",
             negative: "Don't Allow",
             field_label: Some("Remote sudo password"),
