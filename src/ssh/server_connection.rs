@@ -264,6 +264,8 @@ struct Entry {
     /// Whether the person wants this connection kept up, which relaunch continues.
     active: bool,
     offer: Option<(u64, Arc<dyn SshInstallation>)>,
+    /// What the latest connection or Check Status reported, kept for this process only.
+    last_facts: Option<SshServerFacts>,
 }
 impl Default for Entry {
     fn default() -> Self {
@@ -277,6 +279,7 @@ impl Default for Entry {
             checking: false,
             active: false,
             offer: None,
+            last_facts: None,
         }
     }
 }
@@ -374,6 +377,16 @@ impl SshServerConnections {
             .unwrap_or_default();
         connections.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
         connections
+    }
+    /// The facts the latest connection or Check Status reported for a saved connection. They
+    /// outlive Disconnect and later failures until the connection is removed or SpaceTerm quits.
+    pub(crate) fn last_facts(&self, destination: &SshDestination) -> Option<SshServerFacts> {
+        self.inner.state.lock().ok().and_then(|state| {
+            state
+                .entries
+                .get(destination.as_str())
+                .and_then(|entry| entry.last_facts.clone())
+        })
     }
     pub(crate) fn server(&self, destination: &SshDestination) -> Option<LocalServer> {
         self.inner.state.lock().ok().and_then(|state| {
@@ -505,6 +518,7 @@ impl SshServerConnections {
                             entry.status = if entry.cancellation.is_cancelled() {
                                 RemoteConnectionStatus::Inactive
                             } else {
+                                entry.last_facts = Some(observation.facts.clone());
                                 RemoteConnectionStatus::Checked {
                                     availability: observation.availability,
                                     facts: observation.facts,
@@ -775,6 +789,7 @@ fn run_worker(
                 };
                 entry.continuity = expected.clone();
                 entry.presented = Some(connected.server.clone());
+                entry.last_facts = Some(connected.facts.clone());
                 entry.status = RemoteConnectionStatus::Connected {
                     protocol_major: connected.protocol_major,
                     facts: connected.facts.clone(),
@@ -1170,6 +1185,26 @@ mod tests {
         assert!(registry.server(&destination()).is_none());
         assert_eq!(registry.connections().len(), 1, "it stays saved");
         assert_eq!(backend.disconnects.load(Ordering::SeqCst), 1);
+    }
+    #[test]
+    fn the_latest_observed_facts_outlive_disconnect_until_removal() {
+        let (registry, _, intents, entered, release) = setup(false);
+        assert_eq!(registry.last_facts(&destination()), None);
+        registry.connect(destination());
+        entered.recv_blocking().unwrap();
+        release.send_blocking(()).unwrap();
+        eventually(|| registry.server(&destination()).is_some());
+
+        registry.disconnect(&destination());
+        eventually(|| intents.active(&destination()) == Some(false));
+        assert!(matches!(
+            registry.status(&destination()),
+            RemoteConnectionStatus::Inactive
+        ));
+        assert_eq!(registry.last_facts(&destination()), Some(facts()));
+
+        registry.remove(&destination());
+        assert_eq!(registry.last_facts(&destination()), None);
     }
     #[test]
     fn restored_active_intent_is_quiet_and_stop_ends_retained_retry_intent() {
