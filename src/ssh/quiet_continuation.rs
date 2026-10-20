@@ -8,9 +8,8 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 
 use super::cancellation::SshCancellationToken;
-use super::command::SshCommandContext;
+use super::host_config::{HostConfigFilesystem, HostConfigFilesystemError};
 use super::process::{SshProbeEnvironment, SshProcessAdapter, run_probe_process};
-use super::startup_environment::StartupSshEnvironment;
 use crate::platform::{
     app_directories::AppDirectoryRoot,
     app_paths::AppPaths,
@@ -23,26 +22,16 @@ struct Dependency {
     digest: Option<[u8; 32]>,
 }
 impl Dependency {
-    fn read(path: PathBuf) -> Option<Self> {
-        use std::io::Read;
-        let digest = match std::fs::File::open(&path) {
-            Ok(file) => {
-                let mut bytes = zeroize::Zeroizing::new(Vec::new());
-                file.take(4 * 1024 * 1024 + 1)
-                    .read_to_end(&mut bytes)
-                    .ok()?;
-                if bytes.len() > 4 * 1024 * 1024 {
-                    return None;
-                }
-                Some(Sha256::digest(&bytes).into())
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+    fn read(filesystem: &dyn HostConfigFilesystem, path: PathBuf) -> Option<Self> {
+        let digest = match filesystem.file_digest_limited(&path, 4 * 1024 * 1024) {
+            Ok(digest) => Some(digest),
+            Err(HostConfigFilesystemError::Missing) => None,
             Err(_) => return None,
         };
         Some(Self { path, digest })
     }
-    fn unchanged(&self) -> bool {
-        Self::read(self.path.clone()).as_ref() == Some(self)
+    fn unchanged(&self, filesystem: &dyn HostConfigFilesystem) -> bool {
+        Self::read(filesystem, self.path.clone()).as_ref() == Some(self)
     }
 }
 /// A deliberately limited scanner: literal includes only, no Match or glob expansion.
@@ -51,7 +40,11 @@ pub(super) struct ConfigProof {
     dependencies: Vec<Dependency>,
 }
 impl ConfigProof {
-    pub(super) fn capture(root: &Path, home: &Path) -> Option<Self> {
+    pub(super) fn capture(
+        filesystem: &dyn HostConfigFilesystem,
+        root: &Path,
+        home: &Path,
+    ) -> Option<Self> {
         let mut dependencies = Vec::new();
         let mut pending = vec![root.to_path_buf()];
         let mut seen = BTreeSet::new();
@@ -62,10 +55,10 @@ impl ConfigProof {
             if seen.len() > 16 {
                 return None;
             }
-            dependencies.push(Dependency::read(path.clone())?);
-            let bytes = match std::fs::read(&path) {
+            dependencies.push(Dependency::read(filesystem, path.clone())?);
+            let bytes = match filesystem.read_file_limited(&path, 1024 * 1024) {
                 Ok(bytes) => bytes,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(HostConfigFilesystemError::Missing) => continue,
                 Err(_) => return None,
             };
             if bytes.len() > 1024 * 1024 {
@@ -98,7 +91,10 @@ impl ConfigProof {
                 }
             }
         }
-        if dependencies.iter().all(Dependency::unchanged) {
+        if dependencies
+            .iter()
+            .all(|dependency| dependency.unchanged(filesystem))
+        {
             Some(Self { dependencies })
         } else {
             None
@@ -108,17 +104,21 @@ impl ConfigProof {
 pub(super) struct QuietSshRoute {
     dependencies: Vec<Dependency>,
     config: FrozenConfig,
+    filesystem: Arc<dyn HostConfigFilesystem>,
 }
 impl QuietSshRoute {
     pub(super) fn prove<A: SshProcessAdapter>(
-        paths: Arc<AppPaths>,
-        home: &Path,
-        startup: &StartupSshEnvironment,
-        adapter: &A,
+        context: &super::server_process::NativeSshServerConfig<A>,
         effective: &[u8],
         proof: ConfigProof,
         cancellation: &SshCancellationToken,
     ) -> Option<Self> {
+        let paths = Arc::clone(&context.paths);
+        let filesystem = Arc::clone(&context.filesystem);
+        let home = context.home.as_path();
+        let startup = &context.startup;
+        let adapter = &context.adapter;
+        let bootstrap = context.bootstrap.as_ref();
         let options = eligible_options(effective)?;
         let environment = SshProbeEnvironment::new(home.to_path_buf(), startup).ok()?;
         let mut dependencies = proof.dependencies;
@@ -136,11 +136,9 @@ impl QuietSshRoute {
                         continue;
                     }
                     let path = literal_path(value, home, home)?;
-                    let dependency = Dependency::read(path.clone())?;
+                    let dependency = Dependency::read(filesystem.as_ref(), path.clone())?;
                     if name == "identityfile" && dependency.digest.is_some() {
-                        let command =
-                            SshCommandContext::key_public("/usr/bin/ssh-keygen".into(), &path)
-                                .ok()?;
+                        let command = bootstrap.key_public(&path)?;
                         let output = run_probe_process(
                             adapter,
                             &command,
@@ -168,20 +166,24 @@ impl QuietSshRoute {
                             return None;
                         }
                         keys += 1;
-                        dependencies.push(Dependency::read(PathBuf::from(format!(
-                            "{}.pub",
-                            path.to_str()?
-                        )))?);
-                        dependencies.push(Dependency::read(PathBuf::from(format!(
-                            "{}-cert.pub",
-                            path.to_str()?
-                        )))?);
+                        dependencies.push(Dependency::read(
+                            filesystem.as_ref(),
+                            PathBuf::from(format!("{}.pub", path.to_str()?)),
+                        )?);
+                        dependencies.push(Dependency::read(
+                            filesystem.as_ref(),
+                            PathBuf::from(format!("{}-cert.pub", path.to_str()?)),
+                        )?);
                     }
                     dependencies.push(dependency);
                 }
             }
         }
-        if keys == 0 || !dependencies.iter().all(Dependency::unchanged) {
+        if keys == 0
+            || !dependencies
+                .iter()
+                .all(|dependency| dependency.unchanged(filesystem.as_ref()))
+        {
             return None;
         }
         let mut frozen = String::new();
@@ -218,10 +220,14 @@ impl QuietSshRoute {
         Some(Self {
             dependencies,
             config,
+            filesystem,
         })
     }
     pub(super) fn unchanged(&self) -> bool {
-        self.dependencies.iter().all(Dependency::unchanged) && self.config.unchanged()
+        self.dependencies
+            .iter()
+            .all(|dependency| dependency.unchanged(self.filesystem.as_ref()))
+            && self.config.unchanged()
     }
     pub(super) fn config_path(&self) -> PathBuf {
         self.config.path.clone()
@@ -449,13 +455,8 @@ mod tests {
         let external = format!("{}securitykeyprovider $CUSTOM_PROVIDER\n", options());
         assert!(eligible_options(external.as_bytes()).is_none());
     }
-    #[test]
-    fn dependency_changes_pause_the_original_route() {
-        let path = std::env::temp_dir().join(format!("st-proof-{}", std::process::id()));
-        std::fs::write(&path, b"original").unwrap();
-        let proof = Dependency::read(path.clone()).unwrap();
-        std::fs::write(&path, b"replacement").unwrap();
-        assert!(!proof.unchanged());
-        std::fs::remove_file(path).unwrap();
-    }
 }
+
+#[cfg(all(test, feature = "native-tests"))]
+#[path = "../platform/unix_adapter_tests/quiet_continuation.rs"]
+mod unix_adapter_tests;

@@ -379,11 +379,13 @@ impl SshProcessSpawnRequest {
     }
 }
 
+use spaceterm_server::account_bridge::{AccountRead, AccountWrite};
+
 pub(crate) struct SshProcessPipes {
     stdin: Option<Box<dyn Write + Send>>,
     stdout: Option<Box<dyn Read + Send>>,
     stderr: Option<Box<dyn Read + Send>>,
-    pollable: Option<(std::fs::File, std::fs::File)>,
+    pollable: Option<(Box<dyn AccountWrite>, Box<dyn AccountRead>)>,
 }
 
 impl SshProcessPipes {
@@ -402,24 +404,15 @@ impl SshProcessPipes {
     }
 
     pub(crate) fn new_pollable(
-        stdin: Option<std::process::ChildStdin>,
-        stdout: Option<std::process::ChildStdout>,
-        stderr: Option<std::process::ChildStderr>,
+        stdin: Option<Box<dyn Write + Send>>,
+        stdout: Option<Box<dyn Read + Send>>,
+        stderr: Option<Box<dyn Read + Send>>,
+        pollable: Option<(Box<dyn AccountWrite>, Box<dyn AccountRead>)>,
     ) -> Self {
-        use std::os::fd::AsFd;
-        let pollable = stdin
-            .as_ref()
-            .zip(stdout.as_ref())
-            .and_then(|(write, read)| {
-                Some((
-                    std::fs::File::from(write.as_fd().try_clone_to_owned().ok()?),
-                    std::fs::File::from(read.as_fd().try_clone_to_owned().ok()?),
-                ))
-            });
         Self {
-            stdin: stdin.map(|pipe| Box::new(pipe) as Box<dyn Write + Send>),
-            stdout: stdout.map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
-            stderr: stderr.map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+            stdin,
+            stdout,
+            stderr,
             pollable,
         }
     }
@@ -926,7 +919,11 @@ fn spawn_owned_process<A: SshProcessAdapter>(
 
 /// Start a non-PTY account bridge on the calling worker thread.
 /// The callback owns the entire private process group and reaps it on transport drop.
-pub(crate) type AccountBridgePipes = (std::fs::File, std::fs::File, Box<dyn FnOnce() + Send>);
+pub(crate) type AccountBridgePipes = (
+    Box<dyn AccountRead>,
+    Box<dyn AccountWrite>,
+    Box<dyn FnOnce() + Send>,
+);
 
 pub(crate) fn spawn_account_bridge<A: SshProcessAdapter>(
     adapter: A,
@@ -1437,58 +1434,6 @@ mod tests {
     use crate::ssh::askpass::AskPassLease;
     use crate::ssh::command::SshCommandSpec;
     use zeroize::Zeroizing;
-
-    #[cfg(feature = "native-tests")]
-    #[test]
-    fn pollable_native_pipes_deliver_eof_to_captured_commands() {
-        let adapter = crate::platform::unix_ssh_process::UnixSshProcessAdapter;
-        let environment =
-            SshProcessEnvironment::new_without_authentication(std::env::temp_dir(), None).unwrap();
-        let command = SshCommandSpec::for_test("/bin/cat".into(), Vec::new());
-        let output = run_captured_process(
-            &adapter,
-            &command,
-            &environment,
-            b"bounded transfer".to_vec(),
-            64,
-            &SshCancellationToken::default(),
-            Instant::now() + Duration::from_secs(2),
-        )
-        .unwrap();
-        assert!(output.exit.is_success());
-        assert_eq!(output.stdout, b"bounded transfer");
-    }
-
-    #[cfg(feature = "native-tests")]
-    #[test]
-    fn account_bridge_cancellation_kills_owned_processes_and_unblocks_pipes() {
-        let adapter = crate::platform::unix_ssh_process::UnixSshProcessAdapter;
-        let environment =
-            SshProcessEnvironment::new_without_authentication(std::env::temp_dir(), None).unwrap();
-        let command = SshCommandSpec::for_test(
-            "/bin/sh".into(),
-            vec!["-c".into(), "/bin/sleep 30 & wait".into()],
-        );
-        let cancellation = SshCancellationToken::default();
-        let (mut read, write, cleanup) =
-            spawn_account_bridge(adapter, &command, &environment, cancellation.clone()).unwrap();
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let reader = std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let result = read.read_to_end(&mut bytes);
-            sender.send(result).unwrap();
-        });
-        cancellation.cancel();
-        assert!(
-            receiver
-                .recv_timeout(Duration::from_secs(2))
-                .unwrap()
-                .is_ok()
-        );
-        cleanup();
-        drop(write);
-        reader.join().unwrap();
-    }
 
     const ASKPASS_OVERLAY_NAMES: [&str; 6] = [
         "SSH_ASKPASS",
@@ -2002,3 +1947,11 @@ pub(crate) mod testing {
         }
     }
 }
+
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux"),
+    feature = "native-tests"
+))]
+#[path = "../platform/unix_adapter_tests/account_process.rs"]
+mod unix_adapter_tests;

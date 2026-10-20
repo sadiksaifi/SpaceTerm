@@ -65,13 +65,32 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
         let stdin = child.stdin.take();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
+        use std::os::fd::AsFd;
+        let pollable = stdin
+            .as_ref()
+            .zip(stdout.as_ref())
+            .and_then(|(write, read)| {
+                Some((
+                    Box::new(std::fs::File::from(
+                        write.as_fd().try_clone_to_owned().ok()?,
+                    ))
+                        as Box<dyn spaceterm_server::account_bridge::AccountWrite>,
+                    Box::new(std::fs::File::from(read.as_fd().try_clone_to_owned().ok()?))
+                        as Box<dyn spaceterm_server::account_bridge::AccountRead>,
+                ))
+            });
         Ok(SpawnedSshProcess::new(
             UnixSshProcess {
                 child,
                 process_group,
                 collected_exit: None,
             },
-            SshProcessPipes::new_pollable(stdin, stdout, stderr),
+            SshProcessPipes::new_pollable(
+                stdin.map(|pipe| Box::new(pipe) as Box<dyn std::io::Write + Send>),
+                stdout.map(|pipe| Box::new(pipe) as Box<dyn std::io::Read + Send>),
+                stderr.map(|pipe| Box::new(pipe) as Box<dyn std::io::Read + Send>),
+                pollable,
+            ),
         ))
     }
 
@@ -403,5 +422,116 @@ mod tests {
             }
             missing
         })
+    }
+}
+
+#[cfg(feature = "desktop")]
+fn quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+#[cfg(feature = "desktop")]
+impl crate::ssh::server_process::SshServerBootstrap for UnixSshProcessAdapter {
+    fn key_public(&self, path: &std::path::Path) -> Option<crate::ssh::command::SshCommandSpec> {
+        crate::ssh::command::SshCommandContext::key_public("/usr/bin/ssh-keygen".into(), path).ok()
+    }
+    /// This script selects only the approved digest in a fixed account/build namespace.
+    /// It never evaluates a path or an endpoint supplied by the remote protocol.
+    fn locator(&self, identity: &str, action: &str, missing: bool) -> String {
+        let mut script = format!(
+            r#"set -eu
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+uid=$(id -u)
+[ "$uid" -gt 0 ] || exit 71
+root="$HOME/.local/share/{}/server"
+policy="$root/service.json"
+if [ ! -e "$policy" ]; then
+"#,
+            identity
+        );
+        if missing {
+            script.push_str(
+                r#"case "$(uname -s):$(uname -m)" in
+Darwin:arm64) target=aarch64-apple-darwin;;
+Linux:x86_64) target=x86_64-unknown-linux-gnu;;
+*) exit 72;;
+esac
+printf 'SPACETERM_MISSING %s %s\n' "$uid" "$target"
+exit 0
+"#,
+            );
+        } else {
+            script.push_str("exit 73\n");
+        }
+        script.push_str(r#"fi
+[ ! -L "$HOME/.local" ] && [ ! -L "$HOME/.local/share" ] && [ ! -L "${root%/server}" ] && [ ! -L "$root" ] && [ ! -L "$policy" ] || exit 74
+case "$(uname -s)" in
+Darwin) owner=$(stat -f '%u:%Lp' "$policy"); dir_owner=$(stat -f '%u:%Lp' "$root");;
+Linux) owner=$(stat -c '%u:%a' "$policy"); dir_owner=$(stat -c '%u:%a' "$root");;
+*) exit 72;;
+esac
+[ "$owner" = "$uid:600" ] && [ "$dir_owner" = "$uid:700" ] || exit 74
+[ "$(wc -c < "$policy")" -le 16384 ] || exit 74
+[ "$(grep -o '"installation"' "$policy" | wc -l | tr -d ' ')" = 1 ] || exit 74
+digest=$(sed -n 's/.*"installation"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{64\}\)".*/\1/p' "$policy")
+[ "${#digest}" = 64 ] || exit 74
+case "$digest" in *[!0-9a-f]*) exit 74;; esac
+[ ! -L "$root/installations" ] && [ ! -L "$root/installations/$digest" ] && [ ! -L "$root/installations/$digest/bin" ] && [ ! -L "$root/installations/$digest/bin/spaceterm-server" ] || exit 74
+"#);
+        script.push_str(&format!(
+            "exec \"$root/installations/$digest/bin/spaceterm-server\" {} {}\n",
+            quote(action),
+            quote(identity)
+        ));
+        script
+    }
+    fn install(
+        &self,
+        identity: &str,
+        archive_length: usize,
+        signature: &[u8],
+        digest: &str,
+        password: bool,
+    ) -> String {
+        use base64::Engine;
+        let signature = base64::engine::general_purpose::STANDARD.encode(signature);
+        let read_authorization = if password {
+            "IFS= read -r authorization\n"
+        } else {
+            ""
+        };
+        let authorize = if password {
+            format!(
+                "printf '%s\\n' \"$authorization\" | \"$work/runtime/server/bin/spaceterm-server\" ssh-enable-linger-password {} || exit 77\nunset authorization",
+                quote(identity)
+            )
+        } else {
+            format!(
+                "\"$work/runtime/server/bin/spaceterm-server\" ssh-enable-linger {} || exit 77",
+                quote(identity)
+            )
+        };
+        format!(
+            r#"set -eu
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+umask 077
+work=$(mktemp -d "${{TMPDIR:-/tmp}}/spaceterm-install.XXXXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+{read_authorization}cat > "$work/artifact.tar.gz"
+[ "$(wc -c < "$work/artifact.tar.gz")" -eq {} ] || exit 75
+printf %s {} | openssl base64 -d -A > "$work/artifact.sig"
+mkdir "$work/runtime"
+tar -xzf "$work/artifact.tar.gz" -C "$work/runtime"
+if [ "$(uname -s)" = Linux ]; then
+    {authorize}
+fi
+"$work/runtime/server/bin/spaceterm-server" ssh-install {} "$work/artifact.tar.gz" "$work/artifact.sig" {}
+"#,
+            archive_length,
+            quote(&signature),
+            quote(identity),
+            quote(digest)
+        )
     }
 }

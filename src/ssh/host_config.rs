@@ -217,6 +217,20 @@ pub(crate) trait HostConfigFilesystem: Send + Sync {
         maximum_bytes: usize,
     ) -> Result<Vec<u8>, HostConfigFilesystemError>;
 
+    /// Hash a bounded regular file without exposing private key bytes to policy code.
+    fn file_digest_limited(
+        &self,
+        path: &Path,
+        maximum_bytes: usize,
+    ) -> Result<[u8; 32], HostConfigFilesystemError> {
+        use sha2::{Digest, Sha256};
+        let bytes = zeroize::Zeroizing::new(self.read_file_limited(path, maximum_bytes)?);
+        if bytes.len() > maximum_bytes {
+            return Err(HostConfigFilesystemError::Unavailable);
+        }
+        Ok(Sha256::digest(&bytes).into())
+    }
+
     fn read_directory_limited(
         &self,
         path: &Path,

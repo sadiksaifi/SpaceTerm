@@ -35,6 +35,30 @@ impl HostConfigFilesystem for UnixHostConfigFilesystem {
         Ok(contents)
     }
 
+    fn file_digest_limited(
+        &self,
+        path: &Path,
+        maximum_bytes: usize,
+    ) -> Result<[u8; 32], HostConfigFilesystemError> {
+        use sha2::{Digest, Sha256};
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
+            .open(path)
+            .map_err(classify)?;
+        if !file.metadata().map_err(classify)?.is_file() {
+            return Err(HostConfigFilesystemError::Unavailable);
+        }
+        let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(maximum_bytes.min(16 * 1024)));
+        file.take(maximum_bytes.saturating_add(1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(classify)?;
+        if bytes.len() > maximum_bytes {
+            return Err(HostConfigFilesystemError::Unavailable);
+        }
+        Ok(Sha256::digest(&bytes).into())
+    }
+
     fn read_directory_limited(
         &self,
         path: &Path,
@@ -66,6 +90,32 @@ mod tests {
     use crate::ssh::host_config::{
         HostConfigIssueKind, HostConfigRoots, HostDiscoveryLimits, discover_ssh_hosts,
     };
+
+    #[test]
+    fn bounded_dependency_digest_rejects_oversize_and_nonregular_files() {
+        use sha2::{Digest, Sha256};
+        let directory = std::env::temp_dir().join(format!(
+            "spaceterm-dependency-digest-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("key");
+        std::fs::write(&path, b"original").unwrap();
+        let filesystem = UnixHostConfigFilesystem;
+        assert_eq!(
+            filesystem.file_digest_limited(&path, 8).unwrap(),
+            <[u8; 32]>::from(Sha256::digest(b"original"))
+        );
+        assert_eq!(
+            filesystem.file_digest_limited(&path, 7),
+            Err(HostConfigFilesystemError::Unavailable)
+        );
+        assert_eq!(
+            filesystem.file_digest_limited(&directory, 8),
+            Err(HostConfigFilesystemError::Unavailable)
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn unix_host_discovery_rejects_fifo_and_device_includes_without_blocking() {

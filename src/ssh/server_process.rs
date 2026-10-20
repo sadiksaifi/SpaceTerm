@@ -18,6 +18,7 @@ use super::command::{OpenSshExecutable, SshCommandContext, ValidatedRemoteShellC
 use super::control_connection::{
     ControlConnectionState, ControlConnectionTiming, OpenSshControlConnection,
 };
+use super::host_config::HostConfigFilesystem;
 use super::process::{
     CapturedProcessError, SshProcessAdapter, SshProcessCleanup, SshProcessEnvironment,
     SshProcessSupervisor, run_captured_process, run_captured_transfer, spawn_account_bridge,
@@ -39,26 +40,14 @@ pub(crate) struct SshServerArtifacts {
     root: Option<PathBuf>,
 }
 impl SshServerArtifacts {
-    pub(crate) fn capture() -> Self {
-        let root = if cfg!(spaceterm_packaged) {
-            std::env::current_exe().ok().and_then(|executable| {
-                executable
-                    .parent()
-                    .and_then(std::path::Path::parent)
-                    .map(|root| {
-                        root.join(if cfg!(target_os = "macos") {
-                            "Resources/server-artifacts"
-                        } else {
-                            "share/spaceterm/server-artifacts"
-                        })
-                    })
-            })
-        } else {
-            std::env::var_os("SPACETERM_SSH_SERVER_ARTIFACTS").map(PathBuf::from)
-        };
+    pub(crate) fn new(root: Option<PathBuf>) -> Self {
         Self { root }
     }
-    fn candidate(&self, target: &str) -> Result<VerifiedArtifact, SshConnectFailure> {
+    fn candidate(
+        &self,
+        filesystem: &dyn HostConfigFilesystem,
+        target: &str,
+    ) -> Result<VerifiedArtifact, SshConnectFailure> {
         let platform = platform(target)?;
         let directory = self
             .root
@@ -69,7 +58,7 @@ impl SshServerArtifacts {
             .join(target);
         let archive = directory.join("artifact.tar.gz");
         let signature = directory.join("artifact.sig");
-        let digest_bytes = read_bounded(&directory.join("artifact.sha256"), 65)?;
+        let digest_bytes = read_bounded(filesystem, &directory.join("artifact.sha256"), 65)?;
         let digest = std::str::from_utf8(&digest_bytes)
             .map_err(|_| SshConnectFailure::Refused(RefusalKind::InvalidArtifact))?
             .trim()
@@ -86,8 +75,8 @@ impl SshServerArtifacts {
                 )
             })
             .map_err(map_server_error)?;
-        let bytes = read_bounded(&archive, MAX_ARTIFACT)?;
-        let signature = read_bounded(&signature, 64)?;
+        let bytes = read_bounded(filesystem, &archive, MAX_ARTIFACT)?;
+        let signature = read_bounded(filesystem, &signature, 64)?;
         // Pin the bytes that cross SSH, rather than rereading a replaceable source after verification.
         if signature.len() != 64 || hex_digest(&bytes) != digest {
             return Err(SshConnectFailure::Refused(RefusalKind::InvalidArtifact));
@@ -117,13 +106,13 @@ impl SshServerArtifacts {
         })
     }
 }
-fn read_bounded(path: &std::path::Path, limit: u64) -> Result<Vec<u8>, SshConnectFailure> {
-    use std::io::Read;
-    let file = std::fs::File::open(path)
-        .map_err(|_| SshConnectFailure::Refused(RefusalKind::InvalidArtifact))?;
-    let mut bytes = Vec::new();
-    file.take(limit + 1)
-        .read_to_end(&mut bytes)
+fn read_bounded(
+    filesystem: &dyn HostConfigFilesystem,
+    path: &std::path::Path,
+    limit: u64,
+) -> Result<Vec<u8>, SshConnectFailure> {
+    let bytes = filesystem
+        .read_file_limited(path, limit as usize)
         .map_err(|_| SshConnectFailure::Refused(RefusalKind::InvalidArtifact))?;
     if bytes.len() as u64 > limit {
         return Err(SshConnectFailure::Refused(RefusalKind::InvalidArtifact));
@@ -141,6 +130,8 @@ struct VerifiedArtifact {
 /// All dependencies are captured by host composition; construction starts no SSH process.
 pub(crate) struct NativeSshServerConfig<A: SshProcessAdapter> {
     pub paths: Arc<AppPaths>,
+    pub filesystem: Arc<dyn HostConfigFilesystem>,
+    pub bootstrap: Arc<dyn SshServerBootstrap>,
     pub home: PathBuf,
     pub startup: StartupSshEnvironment,
     pub executable: OpenSshExecutable,
@@ -236,8 +227,11 @@ impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
                 self.config.paths.managed_ssh_config(),
             )
             .map_err(|_| SshConnectFailure::Unavailable(UnavailableKind::SshFailed))?;
-            let proof =
-                ConfigProof::capture(&self.config.paths.managed_ssh_config(), &self.config.home);
+            let proof = ConfigProof::capture(
+                self.config.filesystem.as_ref(),
+                &self.config.paths.managed_ssh_config(),
+                &self.config.home,
+            );
             let configuration = run_captured_process(
                 &self.config.adapter,
                 &commands.configuration(),
@@ -290,16 +284,8 @@ impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
             return Err(SshConnectFailure::Cancelled);
         }
         if let Some((proof, effective)) = proof_inputs {
-            let proof = QuietSshRoute::prove(
-                self.config.paths.clone(),
-                &self.config.home,
-                &self.config.startup,
-                &self.config.adapter,
-                &effective,
-                proof,
-                &cancellation,
-            )
-            .map(Arc::new);
+            let proof =
+                QuietSshRoute::prove(&self.config, &effective, proof, &cancellation).map(Arc::new);
             if let Ok(mut proofs) = self.quiet.lock() {
                 proofs.remove(destination.as_str());
                 if let Some(proof) = proof {
@@ -404,7 +390,10 @@ impl<A: SshProcessAdapter> SshConnectBackend for NativeSshConnectBackend<A> {
                 if expected.is_some() {
                     return Err(SshConnectFailure::Changed(ContinuityChange::ServerChanged));
                 }
-                let artifact = route.config.artifacts.candidate(&target)?;
+                let artifact = route
+                    .config
+                    .artifacts
+                    .candidate(route.config.filesystem.as_ref(), &target)?;
                 Err(SshConnectFailure::InstallationOffered(
                     SshInstallationOffer {
                         version: artifact.version.clone(),
@@ -485,7 +474,10 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
         cancellation: &SshCancellationToken,
     ) -> Result<Discovery, SshConnectFailure> {
         let output = self.run(
-            &locator("ssh-discover", true),
+            &self
+                .config
+                .bootstrap
+                .locator(identity(), "ssh-discover", true),
             Vec::new(),
             OBSERVATION,
             cancellation,
@@ -507,7 +499,10 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
         discovery = prepare_if_needed(discovery, expected, self.route_id, || {
             progress(ConnectPhase::Starting);
             let output = self.run(
-                &locator("ssh-prepare", false),
+                &self
+                    .config
+                    .bootstrap
+                    .locator(identity(), "ssh-prepare", false),
                 Vec::new(),
                 OBSERVATION,
                 cancellation,
@@ -632,7 +627,12 @@ impl<A: SshProcessAdapter> AccountConnector for NativeConnector<A> {
             .upgrade()
             .ok_or(ServerError::NotRunning)?;
         let (command, capability) = route
-            .command(&locator("ssh-connect", false))
+            .command(
+                &route
+                    .config
+                    .bootstrap
+                    .locator(identity(), "ssh-connect", false),
+            )
             .map_err(|_| ServerError::NotRunning)?;
         capability
             .authorize()
@@ -648,7 +648,7 @@ impl<A: SshProcessAdapter> AccountConnector for NativeConnector<A> {
             cleanup();
             return Err(ServerError::NotRunning);
         }
-        AccountBridge::from_streams(Box::new(read), Box::new(write), cleanup, &self.expected)
+        AccountBridge::from_streams(read, write, cleanup, &self.expected)
     }
 }
 struct NativeInstallation<A: SshProcessAdapter> {
@@ -676,7 +676,13 @@ impl<A: SshProcessAdapter> SshInstallation for NativeInstallation<A> {
             _ => return Err(SshConnectFailure::Changed(ContinuityChange::AccountChanged)),
         }
         progress(ConnectPhase::Installing);
-        let script = install_script(&self.artifact, false);
+        let script = self.route.config.bootstrap.install(
+            identity(),
+            self.artifact.bytes.len(),
+            &self.artifact.signature,
+            &self.artifact.digest,
+            false,
+        );
         // Upload has no whole-flow deadline. The server bounds lock/supervisor observation.
         // A long transfer is cancellable, while local per-phase native operations remain bounded.
         let (command, capability) = self.route.command(&script)?;
@@ -739,7 +745,13 @@ impl<A: SshProcessAdapter> SshInstallation for NativeInstallation<A> {
             input.push(b'\n');
             input.extend_from_slice(&self.artifact.bytes);
             let (command, capability) =
-                self.route.command(&install_script(&self.artifact, true))?;
+                self.route.command(&self.route.config.bootstrap.install(
+                    identity(),
+                    self.artifact.bytes.len(),
+                    &self.artifact.signature,
+                    &self.artifact.digest,
+                    true,
+                ))?;
             capability
                 .authorize()
                 .map_err(|_| SshConnectFailure::Unavailable(UnavailableKind::Network))?;
@@ -857,7 +869,7 @@ fn hex_digest(bytes: &[u8]) -> String {
 fn platform(target: &str) -> Result<(String, String), SshConnectFailure> {
     match target {
         "aarch64-apple-darwin" => Ok(("macOS".into(), "arm64".into())),
-        "x86_64-unknown-linux-gnu" => Ok(("Linux".into(), "x86_64".into())),
+        "x86_64-unknown-linux-gnu" => Ok(("linux".into(), "x86_64".into())),
         _ => Err(SshConnectFailure::Incompatible(
             IncompatibilityKind::Platform,
         )),
@@ -987,164 +999,23 @@ fn map_server_error(error: ServerError) -> SshConnectFailure {
         _ => SshConnectFailure::Unavailable(UnavailableKind::ServiceUnavailable),
     }
 }
-fn quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-/// This script selects only the approved digest in a fixed account/build namespace.
-/// It never evaluates a path or an endpoint supplied by the remote protocol.
-fn locator(action: &str, missing: bool) -> String {
-    let mut script = format!(
-        r#"set -eu
-PATH=/usr/bin:/bin:/usr/sbin:/sbin
-export PATH
-uid=$(id -u)
-[ "$uid" -gt 0 ] || exit 71
-root="$HOME/.local/share/{}/server"
-policy="$root/service.json"
-if [ ! -e "$policy" ]; then
-"#,
-        identity()
-    );
-    if missing {
-        script.push_str(
-            r#"case "$(uname -s):$(uname -m)" in
-Darwin:arm64) target=aarch64-apple-darwin;;
-Linux:x86_64) target=x86_64-unknown-linux-gnu;;
-*) exit 72;;
-esac
-printf 'SPACETERM_MISSING %s %s\n' "$uid" "$target"
-exit 0
-"#,
-        );
-    } else {
-        script.push_str("exit 73\n");
-    }
-    script.push_str(r#"fi
-[ ! -L "$HOME/.local" ] && [ ! -L "$HOME/.local/share" ] && [ ! -L "${root%/server}" ] && [ ! -L "$root" ] && [ ! -L "$policy" ] || exit 74
-case "$(uname -s)" in
-Darwin) owner=$(stat -f '%u:%Lp' "$policy"); dir_owner=$(stat -f '%u:%Lp' "$root");;
-Linux) owner=$(stat -c '%u:%a' "$policy"); dir_owner=$(stat -c '%u:%a' "$root");;
-*) exit 72;;
-esac
-[ "$owner" = "$uid:600" ] && [ "$dir_owner" = "$uid:700" ] || exit 74
-[ "$(wc -c < "$policy")" -le 16384 ] || exit 74
-[ "$(grep -o '"installation"' "$policy" | wc -l | tr -d ' ')" = 1 ] || exit 74
-digest=$(sed -n 's/.*"installation"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{64\}\)".*/\1/p' "$policy")
-[ "${#digest}" = 64 ] || exit 74
-case "$digest" in *[!0-9a-f]*) exit 74;; esac
-[ ! -L "$root/installations" ] && [ ! -L "$root/installations/$digest" ] && [ ! -L "$root/installations/$digest/bin" ] && [ ! -L "$root/installations/$digest/bin/spaceterm-server" ] || exit 74
-"#);
-    script.push_str(&format!(
-        "exec \"$root/installations/$digest/bin/spaceterm-server\" {} {}\n",
-        quote(action),
-        quote(identity())
-    ));
-    script
-}
-fn install_script(artifact: &VerifiedArtifact, password: bool) -> String {
-    use base64::Engine;
-    let signature = base64::engine::general_purpose::STANDARD.encode(&artifact.signature);
-    let read_authorization = if password {
-        "IFS= read -r authorization\n"
-    } else {
-        ""
-    };
-    let authorize = if password {
-        format!(
-            "printf '%s\\n' \"$authorization\" | \"$work/runtime/server/bin/spaceterm-server\" ssh-enable-linger-password {} || exit 77\nunset authorization",
-            quote(identity())
-        )
-    } else {
-        format!(
-            "\"$work/runtime/server/bin/spaceterm-server\" ssh-enable-linger {} || exit 77",
-            quote(identity())
-        )
-    };
-    format!(
-        r#"set -eu
-PATH=/usr/bin:/bin:/usr/sbin:/sbin
-export PATH
-umask 077
-work=$(mktemp -d "${{TMPDIR:-/tmp}}/spaceterm-install.XXXXXXXX")
-trap 'rm -rf "$work"' EXIT HUP INT TERM
-{read_authorization}cat > "$work/artifact.tar.gz"
-[ "$(wc -c < "$work/artifact.tar.gz")" -eq {} ] || exit 75
-printf %s {} | openssl base64 -d -A > "$work/artifact.sig"
-mkdir "$work/runtime"
-tar -xzf "$work/artifact.tar.gz" -C "$work/runtime"
-if [ "$(uname -s)" = Linux ]; then
-    {authorize}
-fi
-"$work/runtime/server/bin/spaceterm-server" ssh-install {} "$work/artifact.tar.gz" "$work/artifact.sig" {}
-"#,
-        artifact.bytes.len(),
-        quote(&signature),
-        quote(identity()),
-        quote(&artifact.digest)
-    )
+/// Native shell construction only; policy owns admission and verified artifact bytes.
+pub(crate) trait SshServerBootstrap: Send + Sync {
+    fn key_public(&self, path: &std::path::Path) -> Option<super::command::SshCommandSpec>;
+    fn locator(&self, identity: &str, action: &str, missing: bool) -> String;
+    fn install(
+        &self,
+        identity: &str,
+        archive_length: usize,
+        signature: &[u8],
+        digest: &str,
+        password: bool,
+    ) -> String;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
-
-    #[test]
-    fn installer_executes_the_verified_archive_layout_and_cleans_its_temporary_files() {
-        // This fixture exercises the generated shell and archive layout without service effects.
-        let root = std::env::temp_dir().join(format!("st-install-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let mut bytes = Vec::new();
-        {
-            let compressed =
-                flate2::write::GzEncoder::new(&mut bytes, flate2::Compression::default());
-            let mut archive = tar::Builder::new(compressed);
-            let helper = b"#!/bin/sh\ncase $1 in ssh-enable-linger) exit 0;; ssh-enable-linger-password) IFS= read -r password; test \"$password\" = fixture;; ssh-install) test -f \"$3\" && test -f \"$4\";; *) exit 91;; esac\n";
-            let mut header = tar::Header::new_gnu();
-            header.set_size(helper.len() as u64);
-            header.set_mode(0o755);
-            header.set_cksum();
-            archive
-                .append_data(&mut header, "server/bin/spaceterm-server", &helper[..])
-                .unwrap();
-            archive.into_inner().unwrap().finish().unwrap();
-        }
-        let artifact = VerifiedArtifact {
-            digest: hex_digest(&bytes),
-            bytes,
-            signature: vec![1; 64],
-            version: "test".into(),
-            platform: ("Linux".into(), "x86_64".into()),
-        };
-        for (password, input, expected_code) in [
-            (false, None, 0),
-            (true, Some("fixture"), 0),
-            (true, Some("wrong"), 77),
-        ] {
-            let script = install_script(&artifact, password)
-                .replace("${TMPDIR:-/tmp}", root.to_str().unwrap())
-                .replace("if [ \"$(uname -s)\" = Linux ]; then", "if true; then");
-            let mut child = std::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg(script)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .unwrap();
-            let mut writer = child.stdin.take().unwrap();
-            if let Some(input) = input {
-                writeln!(writer, "{input}").unwrap();
-            }
-            writer.write_all(&artifact.bytes).unwrap();
-            drop(writer);
-            assert_eq!(child.wait().unwrap().code(), Some(expected_code));
-            assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
-        }
-        std::fs::remove_dir(root).unwrap();
-    }
 
     #[test]
     fn bounded_discovery_refuses_wrong_build_and_unsupported_capability() {
@@ -1208,192 +1079,12 @@ mod tests {
             assert!(matches!(result, Err(SshConnectFailure::Changed(_))));
         }
     }
-
-    #[cfg(feature = "native-tests")]
-    mod native {
-        use super::*;
-        use crate::ssh::askpass::{
-            AskPassAttempt, AskPassAttemptObservation, AskPassBrokerLease, AskPassLease,
-            AskPassUnavailable,
-        };
-        struct NoPrompt;
-        impl AskPassLease for NoPrompt {
-            fn entries(&self) -> Vec<(&'static str, &std::ffi::OsStr)> {
-                vec![
-                    ("SSH_ASKPASS", std::ffi::OsStr::new("/usr/bin/false")),
-                    ("SSH_ASKPASS_REQUIRE", std::ffi::OsStr::new("force")),
-                    ("DISPLAY", std::ffi::OsStr::new(":0")),
-                ]
-            }
-            fn cancel(&self) {}
-            fn capability(&self) -> &[u8] {
-                b"native-no-prompt"
-            }
-        }
-        impl AskPassAttemptFactory for NoPrompt {
-            fn start_attempt(&self, _: &AppPaths) -> Result<AskPassAttempt, AskPassUnavailable> {
-                Ok(AskPassAttempt {
-                    lease: AskPassBrokerLease::new(Arc::new(NoPrompt)),
-                    observation: AskPassAttemptObservation::default(),
-                })
-            }
-        }
-        /// Explicit env selects a disposable account. This test never invokes Stop or Start.
-        #[gpui::test]
-        #[ignore = "requires an explicitly selected disposable OpenSSH destination and signed artifacts"]
-        fn native_account_server_connect(cx: &mut gpui::TestAppContext) {
-            use crate::platform::{
-                app_directories::{AppDirectories, AppDirectoryEnvironment},
-                unix_local_socket::UnixControlSocketProbe,
-                unix_secure_filesystem::UnixSecureFilesystem,
-                unix_ssh_process::UnixSshProcessAdapter,
-            };
-            let destination = SshDestination::new(
-                std::env::var("SPACETERM_SSH_NATIVE_DESTINATION")
-                    .expect("explicit destination required"),
-            )
-            .unwrap();
-            let expected =
-                std::env::var("SPACETERM_SSH_NATIVE_EXPECT").unwrap_or_else(|_| "stopped".into());
-            let root = std::fs::canonicalize("/tmp")
-                .unwrap()
-                .join(format!("sts-{}", std::process::id()));
-            std::fs::create_dir(&root).unwrap();
-            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let home = PathBuf::from(std::env::var_os("HOME").unwrap());
-            let env = AppDirectoryEnvironment {
-                home: Some(home.clone().into()),
-                xdg_config_home: Some(root.join("config").into()),
-                xdg_data_home: Some(root.join("data").into()),
-                xdg_state_home: Some(root.join("state").into()),
-                xdg_cache_home: Some(root.join("cache").into()),
-                xdg_runtime_dir: Some(root.join("runtime").into()),
-                ..Default::default()
-            };
-            let directories =
-                AppDirectories::resolve_xdg("spaceterm-development", &env, Some(root.clone()))
-                    .unwrap();
-            let paths = Arc::new(
-                AppPaths::from_directories(directories, 103, Arc::new(UnixSecureFilesystem))
-                    .unwrap(),
-            );
-            paths
-                .ensure_secure_root(crate::platform::app_directories::AppDirectoryRoot::Config)
-                .unwrap();
-            if let Some(configuration) = std::env::var_os("SPACETERM_SSH_NATIVE_CONFIG") {
-                std::fs::write(
-                    paths.managed_ssh_config(),
-                    std::fs::read(configuration).unwrap(),
-                )
-                .unwrap();
-                std::fs::set_permissions(
-                    paths.managed_ssh_config(),
-                    std::fs::Permissions::from_mode(0o600),
-                )
-                .unwrap();
-            }
-            let backend = NativeSshConnectBackend::new(NativeSshServerConfig {
-                paths,
-                home,
-                startup: StartupSshEnvironment::from_environment(
-                    |key| std::env::var_os(key),
-                    "/usr/bin:/bin".into(),
-                )
-                .unwrap(),
-                executable: OpenSshExecutable::new("/usr/bin/ssh".into()).unwrap(),
-                adapter: UnixSshProcessAdapter,
-                socket_probe: Arc::new(UnixControlSocketProbe),
-                askpass: Arc::new(NoPrompt),
-                executor: cx.background_executor.clone(),
-                artifacts: SshServerArtifacts::capture(),
-            });
-            let cancellation = SshCancellationToken::default();
-            let mut result = backend.connect(
-                &destination,
-                ConnectMode::Requested,
-                None,
-                &cancellation,
-                &|_| {},
-            );
-            if let Err(SshConnectFailure::InstallationOffered(offer)) = result {
-                if std::env::var_os("SPACETERM_SSH_NATIVE_INSTALL").as_deref()
-                    == Some(std::ffi::OsStr::new("1"))
-                {
-                    result = offer.installation.install(&cancellation, &|_| {});
-                } else {
-                    result = Err(SshConnectFailure::InstallationOffered(offer));
-                }
-            }
-            match (expected.as_str(), result) {
-                ("stopped", Err(SshConnectFailure::Stopped)) => {}
-                ("missing", Err(SshConnectFailure::InstallationOffered(_))) => {}
-                ("ready", Ok(connected)) => {
-                    assert_eq!(connected.server.refresh().unwrap().protocol_major, 1);
-                    let reused = backend
-                        .connect(
-                            &destination,
-                            ConnectMode::QuietContinuation,
-                            Some(&connected.continuity),
-                            &cancellation,
-                            &|_| {},
-                        )
-                        .unwrap_or_else(|_| panic!("existing route did not quietly reconnect"));
-                    assert_eq!(reused.server.refresh().unwrap().protocol_major, 1);
-                    // Kill only this test's master. Eligible direct software keys recover automatically.
-                    backend.disconnect(&destination);
-                    let recovered = backend.connect(
-                        &destination,
-                        ConnectMode::QuietContinuation,
-                        Some(&connected.continuity),
-                        &cancellation,
-                        &|_| {},
-                    );
-                    if std::env::var_os("SPACETERM_SSH_NATIVE_QUIET").as_deref()
-                        == Some(std::ffi::OsStr::new("1"))
-                    {
-                        if let Err(error) = recovered {
-                            panic!(
-                                "eligible direct route did not reconnect after master loss: {}",
-                                failure_name(&error)
-                            );
-                        }
-                    } else {
-                        assert!(
-                            matches!(recovered, Err(SshConnectFailure::NeedsPerson(_))),
-                            "unproven route attempted background authentication"
-                        );
-                    }
-                }
-                (_, Err(error)) => panic!("unexpected classification: {}", failure_name(&error)),
-                _ => panic!("unexpected connected result"),
-            }
-            backend.disconnect(&destination);
-            let cancelled = SshCancellationToken::cancelled();
-            assert!(matches!(
-                backend.connect(
-                    &destination,
-                    ConnectMode::Requested,
-                    None,
-                    &cancelled,
-                    &|_| {}
-                ),
-                Err(SshConnectFailure::Cancelled)
-            ));
-            drop(backend);
-            let _ = std::fs::remove_dir_all(root);
-        }
-        fn failure_name(error: &SshConnectFailure) -> &'static str {
-            match error {
-                SshConnectFailure::Cancelled => "cancelled",
-                SshConnectFailure::Stopped => "stopped",
-                SshConnectFailure::Unavailable(_) => "unavailable",
-                SshConnectFailure::NeedsPerson(_) => "needs person",
-                SshConnectFailure::Changed(_) => "continuity changed",
-                SshConnectFailure::Refused(_) => "refused",
-                SshConnectFailure::Incompatible(_) => "incompatible",
-                SshConnectFailure::Unconfirmed(_) => "unconfirmed",
-                SshConnectFailure::InstallationOffered(_) => "offered",
-            }
-        }
-    }
 }
+
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux"),
+    feature = "native-tests"
+))]
+#[path = "../platform/unix_adapter_tests/server_process.rs"]
+mod unix_adapter_tests;

@@ -27,7 +27,7 @@ const CONNECTION_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const BROKER_PID_HEX_BYTES: usize = 8;
 const AUTHENTICATED_ENDPOINT_PREFIX_BYTES: usize = BROKER_PID_HEX_BYTES + 1;
 
-struct UnixAskPassLocalIpc;
+pub(crate) struct UnixAskPassLocalIpc;
 
 impl AskPassLocalIpc for UnixAskPassLocalIpc {
     fn bind(&self, paths: &AppPaths) -> Result<BoundAskPassEndpoint, AskPassUnavailable> {
@@ -301,6 +301,36 @@ mod tests {
         let flags = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) };
         assert_ne!(flags, -1);
         flags & libc::O_NONBLOCK != 0
+    }
+
+    #[test]
+    #[ignore = "creates only an owned broker endpoint using the actual application paths"]
+    fn native_actual_application_paths_can_bind_an_askpass_broker() {
+        let directories = crate::platform::app_directories::AppDirectories::resolve(
+            crate::application_identity::ApplicationIdentity::current().directory_name(),
+        )
+        .expect("native application directories");
+        let paths = AppPaths::from_directories(
+            directories,
+            crate::platform::unix_local_socket::LOCAL_IPC_PATH_MAXIMUM,
+            Arc::new(UnixSecureFilesystem),
+        )
+        .expect("native application paths");
+        let owner = paths
+            .create_runtime_owner(ASKPASS_RUNTIME_OWNER_KIND)
+            .expect("actual runtime owner");
+        owner
+            .socket_path(ASKPASS_RUNTIME_SOCKET_NAME)
+            .expect("actual runtime socket bounds");
+        drop(owner);
+        let attempt = start_attempt_with_presenter(
+            &paths,
+            std::env::current_exe().expect("native helper executable"),
+            &UnixAskPassLocalIpc,
+            Arc::new(FakePresenter::new([])),
+        )
+        .expect("actual runtime broker binding");
+        drop(attempt);
     }
 
     #[test]
