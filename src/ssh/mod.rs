@@ -25,3 +25,13 @@ pub(crate) mod startup_environment;
 
 #[cfg(test)]
 pub(crate) mod testing;
+
+#[cfg(feature = "desktop")]
+pub(crate) mod server_connection;
+#[cfg(feature = "desktop")]
+pub(crate) mod server_intents;
+#[cfg(feature = "desktop")]
+pub(crate) mod server_process;
+
+#[cfg(feature = "desktop")]
+mod quiet_continuation;

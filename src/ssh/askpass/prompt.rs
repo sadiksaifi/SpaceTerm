@@ -2,6 +2,8 @@ use std::path::Path;
 
 use zeroize::Zeroizing;
 
+pub(crate) const REMOTE_LINGER_PROMPT: &str = "SpaceTerm: sudo password on the remote computer to keep its SpaceTerm server running after logout:";
+
 const MAX_ASKPASS_PROMPT_BYTES: usize = 4 * 1024;
 const MAX_ASKPASS_SECRET_BYTES: usize = 16 * 1024;
 
@@ -107,6 +109,9 @@ impl AskPassRequest {
             }
             AskPassPromptClassification::KeyPassphrase(key_passphrase) => {
                 AskPassPresentation::key_passphrase(self, key_passphrase)
+            }
+            AskPassPromptClassification::RemoteAdministrator => {
+                AskPassPresentation::remote_administrator()
             }
             AskPassPromptClassification::Secret => AskPassPresentation::secret(self),
         }
@@ -214,6 +219,7 @@ fn is_unsafe_prompt_character(character: char) -> bool {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum AskPassPresentationKind {
+    RemoteAdministrator,
     FirstContact,
     Confirmation,
     Password,
@@ -223,11 +229,17 @@ enum AskPassPresentationKind {
 
 impl AskPassPresentationKind {
     const fn uses_secret_entry(self) -> bool {
-        matches!(self, Self::Password | Self::KeyPassphrase | Self::Secret)
+        matches!(
+            self,
+            Self::Password | Self::KeyPassphrase | Self::Secret | Self::RemoteAdministrator
+        )
     }
 
     const fn requires_nonempty_secret(self) -> bool {
-        matches!(self, Self::Password | Self::KeyPassphrase)
+        matches!(
+            self,
+            Self::Password | Self::KeyPassphrase | Self::RemoteAdministrator
+        )
     }
 }
 
@@ -241,6 +253,17 @@ struct AskPassPresentation {
 }
 
 impl AskPassPresentation {
+    fn remote_administrator() -> Self {
+        Self {
+            kind: AskPassPresentationKind::RemoteAdministrator,
+            title: "Allow the Server to Keep Running",
+            detail: "To keep the SpaceTerm server running on the remote Linux computer after you log out, Linux needs to turn on lingering for your account there. Enter the sudo password for your account on that computer, not the password for this computer.\n\nSpaceTerm sends it once to sudo on that computer and doesn't store it.".into(),
+            affirmative: "Allow",
+            negative: "Don't Allow",
+            field_label: Some("Remote sudo password"),
+        }
+    }
+
     fn first_contact(prompt: FirstContactPrompt<'_>) -> Self {
         let host = match prompt.address {
             Some(address) => format!(
@@ -338,6 +361,7 @@ impl AskPassPresentation {
 }
 
 enum AskPassPromptClassification<'a> {
+    RemoteAdministrator,
     FirstContact(FirstContactPrompt<'a>),
     Confirmation,
     Password(PasswordPrompt<'a>),
@@ -366,6 +390,9 @@ struct KeyPassphrasePrompt<'a> {
 /// Recognizes OpenSSH's first-contact grammar even when the prompt metadata supplies no
 /// confirmation hint to AskPass.
 fn classify_prompt(prompt: &str, hint: AskPassPromptKind) -> AskPassPromptClassification<'_> {
+    if prompt == REMOTE_LINGER_PROMPT && hint == AskPassPromptKind::Secret {
+        return AskPassPromptClassification::RemoteAdministrator;
+    }
     if let Some(first_contact) = parse_first_contact_prompt(prompt) {
         return AskPassPromptClassification::FirstContact(first_contact);
     }
@@ -589,6 +616,26 @@ pub(crate) type AskPassCompletion = Box<dyn FnOnce(AskPassResult)>;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remote_administrator_prompt_names_remote_sudo_and_requires_a_secret() {
+        let request = super::AskPassRequest::new(
+            super::REMOTE_LINGER_PROMPT.into(),
+            super::AskPassPromptKind::Secret,
+        )
+        .unwrap();
+        let presentation = request.secret_presentation().unwrap();
+        assert_eq!(presentation.field_label(), "Remote sudo password");
+        assert!(presentation.requires_nonempty());
+        let similar = super::AskPassRequest::new(
+            format!("{} extra", super::REMOTE_LINGER_PROMPT),
+            super::AskPassPromptKind::Secret,
+        )
+        .unwrap();
+        assert_eq!(
+            similar.secret_presentation().unwrap().field_label(),
+            "SSH authentication response"
+        );
+    }
     use super::*;
 
     fn request(prompt: &str, kind: AskPassPromptKind) -> AskPassRequest {

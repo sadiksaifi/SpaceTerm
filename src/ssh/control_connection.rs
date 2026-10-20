@@ -11,7 +11,7 @@ use thiserror::Error;
 use super::cancellation::SshCancellationToken;
 use super::command::{
     OpenSshExecutable, PreparedSshTerminalSessionChannelCommand, SshCommandContext,
-    SshCommandContextError, ValidatedRemoteShellCommand,
+    SshCommandContextError, SshCommandSpec, ValidatedRemoteShellCommand,
 };
 use super::live_connection::{
     ControlConnectionObserver, LiveConnectionAuthority, LiveConnectionBinding, LiveConnectionState,
@@ -43,6 +43,15 @@ pub(crate) struct ControlConnectionTiming {
     timeout: Option<Duration>,
     poll_interval: Duration,
     readiness_check_timeout: Duration,
+}
+
+impl ControlConnectionTiming {
+    pub(crate) fn quiet() -> Self {
+        Self {
+            timeout: Some(Duration::from_secs(30)),
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for ControlConnectionTiming {
@@ -250,18 +259,47 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         cancellation: &SshCancellationToken,
         timing: ControlConnectionTiming,
     ) -> Result<Self, ControlConnectionError> {
+        Self::connect_configuration(
+            paths,
+            executable,
+            socket_probe,
+            destination,
+            backend,
+            cancellation,
+            timing,
+            None,
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one exact connection launch carries its validated native dependencies"
+    )]
+    pub(crate) async fn connect_configuration(
+        paths: &AppPaths,
+        executable: OpenSshExecutable,
+        socket_probe: &dyn ControlSocketProbe,
+        destination: SshDestination,
+        backend: Arc<B>,
+        cancellation: &SshCancellationToken,
+        timing: ControlConnectionTiming,
+        frozen_config: Option<PathBuf>,
+    ) -> Result<Self, ControlConnectionError> {
         if cancellation.is_cancelled() {
             return Err(ControlConnectionError::Cancelled);
         }
         let runtime_owner = paths.create_runtime_owner(CONTROL_RUNTIME_OWNER_KIND)?;
         let control_path = runtime_owner.socket_path(CONTROL_RUNTIME_SOCKET_NAME)?;
         reserve_socket(&runtime_owner, socket_probe)?;
+        let quiet = frozen_config.is_some();
         let commands = SshCommandContext::new(
             executable,
-            paths.managed_ssh_config(),
+            frozen_config.unwrap_or_else(|| paths.managed_ssh_config()),
             destination,
             control_path.clone(),
         )?;
+        let commands = if quiet { commands.quiet() } else { commands };
         if cancellation.is_cancelled() {
             return Err(ControlConnectionError::Cancelled);
         }
@@ -379,6 +417,31 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
             self.commands.remote_utility(),
             capability,
         ))
+    }
+
+    /// Binds a non-PTY server command to this exact already-authenticated master.
+    pub(crate) fn server_command(
+        &self,
+        command: ValidatedRemoteShellCommand,
+    ) -> Result<
+        (
+            SshCommandSpec,
+            super::live_connection::LiveConnectionCapability,
+        ),
+        ControlConnectionError,
+    > {
+        if self.state() != ControlConnectionState::Ready {
+            return Err(ControlConnectionError::NotReady);
+        }
+        let capability = self
+            .authority
+            .as_ref()
+            .ok_or(ControlConnectionError::Ownership)?
+            .capability();
+        capability
+            .authorize()
+            .map_err(|_| ControlConnectionError::NotReady)?;
+        Ok((self.commands.server_channel(command), capability))
     }
 
     /// Prepares a pane command bound to the current live authority and sanitized environment.
@@ -623,8 +686,9 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
     }
 }
 
-impl<B: SshProcessBackend> Drop for OpenSshControlConnection<B> {
-    fn drop(&mut self) {
+impl<B: SshProcessBackend> OpenSshControlConnection<B> {
+    /// Revoke all child channels immediately and enqueue cleanup of only this owned master.
+    pub(crate) fn cancel_owned(&mut self) {
         let supervisor = self
             .supervisor
             .take()
@@ -641,6 +705,11 @@ impl<B: SshProcessBackend> Drop for OpenSshControlConnection<B> {
                 *pending = Some(cleanup);
             }
         }
+    }
+}
+impl<B: SshProcessBackend> Drop for OpenSshControlConnection<B> {
+    fn drop(&mut self) {
+        self.cancel_owned();
     }
 }
 

@@ -238,6 +238,7 @@ pub(crate) struct SshCommandContext {
     managed_config: PathBuf,
     destination: SshDestination,
     control_path: PathBuf,
+    quiet: bool,
 }
 
 impl SshCommandContext {
@@ -255,11 +256,46 @@ impl SshCommandContext {
             managed_config,
             destination,
             control_path,
+            quiet: false,
         })
     }
 
+    pub(crate) fn quiet(mut self) -> Self {
+        self.quiet = true;
+        self
+    }
+    pub(crate) fn authorization_prompt(
+        helper: PathBuf,
+    ) -> Result<SshCommandSpec, OpenSshExecutableError> {
+        Ok(SshCommandSpec::new(
+            OpenSshExecutable::new(helper)?,
+            vec![
+                "Administrator password to enable boot startup for the selected SSH account:"
+                    .into(),
+            ],
+        ))
+    }
+    pub(crate) fn key_public(
+        executable: PathBuf,
+        identity: &Path,
+    ) -> Result<SshCommandSpec, OpenSshExecutableError> {
+        Ok(SshCommandSpec::new(
+            OpenSshExecutable::new(executable)?,
+            vec![
+                "-y".into(),
+                "-P".into(),
+                "".into(),
+                "-f".into(),
+                identity.as_os_str().to_owned(),
+            ],
+        ))
+    }
     pub(crate) fn master(&self) -> SshCommandSpec {
         let mut arguments = self.base_arguments();
+        if self.quiet {
+            push_option(&mut arguments, "BatchMode=yes".into());
+            push_option(&mut arguments, "StrictHostKeyChecking=yes".into());
+        }
         push_option(&mut arguments, OsString::from("ControlMaster=yes"));
         push_option(&mut arguments, self.control_path_option());
         push_option(&mut arguments, OsString::from("ControlPersist=no"));
@@ -290,6 +326,34 @@ impl SshCommandContext {
         push_option(&mut arguments, OsString::from("SessionType=default"));
         self.push_destination(&mut arguments);
         arguments.extend([OsString::from("/bin/sh"), OsString::from("-s")]);
+        self.spec(arguments)
+    }
+
+    pub(crate) fn server_channel(&self, command: ValidatedRemoteShellCommand) -> SshCommandSpec {
+        let mut arguments = self.child_arguments();
+        for option in [
+            "ClearAllForwardings=yes",
+            "RemoteCommand=none",
+            "RequestTTY=no",
+            "SessionType=default",
+            "BatchMode=yes",
+        ] {
+            push_option(&mut arguments, option.into());
+        }
+        arguments.push("-T".into());
+        self.push_destination(&mut arguments);
+        arguments.push(command.argument.into());
+        self.spec(arguments)
+    }
+
+    pub(crate) fn configuration(&self) -> SshCommandSpec {
+        let arguments = vec![
+            "-F".into(),
+            self.managed_config.as_os_str().to_owned(),
+            "-G".into(),
+            "--".into(),
+            self.destination.as_str().into(),
+        ];
         self.spec(arguments)
     }
 
@@ -513,6 +577,15 @@ pub(crate) struct ValidatedRemoteShellCommand {
 }
 
 impl ValidatedRemoteShellCommand {
+    pub(crate) fn server_script(script: &str) -> Result<Self, RemoteShellCommandError> {
+        if script.len() > 64 * 1024 || script.contains('\0') {
+            return Err(RemoteShellCommandError::CommandTooLong);
+        }
+        Ok(Self {
+            argument: format!("/bin/sh -c {}", quote_for_posix_shell(script)),
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn new(argument: String) -> Result<Self, RemoteShellCommandError> {
         if argument.is_empty() {

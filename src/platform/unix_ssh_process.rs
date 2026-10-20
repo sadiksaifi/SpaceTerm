@@ -1,4 +1,4 @@
-use std::io::{self, Read, Write};
+use std::io;
 use std::mem::MaybeUninit;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
@@ -62,25 +62,16 @@ impl SshProcessAdapter for UnixSshProcessAdapter {
                 return Err(SshProcessMechanismError::LaunchFailed);
             }
         };
-        let stdin = child
-            .stdin
-            .take()
-            .map(|stdin| Box::new(stdin) as Box<dyn Write + Send>);
-        let stdout = child
-            .stdout
-            .take()
-            .map(|stdout| Box::new(stdout) as Box<dyn Read + Send>);
-        let stderr = child
-            .stderr
-            .take()
-            .map(|stderr| Box::new(stderr) as Box<dyn Read + Send>);
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
         Ok(SpawnedSshProcess::new(
             UnixSshProcess {
                 child,
                 process_group,
                 collected_exit: None,
             },
-            SshProcessPipes::new(stdin, stdout, stderr),
+            SshProcessPipes::new_pollable(stdin, stdout, stderr),
         ))
     }
 
