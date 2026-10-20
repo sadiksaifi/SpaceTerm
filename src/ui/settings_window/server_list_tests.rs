@@ -35,6 +35,8 @@ const NAVIGATION_SELECTOR: &str = "settings-navigation-settings-section-servers"
 struct Computers {
     connects: AtomicUsize,
     observations: AtomicUsize,
+    /// Destinations whose host never answers.
+    unreachable: Mutex<Vec<String>>,
 }
 
 impl Computers {
@@ -61,13 +63,24 @@ fn facts() -> SshServerFacts {
 impl SshConnectBackend for Computers {
     fn connect(
         &self,
-        _: &SshDestination,
+        destination: &SshDestination,
         _: ConnectMode,
         _: Option<&SshServerContinuity>,
         _: &SshCancellationToken,
         _: &ConnectProgress<'_>,
     ) -> Result<ConnectedSshServer, SshConnectFailure> {
         self.connects.fetch_add(1, Ordering::SeqCst);
+        if self
+            .unreachable
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|host| host == destination.as_str())
+        {
+            return Err(SshConnectFailure::Unavailable(
+                crate::ssh::server_connection::UnavailableKind::HostUnreachable,
+            ));
+        }
         Ok(ConnectedSshServer {
             server: crate::local_server::LocalServer::for_identity("spaceterm-development")
                 .expect("the development identity resolves"),
@@ -679,6 +692,47 @@ fn a_setting_named_by_the_query_ranks_before_a_host_with_that_name(cx: &mut Test
             Some(SettingsSectionId::Font)
         );
     });
+}
+
+/// A host whose requested Connect failed is still tried quietly when SpaceTerm reopens, so its
+/// detail offers ending that without removing the saved connection.
+#[gpui::test]
+fn a_failed_connection_offers_to_stop_reconnecting_and_stays_saved(cx: &mut TestAppContext) {
+    let servers = open_servers(true, &[], cx);
+    servers
+        .computers
+        .unreachable
+        .lock()
+        .unwrap()
+        .push("nohost".to_owned());
+    servers.connections.connect(destination("nohost"));
+    let connections = servers.connections.clone();
+    settle(servers.cx, |_| {
+        matches!(
+            connections.status(&destination("nohost")),
+            RemoteConnectionStatus::Unavailable { .. }
+        )
+    });
+    select("nohost", servers.cx);
+    let records = servers.saved.clone();
+    let saved = move || {
+        records
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|record| record.destination == destination("nohost"))
+            .map(|record| record.active)
+    };
+    assert_eq!(saved(), Some(true));
+
+    click("settings-ssh-server-stop-reconnecting", servers.cx);
+    settle(servers.cx, |_| saved() == Some(false));
+    assert!(!rendered(
+        "settings-ssh-server-stop-reconnecting",
+        servers.cx
+    ));
+    assert_eq!(listed(servers.cx)[1].0, "nohost");
 }
 
 /// Short queries are partial words a person is still typing, so they select no server.

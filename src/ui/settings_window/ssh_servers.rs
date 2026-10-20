@@ -199,7 +199,9 @@ impl SettingsWindow {
                 self.select_server(ServerChoice::Ssh(destination), cx);
             }
             SshServerAction::Cancel => connections.cancel(&destination),
-            SshServerAction::Disconnect => connections.disconnect(&destination),
+            SshServerAction::Disconnect | SshServerAction::StopReconnecting => {
+                connections.disconnect(&destination)
+            }
             SshServerAction::CheckStatus => connections.check(&destination),
             SshServerAction::Remove => {
                 let next = self.server_after_removing(&destination);
@@ -313,12 +315,31 @@ impl SettingsWindow {
             .ssh_servers
             .as_ref()
             .is_some_and(|rows| rows.connections.server(destination).is_some());
-        present(status)
+        let mut actions: Vec<_> = present(status)
             .actions
             .iter()
             .copied()
             .filter(|action| *action != SshServerAction::CheckStatus || !presented)
-            .collect()
+            .collect();
+        // A failed Connect still reconnects quietly after relaunch; offer to end that intent.
+        if self.ssh_server_reconnects(destination)
+            && !actions.iter().any(|action| {
+                matches!(
+                    action,
+                    SshServerAction::Disconnect | SshServerAction::Cancel
+                )
+            })
+        {
+            actions.push(SshServerAction::StopReconnecting);
+        }
+        actions
+    }
+
+    /// Whether SpaceTerm tries `destination` again on its own although nothing for it runs now.
+    fn ssh_server_reconnects(&self, destination: &SshDestination) -> bool {
+        self.ssh_servers
+            .as_ref()
+            .is_some_and(|rows| rows.connections.reconnects(destination))
     }
 
     /// The selected SSH server's state, announced as it changes, and the steps it allows.
@@ -468,7 +489,16 @@ impl SettingsWindow {
         match row {
             SettingsRowId::SshServerStatus => {
                 let presentation = present(&status);
-                Some((presentation.explanation, presentation.tone))
+                let explanation =
+                    if self.ssh_server_reconnects(&destination) && !presentation.working {
+                        SharedString::from(format!(
+                            "{} SpaceTerm tries again quietly when it reopens.",
+                            presentation.explanation
+                        ))
+                    } else {
+                        presentation.explanation
+                    };
+                Some((explanation, presentation.tone))
             }
             SettingsRowId::RemoveServer => Some((
                 SharedString::from(format!(

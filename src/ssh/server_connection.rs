@@ -378,6 +378,16 @@ impl SshServerConnections {
         connections.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
         connections
     }
+    /// Whether SpaceTerm tries a saved connection again on its own, as it does after relaunch,
+    /// although no work for it runs now. A requested Connect that failed leaves this intent.
+    pub(crate) fn reconnects(&self, destination: &SshDestination) -> bool {
+        self.inner.state.lock().ok().is_some_and(|state| {
+            state
+                .entries
+                .get(destination.as_str())
+                .is_some_and(|entry| entry.active && !entry.running)
+        })
+    }
     /// The facts the latest connection or Check Status reported for a saved connection. They
     /// outlive Disconnect and later failures until the connection is removed or SpaceTerm quits.
     pub(crate) fn last_facts(&self, destination: &SshDestination) -> Option<SshServerFacts> {

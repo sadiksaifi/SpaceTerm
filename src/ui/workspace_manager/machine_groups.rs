@@ -177,7 +177,12 @@ impl WorkspaceManager {
                             .filter(|(connected, _)| presented && !connected)
                             .map(|(_, presentation)| presentation.state),
                         connects: offers(crate::ui::ssh_servers::SshServerAction::Connect),
-                        disconnects: offers(crate::ui::ssh_servers::SshServerAction::Disconnect),
+                        // A failed Connect still reconnects quietly, which Disconnect ends.
+                        disconnects: offers(crate::ui::ssh_servers::SshServerAction::Disconnect)
+                            || presented
+                                && connections.as_ref().is_some_and(|connections| {
+                                    connections.reconnects(&destination)
+                                }),
                         // Settings lists saved SSH connections; native Remote Workspaces alone
                         // name no server there.
                         has_settings: connections.as_ref().is_some_and(|connections| {
