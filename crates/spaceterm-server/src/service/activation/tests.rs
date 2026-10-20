@@ -648,7 +648,10 @@ fn released_version_order_refuses_downgrades_without_inventing_development_order
     assert!(is_released_downgrade("1.9.0", "1.10.0"));
     assert!(is_released_downgrade("1.0.0", "18446744073709551616.0.0"));
     assert!(!is_released_downgrade("2.0.0", "1.10.0"));
-    assert!(!is_released_downgrade("dev.aaaaaaaaaaaa", "dev.bbbbbbbbbbbb"));
+    assert!(!is_released_downgrade(
+        "dev.aaaaaaaaaaaa",
+        "dev.bbbbbbbbbbbb"
+    ));
 }
 
 #[test]
