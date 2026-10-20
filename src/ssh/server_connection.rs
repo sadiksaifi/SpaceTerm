@@ -124,6 +124,8 @@ pub(crate) enum RemoteConnectionStatus {
     Checked {
         availability: ServerAvailability,
         facts: SshServerFacts,
+        /// When the observation finished, which the result describes rather than the present.
+        at: std::time::SystemTime,
     },
     Paused {
         reason: ContinuityChange,
@@ -550,6 +552,7 @@ impl SshServerConnections {
                                 RemoteConnectionStatus::Checked {
                                     availability: observation.availability,
                                     facts: observation.facts,
+                                    at: std::time::SystemTime::now(),
                                 }
                             };
                         });

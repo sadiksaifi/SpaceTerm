@@ -445,6 +445,16 @@ fn check_status_observes_an_inactive_server_once_and_leaves_a_presented_one_alon
         A11yTree::read(servers.cx).find_text("1.4.0").is_some(),
         "the observed version replaces Unknown"
     );
+    let caption = servers.window.read_with(servers.cx, |settings, _| {
+        settings
+            .ssh_server_caption(super::super::SettingsRowId::SshServerStatus)
+            .map(|(caption, _)| caption.to_string())
+            .unwrap_or_default()
+    });
+    assert!(
+        caption.contains("was running") && caption.contains("Last checked just now"),
+        "a check says what it found and when, got {caption:?}"
+    );
 
     click("settings-ssh-server-connect", servers.cx);
     settle(servers.cx, |_| {

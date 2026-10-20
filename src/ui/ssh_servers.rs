@@ -350,6 +350,7 @@ pub(crate) fn present(status: &RemoteConnectionStatus) -> SshServerPresentation 
         RemoteConnectionStatus::Checked {
             availability,
             facts,
+            ..
         } => {
             let (state, selector, detail) = checked(*availability);
             (
@@ -434,19 +435,20 @@ const fn checked(availability: ServerAvailability) -> (&'static str, &'static st
         ServerAvailability::Running => (
             "Available",
             "settings-ssh-server-state-available",
-            "The SpaceTerm server for this account is running. Connect to show its Workspaces.",
+            "When SpaceTerm checked, the SpaceTerm server for this account was running. Connect to show \
+             its Workspaces.",
         ),
         ServerAvailability::NotRunning => (
             "Not Running",
             "settings-ssh-server-state-not-running",
-            "The SpaceTerm server for this account is installed but not running. Connect starts \
-             it.",
+            "When SpaceTerm checked, the SpaceTerm server for this account was installed but not \
+             running. Connect starts it.",
         ),
         ServerAvailability::NotInstalled => (
             "No Server",
             "settings-ssh-server-state-not-installed",
-            "This account has no SpaceTerm server. Connect offers to install a verified one when \
-             SpaceTerm has one for that computer.",
+            "When SpaceTerm checked, this account had no SpaceTerm server. Connect offers to install a \
+             verified one when SpaceTerm has one for that computer.",
         ),
     }
 }

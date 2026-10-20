@@ -493,16 +493,25 @@ impl SettingsWindow {
         match row {
             SettingsRowId::SshServerStatus => {
                 let presentation = present(&status);
-                let explanation =
-                    if self.ssh_server_reconnects(&destination) && !presentation.working {
-                        SharedString::from(format!(
-                            "{} SpaceTerm tries again quietly when it reopens.",
-                            presentation.explanation
-                        ))
-                    } else {
-                        presentation.explanation
+                let mut explanation = presentation.explanation.to_string();
+                // A check describes the moment it ran, so it says how long ago that was.
+                if let RemoteConnectionStatus::Checked { at, .. } = &status {
+                    let seconds = |time: std::time::SystemTime| {
+                        time.duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |elapsed| elapsed.as_secs())
                     };
-                Some((explanation, presentation.tone))
+                    explanation.push_str(&format!(
+                        " {}.",
+                        super::updates::last_checked(
+                            Some(seconds(*at)),
+                            seconds(std::time::SystemTime::now())
+                        )
+                    ));
+                }
+                if self.ssh_server_reconnects(&destination) && !presentation.working {
+                    explanation.push_str(" SpaceTerm tries again quietly when it reopens.");
+                }
+                Some((SharedString::from(explanation), presentation.tone))
             }
             SettingsRowId::RemoveServer => Some((
                 SharedString::from(format!(
