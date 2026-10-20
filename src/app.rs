@@ -4,7 +4,7 @@ use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
 use gpui::{
-    App, AppContext, Bounds, PromptButton, PromptLevel, TitlebarOptions, WindowBounds,
+    App, AppContext, Bounds, PromptButton, PromptLevel, TitlebarOptions, Window, WindowBounds,
     WindowOptions, actions, px, size,
 };
 
@@ -125,6 +125,28 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
         })
     }
 
+    /// The desktop's SSH server connections. Construction has no effects: nothing connects,
+    /// reads retained intent, or discovers hosts until the first Workspace Window opens.
+    pub(crate) fn ssh_servers_factory(
+        &self,
+        askpass: Arc<dyn crate::ssh::askpass::AskPassWindowFactory>,
+    ) -> Rc<dyn crate::ui::ssh_servers::SshServersFactory>
+    where
+        A: Clone + 'static,
+    {
+        Rc::new(NativeSshServersFactory {
+            paths: Arc::clone(&self.paths),
+            home: self.home_directory.clone(),
+            startup: self.ssh_environment.clone(),
+            capability: self.ssh_capability.clone(),
+            executable: self.executable.clone(),
+            adapter: self.process_adapter.clone(),
+            socket_probe: Arc::clone(&self.control_socket_probe),
+            host_config: Arc::clone(&self.host_config_filesystem),
+            askpass,
+        })
+    }
+
     pub(crate) fn remote_backend_factory(
         &self,
         askpass: Arc<dyn crate::ssh::askpass::AskPassWindowFactory>,
@@ -143,6 +165,90 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
             },
             askpass,
         ))
+    }
+}
+
+/// Builds the native SSH server registry once a window can present SSH's prompts.
+struct NativeSshServersFactory<A: SshProcessAdapter> {
+    paths: Arc<AppPaths>,
+    home: PathBuf,
+    startup: StartupSshEnvironment,
+    capability: SshCapability,
+    executable: OpenSshExecutable,
+    adapter: A,
+    socket_probe: Arc<dyn ControlSocketProbe>,
+    host_config: Arc<dyn HostConfigFilesystem>,
+    askpass: Arc<dyn crate::ssh::askpass::AskPassWindowFactory>,
+}
+
+/// The hosts this computer's SSH configuration names, including SpaceTerm's managed hosts.
+struct ConfiguredSshHosts {
+    roots: crate::ssh::host_config::HostConfigRoots,
+    filesystem: Arc<dyn HostConfigFilesystem>,
+}
+
+impl crate::ui::ssh_servers::SshHostSource for ConfiguredSshHosts {
+    fn hosts(&self) -> Vec<crate::domain::SshDestination> {
+        crate::ssh::host_config::discover_ssh_hosts(
+            self.filesystem.as_ref(),
+            &self.roots,
+            crate::ssh::host_config::HostDiscoveryLimits::default(),
+        )
+        .hosts
+        .iter()
+        .filter_map(|host| {
+            crate::domain::SshDestination::new(host.alias().as_str().to_owned()).ok()
+        })
+        .collect()
+    }
+}
+
+impl<A: SshProcessAdapter + Clone + 'static> crate::ui::ssh_servers::SshServersFactory
+    for NativeSshServersFactory<A>
+{
+    fn create(
+        &self,
+        window: &Window,
+        cx: &mut App,
+    ) -> Option<crate::ssh::server_connection::SshServerConnections> {
+        use crate::ssh::server_process::{
+            NativeSshConnectBackend, NativeSshServerConfig, SshServerArtifacts,
+        };
+        // Without a usable OpenSSH, no SSH server can be reached.
+        if !matches!(self.capability, SshCapability::Available(_)) {
+            return None;
+        }
+        let askpass = self.askpass.create(window, cx).ok()?;
+        let backend = NativeSshConnectBackend::new(NativeSshServerConfig {
+            paths: Arc::clone(&self.paths),
+            home: self.home.clone(),
+            startup: self.startup.clone(),
+            executable: self.executable.clone(),
+            adapter: self.adapter.clone(),
+            socket_probe: Arc::clone(&self.socket_probe),
+            askpass,
+            executor: cx.background_executor().clone(),
+            artifacts: SshServerArtifacts::capture(),
+        });
+        Some(crate::ssh::server_connection::SshServerConnections::new(
+            Arc::new(backend),
+            Arc::new(
+                crate::ssh::server_intents::PrivateSshConnectionIntents::new(Arc::clone(
+                    &self.paths,
+                )),
+            ),
+        ))
+    }
+
+    fn hosts(&self) -> Option<Arc<dyn crate::ui::ssh_servers::SshHostSource>> {
+        Some(Arc::new(ConfiguredSshHosts {
+            roots: crate::ssh::host_config::HostConfigRoots {
+                managed: self.paths.managed_ssh_config(),
+                user: self.home.join(".ssh/config"),
+                home: self.home.clone(),
+            },
+            filesystem: Arc::clone(&self.host_config),
+        }))
     }
 }
 
@@ -605,7 +711,12 @@ pub(crate) fn open(
         .try_global::<crate::ui::appearance_runtime::AppearanceRuntime>()
         .map(|runtime| runtime.settings.snapshot().candidate.sidebar.default_state)
         .unwrap_or_default();
+    let ssh_servers = host.adapters.ssh_servers.clone();
     let result = cx.open_window(workspace_window_options(host, cx), |window, cx| {
+        // The first Workspace Window can present SSH's prompts, so the registry begins here.
+        if let Some(factory) = ssh_servers.as_deref() {
+            crate::ui::ssh_servers::ensure(factory, window, cx);
+        }
         let workspace_manager = cx.new(|cx| {
             WorkspaceManager::new_with_adapters(
                 session_factory,
@@ -893,6 +1004,9 @@ pub(crate) struct ApplicationCapabilities {
     pub(crate) background_images: Option<Arc<crate::background_image::BackgroundImageStore>>,
     /// Launches and presents the account-local SpaceTerm Server in the Workspace Window.
     pub(crate) local_server: crate::ui::LocalServerAdapters,
+    /// Creates the desktop's SSH server connections from its first Workspace Window. `None`
+    /// offers no SSH servers.
+    pub(crate) ssh_servers: Option<Rc<dyn crate::ui::ssh_servers::SshServersFactory>>,
 }
 
 /// The startup-supplied file opener available to explicit local file selections.
@@ -1564,6 +1678,7 @@ mod runtime_tests {
                 repository_status: None,
                 background_images: None,
                 local_server: crate::ui::launch_testing::presenting(session_factory),
+                ssh_servers: None,
             },
             services: Some(services),
             window_movement: movement,

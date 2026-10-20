@@ -248,6 +248,11 @@ fn compose(
             super::launch_host::running_executable(),
         ),
     ));
+    let ssh_servers = startup.ssh_servers_factory(Arc::new(
+        super::unix_askpass_transport::AskPassWindowFactory::new(
+            super::launch_host::running_executable(),
+        ),
+    ));
     // Repository Status reads run on threads that the deterministic test executor rejects.
     let repository_status = (!cfg!(test)).then(|| {
         super::repository_status_host::repository_status_adapters(
@@ -306,6 +311,7 @@ fn compose(
             repository_status,
             background_images: None,
             local_server: crate::ui::LocalServerAdapters::account(),
+            ssh_servers: Some(ssh_servers),
         },
         services: None,
         window_movement: Rc::new(super::linux_window_drag::LinuxWindowMovementFactory),
