@@ -36,6 +36,10 @@ use std::{
 pub enum LingerAuthorization {
     Terminal,
     Desktop,
+    /// SSH prerequisite check that must never request a password or open authorization UI.
+    RemoteNoninteractive,
+    /// Explicit remote authorization whose password arrives only on inherited standard input.
+    RemoteStdin,
 }
 
 /// When the owning account's service manager can automatically start this server.

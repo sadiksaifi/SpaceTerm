@@ -3,7 +3,7 @@ mod check;
 use spaceterm_server::{
     ServerError,
     service::{
-        Service,
+        LingerAuthorization, Service,
         control::{cli, display_name},
     },
 };
@@ -35,7 +35,7 @@ enum Request<'a> {
         signature: &'a Path,
         digest: &'a str,
     },
-    SshEnableLinger,
+    SshEnableLinger(LingerAuthorization),
 }
 
 impl<'a> Request<'a> {
@@ -54,7 +54,12 @@ impl<'a> Request<'a> {
             (Some("ssh-discover"), []) => Ok(Self::SshDiscover),
             (Some("ssh-connect"), []) => Ok(Self::SshConnect),
             (Some("ssh-prepare"), []) => Ok(Self::SshPrepare),
-            (Some("ssh-enable-linger"), []) => Ok(Self::SshEnableLinger),
+            (Some("ssh-enable-linger"), []) => Ok(Self::SshEnableLinger(
+                LingerAuthorization::RemoteNoninteractive,
+            )),
+            (Some("ssh-enable-linger-password"), []) => {
+                Ok(Self::SshEnableLinger(LingerAuthorization::RemoteStdin))
+            }
             (Some("ssh-install"), [archive, signature, digest])
                 if !archive.as_encoded_bytes().starts_with(b"-")
                     && !signature.as_encoded_bytes().starts_with(b"-") =>
@@ -91,7 +96,8 @@ fn run() -> Result<ExitCode, cli::Error> {
                ssh-connect IDENTITY                        Carry protocol over non-PTY stdio\n\
                ssh-prepare IDENTITY                        Start approved service, preserving Stop\n\
                ssh-install IDENTITY ARCHIVE SIGNATURE SHA256\n\
-               ssh-enable-linger IDENTITY                  Request account boot authorization\n\
+               ssh-enable-linger IDENTITY                  Try account boot authorization without prompting\n\
+               ssh-enable-linger-password IDENTITY         Authorize account boot using standard input\n\
                --version | --build-info | --check | --help",
             cli::help(IDENTITY)
         );
@@ -156,8 +162,9 @@ fn run() -> Result<ExitCode, cli::Error> {
             )?;
             service.install(&candidate.directory)?;
         }
-        Request::SshEnableLinger => Service::for_identity(IDENTITY)?
-            .enable_linger(spaceterm_server::service::LingerAuthorization::Terminal)?,
+        Request::SshEnableLinger(authorization) => {
+            Service::for_identity(IDENTITY)?.enable_linger(authorization)?
+        }
         Request::ServiceServe => {
             check::resources()?;
             spaceterm_server::service::run(
@@ -208,6 +215,25 @@ fn run() -> Result<ExitCode, cli::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssh_authorization_reads_passwords_only_after_the_explicit_password_command() {
+        for (command, expected) in [
+            (
+                "ssh-enable-linger",
+                LingerAuthorization::RemoteNoninteractive,
+            ),
+            (
+                "ssh-enable-linger-password",
+                LingerAuthorization::RemoteStdin,
+            ),
+        ] {
+            let args = [command, IDENTITY].map(OsString::from);
+            assert!(
+                matches!(Request::parse(&args), Ok(Request::SshEnableLinger(actual)) if actual==expected)
+            );
+        }
+    }
 
     #[test]
     fn confirmation_cannot_authorize_install_or_root_commands() {

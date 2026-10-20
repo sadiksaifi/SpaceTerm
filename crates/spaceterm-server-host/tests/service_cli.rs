@@ -38,6 +38,7 @@ fn service_controls_refuse_foreign_and_malformed_identities() {
             "ssh-discover",
             "ssh-prepare",
             "ssh-enable-linger",
+            "ssh-enable-linger-password",
         ] {
             assert_protocol_refusal(&[command.into(), identity.into()]);
             assert_protocol_refusal(&[command.into(), identity.into(), "--confirm".into()]);
@@ -82,6 +83,12 @@ fn malformed_service_invocations_return_bounded_errors() {
         vec!["ssh-discover", identity, "--confirm"],
         vec!["ssh-prepare", identity, "--confirm"],
         vec!["ssh-enable-linger", identity, "--confirm"],
+        vec!["ssh-enable-linger-password", identity, "--confirm"],
+        vec![
+            "ssh-enable-linger-password",
+            identity,
+            "not-a-password-argument",
+        ],
         vec!["ssh-install", identity],
         vec!["ssh-install", identity, "--confirm", "signature", "digest"],
         vec!["--help", identity],

@@ -197,6 +197,43 @@ fn property<'a>(observation: &'a [(String, String)], key: &str) -> Result<&'a st
         .map(|(_, value)| value.as_str())
         .ok_or(ServerError::ServiceUnavailable)
 }
+
+fn linger_command(uid: u32, authorization: LingerAuthorization) -> Command {
+    let mut process = Command::new(if authorization == LingerAuthorization::Desktop {
+        "/usr/bin/pkexec"
+    } else {
+        "/usr/bin/sudo"
+    });
+    match authorization {
+        LingerAuthorization::RemoteNoninteractive => {
+            process.args(["-n", "--"]);
+        }
+        LingerAuthorization::RemoteStdin => {
+            process.args(["-S", "-p", "", "--"]);
+        }
+        LingerAuthorization::Terminal | LingerAuthorization::Desktop => {}
+    }
+    process.args(["/usr/bin/loginctl", "enable-linger", &uid.to_string()]);
+    linger_stdio(&mut process, authorization);
+    process
+}
+
+fn linger_stdio(process: &mut Command, authorization: LingerAuthorization) {
+    match authorization {
+        LingerAuthorization::Terminal => {}
+        LingerAuthorization::Desktop
+        | LingerAuthorization::RemoteNoninteractive
+        | LingerAuthorization::RemoteStdin => {
+            process.stdin(if authorization == LingerAuthorization::RemoteStdin {
+                Stdio::inherit()
+            } else {
+                Stdio::null()
+            });
+            process.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+    }
+}
+
 impl Supervisor for UserService {
     fn replace(&self, previous: &Path, candidate: &Path) -> Result<(), ServerError> {
         self.registration()
@@ -327,19 +364,7 @@ impl Supervisor for UserService {
             Err(ServerError::AuthorizationRequired) => {}
             Err(error) => return Err(error),
         }
-        let terminal = authorization == LingerAuthorization::Terminal;
-        let mut process = Command::new(if terminal {
-            "/usr/bin/sudo"
-        } else {
-            "/usr/bin/pkexec"
-        });
-        process.args(["/usr/bin/loginctl", "enable-linger", &self.uid.to_string()]);
-        if !terminal {
-            process
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-        }
+        let mut process = linger_command(self.uid, authorization);
         let mut child = process
             .spawn()
             .map_err(|_| ServerError::AuthorizationRequired)?;
@@ -364,6 +389,86 @@ impl Supervisor for UserService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_linger_authorization_limits_sudo_to_the_requested_account_and_prompt_mode() {
+        for (authorization, expected) in [
+            (
+                LingerAuthorization::RemoteNoninteractive,
+                vec!["-n", "--", "/usr/bin/loginctl", "enable-linger", "501"],
+            ),
+            (
+                LingerAuthorization::RemoteStdin,
+                vec![
+                    "-S",
+                    "-p",
+                    "",
+                    "--",
+                    "/usr/bin/loginctl",
+                    "enable-linger",
+                    "501",
+                ],
+            ),
+        ] {
+            let command = linger_command(501, authorization);
+            assert_eq!(command.get_program(), "/usr/bin/sudo");
+            assert_eq!(command.get_args().collect::<Vec<_>>(), expected);
+        }
+    }
+
+    #[test]
+    fn only_explicit_remote_password_authorization_inherits_standard_input() {
+        for authorization in ["noninteractive", "password"] {
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "service::linux::tests::remote_linger_input_child",
+                ])
+                .env("SPACETERM_TEST_LINGER_INPUT", authorization)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"authorized-fixture\n")
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "runs only inside the isolated remote stdin policy test"]
+    fn remote_linger_input_child() {
+        let authorization = match std::env::var("SPACETERM_TEST_LINGER_INPUT")
+            .unwrap()
+            .as_str()
+        {
+            "noninteractive" => LingerAuthorization::RemoteNoninteractive,
+            "password" => LingerAuthorization::RemoteStdin,
+            _ => panic!("invalid fixture mode"),
+        };
+        let mut process = Command::new("/bin/sh");
+        process.args([
+            "-c",
+            "IFS= read -r value && test \"$value\" = authorized-fixture",
+        ]);
+        linger_stdio(&mut process, authorization);
+        assert_eq!(
+            process.status().unwrap().success(),
+            authorization == LingerAuthorization::RemoteStdin
+        );
+    }
+
     #[test]
     fn startup_link_cleanup_preserves_a_replacement_and_removes_only_its_own_link() {
         let root = std::env::temp_dir().join(format!(
