@@ -335,6 +335,13 @@ impl Service {
     }
     /// Explicit Start is the only operation that clears retained Stop intent.
     pub fn start(&self) -> Result<ServiceStatus, ServerError> {
+        self.start_existing(true)
+    }
+    /// Continue requested account work using the approved installation. Never reverses Stop.
+    pub fn connect(&self) -> Result<ServiceStatus, ServerError> {
+        self.start_existing(false)
+    }
+    fn start_existing(&self, explicit: bool) -> Result<ServiceStatus, ServerError> {
         let (data, _) = self.read()?.ok_or(ServerError::NotInstalled)?;
         let _operation = data.lock("service.lock", false)?;
         let recovering = Self::state(&data)?.is_some_and(|s| {
@@ -350,7 +357,10 @@ impl Service {
         if !state.installed {
             return Err(ServerError::NotInstalled);
         }
-        self.start_locked(&data, &mut state, true)?;
+        if state.stopped && !explicit {
+            return Err(ServerError::Stopped);
+        }
+        self.start_locked(&data, &mut state, explicit)?;
         self.snapshot(&state)
     }
     fn start_locked(
@@ -596,7 +606,6 @@ pub(crate) fn check_start(paths: &Paths) -> Result<(), ServerError> {
 /// A refusal observed during Restart is provisional until its service operation completes.
 /// Runtime startup uses check_start directly: waiting here from the service itself would
 /// deadlock the controller that is waiting for its endpoint to become ready.
-#[cfg(feature = "client")]
 pub(crate) fn check_admission(paths: &Paths) -> Result<(), ServerError> {
     match check_start(paths) {
         Err(ServerError::Stopped) => {}
@@ -1172,6 +1181,7 @@ mod tests {
             std::sync::Arc::new(TestSupervisor::default()),
         );
         assert_eq!(service.restart(), Err(ServerError::Stopped));
+        assert_eq!(service.connect(), Err(ServerError::Stopped));
     }
     #[test]
     fn quiescence_refuses_unowned_endpoint_cleanup() {

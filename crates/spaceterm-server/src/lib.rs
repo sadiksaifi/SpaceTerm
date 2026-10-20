@@ -1,4 +1,5 @@
 //! Private local SpaceTerm Protocol and explicit local server setup.
+pub mod account_bridge;
 pub mod attachments;
 #[cfg(feature = "client")]
 mod client;
@@ -13,6 +14,7 @@ pub mod service;
 #[cfg(feature = "client")]
 mod startup;
 mod storage;
+mod transport;
 pub mod worktree;
 
 #[cfg(feature = "client")]
