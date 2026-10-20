@@ -18,7 +18,8 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(shared) = self.shared.as_ref() else {
+        // Worktree writes reach only the account-local server.
+        let Some(shared) = self.shared.local().filter(|s| s.is_shared(workspace_id)) else {
             return false;
         };
         if !shared.editability().available() {
@@ -173,7 +174,7 @@ impl WorkspaceManager {
         };
         let Some(server) = self
             .shared
-            .as_ref()
+            .local()
             .and_then(|s| s.server_workspace(*workspace))
         else {
             self.sidebar_worktrees.created_shared = None;
@@ -187,7 +188,7 @@ impl WorkspaceManager {
         else {
             if self
                 .shared
-                .as_ref()
+                .local()
                 .and_then(|s| s.latest_inventory())
                 .is_some_and(|i| i.revision >= *minimum_revision)
             {
@@ -213,7 +214,8 @@ impl WorkspaceManager {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(shared) = self.shared.as_ref() else {
+        // Worktree writes reach only the account-local server.
+        let Some(shared) = self.shared.local().filter(|s| s.is_shared(workspace_id)) else {
             return false;
         };
         let Some(workspace) = shared.server_workspace(workspace_id).map(|w| w.id) else {
@@ -274,7 +276,7 @@ impl WorkspaceManager {
         if self.sidebar_worktrees.removal.is_some() {
             return;
         }
-        let Some(shared) = self.shared.as_ref() else {
+        let Some(shared) = self.shared.local().filter(|s| s.is_shared(workspace_id)) else {
             return;
         };
         if !shared.editability().available() {
@@ -364,7 +366,7 @@ impl WorkspaceManager {
         let other = review
             .tabs
             .iter()
-            .filter(|t| self.shared.as_ref().and_then(|s| s.local(t.workspace)) != Some(workspace))
+            .filter(|t| self.shared.local().and_then(|s| s.local(t.workspace)) != Some(workspace))
             .count();
         if !review.tabs.is_empty() {
             let elsewhere = match other {
@@ -501,7 +503,7 @@ impl WorkspaceManager {
         let Some(review) = self.sidebar_worktrees.server_review.as_ref() else {
             return;
         };
-        let Some(inventory) = self.shared.as_ref().and_then(|s| s.latest_inventory()) else {
+        let Some(inventory) = self.shared.local().and_then(|s| s.latest_inventory()) else {
             return;
         };
         let missing = self

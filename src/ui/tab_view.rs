@@ -3078,12 +3078,29 @@ impl TabView {
             }
             None => screen.into_any_element(),
         });
+        // Start Server reaches only this computer's server. Another computer's stopped server
+        // is started there, so its Pane explains that and offers nothing.
+        let remote = self
+            .shared
+            .as_ref()
+            .and_then(|shared| shared.sessions().remote_destination().cloned());
         let notice = pane.notice().map(|(title, detail, intent)| {
+            let detail = match &remote {
+                Some(destination) if pane.server_stopped() => gpui::SharedString::from(format!(
+                    "The SpaceTerm server on \u{201C}{}\u{201D} was stopped, so the programs in \
+                     this Pane ended. It stays stopped until it\u{2019}s started on that \
+                     computer.",
+                    destination.as_str()
+                )),
+                _ => detail,
+            };
             let retry = if pane.server_stopped() {
-                Some(server_pane::start_server_button(
-                    selector("start-server"),
-                    crate::ui::workspace_manager::start_local_server,
-                ))
+                remote.is_none().then(|| {
+                    server_pane::start_server_button(
+                        selector("start-server"),
+                        crate::ui::workspace_manager::start_local_server,
+                    )
+                })
             } else {
                 pane.can_retry().then(|| {
                     let owner = view.clone();

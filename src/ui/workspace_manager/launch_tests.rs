@@ -203,9 +203,9 @@ fn launch_harness_with(
 /// Reads the scripted server's inventory, as the window's poll does.
 fn sync(harness: &LaunchHarness, cx: &mut VisualTestContext) {
     cx.update(|window, cx| {
-        harness
-            .manager
-            .update(cx, |manager, cx| manager.sync_shared_workspaces(window, cx));
+        harness.manager.update(cx, |manager, cx| {
+            manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx)
+        });
     });
     cx.run_until_parked();
 }
@@ -764,7 +764,7 @@ fn a_pending_rename_says_saving_on_its_own_row(cx: &mut TestAppContext) {
     let (harness, cx) = ready_harness(cx);
     harness.manager.update(cx, |manager, cx| {
         let id = manager.workspaces.iter().next().expect("one row").id();
-        let shared = manager.shared.as_mut().expect("shared Workspaces");
+        let shared = manager.shared.local_mut().expect("shared Workspaces");
         let _ = shared.rename(id, "Logs".to_owned(), None);
         cx.notify();
     });
@@ -963,7 +963,7 @@ fn active_server_workspace(
         let local = manager.workspaces.active_workspace_id()?;
         manager
             .shared
-            .as_ref()?
+            .local()?
             .facts(local)
             .map(|facts| facts.server)
     })

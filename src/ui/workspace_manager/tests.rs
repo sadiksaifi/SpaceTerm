@@ -11663,7 +11663,7 @@ fn a_shared_pin_chosen_while_another_client_pins_should_submit_the_version_it_op
                 window,
                 cx,
             );
-            manager.sync_shared_workspaces(window, cx);
+            manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
         });
     });
     cx.run_until_parked();
@@ -11699,7 +11699,9 @@ fn a_shared_pin_chosen_while_another_client_pins_should_submit_the_version_it_op
     // the publication before the chooser finishes.
     edits.set_inventory(published(2, 1, Some(PathBuf::from("/server/theirs"))));
     cx.update(|window, cx| {
-        manager.update(cx, |manager, cx| manager.sync_shared_workspaces(window, cx));
+        manager.update(cx, |manager, cx| {
+            manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx)
+        });
     });
     cx.run_until_parked();
 
@@ -11712,6 +11714,151 @@ fn a_shared_pin_chosen_while_another_client_pins_should_submit_the_version_it_op
         }),
         "the chooser's draft must stay fenced to the pin version it opened at, so the server \
          refuses it instead of overwriting the other client"
+    );
+}
+
+/// Two servers may publish Workspaces with the same server identity. Each edit reaches the server
+/// that owns the Workspace, a folder on this computer never becomes another computer's pin, and
+/// disconnecting from one server leaves the other's Workspaces in place.
+#[gpui::test]
+fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_server(
+    cx: &mut TestAppContext,
+) {
+    use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
+    use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+    use spaceterm_server::hierarchy::{Axis, Inventory, Mutation, Pane, Tab, Workspace};
+
+    // Both servers name their only Workspace, Tab, and Pane with the same identities.
+    let published = |name: &str| Inventory {
+        repositories: None,
+        revision: 1,
+        close: None,
+        workspaces: vec![Workspace {
+            id: [1; 32],
+            name: name.to_owned(),
+            name_version: 0,
+            pin_version: 0,
+            pinned_directory: None,
+            root_tab: [2; 32],
+            tabs: vec![Tab {
+                worktree: None,
+                worktree_membership_fixed: false,
+                worktree_repository: None,
+                id: [2; 32],
+                root_pane: [3; 32],
+                panes: vec![Pane {
+                    id: [3; 32],
+                    source: None,
+                    axis: Axis::Right,
+                    starting_directory: PathBuf::from("/srv/work"),
+                    confirmed_directory: None,
+                    creator: None,
+                }],
+            }],
+        }],
+    };
+
+    let chosen = temporary_directory("remote-server-local-pin");
+    fs::create_dir_all(&chosen).unwrap();
+    let (manager, _records, cx) =
+        workspace_manager_with_directory_selection([Ok(Some(chosen))], cx);
+    let local = Rc::new(ScriptedEdits::new(Some(published("Here"))));
+    let remote = Rc::new(ScriptedEdits::new(Some(published("There"))));
+    let destination = crate::domain::SshDestination::new("penguin".to_owned()).unwrap();
+    let remote_key = cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            let sessions = || {
+                SharedPaneSessions::with_opener(
+                    ScriptedPanes::new(WorkspaceTerminalSessionFactory::new_local(
+                        Rc::new(TestTerminalSessionFactory::new(
+                            TestTerminalSessionRecords::default(),
+                        )),
+                        crate::terminal::testing::test_local_directory(std::env::temp_dir()),
+                    )) as Rc<_>,
+                    &PaneConstruction::testing(),
+                )
+            };
+            manager.present_shared_workspaces(
+                SharedEditSource::new(Rc::clone(&local) as Rc<_>),
+                sessions(),
+                window,
+                cx,
+            );
+            let remote_key = manager.present_server_workspaces(
+                ServerOrigin::Ssh(destination.clone()),
+                SharedEditSource::new(Rc::clone(&remote) as Rc<_>),
+                sessions(),
+                window,
+                cx,
+            );
+            manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
+            manager.sync_shared_workspaces(remote_key, window, cx);
+            remote_key
+        })
+    });
+    cx.run_until_parked();
+    let named = |name: &str, cx: &mut VisualTestContext| {
+        let name = name.to_owned();
+        manager.read_with(cx, move |manager, _| {
+            manager
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.name() == name)
+                .map(|workspace| workspace.id())
+        })
+    };
+    let here = named("Here", cx).expect("the local server's Workspace should be presented");
+    let there = named("There", cx).expect("the SSH server's Workspace should be presented");
+
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            assert!(manager.rename_shared_workspace(there, "Renamed", None, window, cx));
+        });
+    });
+    assert_eq!(
+        remote.submitted().last(),
+        Some(&Mutation::RenameWorkspace {
+            workspace: [1; 32],
+            version: 0,
+            name: "Renamed".to_owned(),
+        }),
+        "the rename must reach the server that owns the Workspace"
+    );
+    assert!(
+        local.submitted().is_empty(),
+        "the local server must not receive another server's edit"
+    );
+
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.choose_local_pin_directory(PinTarget::Workspace(there), window, cx);
+        });
+    });
+    cx.run_until_parked();
+    assert!(
+        !remote
+            .submitted()
+            .iter()
+            .chain(local.submitted().iter())
+            .any(|mutation| matches!(mutation, Mutation::PinWorkspace { .. })),
+        "a folder on this computer must never become another computer's pinned directory"
+    );
+
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| {
+            manager.withdraw_server_workspaces(remote_key, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        named("There", cx),
+        None,
+        "disconnecting withdraws that server's Workspaces"
+    );
+    assert_eq!(
+        named("Here", cx),
+        Some(here),
+        "the local server's Workspaces stay presented"
     );
 }
 
@@ -11786,7 +11933,7 @@ fn shared_pane_harness(cx: &mut TestAppContext) -> (SharedPaneHarness, &mut Visu
                 window,
                 cx,
             );
-            manager.sync_shared_workspaces(window, cx);
+            manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
         });
     });
     cx.run_until_parked();
@@ -12066,7 +12213,7 @@ fn shared_close_harness(cx: &mut TestAppContext) -> (SharedCloseHarness, &mut Vi
                 window,
                 cx,
             );
-            manager.sync_shared_workspaces(window, cx);
+            manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
         });
     });
     cx.run_until_parked();
@@ -12094,8 +12241,9 @@ impl SharedCloseHarness {
 
     fn sync(&self, cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
-            self.manager
-                .update(cx, |manager, cx| manager.sync_shared_workspaces(window, cx));
+            self.manager.update(cx, |manager, cx| {
+                manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx)
+            });
         });
         redraw(cx);
     }
@@ -12975,7 +13123,7 @@ fn attachment_harness(cx: &mut TestAppContext) -> (AttachmentHarness, &mut Visua
     // The person attaches the other Workspace, then returns to the one they started in.
     cx.update(|window, cx| {
         harness.manager.update(cx, |manager, cx| {
-            manager.attach_detached_workspace(ATTACHED_DOCS, window, cx);
+            manager.attach_detached_workspace(ServerKey::LOCAL, ATTACHED_DOCS, window, cx);
             manager.activate_workspace(WorkspaceId::new(1), window, cx);
         });
     });
@@ -12987,8 +13135,9 @@ fn attachment_harness(cx: &mut TestAppContext) -> (AttachmentHarness, &mut Visua
 impl AttachmentHarness {
     fn sync(&self, cx: &mut VisualTestContext) {
         cx.update(|window, cx| {
-            self.manager
-                .update(cx, |manager, cx| manager.sync_shared_workspaces(window, cx));
+            self.manager.update(cx, |manager, cx| {
+                manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx)
+            });
         });
         settle_shared_panes(cx);
     }
@@ -13108,7 +13257,7 @@ fn choosing_a_detached_workspace_should_attach_and_activate_it_without_taking_ov
     let reattached = harness.manager.read_with(cx, |manager, _| {
         manager
             .shared
-            .as_ref()
+            .local()
             .and_then(|shared| shared.local(ATTACHED_BUILD))
     });
     let switcher_open = cx.update(|window, cx| window_combo_box_is_open(window, cx));
@@ -13578,8 +13727,9 @@ mod shared_repositories {
         fn publish(&self, inventory: Inventory, cx: &mut VisualTestContext) {
             self.edits.set_inventory(inventory);
             cx.update(|window, cx| {
-                self.manager
-                    .update(cx, |manager, cx| manager.sync_shared_workspaces(window, cx));
+                self.manager.update(cx, |manager, cx| {
+                    manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx)
+                });
             });
             cx.run_until_parked();
         }
@@ -13633,7 +13783,7 @@ mod shared_repositories {
                     window,
                     cx,
                 );
-                manager.sync_shared_workspaces(window, cx);
+                manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
                 // The person returns to the desktop's own Workspace, so this one is inactive.
                 manager.activate_workspace(WorkspaceId::new(1), window, cx);
             });

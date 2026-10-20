@@ -601,6 +601,11 @@ mod development {
         ) -> Option<&crate::platform::local_filesystem::LocalFilesystemAuthority> {
             None
         }
+
+        /// The SSH destination of another computer's server, or `None` for this computer's.
+        fn remote_destination(&self) -> Option<&crate::domain::SshDestination> {
+            None
+        }
     }
 
     /// The local server's own Panes.
@@ -625,6 +630,41 @@ mod development {
                 self.server.clone(),
                 &self.controls,
                 self.local_files.clone(),
+                pane,
+            );
+            let permit = self.server.attachments().ok()?.permit(pane)?;
+            let session_factory = WorkspaceTerminalSessionFactory::new_server(
+                Rc::new(factory.with_attachment(permit)),
+                self.client_home.clone(),
+            );
+            let prepared = session_factory
+                .prepare_child_launch()
+                .inspect_err(|_| eprintln!("a server-backed launch reserves no channel"))
+                .ok()?;
+            Some((session_factory, prepared, state))
+        }
+    }
+
+    /// Another computer's server Panes, reached through an SSH account route. Nothing here
+    /// grants local file authority: the server's paths and links name files on that computer.
+    struct RemoteServerPanes {
+        server: LocalServer,
+        controls: Arc<PaneControls>,
+        destination: crate::domain::SshDestination,
+        /// Completes the launch plan the server factory ignores, as for the local server.
+        client_home: ValidatedLocalDirectory,
+    }
+
+    impl SharedPaneOpener for RemoteServerPanes {
+        fn remote_destination(&self) -> Option<&crate::domain::SshDestination> {
+            Some(&self.destination)
+        }
+
+        fn open(&self, pane: Id) -> Option<SharedPaneSubscription> {
+            let (factory, state) = DevelopmentServerSessionFactory::for_remote_pane(
+                self.server.clone(),
+                &self.controls,
+                self.destination.clone(),
                 pane,
             );
             let permit = self.server.attachments().ok()?.permit(pane)?;
@@ -669,6 +709,25 @@ mod development {
             )
         }
 
+        /// Another computer's server Panes. They take no local file authority.
+        pub(crate) fn remote(
+            server: LocalServer,
+            controls: Arc<PaneControls>,
+            destination: crate::domain::SshDestination,
+            client_home: ValidatedLocalDirectory,
+            panes: &PaneConstruction,
+        ) -> Self {
+            Self::with_opener(
+                Rc::new(RemoteServerPanes {
+                    server,
+                    controls,
+                    destination,
+                    client_home,
+                }),
+                panes,
+            )
+        }
+
         pub(crate) fn with_opener(
             opener: Rc<dyn SharedPaneOpener>,
             panes: &PaneConstruction,
@@ -683,6 +742,12 @@ mod development {
             &self,
         ) -> Option<&crate::platform::local_filesystem::LocalFilesystemAuthority> {
             self.opener.local_filesystem()
+        }
+
+        /// The SSH destination of another computer's server, or `None` for this computer's. Only
+        /// this computer's server takes Start Server from this client.
+        pub(crate) fn remote_destination(&self) -> Option<&crate::domain::SshDestination> {
+            self.opener.remote_destination()
         }
 
         pub(crate) const fn panes(&self) -> &PaneConstruction {

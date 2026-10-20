@@ -85,9 +85,10 @@ impl WorkspaceManager {
             && self.open_server_worktree_tab(workspace_id, worktree_id, window, cx)
     }
 
-    /// Whether a Workspace's owning server can create Worktrees in it.
+    /// Whether a Workspace's owning server can create Worktrees in it. Worktree writes reach
+    /// only the account-local server.
     pub(super) fn creates_worktrees(&self, workspace_id: WorkspaceId, cx: &App) -> bool {
-        self.is_shared_workspace(workspace_id)
+        self.is_local_server_workspace(workspace_id)
             && crate::ui::server_worktrees::available(cx)
             && self.shared_inventory(workspace_id).is_some()
     }

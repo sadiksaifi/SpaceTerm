@@ -628,7 +628,7 @@ impl WorkspaceManager {
 
     /// Presents a ready server's Workspaces in this window.
     fn connect_local_server(&mut self, window: &mut Window, cx: &mut Context<Self>) -> LaunchState {
-        if self.shared.is_some() {
+        if self.shared.local().is_some() {
             return LaunchState::Ready;
         }
         // One device presents its server in one Workspace Window, which comes forward instead.
@@ -654,13 +654,13 @@ impl WorkspaceManager {
             return LaunchState::Failed(ServerError::RuntimeUnavailable);
         };
         self.present_shared_workspaces(connection.edits, connection.sessions, window, cx);
-        if let (Some(shared), Some(server)) = (self.shared.as_mut(), connection.retained) {
+        if let (Some(shared), Some(server)) = (self.shared.local_mut(), connection.retained) {
             shared.retain_client_views(server);
             let read = shared.client_views_read();
             self.launch._views_read = Some(cx.spawn_in(window, async move |manager, cx| {
                 read.await;
                 let _ = manager.update_in(cx, |manager, window, cx| {
-                    manager.sync_shared_workspaces(window, cx);
+                    manager.sync_shared_workspaces(super::ServerKey::LOCAL, window, cx);
                 });
             }));
         }
@@ -694,7 +694,7 @@ impl WorkspaceManager {
     /// It stays until the server's first inventory arrives, so a person never sees "No
     /// Workspaces" while their Workspaces are on the way.
     pub(super) fn launch_presentation(&self) -> Option<LaunchPresentation> {
-        match &self.shared {
+        match self.shared.local() {
             Some(shared) if shared.latest_inventory().is_some() => None,
             // A step the person chose, or its refusal, says so until launch runs again.
             Some(_)
@@ -727,7 +727,7 @@ impl WorkspaceManager {
     pub(super) fn read_refusal_offer(&mut self, cx: &mut Context<Self>) {
         let refused = self
             .shared
-            .as_ref()
+            .local()
             .filter(|shared| shared.latest_inventory().is_none())
             .and_then(|shared| shared.connection_error())
             .filter(|error| incompatible(*error));
