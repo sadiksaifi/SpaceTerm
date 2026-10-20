@@ -180,6 +180,7 @@ impl SharedWorkspaceHost {
                 directory_unavailable: false,
                 failed_directory_session: None,
                 directories: super::directories::DirectoryReads::default(),
+                names: Arc::clone(&self.prototype.names),
             };
             self.panes.insert(id, host);
         }
@@ -204,18 +205,18 @@ impl SharedWorkspaceHost {
         let creator = self.state.pane(id).ok_or(Refusal::Missing)?.2.creator;
         let host = self.pane_host(id)?;
         if host.pane.is_none() && creator.is_some_and(|owner| owner != device) {
-            return Ok(Reply::Takeover {
-                target: PaneTarget {
-                    server: host.boot,
-                    session: id,
-                },
-            });
+            let target = PaneTarget {
+                server: host.boot,
+                session: id,
+            };
+            return Ok(host.takeover(target, creator, device));
         }
         // Passive subscriptions may resume existing grants, but cannot acquire or start work.
-        if !explicit && host.pane.as_ref().is_some_and(|p| p.device != Some(device)) {
-            return Ok(Reply::Takeover {
-                target: host.pane.as_ref().ok_or(Refusal::Missing)?.lease.into(),
-            });
+        if !explicit
+            && let Some(pane) = &host.pane
+            && pane.device != Some(device)
+        {
+            return Ok(host.takeover(pane.lease.into(), pane.device, device));
         }
         host.select(device, connection, explicit, size, None, style)
     }
@@ -307,9 +308,7 @@ impl SharedWorkspaceHost {
                     && pane.device == Some(device)
                     && pane.attachment_generation != Some(attachment.generation)
                 {
-                    return Ok(Reply::Takeover {
-                        target: pane.lease.into(),
-                    });
+                    return Ok(host.takeover(pane.lease.into(), pane.device, device));
                 }
                 let reply = match claim {
                     AttachmentClaim::Repair {
@@ -647,6 +646,9 @@ impl PaneService for SharedWorkspaceHost {
         self.prototype.directories.tick();
         let _ = self.synchronize();
     }
+    fn admitted(&mut self, client: Id, name: control::ClientName) {
+        self.prototype.admitted(client, name);
+    }
     fn request(&mut self, device: Id, connection: Id, request: Request) -> Reply {
         self.handle(device, connection, request)
             .unwrap_or_else(Reply::Refused)
@@ -711,6 +713,93 @@ mod tests {
             Reply::Refused(Refusal::Missing)
         ));
         restored.shutdown().unwrap();
+    }
+
+    #[test]
+    fn clients_learn_who_controls_a_pane_as_control_moves_and_ends() {
+        use spaceterm_server::hierarchy::{Axis, Mutation, Outcome};
+        use spaceterm_server::pane::control::Controller;
+        let mut host = SharedWorkspaceHost::new(host());
+        host.prepare_initial_organization().unwrap();
+        let inventory = shared_inventory(&mut host);
+        let (workspace, tab) = (&inventory.workspaces[0], &inventory.workspaces[0].tabs[0]);
+        let pane = tab.root_pane;
+        host.admitted([1; 32], "Studio".into());
+        host.admitted([2; 32], "Laptop".into());
+        let select = |pane, explicit| Request::SelectPane {
+            pane,
+            explicit,
+            size: size(),
+            style: None,
+        };
+        let observe = |host: &mut SharedWorkspaceHost, client: u8, pane| match host.request(
+            [client; 32],
+            [client; 32],
+            select(pane, false),
+        ) {
+            Reply::Takeover { controller, .. } => controller,
+            _ => panic!("client {client} should be offered Take Over"),
+        };
+        let named = |name: &str| Controller::Client {
+            name: name.into(),
+            this_client: false,
+        };
+        let Reply::Attached { lease: first } = host.request([1; 32], [1; 32], select(pane, true))
+        else {
+            panic!("first use starts the shell");
+        };
+        assert_eq!(observe(&mut host, 2, pane), named("Studio"));
+
+        let Reply::Attached { lease: second } = host.request(
+            [2; 32],
+            [2; 32],
+            Request::TakeOver {
+                target: first.into(),
+                size: size(),
+                style: None,
+            },
+        ) else {
+            panic!("Take Over moves control");
+        };
+        assert_eq!(observe(&mut host, 1, pane), named("Laptop"));
+        host.admitted([2; 32], "Renamed Laptop".into());
+        assert_eq!(
+            observe(&mut host, 1, pane),
+            named("Renamed Laptop"),
+            "a client's latest admission names it"
+        );
+
+        assert!(matches!(
+            host.request([2; 32], [2; 32], Request::Release { lease: second }),
+            Reply::Unchanged
+        ));
+        assert_eq!(observe(&mut host, 1, pane), Controller::Nobody);
+        assert_eq!(observe(&mut host, 2, pane), Controller::Nobody);
+
+        let Reply::Outcome(split) = host.request(
+            [2; 32],
+            [2; 32],
+            Request::Mutate {
+                sequence: 1,
+                mutation: Mutation::SplitPane {
+                    workspace: workspace.id,
+                    tab: tab.id,
+                    source: pane,
+                    axis: Axis::Down,
+                },
+            },
+        ) else {
+            panic!("split unavailable");
+        };
+        let Outcome::Accepted { target: created } = split.outcome else {
+            panic!("split refused");
+        };
+        assert_eq!(
+            observe(&mut host, 1, created),
+            named("Renamed Laptop"),
+            "the client that created a Pane controls it before its shell starts"
+        );
+        host.shutdown().unwrap();
     }
 
     #[test]

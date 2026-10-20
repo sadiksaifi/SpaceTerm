@@ -1,5 +1,6 @@
 //! Bounded account-local admission and length-prefixed JSON exchanges.
 //! Peer-account authority comes from the socket. IDs are nonsecret fences, never credentials.
+use crate::pane::control::ClientName;
 use crate::transport::Transport;
 use crate::{AuthenticatedStatus, ServerError};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -20,6 +21,7 @@ struct Hello {
     build: String,
     server: [u8; 32],
     client: [u8; 32],
+    name: ClientName,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -163,12 +165,13 @@ impl<'a> Wire<'a> {
     }
 }
 
-/// Both peers verify the owning account before accepting any protocol values.
+/// Both peers verify the owning account before accepting any protocol values. The client's
+/// identity and name are nonsecret and grant nothing beyond the connection's authority.
 pub(crate) fn admit_server(
     stream: &mut UnixStream,
     server: &[u8; 32],
     build: &str,
-) -> Result<(AuthenticatedStatus, [u8; 32]), ServerError> {
+) -> Result<(AuthenticatedStatus, [u8; 32], ClientName), ServerError> {
     crate::host::check_peer(stream)?;
     let mut wire = Wire::new(stream)?;
     let hello: Hello = wire.read()?;
@@ -197,6 +200,7 @@ pub(crate) fn admit_server(
             development_pane: false,
         },
         hello.client,
+        hello.name,
     ))
 }
 
@@ -206,7 +210,7 @@ pub(crate) fn admit_server(
 )]
 pub(crate) fn admit_client(
     stream: &mut UnixStream,
-    client: &[u8; 32],
+    client: (&[u8; 32], &ClientName),
     server: &[u8; 32],
     build: &str,
     versions: &[u16],
@@ -217,7 +221,7 @@ pub(crate) fn admit_client(
 
 pub(crate) fn admit_transport(
     stream: &mut dyn Transport,
-    client: &[u8; 32],
+    (client, name): (&[u8; 32], &ClientName),
     server: &[u8; 32],
     build: &str,
     versions: &[u16],
@@ -228,6 +232,7 @@ pub(crate) fn admit_transport(
         build: build.to_owned(),
         server: *server,
         client: *client,
+        name: name.clone(),
     })?;
     let offer: Offer = wire.read()?;
     if offer.build != build || offer.server != *server {
@@ -258,7 +263,7 @@ mod tests {
             });
             let result = admit_client(
                 &mut client,
-                &[9; 32],
+                (&[9; 32], &"Build Mac".into()),
                 &[7; 32],
                 "spaceterm-development",
                 &versions,
@@ -266,7 +271,8 @@ mod tests {
             let server_result = thread.join().unwrap();
             if accepted {
                 assert_eq!(result.unwrap().protocol_major, 1);
-                assert_eq!(server_result.unwrap().1, [9; 32]);
+                let (_, client, name) = server_result.unwrap();
+                assert_eq!((client, name.as_str()), ([9; 32], "Build Mac"));
             } else {
                 assert_eq!(result, Err(ServerError::IncompatibleProtocol));
                 assert_eq!(server_result, Err(ServerError::IncompatibleProtocol));
@@ -280,7 +286,16 @@ mod tests {
             let thread = std::thread::spawn(move || {
                 admit_server(&mut server, &[7; 32], "spaceterm-development")
             });
-            assert!(admit_client(&mut client, &[9; 32], &id, build, &[1]).is_err());
+            assert!(
+                admit_client(
+                    &mut client,
+                    (&[9; 32], &"Build Mac".into()),
+                    &id,
+                    build,
+                    &[1]
+                )
+                .is_err()
+            );
             assert_eq!(
                 thread.join().unwrap(),
                 Err(ServerError::AuthenticationRefused)
@@ -304,7 +319,7 @@ mod tests {
             assert_eq!(
                 admit_client(
                     &mut client,
-                    &[9; 32],
+                    (&[9; 32], &"Build Mac".into()),
                     &[7; 32],
                     "spaceterm-development",
                     &[1]

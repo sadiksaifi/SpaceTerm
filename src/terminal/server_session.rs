@@ -1379,7 +1379,7 @@ fn present(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .take();
-            while let Reply::Takeover { target } = reply {
+            while let Reply::Takeover { target, .. } = reply {
                 expected_target = Some(target);
                 state.paste_unconfirmed.store(false, Ordering::Release);
                 if !takeover {

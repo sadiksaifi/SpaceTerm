@@ -1309,7 +1309,7 @@ mod tests {
                     let pin = Directory::open(&self.paths.data, false)?.read()?.server;
                     protocol::admit_client(
                         &mut stream,
-                        &[11; 32],
+                        (&[11; 32], &"Test".into()),
                         &pin,
                         &self.paths.identity,
                         &[protocol::MAJOR],

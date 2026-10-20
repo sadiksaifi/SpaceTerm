@@ -43,6 +43,8 @@ pub struct DevelopmentPaneHost {
     directory_unavailable: bool,
     failed_directory_session: Option<PaneTarget>,
     directories: directories::DirectoryReads,
+    /// Shared by every Pane of one server, so each names its Controlling Client the same way.
+    names: Arc<std::sync::Mutex<control::ClientNames>>,
 }
 struct OwnedPane {
     device: Option<[u8; 32]>,
@@ -90,6 +92,7 @@ impl DevelopmentPaneHost {
             directory_unavailable: false,
             failed_directory_session: None,
             directories: directories::DirectoryReads::default(),
+            names: Arc::default(),
         })
     }
     /// Native composition for the explicitly launched local Development host.
@@ -134,7 +137,21 @@ impl DevelopmentPaneHost {
             directory_unavailable: false,
             failed_directory_session: None,
             directories: directories::DirectoryReads::default(),
+            names: Arc::default(),
         })
+    }
+    /// Offers Take Over to `asking`, naming who controls the Pane now.
+    fn takeover(
+        &self,
+        target: PaneTarget,
+        controlling: Option<[u8; 32]>,
+        asking: [u8; 32],
+    ) -> Reply {
+        let names = self.names.lock().unwrap_or_else(|e| e.into_inner());
+        Reply::Takeover {
+            target,
+            controller: names.controller(controlling, asking),
+        }
     }
     fn retain(&mut self, organization: Option<Organization>) -> Result<(), Refusal> {
         if self.organization == organization && !self.uncertain {
@@ -302,7 +319,7 @@ impl DevelopmentPaneHost {
     ) -> Result<Reply, Refusal> {
         size.validate().map_err(|_| Refusal::Unsupported)?;
         self.reconcile_selection()?;
-        if let Some(pane) = &mut self.pane {
+        if let Some(pane) = &self.pane {
             let target = PaneTarget::from(pane.lease);
             if resume.is_some_and(|old| old != target) {
                 return Err(Refusal::Stale);
@@ -310,8 +327,10 @@ impl DevelopmentPaneHost {
             if pane.device.is_some_and(|owner| owner != device)
                 || (pane.device.is_none() && resume.is_some())
             {
-                return Ok(Reply::Takeover { target });
+                return Ok(self.takeover(target, pane.device, device));
             }
+        }
+        if let Some(pane) = &mut self.pane {
             return pane.claim(device, connection, size, style, pane.device.is_none());
         }
         if self.organization.is_some() {
@@ -754,6 +773,12 @@ impl PaneService for DevelopmentPaneHost {
         if self.recover().is_ok() && self.retain_directory().is_ok() {
             let _ = self.retire_exited();
         }
+    }
+    fn admitted(&mut self, client: [u8; 32], name: control::ClientName) {
+        self.names
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .admit(client, name);
     }
     fn request(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Reply {
         self.handle(device, connection, request)
@@ -3448,7 +3473,7 @@ mod tests {
             panic!("first use");
         };
         assert!(
-            matches!(host.request([2; 32], [2; 32], request), Reply::Takeover { target } if target == lease.into())
+            matches!(host.request([2; 32], [2; 32], request), Reply::Takeover { target, .. } if target == lease.into())
         );
         assert_eq!(host.organization.as_ref().unwrap().pane, pane_id);
         host.shutdown().unwrap();
@@ -3548,7 +3573,7 @@ mod tests {
         );
         await_text(&mut host, 2, original, "STARTED");
         host.disconnected([2; 32]);
-        let Reply::Takeover { target } = select(&mut host, 9, 9) else {
+        let Reply::Takeover { target, .. } = select(&mut host, 9, 9) else {
             panic!("selection must not replace a disconnected controller");
         };
         let Reply::Attached { lease: transferred } = host.request(

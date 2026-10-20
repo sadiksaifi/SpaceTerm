@@ -187,7 +187,7 @@ fn installed_service_preserves_sessions_and_restores_dormant_organization() {
             })
             .unwrap();
         if phase == "resume"
-            && let Reply::Takeover { target } = reply
+            && let Reply::Takeover { target, .. } = reply
         {
             assert_eq!(
                 (target.server, target.session),

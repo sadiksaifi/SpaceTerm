@@ -1,5 +1,6 @@
 //! Authenticated terminal operations. Native requests never grant local file authority.
 pub mod accessibility;
+pub mod control;
 pub mod directories;
 pub mod effects;
 pub mod graphics;
@@ -402,8 +403,10 @@ pub enum Reply {
         tab: [u8; 32],
         pane: [u8; 32],
     },
+    /// This client does not control the Pane. `controller` says who does, for presentation only.
     Takeover {
         target: PaneTarget,
+        controller: control::Controller,
     },
     Attached {
         lease: Lease,
@@ -509,6 +512,8 @@ pub trait PaneService: Send {
         Ok(())
     }
     fn tick(&mut self) {}
+    /// Records the Client Name an admitted client supplied, before any of its requests.
+    fn admitted(&mut self, _client: [u8; 32], _name: control::ClientName) {}
     fn request(&mut self, device: [u8; 32], connection: [u8; 32], request: Request) -> Reply;
     fn disconnected(&mut self, connection: [u8; 32]);
     fn shutdown(&mut self) -> Result<(), ServerError>;
