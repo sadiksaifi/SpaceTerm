@@ -2,14 +2,26 @@
 use crate::{
     local_server::LocalServer,
     terminal::shared_workspace::SharedWorkspaceClient,
-    ui::shared_workspaces::{SharedEditSource, SharedRefusalReason},
+    ui::shared_workspaces::{SharedEditSource, SharedRefusalReason, SharedWorkspaceEdits},
 };
 use gpui::{App, AppContext as _, Global, Task};
 use spaceterm_server::{
     hierarchy::{Mutation, Outcome, RetainedOutcome},
     worktree::{Error, Operation, Read, ReadReply},
 };
-use std::{path::PathBuf, rc::Rc};
+use std::{path::PathBuf, rc::Rc, sync::Arc};
+
+/// Answers one server's Worktree reads over its own connection. Reading blocks, so callers run
+/// it on a worker.
+pub(crate) trait WorktreeReads: Send + Sync {
+    fn read(&self, read: Read) -> Result<ReadReply, Error>;
+}
+
+impl WorktreeReads for LocalServer {
+    fn read(&self, read: Read) -> Result<ReadReply, Error> {
+        read_server(self, read)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WriteError {
@@ -28,7 +40,8 @@ pub(crate) struct Client {
     /// Pane control sequencing outlives every window, like this client's connection.
     pub(crate) controls: std::sync::Arc<crate::terminal::server_session::PaneControls>,
     pub(crate) source: SharedEditSource,
-    edits: Rc<SharedWorkspaceClient>,
+    edits: Rc<dyn SharedWorkspaceEdits>,
+    reads: Arc<dyn WorktreeReads>,
 }
 impl Global for Client {}
 
@@ -54,6 +67,7 @@ impl Client {
             legacy,
         ));
         let client = Self {
+            reads: Arc::new(server.clone()),
             server,
             controls,
             source: SharedEditSource::new(edits.clone()),
@@ -78,6 +92,7 @@ impl Client {
             std::sync::Arc::clone(&controls),
         ));
         let client = Self {
+            reads: Arc::new(server.clone()),
             server,
             controls,
             source: SharedEditSource::new(edits.clone()),
@@ -100,14 +115,14 @@ impl Client {
         }
     }
     pub(crate) fn supports_worktree_writes(&self) -> bool {
-        self.edits.supports_worktree_writes()
+        self.edits.worktree_writes()
     }
     pub(crate) fn availability(&self) -> (bool, bool) {
         self.edits.availability()
     }
     pub(crate) fn read(&self, read: Read, cx: &mut App) -> Task<Result<ReadReply, Error>> {
-        let server = self.server.clone();
-        cx.background_spawn(async move { read_server(&server, read) })
+        let reads = Arc::clone(&self.reads);
+        cx.background_spawn(async move { reads.read(read) })
     }
     pub(crate) fn write(
         &self,
@@ -238,7 +253,7 @@ impl crate::ui::worktree_form::WorktreeFormBackend for FormBackend {
 
 pub(crate) fn available(cx: &App) -> bool {
     cx.try_global::<Client>()
-        .is_some_and(|c| c.edits.supports_worktree_writes())
+        .is_some_and(Client::supports_worktree_writes)
 }
 
 fn create_error(error: WriteError) -> crate::worktrees::git::WorktreeCreateError {

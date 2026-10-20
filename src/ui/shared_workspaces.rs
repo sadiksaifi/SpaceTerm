@@ -27,9 +27,9 @@ pub(crate) use development::{
     POLL_INTERVAL, SharedAcceptance, SharedAttachmentFailure, SharedCloseApproval,
     SharedCloseReview, SharedCloseState, SharedCloseUnavailable, SharedEditSource,
     SharedPaneSessions, SharedPanes, SharedRefusal, SharedRefusalReason, SharedRemoval,
-    SharedRowStatus, SharedSubmission, SharedTabs, SharedWorkspaceConflict, SharedWorkspaceFacts,
-    SharedWorkspaceHost, SharedWorkspacePlan, SharedWorkspaces, presenting_window,
-    shared_close_changed_title,
+    SharedRowStatus, SharedSubmission, SharedTabs, SharedWorkspaceConflict, SharedWorkspaceEdits,
+    SharedWorkspaceFacts, SharedWorkspaceHost, SharedWorkspacePlan, SharedWorkspaces,
+    presenting_window, shared_close_changed_title,
 };
 
 #[path = "shared_workspaces/repositories.rs"]
@@ -116,11 +116,20 @@ mod development {
         fn subscribe(&self) -> Option<async_channel::Receiver<()>> {
             None
         }
+
+        /// Whether the server accepts Worktree writes, without copying the hierarchy.
+        fn worktree_writes(&self) -> bool {
+            self.snapshot().worktree_writes
+        }
     }
 
     impl SharedWorkspaceEdits for SharedWorkspaceClient {
         fn snapshot(&self) -> SharedWorkspaceSnapshot {
             Self::snapshot(self)
+        }
+
+        fn worktree_writes(&self) -> bool {
+            Self::supports_worktree_writes(self)
         }
 
         fn availability(&self) -> (bool, bool) {
