@@ -286,9 +286,12 @@ fn eligible_options(bytes: &[u8]) -> Option<BTreeMap<String, Vec<String>>> {
             return None;
         }
     }
+    // OpenSSH builds without an internal SK provider dump this default environment reference.
+    // StartupSshEnvironment never captures SSH_SK_PROVIDER, so OpenSSH disables it; no external
+    // provider is selected. Keys are independently proved software-only before this route is used.
     if !matches!(
         single("securitykeyprovider"),
-        None | Some("none" | "internal")
+        None | Some("none" | "internal" | "$SSH_SK_PROVIDER")
     ) {
         return None;
     }
@@ -438,6 +441,13 @@ mod tests {
                 "accepted {extra}"
             );
         }
+    }
+    #[test]
+    fn accepts_the_disabled_openssh_default_provider_reference() {
+        let standard = format!("{}securitykeyprovider $SSH_SK_PROVIDER\n", options());
+        assert!(eligible_options(standard.as_bytes()).is_some());
+        let external = format!("{}securitykeyprovider $CUSTOM_PROVIDER\n", options());
+        assert!(eligible_options(external.as_bytes()).is_none());
     }
     #[test]
     fn dependency_changes_pause_the_original_route() {

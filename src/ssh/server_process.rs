@@ -215,6 +215,7 @@ impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
             )
         } else {
             progress(ConnectPhase::Authenticating);
+            ensure_connection_configuration(&self.config.paths)?;
             let attempt = self
                 .config
                 .askpass
@@ -823,6 +824,27 @@ fn prepare_if_needed(
     Ok(prepared)
 }
 
+/// The explicit Connect worker prepares the app-owned -F entry point on first use.
+/// Existing private configuration is read by OpenSSH and is never replaced here.
+fn ensure_connection_configuration(paths: &AppPaths) -> Result<(), SshConnectFailure> {
+    let target = paths.managed_ssh_config_file();
+    let directory = paths
+        .open_secure_root(target.root())
+        .map_err(|_| SshConnectFailure::Unavailable(UnavailableKind::SshFailed))?;
+    if let Some(directory) = directory
+        && paths
+            .filesystem()
+            .read_private_file(&directory, target.file_name(), 1024 * 1024)
+            .map_err(|_| SshConnectFailure::Unavailable(UnavailableKind::SshFailed))?
+            .is_some()
+    {
+        return Ok(());
+    }
+    super::managed_hosts::ManagedHostsStore::new(paths)
+        .ensure_exists()
+        .map_err(|_| SshConnectFailure::Unavailable(UnavailableKind::SshFailed))
+}
+
 fn identity() -> &'static str {
     ApplicationIdentity::current().directory_name()
 }
@@ -1258,16 +1280,18 @@ mod tests {
             paths
                 .ensure_secure_root(crate::platform::app_directories::AppDirectoryRoot::Config)
                 .unwrap();
-            let configuration = std::env::var_os("SPACETERM_SSH_NATIVE_CONFIG")
-                .map(PathBuf::from)
-                .map(|path| std::fs::read(path).unwrap())
-                .unwrap_or_else(|| b"Include ~/.ssh/config\n".to_vec());
-            std::fs::write(paths.managed_ssh_config(), configuration).unwrap();
-            std::fs::set_permissions(
-                paths.managed_ssh_config(),
-                std::fs::Permissions::from_mode(0o600),
-            )
-            .unwrap();
+            if let Some(configuration) = std::env::var_os("SPACETERM_SSH_NATIVE_CONFIG") {
+                std::fs::write(
+                    paths.managed_ssh_config(),
+                    std::fs::read(configuration).unwrap(),
+                )
+                .unwrap();
+                std::fs::set_permissions(
+                    paths.managed_ssh_config(),
+                    std::fs::Permissions::from_mode(0o600),
+                )
+                .unwrap();
+            }
             let backend = NativeSshConnectBackend::new(NativeSshServerConfig {
                 paths,
                 home,
@@ -1327,10 +1351,12 @@ mod tests {
                     if std::env::var_os("SPACETERM_SSH_NATIVE_QUIET").as_deref()
                         == Some(std::ffi::OsStr::new("1"))
                     {
-                        assert!(
-                            recovered.is_ok(),
-                            "eligible direct route did not reconnect after master loss"
-                        );
+                        if let Err(error) = recovered {
+                            panic!(
+                                "eligible direct route did not reconnect after master loss: {}",
+                                failure_name(&error)
+                            );
+                        }
                     } else {
                         assert!(
                             matches!(recovered, Err(SshConnectFailure::NeedsPerson(_))),
