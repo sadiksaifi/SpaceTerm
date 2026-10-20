@@ -1204,12 +1204,12 @@ mod tests {
                 ..
             })
         ));
-        let older_major = AccountDiscovery {
+        let other_major = AccountDiscovery {
             protocol_majors: vec![0],
             ..compatible.clone()
         };
         assert!(matches!(
-            observe(&older_major),
+            observe(&other_major),
             Err(SshConnectFailure::Incompatible(
                 IncompatibilityKind::Protocol
             ))
