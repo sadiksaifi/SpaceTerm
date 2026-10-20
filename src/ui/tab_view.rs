@@ -2903,6 +2903,7 @@ impl TabView {
                 unconfirmed,
                 offered,
                 ended,
+                controller,
             } => {
                 let status = if taking_over {
                     Some(server_pane::progress_status(
@@ -2922,15 +2923,16 @@ impl TabView {
                 };
                 let (title, detail) = if ended {
                     (
-                        server_pane::SESSION_ENDED_TITLE,
+                        server_pane::SESSION_ENDED_TITLE.into(),
                         server_pane::SESSION_ENDED_DETAIL,
                     )
                 } else if offered || taking_over {
-                    (server_pane::TAKEOVER_TITLE, server_pane::TAKEOVER_DETAIL)
+                    server_pane::takeover_copy(controller.as_ref())
                 } else {
-                    // SpaceTerm stopped reconnecting, so the screen claims nothing about the shell.
+                    // SpaceTerm stopped reconnecting, so the screen claims nothing about the shell
+                    // or who controls it.
                     (
-                        server_pane::TAKEOVER_TITLE,
+                        server_pane::TAKEOVER_TITLE.into(),
                         server_pane::TAKEOVER_FAILED_DETAIL,
                     )
                 };
@@ -2954,9 +2956,9 @@ impl TabView {
                 });
                 server_pane::render_screen(
                     selector("takeover"),
-                    server_pane::ScreenCopy::new(title.into(), detail.into()),
-                    // Losing control and the end of a Session both happen without any action
-                    // here, so assistive technology announces them.
+                    server_pane::ScreenCopy::new(title, detail.into()),
+                    // Losing control, a new Controlling Client, and the end of a Session all happen
+                    // without any action here, so assistive technology announces them.
                     true,
                     action,
                     status,

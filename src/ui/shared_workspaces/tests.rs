@@ -653,6 +653,74 @@ fn a_takeover_screen_should_replace_the_pane_and_offer_take_over(cx: &mut TestAp
     );
 }
 
+/// The Takeover Screen names who controls the Pane, and follows control as it moves, so a person
+/// knows where typing goes before taking it over. Each change is announced.
+#[gpui::test]
+fn a_takeover_screen_should_name_the_controlling_client_as_control_moves(cx: &mut TestAppContext) {
+    use spaceterm_server::pane::control::Controller;
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (harness, cx) = shared_tab_manager(cx);
+    let pane = harness.panes.pane(ROOT_PANE);
+    let client = |name: &str| Controller::Client {
+        name: name.into(),
+        this_client: false,
+    };
+    let announced = |cx: &mut VisualTestContext, title: &str, detail: &str| {
+        let tree = A11yTree::read(cx);
+        assert_eq!(
+            tree.node(title)["aria"]["role"],
+            "Group",
+            "the screen is named {title:?}"
+        );
+        assert_eq!(
+            tree.node(&format!("{title}. {detail}"))["aria"]["role"],
+            "Status",
+            "assistive technology hears {title:?}"
+        );
+    };
+
+    pane.offer_take_over(client("Sadik’s MacBook Pro"));
+    settle(&harness, cx);
+    announced(
+        cx,
+        "Controlled by Sadik’s MacBook Pro",
+        crate::ui::server_pane::TAKEOVER_DETAIL,
+    );
+
+    pane.offer_take_over(client("Build Server"));
+    settle(&harness, cx);
+    announced(
+        cx,
+        "Controlled by Build Server",
+        crate::ui::server_pane::TAKEOVER_DETAIL,
+    );
+    assert!(
+        A11yTree::read(cx)
+            .find("Controlled by Sadik’s MacBook Pro")
+            .is_none(),
+        "the former Controlling Client is no longer named"
+    );
+
+    pane.offer_take_over(Controller::Nobody);
+    settle(&harness, cx);
+    announced(
+        cx,
+        "Not Controlled",
+        "No SpaceTerm controls this Pane. Take Over to type and resize here. The shell keeps \
+         running.",
+    );
+
+    // An interrupted connection cannot say who controls the Pane now, so it names nobody.
+    pane.offer_take_over(client("Build Server"));
+    settle(&harness, cx);
+    pane.set(DevelopmentPaneStatus::TakeoverReconnecting);
+    settle(&harness, cx);
+    let tree = A11yTree::read(cx);
+    assert!(tree.find("Controlled by Build Server").is_none());
+    assert!(tree.find(crate::ui::server_pane::TAKEOVER_TITLE).is_some());
+}
+
 /// An SSH server's Pane may wait for a route that needs the person to sign in again. Its Retry is
 /// the person's request, so it asks the registry to connect as the person would from Settings,
 /// once, and nothing asks again on its own.

@@ -2078,6 +2078,7 @@ mod development {
         /// A scripted Pane whose status a test sets and whose explicit requests it counts.
         pub(crate) struct ScriptedPane {
             status: Mutex<crate::terminal::server_session::DevelopmentPaneStatus>,
+            controller: Mutex<Option<spaceterm_server::pane::control::Controller>>,
             generation: std::sync::atomic::AtomicU64,
             selections: std::sync::atomic::AtomicUsize,
             take_overs: std::sync::atomic::AtomicUsize,
@@ -2091,6 +2092,7 @@ mod development {
                     status: Mutex::new(
                         crate::terminal::server_session::DevelopmentPaneStatus::Connecting,
                     ),
+                    controller: Mutex::default(),
                     generation: std::sync::atomic::AtomicU64::new(0),
                     selections: std::sync::atomic::AtomicUsize::new(0),
                     take_overs: std::sync::atomic::AtomicUsize::new(0),
@@ -2104,6 +2106,15 @@ mod development {
                 status: crate::terminal::server_session::DevelopmentPaneStatus,
             ) {
                 *self.status.lock().expect("status") = status;
+            }
+
+            /// The server offers Take Over and says who controls the Pane.
+            pub(crate) fn offer_take_over(
+                &self,
+                controller: spaceterm_server::pane::control::Controller,
+            ) {
+                *self.controller.lock().expect("controller") = Some(controller);
+                self.set(crate::terminal::server_session::DevelopmentPaneStatus::Takeover);
             }
 
             /// A new connection reaches the Terminal Session and supplies its screen.
@@ -2135,6 +2146,10 @@ mod development {
         impl crate::ui::server_pane::ServerPaneConnection for ScriptedPane {
             fn status(&self) -> crate::terminal::server_session::DevelopmentPaneStatus {
                 *self.status.lock().expect("status")
+            }
+
+            fn controller(&self) -> Option<spaceterm_server::pane::control::Controller> {
+                self.controller.lock().expect("controller").clone()
             }
 
             fn connection_generation(&self) -> u64 {
