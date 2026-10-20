@@ -291,6 +291,20 @@ fn run() -> Result<(), Box<dyn Error>> {
     println!(
         "Changed run observations required fresh approval; stopped activation preserved deliberate Stop."
     );
+    service.start()?;
+    let mut started = connect(&second)?;
+    if !matches!(
+        started.exchange(&Request::SelectPane {
+            pane,
+            explicit: false,
+            size: SIZE,
+            style: None
+        })?,
+        Reply::Restored { .. }
+    ) {
+        return Err("first Start after stopped activation started a shell incidentally".into());
+    }
+    service.stop()?;
     service.uninstall()?;
     println!("Disposable signed native update check completed; service stopped and uninstalled.");
     Ok(())
