@@ -31,10 +31,6 @@ pub struct CandidateMetadata {
 
 impl Service {
     /// Authenticate a signed remote-target candidate without executing or extracting it.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the remote target supplements the existing exact signed candidate contract"
-    )]
     pub fn inspect_candidate_for_target(
         &self,
         archive: &Path,
