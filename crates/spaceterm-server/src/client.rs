@@ -84,6 +84,12 @@ impl LocalServer {
         Ok(Directory::open(&self.paths.data, false)?.read()?.server)
     }
     /// One durable attachment writer shared by the inventory and all Pane subscriptions.
+    /// Whether `other` is a clone of this handle rather than a separately created one, such as
+    /// the handle a later connection to the same account creates.
+    pub fn same_handle(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.shared_pane, &other.shared_pane)
+    }
+
     pub fn attachments(&self) -> Result<crate::attachments::Attachments, ServerError> {
         if let Some(attachments) = self.attachments.get() {
             return attachments.clone();

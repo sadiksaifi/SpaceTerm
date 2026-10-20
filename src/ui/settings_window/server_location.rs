@@ -147,7 +147,7 @@ impl SettingsWindow {
                 // this window hears of it, so each reading looks the writer up again.
                 let client = cx.update(|cx| match &target {
                     ServerChoice::Local => Client::get(cx),
-                    ServerChoice::Ssh(destination) => Client::ssh(destination, cx),
+                    ServerChoice::Ssh(destination) => Client::presented_ssh(destination, cx),
                 });
                 let read = match &client {
                     Some(client) => Some(cx.update(|cx| client.read(Read::Settings, cx)).await),

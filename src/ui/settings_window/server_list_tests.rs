@@ -552,6 +552,15 @@ fn present_both<'a>(
     use crate::ui::shared_workspaces::testing::ScriptedEdits;
 
     let servers = open_servers(false, &["alpha", "bravo"], cx);
+    for name in ["alpha", "bravo"] {
+        servers.connections.connect(destination(name));
+    }
+    let connections = servers.connections.clone();
+    settle(servers.cx, |_| {
+        connections.server(&destination("alpha")).is_some()
+            && connections.server(&destination("bravo")).is_some()
+    });
+    // Each writer wraps its connection's server, as the Workspace Window's does.
     let writers: Vec<_> = ["alpha", "bravo"]
         .into_iter()
         .map(|name| {
@@ -562,15 +571,9 @@ fn present_both<'a>(
             servers.cx.update(|_, cx| {
                 present_ssh(&destination(name), edits_for_window, reads, cx);
             });
-            servers.connections.connect(destination(name));
             edits
         })
         .collect();
-    let connections = servers.connections.clone();
-    settle(servers.cx, |_| {
-        connections.server(&destination("alpha")).is_some()
-            && connections.server(&destination("bravo")).is_some()
-    });
     let [alpha, bravo]: [_; 2] = writers.try_into().ok().unwrap();
     (servers, alpha, bravo)
 }
@@ -645,6 +648,8 @@ fn a_server_settings_change_reaches_only_the_selected_server(cx: &mut TestAppCon
 #[gpui::test]
 fn choosing_another_server_carries_no_draft_to_it(cx: &mut TestAppContext) {
     let (servers, alpha, bravo) = present_both(cx);
+    // The list selects alpha first; choosing bravo and back reads alpha through its writer.
+    select("bravo", servers.cx);
     select("alpha", servers.cx);
     settle(servers.cx, |cx| {
         location_field(cx) == "~/alpha/{repository}/{branch}"
