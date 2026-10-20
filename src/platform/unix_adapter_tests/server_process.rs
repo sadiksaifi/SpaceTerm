@@ -289,8 +289,21 @@ fn native_account_server_connect(cx: &mut gpui::TestAppContext) {
                 )
                 .unwrap_or_else(|_| panic!("existing route did not quietly reconnect"));
             assert_eq!(reused.server.refresh().unwrap().protocol_major, 1);
+            let observed = adapter.spawns.load(std::sync::atomic::Ordering::SeqCst);
+            for _ in 0..4 {
+                assert!(connected.lease.is_alive());
+            }
+            assert_eq!(
+                adapter.spawns.load(std::sync::atomic::Ordering::SeqCst),
+                observed,
+                "idle health observations must reuse their authenticated transport"
+            );
             // Kill only this test's master. Eligible direct software keys recover automatically.
             backend.disconnect(&destination);
+            assert!(
+                !connected.lease.is_alive(),
+                "closed original route must become unavailable"
+            );
             let recovered = backend.connect(
                 &destination,
                 ConnectMode::QuietContinuation,

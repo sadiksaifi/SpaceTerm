@@ -596,12 +596,13 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
         };
         drop(cache);
         let status = client.refresh().map_err(map_server_error)?;
+        let health = client.connect_pane().map_err(map_server_error)?;
         Ok(ConnectedSshServer {
             server: client.clone(),
             continuity,
             lease: Arc::new(NativeConnectedLease {
                 route: self.clone(),
-                server: client.clone(),
+                health: Mutex::new(health),
             }),
             protocol_major: status.protocol_major,
         })
@@ -609,11 +610,17 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
 }
 struct NativeConnectedLease<A: SshProcessAdapter> {
     route: Arc<NativeRoute<A>>,
-    server: LocalServer,
+    health: Mutex<spaceterm_server::pane::PaneConnection>,
 }
 impl<A: SshProcessAdapter> SshServerLease for NativeConnectedLease<A> {
     fn is_alive(&self) -> bool {
-        self.route.is_alive() && self.server.refresh().is_ok()
+        self.route.is_alive()
+            && self.health.lock().is_ok_and(|mut health| {
+                matches!(
+                    health.exchange(&spaceterm_server::pane::Request::Capabilities),
+                    Ok(spaceterm_server::pane::Reply::Capabilities { .. })
+                )
+            })
     }
 }
 struct NativeCachedClient<A: SshProcessAdapter> {
