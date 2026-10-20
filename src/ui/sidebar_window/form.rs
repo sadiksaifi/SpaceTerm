@@ -109,7 +109,7 @@ pub(crate) enum FormRowLayout {
 /// One titled run of related rows. An empty title draws no heading.
 pub(crate) struct FormGroup {
     selector: String,
-    title: &'static str,
+    title: SharedString,
     rows: Vec<AnyElement>,
     on_rows_prepainted: Option<RowsPrepainted>,
 }
@@ -117,10 +117,14 @@ pub(crate) struct FormGroup {
 type RowsPrepainted = Box<dyn Fn(Vec<Bounds<Pixels>>, &mut Window, &mut App)>;
 
 impl FormGroup {
-    pub(crate) fn new(selector: String, title: &'static str, rows: Vec<AnyElement>) -> Self {
+    pub(crate) fn new(
+        selector: String,
+        title: impl Into<SharedString>,
+        rows: Vec<AnyElement>,
+    ) -> Self {
         Self {
             selector,
-            title,
+            title: title.into(),
             rows,
             on_rows_prepainted: None,
         }
@@ -181,7 +185,7 @@ impl FormGroup {
                             .id(SharedString::from(title_selector.clone()))
                             .role(accesskit::Role::Heading)
                             .aria_level(2)
-                            .aria_label(self.title)
+                            .aria_label(self.title.clone())
                             .debug_selector(move || title_selector.clone())
                             .chrome_text(appearance.typography.style(TextRole::Section))
                             .text_color(gpui_color(appearance.colors.text))

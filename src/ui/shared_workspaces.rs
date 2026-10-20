@@ -2269,6 +2269,10 @@ mod development {
                 self.snapshot.lock().expect("snapshot").connected = connected;
             }
 
+            pub(crate) fn set_worktree_writes(&self, worktree_writes: bool) {
+                self.snapshot.lock().expect("snapshot").worktree_writes = worktree_writes;
+            }
+
             pub(crate) fn set_error(&self, error: spaceterm_server::ServerError) {
                 self.snapshot.lock().expect("snapshot").error = Some(error);
             }

@@ -22,7 +22,8 @@ pub(crate) enum SettingsSectionId {
     Privacy,
     /// Repository Status and Pull Requests, and the tools that provide them.
     Git,
-    /// The account-local SpaceTerm Server and its connection status.
+    /// The servers this desktop presents, and the selected server's state, connection and
+    /// Server Settings.
     Servers,
     /// The installed version, the latest check, and how SpaceTerm keeps itself current.
     Updates,
@@ -81,8 +82,8 @@ impl SettingsSectionId {
                 "The branch and changes of the repository each terminal pane is in, read with your own Git and GitHub CLI."
             }
             Self::Servers => {
-                "The SpaceTerm Server for your account. It runs your Workspaces' terminals, so \
-                 they keep running after SpaceTerm quits."
+                "The SpaceTerm servers that run your Workspaces\u{2019} terminals, so they keep running \
+                 after SpaceTerm quits. Select a server to see its connection and settings."
             }
             Self::Updates => {
                 "SpaceTerm keeps itself current in the background and asks before it restarts."
@@ -149,15 +150,34 @@ pub(super) enum SettingsRowId {
     GitHubCli,
     /// The Worktree Path Template, where a new Worktree's directory goes.
     WorktreeLocation,
+    /// Every server this desktop presents, which selects the server the rows below act on.
+    ServerList,
     /// The local server's connection status and the next step.
     LocalServer,
     /// The service that runs the local server while the person is logged in, and its controls.
     ServerService,
     /// The approved server version, the version this SpaceTerm includes, and Update Server.
     ServerUpdate,
+    /// The selected saved SSH server's state and the steps it allows.
+    SshServerStatus,
+    /// The selected SSH server's version, as last observed.
+    SshServerVersion,
+    /// The operating system and processor of the selected SSH server's computer.
+    SshServerPlatform,
+    /// Whether this SpaceTerm and the selected SSH server share what they need to connect.
+    SshServerCompatibility,
+    /// Whether the selected SSH server's computer starts the server on its own.
+    SshServerStartup,
+    /// How SpaceTerm reaches the selected server, and whose authority admits it.
+    ServerConnection,
+    /// The devices paired with the selected server for direct network connections.
+    DirectNetworkPairing,
+    /// Forgets the selected saved SSH connection.
+    RemoveServer,
+    /// The selected server's New Worktree Location, a Server Setting.
     ServerWorktreeLocation,
-    /// Each SSH server SpaceTerm knows, its connection state and steps, and Connect to Server.
-    SshServers,
+    /// Connects to a computer by its SSH host name or alias, or one SSH configuration names.
+    SshConnect,
     /// The installed version, the latest check, and the next step the update service offers.
     UpdateStatus,
     AutomaticUpdateDownloads,
@@ -214,11 +234,20 @@ impl SettingsRowId {
             | Self::GitHubCli
             | Self::ServerWorktreeLocation
             | Self::WorktreeLocation
-            // The local server rows hold status and actions, not a preference.
+            // The server rows hold status and actions, not a preference.
+            | Self::ServerList
             | Self::LocalServer
             | Self::ServerService
             | Self::ServerUpdate
-            | Self::SshServers
+            | Self::SshServerStatus
+            | Self::SshServerVersion
+            | Self::SshServerPlatform
+            | Self::SshServerCompatibility
+            | Self::SshServerStartup
+            | Self::ServerConnection
+            | Self::DirectNetworkPairing
+            | Self::RemoveServer
+            | Self::SshConnect
             | Self::UpdateStatus
             | Self::AutomaticUpdateDownloads
             | Self::UpdateCheckInterval
@@ -649,10 +678,46 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-worktree-location",
     },
     SettingsRowDescriptor {
+        id: SettingsRowId::ServerList,
+        section: SettingsSectionId::Servers,
+        // The list leads the page and needs no title: it is what the page is about.
+        group: "",
+        label: "Server list",
+        keywords: &[
+            "computer",
+            "machine",
+            "select",
+            "remote",
+            "this mac",
+            "this computer",
+        ],
+        selector: "settings-row-server-list",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::SshConnect,
+        section: SettingsSectionId::Servers,
+        group: "",
+        label: "Add SSH server",
+        keywords: &[
+            "ssh",
+            "openssh",
+            "remote",
+            "remote server",
+            "host",
+            "ssh host",
+            "alias",
+            "add",
+            "new",
+            "linux",
+            "mac",
+        ],
+        selector: "settings-row-ssh-connect",
+    },
+    SettingsRowDescriptor {
         id: SettingsRowId::LocalServer,
         section: SettingsSectionId::Servers,
-        // The server leads the page and needs no title: it is what the page is about.
-        group: "",
+        // The detail's heading names the selected machine.
+        group: super::server_list::SERVER_GROUP,
         label: "Local server",
         keywords: &[
             "server",
@@ -672,7 +737,7 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
     SettingsRowDescriptor {
         id: SettingsRowId::ServerService,
         section: SettingsSectionId::Servers,
-        group: "",
+        group: super::server_list::SERVER_GROUP,
         label: "Background service",
         keywords: &[
             "service",
@@ -693,13 +758,15 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
             "stop",
             "restart",
             "running",
+            "authorization",
+            "authorize",
         ],
         selector: "settings-row-server-service",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::ServerUpdate,
         section: SettingsSectionId::Servers,
-        group: "",
+        group: super::server_list::SERVER_GROUP,
         label: "Server version",
         keywords: &[
             "version",
@@ -716,12 +783,125 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-server-update",
     },
     SettingsRowDescriptor {
+        id: SettingsRowId::SshServerStatus,
+        section: SettingsSectionId::Servers,
+        group: super::server_list::SERVER_GROUP,
+        label: "Status",
+        keywords: &[
+            "ssh",
+            "openssh",
+            "remote server",
+            "status",
+            "check status",
+            "connect",
+            "disconnect",
+            "reconnect",
+            "cancel",
+            "install",
+            "sign in",
+        ],
+        selector: "settings-row-ssh-server-status",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::SshServerVersion,
+        section: SettingsSectionId::Servers,
+        group: super::server_list::SERVER_GROUP,
+        label: "Server version",
+        keywords: &["version", "installed", "release"],
+        selector: "settings-row-ssh-server-version",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::SshServerPlatform,
+        section: SettingsSectionId::Servers,
+        group: super::server_list::SERVER_GROUP,
+        label: "Operating system",
+        keywords: &[
+            "platform",
+            "os",
+            "linux",
+            "macos",
+            "processor",
+            "architecture",
+        ],
+        selector: "settings-row-ssh-server-platform",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::SshServerCompatibility,
+        section: SettingsSectionId::Servers,
+        group: super::server_list::SERVER_GROUP,
+        label: "Compatibility",
+        keywords: &["compatible", "incompatible", "protocol", "version"],
+        selector: "settings-row-ssh-server-compatibility",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::SshServerStartup,
+        section: SettingsSectionId::Servers,
+        group: super::server_list::SERVER_GROUP,
+        label: "Starts automatically",
+        keywords: &[
+            "service",
+            "background",
+            "boot",
+            "login",
+            "systemd",
+            "launchd",
+            "launch agent",
+            "linger",
+            "authorization",
+        ],
+        selector: "settings-row-ssh-server-startup",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::ServerConnection,
+        section: SettingsSectionId::Servers,
+        group: super::server_list::CONNECTION_GROUP,
+        label: "Connection method",
+        keywords: &[
+            "method",
+            "authority",
+            "authorization",
+            "account",
+            "ssh",
+            "openssh",
+            "sign in",
+            "access",
+        ],
+        selector: "settings-row-server-connection",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::DirectNetworkPairing,
+        section: SettingsSectionId::Servers,
+        group: super::server_list::CONNECTION_GROUP,
+        label: "Direct network pairing",
+        keywords: &[
+            "pairing",
+            "paired",
+            "paired devices",
+            "pair",
+            "unpair",
+            "direct network",
+            "network",
+            "device",
+            "devices",
+        ],
+        selector: "settings-row-direct-network-pairing",
+    },
+    SettingsRowDescriptor {
+        id: SettingsRowId::RemoveServer,
+        section: SettingsSectionId::Servers,
+        group: super::server_list::CONNECTION_GROUP,
+        label: "Saved connection",
+        keywords: &["remove", "remove connection", "forget", "delete", "saved"],
+        selector: "settings-row-remove-server",
+    },
+    SettingsRowDescriptor {
         id: SettingsRowId::ServerWorktreeLocation,
         section: SettingsSectionId::Servers,
-        group: "Server Settings",
+        group: super::server_list::SERVER_SETTINGS_GROUP,
         label: "New Worktree Location",
         keywords: &[
             "server",
+            "server settings",
             "worktree",
             "path",
             "folder",
@@ -731,26 +911,6 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
             "repository",
         ],
         selector: "settings-row-server-worktree-location",
-    },
-    SettingsRowDescriptor {
-        id: SettingsRowId::SshServers,
-        section: SettingsSectionId::Servers,
-        group: "SSH Servers",
-        label: "SSH servers",
-        keywords: &[
-            "ssh",
-            "remote",
-            "remote server",
-            "host",
-            "ssh host",
-            "linux",
-            "mac",
-            "connect",
-            "disconnect",
-            "install",
-            "reconnect",
-        ],
-        selector: "settings-row-ssh-servers",
     },
     SettingsRowDescriptor {
         id: SettingsRowId::UpdateStatus,
@@ -1008,7 +1168,7 @@ mod tests {
     }
 
     /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 38] = [
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 47] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Opacity,
         SettingsRowId::Blur,
@@ -1034,11 +1194,20 @@ mod tests {
         SettingsRowId::ShowPullRequests,
         SettingsRowId::GitHubCli,
         SettingsRowId::WorktreeLocation,
+        SettingsRowId::ServerList,
+        SettingsRowId::SshConnect,
         SettingsRowId::LocalServer,
         SettingsRowId::ServerService,
         SettingsRowId::ServerUpdate,
+        SettingsRowId::SshServerStatus,
+        SettingsRowId::SshServerVersion,
+        SettingsRowId::SshServerPlatform,
+        SettingsRowId::SshServerCompatibility,
+        SettingsRowId::SshServerStartup,
+        SettingsRowId::ServerConnection,
+        SettingsRowId::DirectNetworkPairing,
+        SettingsRowId::RemoveServer,
         SettingsRowId::ServerWorktreeLocation,
-        SettingsRowId::SshServers,
         SettingsRowId::UpdateStatus,
         SettingsRowId::AutomaticUpdateDownloads,
         SettingsRowId::UpdateCheckInterval,
@@ -1341,10 +1510,19 @@ mod tests {
                     | SettingsRowId::GitHubCli
                     | SettingsRowId::ServerWorktreeLocation
                     | SettingsRowId::WorktreeLocation
+                    | SettingsRowId::ServerList
                     | SettingsRowId::LocalServer
                     | SettingsRowId::ServerService
                     | SettingsRowId::ServerUpdate
-                    | SettingsRowId::SshServers
+                    | SettingsRowId::SshServerStatus
+                    | SettingsRowId::SshServerVersion
+                    | SettingsRowId::SshServerPlatform
+                    | SettingsRowId::SshServerCompatibility
+                    | SettingsRowId::SshServerStartup
+                    | SettingsRowId::ServerConnection
+                    | SettingsRowId::DirectNetworkPairing
+                    | SettingsRowId::RemoveServer
+                    | SettingsRowId::SshConnect
                     | SettingsRowId::UpdateStatus
                     | SettingsRowId::AutomaticUpdateDownloads
                     | SettingsRowId::UpdateCheckInterval
@@ -1401,7 +1579,12 @@ mod tests {
 
     #[test]
     fn a_server_query_reaches_the_local_server() {
-        for query in ["server", "account", "set up", "start server", "protocol"] {
+        // The list of servers leads the section, so a bare "server" reaches it first.
+        assert_eq!(
+            matching_rows("server").first(),
+            Some(&SettingsRowId::ServerList)
+        );
+        for query in ["account", "set up", "start server", "protocol"] {
             assert_eq!(
                 matching_rows(query).first(),
                 Some(&SettingsRowId::LocalServer),

@@ -264,6 +264,57 @@ fn create_error(error: WriteError) -> crate::worktrees::git::WorktreeCreateError
     }
 }
 
+/// Writers whose answers a test scripts, standing in for a server's connection.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use crate::ui::shared_workspaces::testing::ScriptedEdits;
+    use spaceterm_server::worktree::Settings;
+    use std::sync::Mutex;
+
+    /// One server's Server Settings, answered from memory.
+    pub(crate) struct ScriptedReads(Mutex<Settings>);
+
+    impl ScriptedReads {
+        pub(crate) fn new(template: &str) -> Arc<Self> {
+            Arc::new(Self(Mutex::new(Settings {
+                template: template.to_owned(),
+                version: 0,
+            })))
+        }
+    }
+
+    impl WorktreeReads for ScriptedReads {
+        fn read(&self, read: Read) -> Result<ReadReply, Error> {
+            match read {
+                Read::Settings => Ok(ReadReply::Settings(self.0.lock().unwrap().clone())),
+                _ => Err(Error::Unavailable),
+            }
+        }
+    }
+
+    /// Registers a presented SSH server's writer, as the Workspace Window does when it presents
+    /// that server.
+    pub(crate) fn present_ssh(
+        destination: &crate::domain::SshDestination,
+        edits: Rc<ScriptedEdits>,
+        reads: Arc<ScriptedReads>,
+        cx: &mut App,
+    ) {
+        let client = Client {
+            server: LocalServer::for_identity("spaceterm-development")
+                .expect("the development identity resolves"),
+            controls: Arc::default(),
+            source: SharedEditSource::new(edits.clone()),
+            edits,
+            reads,
+        };
+        cx.default_global::<SshClients>()
+            .0
+            .insert(destination.as_str().to_owned(), client);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
