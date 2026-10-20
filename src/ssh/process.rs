@@ -1093,6 +1093,7 @@ pub(crate) fn run_captured_process<A: SshProcessAdapter>(
         spec,
         environment.launch_parts(),
         CapturedProcessPlan {
+            admitted: None,
             input: Some(input),
             stdout_limit,
             stderr_limit: None,
@@ -1100,6 +1101,47 @@ pub(crate) fn run_captured_process<A: SshProcessAdapter>(
         },
         cancellation,
     )
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum CapturedEffectError {
+    #[error("the SSH effect was not dispatched")]
+    NotAdmitted(#[source] CapturedProcessError),
+    #[error("the admitted SSH effect has an unconfirmed outcome")]
+    Unconfirmed,
+}
+
+/// An effect distinguishes cancellation before dispatch from an uncertain admitted outcome.
+pub(crate) fn run_captured_effect<A: SshProcessAdapter>(
+    adapter: &A,
+    spec: &SshCommandSpec,
+    environment: &SshProcessEnvironment,
+    input: Vec<u8>,
+    stdout_limit: usize,
+    cancellation: &SshCancellationToken,
+    deadline: Instant,
+) -> Result<CapturedProcessOutput, CapturedEffectError> {
+    let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    run_captured_process_with_parts(
+        adapter,
+        spec,
+        environment.launch_parts(),
+        CapturedProcessPlan {
+            admitted: Some(Arc::clone(&admitted)),
+            input: Some(input),
+            stdout_limit,
+            stderr_limit: None,
+            deadline: Some(deadline),
+        },
+        cancellation,
+    )
+    .map_err(|error| {
+        if admitted.load(std::sync::atomic::Ordering::Acquire) {
+            CapturedEffectError::Unconfirmed
+        } else {
+            CapturedEffectError::NotAdmitted(error)
+        }
+    })
 }
 
 /// A cancellable transfer has no arbitrary total download/authentication deadline.
@@ -1117,6 +1159,7 @@ pub(crate) fn run_captured_transfer<A: SshProcessAdapter>(
         spec,
         environment.launch_parts(),
         CapturedProcessPlan {
+            admitted: None,
             input: Some(input),
             stdout_limit,
             stderr_limit: None,
@@ -1140,6 +1183,7 @@ pub(crate) fn run_probe_process<A: SshProcessAdapter>(
         spec,
         (current_directory, environment, None),
         CapturedProcessPlan {
+            admitted: None,
             input: None,
             stdout_limit: stream_limit,
             stderr_limit: Some(stream_limit),
@@ -1150,6 +1194,7 @@ pub(crate) fn run_probe_process<A: SshProcessAdapter>(
 }
 
 struct CapturedProcessPlan {
+    admitted: Option<Arc<std::sync::atomic::AtomicBool>>,
     input: Option<Vec<u8>>,
     stdout_limit: usize,
     stderr_limit: Option<usize>,
@@ -1168,6 +1213,7 @@ fn run_captured_process_with_parts<A: SshProcessAdapter>(
     cancellation: &SshCancellationToken,
 ) -> Result<CapturedProcessOutput, CapturedProcessError> {
     let CapturedProcessPlan {
+        admitted,
         input,
         stdout_limit,
         stderr_limit,
@@ -1190,6 +1236,9 @@ fn run_captured_process_with_parts<A: SshProcessAdapter>(
     let SpawnedSshProcess { process, mut pipes } = adapter
         .spawn(request)
         .map_err(CapturedProcessError::Operation)?;
+    if let Some(admitted) = admitted {
+        admitted.store(true, std::sync::atomic::Ordering::Release);
+    }
     // Captured commands must see stdin EOF when their one writer finishes.
     drop(pipes.pollable.take());
     let mut ownership = CapturedProcessOwnership::new(adapter.clone(), process);
@@ -1650,6 +1699,46 @@ mod tests {
     fn test_environment() -> SshProcessEnvironment {
         SshProcessEnvironment::new_without_authentication(PathBuf::from("/captured/home"), None)
             .unwrap()
+    }
+
+    #[test]
+    fn effect_cancellation_preserves_whether_dispatch_was_admitted() {
+        let adapter = RecordingAdapter::default();
+        let cancelled = SshCancellationToken::cancelled();
+        let result = run_captured_effect(
+            &adapter,
+            &test_spec(),
+            &test_environment(),
+            Vec::new(),
+            16,
+            &cancelled,
+            Instant::now() + Duration::from_secs(1),
+        );
+        assert!(matches!(
+            result,
+            Err(CapturedEffectError::NotAdmitted(
+                CapturedProcessError::Cancelled
+            ))
+        ));
+        assert_eq!(adapter.state.lock().unwrap().spawns, 0);
+        let cancellation = SshCancellationToken::default();
+        adapter.state.lock().unwrap().cancel_on_status = Some(cancellation.clone());
+        let result = run_captured_effect(
+            &adapter,
+            &test_spec(),
+            &test_environment(),
+            Vec::new(),
+            16,
+            &cancellation,
+            Instant::now() + Duration::from_secs(1),
+        );
+        assert!(
+            matches!(result, Err(CapturedEffectError::Unconfirmed)),
+            "an admitted effect may have run despite cancellation"
+        );
+        let state = adapter.state.lock().unwrap();
+        assert_eq!(state.spawns, 1);
+        assert_eq!(state.reaps, 1);
     }
 
     #[test]

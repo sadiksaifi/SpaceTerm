@@ -469,6 +469,37 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
         )
         .map_err(map_process_error)
     }
+    fn prepare_service(
+        &self,
+        cancellation: &SshCancellationToken,
+    ) -> Result<AccountDiscovery, SshConnectFailure> {
+        use super::process::{CapturedEffectError, run_captured_effect};
+        let (command, capability) = self.command(&self.config.bootstrap.locator(
+            identity(),
+            "ssh-prepare",
+            false,
+        ))?;
+        capability
+            .authorize()
+            .map_err(|_| SshConnectFailure::Unavailable(UnavailableKind::Network))?;
+        let cancellation = SshCancellationToken::linked(cancellation, &capability.cancellation());
+        let output = run_captured_effect(
+            &self.config.adapter,
+            &command,
+            &self.environment,
+            Vec::new(),
+            MAX_DISCOVERY,
+            &cancellation,
+            Instant::now() + OBSERVATION,
+        )
+        .map_err(|error| match error {
+            CapturedEffectError::NotAdmitted(error) => map_process_error(error),
+            CapturedEffectError::Unconfirmed => {
+                SshConnectFailure::Unconfirmed(UnconfirmedOperation::Connect)
+            }
+        })?;
+        observe_preparation(output.exit.is_success(), || self.discover(&cancellation))
+    }
     fn discover(
         &self,
         cancellation: &SshCancellationToken,
@@ -498,31 +529,7 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
     ) -> Result<ConnectedSshServer, SshConnectFailure> {
         discovery = prepare_if_needed(discovery, expected, self.route_id, || {
             progress(ConnectPhase::Starting);
-            let output = self.run(
-                &self
-                    .config
-                    .bootstrap
-                    .locator(identity(), "ssh-prepare", false),
-                Vec::new(),
-                OBSERVATION,
-                cancellation,
-            )?;
-            if !output.exit.is_success() {
-                if let Discovery::Existing(latest) = self.discover(cancellation)?
-                    && latest.stopped
-                {
-                    return Err(SshConnectFailure::Stopped);
-                }
-                return Err(SshConnectFailure::Unavailable(
-                    UnavailableKind::ServiceUnavailable,
-                ));
-            }
-            let Discovery::Existing(latest) = self.discover(cancellation)? else {
-                return Err(SshConnectFailure::Unconfirmed(
-                    UnconfirmedOperation::Connect,
-                ));
-            };
-            Ok(latest)
+            self.prepare_service(cancellation)
         })?;
         let server = discovery.server.filter(|server| *server != [0; 32]).ok_or(
             SshConnectFailure::Unavailable(UnavailableKind::ServiceUnavailable),
@@ -785,6 +792,28 @@ impl<A: SshProcessAdapter> SshInstallation for NativeInstallation<A> {
         }
     }
 }
+fn observe_preparation(
+    successful: bool,
+    discover: impl FnOnce() -> Result<Discovery, SshConnectFailure>,
+) -> Result<AccountDiscovery, SshConnectFailure> {
+    let latest =
+        discover().map_err(|_| SshConnectFailure::Unconfirmed(UnconfirmedOperation::Connect))?;
+    let Discovery::Existing(latest) = latest else {
+        return Err(SshConnectFailure::Unconfirmed(
+            UnconfirmedOperation::Connect,
+        ));
+    };
+    if latest.stopped {
+        return Err(SshConnectFailure::Stopped);
+    }
+    if !successful {
+        return Err(SshConnectFailure::Unconfirmed(
+            UnconfirmedOperation::Connect,
+        ));
+    }
+    Ok(latest)
+}
+
 fn prepare_if_needed(
     discovery: AccountDiscovery,
     expected: Option<&SshServerContinuity>,
@@ -1047,6 +1076,21 @@ mod tests {
                 IncompatibilityKind::Capability
             ))
         ));
+    }
+
+    #[test]
+    fn lost_observation_after_preparation_keeps_the_effect_unconfirmed() {
+        for error in [
+            SshConnectFailure::Cancelled,
+            SshConnectFailure::Unavailable(UnavailableKind::Network),
+        ] {
+            assert!(matches!(
+                observe_preparation(true, || Err(error)),
+                Err(SshConnectFailure::Unconfirmed(
+                    UnconfirmedOperation::Connect
+                ))
+            ));
+        }
     }
 
     #[test]
