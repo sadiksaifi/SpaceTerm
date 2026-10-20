@@ -5521,9 +5521,7 @@ mod empty;
 mod launch;
 #[cfg(test)]
 pub(crate) use launch::testing as launch_testing;
-pub(crate) use launch::{
-    LocalServerAdapters, resume_waiting_launches, start_local_server, update_resolved,
-};
+pub(crate) use launch::{LocalServerAdapters, resume_waiting_launches, start_local_server};
 #[path = "workspace_manager/repository.rs"]
 mod repository;
 mod shared_repositories;

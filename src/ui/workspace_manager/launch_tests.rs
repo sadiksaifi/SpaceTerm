@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{App, Entity, Modifiers, TestAppContext, VisualTestContext};
+use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
 use spaceterm_server::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
 
 use super::*;
@@ -1271,81 +1271,6 @@ fn a_service_start_elsewhere_reconnects_the_stopped_panes_of_a_presenting_window
     assert_eq!(
         (pane.retries(), pane.take_overs(), pane.restored_starts()),
         (1, 0, 0)
-    );
-}
-
-/// A Pane refused while an update was resolving connects again once the update finishes, as a
-/// stopped Pane does after Start, whether the server then runs or stays stopped. The server
-/// says what became of it; nothing takes control, starts a shell, or starts the server.
-fn assert_update_reconnects(
-    status: crate::terminal::server_session::DevelopmentPaneStatus,
-    finished: fn(&mut App),
-    retries: usize,
-    cx: &mut TestAppContext,
-) {
-    let (harness, cx) = stopped_in_session_as(status, cx);
-    let pane = harness.panes.pane(PANE);
-
-    cx.cx.update(finished);
-    cx.run_until_parked();
-
-    assert_eq!(harness.launch.steps(), ["run"]);
-    assert_eq!(
-        (pane.retries(), pane.take_overs(), pane.restored_starts()),
-        (retries, 0, 0)
-    );
-}
-
-#[gpui::test]
-fn a_finished_update_reconnects_a_pane_refused_while_it_resolved(cx: &mut TestAppContext) {
-    assert_update_reconnects(
-        crate::terminal::server_session::DevelopmentPaneStatus::Failed(
-            ServerError::ActivationUnresolved,
-        ),
-        crate::ui::workspace_manager::resume_waiting_launches,
-        1,
-        cx,
-    );
-}
-
-#[gpui::test]
-fn a_finished_update_reconnects_a_refused_take_over_pane_without_taking_control(
-    cx: &mut TestAppContext,
-) {
-    assert_update_reconnects(
-        crate::terminal::server_session::DevelopmentPaneStatus::TakeoverFailed(
-            ServerError::ActivationUnresolved,
-        ),
-        crate::ui::workspace_manager::resume_waiting_launches,
-        1,
-        cx,
-    );
-}
-
-/// A Return leaves the server stopped, so nothing resumes launch, yet the refused Pane still
-/// connects again and then says the server is stopped.
-#[gpui::test]
-fn a_return_that_keeps_the_server_stopped_reconnects_a_refused_pane(cx: &mut TestAppContext) {
-    assert_update_reconnects(
-        crate::terminal::server_session::DevelopmentPaneStatus::Failed(
-            ServerError::ActivationUnresolved,
-        ),
-        crate::ui::workspace_manager::update_resolved,
-        1,
-        cx,
-    );
-}
-
-/// Unrelated refusals still wait for the person's Retry.
-#[gpui::test]
-fn a_finished_update_leaves_an_unrelated_refusal_alone(cx: &mut TestAppContext) {
-    assert_update_reconnects(
-        crate::terminal::server_session::DevelopmentPaneStatus::Failed(
-            ServerError::AuthenticationRefused,
-        ),
-        crate::ui::workspace_manager::resume_waiting_launches,
-        0,
-        cx,
     );
 }
 

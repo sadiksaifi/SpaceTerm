@@ -966,22 +966,11 @@ mod connection {
                 )
         }
 
-        /// Whether the server refused this Pane only while an update was resolving. Its
-        /// finished update connects it again, as Start does for a stopped server.
-        fn refused_during_update(&self) -> bool {
-            matches!(
-                self.status,
-                DevelopmentPaneStatus::Failed(ServerError::ActivationUnresolved)
-                    | DevelopmentPaneStatus::TakeoverFailed(ServerError::ActivationUnresolved)
-            )
-        }
-
-        /// Connects again once the server runs after the person's Start or a finished update,
-        /// for a Pane that stopped with it or was refused while the update resolved. The
+        /// Connects again once the person started the server this Pane stopped with. The
         /// connection keeps its mode, so the server says what became of the Pane; nothing takes
         /// control or starts a shell. Any other Pane is left alone.
         pub(crate) fn server_started(&mut self) -> ServerPaneSync {
-            if !self.server_stopped() && !self.refused_during_update() {
+            if !self.server_stopped() {
                 return ServerPaneSync::default();
             }
             self.connection.retry();
