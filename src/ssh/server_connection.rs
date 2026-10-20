@@ -284,6 +284,9 @@ struct State {
     entries: HashMap<String, Entry>,
     subscribers: Vec<async_channel::Sender<()>>,
     next_offer: u64,
+    /// Generations come from one counter, so a removed connection's late work never matches a
+    /// connection saved again under the same destination.
+    next_generation: u64,
     resumed: bool,
     persistence_error: Option<SshIntentStoreError>,
 }
@@ -318,6 +321,7 @@ impl SshServerConnections {
                 entries: HashMap::new(),
                 subscribers: Vec::new(),
                 next_offer: 0,
+                next_generation: 0,
                 resumed: false,
                 persistence_error: None,
             }),
@@ -446,13 +450,18 @@ impl SshServerConnections {
             let Ok(mut state) = self.inner.state.lock() else {
                 return;
             };
+            if state
+                .entries
+                .get(destination.as_str())
+                .is_none_or(|entry| entry.running || entry.presented.is_some())
+            {
+                return;
+            }
+            let generation = next_generation(&mut state);
             let Some(entry) = state.entries.get_mut(destination.as_str()) else {
                 return;
             };
-            if entry.running || entry.presented.is_some() {
-                return;
-            }
-            entry.generation = entry.generation.saturating_add(1);
+            entry.generation = generation;
             entry.cancellation = SshCancellationToken::default();
             entry.running = true;
             entry.checking = true;
@@ -488,8 +497,9 @@ impl SshServerConnections {
                 };
                 match backend.observe(&destination, expected.as_ref(), &cancellation, &progress) {
                     Ok(observation) => {
-                        backend.disconnect(&destination);
+                        // Only the current observation ends the route, never a newer one's.
                         update(&weak, &destination, generation, |entry| {
+                            backend.disconnect(&destination);
                             entry.running = false;
                             entry.checking = false;
                             entry.status = if entry.cancellation.is_cancelled() {
@@ -520,6 +530,7 @@ impl SshServerConnections {
         let Ok(mut state) = self.inner.state.lock() else {
             return;
         };
+        let generation = next_generation(&mut state);
         let Some(entry) = state.entries.get_mut(destination.as_str()) else {
             return;
         };
@@ -537,7 +548,7 @@ impl SshServerConnections {
             entry.active = false;
         }
         if !cancelling {
-            entry.generation = entry.generation.saturating_add(1);
+            entry.generation = generation;
             entry.running = false;
             entry.checking = false;
         }
@@ -576,14 +587,19 @@ impl SshServerConnections {
             let Ok(mut state) = self.inner.state.lock() else {
                 return;
             };
+            if state
+                .entries
+                .get(destination.as_str())
+                .is_some_and(|entry| entry.running)
+            {
+                return;
+            }
+            let generation = next_generation(&mut state);
             let entry = state
                 .entries
                 .entry(destination.as_str().to_owned())
                 .or_default();
-            if entry.running {
-                return;
-            }
-            entry.generation = entry.generation.saturating_add(1);
+            entry.generation = generation;
             entry.cancellation = SshCancellationToken::default();
             entry.running = true;
             entry.checking = false;
@@ -637,6 +653,10 @@ impl SshServerConnections {
             });
         }
     }
+}
+fn next_generation(state: &mut State) -> u64 {
+    state.next_generation = state.next_generation.saturating_add(1);
+    state.next_generation
 }
 fn notify(state: &mut State) {
     state
@@ -1205,6 +1225,32 @@ mod tests {
         assert!(registry.server(&destination()).is_none());
         assert!(intents.active(&destination()).is_none());
         assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+    }
+    #[test]
+    fn a_removed_connections_late_result_never_reaches_its_re_added_successor() {
+        let (registry, _, _, entered, release) = setup(false);
+        registry.connect(destination());
+        entered.recv_blocking().unwrap();
+        registry.remove(&destination());
+        registry.connect(destination());
+        entered.recv_blocking().unwrap();
+        release.send_blocking(()).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            matches!(
+                registry.status(&destination()),
+                RemoteConnectionStatus::Working { .. }
+            ),
+            "the removed attempt's success must not present the re-added connection"
+        );
+        assert!(registry.server(&destination()).is_none());
+        release.send_blocking(()).unwrap();
+        eventually(|| {
+            matches!(
+                registry.status(&destination()),
+                RemoteConnectionStatus::Connected { .. }
+            )
+        });
     }
     #[test]
     fn check_status_observes_once_and_leaves_intent_and_presentation_unchanged() {
