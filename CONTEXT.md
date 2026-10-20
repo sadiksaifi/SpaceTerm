@@ -69,6 +69,8 @@ The account-local SpaceTerm Server owns local terminal work. Production SSH Work
 
 **Client Identity**: A stable nonsecret identifier distinguishing one SpaceTerm Client's views, attachments, Pane control and operations.
 
+**Client Name**: The person-readable name a SpaceTerm Client supplies when it connects, such as its computer's name, which other clients see while it is a Controlling Client. It grants no authority.
+
 **Account-local Connection**: A connection authorized by the operating system as belonging to the SpaceTerm Server's owning account.
 
 **Paired Device**: A client device deliberately enrolled for direct-network access to a SpaceTerm Server.
@@ -91,7 +93,7 @@ The account-local SpaceTerm Server owns local terminal work. Production SSH Work
 
 **Take Over**: The action that replaces a Pane's Controlling Client.
 
-**Takeover Screen**: The Pane presentation shown to a SpaceTerm Client when another client is its Controlling Client.
+**Takeover Screen**: The Pane presentation shown to a SpaceTerm Client that is not a Pane's Controlling Client. It names the Controlling Client, or says that no client controls the Pane.
 
 ## Settings
 
