@@ -195,11 +195,8 @@ impl WorkspaceManager {
         cx: &mut Context<Self>,
     ) {
         match (command, destination) {
-            (MachineMenuCommand::ServerSettings, _) => {
-                crate::ui::settings_window::open_or_activate(
-                    Some(crate::ui::settings_window::SettingsSectionId::Servers),
-                    cx,
-                )
+            (MachineMenuCommand::ServerSettings, destination) => {
+                crate::ui::settings_window::open_server_settings(destination, cx)
             }
             (MachineMenuCommand::Connect, Some(destination)) => {
                 if let Some(connections) = crate::ui::ssh_servers::installed(cx) {

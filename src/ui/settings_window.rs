@@ -244,6 +244,29 @@ pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App)
     }
 }
 
+/// Opens Settings on Servers with one server selected: an SSH server by its destination, or the
+/// account-local server for `None`. Selecting reads nothing from that server.
+pub(crate) fn open_server_settings(
+    destination: Option<crate::domain::SshDestination>,
+    cx: &mut App,
+) {
+    open_or_activate(Some(SettingsSectionId::Servers), cx);
+    // An existing window selects the section in a deferred update, so the selection follows it.
+    cx.defer(move |cx| {
+        if let Some(settings) = open_settings_window(cx) {
+            let _ = settings.update(cx, |settings, _, cx| {
+                settings.select_server(
+                    destination.map_or(
+                        server_list::ServerChoice::Local,
+                        server_list::ServerChoice::Ssh,
+                    ),
+                    cx,
+                );
+            });
+        }
+    });
+}
+
 /// Opens Settings on Servers and starts the one Update Server journey there, for a surface that
 /// offers it elsewhere, such as the incompatible-server screen or the status item. The journey
 /// reads the server first and asks before it changes anything.
@@ -252,7 +275,11 @@ pub(crate) fn open_server_update(cx: &mut App) {
     // An existing window selects the section in a deferred update, so the request follows it.
     cx.defer(|cx| {
         if let Some(settings) = open_settings_window(cx) {
-            let _ = settings.update(cx, |settings, _, cx| settings.request_server_update(cx));
+            let _ = settings.update(cx, |settings, _, cx| {
+                // The journey updates the local server, so its detail is the one presented.
+                settings.select_server(server_list::ServerChoice::Local, cx);
+                settings.request_server_update(cx);
+            });
         }
     });
 }
