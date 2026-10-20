@@ -58,6 +58,32 @@ fn inventory(
     }
 }
 
+fn create_workspace(
+    connection: &mut PaneConnection,
+    name: &str,
+) -> Result<spaceterm_server::hierarchy::Id, Box<dyn Error>> {
+    let Reply::Inventory { next_sequence, .. } = connection.exchange(&Request::Inventory)? else {
+        return Err("inventory unavailable".into());
+    };
+    let Reply::Outcome(outcome) = connection.exchange(&Request::Mutate {
+        sequence: next_sequence,
+        mutation: Mutation::CreateWorkspace {
+            name: name.into(),
+            directory: None,
+        },
+    })?
+    else {
+        return Err("creation unavailable".into());
+    };
+    let Outcome::Accepted { target } = outcome.outcome else {
+        return Err("creation refused".into());
+    };
+    connection.exchange(&Request::Acknowledge {
+        sequence: next_sequence,
+    })?;
+    Ok(target)
+}
+
 fn run() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() != 7 || args[6] != "--confirm-disposable-development" {
@@ -78,25 +104,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     second.setup()?;
     let mut a = connect(&first)?;
     let mut b = connect(&second)?;
-    let Reply::Inventory { next_sequence, .. } = a.exchange(&Request::Inventory)? else {
-        return Err("inventory unavailable".into());
-    };
-    let Reply::Outcome(outcome) = a.exchange(&Request::Mutate {
-        sequence: next_sequence,
-        mutation: Mutation::CreateWorkspace {
-            name: "Signed update check".into(),
-            directory: None,
-        },
-    })?
-    else {
-        return Err("creation unavailable".into());
-    };
-    let Outcome::Accepted { target } = outcome.outcome else {
-        return Err("creation refused".into());
-    };
-    a.exchange(&Request::Acknowledge {
-        sequence: next_sequence,
-    })?;
+    let target = create_workspace(&mut a, "Signed update check")?;
     let before = inventory(&mut a)?;
     let workspace = before
         .workspaces
@@ -131,6 +139,50 @@ fn run() -> Result<(), Box<dyn Error>> {
         "stty -echo; printf '\\033[2J\\033[HUPDATE-BEGIN\\n'; sleep 3; printf '\\nSTAGING-CONTINUED\\n'; sleep 120",
     )?;
     support::await_output(&mut a, lease, "UPDATE-BEGIN")?;
+    let archive = Path::new(&args[3]);
+    let signature = Path::new(&args[4]);
+    if !matches!(
+        service.inspect_candidate(
+            archive,
+            signature,
+            &"0".repeat(64),
+            1,
+            &["workspace_policy"]
+        ),
+        Err(ServerError::CandidateChanged)
+    ) {
+        return Err("a changed client pin was accepted".into());
+    }
+    if !matches!(
+        service.inspect_candidate(
+            archive,
+            Path::new(&args[1]),
+            &args[5],
+            1,
+            &["workspace_policy"]
+        ),
+        Err(ServerError::RuntimeUnavailable)
+    ) {
+        return Err("an inconsistent signed pair was accepted".into());
+    }
+    if !matches!(
+        service.inspect_candidate(archive, signature, &args[5], 2, &["workspace_policy"]),
+        Err(ServerError::IncompatibleProtocol)
+    ) {
+        return Err("an unsupported required major was accepted".into());
+    }
+    if !matches!(
+        service.inspect_candidate(
+            archive,
+            signature,
+            &args[5],
+            1,
+            &["unavailable_required_feature"]
+        ),
+        Err(ServerError::MissingRequiredCapability)
+    ) {
+        return Err("a missing required capability was accepted".into());
+    }
     let candidate = retain(&service, &args[3..6])?;
     if previous.directory == candidate.directory {
         return Err("use different signed archive bytes".into());
@@ -149,6 +201,18 @@ fn run() -> Result<(), Box<dyn Error>> {
     {
         return Err("staging changed shared organization".into());
     }
+    let created_while_staged = create_workspace(&mut b, "Created while staged")?;
+    let newcomer = LocalServer::for_development_client("update-smoke-c", 1)?;
+    newcomer.setup()?;
+    let mut c = connect(&newcomer)?;
+    if inventory(&mut c)?
+        .workspaces
+        .iter()
+        .all(|workspace| workspace.id != created_while_staged)
+    {
+        return Err("new clients could not use the approved runtime while staged".into());
+    }
+    drop(c);
     drop(approval); // Cancellation preserves the running command and approved installation.
     if !service.status()?.running {
         return Err("staging stopped the approved runtime".into());
@@ -168,6 +232,13 @@ fn run() -> Result<(), Box<dyn Error>> {
     drop(b);
     let mut fresh = connect(&first)?;
     let after = inventory(&mut fresh)?;
+    if after
+        .workspaces
+        .iter()
+        .all(|workspace| workspace.id != created_while_staged)
+    {
+        return Err("Workspace created during staging was lost".into());
+    }
     let restored = after
         .workspaces
         .iter()
