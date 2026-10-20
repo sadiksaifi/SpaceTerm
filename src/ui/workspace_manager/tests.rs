@@ -1305,6 +1305,7 @@ impl WorkspaceManager {
                 .activate_workspace(previous)
                 .expect("the previous Workspace remains");
         }
+        self.arrange_by_machine();
         self.activate_workspace(workspace_id, window, cx);
         workspace_id
     }
@@ -11859,6 +11860,351 @@ fn each_servers_workspaces_should_take_edits_and_withdrawal_only_from_their_own_
         named("Here", cx),
         Some(here),
         "the local server's Workspaces stay presented"
+    );
+}
+
+/// One inventory at `revision` publishing each named Workspace, identified by its number below 50.
+fn machine_inventory(
+    revision: u64,
+    workspaces: &[(&str, u8)],
+) -> spaceterm_server::hierarchy::Inventory {
+    use spaceterm_server::hierarchy::{Axis, Inventory, Pane, Tab, Workspace};
+
+    Inventory {
+        repositories: None,
+        revision,
+        close: None,
+        workspaces: workspaces
+            .iter()
+            .map(|(name, number)| Workspace {
+                id: [*number; 32],
+                name: (*name).to_owned(),
+                name_version: 0,
+                pin_version: 0,
+                pinned_directory: None,
+                root_tab: [number + 50; 32],
+                tabs: vec![Tab {
+                    worktree: None,
+                    worktree_membership_fixed: false,
+                    worktree_repository: None,
+                    id: [number + 50; 32],
+                    root_pane: [number + 100; 32],
+                    panes: vec![Pane {
+                        id: [number + 100; 32],
+                        source: None,
+                        axis: Axis::Right,
+                        starting_directory: PathBuf::from("/srv/work"),
+                        confirmed_directory: None,
+                        creator: None,
+                    }],
+                }],
+            })
+            .collect(),
+    }
+}
+
+/// A window presenting the account-local server beside SSH servers, each with scripted edits.
+struct MachineGroupsHarness {
+    manager: Entity<WorkspaceManager>,
+    local: Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
+    /// The revision the next publication carries, so every server reads it as new.
+    revision: std::cell::Cell<u64>,
+}
+
+impl MachineGroupsHarness {
+    fn new(cx: &mut TestAppContext) -> (Self, &mut VisualTestContext) {
+        use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
+        use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+
+        let (manager, _records, cx) = workspace_manager(cx);
+        let local = Rc::new(ScriptedEdits::new(Some(machine_inventory(1, &[]))));
+        cx.update(|window, cx| {
+            manager.update(cx, |manager, cx| {
+                manager.present_shared_workspaces(
+                    SharedEditSource::new(Rc::clone(&local) as Rc<_>),
+                    SharedPaneSessions::with_opener(
+                        ScriptedPanes::new(Self::session_factory()) as Rc<_>,
+                        &PaneConstruction::testing(),
+                    ),
+                    window,
+                    cx,
+                );
+                manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        (
+            Self {
+                manager,
+                local,
+                revision: std::cell::Cell::new(2),
+            },
+            cx,
+        )
+    }
+
+    fn session_factory() -> WorkspaceTerminalSessionFactory {
+        WorkspaceTerminalSessionFactory::new_local(
+            Rc::new(TestTerminalSessionFactory::new(
+                TestTerminalSessionRecords::default(),
+            )),
+            crate::terminal::testing::test_local_directory(std::env::temp_dir()),
+        )
+    }
+
+    /// Presents the SSH server at `destination`, publishing `workspaces`, and attaches each one.
+    fn present_ssh(
+        &self,
+        destination: &str,
+        workspaces: &[(&str, u8)],
+        cx: &mut VisualTestContext,
+    ) -> (
+        ServerKey,
+        Rc<crate::ui::shared_workspaces::testing::ScriptedEdits>,
+    ) {
+        use crate::ui::shared_workspaces::testing::{ScriptedEdits, ScriptedPanes};
+        use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+
+        let edits = Rc::new(ScriptedEdits::new(Some(machine_inventory(
+            self.next_revision(),
+            workspaces,
+        ))));
+        let destination = crate::domain::SshDestination::new(destination.to_owned()).unwrap();
+        let key = cx.update(|window, cx| {
+            self.manager.update(cx, |manager, cx| {
+                let key = manager.present_server_workspaces(
+                    ServerOrigin::Ssh(destination),
+                    SharedEditSource::new(Rc::clone(&edits) as Rc<_>),
+                    SharedPaneSessions::with_opener(
+                        ScriptedPanes::new(Self::session_factory()) as Rc<_>,
+                        &PaneConstruction::testing(),
+                    ),
+                    window,
+                    cx,
+                );
+                manager.sync_shared_workspaces(key, window, cx);
+                key
+            })
+        });
+        self.attach(key, workspaces, cx);
+        (key, edits)
+    }
+
+    /// Publishes `workspaces` from the server at `key` and attaches each one.
+    fn publish(
+        &self,
+        key: ServerKey,
+        edits: &crate::ui::shared_workspaces::testing::ScriptedEdits,
+        workspaces: &[(&str, u8)],
+        cx: &mut VisualTestContext,
+    ) {
+        edits.set_inventory(machine_inventory(self.next_revision(), workspaces));
+        cx.update(|window, cx| {
+            self.manager.update(cx, |manager, cx| {
+                manager.sync_shared_workspaces(key, window, cx);
+            });
+        });
+        self.attach(key, workspaces, cx);
+    }
+
+    /// Attaches each of `workspaces` this client does not present yet, as choosing it in the
+    /// Workspace Switcher does.
+    fn attach(&self, key: ServerKey, workspaces: &[(&str, u8)], cx: &mut VisualTestContext) {
+        cx.update(|window, cx| {
+            self.manager.update(cx, |manager, cx| {
+                for (_, number) in workspaces {
+                    let server = [*number; 32];
+                    if manager
+                        .shared
+                        .get(key)
+                        .is_some_and(|shared| shared.local(server).is_none())
+                    {
+                        manager.attach_detached_workspace(key, server, window, cx);
+                    }
+                }
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    fn next_revision(&self) -> u64 {
+        let revision = self.revision.get();
+        self.revision.set(revision + 1);
+        revision
+    }
+
+    /// Every presented Workspace's name, in Workspace order.
+    fn names(&self, cx: &mut VisualTestContext) -> Vec<String> {
+        self.manager.read_with(cx, |manager, _| {
+            manager
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.name().to_owned())
+                .collect()
+        })
+    }
+
+    fn named(&self, name: &str, cx: &mut VisualTestContext) -> WorkspaceId {
+        let name = name.to_owned();
+        self.manager.read_with(cx, move |manager, _| {
+            manager
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.name() == name)
+                .map(|workspace| workspace.id())
+                .expect("the Workspace should be presented")
+        })
+    }
+
+    fn active_name(&self, cx: &mut VisualTestContext) -> String {
+        self.manager.read_with(cx, |manager, _| {
+            manager.workspaces.active().name().to_owned()
+        })
+    }
+}
+
+/// Each machine's Workspaces stay together in Workspace order, the local ones first and then each
+/// other machine's by name, so a Workspace published later joins the end of its own machine's.
+#[gpui::test]
+fn workspaces_from_several_servers_should_stay_grouped_by_machine(cx: &mut TestAppContext) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+    let (zeta, zeta_edits) = harness.present_ssh("zeta", &[("Far", 1)], cx);
+    harness.publish(
+        ServerKey::LOCAL,
+        &harness.local,
+        &[("Here", 1), ("Also Here", 2)],
+        cx,
+    );
+    harness.present_ssh("Alpha", &[("Near", 1)], cx);
+    harness.publish(zeta, &zeta_edits, &[("Far", 1), ("Farther", 2)], cx);
+
+    assert_eq!(
+        harness.names(cx),
+        ["Default", "Here", "Also Here", "Near", "Far", "Farther",],
+        "local Workspaces come first, then each machine's by name regardless of case, and a new \
+         Workspace lands at the end of its machine's"
+    );
+}
+
+/// Moving a Workspace past its machine's Workspaces leaves it at the nearer end of them.
+#[gpui::test]
+fn moving_a_workspace_should_stay_among_its_machines_workspaces(cx: &mut TestAppContext) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+    harness.present_ssh("penguin", &[("Far", 1), ("Farther", 2)], cx);
+    let farther = harness.named("Farther", cx);
+    let default = harness.named("Default", cx);
+
+    let move_to = |workspace_id: WorkspaceId, position: usize, cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            harness.manager.update(cx, |manager, cx| {
+                manager.handle_sidebar_event(
+                    SidebarEvent::Move {
+                        workspace_id,
+                        position,
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+    };
+    move_to(farther, 0, cx);
+    let toward_start = harness.names(cx);
+    move_to(default, 3, cx);
+
+    assert_eq!(
+        (toward_start, harness.names(cx)),
+        (
+            vec![
+                "Default".to_owned(),
+                "Here".to_owned(),
+                "Farther".to_owned(),
+                "Far".to_owned(),
+            ],
+            vec![
+                "Here".to_owned(),
+                "Default".to_owned(),
+                "Farther".to_owned(),
+                "Far".to_owned(),
+            ]
+        ),
+        "a move past a machine's Workspaces stops at their nearer end"
+    );
+}
+
+/// Position shortcuts follow the grouped order the sidebar shows, not the order Workspaces arrived.
+#[gpui::test]
+fn workspace_shortcuts_should_follow_the_grouped_order(cx: &mut TestAppContext) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+    harness.present_ssh("penguin", &[("Far", 1)], cx);
+    harness.publish(
+        ServerKey::LOCAL,
+        &harness.local,
+        &[("Here", 1), ("Also Here", 2)],
+        cx,
+    );
+
+    cx.simulate_keystrokes("ctrl-3");
+    cx.run_until_parked();
+    let third = harness.active_name(cx);
+    cx.simulate_keystrokes("ctrl-4");
+    cx.run_until_parked();
+
+    assert_eq!(
+        (third, harness.active_name(cx)),
+        ("Also Here".to_owned(), "Far".to_owned())
+    );
+}
+
+/// Disconnecting from one server removes only its machine's Workspaces. The Active Workspace and
+/// the order of the others stay as the person left them.
+#[gpui::test]
+fn withdrawing_one_server_should_keep_the_other_machines_workspaces_and_active_workspace(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    harness.publish(
+        ServerKey::LOCAL,
+        &harness.local,
+        &[("Here", 1), ("Also Here", 2)],
+        cx,
+    );
+    let (penguin, _) = harness.present_ssh("penguin", &[("Far", 1)], cx);
+    let here = harness.named("Here", cx);
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.handle_sidebar_event(
+                SidebarEvent::Move {
+                    workspace_id: here,
+                    position: 2,
+                },
+                window,
+                cx,
+            );
+            manager.activate_workspace(here, window, cx);
+        });
+    });
+
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            manager.withdraw_server_workspaces(penguin, window, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        (harness.names(cx), harness.active_name(cx)),
+        (
+            vec![
+                "Default".to_owned(),
+                "Also Here".to_owned(),
+                "Here".to_owned(),
+            ],
+            "Here".to_owned()
+        )
     );
 }
 

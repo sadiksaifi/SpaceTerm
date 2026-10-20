@@ -1620,6 +1620,7 @@ impl WorkspaceManager {
         {
             Self::report_workspace_error("rename", error);
         }
+        self.arrange_by_machine();
         let (control_connection, _, _, _, _, _, lifecycle) = completion.into_parts();
         let replaced = self.remote_workspace_runtimes.insert(
             workspace_id,
@@ -2813,6 +2814,8 @@ impl WorkspaceManager {
                 workspace_id,
                 position,
             } => {
+                // Each machine's Workspaces stay together, so a move stops at their ends.
+                let position = self.position_within_machine(workspace_id, position);
                 if let Err(error) = self.workspaces.move_workspace(workspace_id, position) {
                     Self::report_workspace_error("move", error);
                 }
@@ -4097,6 +4100,8 @@ impl WorkspaceManager {
         if let Some(shared) = self.shared.get_mut(key) {
             shared.register(workspace_id, facts.clone());
         }
+        // Registration names the Workspace's server, and so its machine's group.
+        self.arrange_by_machine();
         self.synchronize_tab_manager_layout(workspace_id, window, cx);
         if let Some(manager) = self
             .workspaces
@@ -5679,6 +5684,7 @@ mod launch;
 #[cfg(test)]
 pub(crate) use launch::testing as launch_testing;
 pub(crate) use launch::{LocalServerAdapters, resume_waiting_launches, start_local_server};
+mod machine_groups;
 #[path = "workspace_manager/repository.rs"]
 mod repository;
 mod server_bindings;
