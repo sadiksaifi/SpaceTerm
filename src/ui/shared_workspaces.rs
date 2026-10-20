@@ -2163,6 +2163,8 @@ mod development {
             local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
             session_factory: crate::terminal::WorkspaceTerminalSessionFactory,
             panes: Mutex<std::collections::BTreeMap<super::Id, std::sync::Arc<ScriptedPane>>>,
+            /// The SSH destination of a scripted server on another computer.
+            remote: Option<crate::domain::SshDestination>,
         }
 
         impl ScriptedPanes {
@@ -2173,6 +2175,20 @@ mod development {
                     local_files: crate::runtime::local_filesystem(),
                     session_factory,
                     panes: Mutex::new(std::collections::BTreeMap::new()),
+                    remote: None,
+                })
+            }
+
+            /// Scripted Panes of a server on another computer, which take no local file authority.
+            pub(crate) fn remote(
+                session_factory: crate::terminal::WorkspaceTerminalSessionFactory,
+                destination: crate::domain::SshDestination,
+            ) -> std::rc::Rc<Self> {
+                std::rc::Rc::new(Self {
+                    local_files: crate::runtime::local_filesystem(),
+                    session_factory,
+                    panes: Mutex::new(std::collections::BTreeMap::new()),
+                    remote: Some(destination),
                 })
             }
 
@@ -2192,7 +2208,11 @@ mod development {
             fn local_filesystem(
                 &self,
             ) -> Option<&crate::platform::local_filesystem::LocalFilesystemAuthority> {
-                Some(&self.local_files)
+                self.remote.is_none().then_some(&self.local_files)
+            }
+
+            fn remote_destination(&self) -> Option<&crate::domain::SshDestination> {
+                self.remote.as_ref()
             }
 
             fn open(&self, pane: super::Id) -> Option<super::SharedPaneSubscription> {
