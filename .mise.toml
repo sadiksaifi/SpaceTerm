@@ -479,6 +479,17 @@ run = [
 description = "Test shared Workspace integration and server Pane presentation in the main app"
 run = "cargo test --package spaceterm --lib --all-features --locked -- shared server_pane"
 
+[tasks."server:ssh:desktop:test"]
+description = "Test SSH account connections, retained intent and remote Pane presentation"
+usage = '''
+arg "[filter]" help="Run one regression instead of the SSH and Pane suites"
+'''
+run = "cargo test --package spaceterm --lib --all-features --locked -- {% if usage.filter %}{{usage.filter | quote}}{% else %}ssh::server terminal::server_session{% endif %}"
+
+[tasks."server:ssh:native:test"]
+description = "Verify an explicitly selected SSH account server on the native host"
+run = "cargo test --package spaceterm --lib --all-features --locked -- ssh::server_process::tests::native::native_account_server_connect --ignored --exact --nocapture"
+
 [tasks."server:worktree:smoke"]
 description = "Exercise owning-server Worktree writes and interrupted originals with the initial protocol major"
 run = [
