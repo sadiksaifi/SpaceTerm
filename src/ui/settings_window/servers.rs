@@ -12,6 +12,7 @@ use spaceterm_ui::{
 };
 
 use super::SettingsWindow;
+use super::server_update::ServerUpdateControl;
 use crate::application_identity::ApplicationIdentity;
 pub(super) use crate::local_server::service::ServiceStartup;
 use crate::local_server::service::{
@@ -129,6 +130,8 @@ pub(super) struct OfferedServer {
     pub(super) connection: Result<Arc<dyn LocalServerControl>, ServerError>,
     /// `None` omits the service row, which keeps the connection row's own Set Up and Start.
     pub(super) service: Option<Result<Arc<dyn ServerServiceControl>, ServerError>>,
+    /// The server version and its update journey. `None` omits the version row.
+    pub(super) update: Option<Arc<dyn ServerUpdateControl>>,
 }
 
 /// The local server a Settings window presents. Every build offers one. `None` hides the Servers
@@ -139,7 +142,13 @@ pub(super) type OfferedLocalServer = Option<OfferedServer>;
 /// sets up, installs, starts, and connects to nothing.
 pub(super) fn offered_local_server() -> OfferedLocalServer {
     let identity = ApplicationIdentity::current().directory_name();
-    let service = match Service::for_identity(identity) {
+    let resolved = Service::for_identity(identity);
+    // Only a resolved service can report or replace its approved build.
+    let update = resolved
+        .as_ref()
+        .ok()
+        .map(|service| Arc::new(service.clone()) as Arc<dyn ServerUpdateControl>);
+    let service = match resolved {
         // A platform without a service layer keeps the connection row's own workflow.
         Err(ServerError::Unsupported) => None,
         resolved => {
@@ -150,6 +159,7 @@ pub(super) fn offered_local_server() -> OfferedLocalServer {
         connection: LocalServer::for_identity(identity)
             .map(|server| Arc::new(server) as Arc<dyn LocalServerControl>),
         service,
+        update,
     })
 }
 
@@ -271,6 +281,20 @@ pub(super) fn present(status: LocalServerStatus) -> LocalServerPresentation {
                     )),
                     CaptionTone::Error,
                 ),
+                // The refusal is scoped to this connection. The server and its Terminal Sessions
+                // keep running, and the Server version row offers any verified update.
+                ServerError::IncompatibleProtocol => (
+                    SharedString::new_static(INCOMPATIBLE_PROTOCOL),
+                    CaptionTone::Error,
+                ),
+                ServerError::MissingRequiredCapability => (
+                    SharedString::new_static(MISSING_CAPABILITY),
+                    CaptionTone::Error,
+                ),
+                ServerError::ActivationUnresolved => guidance(
+                    "An update you confirmed hasn\u{2019}t finished, so SpaceTerm doesn\u{2019}t \
+                     connect yet. Choose Finish Update under Server version below.",
+                ),
                 // A deliberate Stop is a state the person chose, not a fault.
                 ServerError::Stopped => guidance(STOPPED_GUIDANCE),
                 ServerError::NotInstalled => {
@@ -339,6 +363,18 @@ fn failure(error: ServerError) -> (&'static str, &'static str, bool) {
             "settings-local-server-state-incompatible",
             true,
         ),
+        ServerError::MissingRequiredCapability => (
+            "Incompatible",
+            "settings-local-server-state-missing-capability",
+            true,
+        ),
+        // Only a fresh SpaceTerm process uses its replaced installation's server package, so
+        // checking again from this one says nothing new.
+        ServerError::CandidateChanged => (
+            "Restart SpaceTerm",
+            "settings-local-server-state-candidate-changed",
+            false,
+        ),
         ServerError::IncompatibleState => (
             "Incompatible State",
             "settings-local-server-state-incompatible-state",
@@ -388,8 +424,33 @@ fn failure(error: ServerError) -> (&'static str, &'static str, bool) {
         // Another surface changed the service after a confirmation was prepared. A check reads
         // its current state before the person asks again.
         ServerError::Changed => ("Changed", "settings-local-server-state-changed", true),
+        // An update the person confirmed has not resolved, so the server admits no connection
+        // until Finish Update resolves it. A check reports whether it has since.
+        ServerError::ActivationUnresolved => (
+            "Update Unfinished",
+            "settings-local-server-state-update-unfinished",
+            true,
+        ),
+        ServerError::ReturnUnavailable => (
+            "Update Failed",
+            "settings-local-server-state-return-unavailable",
+            true,
+        ),
     }
 }
+
+/// Why this client refused a server with no protocol major in common. Neither side's release
+/// number says which one is older, so the wording names no side.
+pub(crate) const INCOMPATIBLE_PROTOCOL: &str = "SpaceTerm and the server for your account have no \
+                                                protocol version in common, so SpaceTerm didn\u{2019}t \
+                                                connect. The server and its Terminal Sessions keep \
+                                                running.";
+
+/// Why this client refused a server that lacks a capability it requires.
+pub(crate) const MISSING_CAPABILITY: &str = "The server for your account doesn\u{2019}t support a \
+                                             feature this SpaceTerm requires, so SpaceTerm \
+                                             didn\u{2019}t connect. The server and its Terminal \
+                                             Sessions keep running.";
 
 /// The connection row's guidance once the person has stopped the server. A stopped server stays
 /// stopped through account login and computer startup alike.
@@ -1069,11 +1130,7 @@ impl SettingsWindow {
     /// Checks the connection on the background executor. One check runs at a time, and none
     /// while the service is changing: its result checks the connection afresh.
     pub(super) fn check_local_server(&mut self, cx: &mut Context<Self>) {
-        if self
-            .server_service
-            .as_ref()
-            .is_some_and(ServerServiceRow::changing)
-        {
+        if self.server_changing() {
             return;
         }
         let Some(row) = &mut self.local_server else {
@@ -1116,16 +1173,40 @@ impl SettingsWindow {
     /// Whether the service row can take `action` now. One service action runs at a time, and a
     /// change waits for the connection row to finish.
     fn server_service_ready(&self, action: ServiceAction) -> bool {
-        let connection_working = self.local_server_working();
+        // One server operation runs at a time across the Servers rows.
+        let others_working = self.local_server_working()
+            || self
+                .server_update
+                .as_ref()
+                .is_some_and(|row| row.state.working.is_some());
         self.server_service.as_ref().is_some_and(|row| {
             row.control.is_ok()
                 && row.state.working.is_none()
-                && !(action.changes_service() && connection_working)
+                && !(action.changes_service() && others_working)
         })
     }
 
+    /// Whether the service or version row is running a step that may change the server. The
+    /// connection is checked afresh when it finishes.
+    pub(super) fn server_changing(&self) -> bool {
+        self.server_service
+            .as_ref()
+            .is_some_and(ServerServiceRow::changing)
+            || self
+                .server_update
+                .as_ref()
+                .is_some_and(super::server_update::ServerUpdateRow::changing)
+    }
+
+    /// Whether the service row has an action running.
+    pub(super) fn server_service_working(&self) -> bool {
+        self.server_service
+            .as_ref()
+            .is_some_and(|row| row.state.working.is_some())
+    }
+
     /// Whether the connection row has an action running.
-    fn local_server_working(&self) -> bool {
+    pub(super) fn local_server_working(&self) -> bool {
         self.local_server
             .as_ref()
             .is_some_and(|row| matches!(row.status, LocalServerStatus::Checking))
@@ -1322,6 +1403,7 @@ impl SettingsWindow {
                 // with, so the connection is checked afresh. A retry checks it when it finishes.
                 if action.changes_service() {
                     settings.check_local_server(cx);
+                    settings.check_server_update(cx);
                 }
                 // A Workspace Window waiting on a stopped or missing server opens its Workspaces
                 // once the person starts it here.
@@ -1599,10 +1681,7 @@ impl SettingsWindow {
                 .into_any_element()
         };
         // A service change checks the connection when it finishes, so the check waits for it.
-        let service_changing = self
-            .server_service
-            .as_ref()
-            .is_some_and(ServerServiceRow::changing);
+        let service_changing = self.server_changing();
         let owner = cx.weak_entity();
         let check = presentation.check.then(|| {
             action_button(

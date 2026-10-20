@@ -62,6 +62,7 @@ fn offered(server: &Arc<ScriptedServer>) -> OfferedLocalServer {
     Some(OfferedServer {
         connection: Ok(Arc::clone(server) as Arc<dyn LocalServerControl>),
         service: None,
+        update: None,
     })
 }
 
@@ -72,6 +73,7 @@ fn offered_with_service(
     Some(OfferedServer {
         connection: Ok(Arc::clone(server) as Arc<dyn LocalServerControl>),
         service: Some(Ok(Arc::clone(service) as Arc<dyn ServerServiceControl>)),
+        update: None,
     })
 }
 
@@ -210,6 +212,11 @@ fn a_failure_needing_attention_reads_as_an_error_in_its_bounded_wording() {
             | ServerError::NotInstalled
             | ServerError::AuthorizationRequired => {
                 assert_eq!(presented.tone, CaptionTone::Guidance, "{error:?}");
+            }
+            // The refusal names no side and says the server's work keeps running.
+            ServerError::IncompatibleProtocol => {
+                assert_eq!(presented.tone, CaptionTone::Error);
+                assert_eq!(presented.explanation, super::INCOMPATIBLE_PROTOCOL);
             }
             _ => {
                 assert_eq!(presented.tone, CaptionTone::Error, "{error:?}");
@@ -371,6 +378,7 @@ fn an_unresolved_server_explains_itself_and_offers_nothing(cx: &mut TestAppConte
         Some(OfferedServer {
             connection: Err(ServerError::StorageUnavailable),
             service: None,
+            update: None,
         }),
         cx,
     );
@@ -988,6 +996,7 @@ fn an_unresolved_service_explains_itself_and_offers_nothing(cx: &mut TestAppCont
         Some(OfferedServer {
             connection: Ok(Arc::clone(&server) as Arc<dyn LocalServerControl>),
             service: Some(Err(ServerError::StorageUnavailable)),
+            update: None,
         }),
         cx,
     );

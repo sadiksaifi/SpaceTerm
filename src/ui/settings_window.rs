@@ -12,6 +12,7 @@ mod keybindings;
 mod microphone;
 mod permission_access;
 mod server_location;
+mod server_update;
 mod servers;
 mod sidebar;
 mod theme_gallery;
@@ -79,7 +80,10 @@ use keybindings::ShortcutRows;
 use microphone::MicrophoneAccessRow;
 use permission_access::{PermissionAccessChanges, PermissionAccessRows};
 /// The server control window shares the service row's progress and authorization wording.
-pub(crate) use servers::{AuthorizationPrompt, AuthorizedRequest, ServiceAction};
+pub(crate) use servers::{
+    AuthorizationPrompt, AuthorizedRequest, INCOMPATIBLE_PROTOCOL, MISSING_CAPABILITY,
+    ServiceAction,
+};
 use theme_gallery::ThemeGallery;
 use theme_store::ThemeStore;
 
@@ -237,6 +241,19 @@ pub(crate) fn open_or_activate(section: Option<SettingsSectionId>, cx: &mut App)
     }
 }
 
+/// Opens Settings on Servers and starts the one Update Server journey there, for a surface that
+/// offers it elsewhere, such as the incompatible-server screen or the status item. The journey
+/// reads the server first and asks before it changes anything.
+pub(crate) fn open_server_update(cx: &mut App) {
+    open_or_activate(Some(SettingsSectionId::Servers), cx);
+    // An existing window selects the section in a deferred update, so the request follows it.
+    cx.defer(|cx| {
+        if let Some(settings) = open_settings_window(cx) {
+            let _ = settings.update(cx, |settings, _, cx| settings.request_server_update(cx));
+        }
+    });
+}
+
 /// Retains Settings until its latest edit is saved, then completes an authorized application quit.
 /// Closes the Settings window the way its own close button does: it saves first and stays open
 /// when saving fails. Reports whether `window` is the Settings window.
@@ -332,6 +349,8 @@ pub(crate) struct SettingsWindow {
     local_server: Option<servers::LocalServerRow>,
     /// The service that runs the local server. `None` omits its row.
     server_service: Option<servers::ServerServiceRow>,
+    /// The server version and its update journey. `None` omits its row.
+    server_update: Option<server_update::ServerUpdateRow>,
 }
 
 impl SidebarOwner for SettingsWindow {
@@ -597,6 +616,10 @@ impl SettingsWindow {
                         && local_server
                             .as_ref()
                             .is_none_or(|offered| offered.service.is_none()))
+                    || (*row == SettingsRowId::ServerUpdate
+                        && local_server
+                            .as_ref()
+                            .is_none_or(|offered| offered.update.is_none()))
             })
             .collect();
         Self {
@@ -636,6 +659,12 @@ impl SettingsWindow {
                 .as_ref()
                 .and_then(|offered| offered.service.clone())
                 .map(servers::ServerServiceRow::new),
+            server_update: local_server
+                .as_ref()
+                .and_then(|offered| offered.update.clone())
+                .map(|control| {
+                    server_update::ServerUpdateRow::new(control, window.window_handle())
+                }),
             local_server: local_server
                 .map(|offered| servers::LocalServerRow::new(offered.connection)),
         }
@@ -649,6 +678,7 @@ impl SettingsWindow {
         {
             self.check_local_server(cx);
             self.check_server_service(cx);
+            self.check_server_update(cx);
         }
     }
 
@@ -1262,6 +1292,10 @@ impl SettingsWindow {
             if let Some(presentation) = self.server_service_presentation() {
                 rendered = rendered.caption(presentation.explanation, presentation.tone);
             }
+        } else if row == SettingsRowId::ServerUpdate {
+            if let Some(presentation) = self.server_update_presentation() {
+                rendered = rendered.caption(presentation.explanation, presentation.tone);
+            }
         } else if let SettingsRowId::Shortcut(command) = row {
             if let Some(description) = self.shortcut_description(command, cx) {
                 rendered = rendered.caption(description.text, description.tone);
@@ -1316,6 +1350,7 @@ impl SettingsWindow {
             SettingsRowId::WorktreeLocation => self.render_worktree_location(appearance, cx),
             SettingsRowId::LocalServer => self.render_local_server(appearance, cx),
             SettingsRowId::ServerService => self.render_server_service(appearance, cx),
+            SettingsRowId::ServerUpdate => self.render_server_update(appearance, cx),
             SettingsRowId::UpdateStatus => self.render_update_status(cx),
             SettingsRowId::AutomaticUpdateDownloads => self.render_automatic_update_downloads(cx),
             SettingsRowId::UpdateCheckInterval => self.render_update_check_interval(cx),

@@ -153,6 +153,8 @@ pub(super) enum SettingsRowId {
     LocalServer,
     /// The service that runs the local server while the person is logged in, and its controls.
     ServerService,
+    /// The approved server version, the version this SpaceTerm includes, and Update Server.
+    ServerUpdate,
     ServerWorktreeLocation,
     /// The installed version, the latest check, and the next step the update service offers.
     UpdateStatus,
@@ -213,6 +215,7 @@ impl SettingsRowId {
             // The local server rows hold status and actions, not a preference.
             | Self::LocalServer
             | Self::ServerService
+            | Self::ServerUpdate
             | Self::UpdateStatus
             | Self::AutomaticUpdateDownloads
             | Self::UpdateCheckInterval
@@ -691,6 +694,25 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-server-service",
     },
     SettingsRowDescriptor {
+        id: SettingsRowId::ServerUpdate,
+        section: SettingsSectionId::Servers,
+        group: "",
+        label: "Server version",
+        keywords: &[
+            "version",
+            "server version",
+            "update",
+            "update server",
+            "upgrade",
+            "server update",
+            "incompatible",
+            "compatibility",
+            "return",
+            "previous version",
+        ],
+        selector: "settings-row-server-update",
+    },
+    SettingsRowDescriptor {
         id: SettingsRowId::ServerWorktreeLocation,
         section: SettingsSectionId::Servers,
         group: "Server Settings",
@@ -963,7 +985,7 @@ mod tests {
     }
 
     /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 36] = [
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 37] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Opacity,
         SettingsRowId::Blur,
@@ -991,6 +1013,7 @@ mod tests {
         SettingsRowId::WorktreeLocation,
         SettingsRowId::LocalServer,
         SettingsRowId::ServerService,
+        SettingsRowId::ServerUpdate,
         SettingsRowId::ServerWorktreeLocation,
         SettingsRowId::UpdateStatus,
         SettingsRowId::AutomaticUpdateDownloads,
@@ -1296,6 +1319,7 @@ mod tests {
                     | SettingsRowId::WorktreeLocation
                     | SettingsRowId::LocalServer
                     | SettingsRowId::ServerService
+                    | SettingsRowId::ServerUpdate
                     | SettingsRowId::UpdateStatus
                     | SettingsRowId::AutomaticUpdateDownloads
                     | SettingsRowId::UpdateCheckInterval
