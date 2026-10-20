@@ -2,7 +2,7 @@
 
 pub mod cli;
 
-use super::{LingerAuthorization, Service, ServiceStartup, ServiceStatus};
+use super::{LingerAuthorization, RetainedInstallation, Service, ServiceStartup, ServiceStatus};
 use crate::ServerError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -113,6 +113,159 @@ impl Wording {
             }
         }
     }
+}
+
+/// Whether an update confirmation installs the candidate or returns to the previous version.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UpdateChange {
+    /// Replaces the approved runtime with the verified candidate.
+    Update,
+    /// Returns to the retained previous runtime after the candidate never became ready.
+    Return,
+}
+
+/// Shared copy for confirming one exact server update or return, without service access or an
+/// authority grant. Each build is named by version and abbreviated commit, so two builds of one
+/// version read apart.
+pub struct UpdateWording {
+    server: String,
+    change: UpdateChange,
+    previous: String,
+    candidate: String,
+    running: bool,
+    stopped: bool,
+}
+
+impl UpdateWording {
+    /// `previous` is the approved build and `candidate` the verified build it changes to.
+    /// `running` and `stopped` are the observation the confirmation binds.
+    pub fn new(
+        identity: &str,
+        change: UpdateChange,
+        previous: &RetainedInstallation,
+        candidate: &RetainedInstallation,
+        running: bool,
+        stopped: bool,
+    ) -> Self {
+        let (previous, candidate) = build_labels(BuildName::of(previous), BuildName::of(candidate));
+        Self {
+            server: display_name(identity).into(),
+            change,
+            previous,
+            candidate,
+            running,
+            stopped,
+        }
+    }
+
+    pub fn title(&self) -> &'static str {
+        match self.change {
+            UpdateChange::Update => "Update Server",
+            UpdateChange::Return => "Return to Previous Version",
+        }
+    }
+
+    pub fn confirm_label(&self) -> &'static str {
+        self.title()
+    }
+
+    pub fn message(&self) -> String {
+        let Self {
+            server,
+            previous,
+            candidate,
+            ..
+        } = self;
+        match self.change {
+            UpdateChange::Update if self.running => format!(
+                "Update the {server} server to version {candidate} and end all of its Terminal \
+                 Sessions?"
+            ),
+            UpdateChange::Update if self.stopped => {
+                format!("Update the stopped {server} server to version {candidate}?")
+            }
+            UpdateChange::Update => format!("Update the {server} server to version {candidate}?"),
+            UpdateChange::Return => {
+                format!("Return the {server} server to version {previous}?")
+            }
+        }
+    }
+
+    pub fn detail(&self) -> String {
+        let Self {
+            previous,
+            candidate,
+            ..
+        } = self;
+        let kept = "Workspaces and paired devices are kept, and each Pane starts a new shell when \
+                    you next use it.";
+        match self.change {
+            UpdateChange::Update if self.running => format!(
+                "The server changes from version {previous} to version {candidate}. Terminal \
+                 Sessions end for every client using this server, and programs running in them \
+                 stop. {kept}"
+            ),
+            UpdateChange::Update if self.stopped => format!(
+                "The server changes from version {previous} to version {candidate}. No Terminal \
+                 Sessions are running, and the server stays stopped until you choose Start \
+                 Server. {kept}"
+            ),
+            UpdateChange::Update => format!(
+                "The server changes from version {previous} to version {candidate}. It \
+                 isn\u{2019}t running now, so no Terminal Sessions end. {kept}"
+            ),
+            UpdateChange::Return => format!(
+                "Version {candidate} never became ready, so no Terminal Sessions are running. \
+                 SpaceTerm confirmed that version {previous} and the server\u{2019}s saved \
+                 Workspaces are unchanged. The server stays stopped until you choose Start \
+                 Server. Terminal Sessions that ended don\u{2019}t return."
+            ),
+        }
+    }
+}
+
+/// What names a server build to a person: its version, source commit, and package digest.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BuildName<'a> {
+    pub version: &'a str,
+    pub commit: &'a str,
+    /// The whole signed package's digest. Two packages of one version and commit differ here.
+    pub package: &'a str,
+}
+
+impl<'a> BuildName<'a> {
+    pub fn of(installation: &'a RetainedInstallation) -> Self {
+        Self {
+            version: &installation.version,
+            commit: &installation.commit,
+            package: installation
+                .directory
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// Names a server build by version and abbreviated source commit.
+pub fn build_label(version: &str, commit: &str) -> String {
+    let commit = commit.get(..7).unwrap_or(commit);
+    format!("{version} (commit {commit})")
+}
+
+/// Names two builds so they read apart. Version and commit name each build, and the package
+/// digest's prefix is added only when those match, since the packages then differ elsewhere.
+pub fn build_labels(first: BuildName<'_>, second: BuildName<'_>) -> (String, String) {
+    let name = |build: BuildName<'_>| {
+        let commit = build.commit.get(..7).unwrap_or(build.commit);
+        format!("{} (commit {commit}", build.version)
+    };
+    let ambiguous = name(first) == name(second) && first.package != second.package;
+    let label = |build: BuildName<'_>| match build.package.get(..8) {
+        Some(package) if ambiguous => format!("{}, package {package})", name(build)),
+        _ => format!("{})", name(build)),
+    };
+    (label(first), label(second))
 }
 
 /// The application display name for a compiled service identity.
