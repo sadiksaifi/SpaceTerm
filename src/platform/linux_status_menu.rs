@@ -63,6 +63,7 @@ pub(crate) fn install(
     let Ok(service) = Service::for_identity(identity.directory_name()) else {
         return;
     };
+    let offered = service.clone();
     let controller = Controller::new(service);
     let name = controller.display_name().to_owned();
     let shared = Arc::new(Mutex::new(Published {
@@ -98,7 +99,8 @@ pub(crate) fn install(
     };
     let worker = {
         let sender = sender.clone();
-        match Worker::spawn(controller.clone(), move |event| {
+        let update_offered = move || crate::ui::settings_window::update_offered(&offered);
+        match Worker::spawn(controller.clone(), update_offered, move |event| {
             let _ = sender.send_blocking(Message::Worker(event));
         }) {
             Ok(worker) => worker,
@@ -164,6 +166,9 @@ impl LinuxStatusItem {
             Message::Worker(Event::Status(status)) => self.change(|state| {
                 state.status = Some(status);
             }),
+            Message::Worker(Event::Update(update)) => self.change(|state| {
+                state.update = update;
+            }),
             Message::Worker(Event::Finished(command, result)) => {
                 self.change(|state| {
                     state.working = None;
@@ -199,6 +204,7 @@ impl LinuxStatusItem {
                     let published = lock(&self.shared);
                     std::iter::once(&published.presentation.open)
                         .chain(&published.presentation.controls)
+                        .chain(&published.presentation.update)
                         .chain(std::iter::once(&published.presentation.quit))
                         .find(|item| item.command == command)
                         .is_some_and(|item| item.enabled)
@@ -216,6 +222,11 @@ impl LinuxStatusItem {
                     }
                     Command::Stop => self.prepare(Operation::Stop, Action::Stop, cx),
                     Command::Restart => self.prepare(Operation::Restart, Action::Restart, cx),
+                    // Settings owns the one journey, which reads the server again and asks first.
+                    Command::Update => {
+                        crate::app::leave_menu_only(cx);
+                        crate::ui::settings_window::open_server_update(cx);
+                    }
                     // The client's own quit policy decides, including its confirmation.
                     Command::Quit => cx.dispatch_action(&crate::app::QuitApplication),
                 }
@@ -417,6 +428,7 @@ const START: i32 = 7;
 const STOP: i32 = 8;
 const RESTART: i32 = 9;
 const QUIT: i32 = 11;
+const UPDATE: i32 = 12;
 const SEPARATORS: [i32; 3] = [4, 6, 10];
 
 fn command(id: i32) -> Option<Command> {
@@ -425,6 +437,7 @@ fn command(id: i32) -> Option<Command> {
         START => Command::Start,
         STOP => Command::Stop,
         RESTART => Command::Restart,
+        UPDATE => Command::Update,
         QUIT => Command::Quit,
         _ => return None,
     })
@@ -459,6 +472,15 @@ impl Menu {
             (START, item(start)),
             (STOP, item(stop)),
             (RESTART, item(restart)),
+        ]);
+        // Shown only while a verified build is offered.
+        rows.extend(
+            presentation
+                .update
+                .as_ref()
+                .map(|update| (UPDATE, item(update))),
+        );
+        rows.extend([
             (SEPARATORS[2], separator()),
             (QUIT, item(&presentation.quit)),
         ]);

@@ -725,7 +725,7 @@ fn close_all_windows(cx: &mut App) {
 }
 
 /// Returns a menu-only client to the Dock before it presents a window again.
-fn leave_menu_only(cx: &mut App) {
+pub(crate) fn leave_menu_only(cx: &mut App) {
     dismissal_cancelled(cx);
     crate::status_menu::show_in_dock(cx, true);
 }

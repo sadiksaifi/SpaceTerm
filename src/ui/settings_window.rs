@@ -84,6 +84,7 @@ pub(crate) use servers::{
     AuthorizationPrompt, AuthorizedRequest, INCOMPATIBLE_PROTOCOL, MISSING_CAPABILITY,
     ServiceAction,
 };
+pub(crate) use server_update::update_offered;
 use theme_gallery::ThemeGallery;
 use theme_store::ThemeStore;
 

@@ -130,28 +130,8 @@ impl LocalLaunch for AccountLaunch {
     }
 
     fn update_offered(&self) -> bool {
-        let Ok(service) = Self::service() else {
-            return false;
-        };
-        // Discovery verifies the signed manifest this client was built with, including that it
-        // declares this client's protocol major and required capabilities.
-        let Ok(candidate) = crate::local_startup::discover_candidate() else {
-            return false;
-        };
-        // An installed service lists only its approved build.
-        service.status().is_ok_and(|status| status.installed)
-            && service
-                .retained_installations()
-                .ok()
-                .and_then(|installations| installations.into_iter().next())
-                .is_some_and(|approved| {
-                    // The service never activates an earlier release over the approved one.
-                    !candidate.is_approved(&approved)
-                        && !crate::local_server::service::activation::is_released_downgrade(
-                            candidate.version(),
-                            &approved.version,
-                        )
-                })
+        // The same offer the Server version row makes, so both surfaces agree.
+        Self::service().is_ok_and(|service| crate::ui::settings_window::update_offered(&service))
     }
 }
 

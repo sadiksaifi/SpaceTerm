@@ -11,6 +11,9 @@ pub(crate) enum Command {
     Stop,
     /// Asks first, since it ends every client's Terminal Sessions.
     Restart,
+    /// Opens Settings on Servers and starts the Update Server journey there, which reads the
+    /// server again and asks before it changes anything.
+    Update,
     /// Exits the whole client, status item included. The server and its Terminal Sessions keep
     /// running. Unavailable while a server operation runs, so exiting never abandons an admitted
     /// operation's cleanup.
@@ -27,6 +30,8 @@ pub(crate) struct State {
     /// A server control window is asking about or running an operation. Menus withhold the
     /// server operations and Quit until it closes.
     pub(crate) asking: bool,
+    /// The last read found a verified server build the Server version row offers to update to.
+    pub(crate) update: bool,
 }
 
 /// One menu row, in the order the menu shows it.
@@ -52,6 +57,9 @@ pub(crate) struct Presentation {
     /// Open, then the server operations, then Quit. Hosts separate these three groups.
     pub(crate) open: Item,
     pub(crate) controls: [Item; 3],
+    /// Update Server, shown only while a verified build is offered. An approved build offers
+    /// nothing to update to, so the row is absent rather than dimmed.
+    pub(crate) update: Option<Item>,
     pub(crate) quit: Item,
 }
 
@@ -89,6 +97,11 @@ impl Presentation {
                 control(Command::Stop, "Stop Server\u{2026}"),
                 control(Command::Restart, "Restart Server\u{2026}"),
             ],
+            update: state.update.then(|| Item {
+                command: Command::Update,
+                label: "Update Server\u{2026}".to_owned(),
+                enabled: idle && phase.offers(Command::Update),
+            }),
             quit: Item {
                 command: Command::Quit,
                 label: format!("Quit {name}"),
@@ -126,8 +139,8 @@ impl Phase {
 
     fn offers(self, command: Command) -> bool {
         match self {
-            Self::Running => matches!(command, Command::Stop | Command::Restart),
-            Self::Stopped | Self::NotRunning => command == Command::Start,
+            Self::Running => matches!(command, Command::Stop | Command::Restart | Command::Update),
+            Self::Stopped | Self::NotRunning => matches!(command, Command::Start | Command::Update),
             // A Stop whose cleanup was not confirmed is retried only by another explicit Stop.
             Self::Unavailable(ServerError::CleanupUnresolved) => command == Command::Stop,
             Self::Checking | Self::NotInstalled | Self::Unavailable(_) => false,
@@ -189,6 +202,7 @@ mod tests {
             })),
             working: None,
             asking: false,
+            update: false,
         }
     }
 
@@ -240,5 +254,37 @@ mod tests {
         };
         assert!(offered(asking).is_empty());
         assert!(!Presentation::of("SpaceTerm Preflight", asking).quit.enabled);
+    }
+
+    #[test]
+    fn update_server_appears_only_while_a_verified_build_is_offered() {
+        let update = |state: State| Presentation::of("SpaceTerm Preflight", state).update;
+        assert_eq!(update(status(true, true, false)), None);
+        let offered = |state: State| State {
+            update: true,
+            ..state
+        };
+        for state in [status(true, true, false), status(true, false, true)] {
+            let item = update(offered(state)).expect("the row is shown");
+            assert_eq!(item.label, "Update Server\u{2026}");
+            assert!(item.enabled);
+        }
+        // Another operation, or a control window asking, holds it back.
+        for state in [
+            State {
+                working: Some(Command::Stop),
+                ..offered(status(true, true, false))
+            },
+            State {
+                asking: true,
+                ..offered(status(true, true, false))
+            },
+            State {
+                status: Some(Err(ServerError::StorageUnavailable)),
+                ..offered(State::default())
+            },
+        ] {
+            assert!(!update(state).expect("the row is shown").enabled);
+        }
     }
 }

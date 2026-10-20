@@ -162,6 +162,19 @@ impl ServerUpdateControl for Service {
     }
 }
 
+/// Whether the Server version row offers Update Server for `service`, for a surface that opens
+/// the journey from elsewhere. Reads only, so it stages, installs, and starts nothing. Blocking.
+pub(crate) fn update_offered(service: &Service) -> bool {
+    ServerUpdateControl::read(service).is_ok_and(|facts| {
+        present_update(&UpdateState {
+            facts: Some(facts),
+            ..UpdateState::default()
+        })
+        .actions
+        .contains(&UpdateAction::Update)
+    })
+}
+
 /// A step the person can take from the row.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum UpdateAction {

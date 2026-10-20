@@ -60,12 +60,14 @@ pub(crate) fn install(
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
+    let offered = service.clone();
     let controller = Controller::new(service);
     let name = controller.display_name().to_owned();
     let (sender, messages) = async_channel::unbounded();
     let worker = {
         let sender = sender.clone();
-        match Worker::spawn(controller, move |event| {
+        let update_offered = move || crate::ui::settings_window::update_offered(&offered);
+        match Worker::spawn(controller, update_offered, move |event| {
             let _ = sender.send_blocking(Message::Worker(event));
         }) {
             Ok(worker) => worker,
@@ -113,6 +115,7 @@ struct Rows {
     state: Retained<NSMenuItem>,
     open: Retained<NSMenuItem>,
     controls: [Retained<NSMenuItem>; 3],
+    update: Retained<NSMenuItem>,
     quit: Retained<NSMenuItem>,
 }
 
@@ -146,6 +149,7 @@ impl StatusItem {
             },
             open: row(sel!(open:)),
             controls: [row(sel!(start:)), row(sel!(stop:)), row(sel!(restart:))],
+            update: row(sel!(update:)),
             quit: row(sel!(quit:)),
         };
         menu.addItem(&rows.header);
@@ -156,6 +160,7 @@ impl StatusItem {
         for control in &rows.controls {
             menu.addItem(control);
         }
+        menu.addItem(&rows.update);
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         menu.addItem(&rows.quit);
         let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
@@ -194,6 +199,10 @@ impl StatusItem {
         for (row, item) in rows.controls.iter().zip(&presentation.controls) {
             apply(row, item);
         }
+        rows.update.setHidden(presentation.update.is_none());
+        if let Some(update) = &presentation.update {
+            apply(&rows.update, update);
+        }
         apply(&rows.quit, &presentation.quit);
         let Some(button) = self.item.button(self.mtm) else {
             return;
@@ -222,6 +231,12 @@ impl StatusItem {
             Message::Worker(Event::Status(status)) => {
                 let mut state = self.state.get();
                 state.status = Some(status);
+                self.state.set(state);
+                self.render();
+            }
+            Message::Worker(Event::Update(update)) => {
+                let mut state = self.state.get();
+                state.update = update;
                 self.state.set(state);
                 self.render();
             }
@@ -261,6 +276,7 @@ impl StatusItem {
         let presentation = Presentation::of(&self.name, self.state.get());
         let offered = std::iter::once(&presentation.open)
             .chain(&presentation.controls)
+            .chain(&presentation.update)
             .chain(std::iter::once(&presentation.quit))
             .any(|item| item.command == command && item.enabled);
         if !offered {
@@ -274,6 +290,12 @@ impl StatusItem {
             Command::Start => self.begin(Command::Start, Request::Start, cx),
             Command::Stop => self.worker.send(Request::Prepare(Action::Stop)),
             Command::Restart => self.worker.send(Request::Prepare(Action::Restart)),
+            // Settings owns the one journey, which reads the server again and asks first.
+            Command::Update => {
+                crate::app::leave_menu_only(cx);
+                crate::ui::settings_window::open_server_update(cx);
+                cx.activate(true);
+            }
             // The client's own quit policy decides, including its confirmation and saving.
             Command::Quit => cx.dispatch_action(&crate::app::QuitApplication),
         }
@@ -424,6 +446,11 @@ define_class!(
         #[unsafe(method(restart:))]
         fn restart(&self, _sender: &NSObject) {
             self.send(Message::Command(Command::Restart));
+        }
+
+        #[unsafe(method(update:))]
+        fn update(&self, _sender: &NSObject) {
+            self.send(Message::Command(Command::Update));
         }
 
         #[unsafe(method(quit:))]
