@@ -133,6 +133,9 @@ pub(super) struct MachineSection {
     pub(super) disconnects: bool,
     /// Whether Settings lists this machine's server, so Server Settings can open on it.
     pub(super) has_settings: bool,
+    /// Whether the machine's server is a Saved Connection that isn't presented yet, so its
+    /// Workspaces appear only once it connects.
+    pub(super) awaiting_connection: bool,
     /// How many Workspace rows follow the heading.
     pub(super) workspaces: usize,
 }

@@ -12587,22 +12587,18 @@ fn a_machine_with_only_remote_workspaces_should_offer_no_connection_controls(
     cx: &mut TestAppContext,
 ) {
     let (harness, cx) = MachineGroupsHarness::new(cx);
-    let (connections, connects) = waiting_ssh_registry(cx);
+    // The registry reads "work" as an inactive host, whose status alone would offer Connect.
+    let (_connections, _connects) = waiting_ssh_registry(cx);
     create_disconnected_remote_workspace(&harness.manager, cx);
-    connections.connect(crate::domain::SshDestination::new("work".to_owned()).unwrap());
-    wait_for_person(&connections, "work");
-    let _ = connects.try_recv();
     redraw(cx);
 
-    right_click("machine-heading-work", cx);
-
-    assert_eq!(
-        (
-            cx.debug_bounds("machine-menu-server-settings").is_some(),
-            cx.debug_bounds("machine-menu-connect").is_some(),
-            cx.debug_bounds("machine-menu-disconnect").is_some(),
-        ),
-        (true, false, false)
+    assert!(
+        cx.debug_bounds("machine-heading-work").is_some(),
+        "the machine still heads its Workspaces"
+    );
+    assert!(
+        cx.debug_bounds("machine-heading-work-menu").is_none(),
+        "no SSH server is saved or presented there, so its heading offers nothing"
     );
 }
 
@@ -15357,3 +15353,268 @@ mod shared_repositories {
 
 #[path = "launch_tests.rs"]
 mod launch_tests;
+
+/// Saved connections remembered in memory, as the private record keeps them.
+#[derive(Default)]
+struct RememberedConnections(Mutex<Vec<crate::ssh::server_connection::RetainedSshConnection>>);
+
+impl RememberedConnections {
+    fn active(&self, destination: &str) -> Option<bool> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|record| record.destination.as_str() == destination)
+            .map(|record| record.active)
+    }
+}
+
+impl crate::ssh::server_connection::SshConnectionIntentStore for RememberedConnections {
+    fn load(
+        &self,
+    ) -> Result<
+        Vec<crate::ssh::server_connection::RetainedSshConnection>,
+        crate::ssh::server_connection::SshIntentStoreError,
+    > {
+        Ok(self.0.lock().unwrap().clone())
+    }
+    fn retain(
+        &self,
+        record: crate::ssh::server_connection::RetainedSshConnection,
+    ) -> Result<(), crate::ssh::server_connection::SshIntentStoreError> {
+        let mut records = self.0.lock().unwrap();
+        records.retain(|other| other.destination != record.destination);
+        records.push(record);
+        Ok(())
+    }
+    fn remove(
+        &self,
+        destination: &crate::domain::SshDestination,
+    ) -> Result<(), crate::ssh::server_connection::SshIntentStoreError> {
+        self.0
+            .lock()
+            .unwrap()
+            .retain(|record| record.destination != *destination);
+        Ok(())
+    }
+}
+
+/// An SSH computer that connects once over a route the test can end, then answers every later
+/// attempt with `later`. Requested attempts are counted.
+struct ConnectsOnceThen {
+    route: Arc<AtomicBool>,
+    attempts: AtomicUsize,
+    requested: AtomicUsize,
+    first_succeeds: bool,
+    later: fn() -> crate::ssh::server_connection::SshConnectFailure,
+}
+
+struct ScriptedRoute(Arc<AtomicBool>);
+impl crate::ssh::server_connection::SshServerLease for ScriptedRoute {
+    fn is_alive(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+impl crate::ssh::server_connection::SshConnectBackend for ConnectsOnceThen {
+    fn connect(
+        &self,
+        _: &crate::domain::SshDestination,
+        mode: crate::ssh::server_connection::ConnectMode,
+        _: Option<&crate::ssh::server_connection::SshServerContinuity>,
+        _: &crate::ssh::cancellation::SshCancellationToken,
+        _: &crate::ssh::server_connection::ConnectProgress<'_>,
+    ) -> Result<
+        crate::ssh::server_connection::ConnectedSshServer,
+        crate::ssh::server_connection::SshConnectFailure,
+    > {
+        if mode == crate::ssh::server_connection::ConnectMode::Requested {
+            self.requested.fetch_add(1, Ordering::SeqCst);
+        }
+        if !self.first_succeeds || self.attempts.fetch_add(1, Ordering::SeqCst) > 0 {
+            return Err((self.later)());
+        }
+        Ok(crate::ssh::server_connection::ConnectedSshServer {
+            server: spaceterm_server::LocalServer::for_identity("spaceterm-development").unwrap(),
+            continuity: crate::ssh::server_connection::SshServerContinuity {
+                route: [1; 32],
+                account: 501,
+                build: "spaceterm-development".into(),
+                server: [2; 32],
+            },
+            lease: Arc::new(ScriptedRoute(self.route.clone())),
+            protocol_major: 1,
+            facts: crate::ssh::server_connection::SshServerFacts {
+                platform: ("linux".into(), "x86_64".into()),
+                version: Some("1.0.0".into()),
+                starts_automatically: true,
+            },
+        })
+    }
+    fn observe(
+        &self,
+        _: &crate::domain::SshDestination,
+        _: Option<&crate::ssh::server_connection::SshServerContinuity>,
+        _: &crate::ssh::cancellation::SshCancellationToken,
+        _: &crate::ssh::server_connection::ConnectProgress<'_>,
+    ) -> Result<
+        crate::ssh::server_connection::SshServerObservation,
+        crate::ssh::server_connection::SshConnectFailure,
+    > {
+        Err((self.later)())
+    }
+}
+
+fn wait_until(mut done: impl FnMut() -> bool, cx: &mut VisualTestContext) {
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    while !done() {
+        assert!(Instant::now() < deadline, "the registry settles");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        cx.run_until_parked();
+    }
+    redraw(cx);
+}
+
+/// Connects to "penguin", presents it, ends its route so the next attempt answers `later`, and
+/// checks that the heading shows `state` and offers Disconnect, which withdraws the server and
+/// saves it inactive.
+fn a_failing_presented_server_should_offer_disconnect(
+    later: fn() -> crate::ssh::server_connection::SshConnectFailure,
+    state: &str,
+    cx: &mut TestAppContext,
+) {
+    use crate::ssh::server_connection::SshServerConnections;
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let route = Arc::new(AtomicBool::new(true));
+    let remembered = Arc::new(RememberedConnections::default());
+    let connections = SshServerConnections::new(
+        Arc::new(ConnectsOnceThen {
+            route: route.clone(),
+            attempts: AtomicUsize::new(0),
+            requested: AtomicUsize::new(0),
+            first_succeeds: true,
+            later,
+        }),
+        remembered.clone(),
+    );
+    let installed = connections.clone();
+    cx.update(|_, cx| crate::ui::ssh_servers::install(installed, None, cx));
+    let penguin = crate::domain::SshDestination::new("penguin".to_owned()).unwrap();
+    connections.connect(penguin.clone());
+    wait_until(|| connections.server(&penguin).is_some(), cx);
+    // The window presents the connected server as its registry binding would.
+    harness.present_ssh("penguin", &[("Far", 1)], cx);
+
+    route.store(false, Ordering::SeqCst);
+    let expected = format!("penguin, {state}");
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    while !heading_names(cx).contains(&expected) {
+        assert!(
+            Instant::now() < deadline,
+            "the heading should show {expected:?}, got {:?}",
+            heading_names(cx)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        redraw(cx);
+    }
+
+    right_click("machine-heading-penguin", cx);
+    click("machine-menu-disconnect", cx);
+    wait_until(|| remembered.active("penguin") == Some(false), cx);
+    assert!(connections.server(&penguin).is_none());
+}
+
+/// A presented server whose reconnect fails keeps its frozen Workspaces under its heading, which
+/// still reconnects it quietly and offers Disconnect to end that.
+#[gpui::test]
+fn a_presented_server_that_fails_after_connecting_should_offer_disconnect(cx: &mut TestAppContext) {
+    use crate::ssh::server_connection::{SshConnectFailure, UnavailableKind};
+    a_failing_presented_server_should_offer_disconnect(
+        || SshConnectFailure::Unavailable(UnavailableKind::ServiceUnavailable),
+        "Unavailable",
+        cx,
+    );
+}
+
+/// A presented server stopped on its computer no longer reconnects, yet its heading still offers
+/// Disconnect, so Remove isn't the only way to withdraw it.
+#[gpui::test]
+fn a_presented_server_stopped_after_connecting_should_offer_disconnect(cx: &mut TestAppContext) {
+    a_failing_presented_server_should_offer_disconnect(
+        || crate::ssh::server_connection::SshConnectFailure::Stopped,
+        "Stopped",
+        cx,
+    );
+}
+
+/// After relaunch, a Saved Connection SpaceTerm keeps trying heads the Workspace Window while it
+/// waits for the person, even before any of its Workspaces arrive, and its Connect asks once.
+#[gpui::test]
+fn a_saved_connection_waiting_after_relaunch_should_head_the_window_with_connect(
+    cx: &mut TestAppContext,
+) {
+    use crate::ssh::server_connection::{
+        InteractionReason, RetainedSshConnection, SshConnectFailure, SshServerConnections,
+    };
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let remembered = Arc::new(RememberedConnections::default());
+    remembered.0.lock().unwrap().extend([
+        RetainedSshConnection {
+            destination: crate::domain::SshDestination::new("penguin".to_owned()).unwrap(),
+            continuity: None,
+            active: true,
+        },
+        RetainedSshConnection {
+            destination: crate::domain::SshDestination::new("idle".to_owned()).unwrap(),
+            continuity: None,
+            active: false,
+        },
+    ]);
+    let backend = Arc::new(ConnectsOnceThen {
+        route: Arc::new(AtomicBool::new(true)),
+        attempts: AtomicUsize::new(0),
+        requested: AtomicUsize::new(0),
+        first_succeeds: false,
+        later: || SshConnectFailure::NeedsPerson(InteractionReason::CredentialProvider),
+    });
+    let connections = SshServerConnections::new(backend.clone(), remembered.clone());
+    let installed = connections.clone();
+    cx.update(|window, cx| {
+        crate::ui::ssh_servers::install(installed, None, cx);
+        harness
+            .manager
+            .update(cx, |manager, cx| manager.follow_ssh_servers(window, cx));
+    });
+    connections.resume_retained();
+    let penguin = crate::domain::SshDestination::new("penguin".to_owned()).unwrap();
+    wait_until(
+        || {
+            matches!(
+                connections.status(&penguin),
+                crate::ssh::server_connection::RemoteConnectionStatus::NeedsPerson { .. }
+            )
+        },
+        cx,
+    );
+
+    assert_eq!(
+        heading_names(cx),
+        vec![
+            "This Computer".to_owned(),
+            "penguin, Waiting for You".to_owned()
+        ],
+        "the waiting connection has its heading; the inactive one has none"
+    );
+    assert!(cx.debug_bounds("machine-empty-penguin").is_some());
+    assert_eq!(
+        backend.requested.load(Ordering::SeqCst),
+        0,
+        "relaunch asks nothing"
+    );
+
+    right_click("machine-heading-penguin", cx);
+    click("machine-menu-connect", cx);
+    wait_until(|| backend.requested.load(Ordering::SeqCst) == 1, cx);
+}

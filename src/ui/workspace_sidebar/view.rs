@@ -1194,11 +1194,17 @@ impl WorkspaceSidebar {
             })
             .into_any_element()
         };
+        // A connection that isn't presented yet has no Workspaces to show until it connects.
+        let empty_note = if section.awaiting_connection && section.connects {
+            "Connect to show its Workspaces."
+        } else {
+            "No Workspaces"
+        };
         let empty = (section.workspaces == 0).then(|| {
             div()
                 .id(SharedString::from(format!("machine-empty-{label}")))
                 .role(accesskit::Role::Label)
-                .aria_label("No Workspaces")
+                .aria_label(empty_note)
                 .debug_selector({
                     let label = label.clone();
                     move || format!("machine-empty-{label}")
@@ -1213,7 +1219,7 @@ impl WorkspaceSidebar {
                 .truncate()
                 .chrome_text(appearance.typography.style(TextRole::Secondary))
                 .text_color(gpui_color(colors.row_secondary))
-                .child("No Workspaces")
+                .child(empty_note)
         });
         let motion = self.workspace_reorder.motion(item, cx);
         motion

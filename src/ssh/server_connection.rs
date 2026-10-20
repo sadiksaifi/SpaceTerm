@@ -384,6 +384,15 @@ impl SshServerConnections {
         connections.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
         connections
     }
+    /// Whether the person wants a saved connection kept up, whether or not work for it runs now.
+    pub(crate) fn intends(&self, destination: &SshDestination) -> bool {
+        self.inner.state.lock().ok().is_some_and(|state| {
+            state
+                .entries
+                .get(destination.as_str())
+                .is_some_and(|entry| entry.active)
+        })
+    }
     /// Whether SpaceTerm tries a saved connection again on its own, as it does after relaunch,
     /// although no work for it runs now. A requested Connect that failed leaves this intent.
     pub(crate) fn reconnects(&self, destination: &SshDestination) -> bool {
@@ -1449,6 +1458,79 @@ mod tests {
             Some(false),
             "the write that failed is saved with the next one"
         );
+    }
+    /// A route that stays up until the test ends it.
+    struct Route(Arc<std::sync::atomic::AtomicBool>);
+    impl SshServerLease for Route {
+        fn is_alive(&self) -> bool {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+    /// Connects once over a route the test can end, then answers every later attempt with
+    /// `later`.
+    struct ConnectsThen {
+        route: Arc<std::sync::atomic::AtomicBool>,
+        attempts: AtomicUsize,
+        later: fn() -> SshConnectFailure,
+    }
+    impl SshConnectBackend for ConnectsThen {
+        fn connect(
+            &self,
+            _: &SshDestination,
+            _: ConnectMode,
+            _: Option<&SshServerContinuity>,
+            _: &SshCancellationToken,
+            _: &ConnectProgress<'_>,
+        ) -> Result<ConnectedSshServer, SshConnectFailure> {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) > 0 {
+                return Err((self.later)());
+            }
+            Ok(ConnectedSshServer {
+                lease: Arc::new(Route(self.route.clone())),
+                ..connected()
+            })
+        }
+        fn observe(
+            &self,
+            _: &SshDestination,
+            _: Option<&SshServerContinuity>,
+            _: &SshCancellationToken,
+            _: &ConnectProgress<'_>,
+        ) -> Result<SshServerObservation, SshConnectFailure> {
+            Err((self.later)())
+        }
+    }
+    #[test]
+    fn a_server_stopped_while_presented_stays_presented_until_disconnect() {
+        let route = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let intents = Arc::new(Intents::default());
+        let registry = SshServerConnections::new(
+            Arc::new(ConnectsThen {
+                route: route.clone(),
+                attempts: AtomicUsize::new(0),
+                later: || SshConnectFailure::Stopped,
+            }),
+            intents.clone(),
+        );
+        registry.connect(destination());
+        eventually(|| registry.server(&destination()).is_some());
+        route.store(false, Ordering::SeqCst);
+        eventually(|| {
+            matches!(
+                registry.status(&destination()),
+                RemoteConnectionStatus::Stopped
+            )
+        });
+        assert!(
+            registry.server(&destination()).is_some(),
+            "its frozen Workspaces stay in place to explain the stop"
+        );
+        eventually(|| intents.active(&destination()) == Some(false));
+        assert!(!registry.reconnects(&destination()));
+
+        registry.disconnect(&destination());
+        assert!(registry.server(&destination()).is_none());
+        assert_eq!(registry.connections().len(), 1, "it stays saved");
     }
     #[test]
     fn a_damaged_record_reports_damage_rather_than_an_unsaved_removal() {

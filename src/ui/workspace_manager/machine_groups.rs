@@ -115,25 +115,37 @@ impl WorkspaceManager {
                 _ => sections.push((machine, 1)),
             }
         }
-        for key in self.shared.keys() {
-            let machine = match self.shared.origin(key) {
-                Some(ServerOrigin::Local) => Machine::Local,
-                Some(ServerOrigin::Ssh(destination)) => Machine::Ssh(destination.clone()),
-                None => continue,
-            };
+        let connections = crate::ui::ssh_servers::installed(cx);
+        // A Saved Connection the person wants kept up has its heading before it connects, so a
+        // connection that waits for sign-in after relaunch shows that state here.
+        let intended = connections
+            .iter()
+            .flat_map(|connections| {
+                connections
+                    .connections()
+                    .into_iter()
+                    .map(|(destination, _)| destination)
+                    .filter(|destination| connections.intends(destination))
+            })
+            .map(Machine::Ssh);
+        let presented =
+            self.shared
+                .keys()
+                .into_iter()
+                .filter_map(|key| match self.shared.origin(key)? {
+                    ServerOrigin::Local => Some(Machine::Local),
+                    ServerOrigin::Ssh(destination) => Some(Machine::Ssh(destination.clone())),
+                });
+        let mut ssh_server = false;
+        for machine in presented.collect::<Vec<_>>().into_iter().chain(intended) {
+            ssh_server |= matches!(machine, Machine::Ssh(_));
             if let Err(position) = sections.binary_search_by(|(other, _)| other.cmp(&machine)) {
                 sections.insert(position, (machine, 0));
             }
         }
-        let ssh_server = self
-            .shared
-            .keys()
-            .into_iter()
-            .any(|key| matches!(self.shared.origin(key), Some(ServerOrigin::Ssh(_))));
         if sections.len() < 2 && !ssh_server {
             return Vec::new();
         }
-        let connections = crate::ui::ssh_servers::installed(cx);
         let this_computer = crate::desktop_profile::DesktopPresentation::get(cx)
             .wording()
             .this_computer;
@@ -147,6 +159,7 @@ impl WorkspaceManager {
                     connects: false,
                     disconnects: false,
                     has_settings: true,
+                    awaiting_connection: false,
                     workspaces,
                 },
                 Machine::Ssh(destination) => {
@@ -154,16 +167,20 @@ impl WorkspaceManager {
                         .shared
                         .key_of(&ServerOrigin::Ssh(destination.clone()))
                         .is_some();
+                    let intended = connections
+                        .as_ref()
+                        .is_some_and(|connections| connections.intends(&destination));
+                    // A heading controls a connection SpaceTerm presents or keeps trying. A
+                    // machine with only native Remote Workspaces offers no Connect that would set
+                    // up a server there.
+                    let controlled = presented || intended;
                     let presentation = connections.as_ref().map(|connections| {
                         let status = connections.status(&destination);
                         let connected = matches!(status, RemoteConnectionStatus::Connected { .. });
                         (connected, crate::ui::ssh_servers::present(&status))
                     });
-                    // Only a presented SSH server's heading controls its connection. A machine
-                    // with only native Remote Workspaces offers no Connect that would set up a
-                    // server there.
                     let offers = |action| {
-                        presented
+                        controlled
                             && presentation.as_ref().is_some_and(|(_, presentation)| {
                                 presentation.actions.contains(&action)
                             })
@@ -174,15 +191,13 @@ impl WorkspaceManager {
                         // reports the SSH server's.
                         status: presentation
                             .as_ref()
-                            .filter(|(connected, _)| presented && !connected)
+                            .filter(|(connected, _)| controlled && !connected)
                             .map(|(_, presentation)| presentation.state),
                         connects: offers(crate::ui::ssh_servers::SshServerAction::Connect),
-                        // A failed Connect still reconnects quietly, which Disconnect ends.
-                        disconnects: offers(crate::ui::ssh_servers::SshServerAction::Disconnect)
-                            || presented
-                                && connections.as_ref().is_some_and(|connections| {
-                                    connections.reconnects(&destination)
-                                }),
+                        // Disconnect withdraws a presented server whatever its state, such as one
+                        // stopped or failing after it connected, and ends reconnect intent.
+                        disconnects: controlled,
+                        awaiting_connection: !presented && intended,
                         // Settings lists saved SSH connections; native Remote Workspaces alone
                         // name no server there.
                         has_settings: connections.as_ref().is_some_and(|connections| {

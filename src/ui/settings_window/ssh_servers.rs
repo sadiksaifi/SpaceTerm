@@ -325,15 +325,20 @@ impl SettingsWindow {
             .copied()
             .filter(|action| *action != SshServerAction::CheckStatus || !presented)
             .collect();
-        // A failed Connect still reconnects quietly after relaunch; offer to end that intent.
-        if self.ssh_server_reconnects(destination)
-            && !actions.iter().any(|action| {
+        let ends = |actions: &[SshServerAction]| {
+            actions.iter().any(|action| {
                 matches!(
                     action,
                     SshServerAction::Disconnect | SshServerAction::Cancel
                 )
             })
-        {
+        };
+        // A presented server can always be withdrawn, such as one stopped after it connected.
+        if presented && !ends(&actions) {
+            actions.push(SshServerAction::Disconnect);
+        }
+        // A failed Connect still reconnects quietly after relaunch; offer to end that intent.
+        if self.ssh_server_reconnects(destination) && !ends(&actions) {
             actions.push(SshServerAction::StopReconnecting);
         }
         actions
