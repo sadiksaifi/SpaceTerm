@@ -153,11 +153,12 @@ fn compose(
             super::launch_host::running_executable(),
         ),
     ));
-    let ssh_servers = startup.ssh_servers_factory(Arc::new(
-        super::unix_askpass_transport::AskPassWindowFactory::new(
+    let ssh_servers = startup.ssh_servers_factory(
+        Arc::new(super::unix_askpass_transport::AskPassWindowFactory::new(
             super::launch_host::running_executable(),
-        ),
-    ));
+        )),
+        super::launch_host::ssh_server_artifacts(),
+    );
     let repository_status = super::repository_status_host::repository_status_adapters(
         &startup.home_directory,
         Arc::new(super::macos_repository_tools::MacosRepositoryToolDiscovery::new()),

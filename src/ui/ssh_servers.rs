@@ -506,7 +506,7 @@ mod tests {
         let offered = present(&RemoteConnectionStatus::InstallationOffered {
             offer_id: 1,
             version: "1.0.0".to_owned(),
-            platform: ("Linux".to_owned(), "x86_64".to_owned()),
+            platform: ("Example OS".to_owned(), "x86_64".to_owned()),
         });
         assert_eq!(offered.actions.first(), Some(&SshServerAction::Install));
     }

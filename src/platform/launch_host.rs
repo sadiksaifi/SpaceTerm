@@ -21,6 +21,24 @@ pub(crate) fn running_executable() -> Option<PathBuf> {
     running_executable_of_host()
 }
 
+/// Where this installation keeps the verified server packages SSH Connect may install on another
+/// computer. A packaged build reads its own installation; any other build reads only an explicit
+/// `SPACETERM_SSH_SERVER_ARTIFACTS` root.
+pub(crate) fn ssh_server_artifacts() -> Option<PathBuf> {
+    if cfg!(spaceterm_packaged) {
+        let executable = running_executable()?;
+        Some(executable.parent()?.parent()?.join(SSH_SERVER_ARTIFACTS))
+    } else {
+        std::env::var_os("SPACETERM_SSH_SERVER_ARTIFACTS").map(PathBuf::from)
+    }
+}
+
+/// The server packages' place inside an installation, relative to its executable's parent.
+#[cfg(target_os = "macos")]
+const SSH_SERVER_ARTIFACTS: &str = "Resources/server-artifacts";
+#[cfg(target_os = "linux")]
+const SSH_SERVER_ARTIFACTS: &str = "share/spaceterm/server-artifacts";
+
 #[cfg(target_os = "macos")]
 fn running_executable_of_host() -> Option<PathBuf> {
     std::env::current_exe()

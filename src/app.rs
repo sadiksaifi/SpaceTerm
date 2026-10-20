@@ -130,9 +130,10 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
     pub(crate) fn ssh_servers_factory(
         &self,
         askpass: Arc<dyn crate::ssh::askpass::AskPassWindowFactory>,
+        artifacts: Option<PathBuf>,
     ) -> Rc<dyn crate::ui::ssh_servers::SshServersFactory>
     where
-        A: Clone + 'static,
+        A: crate::ssh::server_process::SshServerBootstrap + Clone + 'static,
     {
         Rc::new(NativeSshServersFactory {
             paths: Arc::clone(&self.paths),
@@ -144,6 +145,7 @@ impl<A: SshProcessAdapter> StartupDependencies<A> {
             socket_probe: Arc::clone(&self.control_socket_probe),
             host_config: Arc::clone(&self.host_config_filesystem),
             askpass,
+            artifacts,
         })
     }
 
@@ -179,6 +181,8 @@ struct NativeSshServersFactory<A: SshProcessAdapter> {
     socket_probe: Arc<dyn ControlSocketProbe>,
     host_config: Arc<dyn HostConfigFilesystem>,
     askpass: Arc<dyn crate::ssh::askpass::AskPassWindowFactory>,
+    /// The installation's verified server packages, which the host composition located.
+    artifacts: Option<PathBuf>,
 }
 
 /// The hosts this computer's SSH configuration names, including SpaceTerm's managed hosts.
@@ -203,8 +207,9 @@ impl crate::ui::ssh_servers::SshHostSource for ConfiguredSshHosts {
     }
 }
 
-impl<A: SshProcessAdapter + Clone + 'static> crate::ui::ssh_servers::SshServersFactory
-    for NativeSshServersFactory<A>
+impl<A> crate::ui::ssh_servers::SshServersFactory for NativeSshServersFactory<A>
+where
+    A: SshProcessAdapter + crate::ssh::server_process::SshServerBootstrap + Clone + 'static,
 {
     fn create(
         &self,
@@ -226,9 +231,12 @@ impl<A: SshProcessAdapter + Clone + 'static> crate::ui::ssh_servers::SshServersF
             executable: self.executable.clone(),
             adapter: self.adapter.clone(),
             socket_probe: Arc::clone(&self.socket_probe),
+            filesystem: Arc::clone(&self.host_config),
+            // The host composition's process adapter also prepares the remote account.
+            bootstrap: Arc::new(self.adapter.clone()),
             askpass,
             executor: cx.background_executor().clone(),
-            artifacts: SshServerArtifacts::capture(),
+            artifacts: SshServerArtifacts::new(self.artifacts.clone()),
         });
         Some(crate::ssh::server_connection::SshServerConnections::new(
             Arc::new(backend),

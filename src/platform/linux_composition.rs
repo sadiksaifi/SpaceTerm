@@ -248,11 +248,12 @@ fn compose(
             super::launch_host::running_executable(),
         ),
     ));
-    let ssh_servers = startup.ssh_servers_factory(Arc::new(
-        super::unix_askpass_transport::AskPassWindowFactory::new(
+    let ssh_servers = startup.ssh_servers_factory(
+        Arc::new(super::unix_askpass_transport::AskPassWindowFactory::new(
             super::launch_host::running_executable(),
-        ),
-    ));
+        )),
+        super::launch_host::ssh_server_artifacts(),
+    );
     // Repository Status reads run on threads that the deterministic test executor rejects.
     let repository_status = (!cfg!(test)).then(|| {
         super::repository_status_host::repository_status_adapters(
