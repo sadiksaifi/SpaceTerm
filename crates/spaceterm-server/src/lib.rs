@@ -39,7 +39,9 @@ pub enum ServerError {
     Stopped,
     #[error("The server changed since you were asked. Review and confirm again.")]
     Changed,
-    #[error("The admitted server update could not be resolved. Finish Update to check its original outcome.")]
+    #[error(
+        "The admitted server update could not be resolved. Finish Update to check its original outcome."
+    )]
     ActivationUnresolved,
     #[error("Returning to the previous server runtime could not be proved safe.")]
     ReturnUnavailable,

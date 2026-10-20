@@ -98,6 +98,74 @@ impl Registration {
         }
         self.validate(&directory, expected).map(|_| ())
     }
+    /// Replace only the original admitted bytes, or synchronize that exact replacement again.
+    pub fn replace(&self, previous: &[u8], candidate: &[u8]) -> Result<(), ServerError> {
+        let directory = owned_directory(&self.directory)?;
+        if self.validate(&directory, candidate).is_ok() {
+            return directory
+                .sync_all()
+                .map_err(|_| ServerError::StorageUnavailable);
+        }
+        let original = self.validate(&directory, previous)?;
+        let before = original
+            .metadata()
+            .map_err(|_| ServerError::StorageUnavailable)?;
+        let temporary = format!(
+            ".replace-{:x}",
+            u128::from_be_bytes(
+                crate::protocol::random()?[..16]
+                    .try_into()
+                    .map_err(|_| ServerError::StorageUnavailable)?
+            )
+        );
+        let pending = CString::new(temporary.as_bytes()).map_err(|_| ServerError::UnsafeStorage)?;
+        let name = CString::new(self.name.as_bytes()).map_err(|_| ServerError::UnsafeStorage)?;
+        // SAFETY: exclusively create one unpredictable leaf under the retained owned directory.
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                pending.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(ServerError::StorageUnavailable);
+        }
+        // SAFETY: openat transferred a new owned descriptor.
+        let mut file = unsafe { File::from_raw_fd(fd) };
+        let result = (|| {
+            file.write_all(candidate)
+                .and_then(|()| file.sync_all())
+                .map_err(|_| ServerError::StorageUnavailable)?;
+            verify_directory_path(&directory, &self.directory)?;
+            let current = self
+                .validate(&directory, previous)?
+                .metadata()
+                .map_err(|_| ServerError::StorageUnavailable)?;
+            if (before.dev(), before.ino()) != (current.dev(), current.ino()) {
+                return Err(ServerError::CleanupUnresolved);
+            }
+            // SAFETY: replace the just-revalidated owned leaf with the complete synced file.
+            if unsafe {
+                libc::renameat(
+                    directory.as_raw_fd(),
+                    pending.as_ptr(),
+                    directory.as_raw_fd(),
+                    name.as_ptr(),
+                )
+            } != 0
+            {
+                return Err(ServerError::StorageUnavailable);
+            }
+            directory
+                .sync_all()
+                .map_err(|_| ServerError::StorageUnavailable)
+        })();
+        // SAFETY: cleanup only the temporary name created by this call.
+        unsafe { libc::unlinkat(directory.as_raw_fd(), pending.as_ptr(), 0) };
+        result
+    }
     pub fn remove(&self, expected: &[u8]) -> Result<(), ServerError> {
         let directory = owned_directory(&self.directory)?;
         // Missing is idempotent only after the caller durably recorded removal intent.
@@ -144,5 +212,41 @@ fn exists(directory: &File, name: &str) -> Result<bool, ServerError> {
         Ok(false)
     } else {
         Err(ServerError::StorageUnavailable)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replacement_accepts_only_original_or_exact_completed_bytes_and_preserves_foreign_entries() {
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "sts-registration-{:x}",
+            u128::from_be_bytes(crate::protocol::random().unwrap()[..16].try_into().unwrap())
+        ));
+        Directory::open(&root, true).unwrap();
+        let registration = Registration {
+            directory: root.clone(),
+            name: "service".into(),
+        };
+        registration.install(b"original").unwrap();
+        registration.replace(b"original", b"candidate").unwrap();
+        registration.replace(b"original", b"candidate").unwrap();
+        assert_eq!(std::fs::read(registration.path()).unwrap(), b"candidate");
+        std::fs::write(registration.path(), b"foreign").unwrap();
+        assert_eq!(
+            registration.replace(b"original", b"candidate"),
+            Err(ServerError::CleanupUnresolved)
+        );
+        assert_eq!(std::fs::read(registration.path()).unwrap(), b"foreign");
+        std::fs::remove_file(registration.path()).unwrap();
+        std::os::unix::fs::symlink("unchanged-foreign-target", registration.path()).unwrap();
+        assert!(registration.replace(b"original", b"candidate").is_err());
+        assert_eq!(
+            std::fs::read_link(registration.path()).unwrap(),
+            Path::new("unchanged-foreign-target")
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -198,6 +198,26 @@ fn property<'a>(observation: &'a [(String, String)], key: &str) -> Result<&'a st
         .ok_or(ServerError::ServiceUnavailable)
 }
 impl Supervisor for UserService {
+    fn replace(&self, previous: &Path, candidate: &Path) -> Result<(), ServerError> {
+        self.registration()
+            .check(&self.contents(previous)?, false)
+            .or_else(|_| self.registration().check(&self.contents(candidate)?, false))?;
+        if self.running()? {
+            return Err(ServerError::ActivationUnresolved);
+        }
+        let observation = self.observation()?;
+        if property(&observation, "LoadState")? != "not-found"
+            && (property(&observation, "LoadState")? != "loaded"
+                || Path::new(property(&observation, "FragmentPath")?) != self.registration().path()
+                || !property(&observation, "DropInPaths")?.is_empty())
+        {
+            return Err(ServerError::CleanupUnresolved);
+        }
+        self.registration()
+            .replace(&self.contents(previous)?, &self.contents(candidate)?)?;
+        self.systemctl(&["daemon-reload"])?;
+        self.check(candidate, false)
+    }
     fn startup(&self) -> ServiceStartup {
         ServiceStartup::AtBoot
     }
