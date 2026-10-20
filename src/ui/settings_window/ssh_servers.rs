@@ -171,13 +171,18 @@ impl SettingsWindow {
         };
         let connections = rows.connections.clone();
         // The person asked here, so any sign-in or host approval this needs appears here.
-        if matches!(action, SshServerAction::Connect | SshServerAction::Install) {
+        if matches!(
+            action,
+            SshServerAction::Connect | SshServerAction::Install | SshServerAction::CheckStatus
+        ) {
             crate::ui::ssh_servers::present_prompts_in(window, cx);
         }
         match action {
             SshServerAction::Connect => connections.connect(destination),
             SshServerAction::Cancel => connections.cancel(&destination),
             SshServerAction::Disconnect => connections.disconnect(&destination),
+            SshServerAction::CheckStatus => connections.check(&destination),
+            SshServerAction::Remove => connections.remove(&destination),
             SshServerAction::Install => self.confirm_ssh_installation(destination, window, cx),
         }
         cx.notify();
@@ -458,7 +463,10 @@ fn render_server(
                     .child(presentation.state),
             )
         });
-    let actions = presentation.actions.iter().map(|&action| {
+    // Removing is always available and immediate: it ends only this computer's saved
+    // connection.
+    let actions = presentation.actions.iter().chain([&SshServerAction::Remove]);
+    let actions = actions.map(|&action| {
         let owner = owner.clone();
         let destination = destination.clone();
         let primary = presentation.actions.first() == Some(&action)

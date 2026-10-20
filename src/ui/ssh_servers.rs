@@ -15,8 +15,8 @@ use crate::platform::app_paths::AppPaths;
 use crate::ssh::askpass::{AskPassAttempt, AskPassAttemptFactory, AskPassUnavailable};
 use crate::ssh::server_connection::{
     ConnectPhase, ContinuityChange, IncompatibilityKind, InteractionReason, RefusalKind,
-    RemoteConnectionStatus, SshIntentStoreError, SshServerConnections, UnavailableKind,
-    UnconfirmedOperation,
+    RemoteConnectionStatus, ServerAvailability, SshIntentStoreError, SshServerConnections,
+    SshServerFacts, UnavailableKind, UnconfirmedOperation,
 };
 use crate::ui::sidebar_window::form::CaptionTone;
 
@@ -175,6 +175,10 @@ pub(crate) enum SshServerAction {
     Install,
     Cancel,
     Disconnect,
+    /// Signs in and reads the server's state once, without connecting, starting, or installing.
+    CheckStatus,
+    /// Forgets the saved connection. The server, its Terminal Sessions and SSH access stay.
+    Remove,
 }
 
 impl SshServerAction {
@@ -184,6 +188,8 @@ impl SshServerAction {
             Self::Install => "Install\u{2026}",
             Self::Cancel => "Cancel",
             Self::Disconnect => "Disconnect",
+            Self::CheckStatus => "Check Status",
+            Self::Remove => "Remove",
         }
     }
 
@@ -193,6 +199,8 @@ impl SshServerAction {
             Self::Install => "settings-ssh-server-install",
             Self::Cancel => "settings-ssh-server-cancel",
             Self::Disconnect => "settings-ssh-server-disconnect",
+            Self::CheckStatus => "settings-ssh-server-check",
+            Self::Remove => "settings-ssh-server-remove",
         }
     }
 }
@@ -230,7 +238,7 @@ pub(crate) const fn persistence_warning(error: SshIntentStoreError) -> &'static 
 
 /// The presentation of one connection's status.
 pub(crate) fn present(status: &RemoteConnectionStatus) -> SshServerPresentation {
-    use SshServerAction::{Cancel, Connect, Disconnect, Install};
+    use SshServerAction::{Cancel, CheckStatus, Connect, Disconnect, Install};
 
     let guidance = |text: &'static str| (SharedString::new_static(text), CaptionTone::Guidance);
     let error = |text: &'static str| (SharedString::new_static(text), CaptionTone::Error);
@@ -249,7 +257,7 @@ pub(crate) fn present(status: &RemoteConnectionStatus) -> SshServerPresentation 
                  for that account, or offers to install one.",
             ),
             false,
-            &[Connect],
+            &[Connect, CheckStatus],
         ),
         RemoteConnectionStatus::Working { phase, cancellable } => (
             phase_label(*phase),
@@ -319,18 +327,38 @@ pub(crate) fn present(status: &RemoteConnectionStatus) -> SshServerPresentation 
             false,
             &[Install, Disconnect],
         ),
-        RemoteConnectionStatus::Connected { protocol_major, .. } => (
+        RemoteConnectionStatus::Connected {
+            protocol_major,
+            facts,
+        } => (
             "Connected",
             "settings-ssh-server-state-connected",
             (
                 SharedString::from(format!(
-                    "Its Workspaces appear in the sidebar. Protocol version {protocol_major}."
+                    "Its Workspaces appear in the sidebar. {} Protocol version {protocol_major}.",
+                    describe_server(facts)
                 )),
                 CaptionTone::Guidance,
             ),
             false,
             &[Disconnect],
         ),
+        RemoteConnectionStatus::Checked {
+            availability,
+            facts,
+        } => {
+            let (state, selector, detail) = checked(*availability);
+            (
+                state,
+                selector,
+                (
+                    SharedString::from(format!("{detail} {}", describe_server(facts))),
+                    CaptionTone::Guidance,
+                ),
+                false,
+                &[Connect, CheckStatus],
+            )
+        }
         RemoteConnectionStatus::Paused { reason } => (
             "Paused",
             "settings-ssh-server-state-paused",
@@ -346,35 +374,35 @@ pub(crate) fn present(status: &RemoteConnectionStatus) -> SshServerPresentation 
                  started on that computer; connecting doesn\u{2019}t start it.",
             ),
             false,
-            &[Connect],
+            &[Connect, CheckStatus],
         ),
         RemoteConnectionStatus::Incompatible { kind } => (
             "Incompatible",
             "settings-ssh-server-state-incompatible",
             error(incompatibility_detail(*kind)),
             false,
-            &[Connect],
+            &[Connect, CheckStatus],
         ),
         RemoteConnectionStatus::Refused { kind } => (
             "Refused",
             "settings-ssh-server-state-refused",
             error(refusal_detail(*kind)),
             false,
-            &[Connect],
+            &[Connect, CheckStatus],
         ),
         RemoteConnectionStatus::Unavailable { kind } => (
             "Unavailable",
             "settings-ssh-server-state-unavailable",
             error(unavailable_detail(*kind)),
             false,
-            &[Connect],
+            &[Connect, CheckStatus],
         ),
         RemoteConnectionStatus::Unconfirmed { operation } => (
             "Unconfirmed",
             "settings-ssh-server-state-unconfirmed",
             error(unconfirmed_detail(*operation)),
             false,
-            &[Connect],
+            &[Connect, CheckStatus],
         ),
     };
     SshServerPresentation {
@@ -384,6 +412,38 @@ pub(crate) fn present(status: &RemoteConnectionStatus) -> SshServerPresentation 
         tone,
         working,
         actions,
+    }
+}
+
+/// One sentence naming the observed server's version and computer.
+pub(crate) fn describe_server(facts: &SshServerFacts) -> String {
+    let platform = platform_name(&facts.platform.0, &facts.platform.1);
+    match &facts.version {
+        Some(version) => format!("Version {version} on {platform}."),
+        None => format!("{platform}."),
+    }
+}
+
+/// The state, its selector, and its explanation after Check Status reached the server.
+const fn checked(availability: ServerAvailability) -> (&'static str, &'static str, &'static str) {
+    match availability {
+        ServerAvailability::Running => (
+            "Available",
+            "settings-ssh-server-state-available",
+            "The SpaceTerm server for this account is running. Connect to show its Workspaces.",
+        ),
+        ServerAvailability::NotRunning => (
+            "Not Running",
+            "settings-ssh-server-state-not-running",
+            "The SpaceTerm server for this account is installed but not running. Connect starts \
+             it.",
+        ),
+        ServerAvailability::NotInstalled => (
+            "No Server",
+            "settings-ssh-server-state-not-installed",
+            "This account has no SpaceTerm server. Connect offers to install a verified one when \
+             SpaceTerm has one for that computer.",
+        ),
     }
 }
 
@@ -479,10 +539,6 @@ const fn refusal_detail(kind: RefusalKind) -> &'static str {
             "The server package didn\u{2019}t pass verification, so SpaceTerm didn\u{2019}t \
              install it."
         }
-        RefusalKind::IntentPersistence => {
-            "SpaceTerm couldn\u{2019}t save this connection, so it won\u{2019}t reconnect on its \
-             own after SpaceTerm reopens."
-        }
     }
 }
 
@@ -524,7 +580,7 @@ const fn unconfirmed_detail(operation: UnconfirmedOperation) -> &'static str {
 
 /// A person-facing name for the other computer's operating system and processor. The backend
 /// reports the system's display name, which this presents unchanged.
-fn platform_name(os: &str, arch: &str) -> String {
+pub(crate) fn platform_name(os: &str, arch: &str) -> String {
     let arch = match arch.to_ascii_lowercase().as_str() {
         "aarch64" | "arm64" => "ARM",
         "x86_64" | "amd64" => "x86-64",
@@ -564,7 +620,7 @@ mod tests {
     use crate::ssh::cancellation::SshCancellationToken;
     use crate::ssh::server_connection::{
         ConnectMode, ConnectProgress, ConnectedSshServer, RetainedSshConnection, SshConnectBackend,
-        SshConnectFailure, SshConnectionIntentStore, SshServerContinuity,
+        SshConnectFailure, SshConnectionIntentStore, SshServerContinuity, SshServerObservation,
     };
 
     /// A computer that always needs the person to sign in.
@@ -578,6 +634,17 @@ mod tests {
             _: &SshCancellationToken,
             _: &ConnectProgress<'_>,
         ) -> Result<ConnectedSshServer, SshConnectFailure> {
+            Err(SshConnectFailure::NeedsPerson(
+                InteractionReason::Authentication,
+            ))
+        }
+        fn observe(
+            &self,
+            _: &SshDestination,
+            _: Option<&SshServerContinuity>,
+            _: &SshCancellationToken,
+            _: &ConnectProgress<'_>,
+        ) -> Result<SshServerObservation, SshConnectFailure> {
             Err(SshConnectFailure::NeedsPerson(
                 InteractionReason::Authentication,
             ))

@@ -253,6 +253,21 @@ fn native_account_server_connect(cx: &mut gpui::TestAppContext) {
         bootstrap: Arc::new(crate::platform::unix_ssh_process::UnixSshProcessAdapter),
     });
     let cancellation = SshCancellationToken::default();
+    // Check Status reads the account's state without preparing, starting or installing anything.
+    let observed = backend.observe(&destination, None, &cancellation, &|phase| {
+        eprintln!("native check phase: {phase:?}")
+    });
+    backend.disconnect(&destination);
+    match (expected.as_str(), &observed) {
+        ("stopped", Err(SshConnectFailure::Stopped)) => {}
+        ("missing", Ok(observation))
+            if observation.availability == ServerAvailability::NotInstalled => {}
+        ("ready", Ok(observation)) if observation.availability == ServerAvailability::Running => {
+            assert!(observation.facts.version.is_some());
+        }
+        (_, Err(error)) => panic!("unexpected check classification: {}", failure_name(error)),
+        _ => panic!("unexpected check availability"),
+    }
     let mut result = backend.connect(
         &destination,
         ConnectMode::Requested,

@@ -409,6 +409,55 @@ impl<A: SshProcessAdapter> SshConnectBackend for NativeSshConnectBackend<A> {
             }
         }
     }
+    fn observe(
+        &self,
+        destination: &SshDestination,
+        expected: Option<&SshServerContinuity>,
+        cancellation: &SshCancellationToken,
+        progress: &ConnectProgress<'_>,
+    ) -> Result<SshServerObservation, SshConnectFailure> {
+        let route = self.route(destination, ConnectMode::Requested, cancellation, progress)?;
+        if expected.is_some_and(|expected| expected.route != route.route_id) {
+            return Err(SshConnectFailure::Changed(ContinuityChange::HostChanged));
+        }
+        progress(ConnectPhase::Discovering);
+        match route.discover(cancellation)? {
+            Discovery::Existing(discovery) => {
+                if let Some(expected) = expected {
+                    expected.verify(&SshServerContinuity {
+                        route: route.route_id,
+                        account: discovery.account,
+                        build: discovery.build.clone(),
+                        server: discovery.server.unwrap_or([0; 32]),
+                    })?;
+                }
+                if discovery.stopped {
+                    return Err(SshConnectFailure::Stopped);
+                }
+                Ok(SshServerObservation {
+                    availability: if discovery.installed && discovery.running {
+                        ServerAvailability::Running
+                    } else {
+                        ServerAvailability::NotRunning
+                    },
+                    facts: facts(&discovery)?,
+                })
+            }
+            Discovery::Missing { target, .. } => {
+                if expected.is_some() {
+                    return Err(SshConnectFailure::Changed(ContinuityChange::ServerChanged));
+                }
+                Ok(SshServerObservation {
+                    availability: ServerAvailability::NotInstalled,
+                    facts: SshServerFacts {
+                        platform: platform(&target)?,
+                        version: None,
+                        starts_automatically: false,
+                    },
+                })
+            }
+        }
+    }
 }
 struct NativeRoute<A: SshProcessAdapter> {
     control: Mutex<OpenSshControlConnection<SshProcessSupervisor<A>>>,
@@ -534,6 +583,7 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
         let server = discovery.server.filter(|server| *server != [0; 32]).ok_or(
             SshConnectFailure::Unavailable(UnavailableKind::ServiceUnavailable),
         )?;
+        let facts = facts(&discovery)?;
         let continuity = SshServerContinuity {
             route: self.route_id,
             account: discovery.account,
@@ -605,6 +655,7 @@ impl<A: SshProcessAdapter> NativeRoute<A> {
                 health: Mutex::new(health),
             }),
             protocol_major: status.protocol_major,
+            facts,
         })
     }
 }
@@ -910,6 +961,24 @@ fn platform(target: &str) -> Result<(String, String), SshConnectFailure> {
             IncompatibilityKind::Platform,
         )),
     }
+}
+/// What Settings may present from a validated discovery. The version is reduced to the
+/// characters a release version uses, so the other computer cannot place arbitrary text there.
+fn facts(discovery: &AccountDiscovery) -> Result<SshServerFacts, SshConnectFailure> {
+    let version = Some(discovery.version.as_str())
+        .filter(|version| {
+            !version.is_empty()
+                && version.len() <= 64
+                && version
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
+        })
+        .map(str::to_owned);
+    Ok(SshServerFacts {
+        platform: platform(&discovery.target)?,
+        version,
+        starts_automatically: discovery.enabled,
+    })
 }
 enum Discovery {
     Existing(AccountDiscovery),

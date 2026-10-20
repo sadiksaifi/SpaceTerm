@@ -662,7 +662,7 @@ fn retry_on_an_ssh_servers_pane_should_ask_for_a_requested_connect(cx: &mut Test
     use crate::ssh::server_connection::{
         ConnectMode, ConnectProgress, ConnectedSshServer, InteractionReason, RetainedSshConnection,
         SshConnectBackend, SshConnectFailure, SshConnectionIntentStore, SshIntentStoreError,
-        SshServerConnections, SshServerContinuity,
+        SshServerConnections, SshServerContinuity, SshServerObservation,
     };
     use std::sync::{Arc, Mutex, mpsc};
 
@@ -681,6 +681,17 @@ fn retry_on_an_ssh_servers_pane_should_ask_for_a_requested_connect(cx: &mut Test
                 .lock()
                 .unwrap()
                 .send((destination.as_str().to_owned(), mode));
+            Err(SshConnectFailure::NeedsPerson(
+                InteractionReason::Authentication,
+            ))
+        }
+        fn observe(
+            &self,
+            _: &crate::domain::SshDestination,
+            _: Option<&SshServerContinuity>,
+            _: &SshCancellationToken,
+            _: &ConnectProgress<'_>,
+        ) -> Result<SshServerObservation, SshConnectFailure> {
             Err(SshConnectFailure::NeedsPerson(
                 InteractionReason::Authentication,
             ))

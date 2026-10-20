@@ -36,6 +36,13 @@ struct Document {
 struct Record {
     destination: String,
     continuity: Option<SshServerContinuity>,
+    /// Records written before inactive connections were saved were all active.
+    #[serde(default = "active_by_default")]
+    active: bool,
+}
+
+const fn active_by_default() -> bool {
+    true
 }
 
 impl PrivateSshConnectionIntents {
@@ -84,6 +91,7 @@ impl PrivateSshConnectionIntents {
                 let connection = RetainedSshConnection {
                     destination,
                     continuity: record.continuity,
+                    active: record.active,
                 };
                 Self::validate(&connection)?;
                 Ok(connection)
@@ -130,6 +138,7 @@ impl PrivateSshConnectionIntents {
                     .map(|record| Record {
                         destination: record.destination.as_str().to_owned(),
                         continuity: record.continuity,
+                        active: record.active,
                     })
                     .collect(),
             };
@@ -221,6 +230,7 @@ mod tests {
                 build: "spaceterm-development".into(),
                 server: [server; 32],
             }),
+            active: true,
         }
     }
 
@@ -240,6 +250,26 @@ mod tests {
         assert_eq!(records[0].continuity.as_ref().unwrap().server, [3; 32]);
         reopened.remove(&records[0].destination).unwrap();
         assert!(reopened.load().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_inactive_saved_connection_survives_relaunch_and_older_records_stay_active() {
+        let (paths, fs) = fixture();
+        let store = PrivateSshConnectionIntents::new(paths.clone());
+        let mut inactive = connection("penguin", 3);
+        inactive.active = false;
+        store.retain(inactive).unwrap();
+        let records = PrivateSshConnectionIntents::new(paths.clone())
+            .load()
+            .unwrap();
+        assert!(!records[0].active);
+
+        let path = paths.directories().data.join(FILE);
+        fs.files.lock().unwrap().values.get_mut(&path).unwrap().0 =
+            br#"{"schema":1,"connections":[{"destination":"other","continuity":null}]}"#.to_vec();
+        let records = store.load().unwrap();
+        assert_eq!(records[0].destination.as_str(), "other");
+        assert!(records[0].active, "a record written before saved inactive hosts was active");
     }
 
     #[test]
