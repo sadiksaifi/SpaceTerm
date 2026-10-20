@@ -158,10 +158,14 @@ impl WorkspaceManager {
                         let connected = matches!(status, RemoteConnectionStatus::Connected { .. });
                         (connected, crate::ui::ssh_servers::present(&status))
                     });
+                    // Only a presented SSH server's heading controls its connection. A machine
+                    // with only native Remote Workspaces offers no Connect that would set up a
+                    // server there.
                     let offers = |action| {
-                        presentation
-                            .as_ref()
-                            .is_some_and(|(_, presentation)| presentation.actions.contains(&action))
+                        presented
+                            && presentation.as_ref().is_some_and(|(_, presentation)| {
+                                presentation.actions.contains(&action)
+                            })
                     };
                     MachineSection {
                         label: destination.as_str().to_owned().into(),
