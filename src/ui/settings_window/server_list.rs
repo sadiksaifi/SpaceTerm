@@ -195,15 +195,14 @@ impl SettingsWindow {
             .map(|(destination, _)| ServerChoice::Ssh(destination.clone()))
     }
 
-    /// Whether `row` belongs on the page for the selected server.
-    pub(super) fn presents_server_row(&self, row: SettingsRowId) -> bool {
+    /// Whether `row` belongs on the page for `selected`, the resolved selection.
+    fn presents_server_row(&self, row: SettingsRowId, selected: Option<&ServerChoice>) -> bool {
         match row {
-            SettingsRowId::ServerList => {
-                self.local_server.is_some() || !self.saved_ssh_servers().is_empty()
-            }
+            // Some server is selected exactly when some server is listed.
+            SettingsRowId::ServerList => selected.is_some(),
             SettingsRowId::ServerWorktreeLocation => {
                 self.offers_server_location()
-                    && match self.selected_server() {
+                    && match selected {
                         Some(ServerChoice::Local) => self
                             .local_server
                             .as_ref()
@@ -213,7 +212,7 @@ impl SettingsWindow {
                         None => false,
                     }
             }
-            row => row_presents(row, self.selected_server().as_ref()),
+            row => row_presents(row, selected),
         }
     }
 
@@ -264,29 +263,33 @@ impl SettingsWindow {
         }
     }
 
-    /// Adds the selected server's whole page when the query names a listed server, leading with
-    /// its status, and keeps the list ahead of the detail it selects.
-    pub(super) fn arrange_server_rows(&self, rows: &mut Vec<SettingsRowId>) {
-        if self.query_names_a_server()
-            && let Some(selected) = self.selected_server()
-        {
-            let page: Vec<_> = super::catalog::rows()
-                .map(|row| row.id)
-                .filter(|row| {
-                    row.descriptor().section == SettingsSectionId::Servers
-                        && self.presents_server_row(*row)
-                        && !self.omitted_rows.contains(row)
-                })
-                .collect();
-            let leading = leading_row(&selected);
+    /// The rows of `reachable` that present the selected server, best first. A query naming a
+    /// listed server adds that server's whole page, leading with its status.
+    pub(super) fn server_search_matches(
+        &self,
+        reachable: Vec<SettingsRowId>,
+    ) -> Vec<SettingsRowId> {
+        let selected = self.selected_server();
+        let mut rows: Vec<_> = reachable
+            .into_iter()
+            .filter(|row| self.presents_server_row(*row, selected.as_ref()))
+            .collect();
+        if let Some(selected) = selected.as_ref().filter(|_| self.query_names_a_server()) {
+            let leading = leading_row(selected);
             rows.retain(|row| *row != leading);
             rows.insert(0, leading);
+            let page = super::catalog::rows().map(|row| row.id).filter(|row| {
+                row.descriptor().section == SettingsSectionId::Servers
+                    && self.presents_server_row(*row, Some(selected))
+                    && !self.omitted_rows.contains(row)
+            });
             for row in page {
                 if !rows.contains(&row) {
                     rows.push(row);
                 }
             }
         }
+        rows
     }
 
     /// `rows` with the server list placed ahead of the first Servers row, so the detail always
@@ -301,7 +304,7 @@ impl SettingsWindow {
         else {
             return rows;
         };
-        if !self.presents_server_row(SettingsRowId::ServerList)
+        if self.selected_server().is_none()
             || self.omitted_rows.contains(&SettingsRowId::ServerList)
         {
             return rows;

@@ -816,13 +816,7 @@ impl SettingsWindow {
 
     /// The rows answering the query for the selected server, best first.
     fn search_matches(&self) -> Vec<SettingsRowId> {
-        let mut rows: Vec<_> = self
-            .reachable_rows()
-            .into_iter()
-            .filter(|row| self.presents_server_row(*row))
-            .collect();
-        self.arrange_server_rows(&mut rows);
-        rows
+        self.server_search_matches(self.reachable_rows())
     }
 
     fn matching_rows(&self) -> Vec<SettingsRowId> {
