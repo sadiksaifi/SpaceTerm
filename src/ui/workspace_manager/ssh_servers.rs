@@ -4,16 +4,11 @@
 //! and one reconnecting after an interruption keep their binding, so their Panes stay frozen in
 //! place, and a disconnected one is withdrawn. Following the registry performs no remote work.
 
-use std::rc::Rc;
-use std::sync::Arc;
-
 use gpui::{Context, Window};
 
 use super::{ServerOrigin, WorkspaceManager};
 use crate::domain::SshDestination;
-use crate::terminal::server_session::PaneControls;
-use crate::terminal::shared_workspace::SharedWorkspaceClient;
-use crate::ui::shared_workspaces::{SharedEditSource, SharedPaneSessions};
+use crate::ui::shared_workspaces::SharedPaneSessions;
 
 impl WorkspaceManager {
     /// Follows the desktop's SSH server registry for this window's life. A build without one
@@ -68,7 +63,9 @@ impl WorkspaceManager {
                 .iter()
                 .any(|(presented, _)| presented == destination)
             {
+                let destination = destination.clone();
                 self.withdraw_server_workspaces(key, window, cx);
+                crate::ui::server_worktrees::Client::forget_ssh(&destination, cx);
             }
         }
         for (destination, server) in presented {
@@ -93,14 +90,11 @@ impl WorkspaceManager {
         let Ok(client_home) = self.local_home_directory() else {
             return;
         };
-        let controls = Arc::new(PaneControls::default());
-        let edits = SharedEditSource::new(Rc::new(SharedWorkspaceClient::remote(
-            server.clone(),
-            Arc::clone(&controls),
-        )));
+        let client = crate::ui::server_worktrees::Client::for_ssh(&destination, server.clone(), cx);
+        let edits = client.source.clone();
         let sessions = SharedPaneSessions::remote(
             server.clone(),
-            controls,
+            client.controls.clone(),
             destination.clone(),
             client_home,
             &self.pane_construction,

@@ -1,4 +1,4 @@
-//! One shared edit writer for the Workspace Window and server Settings.
+//! One shared edit writer per presented server, for the Workspace Window and server Settings.
 use crate::{
     local_server::LocalServer,
     terminal::shared_workspace::SharedWorkspaceClient,
@@ -31,6 +31,11 @@ pub(crate) struct Client {
     edits: Rc<SharedWorkspaceClient>,
 }
 impl Global for Client {}
+
+/// The presented SSH servers' writers, by SSH destination.
+#[derive(Default)]
+struct SshClients(std::collections::HashMap<String, Client>);
+impl Global for SshClients {}
 impl Client {
     pub(crate) fn get(cx: &mut App) -> Option<Self> {
         if let Some(client) = cx.try_global::<Self>() {
@@ -56,6 +61,43 @@ impl Client {
         };
         cx.set_global(client.clone());
         Some(client)
+    }
+    /// The edit writer for a connected SSH server's account server, created once per connection
+    /// so the Workspace Window and Settings share its sequence and Pane control.
+    pub(crate) fn for_ssh(
+        destination: &crate::domain::SshDestination,
+        server: LocalServer,
+        cx: &mut App,
+    ) -> Self {
+        if let Some(client) = Self::ssh(destination, cx) {
+            return client;
+        }
+        let controls = std::sync::Arc::<crate::terminal::server_session::PaneControls>::default();
+        let edits = Rc::new(SharedWorkspaceClient::remote(
+            server.clone(),
+            std::sync::Arc::clone(&controls),
+        ));
+        let client = Self {
+            server,
+            controls,
+            source: SharedEditSource::new(edits.clone()),
+            edits,
+        };
+        cx.default_global::<SshClients>()
+            .0
+            .insert(destination.as_str().to_owned(), client.clone());
+        client
+    }
+    /// The edit writer of a presented SSH server, if SpaceTerm presents it now.
+    pub(crate) fn ssh(destination: &crate::domain::SshDestination, cx: &App) -> Option<Self> {
+        cx.try_global::<SshClients>()
+            .and_then(|clients| clients.0.get(destination.as_str()).cloned())
+    }
+    /// Drops a withdrawn SSH server's writer. A later connection starts a new one.
+    pub(crate) fn forget_ssh(destination: &crate::domain::SshDestination, cx: &mut App) {
+        if cx.has_global::<SshClients>() {
+            cx.global_mut::<SshClients>().0.remove(destination.as_str());
+        }
     }
     pub(crate) fn supports_worktree_writes(&self) -> bool {
         self.edits.supports_worktree_writes()
