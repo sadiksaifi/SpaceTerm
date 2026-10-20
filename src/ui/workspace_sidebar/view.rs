@@ -1158,25 +1158,37 @@ impl WorkspaceSidebar {
         };
         let destination = section.destination.clone();
         let grow_sidebar = sidebar.clone();
-        let heading = ContextMenu::new(
-            SharedString::from(format!("{selector}-menu")),
-            format!("Server actions for {label}"),
-            heading,
-            machine_menu_entries(section),
-        )
-        .size(MenuSize::Wide)
-        .target(ContextMenuTarget::new(accesskit::Role::Heading, accessible))
-        .debug_selector(format!("{selector}-menu"))
-        .on_activate(move |activation, _, cx| {
-            let command = *activation.action();
-            let destination = destination.clone();
-            let _ = sidebar.update(cx, |_, cx| {
-                cx.emit(SidebarEvent::Machine {
-                    destination,
-                    command,
+        let entries = machine_menu_entries(section);
+        // A machine without a server SpaceTerm can act on has no menu, only its name.
+        let heading = if entries.is_empty() {
+            div()
+                .id(SharedString::from(format!("{selector}-name")))
+                .role(accesskit::Role::Heading)
+                .aria_label(accessible)
+                .child(heading)
+                .into_any_element()
+        } else {
+            ContextMenu::new(
+                SharedString::from(format!("{selector}-menu")),
+                format!("Server actions for {label}"),
+                heading,
+                entries,
+            )
+            .size(MenuSize::Wide)
+            .target(ContextMenuTarget::new(accesskit::Role::Heading, accessible))
+            .debug_selector(format!("{selector}-menu"))
+            .on_activate(move |activation, _, cx| {
+                let command = *activation.action();
+                let destination = destination.clone();
+                let _ = sidebar.update(cx, |_, cx| {
+                    cx.emit(SidebarEvent::Machine {
+                        destination,
+                        command,
+                    });
                 });
-            });
-        });
+            })
+            .into_any_element()
+        };
         let empty = (section.workspaces == 0).then(|| {
             div()
                 .id(SharedString::from(format!("machine-empty-{label}")))
@@ -1847,6 +1859,9 @@ fn machine_menu_entries(section: &MachineSection) -> Vec<MenuEntry<MachineMenuCo
                 })
                 .debug_selector("machine-menu-disconnect"),
         );
+    }
+    if !section.has_settings {
+        return entries;
     }
     if !entries.is_empty() {
         entries.push(MenuEntry::separator());

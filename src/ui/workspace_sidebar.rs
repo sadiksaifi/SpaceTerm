@@ -131,6 +131,8 @@ pub(super) struct MachineSection {
     pub(super) status: Option<&'static str>,
     pub(super) connects: bool,
     pub(super) disconnects: bool,
+    /// Whether Settings lists this machine's server, so Server Settings can open on it.
+    pub(super) has_settings: bool,
     /// How many Workspace rows follow the heading.
     pub(super) workspaces: usize,
 }

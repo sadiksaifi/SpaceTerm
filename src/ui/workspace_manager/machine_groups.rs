@@ -146,6 +146,7 @@ impl WorkspaceManager {
                     status: None,
                     connects: false,
                     disconnects: false,
+                    has_settings: true,
                     workspaces,
                 },
                 Machine::Ssh(destination) => {
@@ -177,6 +178,14 @@ impl WorkspaceManager {
                             .map(|(_, presentation)| presentation.state),
                         connects: offers(crate::ui::ssh_servers::SshServerAction::Connect),
                         disconnects: offers(crate::ui::ssh_servers::SshServerAction::Disconnect),
+                        // Settings lists saved SSH connections; native Remote Workspaces alone
+                        // name no server there.
+                        has_settings: connections.as_ref().is_some_and(|connections| {
+                            connections
+                                .connections()
+                                .iter()
+                                .any(|(saved, _)| *saved == destination)
+                        }),
                         destination: Some(destination),
                         workspaces,
                     }
