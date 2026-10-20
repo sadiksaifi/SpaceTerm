@@ -626,7 +626,7 @@ impl PaneConnection {
                 development_pane: true,
                 workspace_policy: false,
                 ..
-            } => Err(ServerError::IncompatibleProtocol),
+            } => Err(ServerError::MissingRequiredCapability),
             Reply::Refused(reason) => Err(reason.into()),
             _ => Err(ServerError::Unsupported),
         }
@@ -730,10 +730,31 @@ mod transport_tests {
             });
             assert!(matches!(
                 PaneConnection::negotiate(client),
-                Err(ServerError::IncompatibleProtocol)
+                Err(ServerError::MissingRequiredCapability)
             ));
             peer.join().unwrap();
         }
+    }
+
+    #[test]
+    fn absent_optional_capabilities_keep_the_required_connection_available() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let peer = std::thread::spawn(move || {
+            let mut wire = crate::protocol::Wire::terminal(&mut server).unwrap();
+            assert!(matches!(
+                wire.read::<Request>().unwrap(),
+                Request::Capabilities
+            ));
+            wire.write(&serde_json::json!({
+                "Capabilities": { "development_pane": true, "workspace_policy": true }
+            }))
+            .unwrap();
+        });
+        let connection = PaneConnection::negotiate(client).unwrap();
+        assert!(!connection.supports_graphics());
+        assert!(!connection.supports_interactive_input());
+        assert!(!connection.supports_reading());
+        peer.join().unwrap();
     }
 
     #[test]
