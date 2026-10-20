@@ -269,7 +269,10 @@ mod tests {
             br#"{"schema":1,"connections":[{"destination":"other","continuity":null}]}"#.to_vec();
         let records = store.load().unwrap();
         assert_eq!(records[0].destination.as_str(), "other");
-        assert!(records[0].active, "a record written before saved inactive hosts was active");
+        assert!(
+            records[0].active,
+            "a record written before saved inactive hosts was active"
+        );
     }
 
     #[test]

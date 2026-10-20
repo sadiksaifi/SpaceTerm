@@ -1223,8 +1223,9 @@ mod tests {
                 }
             )
         });
-        let RemoteConnectionStatus::Checked { facts: observed, .. } =
-            registry.status(&destination())
+        let RemoteConnectionStatus::Checked {
+            facts: observed, ..
+        } = registry.status(&destination())
         else {
             unreachable!()
         };

@@ -465,7 +465,10 @@ fn render_server(
         });
     // Removing is always available and immediate: it ends only this computer's saved
     // connection.
-    let actions = presentation.actions.iter().chain([&SshServerAction::Remove]);
+    let actions = presentation
+        .actions
+        .iter()
+        .chain([&SshServerAction::Remove]);
     let actions = actions.map(|&action| {
         let owner = owner.clone();
         let destination = destination.clone();
