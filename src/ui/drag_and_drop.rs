@@ -139,6 +139,8 @@ struct Lift<Id> {
     /// When the strip last scrolled under the pointer, while the pointer stays near an end.
     scrolled_at: Option<Instant>,
     landing: Option<Landing>,
+    /// The run of items the lifted item may land among, when only part of the strip accepts it.
+    peers: Option<Vec<Id>>,
     /// Each item's slot size along the strip when the gap last opened.
     extents: Vec<Pixels>,
 }
@@ -837,8 +839,17 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
             pointer: None,
             scrolled_at: None,
             landing: None,
+            peers: None,
             extents: Vec::new(),
         });
+    }
+
+    /// Keeps the lifted item's landing among `peers`, a run of the strip's items that holds it.
+    /// A release past them lands it at their nearer end.
+    pub(crate) fn confine_landing(&mut self, peers: Vec<Id>) {
+        if let Some(lift) = self.lift.as_mut() {
+            lift.peers = Some(peers);
+        }
     }
 
     /// Prepares a frame of the strip's `ids`, in presentation order. Ends a lift whose drag GPUI
@@ -978,13 +989,28 @@ impl<Id: Copy + Eq + Hash> ReorderableStrip<Id> {
         let origin = copy.map_or(pointer - lift.grab, |copy| {
             confine(axis, items.bounds(), copy, pointer - lift.grab)
         });
-        let landing = current.zip(copy).map(|(current, copy)| Landing {
-            position: landing_position(
+        let peers = lift.peers.as_ref().map(|peers| {
+            let mut positions = ids
+                .iter()
+                .enumerate()
+                .filter(|(_, id)| peers.contains(id))
+                .map(|(position, _)| position);
+            let first = positions.next();
+            (first, positions.last().or(first))
+        });
+        let landing = current.zip(copy).map(|(current, copy)| {
+            let position = landing_position(
                 &spans(axis, &slots),
                 current,
                 f32::from(origin.along(axis) + copy.size.along(axis) / 2.0),
-            ),
-            len: ids.len(),
+            );
+            Landing {
+                position: match peers {
+                    Some((Some(first), Some(last))) => position.clamp(first, last),
+                    _ => position,
+                },
+                len: ids.len(),
+            }
         });
         lift.pointer = Some(pointer);
         let moved = lift.origin != Some(origin);

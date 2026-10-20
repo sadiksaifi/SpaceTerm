@@ -12208,6 +12208,303 @@ fn withdrawing_one_server_should_keep_the_other_machines_workspaces_and_active_w
     );
 }
 
+/// An SSH registry whose every connection waits for the person to sign in, recording each
+/// request it receives.
+fn waiting_ssh_registry(
+    cx: &mut VisualTestContext,
+) -> (
+    crate::ssh::server_connection::SshServerConnections,
+    std::sync::mpsc::Receiver<String>,
+) {
+    use crate::ssh::cancellation::SshCancellationToken;
+    use crate::ssh::server_connection::{
+        ConnectMode, ConnectProgress, ConnectedSshServer, InteractionReason, RetainedSshConnection,
+        SshConnectBackend, SshConnectFailure, SshConnectionIntentStore, SshIntentStoreError,
+        SshServerConnections, SshServerContinuity, SshServerObservation,
+    };
+    use std::sync::{Arc, mpsc};
+
+    struct WaitingBackend(Mutex<mpsc::Sender<String>>);
+    impl SshConnectBackend for WaitingBackend {
+        fn connect(
+            &self,
+            destination: &crate::domain::SshDestination,
+            _: ConnectMode,
+            _: Option<&SshServerContinuity>,
+            _: &SshCancellationToken,
+            _: &ConnectProgress<'_>,
+        ) -> Result<ConnectedSshServer, SshConnectFailure> {
+            let _ = self.0.lock().unwrap().send(destination.as_str().to_owned());
+            Err(SshConnectFailure::NeedsPerson(
+                InteractionReason::Authentication,
+            ))
+        }
+        fn observe(
+            &self,
+            _: &crate::domain::SshDestination,
+            _: Option<&SshServerContinuity>,
+            _: &SshCancellationToken,
+            _: &ConnectProgress<'_>,
+        ) -> Result<SshServerObservation, SshConnectFailure> {
+            Err(SshConnectFailure::NeedsPerson(
+                InteractionReason::Authentication,
+            ))
+        }
+    }
+    struct NoIntents;
+    impl SshConnectionIntentStore for NoIntents {
+        fn load(&self) -> Result<Vec<RetainedSshConnection>, SshIntentStoreError> {
+            Ok(Vec::new())
+        }
+        fn retain(&self, _: RetainedSshConnection) -> Result<(), SshIntentStoreError> {
+            Ok(())
+        }
+        fn remove(&self, _: &crate::domain::SshDestination) -> Result<(), SshIntentStoreError> {
+            Ok(())
+        }
+    }
+
+    let (sender, connects) = mpsc::channel();
+    let connections = SshServerConnections::new(
+        Arc::new(WaitingBackend(Mutex::new(sender))),
+        Arc::new(NoIntents),
+    );
+    let installed = connections.clone();
+    cx.update(|_, cx| crate::ui::ssh_servers::install(installed, None, cx));
+    (connections, connects)
+}
+
+/// Waits until the registry reports that `destination` waits for the person.
+fn wait_for_person(
+    connections: &crate::ssh::server_connection::SshServerConnections,
+    destination: &str,
+) {
+    use crate::ssh::server_connection::RemoteConnectionStatus;
+
+    let destination = crate::domain::SshDestination::new(destination.to_owned()).unwrap();
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    while !matches!(
+        connections.status(&destination),
+        RemoteConnectionStatus::NeedsPerson { .. }
+    ) {
+        assert!(
+            Instant::now() < deadline,
+            "the connection should come to wait for the person"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+fn heading_names(cx: &mut VisualTestContext) -> Vec<String> {
+    spaceterm_ui::a11y_testing::A11yTree::read(cx)
+        .with_role("Heading")
+        .iter()
+        .filter_map(|node| node["aria"]["label"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// One machine's Workspaces need no heading. Once another machine's server is presented, each
+/// machine heads its own Workspaces, and each row names its machine to assistive technology.
+#[gpui::test]
+fn machine_headings_should_appear_only_once_a_second_machine_is_presented(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+    redraw(cx);
+    let alone = (
+        cx.debug_bounds("machine-heading-This Computer").is_some(),
+        heading_names(cx),
+    );
+
+    harness.present_ssh("penguin", &[("Far", 1)], cx);
+    redraw(cx);
+    let here = harness.named("Here", cx).get();
+    let far = harness.named("Far", cx).get();
+    let bounds = |selector: String, cx: &mut VisualTestContext| {
+        cx.debug_bounds(selector.leak())
+            .expect("the sidebar should present it")
+    };
+    let local = bounds("machine-heading-This Computer".to_owned(), cx);
+    let first = bounds("workspace-row-1-inactive".to_owned(), cx);
+    let here_row = bounds(format!("workspace-group-{here}"), cx);
+    let remote = bounds("machine-heading-penguin".to_owned(), cx);
+    let far_row = bounds(format!("workspace-group-{far}"), cx);
+
+    assert_eq!(alone, (false, Vec::<String>::new()));
+    assert!(
+        local.bottom() <= first.top()
+            && here_row.bottom() <= remote.top()
+            && remote.bottom() <= far_row.top(),
+        "each machine's heading stands above its own Workspaces"
+    );
+    assert_eq!(heading_names(cx), ["This Computer", "penguin"]);
+    let far_item = A11yTree::read(cx)
+        .with_role("TreeItem")
+        .into_iter()
+        .find(|node| node["aria"]["label"] == "Far")
+        .map(|node| {
+            node["aria"]["description"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned()
+        });
+    assert!(
+        far_item.is_some_and(|description| description.starts_with("penguin")),
+        "a row reached on its own names its machine"
+    );
+}
+
+/// A presented SSH server that isn't connected says so in its heading. Reading the state asks
+/// that server for nothing.
+#[gpui::test]
+fn an_ssh_machine_heading_should_show_a_connection_that_is_not_connected(cx: &mut TestAppContext) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+    let (connections, connects) = waiting_ssh_registry(cx);
+    harness.present_ssh("penguin", &[("Far", 1)], cx);
+
+    connections.connect(crate::domain::SshDestination::new("penguin".to_owned()).unwrap());
+    wait_for_person(&connections, "penguin");
+    assert_eq!(connects.try_recv().ok().as_deref(), Some("penguin"));
+    redraw(cx);
+
+    assert!(
+        cx.debug_bounds("machine-heading-status-penguin").is_some(),
+        "the heading should show the connection's state"
+    );
+    assert_eq!(
+        heading_names(cx),
+        ["This Computer", "penguin, Waiting for You"]
+    );
+    assert!(
+        connects.try_recv().is_err(),
+        "presenting the state asks the server for nothing"
+    );
+}
+
+/// A presented SSH server with no attached Workspaces keeps its heading, with a quiet line in
+/// place of its Workspaces.
+#[gpui::test]
+fn an_empty_ssh_server_should_keep_its_heading_and_say_it_has_no_workspaces(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    harness.publish(ServerKey::LOCAL, &harness.local, &[("Here", 1)], cx);
+    harness.present_ssh("penguin", &[], cx);
+    redraw(cx);
+
+    let heading = cx.debug_bounds("machine-heading-penguin");
+    let empty = cx.debug_bounds("machine-empty-penguin");
+    assert!(
+        heading
+            .zip(empty)
+            .is_some_and(|(heading, empty)| heading.bottom() <= empty.top()),
+        "the empty server's heading should stand above its No Workspaces line"
+    );
+    assert!(
+        cx.debug_bounds("machine-empty-This Computer").is_none(),
+        "a machine with Workspaces lists them instead"
+    );
+    assert!(
+        spaceterm_ui::a11y_testing::A11yTree::read(cx)
+            .find("No Workspaces")
+            .is_some()
+    );
+}
+
+/// Dragging a Workspace row past its machine's heading lands it at the nearer end of that
+/// machine's Workspaces.
+#[gpui::test]
+fn dragging_a_workspace_past_its_machine_heading_should_stay_with_its_machine(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    harness.present_ssh("penguin", &[("Far", 1), ("Farther", 2)], cx);
+    harness.manager.update(cx, |manager, cx| {
+        manager
+            .workspaces
+            .activate_workspace(WorkspaceId::new(1))
+            .unwrap();
+        cx.notify();
+    });
+    redraw(cx);
+    let farther = harness.named("Farther", cx).get();
+    let far = harness.named("Far", cx).get();
+    let row = cx
+        .debug_bounds(format!("workspace-row-{farther}-inactive").leak())
+        .expect("the row to drag");
+    let group_start = cx
+        .debug_bounds(format!("workspace-row-{far}-inactive").leak())
+        .expect("the machine's first row")
+        .origin;
+    let top = cx
+        .debug_bounds("workspace-row-1-active")
+        .expect("the local row")
+        .center();
+
+    cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+    cx.simulate_mouse_down(row.center(), MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(
+        row.center() - point(px(0.0), px(8.0)),
+        MouseButton::Left,
+        Modifiers::none(),
+    );
+    cx.run_until_parked();
+    cx.simulate_mouse_move(top, MouseButton::Left, Modifiers::none());
+    finish_slides(cx);
+    let landing = cx
+        .debug_bounds(format!("workspace-row-{farther}-inactive").leak())
+        .map(|face| face.origin);
+    cx.simulate_mouse_up(top, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+
+    assert_eq!(
+        landing,
+        Some(group_start),
+        "the dragged row's place opens at the start of its machine's Workspaces"
+    );
+    assert_eq!(harness.names(cx), ["Default", "Farther", "Far"]);
+}
+
+/// A machine heading's menu reaches that machine's server: Connect asks the registry as Settings
+/// does, and every heading offers the Servers Settings Section.
+#[gpui::test]
+fn a_machine_headings_menu_should_connect_its_server(cx: &mut TestAppContext) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (connections, connects) = waiting_ssh_registry(cx);
+    harness.present_ssh("penguin", &[("Far", 1)], cx);
+    connections.connect(crate::domain::SshDestination::new("penguin".to_owned()).unwrap());
+    wait_for_person(&connections, "penguin");
+    let _ = connects.try_recv();
+    redraw(cx);
+
+    right_click("machine-heading-This Computer", cx);
+    let local = (
+        cx.debug_bounds("machine-menu-server-settings").is_some(),
+        cx.debug_bounds("machine-menu-connect").is_some(),
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    right_click("machine-heading-penguin", cx);
+    let remote = (
+        cx.debug_bounds("machine-menu-server-settings").is_some(),
+        cx.debug_bounds("machine-menu-disconnect").is_some(),
+    );
+    click("machine-menu-connect", cx);
+
+    assert_eq!(local, (true, false));
+    assert_eq!(remote, (true, true));
+    assert_eq!(
+        connects
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .ok()
+            .as_deref(),
+        Some("penguin"),
+        "Connect asks the registry to connect to the heading's machine"
+    );
+}
+
 /// A shared server Workspace presented in this window, with the server Pane its scripted
 /// connection drives. Its Panes reach the same presentation the local Development server's do.
 struct SharedPaneHarness {

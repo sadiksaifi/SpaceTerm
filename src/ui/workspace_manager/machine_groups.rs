@@ -8,8 +8,12 @@
 
 use std::cmp::Ordering;
 
+use gpui::{App, Context, Window};
+
 use super::{ServerBindings, ServerOrigin, WorkspaceManager};
 use crate::domain::{SshDestination, WorkspaceEntry, WorkspaceId, WorkspaceLocation};
+use crate::ssh::server_connection::RemoteConnectionStatus;
+use crate::ui::workspace_sidebar::{MachineMenuCommand, MachineSection};
 
 /// The machine whose group a Workspace joins.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -96,5 +100,115 @@ impl WorkspaceManager {
         };
         let last = positions.last().unwrap_or(first);
         position.clamp(first, last)
+    }
+
+    /// The sidebar's machine headings in Workspace order, or none while the Workspaces of one
+    /// machine need no heading. Every presented server has its heading, even with no Workspaces,
+    /// so an empty or disconnected server stays visible. Reading the SSH servers' statuses
+    /// performs no remote work.
+    pub(super) fn machine_sections(&self, cx: &App) -> Vec<MachineSection> {
+        let mut sections: Vec<(Machine, usize)> = Vec::new();
+        for workspace in self.workspaces.iter() {
+            let machine = Machine::of(&self.shared, workspace);
+            match sections.last_mut() {
+                Some((last, count)) if *last == machine => *count += 1,
+                _ => sections.push((machine, 1)),
+            }
+        }
+        for key in self.shared.keys() {
+            let machine = match self.shared.origin(key) {
+                Some(ServerOrigin::Local) => Machine::Local,
+                Some(ServerOrigin::Ssh(destination)) => Machine::Ssh(destination.clone()),
+                None => continue,
+            };
+            if let Err(position) = sections.binary_search_by(|(other, _)| other.cmp(&machine)) {
+                sections.insert(position, (machine, 0));
+            }
+        }
+        let ssh_server = self
+            .shared
+            .keys()
+            .into_iter()
+            .any(|key| matches!(self.shared.origin(key), Some(ServerOrigin::Ssh(_))));
+        if sections.len() < 2 && !ssh_server {
+            return Vec::new();
+        }
+        let connections = crate::ui::ssh_servers::installed(cx);
+        let this_computer = crate::desktop_profile::DesktopPresentation::get(cx)
+            .wording()
+            .this_computer;
+        sections
+            .into_iter()
+            .map(|(machine, workspaces)| match machine {
+                Machine::Local => MachineSection {
+                    label: this_computer.into(),
+                    destination: None,
+                    status: None,
+                    connects: false,
+                    disconnects: false,
+                    workspaces,
+                },
+                Machine::Ssh(destination) => {
+                    let presented = self
+                        .shared
+                        .key_of(&ServerOrigin::Ssh(destination.clone()))
+                        .is_some();
+                    let presentation = connections.as_ref().map(|connections| {
+                        let status = connections.status(&destination);
+                        let connected = matches!(status, RemoteConnectionStatus::Connected { .. });
+                        (connected, crate::ui::ssh_servers::present(&status))
+                    });
+                    let offers = |action| {
+                        presentation
+                            .as_ref()
+                            .is_some_and(|(_, presentation)| presentation.actions.contains(&action))
+                    };
+                    MachineSection {
+                        label: destination.as_str().to_owned().into(),
+                        // A Remote Workspace reports its own connection on its row. The heading
+                        // reports the SSH server's.
+                        status: presentation
+                            .as_ref()
+                            .filter(|(connected, _)| presented && !connected)
+                            .map(|(_, presentation)| presentation.state),
+                        connects: offers(crate::ui::ssh_servers::SshServerAction::Connect),
+                        disconnects: offers(crate::ui::ssh_servers::SshServerAction::Disconnect),
+                        destination: Some(destination),
+                        workspaces,
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// Performs a machine heading's command. Connecting is the person asking here, so any
+    /// sign-in or host approval it needs appears in this window.
+    pub(super) fn perform_machine_command(
+        &mut self,
+        destination: Option<SshDestination>,
+        command: MachineMenuCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match (command, destination) {
+            (MachineMenuCommand::ServerSettings, _) => {
+                crate::ui::settings_window::open_or_activate(
+                    Some(crate::ui::settings_window::SettingsSectionId::Servers),
+                    cx,
+                )
+            }
+            (MachineMenuCommand::Connect, Some(destination)) => {
+                if let Some(connections) = crate::ui::ssh_servers::installed(cx) {
+                    crate::ui::ssh_servers::present_prompts_in(window, cx);
+                    connections.connect(destination);
+                }
+            }
+            (MachineMenuCommand::Disconnect, Some(destination)) => {
+                if let Some(connections) = crate::ui::ssh_servers::installed(cx) {
+                    connections.disconnect(&destination);
+                }
+            }
+            (MachineMenuCommand::Connect | MachineMenuCommand::Disconnect, None) => {}
+        }
     }
 }

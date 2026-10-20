@@ -2103,7 +2103,9 @@ mod draft {
         cx: &mut VisualTestContext,
     ) {
         cx.update(|_, cx| {
-            sidebar.update(cx, |sidebar, cx| sidebar.set_rows(vec![row], None, cx));
+            sidebar.update(cx, |sidebar, cx| {
+                sidebar.set_rows(vec![row], Vec::new(), None, cx)
+            });
         });
         cx.run_until_parked();
     }

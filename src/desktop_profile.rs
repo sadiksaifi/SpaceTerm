@@ -15,6 +15,8 @@ use spaceterm_ui::{
 pub(crate) struct DesktopWording {
     pub(crate) file_preview: &'static str,
     pub(crate) operating_system_name: &'static str,
+    /// This computer's name beside other machines, as the sidebar heads its Workspaces.
+    pub(crate) this_computer: &'static str,
     /// The command that opens System Directory Selection.
     pub(crate) system_directory_selection: &'static str,
     /// The remedy for an installation the updater cannot replace, as an alert title and message.
@@ -398,6 +400,7 @@ pub(crate) fn testing_presentation() -> DesktopPresentation {
         DesktopWording {
             file_preview: "Preview File",
             operating_system_name: "Operating System",
+            this_computer: "This Computer",
             system_directory_selection: "Choose Directory…",
             read_only_update: ("Move SpaceTerm", "Move SpaceTerm before updating it."),
         },

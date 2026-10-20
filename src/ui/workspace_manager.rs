@@ -949,14 +949,9 @@ impl WorkspaceManager {
     }
 
     fn scroll_active_workspace_into_view(&self, cx: &mut App) {
-        let id = self.workspaces.active_workspace_id();
-        if let Some(index) = self
-            .workspaces
-            .iter()
-            .position(|workspace| Some(workspace.id()) == id)
-        {
+        if let Some(workspace_id) = self.workspaces.active_workspace_id() {
             self.sidebar
-                .update(cx, |sidebar, cx| sidebar.reveal_row(index, cx));
+                .update(cx, |sidebar, cx| sidebar.reveal_workspace(workspace_id, cx));
         }
     }
 
@@ -2869,6 +2864,10 @@ impl WorkspaceManager {
                     self.request_worktree_removal(workspace_id, worktree_id, window, cx);
                 }
             },
+            SidebarEvent::Machine {
+                destination,
+                command,
+            } => self.perform_machine_command(destination, command, window, cx),
             SidebarEvent::LayoutChanged => self.synchronize_tab_manager_layouts(window, cx),
             SidebarEvent::FocusPane => self.focus(window, cx),
             SidebarEvent::FocusChanged => {}
@@ -5311,10 +5310,11 @@ impl WorkspaceManager {
             ),
         };
         let rows = self.sidebar_rows(cx);
+        let sections = self.machine_sections(cx);
         let remote_unavailable = self.remote_workspace_unavailable_reason.clone();
 
         self.sidebar.update(cx, |sidebar, cx| {
-            sidebar.set_rows(rows, remote_unavailable, cx)
+            sidebar.set_rows(rows, sections, remote_unavailable, cx)
         });
         // The New Worktree Command is available only where it can act, so its menu item disables
         // elsewhere.
