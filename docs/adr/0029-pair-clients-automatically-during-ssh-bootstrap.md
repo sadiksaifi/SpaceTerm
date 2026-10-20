@@ -4,8 +4,12 @@ SSH connections use OpenSSH host verification and account authentication under [
 
 Connect composes normal SSH authentication, discovery and reuse, offered verified installation when missing, permitted startup and Workspace presentation. Existing work is reused. Incompatibility does not authorize an update, and Connect never reverses deliberate Stop; only explicit Start does so. Helper preparation stays internal to Connect/Resume rather than becoming a separate public step.
 
+The account bridge derives its endpoint from the authenticated operating-system account and compiled application identity. Remote protocol values cannot select a local endpoint. The client binds its retained nonsecret identity, attachments, views and original-operation journal to the admitted route and server identity. A changed SSH alias cannot redirect that work to another account or server.
+
+Installation is offered only for a supported target with a verified signed artifact. Acceptance binds the exact artifact digest; upload and remote installation revalidate that candidate. Setup reports its current phase and observes cancellation between phases. Once a service effect has been admitted, cancellation reports the observed outcome or an unconfirmed result without claiming rollback. Authentication and artifact transfer have their own phase limits rather than one deadline for the entire journey.
+
 Previously active connection intent and restricted pending-original intent may continue quietly after interruption, sleep or client relaunch. Saved inactive hosts are not discovery targets. Background continuation never solicits SSH passwords, host approval or credential-provider authorization and never bypasses agent, hardware-key or OS consent. Authentication or host/account/server identity changes pause continuation until requested remote work or Connect/Resume obtains authority.
 
 Original-operation resolution keeps the validated original route, account, server, build, client and operation identities. Fresh query authority does not renew destructive approval, repeat Stop or activation, submit replacement work, redirect through a changed alias or Start a stopped server. Removing a saved SSH connection ends presentation and ordinary reconnect intent immediately while preserving restricted pending originals; resolving them never recreates that connection.
 
-These decisions replace automatic SSH pairing. Their implementation remains with the SSH and remote recovery issues in [#520](https://github.com/sadiksaifi/SpaceTerm/issues/520).
+These decisions replace automatic SSH pairing. Remote service controls, update delivery and restricted maintenance recovery remain with their owning issues in [#520](https://github.com/sadiksaifi/SpaceTerm/issues/520).

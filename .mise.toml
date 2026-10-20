@@ -392,6 +392,13 @@ run = "git-cliff --config cliff.toml --unreleased --offline --strip all"
 description = "Test local server account admission and private storage"
 run = "cargo test --package spaceterm-server --package spaceterm-server-host --package spaceterm-directories --all-features --locked"
 
+[tasks."server:fmt"]
+description = "Format the server crates"
+usage = '''
+flag "--check" help="Check formatting without changing files"
+'''
+run = "cargo fmt --package spaceterm-server --package spaceterm-server-host {% if usage.check %}--check{% endif %}"
+
 [tasks."server:test:headless"]
 description = "Test the server without native credential adapters"
 run = "cargo test --package spaceterm-server --no-default-features --locked"
