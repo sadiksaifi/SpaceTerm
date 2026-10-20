@@ -631,8 +631,11 @@ impl WorkspaceManager {
         if self.shared.local().is_some() {
             return LaunchState::Ready;
         }
-        // One device presents its server in one Workspace Window, which comes forward instead.
-        if let Some(existing) = crate::ui::shared_workspaces::presenting_window(cx) {
+        // One device presents its servers in one Workspace Window. Another window comes forward
+        // instead; this one may already present an SSH server and adds the local one beside it.
+        if let Some(existing) = crate::ui::shared_workspaces::presenting_window(cx)
+            && existing.window_id() != window.window_handle().window_id()
+        {
             cx.defer(move |cx| {
                 let _ = existing.update(cx, |_, window, _| window.activate_window());
             });
