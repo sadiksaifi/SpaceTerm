@@ -350,7 +350,11 @@ fn a_local_server_started_after_an_ssh_server_joins_the_same_window(cx: &mut Tes
         });
     });
     cx.run_until_parked();
-    assert_eq!(harness.shared_rows(cx), 1, "the SSH server's Workspace is presented");
+    assert_eq!(
+        harness.shared_rows(cx),
+        1,
+        "the SSH server's Workspace is presented"
+    );
 
     // The person starts the local server from outside this window.
     cx.cx
