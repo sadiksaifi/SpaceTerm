@@ -79,12 +79,12 @@ use editor::{SaveStatus, SettingsEditor};
 use keybindings::ShortcutRows;
 use microphone::MicrophoneAccessRow;
 use permission_access::{PermissionAccessChanges, PermissionAccessRows};
+pub(crate) use server_update::update_offered;
 /// The server control window shares the service row's progress and authorization wording.
 pub(crate) use servers::{
     AuthorizationPrompt, AuthorizedRequest, INCOMPATIBLE_PROTOCOL, MISSING_CAPABILITY,
     ServiceAction,
 };
-pub(crate) use server_update::update_offered;
 use theme_gallery::ThemeGallery;
 use theme_store::ThemeStore;
 
