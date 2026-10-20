@@ -414,6 +414,10 @@ pub(super) struct LocalLaunchState {
     /// Presents the server's Workspaces as soon as this client's saved arrangement is read,
     /// rather than at the next periodic reading.
     _views_read: Option<Task<()>>,
+    /// The open connection's refusal and whether a verified build can update its server. Read
+    /// once per refusal, off the event thread; `false` until the read answers.
+    refusal_offer: Option<(ServerError, bool)>,
+    _refusal_offer: Option<Task<()>>,
 }
 
 impl LocalLaunchState {
@@ -429,6 +433,8 @@ impl LocalLaunchState {
             spoke: std::cell::Cell::new(false),
             _quiet: None,
             _views_read: None,
+            refusal_offer: None,
+            _refusal_offer: None,
         }
     }
 
@@ -702,12 +708,58 @@ impl WorkspaceManager {
             Some(shared) => Some(present(match shared.connection_error() {
                 Some(ServerError::Stopped) => LaunchState::Stopped,
                 // An open connection's refusal offers what the Server version row offers.
-                Some(error) if ends_opening(error) => failed(error, false),
+                Some(error) if ends_opening(error) => failed(
+                    error,
+                    self.launch
+                        .refusal_offer
+                        .is_some_and(|(refused, update)| refused == error && update),
+                ),
                 // The connection retries an interruption by itself, so opening goes on.
                 _ => LaunchState::Launching,
             })),
             None => Some(present(self.launch.state)),
         }
+    }
+
+    /// Reads whether a verified build can update a server the open connection refused before
+    /// its first inventory. Admission can succeed before Pane negotiation refuses a required
+    /// capability, so this refusal reads the same offer launch reads, once per refusal.
+    pub(super) fn read_refusal_offer(&mut self, cx: &mut Context<Self>) {
+        let refused = self
+            .shared
+            .as_ref()
+            .filter(|shared| shared.latest_inventory().is_none())
+            .and_then(|shared| shared.connection_error())
+            .filter(|error| incompatible(*error));
+        let Some(error) = refused else {
+            self.launch.refusal_offer = None;
+            self.launch._refusal_offer = None;
+            return;
+        };
+        if self
+            .launch
+            .refusal_offer
+            .is_some_and(|(read, _)| read == error)
+        {
+            return;
+        }
+        self.launch.refusal_offer = Some((error, false));
+        let adapter = Arc::clone(&self.launch.adapters.launch);
+        let offered = cx.background_spawn(async move { adapter.update_offered() });
+        self.launch._refusal_offer = Some(cx.spawn(async move |manager, cx| {
+            let update = offered.await;
+            let _ = manager.update(cx, |manager, cx| {
+                // A later refusal reads its own offer.
+                if manager
+                    .launch
+                    .refusal_offer
+                    .is_some_and(|(read, _)| read == error)
+                {
+                    manager.launch.refusal_offer = Some((error, update));
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     /// Whether the stage presents nothing for `presentation` now: the window's first launch is

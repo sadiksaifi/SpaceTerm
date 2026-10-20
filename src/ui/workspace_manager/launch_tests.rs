@@ -452,9 +452,10 @@ fn a_failure_before_inventory_explains_itself_and_offers_recovery(cx: &mut TestA
     harness.edits.set_error(ServerError::NotRunning);
     sync(&harness, cx);
     assert_eq!(harness.launch_title(cx), Some(launch::OPENING_TITLE));
+    // The incompatible refusal only read whether an update is offered.
     assert_eq!(
         harness.launch.steps(),
-        ["run"],
+        ["run", "update_offered"],
         "no implicit Start or runtime activation"
     );
     assert!(harness.edits.submitted().is_empty());
@@ -503,6 +504,32 @@ fn a_refused_server_offers_an_update_only_from_a_verified_build(cx: &mut TestApp
         harness.launch.steps(),
         ["run", "update_offered", "run", "update_offered"],
         "reading the offer starts, stages, and activates nothing"
+    );
+}
+
+/// Admission can succeed before Pane negotiation refuses a required capability. That refusal
+/// reads the same verified offer, once, and offers the same update journey.
+#[gpui::test]
+fn a_refusal_after_admission_offers_the_verified_update(cx: &mut TestAppContext) {
+    let edits = ScriptedEdits::new(None);
+    edits.set_connected(false);
+    let (harness, cx) = launch_harness_with(vec![ready()], edits, [], cx);
+    harness.launch.offer_update();
+    cx.run_until_parked();
+    sync(&harness, cx);
+    assert_eq!(harness.launch.steps(), ["run"]);
+
+    harness
+        .edits
+        .set_error(ServerError::MissingRequiredCapability);
+    sync(&harness, cx);
+    assert_eq!(harness.launch_title(cx), Some("Incompatible Server"));
+    assert!(cx.debug_bounds(launch::LAUNCH_UPDATE_SELECTOR).is_some());
+    sync(&harness, cx);
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "update_offered"],
+        "one read per refusal, and nothing starts or activates"
     );
 }
 
