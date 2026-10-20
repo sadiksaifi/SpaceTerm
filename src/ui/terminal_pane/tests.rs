@@ -2782,6 +2782,39 @@ fn server_pane_shift_right_and_middle_clicks_reach_tracking_programs(cx: &mut Te
 }
 
 #[gpui::test]
+fn typing_unavailable_waits_for_the_connection_to_refuse_input(cx: &mut TestAppContext) {
+    use crate::terminal::InteractiveInput;
+    use spaceterm_ui::a11y_testing::A11yTree;
+    let (pane, cx, records) = terminal_pane_with_session_options(cx, |sessions| {
+        sessions
+            .server_backed()
+            .with_interactive_input(InteractiveInput::Pending)
+    });
+    cx.run_until_parked();
+    assert!(
+        A11yTree::read(cx).find("Typing Unavailable").is_none(),
+        "a Pane whose connection has not answered claims no incompatibility"
+    );
+    records.set_interactive_input(1, InteractiveInput::Accepted);
+    pane.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    assert!(A11yTree::read(cx).find("Typing Unavailable").is_none());
+    records.set_interactive_input(1, InteractiveInput::Pending);
+    pane.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    assert!(
+        A11yTree::read(cx).find("Typing Unavailable").is_none(),
+        "an interrupted connection is not a refusal"
+    );
+    records.set_interactive_input(1, InteractiveInput::Refused);
+    pane.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    let tree = A11yTree::read(cx);
+    assert_eq!(tree.node("Typing Unavailable")["aria"]["role"], "Status");
+    assert!(cx.debug_bounds("terminal-input-unavailable").is_some());
+}
+
+#[gpui::test]
 fn server_pane_status_stacks_above_typing_unavailable_without_hiding_either_notice(
     cx: &mut TestAppContext,
 ) {

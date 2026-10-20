@@ -337,6 +337,9 @@ pub(crate) struct WorkspaceManager {
     shared: Option<SharedWorkspaceBinding>,
     /// Reads the server's inventory and edit state while the window lives.
     _shared_poll: Option<Task<()>>,
+    /// Reads the server's inventory as soon as its connection publishes a change. The periodic
+    /// poll stays, so a missed or absent hint only delays a reading.
+    _shared_wake: Option<Task<()>>,
     /// Where the keyboard rests while the window presents no Workspace.
     empty_focus: FocusHandle,
     /// Normal launch of the account-local server this window presents.
@@ -479,6 +482,7 @@ impl WorkspaceManager {
             shared_repositories: shared_repositories::SharedWorkspaceRepositories::default(),
             shared: None,
             _shared_poll: None,
+            _shared_wake: None,
             empty_focus: cx.focus_handle(),
             launch: launch::LocalLaunchState::new(local_server),
         };
@@ -3672,6 +3676,24 @@ impl WorkspaceManager {
                     .await;
             }
         }));
+        let wake = self
+            .shared
+            .as_ref()
+            .and_then(super::shared_workspaces::SharedWorkspaces::subscribe);
+        self._shared_wake = wake.map(|wake| {
+            cx.spawn_in(window, async move |manager, cx| {
+                while wake.recv().await.is_ok() {
+                    if manager
+                        .update_in(cx, |manager, window, cx| {
+                            manager.sync_shared_workspaces(window, cx);
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+        });
         cx.notify();
     }
 
@@ -4776,13 +4798,11 @@ impl WorkspaceManager {
                 name_version: facts.name_version,
                 edits: editability.available(),
                 edits_reason: editability.explanation(),
-                status: shared
-                    .worktree_status(
-                        facts.server,
-                        self.shared_inventory(workspace_id)
-                            .map(|inventory| inventory.main_root.as_path()),
-                    )
-                    .or_else(|| editability.status()),
+                status: shared.row_status(
+                    facts.server,
+                    self.shared_inventory(workspace_id)
+                        .map(|inventory| inventory.main_root.as_path()),
+                ),
                 detaches: shared.attachments_changeable(),
             },
             directory: directory.to_owned(),

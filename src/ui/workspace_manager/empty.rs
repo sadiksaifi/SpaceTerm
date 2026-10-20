@@ -117,6 +117,9 @@ impl WorkspaceManager {
                 .unwrap_or_default()
         });
         let message = match self.launch_presentation() {
+            Some(launch) if self.launch_is_quiet(&launch, cx) => {
+                self.render_launch_quiet(&self.empty_focus)
+            }
             Some(launch) => self.render_launch_message(launch, &self.empty_focus, cx),
             None => self.render_empty_message(switcher_manager, cx),
         };

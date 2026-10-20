@@ -225,6 +225,12 @@ struct Rows<'a> {
 }
 impl Serialize for Rows<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self
+            .previous
+            .is_some_and(|previous| previous.shares_document(self.model))
+        {
+            return serializer.serialize_seq(Some(0))?.end();
+        }
         let previous = self
             .previous
             .into_iter()

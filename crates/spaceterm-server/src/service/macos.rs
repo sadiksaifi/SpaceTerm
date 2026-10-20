@@ -56,6 +56,39 @@ impl LaunchAgent {
             name: self.name.clone(),
         }
     }
+    fn validate_observation(
+        &self,
+        runtime: &Path,
+        removing: bool,
+        bytes: &[u8],
+    ) -> Result<bool, ServerError> {
+        let expected = format!(
+            "\"Program\" = \"{}\";",
+            runtime
+                .join("bin/spaceterm-server")
+                .to_str()
+                .ok_or(ServerError::UnsafeStorage)?
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+        );
+        let text = std::str::from_utf8(bytes).map_err(|_| ServerError::ServiceUnavailable)?;
+        if (removing && !self.registration().path().exists())
+            || !text.lines().any(|line| line.trim() == expected)
+        {
+            return Err(ServerError::CleanupUnresolved);
+        }
+        running(bytes)
+    }
+    fn absent_job(&self, error: ServerError) -> Result<bool, ServerError> {
+        // Distinguish an absent job from an inaccessible login domain.
+        let domain = self
+            .target
+            .rsplit_once('/')
+            .ok_or(ServerError::ServiceUnavailable)?
+            .0;
+        command("/bin/launchctl", &["print".into(), domain.into()]).map_err(|_| error)?;
+        Ok(false)
+    }
 }
 impl Supervisor for LaunchAgent {
     fn startup(&self) -> ServiceStartup {
@@ -71,24 +104,20 @@ impl Supervisor for LaunchAgent {
             "/bin/launchctl",
             &["list".into(), self.label.clone().into()],
         ) {
-            let expected = format!(
-                "\"Program\" = \"{}\";",
-                runtime
-                    .join("bin/spaceterm-server")
-                    .to_str()
-                    .ok_or(ServerError::UnsafeStorage)?
-                    .replace('\\', "\\\\")
-                    .replace('"', "\\\"")
-            );
-            let text = std::str::from_utf8(&bytes).map_err(|_| ServerError::ServiceUnavailable)?;
-            if removing && !self.registration().path().exists() {
-                return Err(ServerError::CleanupUnresolved);
-            }
-            if !text.lines().any(|line| line.trim() == expected) {
-                return Err(ServerError::CleanupUnresolved);
-            }
+            self.validate_observation(runtime, removing, &bytes)?;
         }
         Ok(())
+    }
+    fn observe(&self, runtime: &Path, removing: bool) -> Result<bool, ServerError> {
+        self.registration()
+            .check(&self.contents(runtime)?, removing)?;
+        match command(
+            "/bin/launchctl",
+            &["list".into(), self.label.clone().into()],
+        ) {
+            Ok(bytes) => self.validate_observation(runtime, removing, &bytes),
+            Err(error) => self.absent_job(error),
+        }
     }
     fn prepare_start(&self) -> Result<(), ServerError> {
         Ok(())
@@ -166,27 +195,8 @@ impl Supervisor for LaunchAgent {
             &["list".into(), self.label.clone().into()],
         );
         match result {
-            Ok(bytes) => {
-                let text =
-                    std::str::from_utf8(&bytes).map_err(|_| ServerError::ServiceUnavailable)?;
-                Ok(text.lines().any(|line| {
-                    line.trim()
-                        .strip_prefix("\"PID\" = ")
-                        .and_then(|v| v.strip_suffix(';'))
-                        .and_then(|v| v.parse::<u32>().ok())
-                        .is_some_and(|pid| pid > 0)
-                }))
-            }
-            Err(error) => {
-                // Distinguish an absent job from an inaccessible login domain.
-                let domain = self
-                    .target
-                    .rsplit_once('/')
-                    .ok_or(ServerError::ServiceUnavailable)?
-                    .0;
-                command("/bin/launchctl", &["print".into(), domain.into()]).map_err(|_| error)?;
-                Ok(false)
-            }
+            Ok(bytes) => running(&bytes),
+            Err(error) => self.absent_job(error),
         }
     }
     fn uninstall(&self, runtime: &Path) -> Result<(), ServerError> {
@@ -194,10 +204,57 @@ impl Supervisor for LaunchAgent {
     }
 }
 
+fn running(bytes: &[u8]) -> Result<bool, ServerError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| ServerError::ServiceUnavailable)?;
+    Ok(text.lines().any(|line| {
+        line.trim()
+            .strip_prefix("\"PID\" = ")
+            .and_then(|value| value.strip_suffix(';'))
+            .and_then(|value| value.parse::<u32>().ok())
+            .is_some_and(|pid| pid > 0)
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn one_observation_validates_the_approved_program_before_reporting_running() {
+        let agent = LaunchAgent {
+            directory: PathBuf::from("/unavailable-fixture"),
+            name: "fixture.plist".into(),
+            label: "fixture".into(),
+            target: "gui/fixture".into(),
+            identity: "spaceterm-development".into(),
+        };
+        let runtime = Path::new("/approved-fixture");
+        assert_eq!(
+            agent.validate_observation(
+                runtime,
+                false,
+                b"\"Program\" = \"/approved-fixture/bin/spaceterm-server\";\n\"PID\" = 7;\n"
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            agent.validate_observation(
+                runtime,
+                false,
+                b"\"Program\" = \"/other-fixture/bin/spaceterm-server\";\n\"PID\" = 7;\n"
+            ),
+            Err(ServerError::CleanupUnresolved)
+        );
+        assert_eq!(
+            agent.validate_observation(
+                runtime,
+                false,
+                b"\"Program\" = \"/approved-fixture/bin/spaceterm-server\";\n"
+            ),
+            Ok(false)
+        );
+    }
 
     struct Fixture {
         root: PathBuf,

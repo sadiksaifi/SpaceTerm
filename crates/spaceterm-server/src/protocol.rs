@@ -126,26 +126,27 @@ impl<'a> Wire<'a> {
         if bytes.len() > self.max_frame {
             return Err(ServerError::Protocol);
         }
-        let frame = [&(bytes.len() as u32).to_be_bytes()[..], &bytes].concat();
-        let mut rest = frame.as_slice();
-        while !rest.is_empty() {
-            self.ready(libc::POLLOUT)?;
-            let count = match self.stream.write(rest) {
-                Ok(count) => count,
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                    ) =>
-                {
-                    continue;
+        let prefix = (bytes.len() as u32).to_be_bytes();
+        for mut rest in [prefix.as_slice(), bytes.as_slice()] {
+            while !rest.is_empty() {
+                self.ready(libc::POLLOUT)?;
+                let count = match self.stream.write(rest) {
+                    Ok(count) => count,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) =>
+                    {
+                        continue;
+                    }
+                    Err(_) => return Err(ServerError::Protocol),
+                };
+                if count == 0 {
+                    return Err(ServerError::Protocol);
                 }
-                Err(_) => return Err(ServerError::Protocol),
-            };
-            if count == 0 {
-                return Err(ServerError::Protocol);
+                rest = &rest[count..];
             }
-            rest = &rest[count..];
         }
         Ok(())
     }

@@ -1,5 +1,6 @@
 //! One authenticated inventory subscription and durable edit journal per desktop client.
 use crate::local_server::{LocalServer, ServerError};
+use crate::terminal::server_session::PaneControls;
 use spaceterm_server::{
     hierarchy::{ClientJournal, Inventory, Mutation, RetainedOutcome},
     pane::{PaneConnection, Reply, Request},
@@ -23,9 +24,47 @@ pub(crate) struct SharedWorkspaceSnapshot {
     pub error: Option<ServerError>,
 }
 pub(crate) struct SharedWorkspaceClient {
-    snapshot: Arc<Mutex<SharedWorkspaceSnapshot>>,
+    snapshot: Arc<PublishedSnapshot>,
     commands: mpsc::SyncSender<Mutation>,
     alive: Arc<AtomicBool>,
+}
+
+struct PublishedSnapshot {
+    value: Mutex<SharedWorkspaceSnapshot>,
+    subscribers: Mutex<Vec<async_channel::Sender<()>>>,
+}
+impl PublishedSnapshot {
+    fn new(value: SharedWorkspaceSnapshot) -> Self {
+        Self {
+            value: Mutex::new(value),
+            subscribers: Mutex::default(),
+        }
+    }
+    fn subscribe(&self) -> async_channel::Receiver<()> {
+        let (sender, receiver) = async_channel::bounded(1);
+        let mut subscribers = self.subscribers.lock().unwrap_or_else(|e| e.into_inner());
+        subscribers.retain(|sender| !sender.is_closed());
+        let _ = sender.try_send(());
+        subscribers.push(sender);
+        receiver
+    }
+    fn publish<R>(&self, update: impl FnOnce(&mut SharedWorkspaceSnapshot) -> R) -> R {
+        let result = {
+            let mut value = self.value.lock().unwrap_or_else(|e| e.into_inner());
+            update(&mut value)
+        };
+        // The value is visible before the hint; consumers may immediately read it on another thread.
+        self.subscribers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|sender| {
+                !matches!(
+                    sender.try_send(()),
+                    Err(async_channel::TrySendError::Closed(()))
+                )
+            });
+        result
+    }
 }
 impl Drop for SharedWorkspaceClient {
     fn drop(&mut self) {
@@ -33,8 +72,13 @@ impl Drop for SharedWorkspaceClient {
     }
 }
 impl SharedWorkspaceClient {
-    pub(crate) fn new(server: LocalServer, legacy_location: String) -> Self {
-        let snapshot = Arc::new(Mutex::new(SharedWorkspaceSnapshot {
+    /// Pane control records last only as long as the server lists their Panes.
+    pub(crate) fn new(
+        server: LocalServer,
+        controls: Arc<PaneControls>,
+        legacy_location: String,
+    ) -> Self {
+        let snapshot = Arc::new(PublishedSnapshot::new(SharedWorkspaceSnapshot {
             worktree_writes: false,
             inventory: None,
             connected: false,
@@ -50,11 +94,10 @@ impl SharedWorkspaceClient {
         let running = Arc::clone(&alive);
         if std::thread::Builder::new()
             .name("spaceterm-shared-workspaces".into())
-            .spawn(move || run(server, state, receiver, running, legacy_location))
+            .spawn(move || run(server, controls, state, receiver, running, legacy_location))
             .is_err()
         {
-            snapshot.lock().unwrap_or_else(|e| e.into_inner()).error =
-                Some(ServerError::StartupFailed);
+            snapshot.publish(|snapshot| snapshot.error = Some(ServerError::StartupFailed));
         }
         Self {
             snapshot,
@@ -64,44 +107,59 @@ impl SharedWorkspaceClient {
     }
     pub(crate) fn supports_worktree_writes(&self) -> bool {
         self.snapshot
+            .value
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .worktree_writes
     }
     pub(crate) fn snapshot(&self) -> SharedWorkspaceSnapshot {
         self.snapshot
+            .value
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
+    /// Coalesced change hints, including an initial hint. Read `snapshot` after each wake.
+    /// Dropping the receiver unsubscribes; closed senders are pruned on publication or subscription.
+    pub(crate) fn subscribe(&self) -> async_channel::Receiver<()> {
+        self.snapshot.subscribe()
+    }
     /// Availability checks do not copy the hierarchy or terminal directory metadata.
     pub(crate) fn availability(&self) -> (bool, bool) {
-        let state = self.snapshot.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self
+            .snapshot
+            .value
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         (state.connected, state.pending)
     }
     /// Offline submissions are refused here even if an action's rendered enabled state is stale.
     pub(crate) fn submit(&self, mutation: Mutation) -> bool {
-        let mut state = self.snapshot.lock().unwrap_or_else(|e| e.into_inner());
-        if !state.connected || state.pending {
-            return false;
-        }
-        if !mutation.is_bounded() {
-            state.error = Some(ServerError::Unsupported);
-            return false;
-        }
-        state.pending = true;
-        state.outcome = None;
-        state.rejected = None;
-        state.pending_operation = Some(mutation.clone());
-        if self.commands.try_send(mutation).is_err() {
-            state.pending = false;
-            state.pending_operation = None;
-            return false;
-        }
-        true
+        self.snapshot.publish(|state| {
+            if !state.connected || state.pending {
+                return false;
+            }
+            if !mutation.is_bounded() {
+                state.error = Some(ServerError::Unsupported);
+                return false;
+            }
+            state.pending = true;
+            state.outcome = None;
+            state.rejected = None;
+            state.pending_operation = Some(mutation.clone());
+            if self.commands.try_send(mutation).is_err() {
+                state.pending = false;
+                state.pending_operation = None;
+                return false;
+            }
+            true
+        })
     }
 }
-fn inventory(connection: &mut PaneConnection) -> Result<(Inventory, u64), ServerError> {
+fn inventory(
+    connection: &mut PaneConnection,
+    controls: &PaneControls,
+) -> Result<(Inventory, u64), ServerError> {
     let Reply::Inventory {
         inventory,
         next_sequence,
@@ -109,15 +167,26 @@ fn inventory(connection: &mut PaneConnection) -> Result<(Inventory, u64), Server
     else {
         return Err(ServerError::Protocol);
     };
+    controls.retain(&inventory);
     Ok((inventory, next_sequence))
 }
+struct FinishedOperation {
+    outcome: Option<RetainedOutcome>,
+    reconciled: Option<(Inventory, u64)>,
+}
+
 fn finish(
     connection: &mut PaneConnection,
     journal: &mut ClientJournal,
-) -> Result<Option<RetainedOutcome>, ServerError> {
+    controls: &PaneControls,
+) -> Result<FinishedOperation, ServerError> {
     let Some(pending) = journal.pending().cloned() else {
-        return Ok(journal.last().cloned());
+        return Ok(FinishedOperation {
+            outcome: journal.last().cloned(),
+            reconciled: None,
+        });
     };
+    let mut reconciled = None;
     let result = if let Some(result) = pending.result {
         result
     } else {
@@ -142,7 +211,7 @@ fn finish(
             return Err(ServerError::Protocol);
         };
         // Reconcile the accepted membership before retiring the operation identity.
-        inventory(connection)?;
+        reconciled = Some(inventory(connection, controls)?);
         journal.complete(outcome.clone())?;
         outcome
     };
@@ -154,11 +223,15 @@ fn finish(
         sequence: pending.sequence,
     })?;
     journal.retire()?;
-    Ok(Some(result))
+    Ok(FinishedOperation {
+        outcome: Some(result),
+        reconciled,
+    })
 }
 fn run(
     server: LocalServer,
-    state: Arc<Mutex<SharedWorkspaceSnapshot>>,
+    controls: Arc<PaneControls>,
+    state: Arc<PublishedSnapshot>,
     commands: mpsc::Receiver<Mutation>,
     alive: Arc<AtomicBool>,
     legacy_location: String,
@@ -177,9 +250,8 @@ fn run(
                 ))?;
             }
             // Authoritative reconciliation always precedes a retry of a previously submitted edit.
-            let (initial, _) = inventory(&mut connection)?;
-            {
-                let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+            let (initial, mut sequence) = inventory(&mut connection, &controls)?;
+            state.publish(|s| {
                 s.worktree_writes = connection.worktree_writes();
                 s.inventory = Some(initial);
                 s.pending = journal.pending().is_some();
@@ -195,51 +267,56 @@ fn run(
                     s.rejected = Some(mutation.clone());
                     active = None;
                 }
-            }
-            let outcome = finish(&mut connection, &mut journal)?;
-            {
-                let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-                s.outcome = outcome;
+            });
+            let finished = finish(&mut connection, &mut journal, &controls)?;
+            attachments.release_pending(&mut connection)?;
+            state.publish(|s| {
+                if let Some((current, next_sequence)) = finished.reconciled {
+                    s.inventory = Some(current);
+                    sequence = next_sequence;
+                }
+                s.connected = true;
+                s.error = None;
+                s.outcome = finished.outcome;
                 s.pending = false;
                 s.pending_operation = None;
                 active = None;
-            }
+            });
             loop {
                 if !alive.load(Ordering::Acquire) {
                     return Ok(());
                 }
                 attachments.release_pending(&mut connection)?;
-                let (current, sequence) = inventory(&mut connection)?;
-                {
-                    let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-                    s.inventory = Some(current);
-                    s.connected = true;
-                    s.error = None;
-                }
                 match commands.recv_timeout(Duration::from_millis(150)) {
                     Ok(mutation) => {
                         active = Some((sequence, mutation.clone()));
                         journal.submit(sequence, mutation)?;
-                        let outcome = finish(&mut connection, &mut journal)?;
-                        let (current, _) = inventory(&mut connection)?;
-                        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-                        s.inventory = Some(current);
-                        s.outcome = outcome;
-                        s.pending = false;
-                        s.pending_operation = None;
-                        active = None;
+                        let finished = finish(&mut connection, &mut journal, &controls)?;
+                        let (current, next_sequence) =
+                            finished.reconciled.ok_or(ServerError::Protocol)?;
+                        sequence = next_sequence;
+                        state.publish(|s| {
+                            s.inventory = Some(current);
+                            s.outcome = finished.outcome;
+                            s.pending = false;
+                            s.pending_operation = None;
+                            active = None;
+                        });
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
-                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        let (current, next_sequence) = inventory(&mut connection, &controls)?;
+                        sequence = next_sequence;
+                        state.publish(|s| s.inventory = Some(current));
+                    }
                 }
             }
         })();
         if let Err(error) = result {
-            {
-                let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+            state.publish(|s| {
                 s.connected = false;
                 s.error = Some(error);
-            }
+            });
             // A command accepted just before loss is either in the durable journal or is rejected.
             // Never carry an unsubmitted edit across a reconnect as a new operation.
             reject_queued(&state, &commands);
@@ -255,12 +332,13 @@ fn run(
     }
 }
 
-fn reject_queued(state: &Mutex<SharedWorkspaceSnapshot>, commands: &mpsc::Receiver<Mutation>) {
+fn reject_queued(state: &PublishedSnapshot, commands: &mpsc::Receiver<Mutation>) {
     while let Ok(mutation) = commands.try_recv() {
-        let mut snapshot = state.lock().unwrap_or_else(|e| e.into_inner());
-        snapshot.rejected = Some(mutation);
-        snapshot.pending = false;
-        snapshot.pending_operation = None;
+        state.publish(|snapshot| {
+            snapshot.rejected = Some(mutation);
+            snapshot.pending = false;
+            snapshot.pending_operation = None;
+        });
     }
 }
 
@@ -268,9 +346,48 @@ fn reject_queued(state: &Mutex<SharedWorkspaceSnapshot>, commands: &mpsc::Receiv
 mod tests {
     use super::*;
     #[test]
+    fn each_subscriber_wakes_after_a_coalesced_publication_without_holding_state() {
+        let (commands, _receiver) = mpsc::sync_channel(1);
+        let state = Arc::new(PublishedSnapshot::new(SharedWorkspaceSnapshot {
+            worktree_writes: true,
+            inventory: None,
+            connected: true,
+            pending: false,
+            pending_operation: None,
+            rejected: None,
+            outcome: None,
+            error: None,
+        }));
+        let client = SharedWorkspaceClient {
+            snapshot: Arc::clone(&state),
+            commands,
+            alive: Arc::new(AtomicBool::new(true)),
+        };
+        let first = client.subscribe();
+        let second = client.subscribe();
+        first.try_recv().unwrap();
+        second.try_recv().unwrap();
+        state.publish(|snapshot| snapshot.connected = false);
+        state.publish(|snapshot| snapshot.error = Some(ServerError::NotRunning));
+        for subscriber in [&first, &second] {
+            subscriber
+                .try_recv()
+                .expect("a producer publication must wake every subscriber");
+            assert!(subscriber.try_recv().is_err(), "pending hints coalesce");
+            let snapshot = client.snapshot();
+            assert!(!snapshot.connected);
+            assert_eq!(snapshot.error, Some(ServerError::NotRunning));
+        }
+        drop(second);
+        state.publish(|snapshot| snapshot.connected = true);
+        first.try_recv().unwrap();
+        assert_eq!(state.subscribers.lock().unwrap().len(), 1);
+    }
+
+    #[test]
     fn disconnect_rejects_an_enqueued_edit_without_carrying_it_across_reconnect() {
         let (commands, receiver) = mpsc::sync_channel(1);
-        let state = Arc::new(Mutex::new(SharedWorkspaceSnapshot {
+        let state = Arc::new(PublishedSnapshot::new(SharedWorkspaceSnapshot {
             worktree_writes: true,
             inventory: None,
             connected: true,
@@ -289,9 +406,18 @@ mod tests {
             version: 0,
             template: "~/.worktrees/{repository}/{branch}".into(),
         });
+        let changes = client.subscribe();
+        changes.try_recv().unwrap();
         assert!(client.submit(operation.clone()));
-        state.lock().unwrap().connected = false;
+        changes
+            .try_recv()
+            .expect("submission publishes its pending state");
+        assert!(client.snapshot().pending);
+        state.publish(|snapshot| snapshot.connected = false);
         reject_queued(&state, &receiver);
+        changes
+            .try_recv()
+            .expect("disconnect and rejection wake the consumer");
         let snapshot = client.snapshot();
         assert_eq!(snapshot.rejected, Some(operation));
         assert!(!snapshot.pending);

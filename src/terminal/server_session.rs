@@ -1,13 +1,16 @@
 //! Desktop presentation and fenced input for an authenticated server Pane.
 mod accessibility;
+mod control;
 mod effects;
 use super::server_graphics as graphics;
 mod reading;
+mod schedule;
 use super::pointer_input::{PointerInput, WheelInput};
 use super::session::clipboard::ClipboardAuthority;
 use super::session::*;
 use super::{emulator::*, geometry::TerminalGeometry, key::*};
 use crate::local_server::{LocalServer, ServerError};
+pub(crate) use control::PaneControls;
 use effects::ClientEffects;
 use spaceterm_server::pane::{self, Lease, PaneSize, Reply, Request};
 use std::sync::{
@@ -53,6 +56,8 @@ pub(crate) struct DevelopmentPaneState {
     accessibility: Mutex<accessibility::RetainedSemantics>,
     accessibility_demand: AtomicBool,
     client_effects: Mutex<std::collections::VecDeque<ClientEffectRequest>>,
+    presentable: AtomicBool,
+    wake: schedule::Wake,
 }
 impl DevelopmentPaneState {
     fn new() -> Self {
@@ -76,6 +81,8 @@ impl DevelopmentPaneState {
             accessibility: Mutex::default(),
             accessibility_demand: AtomicBool::new(false),
             client_effects: Mutex::new(std::collections::VecDeque::new()),
+            presentable: AtomicBool::new(true),
+            wake: schedule::Wake::default(),
             effect_authority: {
                 let authority = ClipboardAuthority::default();
                 authority.route();
@@ -86,6 +93,30 @@ impl DevelopmentPaneState {
 
     pub(crate) fn status(&self) -> DevelopmentPaneStatus {
         *self.status.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// What the current connection answered about interactive terminal input.
+    ///
+    /// Only a Connected status carries an answer: attachment records the negotiated capability
+    /// before the status becomes Connected, and a focus barrier the server does not support
+    /// withdraws it while Connected. The status lock is held while the capability is read,
+    /// because an invalidation leaves Connected and clears the capability under that lock, so
+    /// an interrupted connection reads as Pending and never as a refusal.
+    pub(crate) fn interactive_input(&self) -> super::InteractiveInput {
+        let status = self.status.lock().unwrap_or_else(|e| e.into_inner());
+        if *status != DevelopmentPaneStatus::Connected {
+            return super::InteractiveInput::Pending;
+        }
+        let interactive = self
+            .interaction
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .interactive;
+        drop(status);
+        if interactive {
+            super::InteractiveInput::Accepted
+        } else {
+            super::InteractiveInput::Refused
+        }
     }
     pub(crate) fn connection_generation(&self) -> u64 {
         self.connected_epoch.load(Ordering::Acquire)
@@ -99,10 +130,12 @@ impl DevelopmentPaneState {
         ) {
             self.selected.store(true, Ordering::Release);
             self.retry.store(true, Ordering::Release);
+            self.wake.notify();
         }
     }
     pub(crate) fn retry(&self) {
         self.retry.store(true, Ordering::Release);
+        self.wake.notify();
     }
     pub(crate) fn start_restored(&self) {
         if matches!(
@@ -116,6 +149,7 @@ impl DevelopmentPaneState {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = None;
             self.start_restored.store(true, Ordering::Release);
+            self.wake.notify();
         }
     }
     pub(crate) fn directory_progress(&self) -> (bool, Option<&'static str>) {
@@ -153,6 +187,7 @@ impl DevelopmentPaneState {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = None;
             *self.repair.lock().unwrap_or_else(|e| e.into_inner()) = Some((target, replacement));
+            self.wake.notify();
         }
     }
     pub(crate) fn take_over(&self) {
@@ -161,6 +196,7 @@ impl DevelopmentPaneState {
             *status = DevelopmentPaneStatus::TakingOver;
             self.take_over.store(true, Ordering::Release);
             self.retry.store(true, Ordering::Release);
+            self.wake.notify();
         }
     }
     fn invalidate(&self) -> u64 {
@@ -189,6 +225,20 @@ impl DevelopmentPaneState {
         let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
         self.connected_epoch.store(epoch, Ordering::Release);
         epoch
+    }
+    /// Starts a connection epoch whose focus continues above every generation this client
+    /// sent for the Pane, including through presentations that preceded this one.
+    /// An exhausted sequence fails closed rather than reusing a generation.
+    fn attach(&self, presenter: &control::Presenter) -> Result<u64, ServerError> {
+        presenter
+            .with_floor(|floor| {
+                let next = floor.checked_add(1).ok_or(ServerError::Unsupported)?;
+                let epoch = self.invalidate();
+                let mut interaction = self.interaction.lock().unwrap_or_else(|e| e.into_inner());
+                interaction.focus_generation = interaction.focus_generation.max(next);
+                Ok(epoch)
+            })
+            .unwrap_or(Err(ServerError::NotRunning))
     }
     fn connection_failed(&self, error: ServerError, has_takeover: bool) -> bool {
         let retryable = matches!(
@@ -279,12 +329,14 @@ pub(crate) struct DevelopmentServerSessionFactory {
     local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
     pane_id: spaceterm_server::hierarchy::Id,
     attachment: Option<spaceterm_server::attachments::AttachmentPermit>,
+    control: Arc<control::PaneControl>,
     state: Arc<DevelopmentPaneState>,
 }
 impl DevelopmentServerSessionFactory {
     /// Presents one server Pane. Construction connects to nothing.
     pub(crate) fn for_pane(
         server: LocalServer,
+        controls: &PaneControls,
         local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
         pane_id: spaceterm_server::hierarchy::Id,
     ) -> (Self, Arc<DevelopmentPaneState>) {
@@ -299,6 +351,7 @@ impl DevelopmentServerSessionFactory {
                 local_files,
                 pane_id,
                 attachment: None,
+                control: controls.pane(pane_id),
                 state: Arc::clone(&state),
             },
             state,
@@ -485,6 +538,8 @@ impl Drop for PresentationHandle {
     fn drop(&mut self) {
         self.state.effect_authority.client_focus(None);
         self.alive.store(false, Ordering::Release);
+        // The worker retires this presentation now rather than at its next output check.
+        self.state.wake.notify();
     }
 }
 impl PresentationHandle {
@@ -588,6 +643,9 @@ fn submit_input(
     };
     let sent = sender.try_send(submitted);
     drop(interaction);
+    if sent.is_ok() {
+        state.wake.notify();
+    }
     if let Err(error) = sent {
         discard_input(
             state,
@@ -1044,12 +1102,14 @@ impl TerminalSessionFactory for DevelopmentServerSessionFactory {
             geometry: Mutex::new(geometry),
         };
         let factory = self.clone();
+        // Ownership follows creation order, however late each worker first runs.
+        let reservation = self.control.reserve();
         std::thread::Builder::new()
             .name("spaceterm-pane-connection".into())
             .spawn(move || {
                 present(
                     factory,
-                    alive,
+                    (reservation, alive),
                     receiver,
                     (events, accessibility_sender),
                     measured_size,
@@ -1078,6 +1138,23 @@ fn exchange(
     }
 }
 
+/// Sends in this worker's turn. A retired or dismissed presentation sends nothing.
+fn send(
+    presenter: &control::Presenter,
+    alive: &AtomicBool,
+    attachment: &Option<spaceterm_server::attachments::AttachmentPermit>,
+    connection: &mut pane::PaneConnection,
+    request: &Request,
+) -> Result<Reply, ServerError> {
+    presenter.send(request, |request| {
+        if alive.load(Ordering::Acquire) {
+            exchange(attachment, connection, request)
+        } else {
+            Err(ServerError::NotRunning)
+        }
+    })
+}
+
 fn expect_unchanged(reply: Reply) -> Result<(), ServerError> {
     if matches!(reply, Reply::Unchanged) {
         Ok(())
@@ -1088,7 +1165,7 @@ fn expect_unchanged(reply: Reply) -> Result<(), ServerError> {
 
 fn present(
     factory: DevelopmentServerSessionFactory,
-    alive: Arc<AtomicBool>,
+    (reservation, alive): (control::Reservation, Arc<AtomicBool>),
     input: mpsc::Receiver<SubmittedInput>,
     (events, semantics): (
         async_channel::Sender<TerminalSessionEvent>,
@@ -1103,8 +1180,10 @@ fn present(
         local_files,
         pane_id,
         attachment,
+        control: _,
         state,
     } = factory;
+    let presenter = reservation.activate(&alive);
     let mut expected_session: Option<Lease> = None;
     let mut expected_target: Option<pane::PaneTarget> = None;
     let mut generation = PresentationGeneration::default();
@@ -1128,7 +1207,7 @@ fn present(
                 style,
             };
             let mut unavailable = false;
-            let mut reply = match exchange(&attachment, &mut connection, &request) {
+            let mut reply = match send(&presenter, &alive, &attachment, &mut connection, &request) {
                 Err(ServerError::DirectoryUnavailable) => {
                     unavailable = true;
                     let passive = Request::SelectPane {
@@ -1137,7 +1216,7 @@ fn present(
                         size: grant_size,
                         style: None,
                     };
-                    exchange(&attachment, &mut connection, &passive)?
+                    send(&presenter, &alive, &attachment, &mut connection, &passive)?
                 }
                 other => other.map_err(|error| match error {
                     ServerError::Controlled => ServerError::Unsupported,
@@ -1225,7 +1304,7 @@ fn present(
                             ..
                         }
                     );
-                    reply = match exchange(&attachment, &mut connection, &action) {
+                    reply = match send(&presenter, &alive, &attachment, &mut connection, &action) {
                         Err(ServerError::DirectoryUnavailable) => {
                             unavailable = true;
                             state.directory_busy.store(false, Ordering::Release);
@@ -1243,11 +1322,16 @@ fn present(
                         result => result?,
                     };
                 } else {
-                    std::thread::sleep(Duration::from_millis(100));
+                    // Take Over, Start and selection wake this check early.
+                    state
+                        .wake
+                        .wait_until(std::time::Instant::now() + Duration::from_millis(100));
                     let size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     grant_size = size;
                     grant_appearance = None;
-                    reply = exchange(
+                    reply = send(
+                        &presenter,
+                        &alive,
                         &attachment,
                         &mut connection,
                         &Request::SelectPane {
@@ -1292,7 +1376,9 @@ fn present(
                     grant_size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     let update = appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     grant_appearance = Some(update.generation);
-                    reply = exchange(
+                    reply = send(
+                        &presenter,
+                        &alive,
                         &attachment,
                         &mut connection,
                         &Request::TakeOver {
@@ -1302,11 +1388,16 @@ fn present(
                         },
                     )?;
                 } else {
-                    std::thread::sleep(Duration::from_millis(100));
+                    // Take Over, Start and selection wake this check early.
+                    state
+                        .wake
+                        .wait_until(std::time::Instant::now() + Duration::from_millis(100));
                     let size = *size.lock().unwrap_or_else(|e| e.into_inner());
                     grant_size = size;
                     grant_appearance = None;
-                    reply = exchange(
+                    reply = send(
+                        &presenter,
+                        &alive,
                         &attachment,
                         &mut connection,
                         &Request::SelectPane {
@@ -1324,7 +1415,7 @@ fn present(
             expected_session = Some(lease);
             expected_target = Some(lease.into());
             // Authenticate and receive the authoritative screen before enabling input.
-            let epoch = state.invalidate();
+            let epoch = state.attach(&presenter)?;
             drain_input(&state, &input);
             let mut active_input = ActiveInput {
                 epoch,
@@ -1337,130 +1428,24 @@ fn present(
             let mut graphics = graphics::Graphics::default();
             let mut semantic = accessibility::Fetcher::new(lease);
             let mut latest_screen = None;
-            loop {
-                if !alive.load(Ordering::Acquire)
-                    || attachment.as_ref().is_some_and(|permit| !permit.active())
-                {
+            let changes = connection.supports_presentation_changes();
+            // Row changes apply only to this exact lease's own previous screen.
+            let mut decoder = pane::presentation::ScreenDecoder::default();
+            let mut cadence = schedule::Cadence::new(
+                std::time::Instant::now(),
+                state.presentable.load(Ordering::Acquire),
+            );
+            let attached = (|| loop {
+                if !alive.load(Ordering::Acquire) {
+                    return Ok(());
+                }
+                if attachment.as_ref().is_some_and(|permit| !permit.active()) {
                     return Ok(());
                 }
                 if state.epoch.load(Ordering::Acquire) != epoch {
                     return Err(ServerError::Protocol);
                 }
-                let reply = exchange(&attachment, &mut connection, &Request::Poll { lease })?;
-                if state.epoch.load(Ordering::Acquire) != epoch {
-                    return Err(ServerError::Protocol);
-                }
-                match reply {
-                    Reply::Screen(mut screen) => {
-                        semantic.note_revision(screen.accessibility_revision);
-                        let graphics_error = graphics
-                            .update(screen.graphics.take(), screen.alternate)
-                            .err();
-                        if let Some(error) = graphics_error {
-                            graphics.clear();
-                            graphics.failure(error);
-                        }
-                        graphics.recovered();
-                        generation = generation.next();
-                        let mapping = ScreenMapping {
-                            epoch,
-                            local: generation,
-                            wire: screen.generation,
-                            selection: screen
-                                .reading
-                                .as_ref()
-                                .map_or(0, |reading| reading.selection_revision),
-                            size: PaneSize {
-                                columns: screen.columns,
-                                rows: screen.rows.len() as u16,
-                                cell_width: screen
-                                    .cell_pixels
-                                    .map_or(active_size.cell_width, |p| p.0),
-                                cell_height: screen
-                                    .cell_pixels
-                                    .map_or(active_size.cell_height, |p| p.1),
-                            },
-                            mouse_tracking: screen.mouse_tracking,
-                            alternate: screen.alternate,
-                            alternate_scroll: screen.alternate_scroll,
-                        };
-                        let mut screen = decode_screen(
-                            *screen,
-                            generation,
-                            &appearance.lock().unwrap_or_else(|e| e.into_inner()),
-                            Some(&local_files),
-                        )?;
-                        Arc::make_mut(&mut screen).graphics = graphics.snapshot();
-                        if !ready {
-                            // Claims apply their measured controller facts once.
-                            // Reconcile changes made while attachment was in flight.
-                            let current_size = *size.lock().unwrap_or_else(|e| e.into_inner());
-                            let update =
-                                appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                            if current_size != grant_size {
-                                expect_unchanged(exchange(
-                                    &attachment,
-                                    &mut connection,
-                                    &Request::Resize {
-                                        lease,
-                                        size: current_size,
-                                    },
-                                )?)?;
-                                active_size = current_size;
-                            }
-                            if grant_appearance != Some(update.generation) {
-                                expect_unchanged(exchange(
-                                    &attachment,
-                                    &mut connection,
-                                    &Request::Style {
-                                        lease,
-                                        style: encode_style(&update),
-                                    },
-                                )?)?;
-                            }
-                            state
-                                .interaction
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .interactive = connection.supports_interactive_input();
-                            state
-                                .interaction
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .reading = connection.supports_reading();
-                            active_input.sync_focus(&state, &mut |request| {
-                                exchange(&attachment, &mut connection, request)
-                            })?;
-                            ready = true;
-                        }
-                        state.connected(epoch, mapping, paste_unconfirmed)?;
-                        reader.screen(&state, mapping, screen.selection_present);
-                        latest_screen = Some((Arc::clone(&screen), mapping));
-                        let _ = events.force_send(TerminalSessionEvent::Screen(screen));
-                        if let Some(model) = semantic.rebind(&state, generation) {
-                            let _ = semantics.force_send(model);
-                        }
-                        takeover = false;
-                        if paste_unconfirmed {
-                            paste_unconfirmed = false;
-                            let _ = events.force_send(TerminalSessionEvent::PasteUnconfirmed);
-                        }
-                    }
-                    Reply::Ended => {
-                        state.set(DevelopmentPaneStatus::Ended);
-                        let _ = events
-                            .force_send(TerminalSessionEvent::Exited(TerminalSessionExit::Success));
-                        return Ok(());
-                    }
-                    Reply::Unchanged => {}
-                    Reply::AccessibilityRevision { revision } => semantic.note_revision(revision),
-                    _ => return Err(ServerError::Protocol),
-                }
-                if ready {
-                    active_input.sync_focus(&state, &mut |request| {
-                        exchange(&attachment, &mut connection, request)
-                    })?;
-                }
+                // Queued input is sent before any output check.
                 for _ in 0..32 {
                     let Ok(submitted) = input.try_recv() else {
                         break;
@@ -1472,7 +1457,8 @@ fn present(
                         &state,
                         submitted,
                         &mut |request| {
-                            let reply = exchange(&attachment, &mut connection, request)?;
+                            let reply =
+                                send(&presenter, &alive, &attachment, &mut connection, request)?;
                             if let Request::Resize { size, .. } = request {
                                 active_size = *size;
                             }
@@ -1481,24 +1467,186 @@ fn present(
                         &mut paste_unconfirmed,
                     )?;
                 }
+                let now = std::time::Instant::now();
+                cadence.set_visible(state.presentable.load(Ordering::Acquire), now);
+                if changes && let Some(visible) = cadence.take_demand() {
+                    expect_unchanged(send(
+                        &presenter,
+                        &alive,
+                        &attachment,
+                        &mut connection,
+                        &Request::PresentationDemand { lease, visible },
+                    )?)?;
+                    // A changed demand restarts row changes from a complete screen.
+                    decoder = pane::presentation::ScreenDecoder::default();
+                }
+                let polled = cadence.poll_due(now);
+                if polled {
+                    let reply = if changes {
+                        let base = decoder.baseline();
+                        let reply = send(
+                            &presenter,
+                            &alive,
+                            &attachment,
+                            &mut connection,
+                            &Request::PollChanges { lease, base },
+                        )?;
+                        decoder.apply(reply)?
+                    } else {
+                        send(
+                            &presenter,
+                            &alive,
+                            &attachment,
+                            &mut connection,
+                            &Request::Poll { lease },
+                        )?
+                    };
+                    // A reply that completed after a successor claimed the Pane is not published.
+                    if !presenter.current() {
+                        return Err(ServerError::NotRunning);
+                    }
+                    if state.epoch.load(Ordering::Acquire) != epoch {
+                        return Err(ServerError::Protocol);
+                    }
+                    match reply {
+                        Reply::Screen(mut screen) => {
+                            semantic.note_revision(screen.accessibility_revision);
+                            let graphics_error = graphics
+                                .update(screen.graphics.take(), screen.alternate)
+                                .err();
+                            if let Some(error) = graphics_error {
+                                graphics.clear();
+                                graphics.failure(error);
+                            }
+                            graphics.recovered();
+                            generation = generation.next();
+                            let mapping = ScreenMapping {
+                                epoch,
+                                local: generation,
+                                wire: screen.generation,
+                                selection: screen
+                                    .reading
+                                    .as_ref()
+                                    .map_or(0, |reading| reading.selection_revision),
+                                size: PaneSize {
+                                    columns: screen.columns,
+                                    rows: screen.rows.len() as u16,
+                                    cell_width: screen
+                                        .cell_pixels
+                                        .map_or(active_size.cell_width, |p| p.0),
+                                    cell_height: screen
+                                        .cell_pixels
+                                        .map_or(active_size.cell_height, |p| p.1),
+                                },
+                                mouse_tracking: screen.mouse_tracking,
+                                alternate: screen.alternate,
+                                alternate_scroll: screen.alternate_scroll,
+                            };
+                            let mut screen = decode_screen(
+                                *screen,
+                                generation,
+                                &appearance.lock().unwrap_or_else(|e| e.into_inner()),
+                                Some(&local_files),
+                            )?;
+                            Arc::make_mut(&mut screen).graphics = graphics.snapshot();
+                            if !ready {
+                                // Claims apply their measured controller facts once.
+                                // Reconcile changes made while attachment was in flight.
+                                let current_size = *size.lock().unwrap_or_else(|e| e.into_inner());
+                                let update =
+                                    appearance.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                                if current_size != grant_size {
+                                    expect_unchanged(send(
+                                        &presenter,
+                                        &alive,
+                                        &attachment,
+                                        &mut connection,
+                                        &Request::Resize {
+                                            lease,
+                                            size: current_size,
+                                        },
+                                    )?)?;
+                                    active_size = current_size;
+                                }
+                                if grant_appearance != Some(update.generation) {
+                                    expect_unchanged(send(
+                                        &presenter,
+                                        &alive,
+                                        &attachment,
+                                        &mut connection,
+                                        &Request::Style {
+                                            lease,
+                                            style: encode_style(&update),
+                                        },
+                                    )?)?;
+                                }
+                                state
+                                    .interaction
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .interactive = connection.supports_interactive_input();
+                                state
+                                    .interaction
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .reading = connection.supports_reading();
+                                // Publish the authorized screen first. Input stays queued
+                                // until this worker's focus barrier is acknowledged.
+                                ready = true;
+                            }
+                            state.connected(epoch, mapping, paste_unconfirmed)?;
+                            reader.screen(&state, mapping, screen.selection_present);
+                            latest_screen = Some((Arc::clone(&screen), mapping));
+                            let _ = events.force_send(TerminalSessionEvent::Screen(screen));
+                            if let Some(model) = semantic.rebind(&state, generation) {
+                                let _ = semantics.force_send(model);
+                            }
+                            takeover = false;
+                            if paste_unconfirmed {
+                                paste_unconfirmed = false;
+                                let _ = events.force_send(TerminalSessionEvent::PasteUnconfirmed);
+                            }
+                        }
+                        Reply::Ended => {
+                            state.set(DevelopmentPaneStatus::Ended);
+                            let _ = events.force_send(TerminalSessionEvent::Exited(
+                                TerminalSessionExit::Success,
+                            ));
+                            return Ok(());
+                        }
+                        Reply::Unchanged => {}
+                        Reply::AccessibilityRevision { revision } => {
+                            semantic.note_revision(revision)
+                        }
+                        _ => return Err(ServerError::Protocol),
+                    }
+                }
+                if ready {
+                    active_input.sync_focus(&state, &mut |request| {
+                        send(&presenter, &alive, &attachment, &mut connection, request)
+                    })?;
+                }
+                let mut next = reading::Next::Idle;
                 if ready && connection.supports_reading() {
-                    reader.poll(&state, lease, &mut |request| {
-                        exchange(&attachment, &mut connection, request)
+                    next = reader.poll(&state, lease, &mut |request| {
+                        send(&presenter, &alive, &attachment, &mut connection, request)
                     })?;
                     let mut reading = state.reading.lock().unwrap_or_else(|e| e.into_inner());
                     reading.publish_ready(&events);
                 }
-                if ready
+                if polled
+                    && ready
                     && connection.supports_native_effects()
                     && let Some((generation, _)) = active_input.focus_sent
                 {
                     effects.poll(&state, lease, generation, &events, &mut |request| {
-                        exchange(&attachment, &mut connection, request)
+                        send(&presenter, &alive, &attachment, &mut connection, request)
                     })?;
                 }
-                if ready && connection.supports_graphics() {
+                // A hidden Pane transfers no images.
+                if polled && cadence.visible() && ready && connection.supports_graphics() {
                     let result = graphics.poll(lease, &mut |request| {
-                        exchange(&attachment, &mut connection, request)
+                        send(&presenter, &alive, &attachment, &mut connection, request)
                     })?;
                     if state.epoch.load(Ordering::Acquire) != epoch {
                         return Err(ServerError::Protocol);
@@ -1524,9 +1672,14 @@ fn present(
                         }
                     }
                 }
-                if ready && connection.supports_accessibility() {
+                // Semantic transfer follows its own explicit demand, even while hidden, and a
+                // partial document continues one chunk per turn.
+                if (polled || semantic.can_continue())
+                    && ready
+                    && connection.supports_accessibility()
+                {
                     let model = semantic.poll(&state, generation, &mut |request| {
-                        exchange(&attachment, &mut connection, request)
+                        send(&presenter, &alive, &attachment, &mut connection, request)
                     })?;
                     if state.epoch.load(Ordering::Acquire) != epoch {
                         return Err(ServerError::Protocol);
@@ -1535,11 +1688,30 @@ fn present(
                         let _ = semantics.force_send(model);
                     }
                 }
-                std::thread::sleep(Duration::from_millis(30));
+                if semantic.can_continue() {
+                    next = next.max(reading::Next::Continue);
+                }
+                let now = std::time::Instant::now();
+                match next {
+                    reading::Next::Idle => state.wake.wait_until(cadence.deadline()),
+                    reading::Next::Recheck => state.wake.wait_until(cadence.recheck_deadline(now)),
+                    reading::Next::Continue => {}
+                    reading::Next::Refresh => cadence.poll_now(now),
+                }
+            })();
+            if alive.load(Ordering::Acquire) {
+                return attached;
             }
+            // Dismissal, even mid-exchange, unfocuses the Pane in order; its control remains.
+            presenter.retire(lease, changes, |request| {
+                exchange(&attachment, &mut connection, request)
+            });
+            Ok(())
         })();
         match connected {
             Ok(()) => return,
+            // A successor owns this Pane's state now; leave it untouched.
+            Err(_) if !alive.load(Ordering::Acquire) || !presenter.current() => return,
             Err(error) => {
                 if error == ServerError::SessionUnavailable {
                     state.set(DevelopmentPaneStatus::Ended);
@@ -1557,13 +1729,18 @@ fn present(
                     clear_presentation(&events, &mut generation, &appearance);
                 }
                 let retryable = state.connection_failed(error, takeover);
-                let mut ticks = 0;
+                // Retry waits for its backoff, or wakes for Retry, Take Over or dismissal.
+                let backoff = std::time::Instant::now() + Duration::from_secs(1);
                 while alive.load(Ordering::Acquire) && !state.retry.swap(false, Ordering::AcqRel) {
-                    if retryable && ticks >= 20 {
+                    let now = std::time::Instant::now();
+                    if retryable && now >= backoff {
                         break;
                     }
-                    ticks += 1;
-                    std::thread::sleep(Duration::from_millis(50));
+                    state.wake.wait_until(if retryable {
+                        backoff
+                    } else {
+                        now + Duration::from_secs(1)
+                    });
                 }
             }
         }
@@ -1632,15 +1809,27 @@ impl TerminalSessionHandle for PresentationHandle {
         Some(super::AccessibilityDemandSender::server(Arc::new(
             move || {
                 state.accessibility_demand.store(true, Ordering::Release);
+                state.wake.notify();
             },
         )))
     }
     fn set_presentable(&self, presentable: bool) {
-        // A hidden Pane ends server semantic work; visual Screens continue.
+        // A hidden Pane keeps its control and Session; only its visual demand ends.
         if !presentable {
             self.state
                 .accessibility_demand
                 .store(false, Ordering::Release);
+        }
+        if self.state.presentable.swap(presentable, Ordering::AcqRel) != presentable {
+            if !presentable {
+                // A hidden view continues no drag; the server cancels its own on hidden demand.
+                self.state
+                    .reading
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .abandon_gesture();
+            }
+            self.state.wake.notify();
         }
     }
     fn reading_available(&self) -> bool {
@@ -1737,15 +1926,11 @@ impl TerminalSessionHandle for PresentationHandle {
                 });
         }
         interaction.focus(target);
+        drop(interaction);
+        self.state.wake.notify();
     }
-    fn interactive_input_available(&self) -> bool {
-        self.state.status() == DevelopmentPaneStatus::Connected
-            && self
-                .state
-                .interaction
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .interactive
+    fn interactive_input(&self) -> super::InteractiveInput {
+        self.state.interactive_input()
     }
     fn input_generation(&self) -> u64 {
         self.state.epoch.load(Ordering::Acquire)
@@ -1773,6 +1958,8 @@ impl TerminalSessionHandle for PresentationHandle {
             self.state.effect_authority.client_focus(Some(false));
             interaction.focus(pane::FocusTarget::Unfocused);
         }
+        drop(interaction);
+        self.state.wake.notify();
     }
     fn clear_screen_and_scrollback(&self) {}
     fn pointer(&self, input: PointerInput) {
@@ -1877,12 +2064,16 @@ impl TerminalSessionHandle for PresentationHandle {
             shift_selection: input.shift_selection
                 == ShiftSelectionPolicy::OverrideApplicationMouse,
         };
-        if !mapping.mouse_tracking && !(mapping.alternate && mapping.alternate_scroll)
-            || mapping.mouse_tracking && wheel.shift_selection && input.modifiers.shift
-        {
-            self.read(pane::reading::Operation::Wheel(wheel));
-        } else {
-            self.send(Input::Wheel(mapping.epoch, wheel));
+        let scrollback = !mapping.mouse_tracking
+            && !(mapping.alternate && mapping.alternate_scroll)
+            || mapping.mouse_tracking && wheel.shift_selection && input.modifiers.shift;
+        // A large native delta becomes several bounded operations, never a refused one.
+        for wheel in reading::split_wheel(wheel) {
+            if scrollback {
+                self.read(pane::reading::Operation::Wheel(wheel));
+            } else {
+                self.send(Input::Wheel(mapping.epoch, wheel));
+            }
         }
     }
     fn scroll_to(&self, offset: u64, generation: PresentationGeneration) {
@@ -2492,6 +2683,15 @@ mod tests {
     }
     impl Adapter {
         pub(super) fn new() -> Self {
+            Self::with_epoch(|state| Ok(state.invalidate())).unwrap()
+        }
+        /// A presentation attached through the client's control record for its Pane.
+        fn attached(presenter: &control::Presenter) -> Result<Self, ServerError> {
+            Self::with_epoch(|state| state.attach(presenter))
+        }
+        fn with_epoch(
+            attach: impl FnOnce(&DevelopmentPaneState) -> Result<u64, ServerError>,
+        ) -> Result<Self, ServerError> {
             use super::super::geometry::{BackingScale, CellGridSize, LogicalCellSize};
             let geometry = TerminalGeometry::from_grid(
                 CellGridSize::new(20, 6),
@@ -2499,7 +2699,7 @@ mod tests {
                 BackingScale::ONE,
             );
             let state = Arc::new(DevelopmentPaneState::new());
-            let epoch = state.invalidate();
+            let epoch = attach(&state)?;
             state.set(DevelopmentPaneStatus::Connected);
             state.interaction.lock().unwrap().interactive = true;
             state.interaction.lock().unwrap().reading = true;
@@ -2513,7 +2713,7 @@ mod tests {
                 geometry: Mutex::new(geometry),
             };
             handle.interactive_focus(true, true);
-            Self {
+            Ok(Self {
                 handle,
                 input,
                 active: ActiveInput {
@@ -2527,7 +2727,7 @@ mod tests {
                     focus_sent: None,
                 },
                 unconfirmed: false,
-            }
+            })
         }
         fn drain(
             &mut self,
@@ -2596,6 +2796,182 @@ mod tests {
             };
             confirmation
         }
+    }
+
+    fn presenter_for(control: &Arc<control::PaneControl>) -> control::Presenter {
+        control.reserve().activate(&AtomicBool::new(true))
+    }
+
+    /// The server's focus rule for one Pane on one connection, stated independently.
+    #[derive(Default)]
+    struct FocusServer {
+        generation: u64,
+        target: Option<pane::FocusTarget>,
+        keys: Vec<u64>,
+        visible: Option<bool>,
+    }
+    impl FocusServer {
+        fn handle(&mut self, request: &Request) -> Result<Reply, ServerError> {
+            match request {
+                Request::Focus {
+                    generation, target, ..
+                } => {
+                    if *generation == self.generation && Some(*target) == self.target {
+                        return Ok(Reply::Unchanged);
+                    }
+                    if *generation <= self.generation {
+                        return Err(ServerError::StaleControl);
+                    }
+                    self.generation = *generation;
+                    self.target = Some(*target);
+                    Ok(Reply::Unchanged)
+                }
+                Request::Input {
+                    generation,
+                    input: pane::InteractiveInput::Key(_),
+                    ..
+                } => {
+                    if *generation != self.generation
+                        || self.target != Some(pane::FocusTarget::Terminal)
+                    {
+                        return Err(ServerError::StaleControl);
+                    }
+                    self.keys.push(*generation);
+                    Ok(Reply::Unchanged)
+                }
+                Request::PresentationDemand { visible, .. } => {
+                    self.visible = Some(*visible);
+                    Ok(Reply::Unchanged)
+                }
+                _ => Ok(Reply::Unchanged),
+            }
+        }
+    }
+
+    #[test]
+    fn a_reopened_presentation_is_interactive_at_once_after_many_focus_changes() {
+        let controls = PaneControls::default();
+        let mut server = FocusServer::default();
+        for changes in [0, 1, 15, 100] {
+            let presenter = presenter_for(&controls.pane([7; 32]));
+            let mut old = Adapter::attached(&presenter).unwrap();
+            for change in 0..changes {
+                old.handle.interactive_focus(change % 2 == 1, true);
+                old.active
+                    .sync_focus(&old.handle.state, &mut |request| {
+                        presenter.send(request, |request| server.handle(request))
+                    })
+                    .unwrap();
+            }
+            // Command-Q closes the window; the same client reopens a new one.
+            presenter.retire(old.active.lease, true, |request| server.handle(request));
+            // Closing every window leaves the Pane unfocused and without visual demand.
+            assert_eq!(server.target, Some(pane::FocusTarget::Unfocused));
+            assert_eq!(server.visible, Some(false));
+            let successor = presenter_for(&controls.pane([7; 32]));
+            let mut new = Adapter::attached(&successor).unwrap();
+            new.handle.key(KeyInput::text_input("x"));
+            new.drain(|request| successor.send(request, |request| server.handle(request)))
+                .unwrap_or_else(|error| {
+                    panic!("after {changes} focus changes the first focus was refused: {error:?}")
+                });
+            assert_eq!(server.target, Some(pane::FocusTarget::Terminal));
+            assert_eq!(server.keys.last(), Some(&server.generation));
+        }
+    }
+
+    #[test]
+    fn a_dismissed_presentations_paused_input_cannot_follow_its_successors_focus() {
+        let controls = PaneControls::default();
+        let mut server = FocusServer::default();
+        let presenter = presenter_for(&controls.pane([7; 32]));
+        let mut old = Adapter::attached(&presenter).unwrap();
+        old.handle.key(KeyInput::text_input("old"));
+        let successor = presenter_for(&controls.pane([7; 32]));
+        let mut new = Adapter::attached(&successor).unwrap();
+        new.drain(|request| successor.send(request, |request| server.handle(request)))
+            .unwrap();
+        let acknowledged = (server.generation, server.target);
+        // The predecessor resumes its paused admission after the successor's focus barrier.
+        let mut reached = 0;
+        let _ = old.drain(|request| {
+            presenter.send(request, |request| {
+                reached += 1;
+                server.handle(request)
+            })
+        });
+        presenter.retire(old.active.lease, true, |request| {
+            reached += 1;
+            server.handle(request)
+        });
+        assert_eq!(reached, 0, "a retired presenter reaches no server");
+        assert!(server.keys.is_empty());
+        assert_eq!((server.generation, server.target), acknowledged);
+    }
+
+    #[test]
+    fn a_dismissed_window_whose_worker_starts_late_cannot_revoke_its_reopened_successor() {
+        let controls = PaneControls::default();
+        let (old, _) = DevelopmentServerSessionFactory::for_pane(
+            LocalServer::for_identity("spaceterm-development").unwrap(),
+            &controls,
+            crate::platform::runtime_local_filesystem(),
+            [7; 32],
+        );
+        // The old window was created first and closed before its worker ran.
+        let reservation = old.control.reserve();
+        let successor = presenter_for(&controls.pane([7; 32]));
+        let focus = Request::Focus {
+            lease: Adapter::new().active.lease,
+            generation: 10,
+            target: pane::FocusTarget::Terminal,
+        };
+        successor.send(&focus, |_| Ok(Reply::Unchanged)).unwrap();
+        let (_, input) = mpsc::sync_channel(1);
+        let (events, _output) = async_channel::bounded(2);
+        let (semantics, _semantics) = async_channel::bounded(1);
+        let (effects, _clipboard) = ClientEffects::new();
+        // The dismissed worker's production entry point. Its view is gone, so it connects to
+        // nothing.
+        present(
+            old,
+            (reservation, Arc::new(AtomicBool::new(false))),
+            input,
+            (events, semantics),
+            Arc::new(Mutex::new(PaneSize {
+                columns: 20,
+                rows: 6,
+                cell_width: 10,
+                cell_height: 20,
+            })),
+            Arc::new(Mutex::new(TerminalAppearanceUpdate::builtin().unwrap())),
+            effects,
+        );
+        assert!(
+            successor.send(&focus, |_| Ok(Reply::Unchanged)).is_ok(),
+            "the reopened window keeps its Pane"
+        );
+    }
+
+    #[test]
+    fn an_exhausted_focus_sequence_fails_closed_instead_of_reusing_a_generation() {
+        let controls = PaneControls::default();
+        let presenter = presenter_for(&controls.pane([7; 32]));
+        presenter
+            .send(
+                &Request::Focus {
+                    lease: Adapter::new().active.lease,
+                    generation: u64::MAX,
+                    target: pane::FocusTarget::Unfocused,
+                },
+                |_| Ok(Reply::Unchanged),
+            )
+            .unwrap();
+        let successor = presenter_for(&controls.pane([7; 32]));
+        assert!(matches!(
+            Adapter::attached(&successor),
+            Err(ServerError::Unsupported)
+        ));
     }
 
     #[test]
@@ -3420,6 +3796,32 @@ mod tests {
         assert_eq!(
             state.status(),
             DevelopmentPaneStatus::TakeoverFailed(ServerError::SessionUnavailable)
+        );
+    }
+
+    #[test]
+    fn only_a_connected_answer_reads_as_refused_input() {
+        use crate::terminal::InteractiveInput;
+        let state = DevelopmentPaneState::new();
+        assert_eq!(
+            state.interactive_input(),
+            InteractiveInput::Pending,
+            "a Pane still attaching has no answer"
+        );
+        state.interaction.lock().unwrap().interactive = true;
+        state.set(DevelopmentPaneStatus::Connected);
+        assert_eq!(state.interactive_input(), InteractiveInput::Accepted);
+        state.invalidate();
+        assert_eq!(
+            state.interactive_input(),
+            InteractiveInput::Pending,
+            "an interrupted connection is not a refusal"
+        );
+        state.set(DevelopmentPaneStatus::Connected);
+        assert_eq!(
+            state.interactive_input(),
+            InteractiveInput::Refused,
+            "a connection that negotiated no input refuses it"
         );
     }
 

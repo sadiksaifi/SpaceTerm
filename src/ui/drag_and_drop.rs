@@ -183,10 +183,11 @@ impl ItemMotion {
     }
 
     /// Sizes `slot`, the element that holds the item's place in a strip along `axis`, while the
-    /// item grows in, and opens the closing gaps beside it. The item shows whole from the start
-    /// and overlaps the items making room for it. `measure` receives the item's natural size
-    /// while it grows, which needs `slot`'s only child to be the item. Both gaps stay inside the
-    /// slot, so a scrolling strip counts them and closes them without jumping.
+    /// item grows in, and opens the closing gaps beside it. The item keeps its natural size and
+    /// the slot uncovers it as the items making room for it move aside. Nothing of it draws
+    /// outside its slot, so its label never crosses a neighbor's. `measure` receives the item's
+    /// natural size while it grows, which needs `slot`'s only child to be the item. Both gaps
+    /// stay inside the slot, so a scrolling strip counts them and closes them without jumping.
     pub(crate) fn frame_slot(
         self,
         axis: Axis,
@@ -205,8 +206,9 @@ impl ItemMotion {
             Axis::Horizontal => slot.w(extent + gaps),
             Axis::Vertical => slot.h(extent + gaps),
         };
-        // An item the strip holds at its visible end shows whole by reaching back over the items
-        // making room for it, instead of past that end.
+        let slot = slot.overflow_hidden();
+        // An item the strip holds at its visible end stands where it settles, uncovered as the
+        // items before it make room, instead of past that end.
         let slot = match (self.grows_from_end, axis) {
             (false, _) => slot,
             (true, Axis::Horizontal) => slot.flex().flex_row().justify_end(),

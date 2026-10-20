@@ -5297,9 +5297,17 @@ impl Render for TerminalPane {
             .when(active_hovered_link.is_some(), |root| root.cursor_pointer())
             .key_context(key_context)
             .track_focus(&self.focus_handle);
+        // Only the connection's answer makes typing unavailable. A Pane still connecting, or
+        // reconnecting after an interruption, has no answer and claims no incompatibility.
         let typing_unavailable = self.server_backed()
             && self.terminal_session_available()
-            && !self.interactive_input_available();
+            && self
+                .terminal_session
+                .session
+                .as_ref()
+                .is_some_and(|session| {
+                    session.interactive_input() == crate::terminal::InteractiveInput::Refused
+                });
         let status_visible = status.is_some() && paste_confirmation.is_none();
         let mut typing_notice = typing_unavailable.then(|| {
                 super::server_pane::render_notice(

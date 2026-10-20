@@ -181,7 +181,7 @@ pub(crate) struct TestTerminalSessionRecords {
         Rc<RefCell<BTreeMap<usize, crate::terminal::permission_request::PermissionRequest>>>,
     accessibility_senders:
         Rc<RefCell<BTreeMap<usize, async_channel::Sender<Arc<TerminalAccessibilityModel>>>>>,
-    interactive_availability: Rc<RefCell<BTreeMap<usize, bool>>>,
+    interactive_availability: Rc<RefCell<BTreeMap<usize, crate::terminal::InteractiveInput>>>,
     input_generations: Rc<RefCell<BTreeMap<usize, u64>>>,
     unconfirmed_pastes: Rc<RefCell<BTreeMap<usize, bool>>>,
     dropped_session_ids: Rc<RefCell<Vec<usize>>>,
@@ -203,10 +203,26 @@ impl TestTerminalSessionRecords {
             .or_default() += 1;
     }
 
+    /// The connection answers that it accepts, or refuses, interactive terminal input.
     pub(crate) fn set_interactive_input_available(&self, session_id: usize, available: bool) {
+        self.set_interactive_input(
+            session_id,
+            if available {
+                crate::terminal::InteractiveInput::Accepted
+            } else {
+                crate::terminal::InteractiveInput::Refused
+            },
+        );
+    }
+
+    pub(crate) fn set_interactive_input(
+        &self,
+        session_id: usize,
+        input: crate::terminal::InteractiveInput,
+    ) {
         self.interactive_availability
             .borrow_mut()
-            .insert(session_id, available);
+            .insert(session_id, input);
     }
 
     pub(crate) fn retain_permission_request(
@@ -363,7 +379,7 @@ pub(crate) struct TestTerminalSessionFactory {
     pending_paste_resolution: Option<async_channel::Receiver<Result<PasteResolution, String>>>,
     server_backed: bool,
     client_files: Option<crate::platform::local_filesystem::LocalFilesystemAuthority>,
-    interactive_input_available: bool,
+    interactive_input: crate::terminal::InteractiveInput,
     reading_available: bool,
 }
 
@@ -382,7 +398,7 @@ impl TestTerminalSessionFactory {
             pending_paste_resolution: None,
             server_backed: false,
             client_files: None,
-            interactive_input_available: true,
+            interactive_input: crate::terminal::InteractiveInput::Accepted,
             reading_available: true,
         }
     }
@@ -413,8 +429,20 @@ impl TestTerminalSessionFactory {
         self
     }
 
-    pub(crate) fn with_interactive_input_available(mut self, available: bool) -> Self {
-        self.interactive_input_available = available;
+    /// Starts Terminal Sessions whose connection accepts, or refuses, interactive input.
+    pub(crate) fn with_interactive_input_available(self, available: bool) -> Self {
+        self.with_interactive_input(if available {
+            crate::terminal::InteractiveInput::Accepted
+        } else {
+            crate::terminal::InteractiveInput::Refused
+        })
+    }
+
+    pub(crate) fn with_interactive_input(
+        mut self,
+        input: crate::terminal::InteractiveInput,
+    ) -> Self {
+        self.interactive_input = input;
         self
     }
 
@@ -523,7 +551,7 @@ impl TerminalSessionFactory for TestTerminalSessionFactory {
             .insert(session_id, selection_receiver);
         let (_, clipboard) = async_channel::bounded(1);
         self.records
-            .set_interactive_input_available(session_id, self.interactive_input_available);
+            .set_interactive_input(session_id, self.interactive_input);
         Ok(StartedTerminalSession {
             clipboard,
             handle: Box::new(TestTerminalSessionHandle {
@@ -614,13 +642,13 @@ impl TerminalSessionHandle for TestTerminalSessionHandle {
             .unwrap_or(0)
     }
 
-    fn interactive_input_available(&self) -> bool {
+    fn interactive_input(&self) -> crate::terminal::InteractiveInput {
         self.records
             .interactive_availability
             .borrow()
             .get(&self.session_id)
             .copied()
-            .unwrap_or(true)
+            .unwrap_or(crate::terminal::InteractiveInput::Accepted)
     }
 
     fn permission_request(&self) -> Option<crate::terminal::permission_request::PermissionRequest> {

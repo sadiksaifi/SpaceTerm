@@ -1,4 +1,5 @@
 //! Explicit account service installation and lifecycle. Discovery never starts a service.
+mod command;
 pub mod control;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -20,10 +21,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
 use std::{
     ffi::OsString,
     io::{Read, Write},
-    process::{Command, Stdio},
+    process::Command,
 };
 
 /// The OS authorization surface selected by an explicit local action.
@@ -96,6 +99,10 @@ trait Supervisor: Send + Sync {
     fn disable(&self) -> Result<(), ServerError>;
     fn uninstall(&self, runtime: &Path) -> Result<(), ServerError>;
     fn running(&self) -> Result<bool, ServerError>;
+    fn observe(&self, runtime: &Path, removing: bool) -> Result<bool, ServerError> {
+        self.check(runtime, removing)?;
+        self.running()
+    }
     fn enable_linger(&self, _authorization: LingerAuthorization) -> Result<(), ServerError> {
         Err(ServerError::Unsupported)
     }
@@ -295,8 +302,9 @@ impl Service {
                     return Ok(None);
                 }
                 self.start_locked(&data, &mut state, false)?;
+                return self.snapshot(&state).map(Some);
             }
-            return self.snapshot(&state).map(Some);
+            return Ok(Some(status));
         }
         // Existing but incompatible identity is never first setup. Leave its exact bytes intact.
         match data.read() {
@@ -458,11 +466,12 @@ impl Service {
         if state.removing {
             return Err(ServerError::CleanupUnresolved);
         }
-        if state.installed {
+        let running = if state.installed {
             self.supervisor
-                .check(&self.runtime(state), state.removing)?;
-        }
-        let running = self.supervisor.running()?;
+                .observe(&self.runtime(state), state.removing)?
+        } else {
+            self.supervisor.running()?
+        };
         if running && (!state.installed || state.stopped) {
             return Err(ServerError::CleanupUnresolved);
         }
@@ -529,6 +538,30 @@ pub(crate) fn check_start(paths: &Paths) -> Result<(), ServerError> {
         return Err(ServerError::Stopped);
     }
     Ok(())
+}
+
+/// A refusal observed during Restart is provisional until its service operation completes.
+/// Runtime startup uses check_start directly: waiting here from the service itself would
+/// deadlock the controller that is waiting for its endpoint to become ready.
+#[cfg(feature = "client")]
+pub(crate) fn check_admission(paths: &Paths) -> Result<(), ServerError> {
+    match check_start(paths) {
+        Err(ServerError::Stopped) => {}
+        result => return result,
+    }
+    let data = Directory::open(&paths.data, false)?;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let _operation = loop {
+        if let Some(lock) = data.try_lock("service.lock")? {
+            break lock;
+        }
+        if Instant::now() >= deadline {
+            return Err(ServerError::ServiceUnavailable);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    data.verify_path(&paths.data)?;
+    check_start(paths)
 }
 
 pub(crate) fn check_runtime(paths: &Paths, supervised: bool) -> Result<(), ServerError> {
@@ -710,40 +743,7 @@ fn command(program: &str, args: &[OsString]) -> Result<Vec<u8>, ServerError> {
     execute(&mut prepared)
 }
 fn execute(prepared: &mut Command) -> Result<Vec<u8>, ServerError> {
-    let mut child = prepared
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| ServerError::ServiceUnavailable)?;
-    let mut output = child.stdout.take().ok_or(ServerError::ServiceUnavailable)?;
-    let reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = output.by_ref().take(65536).read_to_end(&mut bytes);
-        let _ = std::io::copy(&mut output, &mut std::io::sink());
-        bytes
-    });
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let result = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                break if status.success() {
-                    Ok(())
-                } else {
-                    Err(ServerError::ServiceUnavailable)
-                };
-            }
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break Err(ServerError::ServiceUnavailable);
-            }
-        }
-    };
-    let bytes = reader.join().map_err(|_| ServerError::ServiceUnavailable)?;
-    result?;
-    Ok(bytes)
+    command::execute(prepared, Duration::from_secs(20))
 }
 
 // An authenticated explicit protocol Shutdown carries Stop intent too. Service-manager signals
@@ -766,12 +766,16 @@ mod tests {
         stop_data: Option<PathBuf>,
         running: std::sync::Arc<std::sync::atomic::AtomicBool>,
         allow_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        checks: std::sync::atomic::AtomicUsize,
+        running_checks: std::sync::atomic::AtomicUsize,
     }
     impl Supervisor for TestSupervisor {
         fn startup(&self) -> ServiceStartup {
             ServiceStartup::AtLogin
         }
         fn check(&self, _: &Path, _: bool) -> Result<(), ServerError> {
+            self.checks
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if self.stop_data.is_some() {
                 Ok(())
             } else {
@@ -807,6 +811,8 @@ mod tests {
             panic!("unexpected OS call")
         }
         fn running(&self) -> Result<bool, ServerError> {
+            self.running_checks
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if self.stop_data.is_some() {
                 Ok(self.running.load(std::sync::atomic::Ordering::Relaxed))
             } else {
@@ -849,6 +855,35 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+    #[cfg(feature = "client")]
+    #[test]
+    fn warm_launch_reuses_its_validated_service_observation() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let fixture = Fixture::new();
+        let supervisor = Arc::new(TestSupervisor {
+            stop_data: Some(fixture.paths.data.clone()),
+            running: Arc::new(AtomicBool::new(true)),
+            ..Default::default()
+        });
+        let service = Service::new(
+            fixture.paths.clone(),
+            fixture.paths.identity.clone(),
+            supervisor.clone(),
+        );
+        let status = service
+            .launch(
+                || panic!("warm launch must preserve the approved runtime"),
+                || false,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(status.running && status.installed && !status.stopped);
+        assert_eq!(supervisor.checks.load(Ordering::Relaxed), 1);
+        assert_eq!(supervisor.running_checks.load(Ordering::Relaxed), 1);
     }
     #[test]
     fn reinstall_discovery_does_not_offer_an_unapproved_staged_build() {
@@ -1024,6 +1059,7 @@ mod tests {
                 stop_data: Some(fixture.paths.data.clone()),
                 running: Arc::new(AtomicBool::new(true)),
                 allow_stop: allow_stop.clone(),
+                ..Default::default()
             }),
         ));
         let confirmation = control.prepare(Action::Stop).unwrap();
@@ -1103,6 +1139,19 @@ mod tests {
             fn request(&mut self, _: [u8; 32], _: [u8; 32], request: pane::Request) -> pane::Reply {
                 match request {
                     pane::Request::Shutdown => pane::Reply::Closed,
+                    pane::Request::Capabilities => pane::Reply::Capabilities {
+                        development_pane: true,
+                        pane_takeover: false,
+                        interactive_input: false,
+                        native_effects: false,
+                        reading: false,
+                        graphics: false,
+                        accessibility: false,
+                        directory_recovery: false,
+                        worktree_writes: false,
+                        workspace_policy: true,
+                        presentation_changes: false,
+                    },
                     _ => pane::Reply::Refused(pane::Refusal::Unsupported),
                 }
             }
@@ -1114,6 +1163,10 @@ mod tests {
 
         // Substitute the native supervisor only. Storage, verification, startup policy and
         // account-local admission all run their real implementations against private fixtures.
+        struct DisableGate {
+            entered: std::sync::mpsc::SyncSender<()>,
+            proceed: std::sync::mpsc::Receiver<()>,
+        }
         struct AccountSupervisor {
             paths: Paths,
             registered: Mutex<Option<PathBuf>>,
@@ -1123,6 +1176,8 @@ mod tests {
             installs: AtomicUsize,
             starts: AtomicUsize,
             observed_running: AtomicBool,
+            disable_gate: Mutex<Option<DisableGate>>,
+            disable_fails: AtomicBool,
         }
         impl AccountSupervisor {
             fn new(paths: Paths) -> Arc<Self> {
@@ -1135,6 +1190,8 @@ mod tests {
                     installs: AtomicUsize::new(0),
                     starts: AtomicUsize::new(0),
                     observed_running: AtomicBool::new(false),
+                    disable_gate: Mutex::new(None),
+                    disable_fails: AtomicBool::new(false),
                 })
             }
             fn service(self: &Arc<Self>) -> Service {
@@ -1215,6 +1272,13 @@ mod tests {
                 Ok(())
             }
             fn disable(&self) -> Result<(), ServerError> {
+                if let Some(gate) = self.disable_gate.lock().unwrap().take() {
+                    gate.entered.send(()).unwrap();
+                    gate.proceed.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+                if self.disable_fails.load(Ordering::Relaxed) {
+                    return Err(ServerError::ServiceUnavailable);
+                }
                 self.close_host()
             }
             fn uninstall(&self, _: &Path) -> Result<(), ServerError> {
@@ -1334,6 +1398,187 @@ mod tests {
             assert_eq!(supervisor.starts.load(Ordering::Relaxed), 0);
             assert_eq!(supervisor.installs.load(Ordering::Relaxed), 0);
             assert_eq!(supervisor.authorizations.load(Ordering::Relaxed), 0);
+        }
+
+        #[test]
+        fn refresh_after_launch_and_attachment_wait_for_restart_to_finish() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let service = supervisor.service();
+            runtime::test_support::with_artifact(
+                &fixture.root.join("artifact"),
+                &fixture.paths.identity,
+                |archive, signature| {
+                    let server = ready(
+                        LocalStartup::with_service(service.clone())
+                            .unwrap()
+                            .run(|| provision(&service, archive, signature), || false)
+                            .unwrap(),
+                    );
+                    // This is the boundary after LocalStartup's launch operation releases its lock.
+                    assert!(
+                        service
+                            .launch(no_provision, || false)
+                            .unwrap()
+                            .unwrap()
+                            .running
+                    );
+                    let (at_disable, disable_entered) = std::sync::mpsc::sync_channel(1);
+                    let (resume_disable, proceed_disable) = std::sync::mpsc::sync_channel(1);
+                    *supervisor.disable_gate.lock().unwrap() = Some(DisableGate {
+                        entered: at_disable,
+                        proceed: proceed_disable,
+                    });
+                    let observe = std::thread::spawn(move || {
+                        disable_entered
+                            .recv_timeout(Duration::from_secs(5))
+                            .unwrap();
+                        let refresh_server = server.clone();
+                        let (refreshed, refresh_result) = std::sync::mpsc::sync_channel(1);
+                        let refresh = std::thread::spawn(move || {
+                            refreshed.send(refresh_server.refresh()).unwrap();
+                        });
+                        let (attached, attach_result) = std::sync::mpsc::sync_channel(1);
+                        let attach = std::thread::spawn(move || {
+                            attached.send(server.connect_pane()).unwrap();
+                        });
+                        let early_refresh = refresh_result.recv_timeout(Duration::from_millis(80));
+                        let early_attach = attach_result.recv_timeout(Duration::from_millis(80));
+                        resume_disable.send(()).unwrap();
+                        let refresh_result = early_refresh
+                            .or_else(|_| refresh_result.recv_timeout(Duration::from_secs(5)))
+                            .unwrap();
+                        let attach_result = early_attach
+                            .or_else(|_| attach_result.recv_timeout(Duration::from_secs(5)))
+                            .unwrap();
+                        refresh.join().unwrap();
+                        attach.join().unwrap();
+                        assert!(
+                            refresh_result.is_ok(),
+                            "refresh classified Restart as {refresh_result:?}"
+                        );
+                        assert!(
+                            attach_result.is_ok(),
+                            "attachment must survive Restart: {:?}",
+                            attach_result.err()
+                        );
+                    });
+                    assert!(service.restart().unwrap().running);
+                    observe.join().unwrap();
+                    assert_eq!(supervisor.starts.load(Ordering::Relaxed), 2);
+                },
+            );
+        }
+
+        #[test]
+        fn explicit_stop_queued_during_restart_remains_stopped() {
+            let fixture = Fixture::new();
+            fresh(&fixture);
+            let supervisor = AccountSupervisor::new(fixture.paths.clone());
+            let service = supervisor.service();
+            runtime::test_support::with_artifact(
+                &fixture.root.join("artifact"),
+                &fixture.paths.identity,
+                |archive, signature| {
+                    let server = ready(
+                        LocalStartup::with_service(service.clone())
+                            .unwrap()
+                            .run(|| provision(&service, archive, signature), || false)
+                            .unwrap(),
+                    );
+                    let (at_disable, disable_entered) = std::sync::mpsc::sync_channel(1);
+                    let (resume_disable, proceed_disable) = std::sync::mpsc::sync_channel(1);
+                    *supervisor.disable_gate.lock().unwrap() = Some(DisableGate {
+                        entered: at_disable,
+                        proceed: proceed_disable,
+                    });
+                    let stop_service = service.clone();
+                    let observe = std::thread::spawn(move || {
+                        disable_entered
+                            .recv_timeout(Duration::from_secs(5))
+                            .unwrap();
+                        let (entered, waiting) = std::sync::mpsc::sync_channel(1);
+                        let stop = std::thread::spawn(move || {
+                            entered.send(()).unwrap();
+                            stop_service.stop()
+                        });
+                        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+                        std::thread::sleep(Duration::from_millis(80));
+                        let pending = !stop.is_finished();
+                        resume_disable.send(()).unwrap();
+                        assert!(stop.join().unwrap().unwrap().stopped);
+                        assert!(pending, "Stop must serialize after the admitted Restart");
+                        assert_eq!(server.refresh(), Err(ServerError::Stopped));
+                        assert!(matches!(server.connect_pane(), Err(ServerError::Stopped)));
+                    });
+                    assert!(service.restart().unwrap().running);
+                    observe.join().unwrap();
+                    assert!(matches!(
+                        LocalStartup::with_service(service.clone())
+                            .unwrap()
+                            .run(no_provision, || false),
+                        Ok(StartupOutcome::Stopped)
+                    ));
+                    assert_eq!(supervisor.starts.load(Ordering::Relaxed), 2);
+                },
+            );
+        }
+
+        #[test]
+        fn admission_keeps_deliberate_stop_and_failed_restart_stopped() {
+            for failed_restart in [false, true] {
+                let fixture = Fixture::new();
+                fresh(&fixture);
+                let supervisor = AccountSupervisor::new(fixture.paths.clone());
+                let service = supervisor.service();
+                runtime::test_support::with_artifact(
+                    &fixture.root.join("artifact"),
+                    &fixture.paths.identity,
+                    |archive, signature| {
+                        let server = ready(
+                            LocalStartup::with_service(service.clone())
+                                .unwrap()
+                                .run(|| provision(&service, archive, signature), || false)
+                                .unwrap(),
+                        );
+                        let (at_disable, disable_entered) = std::sync::mpsc::sync_channel(1);
+                        let (resume_disable, proceed_disable) = std::sync::mpsc::sync_channel(1);
+                        *supervisor.disable_gate.lock().unwrap() = Some(DisableGate {
+                            entered: at_disable,
+                            proceed: proceed_disable,
+                        });
+                        supervisor
+                            .disable_fails
+                            .store(failed_restart, Ordering::Relaxed);
+                        let observe = std::thread::spawn(move || {
+                            disable_entered
+                                .recv_timeout(Duration::from_secs(5))
+                                .unwrap();
+                            let refresh_server = server.clone();
+                            let refresh = std::thread::spawn(move || refresh_server.refresh());
+                            let attach = std::thread::spawn(move || server.connect_pane());
+                            // Both requests overlap the published Stop inside the control operation.
+                            std::thread::sleep(Duration::from_millis(80));
+                            resume_disable.send(()).unwrap();
+                            assert_eq!(refresh.join().unwrap(), Err(ServerError::Stopped));
+                            assert!(matches!(attach.join().unwrap(), Err(ServerError::Stopped)));
+                        });
+                        if failed_restart {
+                            assert_eq!(service.restart(), Err(ServerError::ServiceUnavailable));
+                        } else {
+                            assert!(service.stop().unwrap().stopped);
+                        }
+                        observe.join().unwrap();
+                        let state =
+                            Service::state(&Directory::open(&fixture.paths.data, false).unwrap())
+                                .unwrap()
+                                .unwrap();
+                        assert!(state.stopped);
+                        assert_eq!(supervisor.starts.load(Ordering::Relaxed), 1);
+                    },
+                );
+            }
         }
 
         #[test]

@@ -125,14 +125,14 @@ pub(crate) use selection::SelectionCopy;
 #[cfg(test)]
 pub(crate) use session::TerminalSessionFailure;
 pub(crate) use session::{AccessibilityDemandSender, AccessibilitySelectionSender};
+pub(crate) use session::{
+    InteractiveInput, NativeTerminalSessionFactory, SelectionCopyError, StartedTerminalSession,
+    TerminalAppearanceUpdate, TerminalSessionEvent, TerminalSessionFactory, TerminalSessionHandle,
+};
 #[cfg(test)]
 pub(crate) use session::{
     LocalTerminalLaunchPlan, RemoteTerminalLaunchPlan, TerminalLaunchPlan, TerminalSessionError,
     TerminalSessionExit, test_terminal_appearance_update,
-};
-pub(crate) use session::{
-    NativeTerminalSessionFactory, SelectionCopyError, StartedTerminalSession,
-    TerminalAppearanceUpdate, TerminalSessionEvent, TerminalSessionFactory, TerminalSessionHandle,
 };
 #[cfg(feature = "desktop")]
 pub(crate) use workspace_terminal_session_factory::{

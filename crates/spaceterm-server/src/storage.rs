@@ -142,6 +142,42 @@ impl Directory {
             .sync_all()
             .map_err(|_| ServerError::StorageUnavailable)
     }
+    /// Publish a prepared private socket without replacing any existing ready endpoint.
+    /// Caller holds server.lock. Both names must remain beneath this retained directory.
+    pub fn publish_socket(
+        &self,
+        pending: &std::ffi::CStr,
+        expected: SocketIdentity,
+    ) -> Result<(), ServerError> {
+        if self.socket_identity(pending)? != Some(expected) || self.socket_identity(c"s")?.is_some()
+        {
+            return Err(ServerError::UnsafeStorage);
+        }
+        // SAFETY: both terminated names are leaves relative to the retained directory.
+        // linkat never replaces an existing destination, including a concurrent unsafe entry.
+        if unsafe {
+            libc::linkat(
+                self.0.as_raw_fd(),
+                pending.as_ptr(),
+                self.0.as_raw_fd(),
+                c"s".as_ptr(),
+                0,
+            )
+        } != 0
+        {
+            return Err(
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::AlreadyExists {
+                    ServerError::UnsafeStorage
+                } else {
+                    ServerError::StorageUnavailable
+                },
+            );
+        }
+        if self.socket_identity(c"s")? != Some(expected) {
+            return Err(ServerError::UnsafeStorage);
+        }
+        self.remove_socket(pending, expected)
+    }
     fn file(&self, name: &str, create: bool) -> Result<File, ServerError> {
         let name = CString::new(name).map_err(|_| ServerError::UnsafeStorage)?;
         let flags = libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;

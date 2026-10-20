@@ -144,11 +144,12 @@ fn server_accessibility_fetches_history_and_rejects_a_disconnected_or_replaced_l
 fn server_accessibility_selection_requires_current_focus_and_live_cell_revisions() {
     let mut host = host();
     let lease = attach(&mut host, 1, true);
+    // Keep the shell prompt on the next row so it cannot invalidate the target's CellRefs.
     command(
         &mut host,
         1,
         lease,
-        "stty -echo; printf '\\033[2J\\033[Hnative-selection-target'",
+        "stty -echo; printf '\\033[2J\\033[Hnative-selection-target\\r\\n'",
     );
     let deadline = Instant::now() + Duration::from_secs(60);
     let row = loop {

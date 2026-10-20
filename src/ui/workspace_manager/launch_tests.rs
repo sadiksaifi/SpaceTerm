@@ -238,12 +238,74 @@ fn the_window_says_workspaces_are_on_the_way_until_the_server_answers(cx: &mut T
     // No answer arrives, as while the server is still starting.
     let (harness, cx) = launch_harness(Vec::new(), cx);
     cx.run_until_parked();
+    assert!(
+        cx.debug_bounds(LAUNCH_SELECTOR).is_none(),
+        "a launch still inside its quiet period says nothing yet"
+    );
+    assert!(cx.debug_bounds("empty-workspace").is_none());
 
+    cx.executor().advance_clock(launch::LAUNCH_QUIET_PERIOD);
+    cx.run_until_parked();
     assert_eq!(harness.launch_title(cx), Some(launch::OPENING_TITLE));
     assert!(cx.debug_bounds(LAUNCH_SELECTOR).is_some());
     assert!(
         cx.debug_bounds("empty-workspace").is_none(),
         "never No Workspaces while they are on the way"
+    );
+}
+
+#[gpui::test]
+fn a_launch_that_opens_within_its_quiet_period_never_shows_the_launch_screen(
+    cx: &mut TestAppContext,
+) {
+    // The server is admitted at once, but its first inventory arrives a moment later.
+    let edits = ScriptedEdits::new(None);
+    let (harness, cx) = launch_harness_with(vec![ready()], edits, [], cx);
+    cx.run_until_parked();
+    assert_eq!(harness.launch_title(cx), Some(launch::OPENING_TITLE));
+    assert!(
+        cx.debug_bounds(LAUNCH_SELECTOR).is_none(),
+        "an opening that has not taken long yet draws no spinner or message"
+    );
+    assert!(
+        cx.debug_bounds("empty-workspace").is_none(),
+        "never No Workspaces while they are on the way"
+    );
+
+    cx.executor().advance_clock(launch::LAUNCH_QUIET_PERIOD / 2);
+    harness.edits.set_inventory(inventory());
+    sync(&harness, cx);
+    assert_eq!(harness.launch_title(cx), None);
+    assert_eq!(harness.shared_rows(cx), 1);
+    cx.executor().advance_clock(launch::LAUNCH_QUIET_PERIOD);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(LAUNCH_SELECTOR).is_none());
+}
+
+#[gpui::test]
+fn a_retry_within_the_quiet_period_keeps_saying_what_it_does(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![Err(ServerError::NotInstalled)], cx);
+    cx.run_until_parked();
+    assert_eq!(harness.launch_title(cx), Some("Server Not Installed"));
+
+    // Try Again runs launch, and no answer arrives yet.
+    harness.click(LAUNCH_RETRY_SELECTOR, cx);
+    assert_eq!(harness.launch.steps(), ["run", "run"]);
+    assert_eq!(harness.launch_title(cx), Some(launch::OPENING_TITLE));
+    assert!(
+        cx.debug_bounds(LAUNCH_SELECTOR).is_some(),
+        "a screen the person already sees never goes blank while launch runs again"
+    );
+}
+
+#[gpui::test]
+fn a_launch_that_needs_the_person_explains_itself_at_once(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped)], cx);
+    cx.run_until_parked();
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+    assert!(
+        cx.debug_bounds(LAUNCH_START_SELECTOR).is_some(),
+        "a screen that asks for an action never waits behind the quiet period"
     );
 }
 
@@ -564,6 +626,70 @@ fn ready_harness(cx: &mut TestAppContext) -> (LaunchHarness, &mut VisualTestCont
     cx.run_until_parked();
     sync(&harness, cx);
     (harness, cx)
+}
+
+/// Whether the window's only Workspace row replaces its directory with a shared status.
+fn shared_row_status_drawn(harness: &LaunchHarness, cx: &mut VisualTestContext) -> bool {
+    let id = harness.manager.read_with(cx, |manager, _| {
+        manager
+            .workspaces
+            .iter()
+            .next()
+            .expect("one Workspace row")
+            .id()
+    });
+    let selector: &'static str =
+        Box::leak(format!("workspace-row-shared-status-{}", id.get()).into_boxed_str());
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    cx.debug_bounds(selector).is_some()
+}
+
+#[gpui::test]
+fn a_tab_creation_leaves_the_workspace_rows_as_they_are(cx: &mut TestAppContext) {
+    use spaceterm_server::hierarchy::Mutation;
+    let (harness, cx) = ready_harness(cx);
+    assert!(!shared_row_status_drawn(&harness, cx));
+
+    harness.click("create-tab-button", cx);
+    sync(&harness, cx);
+    assert!(matches!(
+        harness.edits.submitted().as_slice(),
+        [Mutation::CreateTab { .. }]
+    ));
+    assert!(
+        !shared_row_status_drawn(&harness, cx),
+        "a waiting Tab creation changes nothing a Workspace row shows"
+    );
+}
+
+#[gpui::test]
+fn a_pending_rename_says_saving_on_its_own_row(cx: &mut TestAppContext) {
+    let (harness, cx) = ready_harness(cx);
+    harness.manager.update(cx, |manager, cx| {
+        let id = manager.workspaces.iter().next().expect("one row").id();
+        let shared = manager.shared.as_mut().expect("shared Workspaces");
+        let _ = shared.rename(id, "Logs".to_owned(), None);
+        cx.notify();
+    });
+    sync(&harness, cx);
+    assert!(shared_row_status_drawn(&harness, cx));
+}
+
+#[gpui::test]
+fn not_connected_appears_only_once_the_connection_is_lost(cx: &mut TestAppContext) {
+    let (harness, cx) = ready_harness(cx);
+    // The connection published its inventory and is still finishing its handshake.
+    harness.edits.set_connected(false);
+    sync(&harness, cx);
+    assert!(
+        !shared_row_status_drawn(&harness, cx),
+        "a connection still being established has not been lost"
+    );
+
+    harness.edits.set_error(ServerError::NotRunning);
+    sync(&harness, cx);
+    assert!(shared_row_status_drawn(&harness, cx));
 }
 
 fn created_names(harness: &LaunchHarness) -> Vec<String> {
@@ -1050,4 +1176,61 @@ fn a_service_start_elsewhere_reconnects_the_stopped_panes_of_a_presenting_window
         (pane.retries(), pane.take_overs(), pane.restored_starts()),
         (1, 0, 0)
     );
+}
+
+/// A launch that runs again but has not answered yet, as when a person retries.
+fn launching_after_stop(
+    answers: Vec<Result<LaunchOutcome, ServerError>>,
+    cx: &mut TestAppContext,
+) -> (LaunchHarness, &mut VisualTestContext) {
+    let (harness, cx) = launch_harness(
+        std::iter::once(Ok(LaunchOutcome::Stopped))
+            .chain(answers)
+            .collect(),
+        cx,
+    );
+    cx.run_until_parked();
+    let manager = harness.manager.clone();
+    cx.update(|window, cx| {
+        manager.update(cx, |manager, cx| manager.run_local_launch(None, window, cx));
+    });
+    assert_eq!(
+        harness
+            .manager
+            .read_with(cx, |manager, _| manager.launch.state),
+        launch::LaunchState::Launching,
+        "the second launch has not answered yet"
+    );
+    (harness, cx)
+}
+
+/// A service started elsewhere while this window's launch is still answering, such as a
+/// Restart finishing before a launch that observed it stopped, is not lost. Launch runs once
+/// more and opens the Workspaces, and a server that stays stopped still asks for Start.
+#[gpui::test]
+fn a_service_start_during_launch_runs_launch_again_when_it_finishes(cx: &mut TestAppContext) {
+    let (harness, cx) = launching_after_stop(vec![Ok(LaunchOutcome::Stopped), ready()], cx);
+    cx.cx
+        .update(crate::ui::workspace_manager::resume_waiting_launches);
+    cx.run_until_parked();
+    assert_eq!(
+        harness.launch.steps(),
+        ["run", "run", "run"],
+        "no Start of its own"
+    );
+    assert_eq!(harness.shared_rows(cx), 1);
+}
+
+#[gpui::test]
+fn a_service_start_during_launch_keeps_a_deliberate_stop(cx: &mut TestAppContext) {
+    let (harness, cx) = launching_after_stop(
+        vec![Ok(LaunchOutcome::Stopped), Ok(LaunchOutcome::Stopped)],
+        cx,
+    );
+    cx.cx
+        .update(crate::ui::workspace_manager::resume_waiting_launches);
+    cx.run_until_parked();
+    assert_eq!(harness.launch.steps(), ["run", "run", "run"]);
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+    assert_eq!(harness.shared_rows(cx), 0);
 }

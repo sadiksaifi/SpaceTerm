@@ -27,7 +27,7 @@ pub(crate) use development::{
     POLL_INTERVAL, SharedAcceptance, SharedAttachmentFailure, SharedCloseApproval,
     SharedCloseReview, SharedCloseState, SharedCloseUnavailable, SharedEditSource,
     SharedPaneSessions, SharedPanes, SharedRefusal, SharedRefusalReason, SharedRemoval,
-    SharedSubmission, SharedTabs, SharedWorkspaceConflict, SharedWorkspaceFacts,
+    SharedRowStatus, SharedSubmission, SharedTabs, SharedWorkspaceConflict, SharedWorkspaceFacts,
     SharedWorkspaceHost, SharedWorkspacePlan, SharedWorkspaces, presenting_window,
     shared_close_changed_title,
 };
@@ -57,7 +57,7 @@ mod development {
     use crate::close_confirmation::CloseTarget;
     use crate::domain::{PaneId, TabId, ValidatedLocalDirectory, WorkspaceId};
     use crate::local_server::LocalServer;
-    use crate::terminal::server_session::DevelopmentServerSessionFactory;
+    use crate::terminal::server_session::{DevelopmentServerSessionFactory, PaneControls};
     use crate::terminal::shared_workspace::{SharedWorkspaceClient, SharedWorkspaceSnapshot};
     use crate::terminal::{PreparedWorkspaceTerminalLaunch, WorkspaceTerminalSessionFactory};
     use crate::ui::pane_lifecycle::PaneConstruction;
@@ -110,6 +110,12 @@ mod development {
         /// Submits one edit, or reports that nothing was submitted because this client is offline
         /// or is already waiting for an answer. A refusal is never queued.
         fn submit(&self, mutation: Mutation) -> bool;
+
+        /// A data-free hint after each change the snapshot publishes, or `None` when only
+        /// periodic reading observes changes. The snapshot stays the authority.
+        fn subscribe(&self) -> Option<async_channel::Receiver<()>> {
+            None
+        }
     }
 
     impl SharedWorkspaceEdits for SharedWorkspaceClient {
@@ -123,6 +129,10 @@ mod development {
 
         fn submit(&self, mutation: Mutation) -> bool {
             Self::submit(self, mutation)
+        }
+
+        fn subscribe(&self) -> Option<async_channel::Receiver<()>> {
+            Some(Self::subscribe(self))
         }
     }
 
@@ -201,6 +211,11 @@ mod development {
             Ok(receiver)
         }
 
+        /// Whether the edit this process submitted and has not seen answered satisfies `test`.
+        fn submitted_satisfies(&self, test: impl Fn(&Mutation) -> bool) -> bool {
+            self.submitted.borrow().as_ref().is_some_and(test)
+        }
+
         /// Whether this process asked for the edit an answer settles, which it reports once.
         fn claims(&self, mutation: &Mutation) -> bool {
             let mut submitted = self.submitted.borrow_mut();
@@ -267,15 +282,33 @@ mod development {
                 Self::Pending => "SpaceTerm is waiting for the server to answer the last change.",
             }
         }
+    }
 
-        /// The short status a sidebar row shows.
-        pub(crate) const fn status(self) -> Option<&'static str> {
-            match self {
-                Self::Available => None,
-                Self::Offline => Some("Not connected"),
-                Self::Pending => Some("Saving…"),
+    /// What one shared Workspace's sidebar row says in place of its directory.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) struct SharedRowStatus {
+        pub(crate) text: &'static str,
+        /// Whether the status reports a problem, rather than work in progress.
+        pub(crate) warning: bool,
+    }
+
+    impl SharedRowStatus {
+        const fn progress(text: &'static str) -> Self {
+            Self {
+                text,
+                warning: false,
             }
         }
+    }
+
+    /// Whether `mutation` changes what `workspace`'s row shows: its name or its directory.
+    fn changes_row(mutation: &Mutation, workspace: Id) -> bool {
+        matches!(
+            mutation,
+            Mutation::RenameWorkspace { workspace: target, .. }
+                | Mutation::PinWorkspace { workspace: target, .. }
+                if *target == workspace
+        )
     }
 
     /// What asking for a shared edit did. A refusal submitted nothing and retains nothing.
@@ -573,6 +606,7 @@ mod development {
     /// The local server's own Panes.
     struct LocalServerPanes {
         server: LocalServer,
+        controls: Arc<PaneControls>,
         /// Completes the launch plan the server factory ignores. It is client launch scaffolding
         /// and never a directory the server's Terminal Session starts in.
         client_home: ValidatedLocalDirectory,
@@ -589,6 +623,7 @@ mod development {
         fn open(&self, pane: Id) -> Option<SharedPaneSubscription> {
             let (factory, state) = DevelopmentServerSessionFactory::for_pane(
                 self.server.clone(),
+                &self.controls,
                 self.local_files.clone(),
                 pane,
             );
@@ -618,6 +653,7 @@ mod development {
     impl SharedPaneSessions {
         pub(crate) fn new(
             server: LocalServer,
+            controls: Arc<PaneControls>,
             client_home: ValidatedLocalDirectory,
             local_files: crate::platform::local_filesystem::LocalFilesystemAuthority,
             panes: &PaneConstruction,
@@ -625,6 +661,7 @@ mod development {
             Self::with_opener(
                 Rc::new(LocalServerPanes {
                     server,
+                    controls,
                     client_home,
                     local_files,
                 }),
@@ -1059,6 +1096,20 @@ mod development {
             ));
         }
 
+        /// Completes once the saved arrangement the first inventory waits for has been read,
+        /// or at once when this client retains none.
+        pub(crate) fn client_views_read(&self) -> impl std::future::Future<Output = ()> + 'static {
+            let read = self
+                .retained_views
+                .as_ref()
+                .map(crate::ui::client_view_state::RetainedClientViews::read);
+            async move {
+                if let Some(read) = read {
+                    read.await;
+                }
+            }
+        }
+
         /// Wait for the saved arrangement before applying the first inventory.
         pub(crate) fn prepare_client_views(
             &mut self,
@@ -1176,6 +1227,41 @@ mod development {
                     root,
                     ..
                 })) if repository == Some(root.as_path()) => Some("Removing Worktree…"),
+                _ => None,
+            }
+        }
+        /// What `workspace`'s sidebar row says in place of its directory, if anything.
+        ///
+        /// A row speaks only for itself. A waiting edit marks the one row whose name, directory,
+        /// or Worktree it changes, so creating a Tab or a Workspace marks none. "Not connected"
+        /// waits for an established loss: a connection still finishing its handshake has lost
+        /// nothing, though its edits stay unavailable until it connects.
+        pub(crate) fn row_status(
+            &self,
+            workspace: Id,
+            repository: Option<&Path>,
+        ) -> Option<SharedRowStatus> {
+            if let Some(text) = self.worktree_status(workspace, repository) {
+                return Some(SharedRowStatus::progress(text));
+            }
+            match self.edits.editability() {
+                SharedEditability::Offline if self.connection_error.is_some() => {
+                    Some(SharedRowStatus {
+                        text: "Not connected",
+                        warning: true,
+                    })
+                }
+                SharedEditability::Pending
+                    if self
+                        .pending_operation
+                        .as_ref()
+                        .is_some_and(|mutation| changes_row(mutation, workspace))
+                        || self
+                            .edits
+                            .submitted_satisfies(|mutation| changes_row(mutation, workspace)) =>
+                {
+                    Some(SharedRowStatus::progress("Saving…"))
+                }
                 _ => None,
             }
         }
@@ -1354,6 +1440,11 @@ mod development {
 
         pub(crate) const fn connection_error(&self) -> Option<spaceterm_server::ServerError> {
             self.connection_error
+        }
+
+        /// Wakes for each change the server connection publishes, when it can say so.
+        pub(crate) fn subscribe(&self) -> Option<async_channel::Receiver<()>> {
+            self.edits.edits.subscribe()
         }
 
         /// Reads the server's answer and its inventory together, and reports both.

@@ -25,6 +25,8 @@ impl From<Error> for WriteError {
 #[derive(Clone)]
 pub(crate) struct Client {
     pub(crate) server: LocalServer,
+    /// Pane control sequencing outlives every window, like this client's connection.
+    pub(crate) controls: std::sync::Arc<crate::terminal::server_session::PaneControls>,
     pub(crate) source: SharedEditSource,
     edits: Rc<SharedWorkspaceClient>,
 }
@@ -40,9 +42,15 @@ impl Client {
         .ok()?;
         let legacy = crate::ui::worktree_path_template::path_template(cx)
             .unwrap_or_else(|| spaceterm_server::worktree::Settings::default().template);
-        let edits = Rc::new(SharedWorkspaceClient::new(server.clone(), legacy));
+        let controls = std::sync::Arc::<crate::terminal::server_session::PaneControls>::default();
+        let edits = Rc::new(SharedWorkspaceClient::new(
+            server.clone(),
+            std::sync::Arc::clone(&controls),
+            legacy,
+        ));
         let client = Self {
             server,
+            controls,
             source: SharedEditSource::new(edits.clone()),
             edits,
         };

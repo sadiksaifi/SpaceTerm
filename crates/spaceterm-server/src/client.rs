@@ -128,7 +128,7 @@ impl LocalServer {
     }
     /// Admits a terminal transport using owning-account authority, without implicit Start.
     pub fn connect_pane(&self) -> Result<crate::pane::PaneConnection, ServerError> {
-        crate::service::check_start(&self.paths)?;
+        crate::service::check_admission(&self.paths)?;
         let mut stream = host::connect(&self.paths)?;
         protocol::admit_client(
             &mut stream,
@@ -145,7 +145,7 @@ impl LocalServer {
     }
     /// Checks an existing server. Never sets up storage or starts it.
     pub fn refresh(&self) -> Result<AuthenticatedStatus, ServerError> {
-        crate::service::check_start(&self.paths)?;
+        crate::service::check_admission(&self.paths)?;
         self.server_id()?;
         self.authenticate()
     }

@@ -216,12 +216,25 @@ pub(crate) fn serve_runtime(
         runtime.verify_path(&paths.runtime)?;
         runtime.remove_socket(c"s", identity)?;
     }
-    let listener = UnixListener::bind(&socket).map_err(|_| ServerError::StorageUnavailable)?;
-    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
+    // Keep the ready endpoint absent until its exact private mode has been established.
+    // The staging leaf has the same length as s, preserving Unix socket path limits.
+    let pending = paths.runtime.join("p");
+    if let Some(identity) = runtime.socket_identity(c"p")? {
+        runtime.verify_path(&paths.runtime)?;
+        if !matches!(connect_socket(&pending), Err(SocketUnavailable::Refused)) {
+            return Err(ServerError::StorageUnavailable);
+        }
+        runtime.verify_path(&paths.runtime)?;
+        runtime.remove_socket(c"p", identity)?;
+    }
+    let listener = UnixListener::bind(&pending).map_err(|_| ServerError::StorageUnavailable)?;
+    fs::set_permissions(&pending, fs::Permissions::from_mode(0o600))
         .map_err(|_| ServerError::StorageUnavailable)?;
     let socket_identity = runtime
-        .socket_identity(c"s")?
+        .socket_identity(c"p")?
         .ok_or(ServerError::UnsafeStorage)?;
+    runtime.verify_path(&paths.runtime)?;
+    runtime.publish_socket(c"p", socket_identity)?;
     let mut connections: Vec<(std::thread::JoinHandle<()>, UnixStream)> = Vec::new();
     use std::sync::{
         Arc, Mutex,
@@ -300,6 +313,7 @@ pub(crate) fn serve_runtime(
                                         directory_recovery: true,
                                         worktree_writes: false,
                                         workspace_policy: false,
+                                        presentation_changes: false,
                                     }
                                 }
                                 None => {
@@ -330,12 +344,7 @@ pub(crate) fn serve_runtime(
     }
     stopping.store(true, Ordering::Release);
     drop(listener);
-    for (_, stream) in &connections {
-        let _ = stream.shutdown(std::net::Shutdown::Both);
-    }
-    for (worker, _) in connections {
-        let _ = worker.join();
-    }
+    finish_connections(connections);
     if let Some(panes) = panes.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         panes.shutdown()?;
     }
@@ -344,9 +353,52 @@ pub(crate) fn serve_runtime(
     Ok(())
 }
 
+fn finish_connections(connections: Vec<(std::thread::JoinHandle<()>, UnixStream)>) {
+    for (_, stream) in &connections {
+        // Wake idle readers without cancelling an admitted reply, including Closed. Writes
+        // retain the protocol's absolute frame deadline while workers finish before cleanup.
+        let _ = stream.shutdown(std::net::Shutdown::Read);
+    }
+    for (worker, _) in connections {
+        let _ = worker.join();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shutdown_unblocks_idle_readers_and_finishes_pending_replies() {
+        use std::io::Read;
+
+        let (idle_client, mut idle_server) = UnixStream::pair().unwrap();
+        let idle_cancellation = idle_server.try_clone().unwrap();
+        let idle = std::thread::spawn(move || {
+            let mut byte = [0];
+            assert_eq!(idle_server.read(&mut byte).unwrap(), 0);
+        });
+        let (mut reply_client, mut reply_server) = UnixStream::pair().unwrap();
+        let reply_cancellation = reply_server.try_clone().unwrap();
+        let reply = std::thread::spawn(move || {
+            // The socket read orders the pending reply after cancellation without a timer.
+            let mut byte = [0];
+            assert_eq!(reply_server.read(&mut byte).unwrap(), 0);
+            protocol::Wire::terminal(&mut reply_server)
+                .unwrap()
+                .write(&crate::pane::Reply::Closed)
+                .unwrap();
+        });
+
+        finish_connections(vec![(idle, idle_cancellation), (reply, reply_cancellation)]);
+
+        let received: crate::pane::Reply = protocol::Wire::terminal(&mut reply_client)
+            .unwrap()
+            .read()
+            .unwrap();
+        assert!(matches!(received, crate::pane::Reply::Closed));
+        drop(idle_client);
+    }
+
     #[test]
     fn refuses_another_account_before_protocol_processing() {
         // SAFETY: geteuid has no preconditions.
@@ -460,6 +512,70 @@ mod startup_tests {
             matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
         );
         assert!(fixture.paths.socket().is_symlink());
+    }
+    #[test]
+    fn prepared_socket_is_only_ready_after_atomic_publication() {
+        let fixture = Fixture::new();
+        let runtime = Directory::open(&fixture.paths.runtime, false).unwrap();
+        let pending = fixture.paths.runtime.join("p");
+        let listener = UnixListener::bind(&pending).unwrap();
+        fs::set_permissions(&pending, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(matches!(
+            connect(&fixture.paths),
+            Err(ServerError::NotRunning)
+        ));
+        fs::set_permissions(&pending, fs::Permissions::from_mode(0o600)).unwrap();
+        let expected = runtime.socket_identity(c"p").unwrap().unwrap();
+        runtime.publish_socket(c"p", expected).unwrap();
+        let _client = connect(&fixture.paths).unwrap();
+        let (_peer, _) = listener.accept().unwrap();
+        assert!(runtime.socket_identity(c"s").unwrap() == Some(expected));
+        assert!(!pending.exists());
+    }
+
+    #[test]
+    fn client_refuses_an_unsafe_socket_mode_without_contacting_its_listener() {
+        let fixture = Fixture::new();
+        let listener = UnixListener::bind(fixture.paths.socket()).unwrap();
+        fs::set_permissions(fixture.paths.socket(), fs::Permissions::from_mode(0o700)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        assert!(matches!(
+            connect(&fixture.paths),
+            Err(ServerError::UnsafeStorage)
+        ));
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+        assert_eq!(
+            fs::symlink_metadata(fixture.paths.socket()).unwrap().mode() & 0o7777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn socket_publication_preserves_an_unsafe_ready_entry_and_a_replaced_staging_entry() {
+        let fixture = Fixture::new();
+        let runtime = Directory::open(&fixture.paths.runtime, false).unwrap();
+        let pending = fixture.paths.runtime.join("p");
+        let _listener = UnixListener::bind(&pending).unwrap();
+        fs::set_permissions(&pending, fs::Permissions::from_mode(0o600)).unwrap();
+        let expected = runtime.socket_identity(c"p").unwrap().unwrap();
+        fs::write(fixture.paths.socket(), b"existing entry").unwrap();
+        assert_eq!(
+            runtime.publish_socket(c"p", expected),
+            Err(ServerError::UnsafeStorage)
+        );
+        assert_eq!(fs::read(fixture.paths.socket()).unwrap(), b"existing entry");
+        fs::remove_file(fixture.paths.socket()).unwrap();
+        fs::rename(&pending, fixture.paths.runtime.join("old")).unwrap();
+        let _replacement = UnixListener::bind(&pending).unwrap();
+        fs::set_permissions(&pending, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            runtime.publish_socket(c"p", expected),
+            Err(ServerError::UnsafeStorage)
+        );
+        assert!(!fixture.paths.socket().exists());
+        assert!(pending.exists());
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
@@ -621,6 +737,7 @@ mod startup_tests {
                         directory_recovery: true,
                         worktree_writes: false,
                         workspace_policy: true,
+                        presentation_changes: false,
                     },
                     Request::Inventory => Reply::Inventory {
                         inventory: crate::hierarchy::State::empty().inventory,

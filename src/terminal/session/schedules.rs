@@ -314,16 +314,36 @@ impl WorkerSchedules {
 
     pub(super) fn set_presentable(&mut self, presentable: bool, now: Instant) {
         self.input.set_accessibility_demand_enabled(presentable);
-        self.presentation.set_presentable(presentable, now);
         self.accessibility_presentation
             .set_presentable(presentable, now);
+        if !presentable {
+            self.accessibility_continuation.update(false);
+            self.input.accessibility_demand.clear();
+        }
+        self.set_visual_presentable(presentable, now);
+    }
+
+    pub(super) fn set_server_presentable(&mut self, presentable: bool, now: Instant) {
+        self.input.set_accessibility_demand_enabled(true);
+        self.accessibility_presentation.set_presentable(true, now);
+        self.set_visual_presentable(presentable, now);
+    }
+
+    fn set_visual_presentable(&mut self, presentable: bool, now: Instant) {
+        self.presentation.set_presentable(presentable, now);
         if !presentable {
             if self.graphics_animation.take().is_some() {
                 self.presentation.request();
             }
-            self.accessibility_continuation.update(false);
-            self.input.accessibility_demand.clear();
             self.selection_autoscroll.cancel();
+        }
+    }
+
+    pub(super) fn note_hidden_server_content_changed(&mut self) {
+        if !self.presentation.presentable
+            && self.accessibility_presentation.demand_request.is_some()
+        {
+            self.accessibility_presentation.note_screen_published();
         }
     }
 

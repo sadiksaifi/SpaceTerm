@@ -4688,7 +4688,7 @@ fn prepared_server_copy_survives_unrelated_output_and_rejects_changed_selected_t
             modifiers: Default::default(),
             shift_selection: Default::default(),
         };
-        assert!(worker.process_command(Command::ReadingPointer(input)));
+        assert!(worker.process_command(Command::ReadingPointer(input, mpsc::sync_channel(1).0)));
     }
     assert!(worker.publish_screen_snapshot());
     let selected = latest();
@@ -5016,4 +5016,210 @@ fn paste_confirmation_focus_cannot_claim_a_different_or_cancelled_payload() {
         assert!(records.snapshot().written.is_empty());
         session.shutdown();
     }
+}
+
+#[test]
+fn metadata_only_screen_changes_do_not_schedule_another_semantic_document() {
+    let (mut worker, _records, _requests, _reader, _commands) = clipboard_worker();
+    let (accessibility, _receiver) = async_channel::bounded(1);
+    worker.accessibility = accessibility;
+    let now = Instant::now();
+    let input = ScheduleInput::default();
+    worker.schedules = WorkerSchedules::new(now, input.clone());
+    input.enqueue_accessibility_demand(now);
+    worker.schedules.accessibility_demand_received(now);
+    worker.emulator.feed(b"unchanged text");
+    assert!(worker.publish_screen_snapshot());
+    assert!(worker.publish_accessibility(true));
+    worker.emulator.mark_metadata_stale();
+    assert!(worker.publish_screen_snapshot());
+    assert!(
+        !worker
+            .schedules
+            .accessibility_presentation_due(now + Duration::from_secs(1))
+    );
+    worker.finish();
+}
+
+#[test]
+fn queued_server_reading_reports_application_after_output_and_refuses_changed_rows() {
+    for (output, applied) in [
+        (b"\x1b[4;1Hunrelated".as_slice(), true),
+        (b"\x1b[1;1Hreplacement".as_slice(), false),
+    ] {
+        let (mut worker, _records, _requests, _reader, _commands) = clipboard_worker();
+        assert!(worker.process_command(Command::RouteClientEffects));
+        worker.emulator.feed(b"select this text");
+        assert!(worker.publish_screen_snapshot());
+        let mut input = PointerInput {
+            generation: worker.emulator.presentation_generation(),
+            phase: PointerPhase::Press,
+            button: Some(PointerButton::Left),
+            position: SurfacePosition { x: 1.0, y: 1.0 },
+            modifiers: Default::default(),
+            shift_selection: Default::default(),
+        };
+        let (reply, completion) = mpsc::sync_channel(1);
+        let queued = Command::ReadingPointer(input, reply);
+        worker.emulator.feed(output);
+        assert!(worker.publish_screen_snapshot());
+        assert!(worker.process_command(queued));
+        assert_eq!(completion.recv().unwrap(), applied);
+        if !applied {
+            input.phase = PointerPhase::Motion;
+            input.position.x = 60.0;
+            let (reply, completion) = mpsc::sync_channel(1);
+            assert!(worker.process_command(Command::ReadingPointer(input, reply)));
+            assert!(!completion.recv().unwrap());
+            assert!(worker.emulator.selection_text().unwrap().is_none());
+        }
+        worker.finish();
+    }
+}
+
+#[test]
+fn server_wheel_completion_accepts_unchanged_viewports_and_zero_delta_edges() {
+    let (mut worker, _records, _requests, _reader, _commands) = clipboard_worker();
+    assert!(worker.process_command(Command::RouteClientEffects));
+    worker.emulator.feed(b"no scrollback");
+    assert!(worker.publish_screen_snapshot());
+    for (horizontal_steps, vertical_steps) in [(0, 0), (1, 0), (0, 1)] {
+        let (reply, completion) = mpsc::sync_channel(1);
+        assert!(worker.process_command(Command::ReadingWheel(
+            WheelInput {
+                generation: worker.emulator.presentation_generation(),
+                horizontal_steps,
+                vertical_steps,
+                phase: WheelPhase::GestureEnded,
+                position: SurfacePosition { x: 1.0, y: 1.0 },
+                modifiers: Default::default(),
+                shift_selection: Default::default(),
+            },
+            reply
+        )));
+        assert!(completion.recv().unwrap());
+    }
+    worker.finish();
+}
+
+#[test]
+fn hidden_server_semantic_demand_completes_without_materializing_a_visual_screen() {
+    let (mut worker, _records, _requests, _reader, _commands) = clipboard_worker();
+    let (events, event_receiver) = async_channel::bounded(PTY_OUTPUT_QUEUE_CAPACITY);
+    worker.events = events.into();
+    let (accessibility, semantic_receiver) = async_channel::bounded(1);
+    worker.accessibility = accessibility;
+    let now = Instant::now();
+    let input = ScheduleInput::default();
+    worker.schedules = WorkerSchedules::new(now, input.clone());
+    assert!(worker.process_command(Command::RouteClientEffects));
+    worker.emulator.feed(b"visible baseline");
+    assert!(worker.publish_screen_snapshot());
+    while event_receiver.try_recv().is_ok() {}
+    let visible_generation = worker.emulator.presentation_generation();
+    assert!(worker.process_command(Command::SetPresentable(false)));
+    worker
+        .emulator
+        .feed("hidden semantic row\r\n".repeat(800).as_bytes());
+    worker.schedules.request_presentation();
+    assert!(input.enqueue_accessibility_demand(now));
+    assert!(worker.process_command(Command::AccessibilityDemand));
+    let command = worker.order_presentation_barrier(Command::PublishAccessibility);
+    assert!(matches!(command, Command::PublishAccessibility));
+    assert!(worker.process_command(command));
+    for _ in 0..32 {
+        if !worker.schedules.take_accessibility_continuation() {
+            break;
+        }
+        let command = worker.order_presentation_barrier(Command::AccessibilityContinue);
+        assert!(matches!(command, Command::AccessibilityContinue));
+        assert!(worker.process_command(command));
+    }
+    let model = semantic_receiver.try_recv().unwrap();
+    assert!(
+        model
+            .rows()
+            .any(|row| row.text.contains("hidden semantic row"))
+    );
+    assert!(worker.process_output_chunks(vec![(b"\r\nnew hidden semantic row".to_vec(), None)]));
+    assert!(
+        worker
+            .schedules
+            .accessibility_presentation_due(Instant::now() + Duration::from_secs(1))
+    );
+    let command = worker.order_presentation_barrier(Command::PublishAccessibility);
+    assert!(matches!(command, Command::PublishAccessibility));
+    assert!(worker.process_command(command));
+    for _ in 0..32 {
+        if !worker.schedules.take_accessibility_continuation() {
+            break;
+        }
+        let command = worker.order_presentation_barrier(Command::AccessibilityContinue);
+        assert!(matches!(command, Command::AccessibilityContinue));
+        assert!(worker.process_command(command));
+    }
+    let changed = semantic_receiver.try_recv().unwrap();
+    assert!(
+        changed
+            .rows()
+            .any(|row| row.text.contains("new hidden semantic row"))
+    );
+    assert!(worker.process_command(Command::EndAccessibilityDemand(Instant::now())));
+    assert!(worker.process_output_chunks(vec![(b"\r\nundemanded output".to_vec(), None)]));
+    assert!(
+        !worker
+            .schedules
+            .accessibility_presentation_due(Instant::now() + Duration::from_secs(2))
+    );
+    assert!(!worker.schedules.accessibility_pending());
+    assert!(!worker.schedules.is_presentable());
+    assert!(
+        !worker
+            .schedules
+            .presentation_due(now + Duration::from_secs(1))
+    );
+    assert_eq!(
+        worker.emulator.presentation_generation(),
+        visible_generation
+    );
+    while let Ok(event) = event_receiver.try_recv() {
+        assert!(!matches!(event, TerminalSessionEvent::Screen(_)));
+    }
+    worker.finish();
+}
+
+#[test]
+fn hidden_server_semantic_demand_is_enqueued_before_the_visibility_command_runs() {
+    let (commands, receiver) = mpsc::channel();
+    let session = TerminalRuntime {
+        metadata_state: TerminalSessionMetadataState::default(),
+        permission_request_state: TerminalSessionPermissionRequestState::default(),
+        commands: Some(commands),
+        worker: None,
+        native_pty_close: None,
+        cleanup_confirmation: None,
+        schedule_input: ScheduleInput::default(),
+        event_publisher: async_channel::bounded(1).0.into(),
+        clipboard_authority: Arc::default(),
+    };
+    session.set_presentable(false);
+    session.route_client_effects();
+    session.set_presentable(false);
+    session.accessibility_demand_sender().unwrap().request();
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(Command::SetPresentable(false))
+    ));
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(Command::RouteClientEffects)
+    ));
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(Command::SetPresentable(false))
+    ));
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(Command::AccessibilityDemand)
+    ));
 }

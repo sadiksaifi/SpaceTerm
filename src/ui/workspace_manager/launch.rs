@@ -28,6 +28,12 @@ pub(super) const LAUNCH_START_SELECTOR: &str = "server-launch-start";
 pub(super) const LAUNCH_AUTHORIZE_SELECTOR: &str = "server-launch-authorize";
 pub(super) const LAUNCH_RETRY_SELECTOR: &str = "server-launch-retry";
 pub(super) const LAUNCH_SETTINGS_SELECTOR: &str = "server-launch-settings";
+const LAUNCH_QUIET_SELECTOR: &str = "server-launch-quiet";
+
+/// How long a window's first launch may wait for the server before it says so. Opening an
+/// already running server finishes well inside this, so a person sees the window and then their
+/// Workspaces, never a message that vanishes before it can be read.
+pub(super) const LAUNCH_QUIET_PERIOD: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// What one launch of the account's server found.
 pub(crate) enum LaunchOutcome {
@@ -135,7 +141,13 @@ impl SharedServerConnector for AccountConnector {
         let server = client.server.clone();
         Some(SharedServerConnection {
             edits: client.source,
-            sessions: SharedPaneSessions::new(server.clone(), client_home, local_files, panes),
+            sessions: SharedPaneSessions::new(
+                server.clone(),
+                client.controls,
+                client_home,
+                local_files,
+                panes,
+            ),
             retained: Some(server),
         })
     }
@@ -200,11 +212,15 @@ pub(super) struct LaunchPresentation {
     pub(super) progress: Option<&'static str>,
     /// The first action is the default one.
     pub(super) actions: &'static [LaunchAction],
+    /// The window is only waiting for the server: nothing failed and nothing asks the person to
+    /// act, so a short wait need not be presented at all.
+    pub(super) waiting: bool,
 }
 
 pub(super) const OPENING_TITLE: &str = "Opening Workspaces\u{2026}";
-const OPENING_DETAIL: &str = "SpaceTerm is starting the server for your account. Your Workspaces \
-                              open as soon as it\u{2019}s ready.";
+// Launch reuses a running server or starts it, so the detail claims neither.
+const OPENING_DETAIL: &str = "Your Workspaces open as soon as the server for your account is \
+                              ready.";
 pub(super) const STOPPED_TITLE: &str = "Server Stopped";
 const STOPPED_DETAIL: &str = "You stopped the server, so no Terminal Sessions are running. It \
                               stays stopped, even after you restart the computer, until you start \
@@ -252,26 +268,30 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
         LaunchState::Launching | LaunchState::Ready => LaunchPresentation {
             title: OPENING_TITLE,
             detail: fixed(OPENING_DETAIL),
-            progress: Some("Starting\u{2026}"),
+            progress: Some("Waiting for the server\u{2026}"),
             actions: &[],
+            waiting: true,
         },
         LaunchState::Working(LaunchStep::Start) => LaunchPresentation {
             title: STOPPED_TITLE,
             detail: fixed(STOPPED_DETAIL),
             progress: Some("Starting the server\u{2026}"),
             actions: &[],
+            waiting: false,
         },
         LaunchState::Working(LaunchStep::Authorize) => LaunchPresentation {
             title: AUTHORIZATION_TITLE,
             detail: fixed(AUTHORIZING_DETAIL),
             progress: Some("Waiting for authorization\u{2026}"),
             actions: &[],
+            waiting: false,
         },
         LaunchState::Stopped => LaunchPresentation {
             title: STOPPED_TITLE,
             detail: fixed(STOPPED_DETAIL),
             progress: None,
             actions: &[Start, Settings],
+            waiting: false,
         },
         LaunchState::AuthorizationRequired { declined } => LaunchPresentation {
             title: AUTHORIZATION_TITLE,
@@ -282,12 +302,14 @@ pub(super) fn present(state: LaunchState) -> LaunchPresentation {
             },
             progress: None,
             actions: &[Authorize, Settings],
+            waiting: false,
         },
         LaunchState::Failed(error) => LaunchPresentation {
             title: failure_title(error),
             detail: error.to_string().into(),
             progress: None,
             actions: &[Retry, Settings],
+            waiting: false,
         },
     }
 }
@@ -298,8 +320,20 @@ pub(super) struct LocalLaunchState {
     pub(super) state: LaunchState,
     cancelled: Arc<AtomicBool>,
     _task: Option<Task<()>>,
+    /// The server was started elsewhere while this launch was answering. A launch that then
+    /// finishes waiting runs once more, because its answer may predate that start.
+    resume: bool,
     /// The message assistive technology last announced, so each change is spoken once.
     announced: std::cell::RefCell<Option<SharedString>>,
+    /// When the window's first launch may start saying it is waiting, once that launch began.
+    quiet_until: Option<std::time::Instant>,
+    /// The launch screen has said something, so a later wait keeps saying what it is doing
+    /// rather than going quiet, even within the first launch's quiet period.
+    spoke: std::cell::Cell<bool>,
+    _quiet: Option<Task<()>>,
+    /// Presents the server's Workspaces as soon as this client's saved arrangement is read,
+    /// rather than at the next periodic reading.
+    _views_read: Option<Task<()>>,
 }
 
 impl LocalLaunchState {
@@ -309,7 +343,12 @@ impl LocalLaunchState {
             state: LaunchState::Launching,
             cancelled: Arc::new(AtomicBool::new(false)),
             _task: None,
+            resume: false,
             announced: std::cell::RefCell::default(),
+            quiet_until: None,
+            spoke: std::cell::Cell::new(false),
+            _quiet: None,
+            _views_read: None,
         }
     }
 
@@ -359,8 +398,8 @@ pub(crate) fn start_local_server(window: &mut Window, cx: &mut App) {
 
 /// Runs launch again in every Workspace Window still waiting on the server, after the person
 /// started or installed it from Settings. A window already presenting its Workspaces reconnects
-/// the Panes the stop interrupted instead. A window still launching is left alone, and nothing
-/// here starts the server itself.
+/// the Panes the stop interrupted instead. A window still launching runs launch once more if it
+/// then finishes waiting. Nothing here starts the server itself, so a retained Stop stays.
 pub(crate) fn resume_waiting_launches(cx: &mut App) {
     for window in cx.windows() {
         let Some(window) = window.downcast::<WorkspaceManager>() else {
@@ -375,6 +414,8 @@ pub(crate) fn resume_waiting_launches(cx: &mut App) {
             ) && manager.launch._task.is_none()
             {
                 manager.run_local_launch(None, window, cx);
+            } else if manager.launch._task.is_some() {
+                manager.launch.resume = true;
             } else if manager.launch.state == LaunchState::Ready {
                 manager.server_started(cx);
             }
@@ -392,6 +433,15 @@ impl WorkspaceManager {
     ) {
         let launch = &mut self.launch;
         launch.state = step.map_or(LaunchState::Launching, LaunchState::Working);
+        // Only the window's first launch begins quietly. A later one follows a screen the person
+        // already sees, so it keeps saying what it is doing.
+        if launch.quiet_until.is_none() {
+            launch.quiet_until = Some(cx.background_executor().now() + LAUNCH_QUIET_PERIOD);
+            launch._quiet = Some(cx.spawn_in(window, async move |manager, cx| {
+                cx.background_executor().timer(LAUNCH_QUIET_PERIOD).await;
+                let _ = manager.update(cx, |_, cx| cx.notify());
+            }));
+        }
         let adapter = Arc::clone(&launch.adapters.launch);
         let cancelled = Arc::clone(&launch.cancelled);
         let work = cx.background_spawn(async move {
@@ -444,6 +494,17 @@ impl WorkspaceManager {
         };
         self.launch.state = state;
         self.launch._task = None;
+        if std::mem::take(&mut self.launch.resume)
+            && matches!(
+                state,
+                LaunchState::Stopped
+                    | LaunchState::AuthorizationRequired { .. }
+                    | LaunchState::Failed(_)
+            )
+        {
+            self.run_local_launch(None, window, cx);
+            return;
+        }
         // A running server answers the Panes a stop interrupted, so they connect again.
         if state == LaunchState::Ready {
             self.server_started(cx);
@@ -501,6 +562,13 @@ impl WorkspaceManager {
         self.present_shared_workspaces(connection.edits, connection.sessions, window, cx);
         if let (Some(shared), Some(server)) = (self.shared.as_mut(), connection.retained) {
             shared.retain_client_views(server);
+            let read = shared.client_views_read();
+            self.launch._views_read = Some(cx.spawn_in(window, async move |manager, cx| {
+                read.await;
+                let _ = manager.update_in(cx, |manager, window, cx| {
+                    manager.sync_shared_workspaces(window, cx);
+                });
+            }));
         }
         LaunchState::Ready
     }
@@ -553,6 +621,29 @@ impl WorkspaceManager {
         }
     }
 
+    /// Whether the stage presents nothing for `presentation` now: the window's first launch is
+    /// only waiting for the server, and has not waited long enough to say so.
+    pub(super) fn launch_is_quiet(&self, presentation: &LaunchPresentation, cx: &App) -> bool {
+        presentation.waiting
+            && !self.launch.spoke.get()
+            && self
+                .launch
+                .quiet_until
+                .is_some_and(|until| cx.background_executor().now() < until)
+    }
+
+    /// The stage while launch is quiet. It holds the window's keyboard focus and says nothing.
+    pub(super) fn render_launch_quiet(
+        &self,
+        focus: &gpui::FocusHandle,
+    ) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(LAUNCH_QUIET_SELECTOR)
+            .debug_selector(|| LAUNCH_QUIET_SELECTOR.to_owned())
+            .size_full()
+            .track_focus(focus)
+    }
+
     /// The launch screen's message and actions, centered in the empty stage. Return runs the
     /// default action, as it does for a dialog's default button.
     pub(super) fn render_launch_message(
@@ -567,7 +658,9 @@ impl WorkspaceManager {
             detail,
             progress,
             actions,
+            waiting: _,
         } = presentation;
+        self.launch.spoke.set(true);
         let message: SharedString = match progress {
             Some(progress) => format!("{title} {progress}").into(),
             None => format!("{title}. {detail}").into(),
