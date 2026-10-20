@@ -995,7 +995,20 @@ fn persistence_worker(inner: Weak<Inner>, receiver: async_channel::Receiver<Pers
                         })
                 });
                 match record {
-                    Some(record) => owner.intents.retain(record),
+                    Some(record) => {
+                        let result = owner.intents.retain(record);
+                        // Saving the connection again supersedes a removal that wasn't saved.
+                        if result.is_ok()
+                            && let Ok(mut state) = owner.state.lock()
+                            && state.unsaved_removals.contains(&destination)
+                        {
+                            state
+                                .unsaved_removals
+                                .retain(|unsaved| *unsaved != destination);
+                            notify(&mut state);
+                        }
+                        result
+                    }
                     None => Ok(()),
                 }
             }
@@ -1350,6 +1363,21 @@ mod tests {
         registry.remove(&destination());
         eventually(|| registry.unsaved_removals().is_empty());
         assert!(intents.active(&destination()).is_none());
+    }
+    #[test]
+    fn saving_a_connection_again_supersedes_its_unsaved_removal() {
+        let (registry, _, intents, entered, release) = setup(false);
+        intents.records.lock().unwrap().push(saved(false));
+        registry.resume_retained();
+        eventually(|| registry.connections().len() == 1);
+        intents.removal_fails.store(true, Ordering::SeqCst);
+        registry.remove(&destination());
+        eventually(|| !registry.unsaved_removals().is_empty());
+
+        registry.connect(destination());
+        entered.recv_blocking().unwrap();
+        eventually(|| registry.unsaved_removals().is_empty());
+        release.send_blocking(()).unwrap();
     }
     #[test]
     fn check_status_observes_once_and_leaves_intent_and_presentation_unchanged() {
