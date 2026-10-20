@@ -12509,6 +12509,76 @@ fn a_machine_headings_menu_should_connect_its_server(cx: &mut TestAppContext) {
     );
 }
 
+struct SettingsMovement;
+
+impl crate::platform::window_movement::WindowMovementFactory for SettingsMovement {
+    fn create(
+        &self,
+    ) -> Rc<dyn crate::platform::window_movement::OperatingSystemWindowDragPlatform> {
+        Rc::new(RecordingOperatingSystemWindowDragPlatform::default())
+    }
+}
+
+/// A machine heading's Server Settings opens Settings with that machine's server selected.
+#[gpui::test]
+fn a_machine_headings_server_settings_should_select_its_server(cx: &mut TestAppContext) {
+    use spaceterm_ui::a11y_testing::A11yTree;
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (connections, _connects) = waiting_ssh_registry(cx);
+    for name in ["alpha", "penguin"] {
+        harness.present_ssh(name, &[], cx);
+        connections.connect(crate::domain::SshDestination::new(name.to_owned()).unwrap());
+        wait_for_person(&connections, name);
+    }
+    let settings = crate::settings::Settings::load(
+        crate::settings::storage::testing::MemoryStorage::with_document(
+            &crate::settings::SettingsDocument::default(),
+        ),
+    );
+    cx.update(|_, cx| {
+        crate::ui::appearance_runtime::install(
+            settings,
+            Rc::new(crate::platform::appearance::testing::RecordingAppearancePlatform::default()),
+            cx,
+        )
+        .expect("appearance runtime should install");
+        crate::ui::settings_window::configure_window_chrome(
+            Rc::new(SettingsMovement),
+            Default::default(),
+            None,
+            cx,
+        );
+    });
+    redraw(cx);
+
+    right_click("machine-heading-penguin", cx);
+    click("machine-menu-server-settings", cx);
+
+    let settings_window = cx
+        .windows()
+        .into_iter()
+        .find(|window| {
+            window
+                .downcast::<crate::ui::settings_window::SettingsWindow>()
+                .is_some()
+        })
+        .expect("Settings should open");
+    let mut settings_cx = VisualTestContext::from_window(settings_window, cx);
+    settings_cx.run_until_parked();
+    let selected: Vec<_> = A11yTree::read(&mut settings_cx)
+        .with_role("ListBoxOption")
+        .into_iter()
+        .filter(|option| option["aria"]["selected"] == true)
+        .filter_map(|option| option["aria"]["label"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        selected,
+        ["Servers", "penguin"],
+        "Settings presents the Servers section with the heading's server selected"
+    );
+}
+
 /// A machine with only native Remote Workspaces has no presented SSH server, so its heading offers
 /// no Connect that would set one up there and no Disconnect, whatever the registry reports for its
 /// destination.
