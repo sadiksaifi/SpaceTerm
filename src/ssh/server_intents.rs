@@ -83,8 +83,8 @@ impl PrivateSshConnectionIntents {
                 }
                 let destination = SshDestination::new(record.destination)
                     .map_err(|_| SshIntentStoreError::Malformed)?;
-                if let Some(pin) = &record.continuity {
-                    if pin.route == [0; 32]
+                if let Some(pin) = &record.continuity
+                    && (pin.route == [0; 32]
                         || pin.server == [0; 32]
                         || pin.account == 0
                         || pin.build.is_empty()
@@ -92,10 +92,9 @@ impl PrivateSshConnectionIntents {
                         || !pin
                             .build
                             .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-                    {
-                        return Err(SshIntentStoreError::Malformed);
-                    }
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+                {
+                    return Err(SshIntentStoreError::Malformed);
                 }
                 Ok(RetainedSshConnection {
                     destination,
