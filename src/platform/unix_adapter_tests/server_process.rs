@@ -349,6 +349,9 @@ fn failure_name(error: &SshConnectFailure) -> &'static str {
     match error {
         SshConnectFailure::Cancelled => "cancelled",
         SshConnectFailure::Stopped => "stopped",
+        SshConnectFailure::Unavailable(UnavailableKind::LocalIpcUnavailable) => {
+            "local IPC capacity"
+        }
         SshConnectFailure::Unavailable(UnavailableKind::Network) => "network",
         SshConnectFailure::Unavailable(UnavailableKind::SshFailed) => "ssh failure",
         SshConnectFailure::Unavailable(UnavailableKind::ServiceUnavailable) => {

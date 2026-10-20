@@ -49,6 +49,7 @@ pub(crate) enum RefusalKind {
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum UnavailableKind {
+    LocalIpcUnavailable,
     Network,
     HostUnreachable,
     SshFailed,

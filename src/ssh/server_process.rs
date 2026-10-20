@@ -971,8 +971,19 @@ fn map_control_error(
     use super::control_connection::ControlConnectionError;
     match error {
         ControlConnectionError::Cancelled => SshConnectFailure::Cancelled,
+        ControlConnectionError::Paths(
+            crate::platform::app_paths::AppPathsError::LocalIpcAddressTooLong { .. },
+        ) => SshConnectFailure::Unavailable(UnavailableKind::LocalIpcUnavailable),
         ControlConnectionError::ReadinessTimedOut { .. } => {
             SshConnectFailure::Unavailable(UnavailableKind::HostUnreachable)
+        }
+        ControlConnectionError::MasterExited {
+            ref error_output, ..
+        } if error_output
+            .as_ref()
+            .is_some_and(|output| output.as_str().contains("too long for Unix domain socket")) =>
+        {
+            SshConnectFailure::Unavailable(UnavailableKind::LocalIpcUnavailable)
         }
         ControlConnectionError::MasterExited { error_output, .. }
             if mode == ConnectMode::QuietContinuation =>

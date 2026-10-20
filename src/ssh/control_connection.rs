@@ -870,6 +870,9 @@ fn reserve_socket(
     owner: &RuntimeOwner,
     socket_probe: &dyn ControlSocketProbe,
 ) -> Result<(), ControlConnectionError> {
+    // OpenSSH binds a temporary listener at ControlPath + '.' + 16 random characters.
+    // Validate that address before any probe or master can be dispatched.
+    owner.socket_path(&format!("{CONTROL_RUNTIME_SOCKET_NAME}.{}", "x".repeat(16)))?;
     let path = owner.socket_path(CONTROL_RUNTIME_SOCKET_NAME)?;
     socket_probe.probe(&path)?;
     let registered = owner.register_socket(CONTROL_RUNTIME_SOCKET_NAME)?;
@@ -932,6 +935,38 @@ mod tests {
             )
             .unwrap()
         }
+    }
+
+    #[test]
+    fn control_socket_reserves_the_temporary_listener_suffix_before_probing() {
+        let directory = TestDirectory::new();
+        let initial = directory.paths();
+        let owner = initial
+            .create_runtime_owner(CONTROL_RUNTIME_OWNER_KIND)
+            .unwrap();
+        let base_length = owner
+            .socket_path(CONTROL_RUNTIME_SOCKET_NAME)
+            .unwrap()
+            .as_os_str()
+            .as_encoded_bytes()
+            .len();
+        drop(owner);
+        let paths = AppPaths::from_directories(
+            initial.directories().clone(),
+            base_length + 12,
+            directory.1.clone(),
+        )
+        .unwrap();
+        let owner = paths
+            .create_runtime_owner(CONTROL_RUNTIME_OWNER_KIND)
+            .unwrap();
+        let result = reserve_socket(&owner, &RecordingControlSocketProbe(directory.1.clone()));
+        assert!(matches!(
+            result,
+            Err(ControlConnectionError::Paths(
+                AppPathsError::LocalIpcAddressTooLong { .. }
+            ))
+        ));
     }
 
     struct FakeChild {
