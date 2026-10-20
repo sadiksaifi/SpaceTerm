@@ -170,6 +170,10 @@ impl SettingsWindow {
             return;
         };
         let connections = rows.connections.clone();
+        // The person asked here, so any sign-in or host approval this needs appears here.
+        if matches!(action, SshServerAction::Connect | SshServerAction::Install) {
+            crate::ui::ssh_servers::present_prompts_in(window, cx);
+        }
         match action {
             SshServerAction::Connect => connections.connect(destination),
             SshServerAction::Cancel => connections.cancel(&destination),

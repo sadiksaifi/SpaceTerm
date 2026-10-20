@@ -5,9 +5,14 @@
 //! Servers Settings Section offers Connect and reports each connection. Reading a status performs
 //! no remote work, so rendering stays free of discovery.
 
-use gpui::{App, Global, SharedString, Window};
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+
+use gpui::{App, Global, SharedString, Window, WindowId};
 
 use crate::domain::SshDestination;
+use crate::platform::app_paths::AppPaths;
+use crate::ssh::askpass::{AskPassAttempt, AskPassAttemptFactory, AskPassUnavailable};
 use crate::ssh::server_connection::{
     ConnectPhase, ContinuityChange, IncompatibilityKind, InteractionReason, RefusalKind,
     RemoteConnectionStatus, SshIntentStoreError, SshServerConnections, UnavailableKind,
@@ -17,10 +22,45 @@ use crate::ui::sidebar_window::form::CaptionTone;
 
 struct InstalledSshServers {
     connections: SshServerConnections,
-    hosts: Option<std::sync::Arc<dyn SshHostSource>>,
+    hosts: Option<Arc<dyn SshHostSource>>,
+    /// Where SSH's prompts appear, and the factory that presents them in another window.
+    prompts: Option<(Arc<PromptWindow>, Rc<dyn SshServersFactory>)>,
 }
 
 impl Global for InstalledSshServers {}
+
+/// SSH's authentication prompts, presented in one window. The registry outlives every window, so
+/// the prompts move to the window where the person asks to connect, or to an open window once
+/// theirs closes. A prompt already showing stays in its window; only later attempts move.
+#[derive(Default)]
+struct PromptWindow(Mutex<Option<(WindowId, Arc<dyn AskPassAttemptFactory>)>>);
+
+impl PromptWindow {
+    fn window(&self) -> Option<WindowId> {
+        self.0
+            .lock()
+            .ok()
+            .and_then(|bound| bound.as_ref().map(|(window, _)| *window))
+    }
+
+    fn bind(&self, window: WindowId, prompts: Arc<dyn AskPassAttemptFactory>) {
+        if let Ok(mut bound) = self.0.lock() {
+            *bound = Some((window, prompts));
+        }
+    }
+}
+
+impl AskPassAttemptFactory for PromptWindow {
+    fn start_attempt(&self, paths: &AppPaths) -> Result<AskPassAttempt, AskPassUnavailable> {
+        let prompts = self
+            .0
+            .lock()
+            .ok()
+            .and_then(|bound| bound.as_ref().map(|(_, prompts)| Arc::clone(prompts)))
+            .ok_or(AskPassUnavailable)?;
+        prompts.start_attempt(paths)
+    }
+}
 
 /// Lists the SSH hosts a person can connect to. Listing reads this computer's SSH configuration
 /// only; it reaches no host.
@@ -28,37 +68,90 @@ pub(crate) trait SshHostSource: Send + Sync {
     fn hosts(&self) -> Vec<SshDestination>;
 }
 
-/// Makes one registry the desktop's for the life of the application.
+/// Makes one registry the desktop's for a test, with no window presenting SSH's prompts.
+#[cfg(test)]
 pub(crate) fn install(
     connections: SshServerConnections,
-    hosts: Option<std::sync::Arc<dyn SshHostSource>>,
+    hosts: Option<Arc<dyn SshHostSource>>,
     cx: &mut App,
 ) {
-    cx.set_global(InstalledSshServers { connections, hosts });
+    cx.set_global(InstalledSshServers {
+        connections,
+        hosts,
+        prompts: None,
+    });
 }
 
-/// Creates the desktop's registry. A window is required because SSH asks for authentication
-/// through prompts that window presents.
+/// Creates the desktop's registry and presents SSH's prompts in a window.
 pub(crate) trait SshServersFactory {
-    fn create(&self, window: &Window, cx: &mut App) -> Option<SshServerConnections>;
+    /// The registry, which asks for authentication through `prompts`. Creating it connects to
+    /// nothing.
+    fn create(
+        &self,
+        prompts: Arc<dyn AskPassAttemptFactory>,
+        cx: &mut App,
+    ) -> Option<SshServerConnections>;
+
+    /// SSH's prompts presented in `window`.
+    fn prompts(&self, window: &Window, cx: &mut App) -> Option<Arc<dyn AskPassAttemptFactory>>;
 
     /// The SSH hosts a person can choose from. `None` offers no list.
-    fn hosts(&self) -> Option<std::sync::Arc<dyn SshHostSource>>;
+    fn hosts(&self) -> Option<Arc<dyn SshHostSource>>;
 }
 
 /// Installs the desktop's registry from its first Workspace Window, then resumes the connections
 /// that were active when SpaceTerm last quit. Resuming never asks the person for anything: a
 /// connection that needs a password, host approval, or a credential provider waits until the
-/// person chooses Connect. Later windows reuse the installed registry.
-pub(crate) fn ensure(factory: &dyn SshServersFactory, window: &Window, cx: &mut App) {
-    if installed(cx).is_some() {
+/// person chooses Connect. Later windows reuse the installed registry and take SSH's prompts only
+/// once the window presenting them has closed.
+pub(crate) fn ensure(factory: Rc<dyn SshServersFactory>, window: &Window, cx: &mut App) {
+    if cx.try_global::<InstalledSshServers>().is_some() {
+        let open = prompt_window(cx).is_some_and(|bound| {
+            cx.windows()
+                .iter()
+                .any(|window| window.window_id() == bound)
+        });
+        if !open {
+            present_prompts_in(window, cx);
+        }
         return;
     }
-    let Some(connections) = factory.create(window, cx) else {
+    let prompts = Arc::new(PromptWindow::default());
+    let Some(connections) = factory.create(Arc::clone(&prompts) as Arc<_>, cx) else {
         return;
     };
-    install(connections.clone(), factory.hosts(), cx);
+    cx.set_global(InstalledSshServers {
+        connections: connections.clone(),
+        hosts: factory.hosts(),
+        prompts: Some((prompts, factory)),
+    });
+    present_prompts_in(window, cx);
     connections.resume_retained();
+}
+
+/// Presents SSH's prompts in `window`, where the person just asked to reach a server, so a
+/// sign-in or host approval appears in front of them rather than behind another window.
+pub(crate) fn present_prompts_in(window: &Window, cx: &mut App) {
+    let Some((prompts, factory)) = cx
+        .try_global::<InstalledSshServers>()
+        .and_then(|installed| installed.prompts.clone())
+    else {
+        return;
+    };
+    let id = window.window_handle().window_id();
+    if prompts.window() == Some(id) {
+        return;
+    }
+    if let Some(presenter) = factory.prompts(window, cx) {
+        prompts.bind(id, presenter);
+    }
+}
+
+/// The window SSH's prompts appear in, if any.
+fn prompt_window(cx: &App) -> Option<WindowId> {
+    cx.try_global::<InstalledSshServers>()
+        .and_then(|installed| installed.prompts.as_ref())
+        .and_then(|(prompts, _)| prompts.window())
 }
 
 /// The desktop's registry, or `None` in a build or test that installs none.
@@ -68,7 +161,7 @@ pub(crate) fn installed(cx: &App) -> Option<SshServerConnections> {
 }
 
 /// The desktop's SSH host list, if it offers one.
-pub(crate) fn host_source(cx: &App) -> Option<std::sync::Arc<dyn SshHostSource>> {
+pub(crate) fn host_source(cx: &App) -> Option<Arc<dyn SshHostSource>> {
     cx.try_global::<InstalledSshServers>()
         .and_then(|installed| installed.hosts.clone())
 }
@@ -466,6 +559,168 @@ pub(crate) fn installation_consequence(os: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use crate::ssh::cancellation::SshCancellationToken;
+    use crate::ssh::server_connection::{
+        ConnectMode, ConnectProgress, ConnectedSshServer, RetainedSshConnection, SshConnectBackend,
+        SshConnectFailure, SshConnectionIntentStore, SshServerContinuity,
+    };
+
+    /// A computer that always needs the person to sign in.
+    struct NeedsSignIn;
+    impl SshConnectBackend for NeedsSignIn {
+        fn connect(
+            &self,
+            _: &SshDestination,
+            _: ConnectMode,
+            _: Option<&SshServerContinuity>,
+            _: &SshCancellationToken,
+            _: &ConnectProgress<'_>,
+        ) -> Result<ConnectedSshServer, SshConnectFailure> {
+            Err(SshConnectFailure::NeedsPerson(
+                InteractionReason::Authentication,
+            ))
+        }
+    }
+    struct NoIntents;
+    impl SshConnectionIntentStore for NoIntents {
+        fn load(&self) -> Result<Vec<RetainedSshConnection>, SshIntentStoreError> {
+            Ok(Vec::new())
+        }
+        fn retain(&self, _: RetainedSshConnection) -> Result<(), SshIntentStoreError> {
+            Ok(())
+        }
+        fn remove(&self, _: &SshDestination) -> Result<(), SshIntentStoreError> {
+            Ok(())
+        }
+    }
+
+    /// Records each window SSH's prompts were bound to, and how many registries it created.
+    #[derive(Default)]
+    struct RecordingFactory {
+        prompt_windows: Mutex<Vec<gpui::WindowId>>,
+        registries: Mutex<usize>,
+    }
+    /// Presents nothing; the recording factory names the window it was created for.
+    struct WindowPrompts;
+    impl AskPassAttemptFactory for WindowPrompts {
+        fn start_attempt(&self, _: &AppPaths) -> Result<AskPassAttempt, AskPassUnavailable> {
+            Err(AskPassUnavailable)
+        }
+    }
+    impl SshServersFactory for RecordingFactory {
+        fn create(
+            &self,
+            _: Arc<dyn AskPassAttemptFactory>,
+            _: &mut App,
+        ) -> Option<SshServerConnections> {
+            *self.registries.lock().unwrap() += 1;
+            Some(SshServerConnections::new(
+                Arc::new(NeedsSignIn),
+                Arc::new(NoIntents),
+            ))
+        }
+        fn prompts(&self, window: &Window, _: &mut App) -> Option<Arc<dyn AskPassAttemptFactory>> {
+            self.prompt_windows
+                .lock()
+                .unwrap()
+                .push(window.window_handle().window_id());
+            Some(Arc::new(WindowPrompts))
+        }
+        fn hosts(&self) -> Option<Arc<dyn SshHostSource>> {
+            None
+        }
+    }
+
+    /// Closing the window that presented SSH's prompts and opening another moves the prompts to
+    /// the open one, so a later Connect can still ask the person to sign in. The registry and the
+    /// connections it knows stay as they were.
+    #[gpui::test]
+    fn prompts_move_to_a_reopened_window_while_the_registry_stays(cx: &mut gpui::TestAppContext) {
+        let factory = Rc::new(RecordingFactory::default());
+        let first = cx.add_window(|_, _| gpui::EmptyView);
+        first
+            .update(cx, |_, window, cx| {
+                ensure(factory.clone() as Rc<dyn SshServersFactory>, window, cx)
+            })
+            .unwrap();
+        let destination = SshDestination::new("penguin".to_owned()).unwrap();
+        let registry = cx
+            .update(|cx| installed(cx))
+            .expect("the first window installs the registry");
+        registry.connect(destination.clone());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !matches!(
+            registry.status(&destination),
+            RemoteConnectionStatus::NeedsPerson { .. }
+        ) {
+            assert!(std::time::Instant::now() < deadline, "the attempt settles");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        first
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+        let second = cx.add_window(|_, _| gpui::EmptyView);
+        second
+            .update(cx, |_, window, cx| {
+                ensure(factory.clone() as Rc<dyn SshServersFactory>, window, cx)
+            })
+            .unwrap();
+
+        assert_eq!(
+            factory.prompt_windows.lock().unwrap().last().copied(),
+            Some(second.window_id()),
+            "SSH's prompts must be presented in a window that is still open"
+        );
+        assert_eq!(
+            *factory.registries.lock().unwrap(),
+            1,
+            "reopening keeps the one registry"
+        );
+        assert!(
+            matches!(
+                cx.update(|cx| installed(cx)).unwrap().status(&destination),
+                RemoteConnectionStatus::NeedsPerson { .. }
+            ),
+            "the registry keeps what it knew about each connection"
+        );
+    }
+
+    /// A Connect asked for from another window, such as Settings in front of the Workspace
+    /// Window, presents its prompts in that window, and a window opening later leaves them there.
+    #[gpui::test]
+    fn prompts_appear_in_the_window_where_the_person_asked(cx: &mut gpui::TestAppContext) {
+        let factory = Rc::new(RecordingFactory::default());
+        let workspace = cx.add_window(|_, _| gpui::EmptyView);
+        workspace
+            .update(cx, |_, window, cx| {
+                ensure(factory.clone() as Rc<dyn SshServersFactory>, window, cx)
+            })
+            .unwrap();
+        let settings = cx.add_window(|_, _| gpui::EmptyView);
+
+        settings
+            .update(cx, |_, window, cx| present_prompts_in(window, cx))
+            .unwrap();
+        let reopened = cx.add_window(|_, _| gpui::EmptyView);
+        reopened
+            .update(cx, |_, window, cx| {
+                ensure(factory.clone() as Rc<dyn SshServersFactory>, window, cx)
+            })
+            .unwrap();
+        settings
+            .update(cx, |_, window, cx| present_prompts_in(window, cx))
+            .unwrap();
+
+        assert_eq!(
+            *factory.prompt_windows.lock().unwrap(),
+            [workspace.window_id(), settings.window_id()],
+            "prompts move to where the person asked, once, and an opening window keeps them there"
+        );
+    }
 
     /// The person can tell apart waiting for them, unavailable, stopped, refused, unconfirmed
     /// and incompatible, and no state the person didn't cause offers a step that installs or

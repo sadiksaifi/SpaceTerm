@@ -3104,8 +3104,10 @@ impl TabView {
             } else {
                 pane.can_retry().then(|| {
                     let owner = view.clone();
-                    server_pane::retry_button(selector("retry"), move |_, cx| {
-                        let _ = owner.update(cx, |view, cx| view.retry_shared_pane(pane_id, cx));
+                    server_pane::retry_button(selector("retry"), move |window, cx| {
+                        let _ = owner.update(cx, |view, cx| {
+                            view.retry_shared_pane(pane_id, window, cx);
+                        });
                     })
                 })
             };
@@ -3272,7 +3274,7 @@ impl TabView {
         cx.notify();
     }
 
-    fn retry_shared_pane(&mut self, pane_id: PaneId, cx: &mut Context<Self>) {
+    fn retry_shared_pane(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
         // Retry is the person asking to reach the Pane's server. Another computer's route may
         // need them to sign in again, which only a requested connection may ask for, so Retry
         // asks for one now. An interruption alone never does.
@@ -3286,6 +3288,7 @@ impl TabView {
                 crate::ssh::server_connection::RemoteConnectionStatus::Connected { .. }
             )
         {
+            crate::ui::ssh_servers::present_prompts_in(window, cx);
             connections.connect(destination);
         }
         if self

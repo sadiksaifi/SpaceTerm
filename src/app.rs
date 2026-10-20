@@ -213,7 +213,7 @@ where
 {
     fn create(
         &self,
-        window: &Window,
+        prompts: Arc<dyn crate::ssh::askpass::AskPassAttemptFactory>,
         cx: &mut App,
     ) -> Option<crate::ssh::server_connection::SshServerConnections> {
         use crate::ssh::server_process::{
@@ -223,7 +223,6 @@ where
         if !matches!(self.capability, SshCapability::Available(_)) {
             return None;
         }
-        let askpass = self.askpass.create(window, cx).ok()?;
         let backend = NativeSshConnectBackend::new(NativeSshServerConfig {
             paths: Arc::clone(&self.paths),
             home: self.home.clone(),
@@ -234,7 +233,7 @@ where
             filesystem: Arc::clone(&self.host_config),
             // The host composition's process adapter also prepares the remote account.
             bootstrap: Arc::new(self.adapter.clone()),
-            askpass,
+            askpass: prompts,
             executor: cx.background_executor().clone(),
             artifacts: SshServerArtifacts::new(self.artifacts.clone()),
         });
@@ -246,6 +245,14 @@ where
                 )),
             ),
         ))
+    }
+
+    fn prompts(
+        &self,
+        window: &Window,
+        cx: &mut App,
+    ) -> Option<Arc<dyn crate::ssh::askpass::AskPassAttemptFactory>> {
+        self.askpass.create(window, cx).ok()
     }
 
     fn hosts(&self) -> Option<Arc<dyn crate::ui::ssh_servers::SshHostSource>> {
@@ -722,7 +729,7 @@ pub(crate) fn open(
     let ssh_servers = host.adapters.ssh_servers.clone();
     let result = cx.open_window(workspace_window_options(host, cx), |window, cx| {
         // The first Workspace Window can present SSH's prompts, so the registry begins here.
-        if let Some(factory) = ssh_servers.as_deref() {
+        if let Some(factory) = ssh_servers.clone() {
             crate::ui::ssh_servers::ensure(factory, window, cx);
         }
         let workspace_manager = cx.new(|cx| {
