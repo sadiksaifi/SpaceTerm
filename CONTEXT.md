@@ -77,6 +77,10 @@ The account-local SpaceTerm Server owns local terminal work. Production SSH Work
 
 **Unpair Pending**: An Unpair Device request whose server-side revocation is awaiting confirmation, independently of completed local connection removal.
 
+**Saved Connection**: An SSH Destination a SpaceTerm Client keeps in its Servers Settings Section until the person removes it, together with whether it should stay connected.
+
+**Check Status**: The action that observes a Saved Connection's server once without connecting to it, starting it or installing it.
+
 **Client Settings**: Preferences used by a SpaceTerm Client on its own device.
 
 **Server Settings**: Preferences owned by one SpaceTerm Server and shared by its authorized clients.
