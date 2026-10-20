@@ -3,6 +3,65 @@ use std::os::unix::fs::PermissionsExt;
 use test_support::{COMMIT, VERSION, target, with_artifact};
 
 #[test]
+fn retained_candidate_revalidates_declared_compatibility_and_signature() {
+    let root = temporary();
+    with_artifact(
+        &root.join("source"),
+        "spaceterm-development",
+        |archive, signature| {
+            let installation = provision(
+                &root.join("installations"),
+                "spaceterm-development",
+                archive,
+                signature,
+                target(),
+                COMMIT,
+                VERSION,
+            )
+            .unwrap();
+            assert_eq!(
+                verify_candidate_installation(
+                    &installation.directory,
+                    "spaceterm-development",
+                    1,
+                    &["workspace_policy"]
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                verify_candidate_installation(
+                    &installation.directory,
+                    "spaceterm-development",
+                    2,
+                    &["workspace_policy"]
+                ),
+                Err(ServerError::IncompatibleProtocol)
+            );
+            assert_eq!(
+                verify_candidate_installation(
+                    &installation.directory,
+                    "spaceterm-development",
+                    1,
+                    &["future_required"]
+                ),
+                Err(ServerError::MissingRequiredCapability)
+            );
+            std::fs::write(installation.directory.join("artifact.sig"), [0; 64]).unwrap();
+            assert_eq!(
+                verify_candidate_installation(
+                    &installation.directory,
+                    "spaceterm-development",
+                    1,
+                    &["workspace_policy"]
+                ),
+                Err(ServerError::RuntimeUnavailable)
+            );
+        },
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn signed_candidate_discovery_distinguishes_required_major_and_capability() {
     let root = temporary();
     with_artifact(

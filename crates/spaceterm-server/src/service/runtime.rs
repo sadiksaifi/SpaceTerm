@@ -157,6 +157,28 @@ fn authenticate(bytes: &[u8], signature: &[u8]) -> Result<(), ServerError> {
         .map_err(|_| ServerError::RuntimeUnavailable)
 }
 pub(super) fn verify(path: &Path, identity: &str) -> Result<(), ServerError> {
+    verify_installation(path, identity, None)
+}
+
+/// Recheck authenticated retained declarations at activation admission and dispatch.
+pub(super) fn verify_candidate_installation(
+    path: &Path,
+    identity: &str,
+    required_major: u16,
+    required_capabilities: &[&str],
+) -> Result<(), ServerError> {
+    verify_installation(
+        path,
+        identity,
+        Some((required_major, required_capabilities)),
+    )
+}
+
+fn verify_installation(
+    path: &Path,
+    identity: &str,
+    requirements: Option<(u16, &[&str])>,
+) -> Result<(), ServerError> {
     let directory = owned_directory(path)?;
     let bytes = read_file(&directory, Path::new("artifact.tar.gz"), MAX_ARCHIVE)?;
     let signature = read_file(&directory, Path::new("artifact.sig"), 64)?;
@@ -165,6 +187,9 @@ pub(super) fn verify(path: &Path, identity: &str) -> Result<(), ServerError> {
     }
     authenticate(&bytes, &signature)?;
     let info = verify_contents(&directory, &bytes, identity)?;
+    if let Some((major, capabilities)) = requirements {
+        info.require_compatibility(major, capabilities)?;
+    }
     verify_native(path, identity)?;
     verify_executable(path, &info)?;
     verify_directory_path(&directory, path)
@@ -252,6 +277,23 @@ struct Build {
     capabilities: Vec<String>,
 }
 impl Build {
+    fn require_compatibility(
+        &self,
+        required_major: u16,
+        required_capabilities: &[&str],
+    ) -> Result<(), ServerError> {
+        if self.protocol_major != required_major {
+            return Err(ServerError::IncompatibleProtocol);
+        }
+        if required_capabilities
+            .iter()
+            .any(|required| !self.capabilities.iter().any(|value| value == required))
+        {
+            return Err(ServerError::MissingRequiredCapability);
+        }
+        Ok(())
+    }
+
     fn parse(bytes: &[u8], identity: &str) -> Result<Self, ServerError> {
         if bytes.len() > 4096 {
             return Err(ServerError::RuntimeUnavailable);
@@ -552,15 +594,7 @@ fn candidate(
         return Err(ServerError::CandidateChanged);
     }
     let info = contents(&bytes, identity, |_, _, _, _| Ok(()))?;
-    if info.protocol_major != required_major {
-        return Err(ServerError::IncompatibleProtocol);
-    }
-    if required_capabilities
-        .iter()
-        .any(|required| !info.capabilities.iter().any(|value| value == required))
-    {
-        return Err(ServerError::MissingRequiredCapability);
-    }
+    info.require_compatibility(required_major, required_capabilities)?;
     Ok((bytes, signature, info))
 }
 
