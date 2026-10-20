@@ -395,6 +395,10 @@ const fn refusal_detail(kind: RefusalKind) -> &'static str {
 
 const fn unavailable_detail(kind: UnavailableKind) -> &'static str {
     match kind {
+        UnavailableKind::LocalIpcUnavailable => {
+            "SpaceTerm couldn\u{2019}t prepare its SSH connection on this computer, so it \
+             didn\u{2019}t reach the other computer. Nothing changed there."
+        }
         UnavailableKind::Network => "The network is unavailable. Connect again when it returns.",
         UnavailableKind::HostUnreachable => {
             "SpaceTerm couldn\u{2019}t reach this computer. Check that it\u{2019}s on and \
