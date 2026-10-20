@@ -65,14 +65,16 @@ impl From<ClientName> for String {
     }
 }
 
-/// Format characters that reorder or hide text, which a name never needs.
+/// Format characters that reorder or hide text, which a name never needs. The zero-width
+/// non-joiner and joiner stay, because Persian and Indic words and emoji sequences need them.
 fn invisible(c: char) -> bool {
     matches!(
         c,
         '\u{00AD}'
             | '\u{061C}'
             | '\u{180E}'
-            | '\u{200B}'..='\u{200F}'
+            | '\u{200B}'
+            | '\u{200E}'..='\u{200F}'
             | '\u{202A}'..='\u{202E}'
             | '\u{2060}'..='\u{206F}'
             | '\u{FEFF}'
@@ -142,6 +144,19 @@ mod tests {
             "build[31m box reversed"
         );
         assert_eq!(received("\u{7}\u{202E} \n"), "Another SpaceTerm");
+    }
+
+    /// Joiners shape Persian and Indic words and emoji sequences, so a name keeps them.
+    #[test]
+    fn a_received_name_keeps_joiners_that_shape_its_text() {
+        assert_eq!(
+            received("\u{645}\u{6CC}\u{200C}\u{62E}\u{648}\u{627}\u{647}\u{645}"),
+            "\u{645}\u{6CC}\u{200C}\u{62E}\u{648}\u{627}\u{647}\u{645}"
+        );
+        assert_eq!(
+            received("Lab \u{1F469}\u{200D}\u{1F4BB}"),
+            "Lab \u{1F469}\u{200D}\u{1F4BB}"
+        );
     }
 
     #[test]
