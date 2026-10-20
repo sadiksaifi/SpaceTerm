@@ -75,6 +75,15 @@ def package_bundle(release_tag=None):
         updater = sparkle.directory()
         environment["SPACETERM_SPARKLE_DIR"] = str(updater)
         config["macos"]["frameworks"] = [str(updater / "Sparkle.framework")]
+    from spaceterm_tasks.server_package import prepare_desktop_artifact
+
+    environment.update(
+        prepare_desktop_artifact(
+            STAGE / "server-artifact",
+            template["CFBundleIdentifier"].removeprefix("io.github.sadiksaifi."),
+            release_tag,
+        )
+    )
     print(f"Building the Apple Silicon {template['CFBundleName']} executable")
     executable = build_executable(
         "--release", "--locked", "--no-default-features", "--features", "desktop", env=environment
@@ -83,13 +92,6 @@ def package_bundle(release_tag=None):
     binaries.mkdir()
     shutil.copyfile(executable, binaries / template["CFBundleExecutable"])
     (binaries / template["CFBundleExecutable"]).chmod(0o755)
-    from spaceterm_tasks.server_package import prepare_desktop_artifact
-
-    prepare_desktop_artifact(
-        STAGE / "server-artifact",
-        template["CFBundleIdentifier"].removeprefix("io.github.sadiksaifi."),
-        release_tag,
-    )
     config["resources"].append({"src": str(STAGE / "server-artifact"), "target": "server-artifact"})
     config["version"] = version
     # cargo-packager stamps CFBundleVersion with the build time; the identity's Info.plist
@@ -218,6 +220,7 @@ def verify_bundle(app, name, release_tag, label):
         resources / "server-artifact",
         template["CFBundleIdentifier"].removeprefix("io.github.sadiksaifi."),
         release_tag,
+        executable=executable,
     )
 
     signature = ["codesign", "--verify", "--strict", *(["--deep"] if release_tag else []), str(app)]

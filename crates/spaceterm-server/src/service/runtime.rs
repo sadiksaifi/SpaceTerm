@@ -20,6 +20,15 @@ const TARGET: &str = "aarch64-apple-darwin";
 #[cfg(target_os = "linux")]
 const TARGET: &str = "x86_64-unknown-linux-gnu";
 
+/// Authenticated signed declarations used before staging an update.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CandidateMetadata {
+    pub version: String,
+    pub commit: String,
+    pub protocol_major: u16,
+    pub capabilities: Vec<String>,
+}
+
 impl Service {
     /// Retain this exact signed independent artifact in the owning account's installation store.
     ///
@@ -52,6 +61,63 @@ impl Service {
             target,
             commit,
             version,
+        )
+    }
+
+    /// Read and authenticate a pinned candidate without creating any installation-store entry.
+    /// Native executable build verification remains part of explicit provisioning.
+    ///
+    /// # Errors
+    /// Returns the same pin, signature, layout and compatibility classifications as provisioning.
+    pub fn inspect_candidate(
+        &self,
+        archive: &Path,
+        signature: &Path,
+        expected_sha256: &str,
+        required_major: u16,
+        required_capabilities: &[&str],
+    ) -> Result<CandidateMetadata, ServerError> {
+        let (_, _, info) = candidate(
+            &self.identity,
+            archive,
+            signature,
+            expected_sha256,
+            required_major,
+            required_capabilities,
+        )?;
+        Ok(CandidateMetadata {
+            version: info.version,
+            commit: info.commit,
+            protocol_major: info.protocol_major,
+            capabilities: info.capabilities,
+        })
+    }
+
+    /// Verify and retain the archive pinned by the running client, independently of its release.
+    ///
+    /// Required capabilities apply to the connection; optional features do not gate staging.
+    /// This changes no service policy, approved installation, Stop intent or running work.
+    ///
+    /// # Errors
+    /// Returns CandidateChanged for a different whole-archive digest, IncompatibleProtocol or
+    /// MissingRequiredCapability for unsupported declarations, and the ordinary verification
+    /// or storage classifications for an invalid artifact or inaccessible installation store.
+    pub fn provision_candidate(
+        &self,
+        archive: &Path,
+        signature: &Path,
+        expected_sha256: &str,
+        required_major: u16,
+        required_capabilities: &[&str],
+    ) -> Result<RetainedInstallation, ServerError> {
+        provision_candidate(
+            &self.paths.data.join("installations"),
+            &self.identity,
+            archive,
+            signature,
+            expected_sha256,
+            required_major,
+            required_capabilities,
         )
     }
 }
@@ -182,6 +248,8 @@ struct Build {
     target: String,
     commit: String,
     version: String,
+    protocol_major: u16,
+    capabilities: Vec<String>,
 }
 impl Build {
     fn parse(bytes: &[u8], identity: &str) -> Result<Self, ServerError> {
@@ -213,6 +281,16 @@ impl Build {
             || info.target != TARGET
             || info.version.len() > 64
             || !version
+            || info.protocol_major == 0
+            || info.capabilities.len() > 32
+            || info.capabilities.iter().any(|value| {
+                value.is_empty()
+                    || value.len() > 64
+                    || !value.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+                    })
+            })
+            || info.capabilities.iter().collect::<BTreeSet<_>>().len() != info.capabilities.len()
         {
             return Err(ServerError::RuntimeUnavailable);
         }
@@ -436,21 +514,80 @@ fn provision(
     if info.target != target || info.commit != commit || info.version != version {
         return Err(ServerError::RuntimeUnavailable);
     }
+    retain(parent, identity, &bytes, &signature, &info)
+}
+
+fn provision_candidate(
+    parent: &Path,
+    identity: &str,
+    archive: &Path,
+    signature: &Path,
+    expected_sha256: &str,
+    required_major: u16,
+    required_capabilities: &[&str],
+) -> Result<RetainedInstallation, ServerError> {
+    let (bytes, signature, info) = candidate(
+        identity,
+        archive,
+        signature,
+        expected_sha256,
+        required_major,
+        required_capabilities,
+    )?;
+    retain(parent, identity, &bytes, &signature, &info)
+}
+
+fn candidate(
+    identity: &str,
+    archive: &Path,
+    signature: &Path,
+    expected_sha256: &str,
+    required_major: u16,
+    required_capabilities: &[&str],
+) -> Result<(Vec<u8>, Vec<u8>, Build), ServerError> {
+    let bytes = source(archive, MAX_ARCHIVE)?;
+    let signature = source(signature, 64)?;
+    authenticate(&bytes, &signature)?;
+    if !digest_valid(expected_sha256) || digest(&bytes) != expected_sha256 {
+        return Err(ServerError::CandidateChanged);
+    }
+    let info = contents(&bytes, identity, |_, _, _, _| Ok(()))?;
+    if info.protocol_major != required_major {
+        return Err(ServerError::IncompatibleProtocol);
+    }
+    if required_capabilities
+        .iter()
+        .any(|required| !info.capabilities.iter().any(|value| value == required))
+    {
+        return Err(ServerError::MissingRequiredCapability);
+    }
+    Ok((bytes, signature, info))
+}
+
+fn retain(
+    parent: &Path,
+    identity: &str,
+    bytes: &[u8],
+    signature: &[u8],
+    info: &Build,
+) -> Result<RetainedInstallation, ServerError> {
+    let version = &info.version;
+    let commit = &info.commit;
     // The account-private store is the lock used by both the Python installer and service controls.
     let directory = files::store(parent)?;
     lock_directory(&directory)?;
     verify_directory_path(&directory, parent)?;
-    let digest = digest(&bytes);
+    let digest = digest(bytes);
     let destination = parent.join(&digest);
     let name = files::leaf(&destination)?;
     if files::exists(&directory, &name)? {
         let (retained_version, retained_commit) = describe(&destination, identity)?;
-        if retained_version != version || retained_commit != commit {
+        if retained_version != *version || retained_commit != *commit {
             return Err(ServerError::RuntimeUnavailable);
         }
     } else {
         let prepared = files::Preparation::new(&directory)?;
-        contents(&bytes, identity, |path, is_directory, mode, data| {
+        contents(bytes, identity, |path, is_directory, mode, data| {
             if is_directory {
                 files::create_directories(&prepared.directory, path)?;
             } else {
@@ -461,20 +598,20 @@ fn provision(
         files::create_file(
             &prepared.directory,
             Path::new("artifact.tar.gz"),
-            &bytes,
+            bytes,
             0o644,
         )?;
         files::create_file(
             &prepared.directory,
             Path::new("artifact.sig"),
-            &signature,
+            signature,
             0o644,
         )?;
-        verify_contents(&prepared.directory, &bytes, identity)?;
+        verify_contents(&prepared.directory, bytes, identity)?;
         let prepared_path = prepared.path(parent);
         verify_directory_path(&prepared.directory, &prepared_path)?;
         verify_native(&prepared_path, identity)?;
-        verify_executable(&prepared_path, &info)?;
+        verify_executable(&prepared_path, info)?;
         verify_directory_path(&directory, parent)?;
         prepared
             .directory
@@ -485,7 +622,7 @@ fn provision(
     verify_directory_path(&directory, parent)?;
     Ok(RetainedInstallation {
         directory: destination,
-        version: version.to_owned(),
-        commit: commit.to_owned(),
+        version: version.clone(),
+        commit: commit.clone(),
     })
 }

@@ -112,6 +112,17 @@ def package(release_tag=None):
     name = selected_identity(release_tag)
     display_name = identity(name)["CFBundleName"]
     environment = macos_signing.signing_environment(packaged_environment(release_tag))
+    shutil.rmtree(STAGE, ignore_errors=True)
+    STAGE.mkdir(parents=True)
+    from spaceterm_tasks.server_package import prepare_desktop_artifact
+
+    environment.update(
+        prepare_desktop_artifact(
+            STAGE / DIRECTORIES[name] / "share/spaceterm/server-artifact",
+            DIRECTORIES[name],
+            release_tag,
+        )
+    )
     print(f"Building the x86_64 Linux {display_name} executable")
     executable = build_executable(
         "--release",
@@ -122,16 +133,7 @@ def package(release_tag=None):
         env=environment,
         portable_linux=True,
     )
-    shutil.rmtree(STAGE, ignore_errors=True)
-    STAGE.mkdir(parents=True)
     stage(name, executable, STAGE / DIRECTORIES[name])
-    from spaceterm_tasks.server_package import prepare_desktop_artifact
-
-    prepare_desktop_artifact(
-        STAGE / DIRECTORIES[name] / "share/spaceterm/server-artifact",
-        DIRECTORIES[name],
-        release_tag,
-    )
     DIST.mkdir(exist_ok=True)
     destination = archive_path(name)
     with tempfile.TemporaryDirectory(dir=DIST, prefix=".package.") as temporary:
@@ -184,7 +186,10 @@ def verify_tree(tree, name, release_tag):
     from spaceterm_tasks.server_package import verify_desktop_artifact
 
     verify_desktop_artifact(
-        tree / "share/spaceterm/server-artifact", DIRECTORIES[name], release_tag
+        tree / "share/spaceterm/server-artifact",
+        DIRECTORIES[name],
+        release_tag,
+        executable=executable,
     )
 
     identifier = application_id(name)

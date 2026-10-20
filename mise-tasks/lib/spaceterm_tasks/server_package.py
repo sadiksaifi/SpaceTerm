@@ -30,9 +30,7 @@ from spaceterm_tasks.packaging import (
     TERMINFO,
     checked,
     packaged_environment,
-    release_version,
     require_clean_checkout,
-    verify_resources,
 )
 
 TARGETS = {"darwin": "aarch64-apple-darwin", "linux": "x86_64-unknown-linux-gnu"}
@@ -40,7 +38,7 @@ IDENTITIES = ("spaceterm", "spaceterm-preflight", "spaceterm-development")
 MAX_ARCHIVE = 256 * 1024 * 1024
 MAX_EXPANDED = 512 * 1024 * 1024
 MAX_MEMBERS = 128
-BUILD_KEYS = {"schema", "identity", "target", "commit", "version"}
+BUILD_KEYS = {"schema", "identity", "target", "commit", "version", "protocol_major", "capabilities"}
 
 
 def host_target():
@@ -66,6 +64,15 @@ def document(data):
             or set(value) != BUILD_KEYS
             or type(value["schema"]) is not int
             or value["schema"] != 1
+            or type(value["protocol_major"]) is not int
+            or not 0 < value["protocol_major"] <= 65535
+            or not isinstance(value["capabilities"], list)
+            or len(value["capabilities"]) > 32
+            or any(
+                not isinstance(capability, str) or not re.fullmatch(r"[a-z0-9_]{1,64}", capability)
+                for capability in value["capabilities"]
+            )
+            or len(set(value["capabilities"])) != len(value["capabilities"])
             or value["identity"] not in IDENTITIES
             or value["target"] not in TARGETS.values()
             or not re.fullmatch(r"[0-9a-f]{40}", value["commit"])
@@ -95,7 +102,9 @@ def build_info(executable):
     return document(result.stdout)
 
 
-def unpack_verified(archive, signature, destination, expected):
+def unpack_verified(
+    archive, signature, destination, expected, *, identity=None, expected_sha256=None
+):
     """Authenticate exact archive bytes before parsing or extracting any member.
 
     Callers use a private temporary copy, preventing replacement between signature
@@ -104,6 +113,10 @@ def unpack_verified(archive, signature, destination, expected):
     if archive.stat().st_size > MAX_ARCHIVE or signature.stat().st_size != 64:
         raise TaskError("the signed server artifact has an invalid size")
     release.verify_ed25519(release.public_key(), archive, signature)
+    if expected_sha256 is not None and release.sha256(archive) != expected_sha256:
+        raise TaskError(
+            "the embedded server archive differs from the client's compiled candidate pin"
+        )
     try:
         with tarfile.open(archive, "r:gz") as source:
             members = []
@@ -140,8 +153,10 @@ def unpack_verified(archive, signature, destination, expected):
             if stream is None:
                 raise TaskError("the server build document is missing")
             info = document(stream.read())
-            if info != expected:
+            if expected is not None and info != expected:
                 raise TaskError("the server artifact differs from the requested exact build")
+            if identity is not None:
+                compatible_candidate(info, identity)
             # A failure above cannot create any destination entry.
             source.extractall(destination, members=members, filter="data")
             # Archives may omit directory entries. Tarfile creates those parents using the
@@ -223,7 +238,12 @@ def verify_tree(tree, expected):
     # Inspect native metadata and signatures before executing the candidate.
     if build_info(executable) != expected:
         raise TaskError("the executable differs from the authenticated server build")
-    verify_resources(tree / "share/spaceterm", "server")
+    # Signed resources belong to this server artifact, independently of client source assets.
+    checked(
+        ["infocmp", "-x", "-1", "xterm-spaceterm"],
+        "the server terminfo resource is invalid",
+        env={**os.environ, "TERMINFO": str(tree / "share/spaceterm/terminfo")},
+    )
     try:
         result = subprocess.run(
             [executable, "--check"], env={}, cwd=tree, capture_output=True, timeout=15
@@ -238,7 +258,7 @@ def verify_tree(tree, expected):
         raise TaskError("the installed server headless check failed")
 
 
-def verified_copy(archive, signature, directory, expected):
+def verified_copy(archive, signature, directory, expected, *, identity=None, expected_sha256=None):
     archive = Path(archive)
     signature = Path(signature)
     if archive.stat().st_size > MAX_ARCHIVE or signature.stat().st_size != 64:
@@ -247,9 +267,16 @@ def verified_copy(archive, signature, directory, expected):
     raw = directory / "artifact.sig"
     shutil.copyfile(archive, private)
     shutil.copyfile(signature, raw)
-    unpack_verified(private, raw, directory / "payload", expected)
+    info = unpack_verified(
+        private,
+        raw,
+        directory / "payload",
+        expected,
+        identity=identity,
+        expected_sha256=expected_sha256,
+    )
     tree = directory / "payload/server"
-    verify_tree(tree, expected)
+    verify_tree(tree, info)
     return tree, private, raw
 
 
@@ -403,63 +430,86 @@ def package(identity, release_tag=None):
     return DIST / name, DIST / f"{name}.sig"
 
 
-def desktop_build(identity, release_tag=None):
-    """The exact source revision admitted for a packaged desktop's first server."""
-    commit = checked(
-        ["git", "rev-parse", "HEAD"], "candidate commit unavailable", cwd=ROOT, text=True
-    ).strip()
-    return document(
-        json.dumps(
-            {
-                "schema": 1,
-                "identity": identity,
-                "target": host_target(),
-                "commit": commit,
-                "version": release_version(release_tag) if release_tag else "dev." + commit[:12],
-            }
-        )
-    )
-
-
-def stage_desktop_artifact(archive, signature, destination, expected):
+def stage_desktop_artifact(archive, signature, destination, expected=None, *, identity=None):
     """Embed the verified independent archive and raw signature, never a derived executable."""
-    expected = document(json.dumps(expected))
+    expected = document(json.dumps(expected)) if expected is not None else None
     # Verification and copying use the same private bytes, even if the input path changes.
     with tempfile.TemporaryDirectory(prefix="spaceterm-desktop-artifact-") as temporary:
-        _, private, raw = verified_copy(archive, signature, Path(temporary), expected)
+        tree, private, raw = verified_copy(
+            archive, signature, Path(temporary), expected, identity=identity
+        )
+        info = document((tree / "build.json").read_bytes())
+        compatible_candidate(info, identity or info["identity"])
         destination.mkdir(parents=True)
         shutil.copyfile(private, destination / "artifact.tar.gz")
         shutil.copyfile(raw, destination / "artifact.sig")
         for path in destination.iterdir():
             path.chmod(0o644)
+    return {
+        "SPACETERM_SERVER_ARCHIVE": str((destination / "artifact.tar.gz").resolve()),
+        "SPACETERM_SERVER_SIGNATURE": str((destination / "artifact.sig").resolve()),
+    }
+
+
+def compatible_candidate(info, identity):
+    if info["identity"] != identity or info["target"] != host_target():
+        raise TaskError("the server candidate has a different identity or target")
+    if info["protocol_major"] != 1:
+        raise TaskError("the server candidate has an incompatible protocol major")
+    if "workspace_policy" not in info["capabilities"]:
+        raise TaskError("the server candidate is missing a required capability")
 
 
 def prepare_desktop_artifact(destination, identity, release_tag=None):
     """Signing happens during candidate preparation; launch only consumes the resulting pair.
 
-    An explicit pair uses the same inputs as source builds. A candidate without that pair
-    builds the independent signed package using the existing candidate signing workflow.
+    An explicit pair reuses its signed bytes across client releases. Without that pair,
+    build the independent package using the existing candidate signing workflow.
     """
     archive = os.environ.get("SPACETERM_SERVER_ARCHIVE")
     signature = os.environ.get("SPACETERM_SERVER_SIGNATURE")
     if (archive is not None or signature is not None) and (not archive or not signature):
         raise TaskError("supply both SPACETERM_SERVER_ARCHIVE and SPACETERM_SERVER_SIGNATURE")
     require_clean_checkout()
-    expected = desktop_build(identity, release_tag)
     if not archive:
         archive, signature = package(identity, release_tag)
-    stage_desktop_artifact(archive, signature, destination, expected)
+    return stage_desktop_artifact(archive, signature, destination, identity=identity)
 
 
-def verify_desktop_artifact(destination, identity, release_tag=None):
-    """Verify the pair carried inside the actual app/archive, using the exact candidate build."""
+def verify_desktop_artifact(destination, identity, release_tag=None, *, executable=None):
+    """Verify signed candidate compatibility and the final client's compiled whole-archive pin."""
     try:
         if {path.name for path in destination.iterdir()} != {"artifact.tar.gz", "artifact.sig"}:
             raise TaskError("the desktop server artifact layout is invalid")
-        verify(
-            destination / "artifact.tar.gz",
-            destination / "artifact.sig",
-            desktop_build(identity, release_tag),
-        )
-    except OSError:
+        pin = None
+        if executable is not None:
+            result = subprocess.run(
+                [executable, "--build-info"], env={}, capture_output=True, timeout=10
+            )
+            try:
+                client = json.loads(result.stdout)
+                valid = (
+                    not result.returncode
+                    and not result.stderr
+                    and len(result.stdout) <= 4096
+                    and client["schema"] == 1
+                    and client["identity"] == identity
+                    and client["target"] == host_target()
+                    and re.fullmatch(r"[0-9a-f]{64}", client["server_candidate_sha256"])
+                )
+                pin = client["server_candidate_sha256"] if valid else None
+            except (ValueError, KeyError, TypeError):
+                valid = False
+            if not valid:
+                raise TaskError("the client's compiled server candidate pin is unavailable")
+        with tempfile.TemporaryDirectory(prefix="spaceterm-desktop-verify-") as temporary:
+            verified_copy(
+                destination / "artifact.tar.gz",
+                destination / "artifact.sig",
+                Path(temporary),
+                None,
+                identity=identity,
+                expected_sha256=pin,
+            )
+    except (OSError, subprocess.TimeoutExpired):
         raise TaskError("the desktop server artifact is unavailable") from None

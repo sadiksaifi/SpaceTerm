@@ -1,7 +1,9 @@
 """Desktop packaging keeps signing material out of compiler subprocesses."""
 
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from spaceterm_tasks import TaskError, package_linux
@@ -28,7 +30,16 @@ class PackageCredentialsTests(unittest.TestCase):
             raise TaskError("compiler boundary reached")
 
         with (
+            tempfile.TemporaryDirectory() as temporary,
             patch.dict(os.environ, environment, clear=True),
+            patch.object(package_linux, "STAGE", Path(temporary) / "stage"),
+            patch(
+                "spaceterm_tasks.server_package.prepare_desktop_artifact",
+                return_value={
+                    "SPACETERM_SERVER_ARCHIVE": "/verified/artifact.tar.gz",
+                    "SPACETERM_SERVER_SIGNATURE": "/verified/artifact.sig",
+                },
+            ),
             patch.object(package_linux.sys, "platform", "linux"),
             patch.object(package_linux.platform, "machine", return_value="x86_64"),
             patch("spaceterm_tasks.cargo.subprocess.Popen", side_effect=compiler),

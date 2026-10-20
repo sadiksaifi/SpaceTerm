@@ -3,6 +3,203 @@ use std::os::unix::fs::PermissionsExt;
 use test_support::{COMMIT, VERSION, target, with_artifact};
 
 #[test]
+fn signed_candidate_discovery_distinguishes_required_major_and_capability() {
+    let root = temporary();
+    with_artifact(
+        &root.join("source"),
+        "spaceterm-development",
+        |archive, signature| {
+            for (major, required, expected) in [
+                (
+                    2,
+                    vec!["workspace_policy"],
+                    ServerError::IncompatibleProtocol,
+                ),
+                (
+                    1,
+                    vec!["future_required"],
+                    ServerError::MissingRequiredCapability,
+                ),
+            ] {
+                let pin = digest(&std::fs::read(archive).unwrap());
+                let result = candidate(
+                    "spaceterm-development",
+                    archive,
+                    signature,
+                    &pin,
+                    major,
+                    &required,
+                );
+                assert!(matches!(result, Err(error) if error == expected));
+            }
+            let service = Service::for_identity("spaceterm-development").unwrap();
+            let pin = digest(&std::fs::read(archive).unwrap());
+            let metadata = service
+                .inspect_candidate(archive, signature, &pin, 1, &["workspace_policy"])
+                .unwrap();
+            assert_eq!(metadata.version, VERSION);
+            assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        },
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn signed_candidate_can_reuse_an_independent_release_and_deduplicates_whole_archive() {
+    let root = temporary();
+    with_artifact(
+        &root.join("source"),
+        "spaceterm-development",
+        |archive, signature| {
+            let pin = digest(&std::fs::read(archive).unwrap());
+            let parent = root.join("installations");
+            let first = provision_candidate(
+                &parent,
+                "spaceterm-development",
+                archive,
+                signature,
+                &pin,
+                1,
+                &["workspace_policy"],
+            )
+            .unwrap();
+            let second = provision_candidate(
+                &parent,
+                "spaceterm-development",
+                archive,
+                signature,
+                &pin,
+                1,
+                &["workspace_policy"],
+            )
+            .unwrap();
+            assert_eq!(first, second);
+            rewrite(archive, signature, |entries| {
+                entries
+                    .iter_mut()
+                    .find(|(name, _, _)| name.ends_with(".zshenv"))
+                    .unwrap()
+                    .1 = b"another signed resource".to_vec();
+            });
+            let changed_pin = digest(&std::fs::read(archive).unwrap());
+            let changed = provision_candidate(
+                &parent,
+                "spaceterm-development",
+                archive,
+                signature,
+                &changed_pin,
+                1,
+                &["workspace_policy"],
+            )
+            .unwrap();
+            assert_eq!(changed.version, first.version);
+            assert_ne!(changed.directory, first.directory);
+            assert_eq!(std::fs::read_dir(parent).unwrap().count(), 2);
+        },
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn matching_digest_never_bypasses_signature_or_signed_compatibility_validation() {
+    let root = temporary();
+    with_artifact(
+        &root.join("source"),
+        "spaceterm-development",
+        |archive, signature| {
+            let parent = root.join("installations");
+            for change in 0..4 {
+                rewrite(archive, signature, |entries| {
+                    let mut info: serde_json::Value =
+                        serde_json::from_slice(&entries[0].1).unwrap();
+                    match change {
+                        0 => info["protocol_major"] = 2.into(),
+                        1 => {
+                            info["protocol_major"] = 1.into();
+                            info["capabilities"] = serde_json::json!([]);
+                        }
+                        2 => {
+                            info["capabilities"] =
+                                serde_json::json!(["workspace_policy", "workspace_policy"])
+                        }
+                        3 => info
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("protocol_major")
+                            .map(|_| ())
+                            .unwrap(),
+                        _ => unreachable!(),
+                    }
+                    entries[0].1 = serde_json::to_vec(&info).unwrap();
+                });
+                let pin = digest(&std::fs::read(archive).unwrap());
+                assert!(
+                    provision_candidate(
+                        &parent,
+                        "spaceterm-development",
+                        archive,
+                        signature,
+                        &pin,
+                        1,
+                        &["workspace_policy"]
+                    )
+                    .is_err()
+                );
+                assert!(!parent.exists());
+            }
+            std::fs::write(signature, [0; 64]).unwrap();
+            let pin = digest(&std::fs::read(archive).unwrap());
+            assert!(
+                candidate(
+                    "spaceterm-development",
+                    archive,
+                    signature,
+                    &pin,
+                    1,
+                    &["workspace_policy"]
+                )
+                .is_err()
+            );
+        },
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn candidate_pin_covers_resources_and_build_metadata_before_retention() {
+    let root = temporary();
+    with_artifact(
+        &root.join("source"),
+        "spaceterm-development",
+        |archive, signature| {
+            let pin = digest(&std::fs::read(archive).unwrap());
+            rewrite(archive, signature, |entries| {
+                let resource = entries
+                    .iter_mut()
+                    .find(|(name, _, _)| name.ends_with(".zshenv"))
+                    .unwrap();
+                resource.1 = b"changed signed resource".to_vec();
+            });
+            let parent = root.join("installations");
+            assert_eq!(
+                provision_candidate(
+                    &parent,
+                    "spaceterm-development",
+                    archive,
+                    signature,
+                    &pin,
+                    1,
+                    &["workspace_policy"]
+                ),
+                Err(ServerError::CandidateChanged)
+            );
+            assert!(!parent.exists());
+        },
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn provision_retains_exact_signed_bytes_and_reuses_verified_installation() {
     let root = temporary();
     with_artifact(

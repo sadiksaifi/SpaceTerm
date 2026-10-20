@@ -27,6 +27,8 @@ if __name__ == "__main__":
         "target": args.target,
         "commit": args.commit,
         "version": args.version,
+        "protocol_major": 1,
+        "capabilities": ["workspace_policy"],
     }
     operation = install if args.retain else verify
     main(lambda: operation(args.archive, args.signature, expected) and None)
