@@ -281,6 +281,16 @@ pub(super) struct SettingsRowDescriptor {
 }
 
 impl SettingsRowDescriptor {
+    /// Whether `query` appears whole in the row's name or one of its keywords, rather than only
+    /// as letters scattered through them.
+    pub(super) fn names(&self, query: &str, naming: AccessibilityNaming) -> bool {
+        let query = query.trim().to_lowercase();
+        !query.is_empty()
+            && std::iter::once(self.label(naming))
+                .chain(self.keywords.iter().copied())
+                .any(|text| text.to_lowercase().contains(&query))
+    }
+
     /// The row's name, with its permission named as System Settings does under `naming`.
     pub(super) fn label(&self, naming: AccessibilityNaming) -> &'static str {
         match (self.id, naming) {

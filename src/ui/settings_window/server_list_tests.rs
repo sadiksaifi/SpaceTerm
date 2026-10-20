@@ -638,6 +638,72 @@ fn searching_for_a_server_by_name_reveals_and_selects_it(cx: &mut TestAppContext
     assert_eq!(servers.computers.remote_calls(), 0);
 }
 
+fn search_for(query: &str, servers: &mut Servers<'_>) {
+    let search = servers
+        .window
+        .read_with(servers.cx, |settings, _| settings.search.clone());
+    let query = query.to_owned();
+    servers.cx.update(|_, cx| {
+        search.update(cx, |search, cx| search.set_value(query, cx));
+    });
+    servers.cx.run_until_parked();
+}
+
+/// A word that only appears inside a host's name answers the Settings it names, not that host.
+#[gpui::test]
+fn a_query_inside_a_host_name_keeps_the_local_server_and_its_rows(cx: &mut TestAppContext) {
+    let mut servers = open_servers(true, &["build.local"], cx);
+    search_for("local", &mut servers);
+
+    assert_eq!(listed(servers.cx)[0], (local_name().to_owned(), true));
+    assert!(rendered("settings-row-local-server", servers.cx));
+    servers.window.read_with(servers.cx, |settings, _| {
+        assert_eq!(
+            settings.revealed,
+            Some(super::super::SettingsRowId::LocalServer)
+        );
+    });
+}
+
+/// A Setting the query names by its own words comes before a host that happens to share it.
+#[gpui::test]
+fn a_setting_named_by_the_query_ranks_before_a_host_with_that_name(cx: &mut TestAppContext) {
+    let mut servers = open_servers(true, &["font-box"], cx);
+    click("settings-navigation-settings-section-interface", servers.cx);
+    search_for("font", &mut servers);
+
+    servers.window.read_with(servers.cx, |settings, _| {
+        assert_eq!(settings.active_section, SettingsSectionId::Font);
+        assert_eq!(
+            settings.revealed.map(|row| row.descriptor().section),
+            Some(SettingsSectionId::Font)
+        );
+    });
+}
+
+/// Short queries are partial words a person is still typing, so they select no server.
+#[gpui::test]
+fn a_short_query_selects_no_server(cx: &mut TestAppContext) {
+    let mut servers = open_servers(true, &["penguin"], cx);
+    for query in ["p", "pe"] {
+        search_for(query, &mut servers);
+        assert_eq!(listed(servers.cx)[0], (local_name().to_owned(), true));
+    }
+}
+
+/// A search shows the server it names only while it runs. Clearing it returns to the server the
+/// person chose.
+#[gpui::test]
+fn clearing_a_search_returns_to_the_server_the_person_chose(cx: &mut TestAppContext) {
+    let mut servers = open_servers(true, &["build.local", "penguin"], cx);
+    select("penguin", servers.cx);
+    search_for("build", &mut servers);
+    assert_eq!(listed(servers.cx)[1], ("build.local".to_owned(), true));
+
+    search_for("", &mut servers);
+    assert_eq!(listed(servers.cx)[2], ("penguin".to_owned(), true));
+}
+
 #[gpui::test]
 fn a_query_for_a_local_only_row_selects_the_local_server(cx: &mut TestAppContext) {
     let servers = open_servers(true, &["penguin"], cx);

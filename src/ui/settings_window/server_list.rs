@@ -20,6 +20,8 @@ use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::sidebar_window::form::CaptionTone;
 
 pub(super) const LIST_SELECTOR: &str = "settings-server-list";
+/// The fewest characters of a server's name that search treats as naming it.
+const NAME_QUERY_MINIMUM: usize = 3;
 /// The list's name for assistive technology, distinct from the Servers section it sits in.
 pub(super) const SERVER_LIST_NAME: &str = "Server list";
 
@@ -151,9 +153,12 @@ impl SettingsWindow {
             ServerChoice::Local => local,
             ServerChoice::Ssh(destination) => saved.iter().any(|(saved, _)| saved == destination),
         };
-        self.selected_server
-            .clone()
+        let searching = !self.query.trim().is_empty();
+        searching
+            .then(|| self.search_selected_server.clone())
+            .flatten()
             .filter(listed)
+            .or_else(|| self.selected_server.clone().filter(listed))
             .or_else(|| local.then_some(ServerChoice::Local))
             .or_else(|| {
                 saved
@@ -177,6 +182,7 @@ impl SettingsWindow {
     /// server carries over.
     pub(super) fn select_server(&mut self, server: ServerChoice, cx: &mut Context<Self>) {
         self.selected_server = Some(server);
+        self.search_selected_server = None;
         self.sync_server_location(cx);
         cx.notify();
     }
@@ -216,31 +222,40 @@ impl SettingsWindow {
         }
     }
 
-    /// Whether the query names a listed server, which then presents its whole page.
-    fn query_names_a_server(&self) -> bool {
+    /// The listed server a query names: its whole name, or the start of it from
+    /// `NAME_QUERY_MINIMUM` characters, so a word inside a host name or a partial word names no
+    /// server.
+    fn server_named_by_query(&self) -> Option<ServerChoice> {
         let query = self.query.trim().to_lowercase();
-        !query.is_empty()
-            && self
-                .listed_servers()
-                .iter()
-                .any(|server| server.name.to_lowercase().contains(&query))
+        if query.chars().count() < NAME_QUERY_MINIMUM {
+            return None;
+        }
+        let listed = self.listed_servers();
+        let name = |server: &&ListedServer| server.name.to_lowercase();
+        listed
+            .iter()
+            .find(|server| name(server) == query)
+            .or_else(|| {
+                listed
+                    .iter()
+                    .find(|server| name(server).starts_with(&query))
+            })
+            .map(|server| server.choice.clone())
     }
 
-    /// Selects the server a query is about: one it names, or otherwise the kind of server whose
-    /// rows it reaches when the selected one has none of them.
+    /// Chooses the server the current search shows: one it names, or otherwise the kind of
+    /// server whose rows it reaches when the person's choice has none of them. The person's own
+    /// choice never changes, so clearing the query returns to it.
     pub(super) fn select_server_for_query(&mut self, reachable: &[SettingsRowId]) {
-        let query = self.query.trim().to_lowercase();
-        if query.is_empty() {
+        self.search_selected_server = None;
+        if self.query.trim().is_empty() {
+            return;
+        }
+        if let Some(named) = self.server_named_by_query() {
+            self.search_selected_server = Some(named);
             return;
         }
         let listed = self.listed_servers();
-        if let Some(named) = listed
-            .iter()
-            .find(|server| server.name.to_lowercase().contains(&query))
-        {
-            self.selected_server = Some(named.choice.clone());
-            return;
-        }
         let selected = self.selected_server();
         let detail = |row: &&SettingsRowId| {
             row.descriptor().section == SettingsSectionId::Servers
@@ -259,35 +274,45 @@ impl SettingsWindow {
                 .filter(detail)
                 .any(|row| row_presents(*row, Some(&server.choice)))
         }) {
-            self.selected_server = Some(server.choice);
+            self.search_selected_server = Some(server.choice);
         }
     }
 
     /// The rows of `reachable` that present the selected server, best first. A query naming a
-    /// listed server adds that server's whole page, leading with its status.
+    /// listed server adds that server's whole page after them, leading with its status, so a
+    /// Setting the query matches by its own words still comes first.
     pub(super) fn server_search_matches(
         &self,
         reachable: Vec<SettingsRowId>,
     ) -> Vec<SettingsRowId> {
         let selected = self.selected_server();
-        let mut rows: Vec<_> = reachable
+        let rows: Vec<_> = reachable
             .into_iter()
             .filter(|row| self.presents_server_row(*row, selected.as_ref()))
             .collect();
-        if let Some(selected) = selected.as_ref().filter(|_| self.query_names_a_server()) {
+        if let Some(selected) = selected
+            .as_ref()
+            .filter(|selected| self.server_named_by_query().as_ref() == Some(*selected))
+        {
+            // Rows that name the query outrank the server; rows it only fuzzily touches follow.
+            let naming = self.permission_access.naming();
+            let (mut ranked, loose): (Vec<_>, Vec<_>) = rows
+                .into_iter()
+                .partition(|row| row.descriptor().names(&self.query, naming));
             let leading = leading_row(selected);
-            rows.retain(|row| *row != leading);
-            rows.insert(0, leading);
-            let page = super::catalog::rows().map(|row| row.id).filter(|row| {
-                row.descriptor().section == SettingsSectionId::Servers
-                    && self.presents_server_row(*row, Some(selected))
-                    && !self.omitted_rows.contains(row)
-            });
-            for row in page {
-                if !rows.contains(&row) {
-                    rows.push(row);
+            let page = std::iter::once(leading).chain(
+                super::catalog::rows().map(|row| row.id).filter(|row| {
+                    row.descriptor().section == SettingsSectionId::Servers
+                        && self.presents_server_row(*row, Some(selected))
+                        && !self.omitted_rows.contains(row)
+                }),
+            );
+            for row in page.chain(loose) {
+                if !ranked.contains(&row) {
+                    ranked.push(row);
                 }
             }
+            return ranked;
         }
         rows
     }

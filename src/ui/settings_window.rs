@@ -386,6 +386,9 @@ pub(crate) struct SettingsWindow {
     /// The server the person selected in the Servers list. A server no longer listed gives way
     /// to the local server or the first saved one.
     selected_server: Option<server_list::ServerChoice>,
+    /// The server the current search shows, which stands in for the person's choice only while
+    /// the query lasts.
+    search_selected_server: Option<server_list::ServerChoice>,
     /// The server list's one keyboard stop. The arrow keys move its selection.
     server_list_focus: FocusHandle,
     /// How the server list names the server for this account on this computer.
@@ -715,6 +718,7 @@ impl SettingsWindow {
                 .map(|offered| servers::LocalServerRow::new(offered.connection)),
             ssh_servers,
             selected_server: None,
+            search_selected_server: None,
             server_list_focus: cx.focus_handle().tab_stop(true),
             this_computer,
         }
