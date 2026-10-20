@@ -512,6 +512,22 @@ pub(crate) fn resume_waiting_launches(cx: &mut App) {
     }
 }
 
+/// Connects again, in every window presenting its Workspaces, the Panes refused while a server
+/// update resolved, after an update or Return that left the server stopped. Nothing runs launch
+/// or starts the server: a stopped server answers each Pane that it is stopped.
+pub(crate) fn update_resolved(cx: &mut App) {
+    for window in cx.windows() {
+        let Some(window) = window.downcast::<WorkspaceManager>() else {
+            continue;
+        };
+        let _ = window.update(cx, |manager, _, cx| {
+            if manager.launch.state == LaunchState::Ready {
+                manager.server_started(cx);
+            }
+        });
+    }
+}
+
 impl WorkspaceManager {
     /// Runs launch, after the person's explicit step when there is one.
     pub(super) fn run_local_launch(
@@ -617,7 +633,8 @@ impl WorkspaceManager {
         cx.notify();
     }
 
-    /// Reconnects each Pane the person's stop interrupted, once the server runs again.
+    /// Reconnects each Pane the person's stop or a resolving update interrupted. A Pane connects
+    /// only; a stopped server answers that it is stopped.
     fn server_started(&self, cx: &mut App) {
         for workspace in self.workspaces.iter() {
             workspace

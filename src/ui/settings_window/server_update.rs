@@ -897,6 +897,10 @@ impl SettingsWindow {
             .is_some_and(|status| status.running && !status.stopped);
         if running {
             crate::ui::workspace_manager::resume_waiting_launches(cx);
+        } else {
+            // A Return, or an update of a stopped server, leaves it stopped. Panes refused while
+            // the update resolved still connect again, and learn that it is stopped.
+            crate::ui::workspace_manager::update_resolved(cx);
         }
     }
 
