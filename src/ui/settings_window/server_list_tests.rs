@@ -11,6 +11,7 @@ use spaceterm_ui::a11y_testing::{A11yTree, perform};
 
 use super::super::servers::testing::{ScriptedServer, connected};
 use super::super::servers::{LocalServerControl, OfferedLocalServer, OfferedServer};
+use super::ServerChoice;
 use crate::appearance::Appearance;
 use crate::domain::SshDestination;
 use crate::platform::appearance::testing::RecordingAppearancePlatform;
@@ -473,6 +474,90 @@ fn after_disconnect_the_detail_presents_the_facts_last_observed(cx: &mut TestApp
 
 const LAST_OBSERVED: &str = "SpaceTerm last observed these details when it connected or checked \
                              the status. They may have changed since.";
+
+struct RecordingMovement;
+
+impl crate::platform::window_movement::WindowMovementFactory for RecordingMovement {
+    fn create(
+        &self,
+    ) -> Rc<dyn crate::platform::window_movement::OperatingSystemWindowDragPlatform> {
+        Rc::new(RecordingOperatingSystemWindowDragPlatform::default())
+    }
+}
+
+/// A surface outside Settings, such as a machine heading, opens Settings on the server it names,
+/// whether Settings is closed or already open on another server.
+#[gpui::test]
+fn opening_server_settings_selects_the_named_server(cx: &mut TestAppContext) {
+    let records = Arc::new(SavedConnections::default());
+    *records.records.lock().unwrap() = ["alpha", "bravo"]
+        .into_iter()
+        .map(|name| RetainedSshConnection {
+            destination: destination(name),
+            continuity: None,
+            active: false,
+        })
+        .collect();
+    let computers = Arc::new(Computers::default());
+    let connections = SshServerConnections::new(computers.clone(), records);
+    connections.resume_retained();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while connections.connections().len() < 2 {
+        assert!(Instant::now() < deadline, "the saved connections load");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let settings =
+        crate::settings::Settings::load(MemoryStorage::with_document(&SettingsDocument::default()));
+    cx.update(|cx| {
+        appearance_runtime::install(
+            settings,
+            Rc::new(RecordingAppearancePlatform::default()),
+            cx,
+        )
+        .expect("appearance runtime should install");
+        crate::ui::init(cx).expect("UI initialization should succeed");
+        crate::ui::ssh_servers::install(connections, None, cx);
+        super::super::configure_window_chrome(
+            Rc::new(RecordingMovement),
+            Default::default(),
+            None,
+            cx,
+        );
+    });
+    let opened = |destination: Option<SshDestination>, cx: &mut TestAppContext| {
+        cx.update(|cx| super::super::open_server_settings(destination, cx));
+        cx.run_until_parked();
+        let windows: Vec<_> = cx
+            .windows()
+            .into_iter()
+            .filter_map(|window| window.downcast::<SettingsWindow>())
+            .collect();
+        let [window] = windows[..] else {
+            panic!("Settings should have one window, found {}", windows.len());
+        };
+        window
+            .read_with(cx, |settings, _| {
+                (settings.active_section, settings.selected_server())
+            })
+            .expect("Settings should stay open")
+    };
+
+    let new_window = opened(Some(destination("bravo")), cx);
+    let open_window = opened(None, cx);
+
+    assert_eq!(
+        new_window,
+        (
+            SettingsSectionId::Servers,
+            Some(ServerChoice::Ssh(destination("bravo")))
+        )
+    );
+    assert_eq!(
+        open_window,
+        (SettingsSectionId::Servers, Some(ServerChoice::Local))
+    );
+    assert_eq!(computers.remote_calls(), 0);
+}
 
 #[gpui::test]
 fn remove_forgets_the_connection_at_once_and_selects_the_local_server(cx: &mut TestAppContext) {
