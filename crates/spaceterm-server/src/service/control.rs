@@ -197,8 +197,8 @@ impl UpdateWording {
             candidate,
             ..
         } = self;
-        let kept = "Workspaces and paired devices are kept, and each Pane starts a new shell when \
-                    you next use it.";
+        let kept = "Workspaces and each client\u{2019}s attachments and views are kept, and each \
+                    Pane starts a new shell when you next use it.";
         match self.change {
             UpdateChange::Update if self.running => format!(
                 "The server changes from version {previous} to version {candidate}. Terminal \
