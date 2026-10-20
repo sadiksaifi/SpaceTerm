@@ -76,32 +76,39 @@ impl PrivateSshConnectionIntents {
             .connections
             .into_iter()
             .map(|record| {
-                if record.destination.len() > 255
-                    || !destinations.insert(record.destination.clone())
-                {
+                if !destinations.insert(record.destination.clone()) {
                     return Err(SshIntentStoreError::Malformed);
                 }
                 let destination = SshDestination::new(record.destination)
                     .map_err(|_| SshIntentStoreError::Malformed)?;
-                if let Some(pin) = &record.continuity
-                    && (pin.route == [0; 32]
-                        || pin.server == [0; 32]
-                        || pin.account == 0
-                        || pin.build.is_empty()
-                        || pin.build.len() > 128
-                        || !pin
-                            .build
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b == b'-'))
-                {
-                    return Err(SshIntentStoreError::Malformed);
-                }
-                Ok(RetainedSshConnection {
+                let connection = RetainedSshConnection {
                     destination,
                     continuity: record.continuity,
-                })
+                };
+                Self::validate(&connection)?;
+                Ok(connection)
             })
             .collect()
+    }
+
+    fn validate(connection: &RetainedSshConnection) -> Result<(), SshIntentStoreError> {
+        if connection.destination.as_str().len() > 255 {
+            return Err(SshIntentStoreError::Malformed);
+        }
+        if let Some(pin) = &connection.continuity
+            && (pin.route == [0; 32]
+                || pin.server == [0; 32]
+                || pin.account == 0
+                || pin.build.is_empty()
+                || pin.build.len() > 128
+                || !pin
+                    .build
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+        {
+            return Err(SshIntentStoreError::Malformed);
+        }
+        Ok(())
     }
 
     fn update(
@@ -170,6 +177,7 @@ impl SshConnectionIntentStore for PrivateSshConnectionIntents {
     }
 
     fn retain(&self, connection: RetainedSshConnection) -> Result<(), SshIntentStoreError> {
+        Self::validate(&connection)?;
         self.update(|connections| {
             connections.retain(|current| current.destination != connection.destination);
             connections.push(connection.clone());
@@ -255,5 +263,33 @@ mod tests {
             store.load(),
             Err(SshIntentStoreError::Unavailable)
         ));
+    }
+
+    #[test]
+    fn rejected_records_preserve_readable_intent_and_allow_later_updates() {
+        let (paths, fs) = fixture();
+        let store = PrivateSshConnectionIntents::new(paths.clone());
+        store.retain(connection("penguin", 3)).unwrap();
+        let path = paths.directories().data.join(FILE);
+        let original = fs.files.lock().unwrap().values[&path].0.clone();
+        let mut invalid_pin = connection("other", 0);
+        invalid_pin.continuity.as_mut().unwrap().account = 0;
+        for rejected in [connection(&"a".repeat(256), 4), invalid_pin] {
+            assert_eq!(store.retain(rejected), Err(SshIntentStoreError::Malformed));
+            assert_eq!(fs.files.lock().unwrap().values[&path].0, original);
+            let records = PrivateSshConnectionIntents::new(paths.clone())
+                .load()
+                .unwrap();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].destination.as_str(), "penguin");
+        }
+        let boundary = connection(&"a".repeat(255), 4);
+        store.retain(boundary.clone()).unwrap();
+        assert_eq!(store.load().unwrap().len(), 2);
+        store.remove(&boundary.destination).unwrap();
+        store
+            .remove(&SshDestination::new("penguin".into()).unwrap())
+            .unwrap();
+        assert!(store.load().unwrap().is_empty());
     }
 }
