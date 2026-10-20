@@ -773,7 +773,16 @@ fn a_removal_that_could_not_be_saved_names_the_host_and_can_be_retried(cx: &mut 
     click("settings-ssh-server-remove-again", servers.cx);
     settle(servers.cx, |_| connections.unsaved_removals().is_empty());
     assert!(servers.saved.destinations().is_empty());
+    let connections = servers.connections.clone();
+    settle(servers.cx, |_| connections.persistence_error().is_none());
     assert!(!rendered("settings-ssh-server-remove-again", servers.cx));
+    assert!(
+        !rendered(
+            super::super::ssh_servers::UNSAVED_REMOVAL_SELECTOR,
+            servers.cx
+        ) && !rendered(super::super::ssh_servers::PERSISTENCE_SELECTOR, servers.cx),
+        "once the removal saves, no notice remains"
+    );
 }
 
 /// Short queries are partial words a person is still typing, so they select no server.

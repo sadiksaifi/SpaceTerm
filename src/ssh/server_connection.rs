@@ -1021,7 +1021,9 @@ fn persistence_worker(inner: Weak<Inner>, receiver: async_channel::Receiver<Pers
                     state
                         .unsaved_removals
                         .retain(|unsaved| *unsaved != destination);
-                    if result.is_err() {
+                    // Only unavailable storage keeps the record that brings it back. A damaged
+                    // record loads nothing, so its damage is the notice that matters.
+                    if result == Err(SshIntentStoreError::Unavailable) {
                         state.unsaved_removals.push(destination);
                     }
                     notify(&mut state);
@@ -1029,13 +1031,63 @@ fn persistence_worker(inner: Weak<Inner>, receiver: async_channel::Receiver<Pers
                 result
             }
         };
-        if let Err(error) = result
-            && let Ok(mut state) = owner.state.lock()
-        {
-            state.persistence_error = Some(error);
+        let result = match result {
+            // Storage works again, so what failed before is saved now.
+            Ok(())
+                if owner
+                    .state
+                    .lock()
+                    .is_ok_and(|state| state.persistence_error.is_some()) =>
+            {
+                resync(&owner)
+            }
+            result => result,
+        };
+        if let Ok(mut state) = owner.state.lock() {
+            let error = result.err();
+            if state.persistence_error != error {
+                state.persistence_error = error;
+                notify(&mut state);
+            }
+        }
+    }
+}
+
+/// Saves every saved connection as it stands and every removal that wasn't saved, after an
+/// earlier write failed.
+fn resync(owner: &Inner) -> Result<(), SshIntentStoreError> {
+    let (records, removals) = {
+        let Ok(state) = owner.state.lock() else {
+            return Err(SshIntentStoreError::Unavailable);
+        };
+        let records: Vec<_> = state
+            .entries
+            .iter()
+            .filter_map(|(destination, entry)| {
+                SshDestination::new(destination.clone())
+                    .ok()
+                    .map(|destination| RetainedSshConnection {
+                        destination,
+                        continuity: entry.continuity.clone(),
+                        active: entry.active,
+                    })
+            })
+            .collect();
+        (records, state.unsaved_removals.clone())
+    };
+    for record in records {
+        owner.intents.retain(record)?;
+    }
+    for destination in removals {
+        owner.intents.remove(&destination)?;
+        if let Ok(mut state) = owner.state.lock() {
+            state
+                .unsaved_removals
+                .retain(|unsaved| *unsaved != destination);
             notify(&mut state);
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1048,8 +1100,8 @@ mod tests {
         records: Mutex<Vec<RetainedSshConnection>>,
         loads: AtomicUsize,
         writes: AtomicUsize,
-        /// Whether removing a record fails, as unavailable storage does.
-        removal_fails: std::sync::atomic::AtomicBool,
+        /// The failure every write returns while set, as unavailable or damaged storage does.
+        fails: Mutex<Option<SshIntentStoreError>>,
     }
     impl SshConnectionIntentStore for Intents {
         fn load(&self) -> Result<Vec<RetainedSshConnection>, SshIntentStoreError> {
@@ -1057,6 +1109,9 @@ mod tests {
             Ok(self.records.lock().unwrap().clone())
         }
         fn retain(&self, record: RetainedSshConnection) -> Result<(), SshIntentStoreError> {
+            if let Some(error) = *self.fails.lock().unwrap() {
+                return Err(error);
+            }
             let mut records = self.records.lock().unwrap();
             records.retain(|other| other.destination != record.destination);
             records.push(record);
@@ -1064,8 +1119,8 @@ mod tests {
             Ok(())
         }
         fn remove(&self, destination: &SshDestination) -> Result<(), SshIntentStoreError> {
-            if self.removal_fails.load(Ordering::SeqCst) {
-                return Err(SshIntentStoreError::Unavailable);
+            if let Some(error) = *self.fails.lock().unwrap() {
+                return Err(error);
             }
             self.records
                 .lock()
@@ -1354,7 +1409,7 @@ mod tests {
         intents.records.lock().unwrap().push(saved(false));
         registry.resume_retained();
         eventually(|| registry.connections().len() == 1);
-        intents.removal_fails.store(true, Ordering::SeqCst);
+        *intents.fails.lock().unwrap() = Some(SshIntentStoreError::Unavailable);
         registry.remove(&destination());
         eventually(|| registry.unsaved_removals() == vec![destination()]);
         assert!(
@@ -1362,10 +1417,52 @@ mod tests {
             "the removal still applies now"
         );
 
-        intents.removal_fails.store(false, Ordering::SeqCst);
+        *intents.fails.lock().unwrap() = None;
         registry.remove(&destination());
         eventually(|| registry.unsaved_removals().is_empty());
         assert!(intents.active(&destination()).is_none());
+    }
+    #[test]
+    fn a_later_successful_write_saves_what_failed_and_clears_the_warning() {
+        let (registry, _, intents, _, _) = setup(false);
+        let other = SshDestination::new("other-host".into()).unwrap();
+        intents.records.lock().unwrap().extend([
+            saved(false),
+            RetainedSshConnection {
+                destination: other.clone(),
+                continuity: None,
+                active: false,
+            },
+        ]);
+        registry.resume_retained();
+        eventually(|| registry.connections().len() == 2);
+        intents.records.lock().unwrap()[0].active = true;
+        *intents.fails.lock().unwrap() = Some(SshIntentStoreError::Unavailable);
+        registry.disconnect(&destination());
+        eventually(|| registry.persistence_error().is_some());
+
+        *intents.fails.lock().unwrap() = None;
+        registry.disconnect(&other);
+        eventually(|| registry.persistence_error().is_none());
+        assert_eq!(
+            intents.active(&destination()),
+            Some(false),
+            "the write that failed is saved with the next one"
+        );
+    }
+    #[test]
+    fn a_damaged_record_reports_damage_rather_than_an_unsaved_removal() {
+        let (registry, _, intents, _, _) = setup(false);
+        intents.records.lock().unwrap().push(saved(false));
+        registry.resume_retained();
+        eventually(|| registry.connections().len() == 1);
+        *intents.fails.lock().unwrap() = Some(SshIntentStoreError::Malformed);
+        registry.remove(&destination());
+        eventually(|| registry.persistence_error() == Some(SshIntentStoreError::Malformed));
+        assert!(
+            registry.unsaved_removals().is_empty(),
+            "a damaged record loads nothing, so the removed connection can't return"
+        );
     }
     #[test]
     fn saving_a_connection_again_supersedes_its_unsaved_removal() {
@@ -1373,10 +1470,11 @@ mod tests {
         intents.records.lock().unwrap().push(saved(false));
         registry.resume_retained();
         eventually(|| registry.connections().len() == 1);
-        intents.removal_fails.store(true, Ordering::SeqCst);
+        *intents.fails.lock().unwrap() = Some(SshIntentStoreError::Unavailable);
         registry.remove(&destination());
         eventually(|| !registry.unsaved_removals().is_empty());
 
+        *intents.fails.lock().unwrap() = None;
         registry.connect(destination());
         entered.recv_blocking().unwrap();
         eventually(|| registry.unsaved_removals().is_empty());
