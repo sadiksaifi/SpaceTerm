@@ -1,7 +1,11 @@
 # Confirm server update restarts and explain incompatibility
 
-Client and server release versions may differ when their SpaceTerm Protocol implementations are compatible. An incompatible connection explains which side needs updating and which process must restart; the failure is scoped to that server connection so the client can keep using its other compatible servers.
+Client and server release versions may differ. Compatibility requires a shared supported SpaceTerm Protocol major and the client's required capabilities. A missing optional capability disables only its feature. An incompatible connection distinguishes an unsupported major from a missing required capability and explains which side needs updating only when verified compatibility information proves the direction. Unknown direction uses neutral wording. Refusal affects that connection and leaves server work running.
 
 A client update restarts that client and preserves server-owned terminal work. An update that restarts a SpaceTerm Server requires explicit confirmation stating that every Terminal Session on that server ends for every client; the server's retained identity, paired devices, and [Workspace organization](0031-retain-workspace-organization-across-server-restarts.md) survive, and retained Panes follow the [fresh-shell startup policy](0043-start-restored-shells-on-first-use.md).
+
+The local "Update Server..." journey belongs to the selected server's existing Settings controls. Status controls and incompatible-server recovery open that same journey when a suitable verified candidate is available. The confirmation names the original server and exact candidate. A changed approved installation, run or deliberate Stop observation requires a fresh confirmation before admission. Updating a stopped server leaves it stopped.
+
+Once admitted, recovery resolves the original exact-target operation without renewed destructive consent or repeated destructive dispatch. It never selects a newer staged candidate or replaces later work. An uncertain outcome refuses terminal admission. A failed candidate never triggers silent rollback. An explicit return to the previous verified runtime requires proof that the candidate never reached ready and that saved server state is unchanged. Ended Terminal Sessions cannot return.
 
 [ADR 0040](0040-keep-one-server-runtime-version-active.md) defines staging and activation of the single server runtime version.
