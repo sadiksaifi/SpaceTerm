@@ -12509,6 +12509,63 @@ fn a_machine_headings_menu_should_connect_its_server(cx: &mut TestAppContext) {
     );
 }
 
+/// A machine with only native Remote Workspaces has no presented SSH server, so its heading offers
+/// no Connect that would set one up there and no Disconnect, whatever the registry reports for its
+/// destination.
+#[gpui::test]
+fn a_machine_with_only_remote_workspaces_should_offer_no_connection_controls(
+    cx: &mut TestAppContext,
+) {
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (connections, connects) = waiting_ssh_registry(cx);
+    create_disconnected_remote_workspace(&harness.manager, cx);
+    connections.connect(crate::domain::SshDestination::new("work".to_owned()).unwrap());
+    wait_for_person(&connections, "work");
+    let _ = connects.try_recv();
+    redraw(cx);
+
+    right_click("machine-heading-work", cx);
+
+    assert_eq!(
+        (
+            cx.debug_bounds("machine-menu-server-settings").is_some(),
+            cx.debug_bounds("machine-menu-connect").is_some(),
+            cx.debug_bounds("machine-menu-disconnect").is_some(),
+        ),
+        (true, false, false)
+    );
+}
+
+/// A machine heading's Disconnect ends that machine's connection and leaves the others connected.
+#[gpui::test]
+fn a_machine_headings_menu_should_disconnect_only_its_server(cx: &mut TestAppContext) {
+    use crate::ssh::server_connection::RemoteConnectionStatus;
+
+    let (harness, cx) = MachineGroupsHarness::new(cx);
+    let (connections, _connects) = waiting_ssh_registry(cx);
+    for name in ["penguin", "zeta"] {
+        harness.present_ssh(name, &[], cx);
+        connections.connect(crate::domain::SshDestination::new(name.to_owned()).unwrap());
+        wait_for_person(&connections, name);
+    }
+    redraw(cx);
+
+    right_click("machine-heading-penguin", cx);
+    click("machine-menu-disconnect", cx);
+
+    let status = |name: &str| {
+        connections.status(&crate::domain::SshDestination::new(name.to_owned()).unwrap())
+    };
+    assert!(matches!(
+        status("penguin"),
+        RemoteConnectionStatus::Inactive
+    ));
+    assert!(matches!(
+        status("zeta"),
+        RemoteConnectionStatus::NeedsPerson { .. }
+    ));
+}
+
 /// A shared server Workspace presented in this window, with the server Pane its scripted
 /// connection drives. Its Panes reach the same presentation the local Development server's do.
 struct SharedPaneHarness {
