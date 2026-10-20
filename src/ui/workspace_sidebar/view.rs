@@ -611,7 +611,12 @@ impl WorkspaceSidebar {
                             .child(div().min_w_0().flex_1().child(text::title(
                                 name,
                                 first_line,
-                                if renaming { None } else { machine },
+                                // A machine heading already names the row's machine.
+                                if renaming || self.machine_label(workspace_id).is_some() {
+                                    None
+                                } else {
+                                    machine
+                                },
                                 pinned && disclosing && !renaming,
                                 workspace_id.get(),
                                 row_text_appearance.clone(),

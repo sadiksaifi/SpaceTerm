@@ -235,7 +235,7 @@ fn sidebar_should_follow_remote_root_across_tabs_pins_and_custom_names(cx: &mut 
 }
 
 #[gpui::test]
-fn sidebar_rows_should_keep_the_directory_and_pin_below_name_and_hide_machine_when_narrow(
+fn sidebar_rows_should_keep_the_directory_and_pin_below_name_and_leave_the_machine_to_its_heading(
     cx: &mut TestAppContext,
 ) {
     let (manager, _, cx) = workspace_manager(cx);
@@ -270,10 +270,14 @@ fn sidebar_rows_should_keep_the_directory_and_pin_below_name_and_hide_machine_wh
     });
     cx.run_until_parked();
     let name = cx.debug_bounds("workspace-row-name-2").unwrap();
-    let machine = cx.debug_bounds("workspace-machine-2").unwrap();
     let path = cx.debug_bounds("workspace-row-path-2").unwrap();
     let pin = cx.debug_bounds("workspace-row-pin-2").unwrap();
-    assert!(machine.left() - name.right() >= px(8.0));
+    // The machine's heading names it, so its row doesn't repeat it.
+    assert!(
+        cx.debug_bounds("machine-heading-deploy@staging-production")
+            .is_some()
+    );
+    assert!(cx.debug_bounds("workspace-machine-2").is_none());
     assert!(path.top() >= name.bottom());
     assert!(pin.right() <= path.left());
     cx.update(|window, cx| {

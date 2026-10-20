@@ -356,10 +356,16 @@ impl SettingsWindow {
         if state.saving {
             return ("Saving…".into(), CaptionTone::Guidance);
         }
-        let machine = self.selected_server_name();
+        // The card heading names the machine. A local server reads as the account's own.
+        let server = match self.selected_server() {
+            Some(ServerChoice::Ssh(destination)) => {
+                format!("the server on {}", destination.as_str())
+            }
+            _ => "your account\u{2019}s server".to_owned(),
+        };
         if !state.connected {
             return (
-                format!("Connect to the server on {machine} to change it.").into(),
+                format!("Connect to {server} to change it.").into(),
                 CaptionTone::Guidance,
             );
         }
@@ -370,7 +376,7 @@ impl SettingsWindow {
             );
         }
         (
-            format!("Where the server on {machine} creates new Worktrees for its Workspaces. Use {{repository}} and {{branch}}. For example: ~/.worktrees/my-app/feature-login").into(),
+            format!("Where {server} creates new Worktrees for its Workspaces. Use {{repository}} and {{branch}}. For example: ~/.worktrees/my-app/feature-login").into(),
             CaptionTone::Guidance,
         )
     }
