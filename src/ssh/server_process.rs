@@ -421,42 +421,7 @@ impl<A: SshProcessAdapter> SshConnectBackend for NativeSshConnectBackend<A> {
             return Err(SshConnectFailure::Changed(ContinuityChange::HostChanged));
         }
         progress(ConnectPhase::Discovering);
-        match route.discover(cancellation)? {
-            Discovery::Existing(discovery) => {
-                if let Some(expected) = expected {
-                    expected.verify(&SshServerContinuity {
-                        route: route.route_id,
-                        account: discovery.account,
-                        build: discovery.build.clone(),
-                        server: discovery.server.unwrap_or([0; 32]),
-                    })?;
-                }
-                if discovery.stopped {
-                    return Err(SshConnectFailure::Stopped);
-                }
-                Ok(SshServerObservation {
-                    availability: if discovery.installed && discovery.running {
-                        ServerAvailability::Running
-                    } else {
-                        ServerAvailability::NotRunning
-                    },
-                    facts: facts(&discovery)?,
-                })
-            }
-            Discovery::Missing { target, .. } => {
-                if expected.is_some() {
-                    return Err(SshConnectFailure::Changed(ContinuityChange::ServerChanged));
-                }
-                Ok(SshServerObservation {
-                    availability: ServerAvailability::NotInstalled,
-                    facts: SshServerFacts {
-                        platform: platform(&target)?,
-                        version: None,
-                        starts_automatically: false,
-                    },
-                })
-            }
-        }
+        observation(route.discover(cancellation)?, expected, route.route_id)
     }
 }
 struct NativeRoute<A: SshProcessAdapter> {
@@ -980,6 +945,51 @@ fn facts(discovery: &AccountDiscovery) -> Result<SshServerFacts, SshConnectFailu
         starts_automatically: discovery.enabled,
     })
 }
+/// What Check Status reports for one discovery. It refuses what Connect refuses, so a server Connect
+/// would call incompatible or changed never reads as available.
+fn observation(
+    discovery: Discovery,
+    expected: Option<&SshServerContinuity>,
+    route: [u8; 32],
+) -> Result<SshServerObservation, SshConnectFailure> {
+    match discovery {
+        Discovery::Existing(discovery) => {
+            validate_discovery(&discovery)?;
+            if let Some(expected) = expected {
+                expected.verify(&SshServerContinuity {
+                    route,
+                    account: discovery.account,
+                    build: discovery.build.clone(),
+                    server: discovery.server.unwrap_or([0; 32]),
+                })?;
+            }
+            if discovery.stopped {
+                return Err(SshConnectFailure::Stopped);
+            }
+            Ok(SshServerObservation {
+                availability: if discovery.installed && discovery.running {
+                    ServerAvailability::Running
+                } else {
+                    ServerAvailability::NotRunning
+                },
+                facts: facts(&discovery)?,
+            })
+        }
+        Discovery::Missing { target, .. } => {
+            if expected.is_some() {
+                return Err(SshConnectFailure::Changed(ContinuityChange::ServerChanged));
+            }
+            Ok(SshServerObservation {
+                availability: ServerAvailability::NotInstalled,
+                facts: SshServerFacts {
+                    platform: platform(&target)?,
+                    version: None,
+                    starts_automatically: false,
+                },
+            })
+        }
+    }
+}
 enum Discovery {
     Existing(AccountDiscovery),
     Missing { account: u32, target: String },
@@ -1159,6 +1169,58 @@ mod tests {
         discovery.capabilities.clear();
         assert!(matches!(
             parse_discovery(&serde_json::to_vec(&discovery).unwrap()),
+            Err(SshConnectFailure::Incompatible(
+                IncompatibilityKind::Capability
+            ))
+        ));
+    }
+
+    /// Check Status refuses what Connect refuses: a server without protocol major 1 or a
+    /// required capability reads as incompatible, never as available.
+    #[test]
+    fn check_status_calls_a_server_connect_refuses_incompatible() {
+        let compatible = AccountDiscovery {
+            schema: 1,
+            account: 501,
+            build: identity().into(),
+            server: Some([1; 32]),
+            installed: true,
+            enabled: true,
+            running: true,
+            stopped: false,
+            protocol_majors: vec![1],
+            capabilities: vec!["workspace_policy".into()],
+            target: "x86_64-unknown-linux-gnu".into(),
+            version: "0.1.0".into(),
+            commit: "a".repeat(40),
+        };
+        let observe = |discovery: &AccountDiscovery| {
+            observation(Discovery::Existing(discovery.clone()), None, [2; 32])
+        };
+        assert!(matches!(
+            observe(&compatible),
+            Ok(SshServerObservation {
+                availability: ServerAvailability::Running,
+                ..
+            })
+        ));
+        let older_major = AccountDiscovery {
+            protocol_majors: vec![0],
+            ..compatible.clone()
+        };
+        assert!(matches!(
+            observe(&older_major),
+            Err(SshConnectFailure::Incompatible(
+                IncompatibilityKind::Protocol
+            ))
+        ));
+        let not_running_without_capability = AccountDiscovery {
+            running: false,
+            capabilities: Vec::new(),
+            ..compatible.clone()
+        };
+        assert!(matches!(
+            observe(&not_running_without_capability),
             Err(SshConnectFailure::Incompatible(
                 IncompatibilityKind::Capability
             ))

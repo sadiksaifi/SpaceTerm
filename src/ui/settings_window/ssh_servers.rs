@@ -772,10 +772,17 @@ fn ssh_server_fact(
                     "Both use protocol version {protocol_major}."
                 ))),
             ),
+            // Check Status refuses a server Connect would refuse, so what it found running or
+            // installed declares what this SpaceTerm needs.
             RemoteConnectionStatus::Checked {
-                availability: ServerAvailability::Running,
+                availability: ServerAvailability::Running | ServerAvailability::NotRunning,
                 ..
-            } => (SharedString::new_static("Compatible"), None),
+            } => (
+                SharedString::new_static("Compatible"),
+                Some(SharedString::new_static(
+                    "It reported protocol version 1 and the features this SpaceTerm needs.",
+                )),
+            ),
             RemoteConnectionStatus::Incompatible {
                 kind: IncompatibilityKind::Platform,
             } => (SharedString::new_static("Unsupported Computer"), None),
