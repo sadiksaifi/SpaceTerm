@@ -81,10 +81,11 @@ mod development {
             &mut self,
             cx: &mut Context<Self>,
         ) {
-            let Some(shared) = self.shared.as_ref() else {
-                return;
-            };
-            let keys = shared.repositories().pull_request_keys();
+            let keys = self
+                .shared
+                .iter()
+                .flat_map(|(_, shared)| shared.repositories().pull_request_keys())
+                .collect::<Vec<_>>();
             if let Some(store) = InstalledRepositoryStatus::store(cx) {
                 store.update(cx, |store, cx| store.follow_server_pull_requests(keys, cx));
             }
@@ -120,8 +121,13 @@ mod development {
         }
 
         /// What one server directory presents, with this client's Settings and Pull Requests.
-        fn shared_repository_view(&self, directory: &Path, cx: &App) -> RepositoryView {
-            let Some(shared) = self.shared.as_ref() else {
+        fn shared_repository_view(
+            &self,
+            workspace_id: WorkspaceId,
+            directory: &Path,
+            cx: &App,
+        ) -> RepositoryView {
+            let Some(shared) = self.shared.owning(workspace_id) else {
                 return RepositoryView::Hidden;
             };
             let store = InstalledRepositoryStatus::store(cx);
@@ -143,18 +149,26 @@ mod development {
             workspace_ids: &[WorkspaceId],
             cx: &App,
         ) -> HashMap<Id, RepositoryView> {
-            let Some(shared) = self.shared.as_ref() else {
-                return HashMap::new();
-            };
             workspace_ids
                 .iter()
-                .filter_map(|&workspace_id| shared.server_workspace(workspace_id))
-                .flat_map(|workspace| &workspace.tabs)
-                .flat_map(|tab| &tab.panes)
-                .map(|pane| {
+                .filter_map(|&workspace_id| {
+                    let workspace = self
+                        .shared
+                        .owning(workspace_id)?
+                        .server_workspace(workspace_id)?;
+                    Some((workspace_id, workspace))
+                })
+                .flat_map(|(workspace_id, workspace)| {
+                    workspace
+                        .tabs
+                        .iter()
+                        .flat_map(|tab| &tab.panes)
+                        .map(move |pane| (workspace_id, pane))
+                })
+                .map(|(workspace_id, pane)| {
                     (
                         pane.id,
-                        self.shared_repository_view(pane_directory(pane), cx),
+                        self.shared_repository_view(workspace_id, pane_directory(pane), cx),
                     )
                 })
                 .collect()
@@ -165,7 +179,10 @@ mod development {
             &self,
             workspace_id: WorkspaceId,
         ) -> Option<(&ServerWorkspace, &Path)> {
-            let workspace = self.shared.as_ref()?.server_workspace(workspace_id)?;
+            let workspace = self
+                .shared
+                .owning(workspace_id)?
+                .server_workspace(workspace_id)?;
             Some((workspace, workspace_directory(workspace)?))
         }
 
@@ -176,7 +193,7 @@ mod development {
             cx: &App,
         ) -> Option<SidebarBadge> {
             let (_, directory) = self.shared_row_source(workspace_id)?;
-            SidebarBadge::from_view(&self.shared_repository_view(directory, cx))
+            SidebarBadge::from_view(&self.shared_repository_view(workspace_id, directory, cx))
         }
 
         /// The collapsed title-bar chip's tooltip line for a shared Workspace.
@@ -186,7 +203,7 @@ mod development {
             cx: &App,
         ) -> Option<String> {
             let (_, directory) = self.shared_row_source(workspace_id)?;
-            chip_tooltip_line(&self.shared_repository_view(directory, cx))
+            chip_tooltip_line(&self.shared_repository_view(workspace_id, directory, cx))
         }
 
         /// The Worktrees of the repository a shared Workspace's row reads, as git on the server
@@ -195,7 +212,7 @@ mod development {
             &self,
             workspace_id: WorkspaceId,
         ) -> Option<&WorktreeInventory> {
-            let shared = self.shared.as_ref()?;
+            let shared = self.shared.owning(workspace_id)?;
             shared
                 .repositories()
                 .workspace_worktrees(shared.server_workspace(workspace_id)?)
@@ -209,7 +226,7 @@ mod development {
             workspace_id: WorkspaceId,
             cx: &mut Context<Self>,
         ) {
-            let Some(shared) = self.shared.as_ref() else {
+            let Some(shared) = self.shared.owning(workspace_id) else {
                 return;
             };
             let Some(server) = shared.server_workspace(workspace_id) else {
@@ -293,6 +310,9 @@ mod development {
             let counts = manager.worktree_tab_counts();
             let active = manager.active_worktree();
             let inventory = self.shared_inventory(workspace_id);
+            // Worktree writes reach only the account-local server.
+            let worktree_writes = self.is_local_server_workspace(workspace_id)
+                && crate::ui::server_worktrees::available(cx);
             let current =
                 inventory.map(|inventory| RepositoryIdentity::new(inventory.main_root.clone()));
             // `listed` says whether the repository the Workspace reads lists the Worktree now.
@@ -315,9 +335,11 @@ mod development {
                     })
                     .map_or(record.root.as_path(), pane_directory);
                 // The listing names the branch until the server reads the Worktree's status.
-                let repository = SidebarBadge::from_view(
-                    &self.shared_repository_view(directory, cx),
-                )
+                let repository = SidebarBadge::from_view(&self.shared_repository_view(
+                    workspace_id,
+                    directory,
+                    cx,
+                ))
                 .or_else(|| {
                     (!label.is_empty()).then(|| SidebarBadge::Branch {
                         glyph: HeadGlyph::from_detached(detached),
@@ -336,7 +358,7 @@ mod development {
                     WorktreeRemoval::Locked
                 } else if self
                     .shared
-                    .as_ref()
+                    .owning(workspace_id)
                     .and_then(|s| s.latest_inventory())
                     .is_some_and(|i| {
                         i.workspaces
@@ -346,11 +368,11 @@ mod development {
                     })
                 {
                     WorktreeRemoval::HoldsPinnedDirectory
-                } else if !crate::ui::server_worktrees::available(cx) {
+                } else if !worktree_writes {
                     WorktreeRemoval::Server
                 } else if !self
                     .shared
-                    .as_ref()
+                    .owning(workspace_id)
                     .is_some_and(|s| s.editability().available())
                 {
                     WorktreeRemoval::NeedsServer
@@ -366,7 +388,7 @@ mod development {
                     path: record.root.display().to_string().into(),
                     directory: if self
                         .shared
-                        .as_ref()
+                        .owning(workspace_id)
                         .is_some_and(|s| s.removing_worktree(&record.root))
                     {
                         "Removing…".into()
@@ -378,10 +400,10 @@ mod development {
                     repository,
                     main,
                     has_tabs: counts.contains_key(&id),
-                    opens_first_tab: crate::ui::server_worktrees::available(cx)
+                    opens_first_tab: worktree_writes
                         && self
                             .shared
-                            .as_ref()
+                            .owning(workspace_id)
                             .is_some_and(|s| s.editability().available()),
                     active: active == Some(id),
                     locked: record.locked,
@@ -389,7 +411,7 @@ mod development {
                     removal,
                     closes_tabs: self
                         .shared
-                        .as_ref()
+                        .owning(workspace_id)
                         .is_some_and(|shared| shared.editability().available())
                         && counts.contains_key(&id)
                         && manager.has_tabs_besides(&manager.worktree_tab_ids(id)),

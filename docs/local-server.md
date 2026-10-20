@@ -30,6 +30,22 @@ Packaging prepares the signed server before compiling the desktop. The same vari
 
 Linux first setup can return an authorization requirement before service registration. The caller must obtain explicit scoped linger authorization through the existing service control, then retry startup. Cancellation before service mutation preserves the previous policy; admitted service registration or Start is observed to completion without claiming rollback.
 
+## SSH account servers
+
+Settings > Servers connects a selected SSH destination through normal OpenSSH host verification and account authentication. Connect discovers the account's approved installation before looking for an installation candidate. The SSH bridge uses the same account server as a desktop on that machine. It neither pairs a device nor creates a client signing secret. [ADR 0029](adr/0029-pair-clients-automatically-during-ssh-bootstrap.md) owns route authority and continuation.
+
+Development clients offering first installation on another machine need an artifact for that machine's target. Set `SPACETERM_SSH_SERVER_ARTIFACTS` to a directory containing these files under each supported target, `aarch64-apple-darwin` or `x86_64-unknown-linux-gnu`:
+
+```text
+TARGET/artifact.tar.gz
+TARGET/artifact.sig
+TARGET/artifact.sha256
+```
+
+The archive and raw signature come from `mise run server:package --identity spaceterm-development` on the target platform. `artifact.sha256` contains only the archive's lowercase SHA256 digest. The client verifies the signature, application identity, target, complete digest, resources and declared compatibility before offering that candidate. It retains the verified bytes for the installation offer. Packaged clients read the equivalent `server-artifacts` directory in their resources. A missing suitable candidate prevents first installation while leaving existing installations usable.
+
+An inactive saved host causes no SSH discovery. Previously active intent is retained separately from the shipped Settings Document, together with the original route, account, server and application identity. Quiet continuation can reuse an authenticated connection or a frozen direct software-key route whose configuration, keys and trust files still match its admission. That proof lasts for the client process; after relaunch, restored intent waits for Connect. Other fresh SSH authentication waits for Connect/Resume because an agent or credential provider may require consent even with BatchMode. Disconnect removes ordinary continuation intent. It leaves the server and its Terminal Sessions running.
+
 ## Updating the approved server
 
 Settings > Servers owns the Update Server journey. The status menu and incompatible-server screen open that same journey when the client includes a verified different candidate. Reading these surfaces does not stage or activate anything. Choosing Update Server stages and fully verifies the exact pinned artifact before asking for confirmation. Cancel leaves the approved runtime and its Terminal Sessions running. Confirmation names both versions and binds the observed approved installation, run and Stop policy. A changed observation requires another confirmation. Updating ends Terminal Sessions for every client, retains server identity and Workspace organization, and preserves deliberate Stop. Retained Panes remain dormant until explicitly selected.

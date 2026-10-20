@@ -379,13 +379,17 @@ impl SshProcessSpawnRequest {
     }
 }
 
+use spaceterm_server::account_bridge::{AccountRead, AccountWrite};
+
 pub(crate) struct SshProcessPipes {
     stdin: Option<Box<dyn Write + Send>>,
     stdout: Option<Box<dyn Read + Send>>,
     stderr: Option<Box<dyn Read + Send>>,
+    pollable: Option<(Box<dyn AccountWrite>, Box<dyn AccountRead>)>,
 }
 
 impl SshProcessPipes {
+    #[cfg(test)]
     pub(crate) fn new(
         stdin: Option<Box<dyn Write + Send>>,
         stdout: Option<Box<dyn Read + Send>>,
@@ -395,6 +399,21 @@ impl SshProcessPipes {
             stdin,
             stdout,
             stderr,
+            pollable: None,
+        }
+    }
+
+    pub(crate) fn new_pollable(
+        stdin: Option<Box<dyn Write + Send>>,
+        stdout: Option<Box<dyn Read + Send>>,
+        stderr: Option<Box<dyn Read + Send>>,
+        pollable: Option<(Box<dyn AccountWrite>, Box<dyn AccountRead>)>,
+    ) -> Self {
+        Self {
+            stdin,
+            stdout,
+            stderr,
+            pollable,
         }
     }
 }
@@ -485,7 +504,6 @@ pub(crate) struct SshProbeEnvironment {
 #[derive(Clone)]
 enum SshAuthentication {
     AskPass(AskPassBrokerLease),
-    #[cfg(test)]
     None,
 }
 
@@ -521,6 +539,33 @@ impl SshProcessEnvironment {
             authentication,
             startup,
         })
+    }
+
+    pub(crate) fn cancel_authentication(&self) {
+        if let SshAuthentication::AskPass(lease) = &self.authentication {
+            lease.cancel();
+        }
+    }
+    pub(crate) fn remote_authorization_command(
+        &self,
+    ) -> Result<SshCommandSpec, SshProcessMechanismError> {
+        let SshAuthentication::AskPass(lease) = &self.authentication else {
+            return Err(SshProcessMechanismError::LaunchFailed);
+        };
+        let helper = lease
+            .ordinary_spawn_entries()
+            .find(|(name, _)| *name == "SSH_ASKPASS")
+            .map(|(_, value)| PathBuf::from(value))
+            .ok_or(SshProcessMechanismError::NotFound)?;
+        super::command::SshCommandContext::authorization_prompt(helper)
+            .map_err(|_| SshProcessMechanismError::LaunchFailed)
+    }
+
+    pub(crate) fn noninteractive(
+        home: PathBuf,
+        startup: &StartupSshEnvironment,
+    ) -> Result<Self, SshProcessEnvironmentError> {
+        Self::validated(home, SshAuthentication::None, startup.clone())
     }
 
     #[cfg(test)]
@@ -565,7 +610,6 @@ impl SshProcessEnvironment {
                 );
                 Some(authentication.capability_copy_for_spawn())
             }
-            #[cfg(test)]
             SshAuthentication::None => None,
         };
         (self.home.clone(), entries, askpass_capability)
@@ -621,7 +665,7 @@ impl SshProbeEnvironment {
 #[derive(Clone)]
 /// Desktop SSH process owner built over one capability-specific process adapter.
 pub(crate) struct SshProcessSupervisor<A: SshProcessAdapter> {
-    executor: BackgroundExecutor,
+    executor: Option<BackgroundExecutor>,
     environment: SshProcessEnvironment,
     adapter: A,
     cleanup_scope: SshProcessCleanupScope,
@@ -629,6 +673,11 @@ pub(crate) struct SshProcessSupervisor<A: SshProcessAdapter> {
 
 #[cfg(feature = "desktop")]
 impl<A: SshProcessAdapter> SshProcessSupervisor<A> {
+    /// The SSH server coordinator polls on a dedicated blocking worker.
+    pub(crate) fn on_worker(mut self) -> Self {
+        self.executor = None;
+        self
+    }
     pub(crate) const fn new(
         executor: BackgroundExecutor,
         environment: SshProcessEnvironment,
@@ -636,7 +685,7 @@ impl<A: SshProcessAdapter> SshProcessSupervisor<A> {
         cleanup_scope: SshProcessCleanupScope,
     ) -> Self {
         Self {
-            executor,
+            executor: Some(executor),
             environment,
             adapter,
             cleanup_scope,
@@ -755,7 +804,13 @@ impl<A: SshProcessAdapter> SshProcessBackend for SshProcessSupervisor<A> {
 
     fn delay(&self, duration: Duration) -> impl Future<Output = ()> + Send {
         let executor = self.executor.clone();
-        async move { executor.timer(duration).await }
+        async move {
+            if let Some(executor) = executor {
+                executor.timer(duration).await
+            } else {
+                std::thread::sleep(duration);
+            }
+        }
     }
 }
 
@@ -862,6 +917,83 @@ fn spawn_owned_process<A: SshProcessAdapter>(
     })
 }
 
+/// Start a non-PTY account bridge on the calling worker thread.
+/// The callback owns the entire private process group and reaps it on transport drop.
+pub(crate) type AccountBridgePipes = (
+    Box<dyn AccountRead>,
+    Box<dyn AccountWrite>,
+    Box<dyn FnOnce() + Send>,
+);
+
+pub(crate) fn spawn_account_bridge<A: SshProcessAdapter>(
+    adapter: A,
+    spec: &SshCommandSpec,
+    environment: &SshProcessEnvironment,
+    cancellation: SshCancellationToken,
+) -> Result<AccountBridgePipes, SshProcessMechanismError> {
+    let request = process_request(
+        spec,
+        environment.launch_parts(),
+        SshProcessStdio::Piped,
+        SshProcessStdio::Piped,
+        SshProcessStdio::Null,
+    );
+    let SpawnedSshProcess { process, mut pipes } = adapter.spawn(request)?;
+    let Some((write, read)) = pipes.pollable.take() else {
+        cleanup_now(&adapter, process, Vec::new());
+        return Err(SshProcessMechanismError::PipesUnavailable);
+    };
+    drop(pipes);
+    let owner = Arc::new(BridgeProcessOwner {
+        adapter,
+        process: std::sync::Mutex::new(Some(process)),
+    });
+    let weak = Arc::downgrade(&owner);
+    if std::thread::Builder::new()
+        .name("spaceterm-ssh-bridge-owner".into())
+        .spawn(move || {
+            loop {
+                let Some(owner) = weak.upgrade() else {
+                    break;
+                };
+                if cancellation.is_cancelled() {
+                    owner.cleanup();
+                    break;
+                }
+                drop(owner);
+                std::thread::sleep(PROCESS_POLL_INTERVAL);
+            }
+        })
+        .is_err()
+    {
+        owner.cleanup();
+        return Err(SshProcessMechanismError::LaunchFailed);
+    }
+    Ok((read, write, Box::new(move || owner.cleanup())))
+}
+
+struct BridgeProcessOwner<A: SshProcessAdapter> {
+    adapter: A,
+    process: std::sync::Mutex<Option<A::Process>>,
+}
+impl<A: SshProcessAdapter> BridgeProcessOwner<A> {
+    fn cleanup(&self) {
+        if let Some(process) = self
+            .process
+            .lock()
+            .ok()
+            .and_then(|mut process| process.take())
+        {
+            cleanup_now(&self.adapter, process, Vec::new());
+        }
+    }
+}
+impl<A: SshProcessAdapter> Drop for BridgeProcessOwner<A> {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
 fn read_final_error_tail(mut stderr: impl Read) -> io::Result<Vec<u8>> {
     let mut tail = Vec::with_capacity(MAXIMUM_TRANSIENT_SSH_ERROR_BYTES);
     let mut chunk = [0_u8; 1024];
@@ -961,10 +1093,77 @@ pub(crate) fn run_captured_process<A: SshProcessAdapter>(
         spec,
         environment.launch_parts(),
         CapturedProcessPlan {
+            admitted: None,
             input: Some(input),
             stdout_limit,
             stderr_limit: None,
-            deadline,
+            deadline: Some(deadline),
+        },
+        cancellation,
+    )
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum CapturedEffectError {
+    #[error("the SSH effect was not dispatched")]
+    NotAdmitted(#[source] CapturedProcessError),
+    #[error("the admitted SSH effect has an unconfirmed outcome")]
+    Unconfirmed,
+}
+
+/// An effect distinguishes cancellation before dispatch from an uncertain admitted outcome.
+pub(crate) fn run_captured_effect<A: SshProcessAdapter>(
+    adapter: &A,
+    spec: &SshCommandSpec,
+    environment: &SshProcessEnvironment,
+    input: Vec<u8>,
+    stdout_limit: usize,
+    cancellation: &SshCancellationToken,
+    deadline: Instant,
+) -> Result<CapturedProcessOutput, CapturedEffectError> {
+    let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    run_captured_process_with_parts(
+        adapter,
+        spec,
+        environment.launch_parts(),
+        CapturedProcessPlan {
+            admitted: Some(Arc::clone(&admitted)),
+            input: Some(input),
+            stdout_limit,
+            stderr_limit: None,
+            deadline: Some(deadline),
+        },
+        cancellation,
+    )
+    .map_err(|error| {
+        if admitted.load(std::sync::atomic::Ordering::Acquire) {
+            CapturedEffectError::Unconfirmed
+        } else {
+            CapturedEffectError::NotAdmitted(error)
+        }
+    })
+}
+
+/// A cancellable transfer has no arbitrary total download/authentication deadline.
+/// Callers bound subsequent native observation phases independently.
+pub(crate) fn run_captured_transfer<A: SshProcessAdapter>(
+    adapter: &A,
+    spec: &SshCommandSpec,
+    environment: &SshProcessEnvironment,
+    input: Vec<u8>,
+    stdout_limit: usize,
+    cancellation: &SshCancellationToken,
+) -> Result<CapturedProcessOutput, CapturedProcessError> {
+    run_captured_process_with_parts(
+        adapter,
+        spec,
+        environment.launch_parts(),
+        CapturedProcessPlan {
+            admitted: None,
+            input: Some(input),
+            stdout_limit,
+            stderr_limit: None,
+            deadline: None,
         },
         cancellation,
     )
@@ -984,20 +1183,22 @@ pub(crate) fn run_probe_process<A: SshProcessAdapter>(
         spec,
         (current_directory, environment, None),
         CapturedProcessPlan {
+            admitted: None,
             input: None,
             stdout_limit: stream_limit,
             stderr_limit: Some(stream_limit),
-            deadline,
+            deadline: Some(deadline),
         },
         cancellation,
     )
 }
 
 struct CapturedProcessPlan {
+    admitted: Option<Arc<std::sync::atomic::AtomicBool>>,
     input: Option<Vec<u8>>,
     stdout_limit: usize,
     stderr_limit: Option<usize>,
-    deadline: Instant,
+    deadline: Option<Instant>,
 }
 
 fn run_captured_process_with_parts<A: SshProcessAdapter>(
@@ -1012,6 +1213,7 @@ fn run_captured_process_with_parts<A: SshProcessAdapter>(
     cancellation: &SshCancellationToken,
 ) -> Result<CapturedProcessOutput, CapturedProcessError> {
     let CapturedProcessPlan {
+        admitted,
         input,
         stdout_limit,
         stderr_limit,
@@ -1034,12 +1236,18 @@ fn run_captured_process_with_parts<A: SshProcessAdapter>(
     let SpawnedSshProcess { process, mut pipes } = adapter
         .spawn(request)
         .map_err(CapturedProcessError::Operation)?;
+    if let Some(admitted) = admitted {
+        admitted.store(true, std::sync::atomic::Ordering::Release);
+    }
+    // Captured commands must see stdin EOF when their one writer finishes.
+    drop(pipes.pollable.take());
     let mut ownership = CapturedProcessOwnership::new(adapter.clone(), process);
     let stdout = pipes.stdout.take().ok_or(CapturedProcessError::Operation(
         SshProcessMechanismError::PipesUnavailable,
     ))?;
     let writer = match input {
         Some(input) => {
+            let input = zeroize::Zeroizing::new(input);
             let mut stdin = pipes.stdin.take().ok_or(CapturedProcessError::Operation(
                 SshProcessMechanismError::PipesUnavailable,
             ))?;
@@ -1083,7 +1291,7 @@ fn run_captured_process_with_parts<A: SshProcessAdapter>(
             join_unfinished_reader(stderr_reader);
             return Err(CapturedProcessError::Cancelled);
         }
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             ownership.cleanup_now();
             let _ = join_writer(writer);
             join_unfinished_reader(stdout_reader);
@@ -1095,9 +1303,9 @@ fn run_captured_process_with_parts<A: SshProcessAdapter>(
         let process = ownership.process_mut()?;
         match adapter.try_status(process) {
             Ok(Some(exit)) => break exit,
-            Ok(None) => std::thread::sleep(
-                PROCESS_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
-            ),
+            Ok(None) => std::thread::sleep(deadline.map_or(PROCESS_POLL_INTERVAL, |deadline| {
+                PROCESS_POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now()))
+            })),
             Err(error) => {
                 return Err(CapturedProcessError::Operation(error));
             }
@@ -1494,6 +1702,46 @@ mod tests {
     }
 
     #[test]
+    fn effect_cancellation_preserves_whether_dispatch_was_admitted() {
+        let adapter = RecordingAdapter::default();
+        let cancelled = SshCancellationToken::cancelled();
+        let result = run_captured_effect(
+            &adapter,
+            &test_spec(),
+            &test_environment(),
+            Vec::new(),
+            16,
+            &cancelled,
+            Instant::now() + Duration::from_secs(1),
+        );
+        assert!(matches!(
+            result,
+            Err(CapturedEffectError::NotAdmitted(
+                CapturedProcessError::Cancelled
+            ))
+        ));
+        assert_eq!(adapter.state.lock().unwrap().spawns, 0);
+        let cancellation = SshCancellationToken::default();
+        adapter.state.lock().unwrap().cancel_on_status = Some(cancellation.clone());
+        let result = run_captured_effect(
+            &adapter,
+            &test_spec(),
+            &test_environment(),
+            Vec::new(),
+            16,
+            &cancellation,
+            Instant::now() + Duration::from_secs(1),
+        );
+        assert!(
+            matches!(result, Err(CapturedEffectError::Unconfirmed)),
+            "an admitted effect may have run despite cancellation"
+        );
+        let state = adapter.state.lock().unwrap();
+        assert_eq!(state.spawns, 1);
+        assert_eq!(state.reaps, 1);
+    }
+
+    #[test]
     fn recording_adapter_should_observe_success_and_exactly_once_cleanup() {
         let adapter = RecordingAdapter::default();
         {
@@ -1788,3 +2036,11 @@ pub(crate) mod testing {
         }
     }
 }
+
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux"),
+    feature = "native-tests"
+))]
+#[path = "../platform/unix_adapter_tests/account_process.rs"]
+mod unix_adapter_tests;

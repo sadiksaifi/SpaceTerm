@@ -15,6 +15,7 @@ mod server_location;
 mod server_update;
 mod servers;
 mod sidebar;
+mod ssh_servers;
 mod theme_gallery;
 mod theme_store;
 mod themes;
@@ -352,6 +353,8 @@ pub(crate) struct SettingsWindow {
     server_service: Option<servers::ServerServiceRow>,
     /// The server version and its update journey. `None` omits its row.
     server_update: Option<server_update::ServerUpdateRow>,
+    /// The desktop's SSH server connections. `None` omits their row.
+    ssh_servers: Option<ssh_servers::SshServerRows>,
 }
 
 impl SidebarOwner for SettingsWindow {
@@ -598,12 +601,17 @@ impl SettingsWindow {
             })
             .detach();
         }
+        let ssh_hosts = crate::ui::ssh_servers::host_source(cx);
+        let ssh_servers = crate::ui::ssh_servers::installed(cx)
+            .map(|connections| ssh_servers::SshServerRows::new(connections, ssh_hosts, window, cx));
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let available_sections = SettingsSectionId::ALL
             .into_iter()
             .filter(|section| {
                 section_feature(*section).is_none_or(|feature| presentation.has_feature(feature))
-                    && (*section != SettingsSectionId::Servers || local_server.is_some())
+                    && (*section != SettingsSectionId::Servers
+                        || local_server.is_some()
+                        || ssh_servers.is_some())
             })
             .collect();
         // Only a desktop whose Workspace windows can present a Background Image keeps its copies.
@@ -621,6 +629,7 @@ impl SettingsWindow {
                         && local_server
                             .as_ref()
                             .is_none_or(|offered| offered.update.is_none()))
+                    || (*row == SettingsRowId::SshServers && ssh_servers.is_none())
             })
             .collect();
         Self {
@@ -668,6 +677,7 @@ impl SettingsWindow {
                 }),
             local_server: local_server
                 .map(|offered| servers::LocalServerRow::new(offered.connection)),
+            ssh_servers,
         }
     }
 
@@ -680,6 +690,7 @@ impl SettingsWindow {
             self.check_local_server(cx);
             self.check_server_service(cx);
             self.check_server_update(cx);
+            self.read_ssh_hosts(cx);
         }
     }
 
@@ -1352,6 +1363,7 @@ impl SettingsWindow {
             SettingsRowId::LocalServer => self.render_local_server(appearance, cx),
             SettingsRowId::ServerService => self.render_server_service(appearance, cx),
             SettingsRowId::ServerUpdate => self.render_server_update(appearance, cx),
+            SettingsRowId::SshServers => self.render_ssh_servers(appearance, cx),
             SettingsRowId::UpdateStatus => self.render_update_status(cx),
             SettingsRowId::AutomaticUpdateDownloads => self.render_automatic_update_downloads(cx),
             SettingsRowId::UpdateCheckInterval => self.render_update_check_interval(cx),
@@ -2183,6 +2195,7 @@ fn row_layout(row: SettingsRowId) -> FormRowLayout {
     match row {
         SettingsRowId::TerminalTheme
         | SettingsRowId::InstalledThemes
+        | SettingsRowId::SshServers
         | SettingsRowId::SettingsFile => FormRowLayout::Full,
         SettingsRowId::WorktreeLocation | SettingsRowId::ServerWorktreeLocation => {
             FormRowLayout::Above

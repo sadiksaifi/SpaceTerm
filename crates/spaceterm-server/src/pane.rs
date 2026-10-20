@@ -530,7 +530,7 @@ pub struct ExchangeTiming {
 struct PaneTransport {
     admission: transport::Admission,
     presentation_changes: bool,
-    stream: std::sync::Mutex<Option<std::os::unix::net::UnixStream>>,
+    stream: std::sync::Mutex<Option<Box<dyn crate::transport::Transport>>>,
     takeover: bool,
     interactive_input: bool,
     native_effects: bool,
@@ -577,7 +577,7 @@ impl PaneConnection {
     }
 
     pub(crate) fn negotiate(
-        mut stream: std::os::unix::net::UnixStream,
+        mut stream: impl crate::transport::Transport + 'static,
     ) -> Result<Self, ServerError> {
         let mut wire = crate::protocol::Wire::terminal(&mut stream)?;
         wire.write(&Request::Capabilities)?;
@@ -631,12 +631,12 @@ impl PaneConnection {
             _ => Err(ServerError::Unsupported),
         }
     }
-    pub(crate) fn new(stream: std::os::unix::net::UnixStream, takeover: bool) -> Self {
+    pub(crate) fn new(stream: impl crate::transport::Transport + 'static, takeover: bool) -> Self {
         Self {
             transport: std::sync::Arc::new(PaneTransport {
                 admission: transport::Admission::default(),
                 presentation_changes: false,
-                stream: std::sync::Mutex::new(Some(stream)),
+                stream: std::sync::Mutex::new(Some(Box::new(stream))),
                 takeover,
                 interactive_input: false,
                 native_effects: false,
@@ -683,8 +683,9 @@ impl PaneConnection {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let result = (|| {
-            let mut wire =
-                crate::protocol::Wire::terminal(stream.as_mut().ok_or(ServerError::NotRunning)?)?;
+            let mut wire = crate::protocol::Wire::terminal(
+                stream.as_deref_mut().ok_or(ServerError::NotRunning)?,
+            )?;
             wire.write(request)?;
             wire.read()
         })();

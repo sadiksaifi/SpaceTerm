@@ -1161,6 +1161,30 @@ mod tests {
     use std::io::{Cursor, Error, ErrorKind, Result as IoResult};
     use std::sync::Mutex;
 
+    /// The helper SpaceTerm runs for the remote linger password asks with the prompt the
+    /// presenter recognizes, so the person sees the remote sudo explanation rather than a
+    /// generic SSH authentication request.
+    #[test]
+    fn the_remote_linger_command_reaches_the_remote_administrator_presentation() {
+        let command = super::super::command::SshCommandContext::authorization_prompt(
+            std::path::PathBuf::from("/usr/libexec/spaceterm-askpass"),
+        )
+        .unwrap();
+        let invocation = HelperInvocation {
+            mode: OsString::from(HELPER_MODE),
+            endpoint: None,
+            capability: None,
+            prompt: command.arguments().first().cloned(),
+            prompt_kind: None,
+        };
+        let request = helper_request(&invocation).expect("the helper reads its prompt");
+        let presentation = request
+            .secret_presentation()
+            .expect("the request asks for a secret");
+        assert_eq!(presentation.title(), "Allow the Server to Keep Running");
+        assert_eq!(presentation.field_label(), "Remote sudo password");
+    }
+
     #[cfg(feature = "desktop")]
     #[gpui::test]
     fn application_shutdown_releases_the_askpass_presenter_with_live_producers(

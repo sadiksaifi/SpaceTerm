@@ -137,6 +137,10 @@ impl fmt::Debug for RemoteDirectory {
 }
 
 impl RemoteDirectory {
+    pub fn home() -> Self {
+        Self("~".into())
+    }
+
     pub fn new(value: String) -> Result<Self, RemoteWorkspaceValueError> {
         let supported_form = value.starts_with('/') || value == "~" || value.starts_with("~/");
         if !supported_form || value.chars().any(char::is_control) {

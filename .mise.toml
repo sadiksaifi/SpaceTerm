@@ -392,6 +392,13 @@ run = "git-cliff --config cliff.toml --unreleased --offline --strip all"
 description = "Test local server account admission and private storage"
 run = "cargo test --package spaceterm-server --package spaceterm-server-host --package spaceterm-directories --all-features --locked"
 
+[tasks."server:fmt"]
+description = "Format the server crates"
+usage = '''
+flag "--check" help="Check formatting without changing files"
+'''
+run = "cargo fmt --package spaceterm-server --package spaceterm-server-host {% if usage.check %}--check{% endif %}"
+
 [tasks."server:test:headless"]
 description = "Test the server without native credential adapters"
 run = "cargo test --package spaceterm-server --no-default-features --locked"
@@ -471,6 +478,17 @@ run = [
 [tasks."server:shared:desktop:test"]
 description = "Test shared Workspace integration and server Pane presentation in the main app"
 run = "cargo test --package spaceterm --lib --all-features --locked -- shared server_pane"
+
+[tasks."server:ssh:desktop:test"]
+description = "Test SSH account connections, retained intent and remote Pane presentation"
+usage = '''
+arg "[filter]" help="Run one regression instead of the SSH and Pane suites"
+'''
+run = "cargo test --package spaceterm --lib --all-features --locked -- {% if usage.filter %}{{usage.filter | quote}}{% else %}ssh::server terminal::server_session{% endif %}"
+
+[tasks."server:ssh:native:test"]
+description = "Verify an explicitly selected SSH account server on the native host"
+run = "cargo test --package spaceterm --lib --all-features --locked -- ssh::server_process::unix_adapter_tests::native_account_server_connect --ignored --exact --nocapture"
 
 [tasks."server:worktree:smoke"]
 description = "Exercise owning-server Worktree writes and interrupted originals with the initial protocol major"

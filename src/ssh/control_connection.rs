@@ -11,7 +11,7 @@ use thiserror::Error;
 use super::cancellation::SshCancellationToken;
 use super::command::{
     OpenSshExecutable, PreparedSshTerminalSessionChannelCommand, SshCommandContext,
-    SshCommandContextError, ValidatedRemoteShellCommand,
+    SshCommandContextError, SshCommandSpec, ValidatedRemoteShellCommand,
 };
 use super::live_connection::{
     ControlConnectionObserver, LiveConnectionAuthority, LiveConnectionBinding, LiveConnectionState,
@@ -43,6 +43,15 @@ pub(crate) struct ControlConnectionTiming {
     timeout: Option<Duration>,
     poll_interval: Duration,
     readiness_check_timeout: Duration,
+}
+
+impl ControlConnectionTiming {
+    pub(crate) fn quiet() -> Self {
+        Self {
+            timeout: Some(Duration::from_secs(30)),
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for ControlConnectionTiming {
@@ -250,18 +259,47 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
         cancellation: &SshCancellationToken,
         timing: ControlConnectionTiming,
     ) -> Result<Self, ControlConnectionError> {
+        Self::connect_configuration(
+            paths,
+            executable,
+            socket_probe,
+            destination,
+            backend,
+            cancellation,
+            timing,
+            None,
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one exact connection launch carries its validated native dependencies"
+    )]
+    pub(crate) async fn connect_configuration(
+        paths: &AppPaths,
+        executable: OpenSshExecutable,
+        socket_probe: &dyn ControlSocketProbe,
+        destination: SshDestination,
+        backend: Arc<B>,
+        cancellation: &SshCancellationToken,
+        timing: ControlConnectionTiming,
+        frozen_config: Option<PathBuf>,
+    ) -> Result<Self, ControlConnectionError> {
         if cancellation.is_cancelled() {
             return Err(ControlConnectionError::Cancelled);
         }
         let runtime_owner = paths.create_runtime_owner(CONTROL_RUNTIME_OWNER_KIND)?;
         let control_path = runtime_owner.socket_path(CONTROL_RUNTIME_SOCKET_NAME)?;
         reserve_socket(&runtime_owner, socket_probe)?;
+        let quiet = frozen_config.is_some();
         let commands = SshCommandContext::new(
             executable,
-            paths.managed_ssh_config(),
+            frozen_config.unwrap_or_else(|| paths.managed_ssh_config()),
             destination,
             control_path.clone(),
         )?;
+        let commands = if quiet { commands.quiet() } else { commands };
         if cancellation.is_cancelled() {
             return Err(ControlConnectionError::Cancelled);
         }
@@ -379,6 +417,31 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
             self.commands.remote_utility(),
             capability,
         ))
+    }
+
+    /// Binds a non-PTY server command to this exact already-authenticated master.
+    pub(crate) fn server_command(
+        &self,
+        command: ValidatedRemoteShellCommand,
+    ) -> Result<
+        (
+            SshCommandSpec,
+            super::live_connection::LiveConnectionCapability,
+        ),
+        ControlConnectionError,
+    > {
+        if self.state() != ControlConnectionState::Ready {
+            return Err(ControlConnectionError::NotReady);
+        }
+        let capability = self
+            .authority
+            .as_ref()
+            .ok_or(ControlConnectionError::Ownership)?
+            .capability();
+        capability
+            .authorize()
+            .map_err(|_| ControlConnectionError::NotReady)?;
+        Ok((self.commands.server_channel(command), capability))
     }
 
     /// Prepares a pane command bound to the current live authority and sanitized environment.
@@ -623,8 +686,9 @@ impl<B: SshProcessBackend> OpenSshControlConnection<B> {
     }
 }
 
-impl<B: SshProcessBackend> Drop for OpenSshControlConnection<B> {
-    fn drop(&mut self) {
+impl<B: SshProcessBackend> OpenSshControlConnection<B> {
+    /// Revoke all child channels immediately and enqueue cleanup of only this owned master.
+    pub(crate) fn cancel_owned(&mut self) {
         let supervisor = self
             .supervisor
             .take()
@@ -641,6 +705,11 @@ impl<B: SshProcessBackend> Drop for OpenSshControlConnection<B> {
                 *pending = Some(cleanup);
             }
         }
+    }
+}
+impl<B: SshProcessBackend> Drop for OpenSshControlConnection<B> {
+    fn drop(&mut self) {
+        self.cancel_owned();
     }
 }
 
@@ -801,6 +870,9 @@ fn reserve_socket(
     owner: &RuntimeOwner,
     socket_probe: &dyn ControlSocketProbe,
 ) -> Result<(), ControlConnectionError> {
+    // OpenSSH binds a temporary listener at ControlPath + '.' + 16 random characters.
+    // Validate that address before any probe or master can be dispatched.
+    owner.socket_path(&format!("{CONTROL_RUNTIME_SOCKET_NAME}.{}", "x".repeat(16)))?;
     let path = owner.socket_path(CONTROL_RUNTIME_SOCKET_NAME)?;
     socket_probe.probe(&path)?;
     let registered = owner.register_socket(CONTROL_RUNTIME_SOCKET_NAME)?;
@@ -863,6 +935,38 @@ mod tests {
             )
             .unwrap()
         }
+    }
+
+    #[test]
+    fn control_socket_reserves_the_temporary_listener_suffix_before_probing() {
+        let directory = TestDirectory::new();
+        let initial = directory.paths();
+        let owner = initial
+            .create_runtime_owner(CONTROL_RUNTIME_OWNER_KIND)
+            .unwrap();
+        let base_length = owner
+            .socket_path(CONTROL_RUNTIME_SOCKET_NAME)
+            .unwrap()
+            .as_os_str()
+            .as_encoded_bytes()
+            .len();
+        drop(owner);
+        let paths = AppPaths::from_directories(
+            initial.directories().clone(),
+            base_length + 12,
+            directory.1.clone(),
+        )
+        .unwrap();
+        let owner = paths
+            .create_runtime_owner(CONTROL_RUNTIME_OWNER_KIND)
+            .unwrap();
+        let result = reserve_socket(&owner, &RecordingControlSocketProbe(directory.1.clone()));
+        assert!(matches!(
+            result,
+            Err(ControlConnectionError::Paths(
+                AppPathsError::LocalIpcAddressTooLong { .. }
+            ))
+        ));
     }
 
     struct FakeChild {

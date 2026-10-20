@@ -203,9 +203,9 @@ fn launch_harness_with(
 /// Reads the scripted server's inventory, as the window's poll does.
 fn sync(harness: &LaunchHarness, cx: &mut VisualTestContext) {
     cx.update(|window, cx| {
-        harness
-            .manager
-            .update(cx, |manager, cx| manager.sync_shared_workspaces(window, cx));
+        harness.manager.update(cx, |manager, cx| {
+            manager.sync_shared_workspaces(ServerKey::LOCAL, window, cx)
+        });
     });
     cx.run_until_parked();
 }
@@ -322,6 +322,52 @@ fn a_stopped_server_stays_stopped_until_start_server(cx: &mut TestAppContext) {
     sync(&harness, cx);
     assert_eq!(harness.shared_rows(cx), 1);
     assert_eq!(harness.launch_title(cx), None);
+}
+
+/// An SSH server presented while the local server is stopped makes this window the presenting
+/// one. Starting the local server afterward still adds its Workspaces here, beside the SSH
+/// server's.
+#[gpui::test]
+fn a_local_server_started_after_an_ssh_server_joins_the_same_window(cx: &mut TestAppContext) {
+    let (harness, cx) = launch_harness(vec![Ok(LaunchOutcome::Stopped), ready()], cx);
+    cx.run_until_parked();
+    assert_eq!(harness.launch_title(cx), Some(launch::STOPPED_TITLE));
+
+    let remote = Rc::new(ScriptedEdits::new(Some(inventory())));
+    cx.update(|window, cx| {
+        harness.manager.update(cx, |manager, cx| {
+            let key = manager.present_server_workspaces(
+                ServerOrigin::Ssh(crate::domain::SshDestination::new("penguin".into()).unwrap()),
+                SharedEditSource::new(Rc::clone(&remote) as Rc<_>),
+                SharedPaneSessions::with_opener(
+                    Rc::clone(&harness.panes) as Rc<_>,
+                    &PaneConstruction::testing(),
+                ),
+                window,
+                cx,
+            );
+            manager.sync_shared_workspaces(key, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        harness.shared_rows(cx),
+        1,
+        "the SSH server's Workspace is presented"
+    );
+
+    // The person starts the local server from outside this window.
+    cx.cx
+        .update(crate::ui::workspace_manager::resume_waiting_launches);
+    cx.run_until_parked();
+    sync(&harness, cx);
+
+    assert_eq!(harness.launch.steps(), ["run", "run"]);
+    assert_eq!(
+        harness.shared_rows(cx),
+        2,
+        "the local server's Workspace joins the window already presenting the SSH server"
+    );
 }
 
 #[gpui::test]
@@ -764,7 +810,7 @@ fn a_pending_rename_says_saving_on_its_own_row(cx: &mut TestAppContext) {
     let (harness, cx) = ready_harness(cx);
     harness.manager.update(cx, |manager, cx| {
         let id = manager.workspaces.iter().next().expect("one row").id();
-        let shared = manager.shared.as_mut().expect("shared Workspaces");
+        let shared = manager.shared.local_mut().expect("shared Workspaces");
         let _ = shared.rename(id, "Logs".to_owned(), None);
         cx.notify();
     });
@@ -963,7 +1009,7 @@ fn active_server_workspace(
         let local = manager.workspaces.active_workspace_id()?;
         manager
             .shared
-            .as_ref()?
+            .local()?
             .facts(local)
             .map(|facts| facts.server)
     })

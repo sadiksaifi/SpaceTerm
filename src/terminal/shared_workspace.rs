@@ -78,6 +78,19 @@ impl SharedWorkspaceClient {
         controls: Arc<PaneControls>,
         legacy_location: String,
     ) -> Self {
+        let legacy_location = server.is_account_local().then_some(legacy_location);
+        Self::connect(server, controls, legacy_location)
+    }
+
+    pub(crate) fn remote(server: LocalServer, controls: Arc<PaneControls>) -> Self {
+        Self::connect(server, controls, None)
+    }
+
+    fn connect(
+        server: LocalServer,
+        controls: Arc<PaneControls>,
+        legacy_location: Option<String>,
+    ) -> Self {
         let snapshot = Arc::new(PublishedSnapshot::new(SharedWorkspaceSnapshot {
             worktree_writes: false,
             inventory: None,
@@ -234,7 +247,7 @@ fn run(
     state: Arc<PublishedSnapshot>,
     commands: mpsc::Receiver<Mutation>,
     alive: Arc<AtomicBool>,
-    legacy_location: String,
+    legacy_location: Option<String>,
 ) {
     let mut active: Option<(u64, Mutation)> = None;
     while alive.load(Ordering::Acquire) {
@@ -242,10 +255,12 @@ fn run(
             let attachments = server.attachments()?;
             let mut journal = server.shared_journal()?;
             let mut connection = server.connect_shared_pane()?;
-            if connection.worktree_writes() {
+            if connection.worktree_writes()
+                && let Some(template) = &legacy_location
+            {
                 connection.exchange(&Request::WorktreeRead(
                     spaceterm_server::worktree::Read::SeedLocation {
-                        template: legacy_location.clone(),
+                        template: template.clone(),
                     },
                 ))?;
             }

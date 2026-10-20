@@ -2696,6 +2696,8 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             SettingsRowId::LocalServer => "settings-local-server-control",
             SettingsRowId::ServerService => "settings-server-service-control",
             SettingsRowId::ServerUpdate => "settings-server-update-control",
+            // The fixture installs no SSH server registry, so this row is omitted.
+            SettingsRowId::SshServers => return None,
             // The fixture installs no update service, so this row presents no action control.
             SettingsRowId::UpdateStatus => return None,
             SettingsRowId::AutomaticUpdateDownloads => "settings-automatic-update-downloads",

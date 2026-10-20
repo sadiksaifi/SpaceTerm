@@ -1,10 +1,12 @@
 //! Bounded account-local admission and length-prefixed JSON exchanges.
 //! Peer-account authority comes from the socket. IDs are nonsecret fences, never credentials.
+use crate::transport::Transport;
 use crate::{AuthenticatedStatus, ServerError};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::io::{Read, Write};
-use std::os::{fd::AsRawFd, unix::net::UnixStream};
+#[cfg(test)]
+use std::io::Write;
+use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 pub(crate) const MAJOR: u16 = 1;
@@ -36,22 +38,21 @@ pub(crate) fn random() -> Result<[u8; 32], ServerError> {
 }
 
 pub(crate) struct Wire<'a> {
-    stream: &'a mut UnixStream,
+    stream: &'a mut dyn Transport,
     deadline: Instant,
     max_frame: usize,
 }
 impl<'a> Wire<'a> {
-    fn new(stream: &'a mut UnixStream) -> Result<Self, ServerError> {
-        stream
-            .set_nonblocking(true)
-            .map_err(|_| ServerError::Protocol)?;
+    pub(crate) fn new(stream: &'a mut dyn Transport) -> Result<Self, ServerError> {
+        crate::transport::nonblocking(stream.read_fd())?;
+        crate::transport::nonblocking(stream.write_fd())?;
         Ok(Self {
             stream,
             deadline: Instant::now() + CONNECTION_LIMIT,
             max_frame: MAX_FRAME,
         })
     }
-    pub(crate) fn terminal(stream: &'a mut UnixStream) -> Result<Self, ServerError> {
+    pub(crate) fn terminal(stream: &'a mut dyn Transport) -> Result<Self, ServerError> {
         let mut wire = Self::new(stream)?;
         wire.max_frame = crate::pane::MAX_TERMINAL_FRAME;
         wire.deadline = Instant::now() + Duration::from_secs(10);
@@ -65,7 +66,11 @@ impl<'a> Wire<'a> {
                 .filter(|v| !v.is_zero())
                 .ok_or(ServerError::Protocol)?;
             let mut fd = libc::pollfd {
-                fd: self.stream.as_raw_fd(),
+                fd: if events == libc::POLLIN {
+                    self.stream.read_fd()
+                } else {
+                    self.stream.write_fd()
+                },
                 events,
                 revents: 0,
             };
@@ -111,6 +116,9 @@ impl<'a> Wire<'a> {
         Ok(())
     }
     pub(crate) fn read<T: DeserializeOwned>(&mut self) -> Result<T, ServerError> {
+        serde_json::from_slice(&self.read_frame()?).map_err(|_| ServerError::Protocol)
+    }
+    pub(crate) fn read_frame(&mut self) -> Result<Vec<u8>, ServerError> {
         let mut size = [0; 4];
         self.read_exact(&mut size)?;
         let size = u32::from_be_bytes(size) as usize;
@@ -119,15 +127,18 @@ impl<'a> Wire<'a> {
         }
         let mut bytes = vec![0; size];
         self.read_exact(&mut bytes)?;
-        serde_json::from_slice(&bytes).map_err(|_| ServerError::Protocol)
+        Ok(bytes)
     }
     pub(crate) fn write(&mut self, value: &impl Serialize) -> Result<(), ServerError> {
         let bytes = serde_json::to_vec(value).map_err(|_| ServerError::Protocol)?;
+        self.write_frame(&bytes)
+    }
+    pub(crate) fn write_frame(&mut self, bytes: &[u8]) -> Result<(), ServerError> {
         if bytes.len() > self.max_frame {
             return Err(ServerError::Protocol);
         }
         let prefix = (bytes.len() as u32).to_be_bytes();
-        for mut rest in [prefix.as_slice(), bytes.as_slice()] {
+        for mut rest in [prefix.as_slice(), bytes] {
             while !rest.is_empty() {
                 self.ready(libc::POLLOUT)?;
                 let count = match self.stream.write(rest) {
@@ -201,6 +212,16 @@ pub(crate) fn admit_client(
     versions: &[u16],
 ) -> Result<AuthenticatedStatus, ServerError> {
     crate::host::check_peer(stream)?;
+    admit_transport(stream, client, server, build, versions)
+}
+
+pub(crate) fn admit_transport(
+    stream: &mut dyn Transport,
+    client: &[u8; 32],
+    server: &[u8; 32],
+    build: &str,
+    versions: &[u16],
+) -> Result<AuthenticatedStatus, ServerError> {
     let mut wire = Wire::new(stream)?;
     wire.write(&Hello {
         versions: versions.to_vec(),

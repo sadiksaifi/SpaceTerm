@@ -156,6 +156,8 @@ pub(super) enum SettingsRowId {
     /// The approved server version, the version this SpaceTerm includes, and Update Server.
     ServerUpdate,
     ServerWorktreeLocation,
+    /// Each SSH server SpaceTerm knows, its connection state and steps, and Connect to Server.
+    SshServers,
     /// The installed version, the latest check, and the next step the update service offers.
     UpdateStatus,
     AutomaticUpdateDownloads,
@@ -216,6 +218,7 @@ impl SettingsRowId {
             | Self::LocalServer
             | Self::ServerService
             | Self::ServerUpdate
+            | Self::SshServers
             | Self::UpdateStatus
             | Self::AutomaticUpdateDownloads
             | Self::UpdateCheckInterval
@@ -730,6 +733,26 @@ const PREFERENCE_ROWS: &[SettingsRowDescriptor] = &[
         selector: "settings-row-server-worktree-location",
     },
     SettingsRowDescriptor {
+        id: SettingsRowId::SshServers,
+        section: SettingsSectionId::Servers,
+        group: "SSH Servers",
+        label: "SSH servers",
+        keywords: &[
+            "ssh",
+            "remote",
+            "remote server",
+            "host",
+            "ssh host",
+            "linux",
+            "mac",
+            "connect",
+            "disconnect",
+            "install",
+            "reconnect",
+        ],
+        selector: "settings-row-ssh-servers",
+    },
+    SettingsRowDescriptor {
         id: SettingsRowId::UpdateStatus,
         section: SettingsSectionId::Updates,
         // The installed version leads the page and needs no title: it is what the page is about.
@@ -985,7 +1008,7 @@ mod tests {
     }
 
     /// The complete preference row identity set, so the catalog cannot silently omit one.
-    const EVERY_PREFERENCE_ROW: [SettingsRowId; 37] = [
+    const EVERY_PREFERENCE_ROW: [SettingsRowId; 38] = [
         SettingsRowId::AppearanceMode,
         SettingsRowId::Opacity,
         SettingsRowId::Blur,
@@ -1015,6 +1038,7 @@ mod tests {
         SettingsRowId::ServerService,
         SettingsRowId::ServerUpdate,
         SettingsRowId::ServerWorktreeLocation,
+        SettingsRowId::SshServers,
         SettingsRowId::UpdateStatus,
         SettingsRowId::AutomaticUpdateDownloads,
         SettingsRowId::UpdateCheckInterval,
@@ -1320,6 +1344,7 @@ mod tests {
                     | SettingsRowId::LocalServer
                     | SettingsRowId::ServerService
                     | SettingsRowId::ServerUpdate
+                    | SettingsRowId::SshServers
                     | SettingsRowId::UpdateStatus
                     | SettingsRowId::AutomaticUpdateDownloads
                     | SettingsRowId::UpdateCheckInterval

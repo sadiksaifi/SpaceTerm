@@ -353,7 +353,15 @@ fn absolute_environment_path(value: Option<&OsStr>) -> Option<PathBuf> {
 /// Ownership and permissions are checked when creating or opening the runtime directory.
 #[cfg(target_os = "macos")]
 fn temporary_runtime_name(app_name: &str) -> String {
-    app_name.to_owned()
+    // OpenSSH appends 17 bytes while binding a ControlPath. Keep the identity-specific
+    // runtime root short enough for the account's native temporary directory.
+    match app_name {
+        "spaceterm" => "st",
+        "spaceterm-preflight" => "st-p",
+        "spaceterm-development" => "st-d",
+        other => other,
+    }
+    .to_owned()
 }
 
 #[cfg(target_os = "linux")]

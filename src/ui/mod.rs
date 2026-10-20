@@ -39,6 +39,7 @@ mod sidebar_motion;
 mod sidebar_window;
 mod ssh_host_form;
 mod ssh_host_picker;
+pub(crate) mod ssh_servers;
 mod tab_manager;
 mod tab_view;
 mod terminal_context_menu;

@@ -227,7 +227,6 @@ impl Directory {
         Ok(file)
     }
     /// Attempt an exclusive lock, distinguishing contention from unavailable storage.
-    #[cfg(feature = "client")]
     pub fn try_lock(&self, name: &str) -> Result<Option<File>, ServerError> {
         let file = self.file(name, true)?;
         // SAFETY: flock acts only on the supplied live descriptor.
