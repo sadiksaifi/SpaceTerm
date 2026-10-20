@@ -3,6 +3,59 @@ use std::os::unix::fs::PermissionsExt;
 use test_support::{COMMIT, VERSION, target, with_artifact};
 
 #[test]
+fn remote_candidate_inspection_verifies_the_selected_target_without_executing_it() {
+    let root = temporary();
+    let remote_target = if target() == "aarch64-apple-darwin" {
+        "x86_64-unknown-linux-gnu"
+    } else {
+        "aarch64-apple-darwin"
+    };
+    with_artifact(
+        &root.join("source"),
+        "spaceterm-development",
+        |archive, signature| {
+            rewrite(archive, signature, |entries| {
+                let mut manifest: serde_json::Value =
+                    serde_json::from_slice(&entries[0].1).unwrap();
+                manifest["target"] = remote_target.into();
+                entries[0].1 = serde_json::to_vec(&manifest).unwrap();
+                entries
+                    .iter_mut()
+                    .find(|(name, _, _)| name == "server/bin/spaceterm-server")
+                    .unwrap()
+                    .1 = b"must never execute".to_vec();
+            });
+            let pin = digest(&std::fs::read(archive).unwrap());
+            let service = Service::for_identity("spaceterm-development").unwrap();
+            let metadata = service
+                .inspect_candidate_for_target(
+                    archive,
+                    signature,
+                    &pin,
+                    remote_target,
+                    1,
+                    &["workspace_policy"],
+                )
+                .unwrap();
+            assert_eq!(metadata.version, VERSION);
+            assert_eq!(
+                service.inspect_candidate_for_target(
+                    archive,
+                    signature,
+                    &pin,
+                    target(),
+                    1,
+                    &["workspace_policy"]
+                ),
+                Err(ServerError::RuntimeUnavailable)
+            );
+            assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        },
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn retained_candidate_revalidates_declared_compatibility_and_signature() {
     let root = temporary();
     with_artifact(

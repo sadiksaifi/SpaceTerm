@@ -30,6 +30,36 @@ pub struct CandidateMetadata {
 }
 
 impl Service {
+    /// Authenticate a signed remote-target candidate without executing or extracting it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the remote target supplements the existing exact signed candidate contract"
+    )]
+    pub fn inspect_candidate_for_target(
+        &self,
+        archive: &Path,
+        signature: &Path,
+        expected_sha256: &str,
+        target: &str,
+        required_major: u16,
+        required_capabilities: &[&str],
+    ) -> Result<CandidateMetadata, ServerError> {
+        let (_, _, info) = candidate_for_target(
+            &self.identity,
+            archive,
+            signature,
+            expected_sha256,
+            target,
+            required_major,
+            required_capabilities,
+        )?;
+        Ok(CandidateMetadata {
+            version: info.version,
+            commit: info.commit,
+            protocol_major: info.protocol_major,
+            capabilities: info.capabilities,
+        })
+    }
     /// Retain this exact signed independent artifact in the owning account's installation store.
     ///
     /// Identity comes from this Service. Target must be the supported native target; commit and
@@ -295,6 +325,12 @@ impl Build {
     }
 
     fn parse(bytes: &[u8], identity: &str) -> Result<Self, ServerError> {
+        Self::parse_for_target(bytes, identity, TARGET)
+    }
+    fn parse_for_target(bytes: &[u8], identity: &str, target: &str) -> Result<Self, ServerError> {
+        if !matches!(target, "aarch64-apple-darwin" | "x86_64-unknown-linux-gnu") {
+            return Err(ServerError::RuntimeUnavailable);
+        }
         if bytes.len() > 4096 {
             return Err(ServerError::RuntimeUnavailable);
         }
@@ -320,7 +356,7 @@ impl Build {
                 }));
         if info.schema != 1
             || info.identity != identity
-            || info.target != TARGET
+            || info.target != target
             || info.version.len() > 64
             || !version
             || info.protocol_major == 0
@@ -344,6 +380,14 @@ impl Build {
 fn contents(
     bytes: &[u8],
     identity: &str,
+    visit: impl FnMut(&Path, bool, u32, &[u8]) -> Result<(), ServerError>,
+) -> Result<Build, ServerError> {
+    contents_for_target(bytes, identity, TARGET, visit)
+}
+fn contents_for_target(
+    bytes: &[u8],
+    identity: &str,
+    target: &str,
     mut visit: impl FnMut(&Path, bool, u32, &[u8]) -> Result<(), ServerError>,
 ) -> Result<Build, ServerError> {
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
@@ -414,7 +458,7 @@ fn contents(
             return Err(ServerError::RuntimeUnavailable);
         }
         if path == Path::new("build.json") {
-            manifest = Some(Build::parse(&signed, identity)?);
+            manifest = Some(Build::parse_for_target(&signed, identity, target)?);
         }
         if path == Path::new("bin/spaceterm-server") && !directory {
             executable = true;
@@ -587,13 +631,32 @@ fn candidate(
     required_major: u16,
     required_capabilities: &[&str],
 ) -> Result<(Vec<u8>, Vec<u8>, Build), ServerError> {
+    candidate_for_target(
+        identity,
+        archive,
+        signature,
+        expected_sha256,
+        TARGET,
+        required_major,
+        required_capabilities,
+    )
+}
+fn candidate_for_target(
+    identity: &str,
+    archive: &Path,
+    signature: &Path,
+    expected_sha256: &str,
+    target: &str,
+    required_major: u16,
+    required_capabilities: &[&str],
+) -> Result<(Vec<u8>, Vec<u8>, Build), ServerError> {
     let bytes = source(archive, MAX_ARCHIVE)?;
     let signature = source(signature, 64)?;
     authenticate(&bytes, &signature)?;
     if !digest_valid(expected_sha256) || digest(&bytes) != expected_sha256 {
         return Err(ServerError::CandidateChanged);
     }
-    let info = contents(&bytes, identity, |_, _, _, _| Ok(()))?;
+    let info = contents_for_target(&bytes, identity, target, |_, _, _, _| Ok(()))?;
     info.require_compatibility(required_major, required_capabilities)?;
     Ok((bytes, signature, info))
 }

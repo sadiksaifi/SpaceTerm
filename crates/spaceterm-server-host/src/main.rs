@@ -27,6 +27,15 @@ enum Request<'a> {
     SetupState,
     Status,
     Install(&'a Path),
+    SshDiscover,
+    SshConnect,
+    SshPrepare,
+    SshInstall {
+        archive: &'a Path,
+        signature: &'a Path,
+        digest: &'a str,
+    },
+    SshEnableLinger,
 }
 
 impl<'a> Request<'a> {
@@ -42,6 +51,20 @@ impl<'a> Request<'a> {
             (Some("service-serve"), []) => Ok(Self::ServiceServe),
             (Some("setup-state"), []) => Ok(Self::SetupState),
             (Some("status"), []) => Ok(Self::Status),
+            (Some("ssh-discover"), []) => Ok(Self::SshDiscover),
+            (Some("ssh-connect"), []) => Ok(Self::SshConnect),
+            (Some("ssh-prepare"), []) => Ok(Self::SshPrepare),
+            (Some("ssh-enable-linger"), []) => Ok(Self::SshEnableLinger),
+            (Some("ssh-install"), [archive, signature, digest])
+                if !archive.as_encoded_bytes().starts_with(b"-")
+                    && !signature.as_encoded_bytes().starts_with(b"-") =>
+            {
+                Ok(Self::SshInstall {
+                    archive: Path::new(archive),
+                    signature: Path::new(signature),
+                    digest: digest.to_str().ok_or(ServerError::Protocol)?,
+                })
+            }
             (Some("service-install"), [installation])
                 if !installation.as_encoded_bytes().starts_with(b"-") =>
             {
@@ -64,6 +87,11 @@ fn run() -> Result<ExitCode, cli::Error> {
                serve IDENTITY                              Run in the foreground\n\
                setup-state IDENTITY                        Set up nonsecret state (client feature)\n\
                status IDENTITY                             Connect to an existing server (client feature)\n\
+               ssh-discover IDENTITY                       Discover existing account state\n\
+               ssh-connect IDENTITY                        Carry protocol over non-PTY stdio\n\
+               ssh-prepare IDENTITY                        Start approved service, preserving Stop\n\
+               ssh-install IDENTITY ARCHIVE SIGNATURE SHA256\n\
+               ssh-enable-linger IDENTITY                  Request account boot authorization\n\
                --version | --build-info | --check | --help",
             cli::help(IDENTITY)
         );
@@ -101,6 +129,35 @@ fn run() -> Result<ExitCode, cli::Error> {
     }
     let request = Request::parse(&args)?;
     match request {
+        Request::SshDiscover => {
+            let discovery = spaceterm_server::account_bridge::discover(IDENTITY)?;
+            let mut value = serde_json::to_value(discovery).map_err(|_| ServerError::Protocol)?;
+            value["target"] = env!("SPACETERM_SERVER_TARGET").into();
+            value["version"] = env!("SPACETERM_SERVER_VERSION").into();
+            value["commit"] = env!("SPACETERM_SERVER_COMMIT").into();
+            println!("{value}");
+        }
+        Request::SshConnect => spaceterm_server::account_bridge::run(IDENTITY)?,
+        Request::SshPrepare => {
+            Service::for_identity(IDENTITY)?.connect()?;
+        }
+        Request::SshInstall {
+            archive,
+            signature,
+            digest,
+        } => {
+            let service = Service::for_identity(IDENTITY)?;
+            let candidate = service.provision_candidate(
+                archive,
+                signature,
+                digest,
+                1,
+                &["workspace_policy"],
+            )?;
+            service.install(&candidate.directory)?;
+        }
+        Request::SshEnableLinger => Service::for_identity(IDENTITY)?
+            .enable_linger(spaceterm_server::service::LingerAuthorization::Terminal)?,
         Request::ServiceServe => {
             check::resources()?;
             spaceterm_server::service::run(
