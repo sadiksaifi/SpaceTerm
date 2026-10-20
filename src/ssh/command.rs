@@ -269,10 +269,8 @@ impl SshCommandContext {
     ) -> Result<SshCommandSpec, OpenSshExecutableError> {
         Ok(SshCommandSpec::new(
             OpenSshExecutable::new(helper)?,
-            vec![
-                "Administrator password to enable boot startup for the selected SSH account:"
-                    .into(),
-            ],
+            // The presenter recognizes exactly this prompt and explains the remote sudo request.
+            vec![super::askpass::prompt::REMOTE_LINGER_PROMPT.into()],
         ))
     }
     pub(crate) fn key_public(
