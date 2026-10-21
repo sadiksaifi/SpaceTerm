@@ -108,11 +108,13 @@ impl ScriptedOperations {
         })
     }
 
+    /// Sets one server's state, keeping whether its saved connection was removed: removal
+    /// outlives every later state of the operation it holds.
     fn set(&self, destination: &str, state: RemoteOperationState) {
-        self.states
-            .lock()
-            .expect("states")
-            .insert(destination.to_owned(), (false, state));
+        let mut states = self.states.lock().expect("states");
+        let removed = states.get(destination).is_some_and(|(removed, _)| *removed);
+        states.insert(destination.to_owned(), (removed, state));
+        drop(states);
         self.publish();
     }
 
@@ -818,4 +820,105 @@ fn removing_the_connection_removes_its_maintenance_rows(cx: &mut TestAppContext)
         servers.operations.calls()
     );
     let _ = &servers.window;
+}
+
+/// Removing the saved connection keeps the operation's outcome understandable in the same
+/// Servers surface. The entry offers only the step that settles it, and nothing that would bring
+/// the connection back.
+#[gpui::test]
+fn a_removed_connection_keeps_what_spaceterm_still_has_to_say(cx: &mut TestAppContext) {
+    let servers = open_maintenance(cx);
+    let destination = SshDestination::new("penguin".to_owned()).expect("destination");
+    servers.operations.set(
+        "penguin",
+        RemoteOperationState::Unconfirmed {
+            handle: RemoteOperationHandle(7),
+            kind: SubmittedKind::Service(Action::Stop),
+        },
+    );
+    servers
+        .operations
+        .resume_with(RemoteOperationState::Resolved {
+            handle: RemoteOperationHandle(7),
+            kind: SubmittedKind::Service(Action::Stop),
+            outcome: Box::new(OperationOutcome {
+                operation: [7; 32],
+                kind: OperationKind::Service {
+                    action: Action::Stop,
+                },
+                resolution: OperationResolution::Completed,
+                status: Some(status(true, false, true)),
+            }),
+        });
+    servers.cx.run_until_parked();
+
+    servers.connections.remove(&destination);
+    servers.operations.remove("penguin");
+    servers.cx.run_until_parked();
+
+    assert!(rendered(
+        "settings-row-removed-server-operations",
+        servers.cx
+    ));
+    assert!(rendered(
+        "settings-removed-server-operations-penguin",
+        servers.cx
+    ));
+    assert!(says(
+        "didn\u{2019}t hear whether penguin stopped its server",
+        servers.cx
+    ));
+    assert!(says("Nothing here reconnects", servers.cx));
+    for absent in [
+        "settings-ssh-server-connect",
+        "settings-ssh-server-check",
+        "settings-ssh-server-service-check-penguin",
+        "settings-ssh-server-service-start-penguin",
+    ] {
+        assert!(
+            !rendered(absent, servers.cx),
+            "{absent} would reach a connection the person removed"
+        );
+    }
+
+    click("settings-ssh-server-service-again-penguin", servers.cx);
+
+    assert_eq!(servers.operations.calls(), vec![Call::Resume]);
+    assert!(says("The server on penguin stopped", servers.cx));
+
+    click(
+        "settings-ssh-server-maintenance-acknowledge-penguin",
+        servers.cx,
+    );
+
+    assert_eq!(
+        servers.operations.calls(),
+        vec![Call::Resume, Call::Acknowledge(RemoteOperationHandle(7))]
+    );
+    assert!(
+        !rendered("settings-row-removed-server-operations", servers.cx),
+        "an acknowledged result leaves nothing to say about a removed connection"
+    );
+}
+
+/// A removed connection with nothing left to tell is not listed, so the surface never invites a
+/// reconnection it has no reason to offer.
+#[gpui::test]
+fn a_removed_connection_with_nothing_to_say_is_not_listed(cx: &mut TestAppContext) {
+    let servers = open_maintenance(cx);
+    let destination = SshDestination::new("penguin".to_owned()).expect("destination");
+    servers.operations.set(
+        "penguin",
+        RemoteOperationState::Read(Box::new(facts(status(true, true, false)))),
+    );
+    servers.cx.run_until_parked();
+
+    servers.connections.remove(&destination);
+    servers.operations.remove("penguin");
+    servers.cx.run_until_parked();
+
+    assert!(!rendered(
+        "settings-row-removed-server-operations",
+        servers.cx
+    ));
 }

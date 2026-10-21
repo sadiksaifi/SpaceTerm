@@ -1188,6 +1188,24 @@ impl MaintenanceConfirmation {
     }
 }
 
+/// What a server whose saved connection was removed still has to tell the person, and the one
+/// step it offers. `None` once nothing is left to tell, so a removed connection disappears as
+/// soon as its operation is settled.
+pub(crate) fn removed_presentation(
+    machine: &str,
+    state: &RemoteOperationState,
+) -> Option<MaintenancePresentation> {
+    [MaintenanceRow::Service, MaintenanceRow::Update]
+        .into_iter()
+        .find_map(|row| {
+            let actions = removed_actions(state, row);
+            (!actions.is_empty()).then(|| MaintenancePresentation {
+                actions,
+                ..present(machine, state, row, None)
+            })
+        })
+}
+
 /// The progress badge a machine heading shows while an operation on that machine is underway.
 pub(crate) fn working_state(machine: &str, state: &RemoteOperationState) -> Option<&'static str> {
     [MaintenanceRow::Service, MaintenanceRow::Update]

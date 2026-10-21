@@ -2710,7 +2710,9 @@ fn rendered_control_selector(row: SettingsRowId) -> Option<String> {
             | SettingsRowId::SshServerPlatform
             | SettingsRowId::SshServerCompatibility
             | SettingsRowId::SshServerStartup
-            | SettingsRowId::RemoveServer => return None,
+            | SettingsRowId::RemoveServer
+            // No connection was removed, so nothing is kept for one.
+            | SettingsRowId::RemovedServerOperations => return None,
             // The fixture installs no update service, so this row presents no action control.
             SettingsRowId::UpdateStatus => return None,
             SettingsRowId::AutomaticUpdateDownloads => "settings-automatic-update-downloads",

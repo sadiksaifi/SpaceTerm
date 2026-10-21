@@ -221,6 +221,9 @@ impl SettingsWindow {
                         None => false,
                     }
             }
+            // Servers whose saved connection the person removed are not selected servers, so the
+            // row appears only while SpaceTerm still has something to tell them.
+            SettingsRowId::RemovedServerOperations => self.has_removed_operations(),
             row => row_presents(row, selected),
         }
     }
@@ -583,6 +586,10 @@ impl SettingsWindow {
             )),
             SettingsRowId::DirectNetworkPairing => Some((
                 SharedString::new_static(DIRECT_NETWORK_PAIRING),
+                CaptionTone::Guidance,
+            )),
+            SettingsRowId::RemovedServerOperations => Some((
+                SharedString::new_static(super::ssh_maintenance::REMOVED_GUIDANCE),
                 CaptionTone::Guidance,
             )),
             row if super::ssh_maintenance::maintenance_row(row).is_some() => {

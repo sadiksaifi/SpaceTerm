@@ -26,9 +26,11 @@ use crate::domain::SshDestination;
 use crate::ssh::server_operations::{
     RemoteMaintenanceRequest, RemoteOperationHandle, RemoteOperationState, RemoteServerOperations,
 };
-use crate::ui::appearance::ChromeAppearance;
+use crate::ui::appearance::{ChromeAppearance, gpui_color};
+use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::remote_maintenance::{
     MaintenanceConfirmation, MaintenancePresentation, MaintenanceRow, RemoteAction, present,
+    removed_presentation,
 };
 use crate::ui::sidebar_window::form::{CaptionTone, badge};
 
@@ -36,6 +38,7 @@ pub(super) const SERVICE_CONTROL_SELECTOR: &str = "settings-ssh-server-service-c
 pub(super) const SERVICE_PROGRESS_SELECTOR: &str = "settings-ssh-server-service-progress";
 pub(super) const UPDATE_CONTROL_SELECTOR: &str = "settings-ssh-server-update-control";
 pub(super) const UPDATE_PROGRESS_SELECTOR: &str = "settings-ssh-server-update-progress";
+pub(super) const REMOVED_SELECTOR: &str = "settings-removed-server-operations";
 
 /// The confirmation selectors of one described change, so a test answers the exact alert it
 /// reviewed.
@@ -450,6 +453,162 @@ impl SettingsWindow {
             .gap(appearance.spacing(8.0))
             .children(state)
             .children(actions)
+            .into_any_element()
+    }
+}
+
+/// Why a removed connection still appears, and what the person can do about it.
+pub(super) const REMOVED_GUIDANCE: &str = "You removed these saved connections. SpaceTerm still \
+     has the result of work you asked for on them. Nothing here reconnects, and answering \
+     doesn\u{2019}t bring a connection back.";
+
+impl SettingsWindow {
+    /// The servers whose saved connection was removed and that still have something to say,
+    /// ordered by destination as the owner reports them.
+    fn removed_operations(&self) -> Vec<(SshDestination, MaintenancePresentation)> {
+        let Some(rows) = self.ssh_maintenance.as_ref() else {
+            return Vec::new();
+        };
+        rows.operations
+            .entries()
+            .into_iter()
+            .filter(|entry| entry.removed)
+            .filter_map(|entry| {
+                let presentation = removed_presentation(entry.destination.as_str(), &entry.state)?;
+                Some((entry.destination, presentation))
+            })
+            .collect()
+    }
+
+    pub(super) fn has_removed_operations(&self) -> bool {
+        !self.removed_operations().is_empty()
+    }
+
+    /// Settles one removed connection's operation. A removed connection is no longer a selected
+    /// server, so only resolving its original and acknowledging a validated result reach it, and
+    /// neither recreates the connection.
+    fn request_removed_maintenance(
+        &mut self,
+        destination: SshDestination,
+        action: RemoteAction,
+        cx: &mut Context<Self>,
+    ) {
+        let offered = self
+            .removed_operations()
+            .iter()
+            .any(|(listed, presentation)| {
+                *listed == destination && presentation.actions.contains(&action)
+            });
+        if !offered {
+            return;
+        }
+        let Some(rows) = self.ssh_maintenance.as_ref() else {
+            return;
+        };
+        let operations = Arc::clone(&rows.operations);
+        match action {
+            RemoteAction::Finish | RemoteAction::CheckAgain => operations.resume(&destination),
+            RemoteAction::Acknowledge => {
+                if let Some(handle) = acknowledged(&operations.state(&destination)) {
+                    operations.acknowledge(handle);
+                }
+            }
+            _ => return,
+        }
+        cx.notify();
+    }
+
+    /// Each removed connection's server, what SpaceTerm still has to tell the person about it,
+    /// and the one step that settles it. Nothing here reconnects or reads that machine.
+    pub(super) fn render_removed_operations(
+        &mut self,
+        appearance: &ChromeAppearance,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = appearance.host_colors(spaceterm_ui::ControlHost::Card);
+        let owner = cx.weak_entity();
+        let entries = self
+            .removed_operations()
+            .into_iter()
+            .map(|(destination, presentation)| {
+                let machine = SharedString::from(destination.as_str().to_owned());
+                let steps: Vec<_> = presentation
+                    .actions
+                    .into_iter()
+                    .map(|action| {
+                        let owner = owner.clone();
+                        let destination = destination.clone();
+                        let machine = machine.clone();
+                        Button::new(
+                            ElementId::from(SharedString::from(format!(
+                                "{REMOVED_SELECTOR}-{machine}-{}",
+                                action.slot()
+                            ))),
+                            action.label(),
+                        )
+                        .variant(ButtonVariant::Outline)
+                        .size(ButtonSize::Regular)
+                        .tab_stop(true)
+                        .debug_selector(format!("{}-{machine}", action.selector()))
+                        .accessibility_description(action.consequence(machine.as_ref()))
+                        .on_activate(move |_, _, cx| {
+                            let destination = destination.clone();
+                            let _ = owner.update(cx, |settings, cx| {
+                                settings.request_removed_maintenance(destination, action, cx);
+                            });
+                        })
+                        .into_any_element()
+                    })
+                    .collect();
+                div()
+                    .id(SharedString::from(format!("{REMOVED_SELECTOR}-{machine}")))
+                    .debug_selector({
+                        let machine = machine.clone();
+                        move || format!("{REMOVED_SELECTOR}-{machine}")
+                    })
+                    .role(accesskit::Role::Group)
+                    .aria_label(machine.clone())
+                    .aria_description(presentation.explanation.clone())
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .w_full()
+                    .gap(appearance.spacing(8.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(appearance.spacing(2.0))
+                            .child(
+                                div()
+                                    .chrome_text(appearance.typography.style(TextRole::Body))
+                                    .text_color(gpui_color(colors.text))
+                                    .child(machine.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "{REMOVED_SELECTOR}-{machine}-explanation"
+                                    )))
+                                    .role(accesskit::Role::Label)
+                                    .aria_value(presentation.explanation.clone())
+                                    .chrome_text(appearance.typography.style(TextRole::Secondary))
+                                    .text_color(gpui_color(colors.text_secondary))
+                                    .whitespace_normal()
+                                    .child(presentation.explanation),
+                            ),
+                    )
+                    .children(steps)
+            });
+        div()
+            .debug_selector(|| REMOVED_SELECTOR.to_owned())
+            .flex()
+            .flex_col()
+            .w_full()
+            .gap(appearance.spacing(8.0))
+            .children(entries)
             .into_any_element()
     }
 }

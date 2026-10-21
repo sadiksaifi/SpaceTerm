@@ -700,7 +700,9 @@ impl SettingsWindow {
                     // A build with no operations owner offers no remote maintenance.
                     || (matches!(
                         *row,
-                        SettingsRowId::SshServerService | SettingsRowId::SshServerUpdate
+                        SettingsRowId::SshServerService
+                            | SettingsRowId::SshServerUpdate
+                            | SettingsRowId::RemovedServerOperations
                     ) && ssh_maintenance.is_none())
             })
             .collect();
@@ -1462,6 +1464,9 @@ impl SettingsWindow {
             SettingsRowId::SshServerStatus => self.render_ssh_server_status(appearance, cx),
             SettingsRowId::SshServerService => self.render_ssh_server_service(appearance, cx),
             SettingsRowId::SshServerUpdate => self.render_ssh_server_update(appearance, cx),
+            SettingsRowId::RemovedServerOperations => {
+                self.render_removed_operations(appearance, cx)
+            }
             SettingsRowId::SshServerVersion
             | SettingsRowId::SshServerPlatform
             | SettingsRowId::SshServerCompatibility
@@ -2314,6 +2319,7 @@ fn row_layout(row: SettingsRowId) -> FormRowLayout {
         | SettingsRowId::InstalledThemes
         | SettingsRowId::ServerList
         | SettingsRowId::SshConnect
+        | SettingsRowId::RemovedServerOperations
         | SettingsRowId::SettingsFile => FormRowLayout::Full,
         SettingsRowId::WorktreeLocation | SettingsRowId::ServerWorktreeLocation => {
             FormRowLayout::Above
