@@ -17,6 +17,7 @@ from spaceterm_tasks.accessibility_linux import (
     ReadinessStep,
     SmokeFailure,
     orca_registered,
+    require_account_server,
     require_prerequisites,
 )
 
@@ -61,6 +62,48 @@ class AccessibilityPrerequisiteTests(unittest.TestCase):
         with patch("spaceterm_tasks.accessibility_linux.Path.glob", return_value=iter([])):
             with self.assertRaisesRegex(SmokeFailure, "^lavapipe_driver_missing$"):
                 require_prerequisites("both")
+
+    def test_account_server_prerequisite_distinguishes_service_state_without_disclosing_output(
+        self,
+    ):
+        for installed, running, stopped, failure in (
+            (False, False, False, "account_server_not_installed"),
+            (True, False, True, "account_server_stopped"),
+            (True, False, False, "account_server_not_running"),
+        ):
+            with self.subTest(failure=failure):
+                self.probe_command.return_value = subprocess.CompletedProcess(
+                    [],
+                    0,
+                    stdout=(
+                        "private service details\nInstalled: "
+                        + str(installed).lower()
+                        + "; enabled: true; running: "
+                        + str(running).lower()
+                        + "; stopped: "
+                        + str(stopped).lower()
+                        + ".\n"
+                    ).encode(),
+                )
+                with self.assertRaisesRegex(SmokeFailure, "^" + failure + "$"):
+                    require_account_server(Path("server"))
+        self.probe_command.return_value = subprocess.CompletedProcess(
+            [], 1, stdout=b"raw error with private values"
+        )
+        with self.assertRaisesRegex(SmokeFailure, "^account_server_service_unavailable$"):
+            require_account_server(Path("server"))
+
+    def test_running_service_requires_authenticated_account_connection(self):
+        service = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=b"Installed: true; enabled: true; running: true; stopped: false.\n",
+        )
+        self.probe_command.side_effect = [service, subprocess.CompletedProcess([], 1)]
+        with self.assertRaisesRegex(SmokeFailure, "^account_server_connection_unavailable$"):
+            require_account_server(Path("server"))
+        self.probe_command.side_effect = [service, subprocess.CompletedProcess([], 0)]
+        require_account_server(Path("server"))
 
 
 class AccessibilityReadinessTests(unittest.TestCase):
@@ -292,6 +335,16 @@ class AccessibilityTerminalDiscoveryTests(unittest.TestCase):
             self.smoke.validate_tree(self.probe, driver, None, None, None)
         retained.queryText.assert_not_called()
         driver.command.assert_not_called()
+
+    def test_missing_control_failure_identifies_the_known_operation(self):
+        self.desktop([Accessible("application", pid=42)])
+        self.probe.wait = lambda predicate, classification: (
+            predicate() or self.smoke.require(False, classification)
+        )
+        with self.assertRaisesRegex(
+            SmokeFailure, "^server_workspace_control_missing:rename_workspace$"
+        ):
+            self.probe.activate_control("Rename Workspace")
 
     def test_fixture_creation_precedes_terminal_targeting_even_when_retained_work_is_visible(self):
         retained = Accessible("terminal", name="Terminal Pane")

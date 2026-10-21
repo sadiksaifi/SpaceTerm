@@ -145,6 +145,37 @@ def require_prerequisites(backend):
     )
 
 
+def require_account_server(binary):
+    """Observe the approved native service without installing, starting or reversing Stop."""
+    try:
+        service = subprocess.run(
+            [str(binary), "service-status", "spaceterm-development"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+        require(service.returncode == 0, "account_server_service_unavailable")
+        state = re.search(
+            rb"(?:^|\n)Installed: (true|false); enabled: (true|false); "
+            rb"running: (true|false); stopped: (true|false)\.\n?$",
+            service.stdout,
+        )
+        if state is None:
+            raise SmokeFailure("account_server_service_unavailable")
+        require(state[1] == b"true", "account_server_not_installed")
+        require(state[4] == b"false", "account_server_stopped")
+        require(state[3] == b"true", "account_server_not_running")
+        connection = subprocess.run(
+            [str(binary), "status", "spaceterm-development"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+        require(connection.returncode == 0, "account_server_connection_unavailable")
+    except (OSError, subprocess.TimeoutExpired):
+        raise SmokeFailure("account_server_observation_failed") from None
+
+
 class Processes:
     def __init__(self, registry):
         self.children = []

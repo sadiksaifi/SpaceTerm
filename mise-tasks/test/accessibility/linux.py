@@ -48,6 +48,7 @@ from spaceterm_tasks.accessibility_linux import (
     create_private_runtime,
     orca_registered,
     require,
+    require_account_server,
     require_prerequisites,
     require_private_runtime,
     retire_direct_child,
@@ -202,8 +203,15 @@ class Probe:
         return None
 
     def activate_control(self, name, root=None):
+        control_id = {
+            "New Workspace": "new_workspace",
+            "Local Workspace": "local_workspace",
+            "Rename Workspace": "rename_workspace",
+            "Kill Workspace": "kill_workspace",
+        }[name]
         control = self.wait(
-            lambda: self.find_named_control(name, root), "server_workspace_control_missing"
+            lambda: self.find_named_control(name, root),
+            "server_workspace_control_missing:" + control_id,
         )
         self.press_control(control)
 
@@ -1806,7 +1814,7 @@ def private_session(args):
         )
         # Account-local admission resolves getpwuid, not the private HOME/XDG fixture.
         # Starting or stopping the owning account's server remains an explicit host action.
-        run([str(args.server_binary), "status", "spaceterm-development"])
+        require_account_server(args.server_binary)
         report["server_backed"] = {"existing_account_server_connected": True}
         application = processes.start([str(args.binary)], stderr=frame_output.writer)
         probe.application_pid = application.pid
