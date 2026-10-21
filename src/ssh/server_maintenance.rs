@@ -291,7 +291,9 @@ fn failure(error: SshConnectFailure) -> SshMaintenanceFailure {
         SshConnectFailure::Cancelled => SshMaintenanceFailure::Cancelled,
         SshConnectFailure::NeedsPerson(reason) => SshMaintenanceFailure::NeedsPerson(reason),
         SshConnectFailure::Changed(change) => SshMaintenanceFailure::Changed(change),
-        SshConnectFailure::Stopped => SshMaintenanceFailure::Refused(MaintenanceRefusal::Stopped),
+        SshConnectFailure::Stopped(_) => {
+            SshMaintenanceFailure::Refused(MaintenanceRefusal::Stopped)
+        }
         SshConnectFailure::Incompatible(kind) => SshMaintenanceFailure::Incompatible(kind),
         SshConnectFailure::Refused(RefusalKind::AuthorizationRefused) => {
             SshMaintenanceFailure::Refused(MaintenanceRefusal::AuthorizationRequired)

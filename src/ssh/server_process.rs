@@ -978,7 +978,7 @@ fn observe_preparation(
         ));
     };
     if latest.stopped {
-        return Err(SshConnectFailure::Stopped);
+        return Err(SshConnectFailure::Stopped(None));
     }
     if !successful {
         return Err(SshConnectFailure::Unconfirmed(
@@ -1005,7 +1005,8 @@ fn prepare_if_needed(
         expected.verify(&observed)?;
     }
     if discovery.stopped {
-        return Err(SshConnectFailure::Stopped);
+        // The identity was validated above, so an explicit Start can still bind this server.
+        return Err(SshConnectFailure::Stopped(Some(observed)));
     }
     if !discovery.installed {
         return Err(SshConnectFailure::Unavailable(
@@ -1029,7 +1030,7 @@ fn prepare_if_needed(
         observed.verify(&current)?;
     }
     if prepared.stopped {
-        return Err(SshConnectFailure::Stopped);
+        return Err(SshConnectFailure::Stopped(Some(current)));
     }
     if !prepared.running {
         return Err(SshConnectFailure::Unavailable(
@@ -1121,7 +1122,11 @@ fn observation(
                 server: discovery.server.unwrap_or([0; 32]),
             };
             if discovery.stopped {
-                return Err(SshConnectFailure::Stopped);
+                // The check signed in and validated the account's server before it found the
+                // server stopped, so an explicit Start can still bind what it saw.
+                return Err(SshConnectFailure::Stopped(
+                    (observed.server != [0; 32]).then_some(observed),
+                ));
             }
             Ok(SshServerObservation {
                 availability: if discovery.installed && discovery.running {
@@ -1271,7 +1276,7 @@ fn map_process_error(error: CapturedProcessError) -> SshConnectFailure {
 }
 fn map_server_error(error: ServerError) -> SshConnectFailure {
     match error {
-        ServerError::Stopped => SshConnectFailure::Stopped,
+        ServerError::Stopped => SshConnectFailure::Stopped(None),
         ServerError::AuthorizationRequired => {
             SshConnectFailure::Refused(RefusalKind::AuthorizationRefused)
         }

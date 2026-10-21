@@ -231,7 +231,10 @@ pub(crate) enum SshConnectFailure {
     Cancelled,
     NeedsPerson(InteractionReason),
     Changed(ContinuityChange),
-    Stopped,
+    /// The account's server was deliberately stopped. It carries the identity the exchange
+    /// validated before it found that out, so a server this client has not connected to can
+    /// still be started explicitly.
+    Stopped(Option<SshServerContinuity>),
     Incompatible(IncompatibilityKind),
     Refused(RefusalKind),
     Unavailable(UnavailableKind),
@@ -975,7 +978,14 @@ fn finish(
         SshConnectFailure::Cancelled => RemoteConnectionStatus::Inactive,
         SshConnectFailure::NeedsPerson(reason) => RemoteConnectionStatus::NeedsPerson { reason },
         SshConnectFailure::Changed(reason) => RemoteConnectionStatus::Paused { reason },
-        SshConnectFailure::Stopped => RemoteConnectionStatus::Stopped,
+        SshConnectFailure::Stopped(continuity) => {
+            // The exchange validated the account's server before it found it stopped, so an
+            // explicit Start can bind it even though this client never connected to it.
+            if let Some(continuity) = continuity {
+                entry.continuity = Some(continuity);
+            }
+            RemoteConnectionStatus::Stopped
+        }
         SshConnectFailure::Incompatible(kind) => RemoteConnectionStatus::Incompatible { kind },
         SshConnectFailure::Refused(kind) => RemoteConnectionStatus::Refused { kind },
         SshConnectFailure::Unavailable(kind) => RemoteConnectionStatus::Unavailable { kind },
@@ -1269,7 +1279,7 @@ mod tests {
             self.entered.send_blocking(mode).unwrap();
             self.release.recv_blocking().unwrap();
             if self.stopped {
-                Err(SshConnectFailure::Stopped)
+                Err(SshConnectFailure::Stopped(None))
             } else {
                 Ok(connected())
             }
@@ -1283,7 +1293,8 @@ mod tests {
         ) -> Result<SshServerObservation, SshConnectFailure> {
             self.observations.fetch_add(1, Ordering::SeqCst);
             if self.stopped {
-                Err(SshConnectFailure::Stopped)
+                // A real check validates the account's server before it finds it stopped.
+                Err(SshConnectFailure::Stopped(Some(pin())))
             } else {
                 Ok(SshServerObservation {
                     availability: ServerAvailability::NotRunning,
@@ -1377,6 +1388,33 @@ mod tests {
         assert_eq!(registry.connections().len(), 1, "it stays saved");
         assert_eq!(backend.disconnects.load(Ordering::SeqCst), 1);
     }
+    /// A deliberately stopped server is the one state explicit Start exists for. The exchange
+    /// validated the account's server before it found it stopped, so an operation submitted
+    /// afterwards can bind it even though this client never connected to it.
+    #[test]
+    fn a_stopped_server_leaves_the_identity_an_explicit_start_binds() {
+        let (registry, _, intents, _, _) = setup(true);
+        let mut unknown = saved(false);
+        unknown.continuity = None;
+        intents.records.lock().unwrap().push(unknown);
+        registry.resume_retained();
+        eventually(|| registry.connections().len() == 1);
+
+        registry.check(&destination());
+
+        eventually(|| {
+            matches!(
+                registry.status(&destination()),
+                RemoteConnectionStatus::Stopped
+            )
+        });
+        assert_eq!(
+            registry.continuity(&destination()),
+            Some(pin()),
+            "a stopped server names the identity an explicit Start binds"
+        );
+    }
+
     /// Check Status signs in and validates the account's server, so a server the person only
     /// checked can be maintained without connecting to it and presenting its Workspaces.
     #[test]
@@ -1543,7 +1581,7 @@ mod tests {
             _: &SshCancellationToken,
             _: &ConnectProgress<'_>,
         ) -> Result<SshServerObservation, SshConnectFailure> {
-            Err(SshConnectFailure::Stopped)
+            Err(SshConnectFailure::Stopped(None))
         }
     }
     #[test]
@@ -1746,7 +1784,7 @@ mod tests {
             Arc::new(ConnectsThen {
                 route: route.clone(),
                 attempts: AtomicUsize::new(0),
-                later: || SshConnectFailure::Stopped,
+                later: || SshConnectFailure::Stopped(None),
             }),
             intents.clone(),
         );

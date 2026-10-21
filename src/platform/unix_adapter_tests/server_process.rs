@@ -291,7 +291,7 @@ fn native_account_server_connect(cx: &mut gpui::TestAppContext) {
     });
     backend.disconnect(&destination);
     match (expected.as_str(), &observed) {
-        ("stopped", Err(SshConnectFailure::Stopped)) => {}
+        ("stopped", Err(SshConnectFailure::Stopped(_))) => {}
         ("missing", Ok(observation))
             if observation.availability == ServerAvailability::NotInstalled => {}
         ("ready", Ok(observation)) if observation.availability == ServerAvailability::Running => {
@@ -322,7 +322,7 @@ fn native_account_server_connect(cx: &mut gpui::TestAppContext) {
         adapter.last_exit.load(std::sync::atomic::Ordering::SeqCst)
     );
     match (expected.as_str(), result) {
-        ("stopped", Err(SshConnectFailure::Stopped)) => {}
+        ("stopped", Err(SshConnectFailure::Stopped(_))) => {}
         ("missing", Err(SshConnectFailure::InstallationOffered(_))) => {}
         ("ready", Ok(connected)) => {
             assert_eq!(connected.server.refresh().unwrap().protocol_major, 1);
@@ -961,7 +961,7 @@ fn native_remote_original_finishes_after_the_client_is_lost(cx: &mut gpui::TestA
 fn failure_name(error: &SshConnectFailure) -> &'static str {
     match error {
         SshConnectFailure::Cancelled => "cancelled",
-        SshConnectFailure::Stopped => "stopped",
+        SshConnectFailure::Stopped(_) => "stopped",
         SshConnectFailure::Unavailable(UnavailableKind::LocalIpcUnavailable) => {
             "local IPC capacity"
         }

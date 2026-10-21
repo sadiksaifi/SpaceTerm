@@ -15817,7 +15817,7 @@ fn a_presented_server_that_fails_after_connecting_should_offer_disconnect(cx: &m
 #[gpui::test]
 fn a_presented_server_stopped_after_connecting_should_offer_disconnect(cx: &mut TestAppContext) {
     a_failing_presented_server_should_offer_disconnect(
-        || crate::ssh::server_connection::SshConnectFailure::Stopped,
+        || crate::ssh::server_connection::SshConnectFailure::Stopped(None),
         "Stopped",
         cx,
     );

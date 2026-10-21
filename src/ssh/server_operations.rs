@@ -1805,7 +1805,7 @@ mod tests {
             _: &SshCancellationToken,
             _: &ConnectProgress<'_>,
         ) -> Result<SshServerObservation, SshConnectFailure> {
-            Err(SshConnectFailure::Stopped)
+            Err(SshConnectFailure::Stopped(None))
         }
     }
     #[derive(Default)]
