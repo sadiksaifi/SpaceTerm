@@ -33,6 +33,8 @@ pub(crate) mod server_intents;
 #[cfg(feature = "desktop")]
 pub(crate) mod server_maintenance;
 #[cfg(feature = "desktop")]
+pub(crate) mod server_operation_records;
+#[cfg(feature = "desktop")]
 pub(crate) mod server_operations;
 #[cfg(feature = "desktop")]
 pub(crate) mod server_process;
