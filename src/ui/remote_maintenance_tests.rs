@@ -384,6 +384,35 @@ fn a_removed_connection_offers_only_resolving_and_acknowledging() {
     );
 }
 
+/// Resolving a removed connection's own original is work the person asked for, so the entry
+/// reports its progress rather than disappearing until it settles.
+#[test]
+fn a_removed_connection_reports_the_work_it_is_doing() {
+    let working = RemoteOperationState::Working {
+        phase: MaintenancePhase::Authenticating,
+        kind: Some(SubmittedKind::Service(Action::Stop)),
+        cancellable: true,
+    };
+
+    let presentation = removed_presentation("penguin", &working)
+        .expect("a removed connection resolving its original still has something to say");
+    assert!(presentation.working, "the entry reports the work underway");
+    assert!(
+        presentation.actions.is_empty(),
+        "nothing underway offers a step that would reach the removed connection"
+    );
+    assert!(presentation.explanation.contains("penguin"));
+
+    assert!(
+        removed_presentation(
+            "penguin",
+            &RemoteOperationState::Read(Box::new(facts(status(true, true, false))))
+        )
+        .is_none(),
+        "a removed connection with nothing left to tell is not listed"
+    );
+}
+
 /// The machine heading's menu carries the operations themselves. The everyday acknowledgement and
 /// the cancellation belong to the row that reports the operation.
 #[test]

@@ -12706,6 +12706,10 @@ impl crate::ssh::server_operations::RemoteServerOperations for ScriptedMaintenan
         self.record("acknowledge");
     }
 
+    fn discard(&self, _: &crate::domain::SshDestination) {
+        self.record("discard");
+    }
+
     fn resume_retained(&self) {
         self.record("resume retained");
     }

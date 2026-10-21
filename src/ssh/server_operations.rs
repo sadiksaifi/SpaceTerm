@@ -150,6 +150,11 @@ pub(crate) trait RemoteServerOperations: Send + Sync {
     /// Retires a validated result the person acknowledged, and its retained record with it.
     fn acknowledge(&self, handle: RemoteOperationHandle);
 
+    /// Stops following an original this client can no longer resolve, because the destination no
+    /// longer reaches the computer, account or server the original bound. The record is retired
+    /// and nothing is sent. What the server already did is unchanged.
+    fn discard(&self, destination: &SshDestination);
+
     /// Continues unresolved originals quietly after relaunch, using available noninteractive
     /// authority only. Called once, after a Workspace Window exists.
     fn resume_retained(&self);
@@ -363,15 +368,16 @@ impl SshServerOperations {
                 state.entries.len() - 1
             }
         };
-        if state.entries[index].target.is_none() {
-            state.entries[index].target =
-                self.inner
-                    .connections
-                    .continuity(destination)
-                    .map(|continuity| MaintenanceTarget {
-                        destination: destination.clone(),
-                        continuity,
-                    });
+        // New work binds the identity the connection most recently admitted. An entry holding an
+        // unresolved original keeps the identity that original bound, so resolving it can never
+        // be redirected through a connection admitted later.
+        if state.entries[index].submitted.is_none()
+            && let Some(continuity) = self.inner.connections.continuity(destination)
+        {
+            state.entries[index].target = Some(MaintenanceTarget {
+                destination: destination.clone(),
+                continuity,
+            });
         }
         if state.entries[index].target.is_none() {
             state.entries[index].state = RemoteOperationState::NeedsPerson {
@@ -685,6 +691,51 @@ impl RemoteServerOperations for SshServerOperations {
                     });
                 }
                 // An unretired record still awaits acknowledgement, so the result stays.
+                Err(error) => note_storage(&inner, Some(error)),
+            })
+            .is_err()
+        {
+            note_storage(&owner, Some(SshIntentStoreError::Unavailable));
+        }
+    }
+
+    fn discard(&self, destination: &SshDestination) {
+        let discarded = {
+            let Ok(state) = self.inner.state.lock() else {
+                return;
+            };
+            state
+                .entries
+                .iter()
+                .find(|entry| {
+                    entry.destination == *destination
+                        && matches!(entry.state, RemoteOperationState::Paused { .. })
+                })
+                .and_then(|entry| Some((entry.generation, entry.submitted.as_ref()?.operation)))
+        };
+        let Some((generation, operation)) = discarded else {
+            return;
+        };
+        let owner = Arc::downgrade(&self.inner);
+        let inner = Arc::downgrade(&self.inner);
+        let store = Arc::clone(&self.inner.store);
+        let destination = destination.clone();
+        if std::thread::Builder::new()
+            .name("spaceterm-ssh-operation".into())
+            .spawn(move || match store.retire(operation) {
+                // The original is forgotten with its record, so relaunch never reads it again.
+                Ok(()) => {
+                    update(&inner, &destination, generation, |state, index| {
+                        let entry = &mut state.entries[index];
+                        entry.submitted = None;
+                        if entry.removed {
+                            state.entries.remove(index);
+                        } else {
+                            entry.state = RemoteOperationState::Unread;
+                        }
+                    });
+                }
+                // An unretired record is still followed, so the original stays.
                 Err(error) => note_storage(&inner, Some(error)),
             })
             .is_err()
@@ -2215,6 +2266,59 @@ mod tests {
         owner.acknowledge(handle);
         std::thread::sleep(Duration::from_millis(30));
         assert_eq!(owner.entries().len(), 1);
+    }
+
+    /// A destination that now reaches another computer can never answer about the original it
+    /// bound. The person can stop following it, and the entry then admits ordinary work again
+    /// against the identity the connection admits now.
+    #[test]
+    fn an_original_whose_identity_no_longer_validates_can_be_discarded() {
+        let script = Arc::new(Script::default());
+        let records = Arc::new(Records::default());
+        let (owner, connections, _) =
+            submit(&script, &records, Err(SshMaintenanceFailure::Unconfirmed));
+        eventually(|| {
+            matches!(
+                owner.state(&destination()),
+                RemoteOperationState::Unconfirmed { .. }
+            )
+        });
+        // The destination now reaches another computer, so resolving the original pauses.
+        script.resolves(Err(SshMaintenanceFailure::Changed(
+            ContinuityChange::HostChanged,
+        )));
+        owner.resume(&destination());
+        eventually(|| {
+            matches!(
+                owner.state(&destination()),
+                RemoteOperationState::Paused {
+                    kind: Some(SubmittedKind::Service(Action::Stop)),
+                    ..
+                }
+            )
+        });
+        assert_eq!(records.only().kind, SubmittedKind::Service(Action::Stop));
+
+        // Without the discard the original stays forever: the identity it bound can never answer.
+        owner.discard(&destination());
+
+        eventually(|| records.operations.lock().unwrap().is_empty());
+        eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Unread));
+        // Ordinary work binds the identity the connection admits now, not the discarded one.
+        script.observes(Ok(facts()));
+        owner.refresh(&destination());
+        eventually(|| matches!(owner.state(&destination()), RemoteOperationState::Read(_)));
+        assert_eq!(
+            script
+                .bound
+                .lock()
+                .unwrap()
+                .last()
+                .map(|target| target.continuity.server),
+            connections
+                .continuity(&destination())
+                .map(|continuity| continuity.server)
+        );
     }
 
     #[test]

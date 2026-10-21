@@ -79,6 +79,9 @@ pub(crate) enum RemoteAction {
     Cancel,
     /// Retires a validated result the person has read.
     Acknowledge,
+    /// Discards an original this client can no longer resolve, because the destination no longer
+    /// reaches the computer, account or server it bound. Nothing is sent.
+    Discard,
 }
 
 impl RemoteAction {
@@ -96,6 +99,7 @@ impl RemoteAction {
             Self::CheckAgain => "Check Again",
             Self::Cancel => crate::ui::ssh_servers::SshServerAction::Cancel.label(),
             Self::Acknowledge => "OK",
+            Self::Discard => "Discard\u{2026}",
         }
     }
 
@@ -112,6 +116,7 @@ impl RemoteAction {
             Self::CheckAgain => "settings-ssh-server-service-again",
             Self::Cancel => "settings-ssh-server-maintenance-cancel",
             Self::Acknowledge => "settings-ssh-server-maintenance-acknowledge",
+            Self::Discard => "settings-ssh-server-maintenance-discard",
         }
     }
 
@@ -128,6 +133,8 @@ impl RemoteAction {
             | Self::Finish => "primary",
             // Cancel appears beside a described step, so it keeps a slot of its own.
             Self::Cancel => "cancel",
+            // Discard appears beside the step that would resolve the original it discards.
+            Self::Discard => "discard",
             Self::Restart => "secondary",
             Self::Uninstall => "removal",
             Self::Check => "read",
@@ -162,6 +169,9 @@ impl RemoteAction {
             ),
             Self::Cancel => format!("Stops waiting for {machine}."),
             Self::Acknowledge => format!("Dismisses this result for {machine}."),
+            Self::Discard => {
+                format!("Stops following the operation SpaceTerm sent to {machine}.")
+            }
         };
         SharedString::from(text)
     }
@@ -188,6 +198,7 @@ impl RemoteAction {
             Self::CheckAgain => "check-again",
             Self::Cancel => "cancel",
             Self::Acknowledge => "acknowledge",
+            Self::Discard => "discard",
         }
     }
 
@@ -288,7 +299,10 @@ pub(crate) fn removed_actions(
         .filter(|action| {
             matches!(
                 action,
-                RemoteAction::Finish | RemoteAction::CheckAgain | RemoteAction::Acknowledge
+                RemoteAction::Finish
+                    | RemoteAction::CheckAgain
+                    | RemoteAction::Acknowledge
+                    | RemoteAction::Discard
             )
         })
         .collect()
@@ -762,11 +776,21 @@ fn submitted(
         RemoteOperationState::Paused { reason, kind } => (
             Some("Paused"),
             selector(row, "paused"),
-            failure(format!(
-                "{} Nothing was sent to it.",
-                continuity(*reason, machine)
-            )),
-            vec![kind.as_ref().map_or(RemoteAction::Check, resolve_action)],
+            failure(match kind {
+                // An original bound to an identity the destination no longer reaches can never be
+                // resolved, so the person can stop following it instead of carrying it forever.
+                Some(kind) => format!(
+                    "{} Nothing was sent to it. SpaceTerm can\u{2019}t ask it about the {} it \
+                     already sent.",
+                    continuity(*reason, machine),
+                    sent(kind)
+                ),
+                None => format!("{} Nothing was sent to it.", continuity(*reason, machine)),
+            }),
+            match kind {
+                Some(kind) => vec![resolve_action(kind), RemoteAction::Discard],
+                None => vec![RemoteAction::Check],
+            },
             false,
         ),
         RemoteOperationState::Failed { failure, kind } => failed(machine, *failure, kind, row),
@@ -982,6 +1006,18 @@ const fn resolve_action(kind: &SubmittedKind) -> RemoteAction {
 /// A label without its trailing ellipsis, for use inside a sentence.
 fn plain(label: &'static str) -> &'static str {
     label.trim_end_matches('\u{2026}')
+}
+
+/// What this client sent, as a noun a sentence can name.
+const fn sent(kind: &SubmittedKind) -> &'static str {
+    match kind {
+        SubmittedKind::Start => "start",
+        SubmittedKind::Service(Action::Stop) => "stop",
+        SubmittedKind::Service(Action::Restart) => "restart",
+        SubmittedKind::Service(Action::Uninstall) => "removal",
+        SubmittedKind::Update { .. } => "update",
+        SubmittedKind::Return => "return",
+    }
 }
 
 /// What the submitted operation asked the machine to do, as a sentence completes it.
@@ -1332,10 +1368,13 @@ pub(crate) fn removed_presentation(
     [MaintenanceRow::Service, MaintenanceRow::Update]
         .into_iter()
         .find_map(|row| {
+            let presentation = present(machine, state, row, None);
             let actions = removed_actions(state, row);
-            (!actions.is_empty()).then(|| MaintenancePresentation {
+            // Work underway on a removed connection's own original is still something to say,
+            // so the entry reports its progress instead of disappearing until it settles.
+            (!actions.is_empty() || presentation.working).then(|| MaintenancePresentation {
                 actions,
-                ..present(machine, state, row, None)
+                ..presentation
             })
         })
 }

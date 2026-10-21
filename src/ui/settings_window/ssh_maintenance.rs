@@ -207,6 +207,7 @@ impl SettingsWindow {
                     operations.acknowledge(handle);
                 }
             }
+            RemoteAction::Discard => operations.discard(&destination),
             step => {
                 let Some(request) = step.request() else {
                     return;
@@ -526,6 +527,7 @@ impl SettingsWindow {
                     operations.acknowledge(handle);
                 }
             }
+            RemoteAction::Discard => operations.discard(&destination),
             _ => return,
         }
         cx.notify();

@@ -49,6 +49,7 @@ enum Call {
     Cancel,
     Resume,
     Acknowledge(RemoteOperationHandle),
+    Discard,
     ResumeRetained,
 }
 
@@ -317,6 +318,11 @@ impl RemoteServerOperations for ScriptedOperations {
                 RemoteOperationState::Read(Box::new(facts(observed))),
             );
         }
+    }
+
+    fn discard(&self, destination: &SshDestination) {
+        self.record(Call::Discard);
+        self.set(destination.as_str(), RemoteOperationState::Unread);
     }
 
     fn resume_retained(&self) {
