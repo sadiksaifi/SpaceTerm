@@ -46,6 +46,8 @@ from spaceterm_tasks.accessibility_linux import (
     SmokeFailure,
     cleanup_private_processes,
     create_private_runtime,
+    fixture_document,
+    fixture_line_offsets,
     orca_registered,
     require,
     require_account_server,
@@ -312,7 +314,6 @@ class Probe:
         )
         # Supply the unique name in the creation request. Native proxy replacement cannot
         # prove which unnamed row is new, and renaming a guessed row can touch retained work.
-        previous_terminal = self.find_named_control("Terminal Pane")
         self.activate_control("Switch Workspace")
         field = self.wait(
             lambda: self.find_named_control("Workspace name"), "server_workspace_query_missing"
@@ -329,17 +330,23 @@ class Probe:
         )
         self.server_workspace_named = True
 
-        def fixture_terminal():
-            terminal = self.find_terminal()
-            return terminal if terminal is not None and terminal != previous_terminal else None
+        # WorkspaceManager::render_chrome derives this selected row and the single presented
+        # Tab manager from the same Active Workspace. This fresh client never navigates the
+        # sidebar cursor, so the named selection identifies the content of this Window too.
+        def fixture_pane():
+            require(self.created_workspace_row() is not None, "fixture_workspace_not_selected")
+            window = self.find_window(self.application_pid)
+            return self.find_terminal() or (
+                self.find_named_control("Start New Shell", window) if window is not None else None
+            )
 
         pane = self.wait(
-            lambda: fixture_terminal() or self.find_named_control("Start New Shell"),
+            fixture_pane,
             "server_workspace_pane_missing",
         )
         if pane.name == "Start New Shell":
             self.press_control(pane)
-        self.terminal = self.wait(fixture_terminal, "server_terminal_object_missing")
+        self.terminal = self.wait(self.find_terminal, "server_terminal_object_missing")
         require(self.terminal.queryComponent().grabFocus(), "server_terminal_focus_rejected")
 
     def event(self, event):
@@ -726,20 +733,35 @@ def validate_tree(probe, input_driver, output, fixture_speech, readiness):
     probe.wait(lambda: probe.insert_marker, "shell_text_event_missing")
     # Orca derives inserted output from the CURRENT caret line. Let it finish
     # genuine output presentation before selection changes that caret.
-    document = text.getText(0, -1)
-    start = document.index(MARKER)
-    end = start + len(MARKER)
+    document, start, end, fixture_caret = probe.wait(
+        lambda: fixture_document(text, MARKER), "fixture_document_not_coherent"
+    )
     line_queries = []
-    offsets = {start, end - 1, text.caretOffset}
-    for event in probe.marker_event_offsets:
-        offsets.update((event["start"], event["start"] + event["payload_scalars"] - 1))
-    for offset in sorted(offsets):
+    offsets, expired = fixture_line_offsets(
+        start, end, fixture_caret, len(document), probe.marker_event_offsets
+    )
+    (output / "fixture-line-query-plan.json").write_text(
+        json.dumps(
+            {
+                "document_scalars": len(document),
+                "requested_offsets": offsets,
+                "expired_event_offsets": expired,
+                "marker_event_offsets": probe.marker_event_offsets,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    for offset in offsets:
+        last_evidence = None
 
         def current_line():
+            nonlocal last_evidence
             line, line_start, line_end = text.getStringAtOffset(offset, atspi.TEXT_GRANULARITY_LINE)
             current_document = text.getText(0, -1)
             evidence = {
                 "requested_offset": offset,
+                "document_scalars": len(current_document),
                 "start": line_start,
                 "end": line_end,
                 "scalars": len(line),
@@ -756,6 +778,7 @@ def validate_tree(probe, input_driver, output, fixture_speech, readiness):
                     )
                 ),
             }
+            last_evidence = evidence
             if (
                 evidence["matches_document_slice"]
                 and evidence["offset_inside_range"]
@@ -764,7 +787,13 @@ def validate_tree(probe, input_driver, output, fixture_speech, readiness):
                 return evidence, current_document
             return None
 
-        evidence, document = probe.wait(current_line, "terminal_line_boundary_invalid")
+        try:
+            evidence, document = probe.wait(current_line, "terminal_line_boundary_invalid")
+        except SmokeFailure:
+            (output / "fixture-line-failure.json").write_text(
+                json.dumps(last_evidence, indent=2) + "\n"
+            )
+            raise
         line_queries.append(evidence)
         (output / "fixture-line-verification.json").write_text(
             json.dumps(

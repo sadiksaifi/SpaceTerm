@@ -16,6 +16,8 @@ from spaceterm_tasks.accessibility_linux import (
     Readiness,
     ReadinessStep,
     SmokeFailure,
+    fixture_document,
+    fixture_line_offsets,
     orca_registered,
     require_account_server,
     require_prerequisites,
@@ -104,6 +106,30 @@ class AccessibilityPrerequisiteTests(unittest.TestCase):
             require_account_server(Path("server"))
         self.probe_command.side_effect = [service, subprocess.CompletedProcess([], 0)]
         require_account_server(Path("server"))
+
+
+class AccessibilityLineQueryTests(unittest.TestCase):
+    def test_document_growth_cannot_pair_an_old_length_with_a_new_caret(self):
+        text = SimpleNamespace(
+            caretOffset=8,
+            getText=Mock(side_effect=["M\n", "M\nprompt", "M\nprompt", "M\nprompt"]),
+        )
+        self.assertIsNone(fixture_document(text, "M"))
+        self.assertEqual(fixture_document(text, "M"), ("M\nprompt", 0, 1, 8))
+
+    def test_current_queries_exclude_only_expired_insertion_positions(self):
+        self.assertEqual(
+            fixture_line_offsets(75, 89, 95, 113, [{"start": 75, "payload_scalars": 75}]),
+            ([75, 88, 95], [149]),
+        )
+        self.assertEqual(
+            fixture_line_offsets(2, 7, 10, 10, [{"start": 1, "payload_scalars": 4}]),
+            ([1, 2, 4, 6, 10], []),
+        )
+
+    def test_invalid_current_caret_is_not_discarded_as_a_historical_event(self):
+        with self.assertRaisesRegex(SmokeFailure, "^fixture_current_offset_invalid$"):
+            fixture_line_offsets(2, 7, 11, 10, [])
 
 
 class AccessibilityReadinessTests(unittest.TestCase):

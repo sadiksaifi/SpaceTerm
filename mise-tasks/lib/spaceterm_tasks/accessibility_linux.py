@@ -27,6 +27,33 @@ def require(condition, classification):
         raise SmokeFailure(classification)
 
 
+def fixture_document(text, marker):
+    """Observe marker and caret against one unchanged native Text document."""
+    before = text.getText(0, -1)
+    caret = text.caretOffset
+    after = text.getText(0, -1)
+    if before != after or marker not in after or not 0 <= caret <= len(after):
+        return None
+    start = after.index(marker)
+    return after, start, start + len(marker), caret
+
+
+def fixture_line_offsets(start, end, caret, document_scalars, events):
+    """Query current positions; insertion events can describe an older, longer document."""
+    current = {start, end - 1, caret}
+    require(
+        all(0 <= offset <= document_scalars for offset in current),
+        "fixture_current_offset_invalid",
+    )
+    historical = {
+        offset
+        for event in events
+        for offset in (event["start"], event["start"] + event["payload_scalars"] - 1)
+    }
+    valid = {offset for offset in historical if 0 <= offset <= document_scalars}
+    return sorted(current | valid), sorted(historical - valid)
+
+
 class ReadinessStep(Enum):
     DISPLAY_ENVIRONMENT = "display_environment"
     SPEECH_DISPATCHER = "speech_dispatcher"
