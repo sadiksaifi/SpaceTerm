@@ -17,6 +17,7 @@ mod server_location;
 pub(crate) mod server_update;
 pub(crate) mod servers;
 mod sidebar;
+mod ssh_maintenance;
 mod ssh_servers;
 mod theme_gallery;
 mod theme_store;
@@ -385,6 +386,8 @@ pub(crate) struct SettingsWindow {
     server_update: Option<server_update::ServerUpdateRow>,
     /// The desktop's SSH server connections. `None` omits their row.
     ssh_servers: Option<ssh_servers::SshServerRows>,
+    /// The submitted remote maintenance operations. `None` omits the maintenance rows.
+    ssh_maintenance: Option<ssh_maintenance::SshMaintenanceRows>,
     /// The server the person selected in the Servers list. A server no longer listed gives way
     /// to the local server or the first saved one.
     selected_server: Option<server_list::ServerChoice>,
@@ -644,6 +647,9 @@ impl SettingsWindow {
         let ssh_hosts = crate::ui::ssh_servers::host_source(cx);
         let ssh_servers = crate::ui::ssh_servers::installed(cx)
             .map(|connections| ssh_servers::SshServerRows::new(connections, ssh_hosts, window, cx));
+        let ssh_maintenance = crate::ssh::server_operations::installed(cx).map(|operations| {
+            ssh_maintenance::SshMaintenanceRows::new(operations, window.window_handle(), cx)
+        });
         let presentation = crate::desktop_profile::DesktopPresentation::get(cx);
         let this_computer = presentation.wording().this_computer;
         let available_sections = SettingsSectionId::ALL
@@ -671,6 +677,11 @@ impl SettingsWindow {
                             .as_ref()
                             .is_none_or(|offered| offered.update.is_none()))
                     || (*row == SettingsRowId::SshConnect && ssh_servers.is_none())
+                    // A build with no operations owner offers no remote maintenance.
+                    || (matches!(
+                        *row,
+                        SettingsRowId::SshServerService | SettingsRowId::SshServerUpdate
+                    ) && ssh_maintenance.is_none())
             })
             .collect();
         Self {
@@ -720,6 +731,7 @@ impl SettingsWindow {
             local_server: local_server
                 .map(|offered| servers::LocalServerRow::new(offered.connection)),
             ssh_servers,
+            ssh_maintenance,
             selected_server: None,
             search_selected_server: None,
             server_list_focus: cx.focus_handle().tab_stop(true),
@@ -1428,6 +1440,8 @@ impl SettingsWindow {
             SettingsRowId::ServerList => self.render_server_list(appearance, window, cx),
             SettingsRowId::SshConnect => self.render_ssh_connect(appearance, cx),
             SettingsRowId::SshServerStatus => self.render_ssh_server_status(appearance, cx),
+            SettingsRowId::SshServerService => self.render_ssh_server_service(appearance, cx),
+            SettingsRowId::SshServerUpdate => self.render_ssh_server_update(appearance, cx),
             SettingsRowId::SshServerVersion
             | SettingsRowId::SshServerPlatform
             | SettingsRowId::SshServerCompatibility

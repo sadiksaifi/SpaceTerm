@@ -69,8 +69,10 @@ const LOCAL_ROWS: [SettingsRowId; 3] = [
     SettingsRowId::ServerUpdate,
 ];
 /// The rows that present one saved SSH server alone.
-const SSH_ROWS: [SettingsRowId; 6] = [
+const SSH_ROWS: [SettingsRowId; 8] = [
     SettingsRowId::SshServerStatus,
+    SettingsRowId::SshServerService,
+    SettingsRowId::SshServerUpdate,
     SettingsRowId::SshServerVersion,
     SettingsRowId::SshServerPlatform,
     SettingsRowId::SshServerCompatibility,
@@ -583,6 +585,9 @@ impl SettingsWindow {
                 SharedString::new_static(DIRECT_NETWORK_PAIRING),
                 CaptionTone::Guidance,
             )),
+            row if super::ssh_maintenance::maintenance_row(row).is_some() => {
+                self.ssh_maintenance_caption(row)
+            }
             row if SSH_ROWS.contains(&row) => self.ssh_server_caption(row),
             _ => None,
         }

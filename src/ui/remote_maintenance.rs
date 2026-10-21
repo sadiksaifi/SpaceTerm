@@ -112,21 +112,22 @@ impl RemoteAction {
         }
     }
 
-    /// The element identity of the slot the button occupies. The steps that replace one another
-    /// share a slot, so keyboard focus stays on it as Stop Server gives way to Start Server.
+    /// The slot the button occupies within its row. The steps that replace one another share a
+    /// slot, so keyboard focus stays on it as Stop Server gives way to Start Server.
     pub(crate) const fn slot(self) -> &'static str {
         match self {
             Self::Start
             | Self::Stop
             | Self::CheckAgain
-            | Self::Cancel
             | Self::Acknowledge
             | Self::Update
             | Self::Return
-            | Self::Finish => "settings-ssh-server-maintenance-primary",
-            Self::Restart => "settings-ssh-server-maintenance-secondary",
-            Self::Uninstall => "settings-ssh-server-maintenance-removal",
-            Self::Check => "settings-ssh-server-maintenance-read",
+            | Self::Finish => "primary",
+            // Cancel appears beside a described step, so it keeps a slot of its own.
+            Self::Cancel => "cancel",
+            Self::Restart => "secondary",
+            Self::Uninstall => "removal",
+            Self::Check => "read",
         }
     }
 
