@@ -678,10 +678,19 @@ impl Maintenance {
                 Ok(status) => (OperationResolution::Unconfirmed, None, Some(status)),
                 Err(error) => (resolution_after(error), None, self.policy()),
             },
-            Dispatch::Service(prepared) => match controller.confirm(prepared) {
-                Ok(status) => (OperationResolution::Completed, None, Some(status)),
-                Err(error) => (resolution_after(error), None, self.policy()),
-            },
+            Dispatch::Service(prepared) => {
+                let action = prepared.action();
+                match controller.confirm(prepared) {
+                    // Only the policy the action promises completes it. The service answers an
+                    // interrupted local activation it resumed instead with the same Ok, having
+                    // performed nothing this original asked for.
+                    Ok(status) if promised(action, status) => {
+                        (OperationResolution::Completed, None, Some(status))
+                    }
+                    Ok(status) => (OperationResolution::Unconfirmed, None, Some(status)),
+                    Err(error) => (resolution_after(error), None, self.policy()),
+                }
+            }
             Dispatch::Update(approval) => self.activated(self.service.activate(approval)),
             Dispatch::Return(approval) => self.activated(self.service.return_to_previous(approval)),
         }
@@ -857,6 +866,21 @@ fn resolution_after(error: ServerError) -> OperationResolution {
         | ServerError::Changed
         | ServerError::AuthenticationRefused => OperationResolution::Refused(error.into()),
         _ => OperationResolution::Unconfirmed,
+    }
+}
+
+/// Whether an observed policy is the one a destructive action promises the person.
+///
+/// Stop Server leaves the server durably stopped and not running. Uninstall Server leaves this
+/// account no service registration. Restart Server leaves it running and not deliberately
+/// stopped, which is all the retained policy can show: a server that is running again has been
+/// stopped and started, because that is the only way this service reaches a running server from
+/// any dispatch, but the policy alone never names which operation did it.
+fn promised(action: Action, status: ServiceStatus) -> bool {
+    match action {
+        Action::Stop => status.stopped && !status.running,
+        Action::Restart => status.running && !status.stopped,
+        Action::Uninstall => !status.installed,
     }
 }
 
@@ -1924,6 +1948,76 @@ mod tests {
                 Reply::Outcome(outcome)
             );
             assert_eq!(harness.manager.stops.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    /// Retain one interrupted local activation whose registration change is already published,
+    /// exactly as an interrupted local Update Server leaves this account. Resuming it finishes
+    /// that activation and performs no action a remote original asked for.
+    fn interrupt_with_a_local_activation(harness: &Harness) {
+        let build = |installation: &RetainedInstallation| {
+            let build = RemoteBuild::describe(installation).unwrap();
+            serde_json::json!({
+                "digest": build.digest,
+                "version": build.version,
+                "commit": build.commit,
+            })
+        };
+        let saved: [u8; 32] = ring::digest::digest(
+            &ring::digest::SHA256,
+            &serde_json::to_vec(&harness.data().read().unwrap()).unwrap(),
+        )
+        .as_ref()
+        .try_into()
+        .unwrap();
+        let id = [1u8; 32];
+        let mut state = serde_json::to_value(harness.state()).unwrap();
+        state["installation"] = Harness::digest(&harness.candidate).into();
+        state["activation"] = serde_json::json!({
+            "schema": 1,
+            "id": id,
+            "previous": build(&harness.previous),
+            "candidate": build(&harness.candidate),
+            "stopped": true,
+            "original_run": null,
+            "candidate_run": null,
+            "step": "approved",
+            "saved": saved,
+            "ready": false,
+            "failed": false,
+        });
+        harness.data().write_json(c"service.json", &state).unwrap();
+        // That activation already replaced this account's service registration.
+        *harness.manager.approved.lock().unwrap() = harness.candidate.directory.clone();
+    }
+
+    /// The local control path holds the service lock and not the maintenance fence, so a local
+    /// activation can be admitted and interrupted between this original's admission and its
+    /// dispatch. The service then answers the dispatch by resuming that activation, with an Ok
+    /// that performed nothing the person asked for.
+    #[test]
+    fn an_original_that_only_resumed_an_interrupted_activation_stays_unconfirmed() {
+        with_service(false, true, |harness| {
+            let prepared = Controller::new(harness.service.clone())
+                .prepare(Action::Uninstall)
+                .unwrap();
+            interrupt_with_a_local_activation(harness);
+            let (resolution, activation, status) =
+                harness.maintenance.dispatch(Dispatch::Service(prepared));
+            assert_eq!(
+                (
+                    resolution,
+                    harness.state().installed,
+                    harness.manager.uninstalls.load(Ordering::SeqCst)
+                ),
+                (OperationResolution::Unconfirmed, true, 0),
+                "the dispatch only resumed an interrupted activation, so this Uninstall Server \
+                 original must stay unconfirmed rather than report a registration this service \
+                 still holds as removed"
+            );
+            assert_eq!(activation, None);
+            let status = status.expect("resolved policy unavailable");
+            assert!(status.installed && status.stopped && !status.running);
         });
     }
 }
