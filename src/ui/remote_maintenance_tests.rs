@@ -423,6 +423,10 @@ fn a_removed_connection_offers_only_resolving_and_acknowledging() {
             failure: SshMaintenanceFailure::Refused(MaintenanceRefusal::Unsupported),
             kind: Some(SubmittedKind::Service(Action::Stop)),
         },
+        RemoteOperationState::Paused {
+            reason: ContinuityChange::HostChanged,
+            kind: Some(SubmittedKind::Service(Action::Stop)),
+        },
     ];
 
     for state in &states {
@@ -431,7 +435,11 @@ fn a_removed_connection_offers_only_resolving_and_acknowledging() {
                 assert!(
                     matches!(
                         action,
-                        RemoteAction::Finish | RemoteAction::CheckAgain | RemoteAction::Acknowledge
+                        RemoteAction::Finish
+                            | RemoteAction::CheckAgain
+                            | RemoteAction::Acknowledge
+                            // Discarding sends nothing: it retires this client's own record.
+                            | RemoteAction::Discard
                     ),
                     "{action:?} would reach a connection the person removed"
                 );
@@ -458,6 +466,11 @@ fn a_removed_connection_offers_only_resolving_and_acknowledging() {
         removed_actions(&states[5], MaintenanceRow::Service),
         vec![RemoteAction::CheckAgain],
         "a refused resolution keeps the step that settles the operation it was resolving"
+    );
+    assert_eq!(
+        removed_actions(&states[6], MaintenanceRow::Service),
+        vec![RemoteAction::CheckAgain, RemoteAction::Discard],
+        "an operation the destination can no longer answer can be settled or stopped following"
     );
 }
 
@@ -562,6 +575,12 @@ fn every_state_reads_distinctly() {
         RemoteOperationState::Paused {
             reason: ContinuityChange::HostChanged,
             kind: None,
+        },
+        // The same pause holding an operation it can no longer ask about is a different state: it
+        // offers the step that settles that operation and the step that stops following it.
+        RemoteOperationState::Paused {
+            reason: ContinuityChange::HostChanged,
+            kind: Some(SubmittedKind::Service(Action::Stop)),
         },
         RemoteOperationState::Failed {
             failure: SshMaintenanceFailure::Unavailable(UnavailableKind::HostUnreachable),

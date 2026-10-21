@@ -775,7 +775,17 @@ fn submitted(
         }
         RemoteOperationState::Paused { reason, kind } => (
             Some("Paused"),
-            selector(row, "paused"),
+            // A pause holding an operation it can no longer ask about tells a different story
+            // from one that sent nothing, and offers different steps, so it reads as its own
+            // state.
+            selector(
+                row,
+                if kind.is_some() {
+                    "paused-unresolved"
+                } else {
+                    "paused"
+                },
+            ),
             failure(match kind {
                 // An original bound to an identity the destination no longer reaches can never be
                 // resolved, so the person can stop following it instead of carrying it forever.
