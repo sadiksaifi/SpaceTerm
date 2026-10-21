@@ -238,7 +238,7 @@ fn reply(output: &CapturedProcessOutput, dispatched: bool) -> Result<Reply, SshM
 /// A reply that does not answer what was asked, so the exchange reached no validated result.
 fn unexpected(reply: Reply) -> SshMaintenanceFailure {
     match reply {
-        Reply::Refused(refusal) => SshMaintenanceFailure::Refused(refusal),
+        Reply::Refused { refusal } => SshMaintenanceFailure::Refused(refusal),
         Reply::Unknown => SshMaintenanceFailure::Forgotten,
         _ => SshMaintenanceFailure::Unavailable(UnavailableKind::ServiceUnavailable),
     }
@@ -260,7 +260,7 @@ fn outcome(
 ) -> Result<OperationOutcome, SshMaintenanceFailure> {
     match reply {
         Reply::Outcome(outcome) if outcome.operation == original => Ok(outcome),
-        Reply::Refused(refusal) => Err(SshMaintenanceFailure::Refused(refusal)),
+        Reply::Refused { refusal } => Err(SshMaintenanceFailure::Refused(refusal)),
         Reply::Unknown if !dispatched => Err(SshMaintenanceFailure::Forgotten),
         _ if dispatched => Err(SshMaintenanceFailure::Unconfirmed),
         reply => Err(unexpected(reply)),

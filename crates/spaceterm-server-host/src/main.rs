@@ -377,7 +377,9 @@ mod tests {
         );
         assert_eq!(
             serde_json::from_slice::<Reply>(&output).unwrap(),
-            Reply::Refused(spaceterm_server::service::maintenance::MaintenanceRefusal::Protocol)
+            Reply::Refused {
+                refusal: spaceterm_server::service::maintenance::MaintenanceRefusal::Protocol,
+            }
         );
     }
 }

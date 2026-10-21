@@ -84,7 +84,9 @@ pub enum Reply {
     Outcome(OperationOutcome),
     /// This service holds no record of that original operation.
     Unknown,
-    Refused(MaintenanceRefusal),
+    Refused {
+        refusal: MaintenanceRefusal,
+    },
 }
 
 /// A server build as a person and a confirmation name it: never a path.
@@ -271,7 +273,7 @@ impl Maintenance {
     ) -> Result<u8, control::cli::Error> {
         let reply = match read_request(input) {
             Ok(request) => self.reply(request),
-            Err(refusal) => Reply::Refused(refusal),
+            Err(refusal) => Reply::Refused { refusal },
         };
         write_reply(&reply, output)
     }
@@ -280,7 +282,9 @@ impl Maintenance {
     pub fn reply(&self, request: Request) -> Reply {
         match self.perform(request) {
             Ok(reply) => reply,
-            Err(error) => Reply::Refused(error.into()),
+            Err(error) => Reply::Refused {
+                refusal: error.into(),
+            },
         }
     }
 
@@ -1101,15 +1105,25 @@ pub fn run(
     output: &mut impl Write,
 ) -> Result<u8, control::cli::Error> {
     let [command, requested] = args else {
-        return write_reply(&Reply::Refused(MaintenanceRefusal::Protocol), output);
+        return write_reply(
+            &Reply::Refused {
+                refusal: MaintenanceRefusal::Protocol,
+            },
+            output,
+        );
     };
     if command != "ssh-maintain" {
-        return write_reply(&Reply::Refused(MaintenanceRefusal::Protocol), output);
+        return write_reply(
+            &Reply::Refused {
+                refusal: MaintenanceRefusal::Protocol,
+            },
+            output,
+        );
     }
     let requested = requested.to_str().unwrap_or_default();
     match Maintenance::for_identity(identity, requested) {
         Ok(maintenance) => maintenance.exchange(input, output),
-        Err(refusal) => write_reply(&Reply::Refused(refusal), output),
+        Err(refusal) => write_reply(&Reply::Refused { refusal }, output),
     }
 }
 
@@ -1328,7 +1342,9 @@ mod tests {
                 );
                 assert_eq!(
                     serde_json::from_slice::<Reply>(&output).unwrap(),
-                    Reply::Refused(MaintenanceRefusal::Protocol)
+                    Reply::Refused {
+                        refusal: MaintenanceRefusal::Protocol
+                    }
                 );
             }
             // Nothing above resolved this account's service, so its policy is untouched.
@@ -1348,7 +1364,9 @@ mod tests {
             ] {
                 assert_eq!(
                     harness.wire(&request).0,
-                    Reply::Refused(MaintenanceRefusal::Protocol)
+                    Reply::Refused {
+                        refusal: MaintenanceRefusal::Protocol
+                    }
                 );
             }
             assert_eq!(harness.manager.stops.load(Ordering::SeqCst), 0);
@@ -1374,7 +1392,9 @@ mod tests {
             let (reply, text) = harness.wire(&serde_json::to_vec(&Request::Observe).unwrap());
             assert_eq!(
                 reply,
-                Reply::Refused(MaintenanceRefusal::StorageUnavailable)
+                Reply::Refused {
+                    refusal: MaintenanceRefusal::StorageUnavailable
+                }
             );
             assert!(!text.contains('/'));
             assert!(!text.contains(&ServerError::StorageUnavailable.to_string()));
@@ -1428,7 +1448,9 @@ mod tests {
             for action in [Action::Stop, Action::Restart] {
                 assert_eq!(
                     harness.exchange(&Request::Prepare { action }),
-                    Reply::Refused(MaintenanceRefusal::Stopped)
+                    Reply::Refused {
+                        refusal: MaintenanceRefusal::Stopped
+                    }
                 );
             }
             let mut state = harness.state();
@@ -1438,7 +1460,9 @@ mod tests {
                 harness.exchange(&Request::Prepare {
                     action: Action::Uninstall
                 }),
-                Reply::Refused(MaintenanceRefusal::NotInstalled)
+                Reply::Refused {
+                    refusal: MaintenanceRefusal::NotInstalled
+                }
             );
         });
     }
@@ -1578,7 +1602,9 @@ mod tests {
                 harness.exchange(&Request::Start {
                     operation: [200; 32]
                 }),
-                Reply::Refused(MaintenanceRefusal::StorageUnavailable)
+                Reply::Refused {
+                    refusal: MaintenanceRefusal::StorageUnavailable
+                }
             );
             assert_eq!(harness.manager.starts.load(Ordering::SeqCst), RETAINED);
             for index in 0..RETAINED {
@@ -1636,7 +1662,9 @@ mod tests {
             for candidate in ["b".repeat(64), "not-a-digest".into()] {
                 assert_eq!(
                     harness.exchange(&Request::PrepareUpdate { candidate }),
-                    Reply::Refused(MaintenanceRefusal::CandidateUnavailable)
+                    Reply::Refused {
+                        refusal: MaintenanceRefusal::CandidateUnavailable
+                    }
                 );
             }
         });
