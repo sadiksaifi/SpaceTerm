@@ -13,6 +13,7 @@ use gpui::{App, Global, SharedString, Window, WindowId};
 use crate::domain::SshDestination;
 use crate::platform::app_paths::AppPaths;
 use crate::ssh::askpass::{AskPassAttempt, AskPassAttemptFactory, AskPassUnavailable};
+use crate::ssh::server_operations::RemoteServerOperations;
 use crate::ssh::server_connection::{
     ConnectPhase, ContinuityChange, IncompatibilityKind, InteractionReason, RefusalKind,
     RemoteConnectionStatus, ServerAvailability, SshIntentStoreError, SshServerConnections,
@@ -82,15 +83,23 @@ pub(crate) fn install(
     });
 }
 
+/// The desktop's saved SSH connections and the owner of the maintenance operations submitted to
+/// them. Both share one authenticated route, so they are created together.
+pub(crate) struct CreatedSshServers {
+    pub(crate) connections: SshServerConnections,
+    /// `None` in a build that offers no remote server maintenance.
+    pub(crate) operations: Option<Arc<dyn RemoteServerOperations>>,
+}
+
 /// Creates the desktop's registry and presents SSH's prompts in a window.
 pub(crate) trait SshServersFactory {
-    /// The registry, which asks for authentication through `prompts`. Creating it connects to
-    /// nothing.
+    /// The registry and its maintenance owner, which ask for authentication through `prompts`.
+    /// Creating them connects to nothing.
     fn create(
         &self,
         prompts: Arc<dyn AskPassAttemptFactory>,
         cx: &mut App,
-    ) -> Option<SshServerConnections>;
+    ) -> Option<CreatedSshServers>;
 
     /// SSH's prompts presented in `window`.
     fn prompts(&self, window: &Window, cx: &mut App) -> Option<Arc<dyn AskPassAttemptFactory>>;
@@ -117,9 +126,16 @@ pub(crate) fn ensure(factory: Rc<dyn SshServersFactory>, window: &Window, cx: &m
         return;
     }
     let prompts = Arc::new(PromptWindow::default());
-    let Some(connections) = factory.create(Arc::clone(&prompts) as Arc<_>, cx) else {
+    let Some(CreatedSshServers {
+        connections,
+        operations,
+    }) = factory.create(Arc::clone(&prompts) as Arc<_>, cx)
+    else {
         return;
     };
+    if let Some(operations) = operations {
+        crate::ssh::server_operations::install(operations, cx);
+    }
     cx.set_global(InstalledSshServers {
         connections: connections.clone(),
         hosts: factory.hosts(),
@@ -687,12 +703,15 @@ mod tests {
             &self,
             _: Arc<dyn AskPassAttemptFactory>,
             _: &mut App,
-        ) -> Option<SshServerConnections> {
+        ) -> Option<CreatedSshServers> {
             *self.registries.lock().unwrap() += 1;
-            Some(SshServerConnections::new(
-                Arc::new(NeedsSignIn),
-                Arc::new(NoIntents),
-            ))
+            Some(CreatedSshServers {
+                connections: SshServerConnections::new(
+                    Arc::new(NeedsSignIn),
+                    Arc::new(NoIntents),
+                ),
+                operations: None,
+            })
         }
         fn prompts(&self, window: &Window, _: &mut App) -> Option<Arc<dyn AskPassAttemptFactory>> {
             self.prompt_windows
