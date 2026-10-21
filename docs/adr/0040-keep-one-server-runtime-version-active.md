@@ -12,4 +12,6 @@ Desktop candidate preparation embeds an explicitly selected, independently signe
 
 Candidate verification checks signature, complete archive digest, application identity, native target, resources and declared compatibility before activation is offered. A running client whose installation now contains another candidate must restart before using it. Source builds retain an explicit signed-artifact workflow; [the local workflow](../local-server.md) defines that development boundary. Launch never signs an artifact or promotes a sibling executable into an approved runtime.
 
+Staging and activation on an SSH account server use that account's own operating-system authority over the route that admitted its connection, without a SpaceTerm paired-device credential. The client transfers only an artifact it verified for that machine's application identity and native target, and the account retains and activates only that exact artifact.
+
 An admitted activation retains its exact candidate and original observations durably, separately from deliberate Stop. Ordinary service, desktop and control entry points recover that operation under [ADR 0034](0034-confirm-server-update-restarts-and-explain-incompatibility.md). Recovery never chooses an arbitrary staged artifact. No permanent update helper is installed.

@@ -8,4 +8,6 @@ The local "Update Server..." journey belongs to the selected server's existing S
 
 Once admitted, recovery resolves the original exact-target operation without renewed destructive consent or repeated destructive dispatch. It never selects a newer staged candidate or replaces later work. An uncertain outcome refuses terminal admission. A failed candidate never triggers silent rollback. An explicit return to the previous verified runtime requires proof that the candidate never reached ready and that saved server state is unchanged. Ended Terminal Sessions cannot return.
 
+An SSH account server uses this same journey from the selected server's Servers detail, over the account route that admitted its connection. Staging transfers one exact verified artifact for that machine to the original account, application identity and server, and activation keeps the same exact-candidate and Session-ending confirmation. Recovery of that original follows the rules above over a freshly validated original route, under [ADR 0037](0037-resolve-shared-mutations-at-the-server.md).
+
 [ADR 0040](0040-keep-one-server-runtime-version-active.md) defines staging and activation of the single server runtime version.
