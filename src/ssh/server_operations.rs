@@ -426,14 +426,15 @@ impl SshServerOperations {
             unresolved
                 .into_iter()
                 .filter_map(|index| {
-                    let operation = state.entries[index].submitted.as_ref()?.operation;
+                    let submitted = state.entries[index].submitted.clone()?;
                     let admitted = admit(
                         &mut state,
                         index,
                         MaintenancePhase::Resolving,
                         authority,
-                        true,
+                        Some(submitted.kind),
                     )?;
+                    let operation = submitted.operation;
                     Some((admitted, operation))
                 })
                 .collect::<Vec<_>>()
@@ -509,7 +510,7 @@ impl RemoteServerOperations for SshServerOperations {
                 index,
                 MaintenancePhase::Authenticating,
                 MaintenanceAuthority::Requested,
-                false,
+                None,
             )
         };
         if let Some(admitted) = admitted {
@@ -530,7 +531,7 @@ impl RemoteServerOperations for SshServerOperations {
                 index,
                 MaintenancePhase::Authenticating,
                 MaintenanceAuthority::Requested,
-                false,
+                None,
             )
         };
         if let Some(admitted) = admitted {
@@ -789,10 +790,11 @@ fn adopt(state: &mut State, record: RetainedRemoteOperation) -> Option<(Admitted
         operation: record.operation,
         kind: record.kind.clone(),
     });
+    let kind = record.kind;
     if let Some(outcome) = record.outcome {
         entry.state = RemoteOperationState::Resolved {
             handle,
-            kind: record.kind,
+            kind,
             outcome,
         };
         notify(state);
@@ -803,7 +805,7 @@ fn adopt(state: &mut State, record: RetainedRemoteOperation) -> Option<(Admitted
         index,
         MaintenancePhase::Resolving,
         MaintenanceAuthority::Quiet,
-        true,
+        Some(kind),
     )?;
     Some((admitted, record.operation))
 }
@@ -820,24 +822,26 @@ fn bind(kind: SubmittedKind, confirmation: Option<String>) -> Option<OperationSu
     })
 }
 
-/// Records the original on its entry and admits its dispatch. The record's presence means the
-/// dispatch left this client, so only reading the same original can settle it.
+/// Admits one dispatch and records its original. An entry that already runs an exchange admits
+/// none, so nothing replaces the original an exchange underway is settling.
 fn start_submission(
     state: &mut State,
     index: usize,
     submission: OperationSubmission,
 ) -> Option<(Admitted, OperationSubmission)> {
-    state.entries[index].submitted = Some(Submitted {
-        operation: submission.operation,
-        kind: submission.kind.clone(),
-    });
     let admitted = admit(
         state,
         index,
         MaintenancePhase::Dispatching,
         MaintenanceAuthority::Requested,
-        true,
+        Some(submission.kind.clone()),
     )?;
+    // The record's presence means the dispatch left this client, so only reading the same
+    // original can settle it.
+    state.entries[index].submitted = Some(Submitted {
+        operation: submission.operation,
+        kind: submission.kind.clone(),
+    });
     Some((admitted, submission))
 }
 
@@ -862,7 +866,7 @@ fn admit(
     index: usize,
     phase: MaintenancePhase,
     authority: MaintenanceAuthority,
-    carries_original: bool,
+    kind: Option<SubmittedKind>,
 ) -> Option<Admitted> {
     if state.entries[index].running {
         return None;
@@ -872,14 +876,6 @@ fn admit(
     entry.generation = generation;
     entry.cancellation = SshCancellationToken::default();
     entry.running = true;
-    let kind = carries_original
-        .then(|| {
-            entry
-                .submitted
-                .as_ref()
-                .map(|submitted| submitted.kind.clone())
-        })
-        .flatten();
     entry.state = RemoteOperationState::Working {
         phase,
         kind: kind.clone(),
@@ -1515,6 +1511,8 @@ mod tests {
         observed: Mutex<Vec<MaintenanceAuthority>>,
         applied: Mutex<Vec<OperationSubmission>>,
         resolved: Mutex<Vec<([u8; 32], MaintenanceAuthority)>>,
+        /// The target every resolution bound, which names the route it reached.
+        bound: Mutex<Vec<MaintenanceTarget>>,
         releases: AtomicUsize,
         gate: Mutex<Option<Gate>>,
     }
@@ -1603,13 +1601,14 @@ mod tests {
         }
         fn resolve(
             &self,
-            _: &MaintenanceTarget,
+            target: &MaintenanceTarget,
             operation: [u8; 32],
             authority: MaintenanceAuthority,
             _: &SshCancellationToken,
             _: &MaintenanceProgress<'_>,
         ) -> Result<OperationOutcome, SshMaintenanceFailure> {
             self.resolved.lock().unwrap().push((operation, authority));
+            self.bound.lock().unwrap().push(target.clone());
             Self::next(&self.resolutions)
         }
         fn release(&self, _: &SshDestination) {
@@ -2219,6 +2218,67 @@ mod tests {
             entries.iter().filter(|entry| entry.removed).count(),
             1,
             "only the removed connection keeps the original"
+        );
+    }
+
+    #[test]
+    fn starting_a_server_needs_no_confirmation_and_is_refused_while_work_runs() {
+        let script = Arc::new(Script::default());
+        script.applies(Ok(outcome(OperationResolution::Completed)));
+        let (entered, arrived) = async_channel::unbounded();
+        let (release, held) = async_channel::unbounded();
+        *script.gate.lock().unwrap() = Some(Gate {
+            entered,
+            release: held,
+        });
+        let records = Arc::new(Records::default());
+        let (connections, _) = connected();
+        let owner = SshServerOperations::new(script.clone(), records.clone(), connections);
+        owner.start(&destination());
+        arrived.recv_blocking().unwrap();
+
+        owner.start(&destination());
+        release.send_blocking(()).unwrap();
+        resolved(owner.as_ref());
+        std::thread::sleep(Duration::from_millis(30));
+        let applied = script.applied.lock().unwrap().clone();
+        assert_eq!(
+            applied.len(),
+            1,
+            "an entry already working admits no dispatch"
+        );
+        assert_eq!(applied[0].kind, SubmittedKind::Start);
+        assert_eq!(
+            applied[0].confirmation, None,
+            "Start ends no work, so it needs no exact-observation confirmation"
+        );
+        let retained = records.only();
+        assert_eq!(
+            retained.operation, applied[0].operation,
+            "the record names the original that was dispatched"
+        );
+        assert_eq!(retained.kind, SubmittedKind::Start);
+    }
+
+    #[test]
+    fn recovery_binds_the_route_the_original_bound_rather_than_a_current_alias() {
+        let script = Arc::new(Script::default());
+        script.resolves(Ok(outcome(OperationResolution::Completed)));
+        let records = Arc::new(Records::default());
+        let mut original = record(None);
+        original.target.continuity.route = [5; 32];
+        records.operations.lock().unwrap().push(original.clone());
+        // The alias now reaches another computer, which the registry has admitted.
+        let (connections, _) = connected();
+        assert_eq!(connections.continuity(&destination()), Some(pin()));
+        assert_ne!(original.target.continuity, pin());
+        let owner = SshServerOperations::new(script.clone(), records.clone(), connections);
+        owner.resume_retained();
+        resolved(owner.as_ref());
+        assert_eq!(
+            *script.bound.lock().unwrap(),
+            vec![original.target],
+            "resolution reaches the route the original bound, not the current alias"
         );
     }
 
