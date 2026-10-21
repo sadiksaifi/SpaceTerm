@@ -1119,6 +1119,57 @@ mod tests {
         backend.release(&SshDestination::new("other-host".into()).unwrap());
     }
 
+    /// Connect presents its server only at the end, so a route it is still establishing is not
+    /// a route maintenance owns. Releasing must leave it alone.
+    #[gpui::test]
+    fn releasing_leaves_a_route_connection_work_still_holds(cx: &mut gpui::TestAppContext) {
+        use crate::ssh::server_connection::SshConnectBackend;
+        use std::sync::{Mutex, mpsc::channel};
+
+        let (entered, reached) = channel();
+        let (release, proceed) = channel();
+        let discovered = serde_json::to_vec(&discovery(SERVER)).unwrap();
+        let proceed = Mutex::new(proceed);
+        let holding = std::sync::atomic::AtomicBool::new(true);
+        let account = answering(move |command, _| {
+            // The first discovery stays inside the route until the release has happened.
+            if command.contains("ssh-discover")
+                && holding.swap(false, std::sync::atomic::Ordering::AcqRel)
+            {
+                entered.send(()).ok();
+                proceed.lock().unwrap().recv().ok();
+            }
+            (discovered.clone(), 0)
+        });
+        let (backend, _) = backend(cx.background_executor.clone(), account, artifacts());
+        let backend = Arc::new(backend);
+        let destination = target(bound()).destination;
+
+        let connecting = {
+            let backend = Arc::clone(&backend);
+            let destination = destination.clone();
+            std::thread::spawn(move || {
+                SshConnectBackend::observe(
+                    backend.as_ref(),
+                    &destination,
+                    None,
+                    &SshCancellationToken::default(),
+                    &|_| {},
+                )
+                .is_ok()
+            })
+        };
+        reached.recv().expect("the connection reached its route");
+
+        SshMaintenanceBackend::release(backend.as_ref(), &destination);
+
+        release.send(()).expect("the connection continues");
+        assert!(
+            connecting.join().expect("the connection finished"),
+            "releasing ended a route the connection was still establishing"
+        );
+    }
+
     /// Start is the only remote operation that reverses a deliberate Stop. It ends no work, so it
     /// carries its bound operation identity and no confirmation.
     #[gpui::test]

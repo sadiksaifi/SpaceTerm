@@ -310,6 +310,7 @@ impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
             clients: self.clients.clone(),
             cancellation: cancellation.clone(),
             presented: std::sync::atomic::AtomicBool::new(false),
+            claims: std::sync::atomic::AtomicUsize::new(0),
         });
         {
             let mut routes = self
@@ -363,12 +364,13 @@ impl<A: SshProcessAdapter> NativeSshConnectBackend<A> {
     /// Connect presented a server over belongs to the connection registry, which ends it through
     /// Disconnect, so releasing a maintenance exchange leaves it connected.
     pub(super) fn release_owned_route(&self, destination: &SshDestination) {
-        let presented = self.routes.lock().ok().and_then(|routes| {
-            routes
-                .get(destination.as_str())
-                .map(|route| route.presented.load(std::sync::atomic::Ordering::Acquire))
+        let owned = self.routes.lock().ok().and_then(|routes| {
+            routes.get(destination.as_str()).map(|route| {
+                !route.presented.load(std::sync::atomic::Ordering::Acquire)
+                    && route.claims.load(std::sync::atomic::Ordering::Acquire) == 0
+            })
         });
-        if presented == Some(false) {
+        if owned == Some(true) {
             self.disconnect(destination);
         }
     }
@@ -412,6 +414,8 @@ impl<A: SshProcessAdapter> SshConnectBackend for NativeSshConnectBackend<A> {
         progress: &ConnectProgress<'_>,
     ) -> Result<ConnectedSshServer, SshConnectFailure> {
         let route = self.route(destination, mode, cancellation, progress)?;
+        // A Connect presents its server only at the end, so the route is held meanwhile.
+        let _claim = RouteClaim::hold(&route);
         if expected.is_some_and(|expected| expected.route != route.route_id) {
             return Err(SshConnectFailure::Changed(ContinuityChange::HostChanged));
         }
@@ -452,6 +456,7 @@ impl<A: SshProcessAdapter> SshConnectBackend for NativeSshConnectBackend<A> {
         progress: &ConnectProgress<'_>,
     ) -> Result<SshServerObservation, SshConnectFailure> {
         let route = self.route(destination, ConnectMode::Requested, cancellation, progress)?;
+        let _claim = RouteClaim::hold(&route);
         if expected.is_some_and(|expected| expected.route != route.route_id) {
             return Err(SshConnectFailure::Changed(ContinuityChange::HostChanged));
         }
@@ -469,6 +474,27 @@ pub(super) struct NativeRoute<A: SshProcessAdapter> {
     /// Whether Connect has presented a server over this route. Such a route belongs to the
     /// connection registry, which alone ends it.
     presented: std::sync::atomic::AtomicBool,
+    /// How much connection work holds this route now. A Connect only presents its server at the
+    /// end, so the flag above says nothing about one still underway.
+    claims: std::sync::atomic::AtomicUsize,
+}
+
+/// One holder of a route, counted while connection work runs on it.
+struct RouteClaim<A: SshProcessAdapter>(Arc<NativeRoute<A>>);
+impl<A: SshProcessAdapter> RouteClaim<A> {
+    fn hold(route: &Arc<NativeRoute<A>>) -> Self {
+        route
+            .claims
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self(Arc::clone(route))
+    }
+}
+impl<A: SshProcessAdapter> Drop for RouteClaim<A> {
+    fn drop(&mut self) {
+        self.0
+            .claims
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
 }
 impl<A: SshProcessAdapter> SshServerLease for NativeRoute<A> {
     fn is_alive(&self) -> bool {
