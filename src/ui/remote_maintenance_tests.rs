@@ -688,6 +688,58 @@ fn each_confirmation_names_the_machine_and_the_sessions_that_end() {
     assert!(returning.message.contains("penguin") && returning.message.contains("1.4.0"));
 }
 
+/// Discarding retires the only record that could still say what a submitted operation did, so it
+/// asks first, names the machine and says plainly what the person gives up. Nothing is sent.
+#[test]
+fn discarding_an_operation_names_the_machine_and_what_it_gives_up() {
+    let confirmation =
+        MaintenanceConfirmation::for_discard("penguin", &SubmittedKind::Service(Action::Stop));
+
+    assert!(
+        RemoteAction::Discard.label().ends_with('\u{2026}'),
+        "the step's label promises a confirmation"
+    );
+    assert_eq!(confirmation.confirm, "Discard");
+    assert!(
+        RemoteAction::Discard
+            .consequence("penguin")
+            .contains("SpaceTerm asks first."),
+        "assistive technology hears that the step asks first"
+    );
+    assert!(
+        confirmation.message.contains("penguin"),
+        "the question must name the machine, got {:?}",
+        confirmation.message
+    );
+    assert!(
+        confirmation.detail.contains("what the stop did on penguin"),
+        "the detail must say what the person gives up, got {:?}",
+        confirmation.detail
+    );
+    assert!(
+        confirmation.detail.contains("Nothing is sent to penguin"),
+        "the detail must say that nothing is sent, got {:?}",
+        confirmation.detail
+    );
+    let update = MaintenanceConfirmation::for_discard(
+        "penguin",
+        &SubmittedKind::Update {
+            candidate: "b".repeat(64),
+        },
+    );
+    assert!(
+        update.detail.contains("what the update did on penguin"),
+        "the detail must name the operation it discards, got {:?}",
+        update.detail
+    );
+    for named in [confirmation.message, confirmation.detail, update.detail] {
+        assert!(
+            !named.contains(&"b".repeat(16)),
+            "the copy must carry no operation identity, got {named:?}"
+        );
+    }
+}
+
 /// Updating a stopped server says so instead of promising Sessions end, and leaves it stopped.
 #[test]
 fn updating_a_stopped_server_leaves_it_stopped() {

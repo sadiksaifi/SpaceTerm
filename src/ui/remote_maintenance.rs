@@ -169,9 +169,9 @@ impl RemoteAction {
             ),
             Self::Cancel => format!("Stops waiting for {machine}."),
             Self::Acknowledge => format!("Dismisses this result for {machine}."),
-            Self::Discard => {
-                format!("Stops following the operation SpaceTerm sent to {machine}.")
-            }
+            Self::Discard => format!(
+                "Stops following the operation SpaceTerm sent to {machine}. SpaceTerm asks first."
+            ),
         };
         SharedString::from(text)
     }
@@ -1417,6 +1417,34 @@ impl MaintenanceConfirmation {
                 })
             }
         }
+    }
+
+    /// The confirmation for discarding the submitted operation `kind` on `machine`.
+    ///
+    /// Discarding retires the only record that could still say what that operation did on that
+    /// computer, which no later read recovers, so it asks first and says what is given up.
+    /// Nothing is sent, so the copy promises nothing about the machine.
+    pub(crate) fn for_discard(machine: &str, kind: &SubmittedKind) -> Self {
+        let sent = sent(kind);
+        Self {
+            title: "Discard Operation",
+            message: SharedString::from(format!("Discard the {sent} SpaceTerm sent to {machine}?")),
+            detail: SharedString::from(format!(
+                "This record is the only thing that could still tell you what the {sent} did on \
+                 {machine}. SpaceTerm stops following it and keeps no record of it. Nothing is \
+                 sent to {machine}, and what its server already did stays as it is."
+            )),
+            confirm: "Discard",
+        }
+    }
+}
+
+/// The submitted operation a Discard here would stop following, or `None` for a state that offers
+/// no Discard. The step is offered only where the destination can no longer answer for it.
+pub(crate) const fn discarded_operation(state: &RemoteOperationState) -> Option<&SubmittedKind> {
+    match state {
+        RemoteOperationState::Paused { kind, .. } => kind.as_ref(),
+        _ => None,
     }
 }
 

@@ -24,14 +24,15 @@ use super::catalog::SettingsRowId;
 use super::server_list::ServerChoice;
 use crate::domain::SshDestination;
 use crate::local_server::service::maintenance::PreparedChange;
+use crate::ssh::server_maintenance::SubmittedKind;
 use crate::ssh::server_operations::{
     RemoteMaintenanceRequest, RemoteOperationHandle, RemoteOperationState, RemoteServerOperations,
 };
 use crate::ui::appearance::{ChromeAppearance, gpui_color};
 use crate::ui::chrome_typography::{ChromeTextStyleExt as _, TextRole};
 use crate::ui::remote_maintenance::{
-    MaintenanceConfirmation, MaintenancePresentation, MaintenanceRow, RemoteAction, observed,
-    present, removed_presentation,
+    MaintenanceConfirmation, MaintenancePresentation, MaintenanceRow, RemoteAction,
+    discarded_operation, observed, present, removed_presentation,
 };
 use crate::ui::sidebar_window::form::{CaptionTone, badge};
 
@@ -75,6 +76,14 @@ const fn confirmation_selectors(
         ),
     }
 }
+
+/// The confirmation selectors of a Discard. It describes no change on the other computer, so it
+/// belongs to no request.
+const DISCARD_SELECTORS: (&str, &str, &str) = (
+    "settings-ssh-server-discard",
+    "settings-ssh-server-discard-confirm",
+    "settings-ssh-server-discard-cancel",
+);
 
 /// The maintenance rows: the owner they read, and the change this window asked it to describe.
 pub(super) struct SshMaintenanceRows {
@@ -207,7 +216,11 @@ impl SettingsWindow {
                     operations.acknowledge(handle);
                 }
             }
-            RemoteAction::Discard => operations.discard(&destination),
+            RemoteAction::Discard => {
+                if let Some(kind) = discarded_operation(&state) {
+                    self.confirm_discard(destination, kind, cx);
+                }
+            }
             step => {
                 let Some(request) = step.request() else {
                     return;
@@ -285,16 +298,68 @@ impl SettingsWindow {
         else {
             return;
         };
-        let (id, confirm_selector, cancel_selector) = confirmation_selectors(request);
-        let handle_window = rows.window;
         let operations = Arc::clone(&rows.operations);
+        self.ask(
+            confirmation,
+            confirmation_selectors(request),
+            move |confirmed, _| {
+                if confirmed {
+                    operations.confirm(handle);
+                } else {
+                    // The described change is abandoned, and nothing was sent.
+                    operations.cancel(&destination);
+                }
+            },
+            cx,
+        );
+    }
+
+    /// Asks before Discard retires the only record that could still say what a submitted
+    /// operation did. Nothing is sent to the machine either way, and cancelling keeps the record.
+    fn confirm_discard(
+        &mut self,
+        destination: SshDestination,
+        kind: &SubmittedKind,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(rows) = self.ssh_maintenance.as_ref() else {
+            return;
+        };
+        let operations = Arc::clone(&rows.operations);
+        self.ask(
+            MaintenanceConfirmation::for_discard(destination.as_str(), kind),
+            DISCARD_SELECTORS,
+            move |confirmed, _| {
+                if confirmed {
+                    operations.discard(&destination);
+                }
+            },
+            cx,
+        );
+    }
+
+    /// Presents one confirmation and reports what the person answered. Cancel is the default, so
+    /// Return and Escape both answer no, and the rows start nothing while it is open.
+    fn ask(
+        &mut self,
+        confirmation: MaintenanceConfirmation,
+        selectors: (&'static str, &'static str, &'static str),
+        answered: impl FnOnce(bool, &mut gpui::App) + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(rows) = self.ssh_maintenance.as_ref() else {
+            return;
+        };
+        let (id, confirm_selector, cancel_selector) = selectors;
+        let handle_window = rows.window;
         if let Some(rows) = self.ssh_maintenance.as_mut() {
             rows.asking = true;
         }
         let owner = cx.weak_entity();
         let entity = cx.entity();
-        // The description finished outside any window update, so the alert is presented through
-        // the Settings window it belongs to.
+        // A confirmation may be asked for outside any window update, such as when a description
+        // finishes in the background, so the alert is presented through the Settings window it
+        // belongs to.
         cx.defer(move |cx| {
             let presented = handle_window.update(cx, |_, window, cx| {
                 entity.update(cx, |_, cx| {
@@ -334,14 +399,9 @@ impl SettingsWindow {
                             if let Some(rows) = settings.ssh_maintenance.as_mut() {
                                 rows.asking = false;
                             }
-                            if confirmed {
-                                operations.confirm(handle);
-                            } else {
-                                // The described change is abandoned, and nothing was sent.
-                                operations.cancel(&destination);
-                            }
                             cx.notify();
                         });
+                        answered(confirmed, cx);
                     });
                     if result.is_err() {
                         eprintln!("failed to present the remote server maintenance confirmation");
@@ -519,15 +579,23 @@ impl SettingsWindow {
         let Some(rows) = self.ssh_maintenance.as_ref() else {
             return;
         };
+        if rows.asking {
+            return;
+        }
         let operations = Arc::clone(&rows.operations);
+        let state = operations.state(&destination);
         match action {
             RemoteAction::Finish | RemoteAction::CheckAgain => operations.resume(&destination),
             RemoteAction::Acknowledge => {
-                if let Some(handle) = acknowledged(&operations.state(&destination)) {
+                if let Some(handle) = acknowledged(&state) {
                     operations.acknowledge(handle);
                 }
             }
-            RemoteAction::Discard => operations.discard(&destination),
+            RemoteAction::Discard => {
+                if let Some(kind) = discarded_operation(&state) {
+                    self.confirm_discard(destination, kind, cx);
+                }
+            }
             _ => return,
         }
         cx.notify();

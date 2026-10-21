@@ -22,10 +22,10 @@ use crate::settings::SettingsDocument;
 use crate::settings::storage::testing::MemoryStorage;
 use crate::ssh::cancellation::SshCancellationToken;
 use crate::ssh::server_connection::{
-    ConnectMode, ConnectProgress, ConnectedSshServer, InteractionReason, RemoteConnectionStatus,
-    RetainedSshConnection, ServerAvailability, SshConnectBackend, SshConnectFailure,
-    SshConnectionIntentStore, SshIntentStoreError, SshServerConnections, SshServerContinuity,
-    SshServerFacts, SshServerObservation,
+    ConnectMode, ConnectProgress, ConnectedSshServer, ContinuityChange, InteractionReason,
+    RemoteConnectionStatus, RetainedSshConnection, ServerAvailability, SshConnectBackend,
+    SshConnectFailure, SshConnectionIntentStore, SshIntentStoreError, SshServerConnections,
+    SshServerContinuity, SshServerFacts, SshServerObservation,
 };
 use crate::ssh::server_maintenance::{MaintenancePhase, SubmittedKind};
 use crate::ssh::server_operations::{
@@ -886,6 +886,96 @@ fn a_removed_connection_keeps_what_spaceterm_still_has_to_say(cx: &mut TestAppCo
         !rendered("settings-row-removed-server-operations", servers.cx),
         "an acknowledged result leaves nothing to say about a removed connection"
     );
+}
+
+/// One paused operation the destination can no longer answer, as Discard finds it.
+fn paused(kind: SubmittedKind) -> RemoteOperationState {
+    RemoteOperationState::Paused {
+        reason: ContinuityChange::HostChanged,
+        kind: Some(kind),
+    }
+}
+
+/// Discard retires the only record that could still say what the operation did, so the selected
+/// server's detail asks first and sends nothing to the machine. Cancelling keeps the record.
+#[gpui::test]
+fn discarding_an_operation_asks_before_it_retires_the_record(cx: &mut TestAppContext) {
+    let servers = open_maintenance(cx);
+    servers
+        .operations
+        .set("penguin", paused(SubmittedKind::Service(Action::Stop)));
+    servers.cx.run_until_parked();
+
+    click("settings-ssh-server-maintenance-discard", servers.cx);
+
+    assert!(alert_open(
+        "settings-ssh-server-discard-confirm",
+        servers.cx
+    ));
+    assert!(
+        servers.operations.calls().is_empty(),
+        "nothing is retired until the person confirms, got {:?}",
+        servers.operations.calls()
+    );
+    assert!(says(
+        "Discard the stop SpaceTerm sent to penguin?",
+        servers.cx
+    ));
+    assert!(says("what the stop did on penguin", servers.cx));
+
+    click_modal("settings-ssh-server-discard-cancel", servers.cx);
+
+    assert!(
+        servers.operations.calls().is_empty(),
+        "cancelling keeps the record, got {:?}",
+        servers.operations.calls()
+    );
+    assert!(rendered(
+        "settings-ssh-server-maintenance-discard",
+        servers.cx
+    ));
+
+    click("settings-ssh-server-maintenance-discard", servers.cx);
+    click_modal("settings-ssh-server-discard-confirm", servers.cx);
+
+    assert_eq!(servers.operations.calls(), vec![Call::Discard]);
+}
+
+/// A removed connection's entry offers the same Discard, and it asks there too.
+#[gpui::test]
+fn discarding_a_removed_connections_operation_asks_first(cx: &mut TestAppContext) {
+    let servers = open_maintenance(cx);
+    let destination = SshDestination::new("penguin".to_owned()).expect("destination");
+    servers
+        .operations
+        .set("penguin", paused(SubmittedKind::Service(Action::Uninstall)));
+    servers.cx.run_until_parked();
+    servers.connections.remove(&destination);
+    servers.operations.remove("penguin");
+    servers.cx.run_until_parked();
+
+    click(
+        "settings-ssh-server-maintenance-discard-penguin",
+        servers.cx,
+    );
+
+    assert!(alert_open(
+        "settings-ssh-server-discard-confirm",
+        servers.cx
+    ));
+    assert!(
+        servers.operations.calls().is_empty(),
+        "nothing is retired until the person confirms, got {:?}",
+        servers.operations.calls()
+    );
+    assert!(says(
+        "Discard the removal SpaceTerm sent to penguin?",
+        servers.cx
+    ));
+
+    click_modal("settings-ssh-server-discard-confirm", servers.cx);
+
+    assert_eq!(servers.operations.calls(), vec![Call::Discard]);
 }
 
 /// A removed connection with nothing left to tell is not listed, so the surface never invites a
